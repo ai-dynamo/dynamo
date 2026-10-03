@@ -9,13 +9,18 @@
 use crate::coding::claude::parser::{
     SessionTurnBuilder, SourceFidelityOracle, TraceRecord, TurnDraft, build_source_fidelity_oracle,
 };
+use crate::coding::replay::{
+    AgentContext, HARNESS_EVENT_SOURCE, PrefixPool, REQUEST_TRACE_SCHEMA, ReplayBase, ReplayFields,
+    RequestEndEvent, RequestFields, ToolEvent, ToolFields, TraceLine, synthetic_stream_seed,
+    synthetic_token, usage_shaped_tokens,
+};
 use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker, last_word_overlap_start};
 use anyhow::{Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use dynamo_data_gen::{sequence_hashes_for_tokens, write_empty_files};
+use dynamo_data_gen::write_empty_files;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::json;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fs::File;
@@ -53,6 +58,7 @@ pub struct FidelityReport {
     pub cache_prefix_blocks_verified: usize,
     pub compaction_prefix_blocks_verified: usize,
     pub post_compaction_prefix_blocks_verified: usize,
+    pub pooled_prefix_blocks: usize,
     pub unmatched_tool_calls: usize,
     pub unmatched_tool_results: usize,
     pub unresolved_child_sessions: usize,
@@ -79,7 +85,7 @@ impl FidelityReport {
             .requests_verified
             .saturating_sub(self.compactions_verified);
         format!(
-            "Fidelity: requests={0}/{0} compactions={1}/{1} usage={2}/{15} tools={3}/{3} child_links={4}/{4} cache_prefix_blocks={5} compaction_prefix_blocks={6} post_compaction_prefix_blocks={7}\nBackground: tools={8} agents={9} missing_completions={10} title_requests_unreplayable={11}\nLimitations: synthetic_kv_hashes={0} unmatched_tool_calls={12} unmatched_tool_results={13} unresolved_child_sessions={14}",
+            "Fidelity: requests={0}/{0} compactions={1}/{1} usage={2}/{15} tools={3}/{3} child_links={4}/{4} cache_prefix_blocks={5} compaction_prefix_blocks={6} post_compaction_prefix_blocks={7} pooled_prefix_blocks={16}\nBackground: tools={8} agents={9} missing_completions={10} title_requests_unreplayable={11}\nLimitations: synthetic_kv_hashes={0} unmatched_tool_calls={12} unmatched_tool_results={13} unresolved_child_sessions={14}",
             self.requests_verified,
             self.compactions_verified,
             self.usage_requests_verified,
@@ -96,6 +102,7 @@ impl FidelityReport {
             self.unmatched_tool_results,
             self.unresolved_child_sessions,
             ordinary_requests,
+            self.pooled_prefix_blocks,
         )
     }
 }
@@ -157,7 +164,7 @@ struct SessionState {
     builder: SessionTurnBuilder,
     head: Option<HeadTurn>,
     overlap_base: Option<OverlapBase>,
-    replay_base: Option<Vec<u32>>,
+    replay_base: Option<ReplayBase>,
     next_turn_key: u64,
 }
 
@@ -554,6 +561,7 @@ impl FidelityVerifier {
             cache_prefix_blocks_verified: self.cache_prefix_blocks_verified,
             compaction_prefix_blocks_verified: self.compaction_prefix_blocks_verified,
             post_compaction_prefix_blocks_verified: self.post_compaction_prefix_blocks_verified,
+            pooled_prefix_blocks: 0,
             unmatched_tool_calls: self.oracle.unmatched_tool_calls,
             unmatched_tool_results: self.oracle.unmatched_tool_results,
             unresolved_child_sessions,
@@ -593,12 +601,7 @@ where
             continue;
         };
 
-        let head = HeadTurn {
-            turn: first_turn,
-            turn_key: 0,
-            scheduled: false,
-            ready: None,
-        };
+        let head = head_turn(first_turn, 0);
         states.insert(
             session_id.clone(),
             SessionState {
@@ -638,6 +641,8 @@ where
         result_tx,
     );
 
+    let mut prefix_pool = PrefixPool::default();
+    let mut pooled_prefix_blocks = 0_usize;
     let mut inflight_jobs = 0_usize;
     while !heap.is_empty() {
         schedule_pending_jobs(
@@ -689,95 +694,86 @@ where
                 .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
             state.builder.next_turn(&mut parser_tokenizer)?
         };
-        let replay_tokens = {
+        let replay = {
             let state = states
                 .get(&session_id)
                 .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
-            materialize_replay_tokens(&turn, &ready_turn.tokens, state.replay_base.as_deref())
+            let cached_tokens = turn.cache_read_input_tokens.unwrap_or(0);
+            let source = match state.replay_base.as_ref() {
+                Some(base) => Some(base),
+                None if turn.compaction.is_none()
+                    && turn.observed_input_length.is_some()
+                    && cached_tokens > 0 =>
+                {
+                    Some(prefix_pool.prefix(
+                        &turn.prefix_pool_key,
+                        cached_tokens,
+                        config.block_size,
+                    )?)
+                }
+                None => None,
+            };
+            let (tokens, shared_tokens) = materialize_replay_tokens(
+                &turn,
+                &ready_turn.tokens,
+                source.map(|base| base.tokens.as_slice()),
+            );
+            if state.replay_base.is_none() {
+                pooled_prefix_blocks += shared_tokens / config.block_size;
+            }
+            ReplayBase::derive(source, shared_tokens, tokens, config.block_size)?
         };
-        let input_sequence_hashes = sequence_hashes_for_tokens(&replay_tokens, config.block_size)?;
-        verifier.observe(
-            &turn,
-            &replay_tokens,
-            &input_sequence_hashes,
-            config.block_size,
-        )?;
+        verifier.observe(&turn, &replay.tokens, &replay.hashes, config.block_size)?;
         let request_id = turn.compaction.as_ref().map_or_else(
             || canonical_request_id(&turn.export_session_id, turn.turn_index),
             |compaction| {
                 canonical_compaction_request_id(&turn.export_session_id, compaction.sequence)
             },
         );
-        let mut agent_context = Map::from_iter([(
-            "session_id".to_string(),
-            Value::String(turn.export_session_id.clone()),
-        )]);
-        if let Some(parent_session_id) = &turn.export_parent_session_id {
-            agent_context.insert(
-                "parent_session_id".to_string(),
-                Value::String(parent_session_id.clone()),
-            );
-        }
-        let mut request = Map::from_iter([
-            ("request_id".to_string(), json!(request_id)),
-            ("model".to_string(), json!(turn.model)),
-            ("input_tokens".to_string(), json!(replay_tokens.len())),
-            ("output_tokens".to_string(), json!(turn.output_length)),
-            (
-                "request_received_ms".to_string(),
-                json!(nonnegative_ms(turn.request_start_ms)),
-            ),
-            (
-                "total_time_ms".to_string(),
-                json!((turn.assistant_end_ms - turn.request_start_ms).max(0) as f64),
-            ),
-            (
-                "replay".to_string(),
-                json!({
-                    "trace_block_size": config.block_size,
-                    "input_length": replay_tokens.len(),
-                    "input_sequence_hashes": input_sequence_hashes,
-                }),
-            ),
-        ]);
-        if let Some(cached_tokens) = turn.cache_read_input_tokens {
-            request.insert("cached_tokens".to_string(), json!(cached_tokens));
-        }
-        if let Some(compaction) = &turn.compaction {
-            request.insert(
-                "claude".to_string(),
-                json!({
-                    "compaction": {
-                        "trigger": compaction.trigger,
-                        "pre_tokens": compaction.pre_tokens,
-                        "post_tokens": compaction.post_tokens,
-                        "duration_ms": compaction.duration_ms,
-                        "cache_fidelity": "recoverable_cache_safe_prefix",
-                        "output_fidelity": "tokenized_compact_summary",
-                    }
-                }),
-            );
-        }
-        let event = json!({
-            "schema": "dynamo.request.trace.v1",
-            "event_type": "request_end",
-            "event_time_unix_ms": nonnegative_ms(turn.assistant_end_ms),
-            "event_source": "harness",
-            "agent_context": agent_context,
-            "request": request,
+        let agent_context = AgentContext {
+            session_id: &turn.export_session_id,
+            parent_session_id: turn.export_parent_session_id.as_deref(),
+        };
+        let claude = turn.compaction.as_ref().map(|compaction| {
+            json!({
+                "compaction": {
+                    "trigger": compaction.trigger,
+                    "pre_tokens": compaction.pre_tokens,
+                    "post_tokens": compaction.post_tokens,
+                    "duration_ms": compaction.duration_ms,
+                    "cache_fidelity": "recoverable_cache_safe_prefix",
+                    "output_fidelity": "tokenized_compact_summary",
+                }
+            })
         });
-        let row = json!({
-            "timestamp": nonnegative_ms(turn.assistant_end_ms - trace_start_ms),
-            "event": event,
-        });
-
+        let row = TraceLine {
+            timestamp: nonnegative_ms(turn.assistant_end_ms - trace_start_ms),
+            event: RequestEndEvent {
+                schema: REQUEST_TRACE_SCHEMA,
+                event_type: "request_end",
+                event_time_unix_ms: nonnegative_ms(turn.assistant_end_ms),
+                event_source: HARNESS_EVENT_SOURCE,
+                agent_context: &agent_context,
+                request: RequestFields {
+                    request_id: &request_id,
+                    model: &turn.model,
+                    input_tokens: replay.tokens.len(),
+                    output_tokens: turn.output_length,
+                    request_received_ms: nonnegative_ms(turn.request_start_ms),
+                    total_time_ms: (turn.assistant_end_ms - turn.request_start_ms).max(0) as f64,
+                    replay: ReplayFields {
+                        trace_block_size: config.block_size,
+                        input_length: replay.tokens.len(),
+                        input_sequence_hashes: &replay.hashes,
+                        dependencies: &[],
+                    },
+                    cached_tokens: turn.cache_read_input_tokens,
+                    claude,
+                },
+            },
+        };
         write_json_line(&mut output, &row)?;
         for tool in &turn.tools {
-            let event_type = if tool.is_error {
-                "tool_error"
-            } else {
-                "tool_end"
-            };
             let claude = ClaudeToolReplayMetadata {
                 source_request_id: request_id.clone(),
                 consumer_request_id: tool
@@ -786,27 +782,31 @@ where
                 child_session_id: tool.child_session_id.clone(),
                 execution_mode: tool.execution_mode.clone(),
             };
-            let tool_row = json!({
-                "timestamp": nonnegative_ms(tool.ended_at_ms - trace_start_ms),
-                "event": {
-                    "schema": "dynamo.request.trace.v1",
-                    "event_type": event_type,
-                    "event_time_unix_ms": nonnegative_ms(tool.ended_at_ms),
-                    "event_source": "harness",
-                    "agent_context": agent_context,
-                    "tool": {
-                        "tool_call_id": tool.tool_call_id,
-                        "tool_class": tool.tool_class,
-                        "claude": claude,
-                        "started_at_unix_ms": nonnegative_ms(tool.started_at_ms),
-                        "ended_at_unix_ms": nonnegative_ms(tool.ended_at_ms),
-                        "duration_ms": (tool.ended_at_ms - tool.started_at_ms).max(0) as f64,
-                        "status": if tool.is_error { "error" } else { "succeeded" },
-                        "output_bytes": tool.output_bytes,
-                        "error_type": if tool.is_error { Some("claude_tool_error") } else { None },
-                    }
-                }
-            });
+            let tool_row = TraceLine {
+                timestamp: nonnegative_ms(tool.ended_at_ms - trace_start_ms),
+                event: ToolEvent {
+                    schema: REQUEST_TRACE_SCHEMA,
+                    event_type: if tool.is_error {
+                        "tool_error"
+                    } else {
+                        "tool_end"
+                    },
+                    event_time_unix_ms: nonnegative_ms(tool.ended_at_ms),
+                    event_source: HARNESS_EVENT_SOURCE,
+                    agent_context: &agent_context,
+                    tool: ToolFields {
+                        tool_call_id: &tool.tool_call_id,
+                        tool_class: &tool.tool_class,
+                        claude: Some(claude),
+                        started_at_unix_ms: nonnegative_ms(tool.started_at_ms),
+                        ended_at_unix_ms: nonnegative_ms(tool.ended_at_ms),
+                        duration_ms: (tool.ended_at_ms - tool.started_at_ms).max(0) as f64,
+                        status: if tool.is_error { "error" } else { "succeeded" },
+                        output_bytes: Some(tool.output_bytes),
+                        error_type: tool.is_error.then_some("claude_tool_error"),
+                    },
+                },
+            };
             write_json_line(&mut output, &tool_row)?;
             stats.tool_row_count += 1;
         }
@@ -817,21 +817,16 @@ where
         let state = states
             .get_mut(&session_id)
             .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
-        state.overlap_base = Some(OverlapBase {
+        state.overlap_base = turn.observed_input_length.is_none().then_some(OverlapBase {
             previous_text: ready_turn.current_text,
             previous_tokens: ready_turn.tokens,
         });
-        state.replay_base = Some(replay_tokens);
+        state.replay_base = Some(replay);
 
         if let Some(next_turn) = next_turn {
             let turn_key = state.next_turn_key;
             state.next_turn_key += 1;
-            state.head = Some(HeadTurn {
-                turn: next_turn,
-                turn_key,
-                scheduled: false,
-                ready: None,
-            });
+            state.head = Some(head_turn(next_turn, turn_key));
             push_heap_entry(&mut heap, &session_id, state);
             unscheduled_sessions.push_back(session_id);
             stats.max_heap_len = stats.max_heap_len.max(heap.len());
@@ -848,6 +843,7 @@ where
             .map_err(|_| anyhow!("tokenizer worker panicked"))?;
     }
     stats.fidelity = verifier.finish(stats.row_count, stats.tool_row_count, stats.sidecar_count)?;
+    stats.fidelity.pooled_prefix_blocks = pooled_prefix_blocks;
     output.flush()?;
     sidecar.flush()?;
     Ok(stats)
@@ -878,75 +874,59 @@ fn canonical_compaction_request_id(session_id: &str, sequence: usize) -> String 
     format!("claude:{session_id}:compact:{sequence}")
 }
 
+/// Returns replay tokens and how many of them were copied from `prefix_source`.
+///
+/// Usage-shaped turns copy their cached prefix from the session's previous request, or for a
+/// session's first request from the shared prefix pool, and fill the rest with synthetic tokens.
 fn materialize_replay_tokens(
     turn: &TurnDraft,
     rendered_tokens: &[u32],
-    previous_tokens: Option<&[u32]>,
-) -> Vec<u32> {
+    prefix_source: Option<&[u32]>,
+) -> (Vec<u32>, usize) {
     let Some(input_length) = turn.observed_input_length else {
-        return rendered_tokens.to_vec();
+        return (rendered_tokens.to_vec(), 0);
     };
+    let seed = synthetic_stream_seed(&turn.export_session_id);
 
     if turn.compaction.is_some() {
-        let shared_length = previous_tokens
-            .map(|tokens| tokens.len())
+        let shared_length = prefix_source
+            .map(<[u32]>::len)
             .unwrap_or_default()
             .min(input_length.saturating_sub(1));
         let mut tokens = Vec::with_capacity(input_length);
-        if let Some(previous_tokens) = previous_tokens {
-            tokens.extend_from_slice(&previous_tokens[..shared_length]);
+        if let Some(prefix_source) = prefix_source {
+            tokens.extend_from_slice(&prefix_source[..shared_length]);
         }
-        while tokens.len() < input_length {
-            tokens.push(synthetic_token(
-                &turn.export_session_id,
-                turn.turn_index,
-                tokens.len(),
-                rendered_tokens,
-            ));
-        }
-        return tokens;
+        let start = tokens.len();
+        tokens.extend(
+            (start..input_length).map(|position| synthetic_token(seed, turn.turn_index, position)),
+        );
+        return (tokens, shared_length);
     }
 
-    let cached_length = turn.cache_read_input_tokens.unwrap_or(0).min(input_length);
-    let mut tokens = Vec::with_capacity(input_length);
-    if let Some(previous_tokens) = previous_tokens {
-        tokens.extend_from_slice(&previous_tokens[..cached_length.min(previous_tokens.len())]);
-    }
-    while tokens.len() < cached_length {
-        tokens.push(synthetic_token(
-            &turn.export_session_id,
-            turn.turn_index.saturating_sub(1),
-            tokens.len(),
-            rendered_tokens,
-        ));
-    }
-    while tokens.len() < input_length {
-        tokens.push(synthetic_token(
-            &turn.export_session_id,
-            turn.turn_index,
-            tokens.len(),
-            rendered_tokens,
-        ));
-    }
-    tokens
+    usage_shaped_tokens(
+        seed,
+        turn.turn_index,
+        input_length,
+        turn.cache_read_input_tokens.unwrap_or(0),
+        prefix_source,
+    )
 }
 
-fn synthetic_token(
-    session_id: &str,
-    turn_index: usize,
-    position: usize,
-    rendered_tokens: &[u32],
-) -> u32 {
-    let mut hash = 0x811c_9dc5_u32;
-    for byte in session_id.bytes() {
-        hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
-    }
-    hash = (hash ^ turn_index as u32).wrapping_mul(0x0100_0193);
-    hash = (hash ^ position as u32).wrapping_mul(0x0100_0193);
-    if rendered_tokens.is_empty() {
-        hash
-    } else {
-        hash ^ rendered_tokens[position % rendered_tokens.len()]
+/// Usage-shaped turns replay synthetic hashes, so only transcript-shaped turns are tokenized.
+fn head_turn(mut turn: TurnDraft, turn_key: u64) -> HeadTurn {
+    let ready = turn.observed_input_length.is_some().then(|| {
+        turn.input_text = String::new();
+        ReadyTurn {
+            current_text: String::new(),
+            tokens: Vec::new(),
+        }
+    });
+    HeadTurn {
+        turn,
+        turn_key,
+        scheduled: false,
+        ready,
     }
 }
 
@@ -1209,6 +1189,7 @@ mod tests {
                         turn_index: 1,
                         model: "test-model".to_string(),
                         input_text: String::new(),
+                        prefix_pool_key: String::new(),
                         output_length: 1,
                         observed_input_length: None,
                         cache_read_input_tokens: None,

@@ -5,6 +5,7 @@ use crate::coding::common::{
     anonymized_session_id, canonical_json_string, content_blocks, flatten_block_content_text,
     object_field, parse_utc_timestamp_ms,
 };
+use crate::coding::replay::prefix_pool_key;
 use crate::coding::tokenizer::TokenizerWorker;
 use anyhow::Result;
 use rustc_hash::FxHashMap;
@@ -89,6 +90,7 @@ pub struct TurnDraft {
     pub turn_index: usize,
     pub model: String,
     pub input_text: String,
+    pub prefix_pool_key: String,
     pub output_length: usize,
     pub observed_input_length: Option<usize>,
     pub cache_read_input_tokens: Option<usize>,
@@ -168,16 +170,20 @@ pub struct SessionTurnBuilder {
     session_id: String,
     export_session_id: String,
     export_parent_session_id: Option<String>,
+    cwd: String,
     records: Vec<TraceRecord>,
     top_level_indices: Vec<usize>,
     progress_metrics_index: FxHashMap<String, CachedProgressMetrics>,
     request_index_by_group_key: FxHashMap<String, usize>,
     request_start_ms_by_group_key: FxHashMap<String, i64>,
+    request_first_source_orders: Vec<u64>,
+    request_received_ms_by_group_key: FxHashMap<String, i64>,
+    group_positions_by_key: FxHashMap<String, Vec<usize>>,
+    consumed_positions: Vec<bool>,
     top_level_cursor: usize,
     normalizer: ToolIdNormalizer,
     conversation_entries: Vec<ConversationEntry>,
     prompt_text: String,
-    pending_request_start_ms: Option<i64>,
     previous_assistant_end_ms: Option<i64>,
     turn_index: usize,
     pending_compaction: Option<PendingCompaction>,
@@ -210,25 +216,21 @@ impl SessionTurnBuilder {
             }
         });
 
+        let cwd = records
+            .iter()
+            .find_map(|record| record.raw.get("cwd").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string();
         let progress_index = build_progress_index(&records);
         let progress_metrics_index = build_progress_metrics_index(&progress_index, &records);
         let top_level_indices: Vec<usize> = records
             .iter()
             .enumerate()
-            .filter_map(|(index, record)| {
-                let is_top_level =
-                    matches!(record.row_type.as_str(), "user" | "assistant" | "system")
-                        && (is_subagent
-                            || !record
-                                .raw
-                                .get("isSidechain")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false));
-                is_top_level.then_some(index)
-            })
+            .filter_map(|(index, record)| is_top_level_row(record, is_subagent).then_some(index))
             .collect();
         let mut request_index_by_group_key = FxHashMap::default();
         let mut request_start_ms_by_group_key = FxHashMap::default();
+        let mut request_first_source_orders = Vec::new();
         for index in &top_level_indices {
             let record = &records[*index];
             if record.row_type != "assistant" {
@@ -238,27 +240,37 @@ impl SessionTurnBuilder {
             let next_index = request_index_by_group_key.len();
             request_index_by_group_key
                 .entry(group_key.clone())
-                .or_insert(next_index);
+                .or_insert_with(|| {
+                    request_first_source_orders.push(record.source_order);
+                    next_index
+                });
             request_start_ms_by_group_key
                 .entry(group_key)
                 .and_modify(|start: &mut i64| *start = (*start).min(record.timestamp_ms))
                 .or_insert(record.timestamp_ms);
         }
+        let (group_positions_by_key, request_received_ms_by_group_key) =
+            assign_request_groups(&records, &top_level_indices);
+        let consumed_positions = vec![false; top_level_indices.len()];
 
         Self {
             session_id: trace_id,
             export_session_id,
             export_parent_session_id,
+            cwd,
             records,
             top_level_indices,
             progress_metrics_index,
             request_index_by_group_key,
             request_start_ms_by_group_key,
+            request_first_source_orders,
+            request_received_ms_by_group_key,
+            group_positions_by_key,
+            consumed_positions,
             top_level_cursor: 0,
             normalizer: ToolIdNormalizer::default(),
             conversation_entries: Vec::new(),
             prompt_text: String::new(),
-            pending_request_start_ms: None,
             previous_assistant_end_ms: None,
             turn_index: 0,
             pending_compaction: None,
@@ -270,6 +282,10 @@ impl SessionTurnBuilder {
 
     pub fn next_turn(&mut self, tokenizer: &mut impl TokenizerWorker) -> Result<Option<TurnDraft>> {
         while self.top_level_cursor < self.top_level_indices.len() {
+            if self.consumed_positions[self.top_level_cursor] {
+                self.top_level_cursor += 1;
+                continue;
+            }
             let record_index = self.top_level_indices[self.top_level_cursor];
             let record = &self.records[record_index];
 
@@ -287,12 +303,11 @@ impl SessionTurnBuilder {
             }
 
             if record.row_type == "user" {
-                if should_skip_user_record(record)? {
+                if should_skip_user_record(record) {
                     self.top_level_cursor += 1;
                     continue;
                 }
 
-                let request_start_ms = record.timestamp_ms;
                 let message = object_field(&record.raw, "message");
                 let rendered_entries = render_user_entries(message, &mut self.normalizer)?;
                 if is_compact_summary(record) {
@@ -302,7 +317,6 @@ impl SessionTurnBuilder {
                             .unwrap_or(&Value::Null),
                     )?;
                     self.replace_conversation_entries(rendered_entries);
-                    self.pending_request_start_ms = Some(request_start_ms);
                     self.top_level_cursor += 1;
 
                     let Some(pending) = self.pending_compaction.take() else {
@@ -353,16 +367,18 @@ impl SessionTurnBuilder {
                         .ended_at_ms
                         .saturating_sub(pending.metadata.duration_ms);
                     self.previous_assistant_end_ms = Some(pending.metadata.ended_at_ms);
+                    let model = self
+                        .previous_model
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string());
                     return Ok(Some(TurnDraft {
                         session_id: self.session_id.clone(),
                         source_request_id,
                         export_session_id: self.export_session_id.clone(),
                         export_parent_session_id: self.export_parent_session_id.clone(),
                         turn_index: self.turn_index,
-                        model: self
-                            .previous_model
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string()),
+                        prefix_pool_key: prefix_pool_key("claude", &model, &self.cwd),
+                        model,
                         input_text,
                         output_length,
                         observed_input_length: Some(pending.metadata.pre_tokens),
@@ -380,36 +396,30 @@ impl SessionTurnBuilder {
                     self.pending_compaction = None;
                     self.extend_conversation_entries(rendered_entries);
                 }
-                self.pending_request_start_ms = Some(request_start_ms);
                 self.top_level_cursor += 1;
                 continue;
             }
 
             self.pending_compaction = None;
             let group_key = assistant_group_key(record);
-            let mut group_indices = vec![record_index];
+            // A request owns every row with its key, even when another request streams in
+            // between, plus the tool results assigned to it.
+            let mut group_indices = Vec::new();
             let mut interleaved_user_indices = Vec::new();
-            self.top_level_cursor += 1;
-            while self.top_level_cursor < self.top_level_indices.len() {
-                let next_index = self.top_level_indices[self.top_level_cursor];
-                let next_record = &self.records[next_index];
-                if next_record.row_type == "system" && !is_compact_boundary(next_record) {
-                    self.top_level_cursor += 1;
-                    continue;
+            for position in self
+                .group_positions_by_key
+                .remove(&group_key)
+                .unwrap_or_default()
+            {
+                self.consumed_positions[position] = true;
+                let index = self.top_level_indices[position];
+                if self.records[index].row_type == "assistant" {
+                    group_indices.push(index);
+                } else {
+                    interleaved_user_indices.push(index);
                 }
-                if next_record.row_type == "user" && is_tool_result_user_record(next_record) {
-                    interleaved_user_indices.push(next_index);
-                    self.top_level_cursor += 1;
-                    continue;
-                }
-                if next_record.row_type != "assistant"
-                    || assistant_group_key(next_record) != group_key
-                {
-                    break;
-                }
-                group_indices.push(next_index);
-                self.top_level_cursor += 1;
             }
+            self.top_level_cursor += 1;
 
             let mut group_summary = summarize_assistant_group(
                 &self.records,
@@ -419,8 +429,9 @@ impl SessionTurnBuilder {
             )?;
             let input_text = self.prompt_text.clone();
             let request_start_ms = self
-                .pending_request_start_ms
-                .take()
+                .request_received_ms_by_group_key
+                .get(&group_key)
+                .copied()
                 .unwrap_or(group_summary.start_ms);
             let tools = pair_tool_results(
                 &group_summary.top_level_tool_calls,
@@ -428,7 +439,7 @@ impl SessionTurnBuilder {
                 &self.records,
                 &self.request_index_by_group_key,
                 &self.request_start_ms_by_group_key,
-                &group_key,
+                &self.request_first_source_orders,
                 self.preserve_session_ids,
             )?;
 
@@ -563,6 +574,7 @@ impl SessionTurnBuilder {
                 export_session_id: self.export_session_id.clone(),
                 export_parent_session_id: self.export_parent_session_id.clone(),
                 turn_index: self.turn_index,
+                prefix_pool_key: prefix_pool_key("claude", &model, &self.cwd),
                 model,
                 input_text,
                 output_length: group_summary.output_length,
@@ -595,9 +607,6 @@ impl SessionTurnBuilder {
                 }
             }
             self.extend_conversation_entries(ordered_entries);
-            self.pending_request_start_ms = interleaved_user_indices
-                .last()
-                .map(|index| self.records[*index].timestamp_ms);
             self.previous_assistant_end_ms = Some(group_summary.end_ms);
             self.turn_index += 1;
             return Ok(Some(turn));
@@ -752,14 +761,7 @@ pub fn build_source_fidelity_oracle(
                 background_titles.insert((record.session_id.clone(), title.to_string()));
                 continue;
             }
-            let is_top_level = matches!(record.row_type.as_str(), "user" | "assistant" | "system")
-                && (is_subagent
-                    || !record
-                        .raw
-                        .get("isSidechain")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false));
-            if !is_top_level {
+            if !is_top_level_row(record, is_subagent) {
                 continue;
             }
             if is_compact_boundary(record) {
@@ -776,7 +778,7 @@ pub fn build_source_fidelity_oracle(
             }
 
             if record.row_type == "user" {
-                if should_skip_user_record(record)? {
+                if should_skip_user_record(record) {
                     continue;
                 }
                 pending_request_start_ms = Some(record.timestamp_ms);
@@ -926,6 +928,100 @@ fn queued_tool_id(content: &str) -> Option<&str> {
     Some(&content[start..end])
 }
 
+/// Whether a row belongs to the session's own transcript.
+///
+/// Claude Code writes `<synthetic>` assistant rows for API errors and interruptions. They carry
+/// zero usage and never reach the model, so they are neither requests nor context.
+fn is_top_level_row(record: &TraceRecord, is_subagent: bool) -> bool {
+    let transcript_row = matches!(record.row_type.as_str(), "user" | "assistant" | "system")
+        && (is_subagent
+            || !record
+                .raw
+                .get("isSidechain")
+                .and_then(Value::as_bool)
+                .unwrap_or(false));
+    let synthetic = record.row_type == "assistant"
+        && object_field(&record.raw, "message")
+            .and_then(|message| message.get("model"))
+            .and_then(Value::as_str)
+            == Some("<synthetic>");
+    transcript_row && !synthetic
+}
+
+/// Assigns top-level positions to requests and records when each request was received.
+///
+/// A request owns all assistant rows with its key. A tool result belongs to the request that
+/// issued it, or to the latest request of its segment when no call matches. Prompts and compact
+/// boundaries start a new segment. A request is received at the latest preceding prompt or tool
+/// result that an earlier request has not claimed, or at its first row otherwise.
+fn assign_request_groups(
+    records: &[TraceRecord],
+    top_level_indices: &[usize],
+) -> (FxHashMap<String, Vec<usize>>, FxHashMap<String, i64>) {
+    let mut positions_by_key: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+    let mut received_ms_by_key = FxHashMap::default();
+    let mut tool_owners: FxHashMap<String, String> = FxHashMap::default();
+    let mut segment_key: Option<String> = None;
+    let mut pending_received_ms = None;
+    for (position, index) in top_level_indices.iter().enumerate() {
+        let record = &records[*index];
+        match record.row_type.as_str() {
+            "assistant" => {
+                let key = assistant_group_key(record);
+                for id in message_block_ids(record, "tool_use", "id") {
+                    tool_owners.insert(id.to_string(), key.clone());
+                }
+                received_ms_by_key
+                    .entry(key.clone())
+                    .or_insert_with(|| pending_received_ms.take().unwrap_or(record.timestamp_ms));
+                positions_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .push(position);
+                segment_key = Some(key);
+            }
+            "user" if should_skip_user_record(record) => {}
+            "user" if is_tool_result_user_record(record) => {
+                pending_received_ms = Some(record.timestamp_ms);
+                let owner = message_block_ids(record, "tool_result", "tool_use_id")
+                    .find_map(|id| tool_owners.get(id))
+                    .or(segment_key.as_ref());
+                if let Some(owner) = owner {
+                    positions_by_key
+                        .get_mut(owner)
+                        .expect("tool owner has an assistant row")
+                        .push(position);
+                }
+            }
+            "user" => {
+                pending_received_ms = Some(record.timestamp_ms);
+                tool_owners.clear();
+                segment_key = None;
+            }
+            _ if is_compact_boundary(record) => {
+                tool_owners.clear();
+                segment_key = None;
+            }
+            _ => {}
+        }
+    }
+    (positions_by_key, received_ms_by_key)
+}
+
+fn message_block_ids<'a>(
+    record: &'a TraceRecord,
+    block_type: &'a str,
+    id_field: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    object_field(&record.raw, "message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(move |block| block.get("type").and_then(Value::as_str) == Some(block_type))
+        .filter_map(move |block| block.get(id_field).and_then(Value::as_str))
+}
+
 pub(crate) fn assistant_group_key(record: &TraceRecord) -> String {
     if let Some(request_id) = record.raw.get("requestId").and_then(Value::as_str) {
         return request_id.to_string();
@@ -1026,9 +1122,9 @@ fn is_local_command_wrapper_text(text: &str) -> bool {
     .any(|prefix| stripped.starts_with(prefix))
 }
 
-fn should_skip_user_record(record: &TraceRecord) -> Result<bool> {
+fn should_skip_user_record(record: &TraceRecord) -> bool {
     if record.row_type != "user" {
-        return Ok(false);
+        return false;
     }
     if record
         .raw
@@ -1036,21 +1132,21 @@ fn should_skip_user_record(record: &TraceRecord) -> Result<bool> {
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Ok(true);
+        return true;
     }
 
     let Some(message) = object_field(&record.raw, "message") else {
-        return Ok(false);
+        return false;
     };
     let blocks = content_blocks(message.get("content"));
     if blocks.is_empty() {
-        return Ok(false);
+        return false;
     }
     if blocks
         .iter()
         .any(|block| block.get("type").and_then(Value::as_str) != Some("text"))
     {
-        return Ok(false);
+        return false;
     }
 
     let texts = blocks
@@ -1063,7 +1159,7 @@ fn should_skip_user_record(record: &TraceRecord) -> Result<bool> {
                 .to_string()
         })
         .collect::<Vec<_>>();
-    Ok(!texts.is_empty() && texts.iter().all(|text| is_local_command_wrapper_text(text)))
+    !texts.is_empty() && texts.iter().all(|text| is_local_command_wrapper_text(text))
 }
 
 fn is_tool_result_user_record(record: &TraceRecord) -> bool {
@@ -1086,7 +1182,7 @@ fn pair_tool_results(
     records: &[TraceRecord],
     request_index_by_group_key: &FxHashMap<String, usize>,
     request_start_ms_by_group_key: &FxHashMap<String, i64>,
-    current_group_key: &str,
+    request_first_source_orders: &[u64],
     preserve_session_ids: bool,
 ) -> Result<Vec<ToolDraft>> {
     let calls_by_id = calls
@@ -1150,12 +1246,7 @@ fn pair_tool_results(
                     record.timestamp_ms,
                     content.len(),
                     launch_error,
-                    next_consumer_turn(
-                        records,
-                        record.source_order,
-                        current_group_key,
-                        request_index_by_group_key,
-                    ),
+                    next_consumer_turn(request_first_source_orders, record.source_order),
                 )
             };
             tools.push(ToolDraft {
@@ -1182,21 +1273,15 @@ fn pair_tool_results(
     Ok(tools)
 }
 
+/// Returns the first request whose first row follows a tool result.
+///
+/// Request indices follow first appearance, so `request_first_source_orders` is ascending.
 fn next_consumer_turn(
-    records: &[TraceRecord],
+    request_first_source_orders: &[u64],
     after_source_order: u64,
-    current_group_key: &str,
-    request_index_by_group_key: &FxHashMap<String, usize>,
 ) -> Option<usize> {
-    records
-        .iter()
-        .filter(|record| record.source_order > after_source_order && record.row_type == "assistant")
-        .find_map(|record| {
-            let group_key = assistant_group_key(record);
-            (group_key != current_group_key)
-                .then(|| request_index_by_group_key.get(&group_key).copied())
-                .flatten()
-        })
+    let index = request_first_source_orders.partition_point(|order| *order <= after_source_order);
+    (index < request_first_source_orders.len()).then_some(index)
 }
 
 fn async_tool_completion(
@@ -1887,6 +1972,183 @@ mod tests {
         assert!(first.tools[1].is_error);
         assert_eq!(second.request_start_ms, 1_500);
         assert!(builder.next_turn(&mut StubTokenizer).unwrap().is_none());
+    }
+
+    #[test]
+    fn ignored_companion_row_does_not_split_streamed_request() {
+        let records = vec![
+            make_record(
+                "user",
+                1_000,
+                0,
+                json!({"type":"user","message":{"role":"user","content":"start"}}),
+            ),
+            make_record(
+                "assistant",
+                1_100,
+                1,
+                json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"tool_use","id":"raw-1","name":"Read","input":{}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
+            ),
+            make_record(
+                "user",
+                1_200,
+                2,
+                json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"raw-1","content":"image"}]}}),
+            ),
+            make_record(
+                "user",
+                1_190,
+                3,
+                json!({"type":"user","isMeta":true,"turnCompanion":true,"message":{"role":"user","content":"[Image: original 10x10]"}}),
+            ),
+            make_record(
+                "assistant",
+                1_300,
+                4,
+                json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"tool_use","id":"raw-2","name":"Bash","input":{}}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
+            ),
+            make_record(
+                "user",
+                1_400,
+                5,
+                json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"raw-2","content":"ok"}]}}),
+            ),
+            make_record(
+                "assistant",
+                1_500,
+                6,
+                json!({"type":"assistant","requestId":"req-2","message":{"id":"msg-2","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":10,"output_tokens":2}}}),
+            ),
+        ];
+        let mut sessions = FxHashMap::default();
+        sessions.insert("session-1".to_string(), records.clone());
+        let oracle = build_source_fidelity_oracle(&sessions).unwrap();
+
+        let mut builder = SessionTurnBuilder::new("session-1".to_string(), records, true);
+        let first = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+        let second = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+
+        let expected =
+            &oracle.requests[&("session-1".to_string(), first.source_request_id.clone())];
+        assert_eq!(first.assistant_end_ms, expected.assistant_end_ms);
+        assert_eq!(first.assistant_end_ms, 1_300);
+        assert_eq!(first.tools.len(), 2);
+        assert_eq!(second.request_start_ms, 1_400);
+        assert!(builder.next_turn(&mut StubTokenizer).unwrap().is_none());
+    }
+
+    #[test]
+    fn synthetic_error_rows_are_not_requests() {
+        let records = vec![
+            make_record(
+                "user",
+                1_000,
+                0,
+                json!({"type":"user","message":{"role":"user","content":"start"}}),
+            ),
+            make_record(
+                "assistant",
+                1_100,
+                1,
+                json!({"type":"assistant","requestId":"synthetic","isApiErrorMessage":true,"message":{"id":"msg-0","model":"<synthetic>","content":[{"type":"text","text":"API Error"}],"usage":{"input_tokens":0,"output_tokens":0}}}),
+            ),
+            make_record(
+                "assistant",
+                1_500,
+                2,
+                json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","model":"claude","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
+            ),
+        ];
+        let mut sessions = FxHashMap::default();
+        sessions.insert("session-1".to_string(), records.clone());
+        let oracle = build_source_fidelity_oracle(&sessions).unwrap();
+        assert_eq!(oracle.requests.len(), 1);
+
+        let mut builder = SessionTurnBuilder::new("session-1".to_string(), records, true);
+        let turn = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+        assert_eq!(turn.source_request_id, "req-1");
+        assert_eq!(turn.request_start_ms, 1_000);
+        assert!(builder.next_turn(&mut StubTokenizer).unwrap().is_none());
+    }
+
+    #[test]
+    fn interleaved_concurrent_requests_match_fidelity_oracle() {
+        let assistant = |timestamp_ms, order, request: &str, content: Value| {
+            make_record(
+                "assistant",
+                timestamp_ms,
+                order,
+                json!({"type":"assistant","requestId":request,"message":{"id":format!("msg-{request}"),"content":[content],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}),
+            )
+        };
+        let tool_use = |id: &str| json!({"type":"tool_use","id":id,"name":"Read","input":{}});
+        let tool_result = |timestamp_ms, order, id: &str| {
+            make_record(
+                "user",
+                timestamp_ms,
+                order,
+                json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"ok"}]}}),
+            )
+        };
+        let records = vec![
+            make_record(
+                "user",
+                1_000,
+                0,
+                json!({"type":"user","message":{"role":"user","content":"start"}}),
+            ),
+            assistant(1_100, 1, "req-a", json!({"type":"text","text":"a"})),
+            assistant(1_200, 2, "req-b", json!({"type":"text","text":"b"})),
+            assistant(1_300, 3, "req-a", tool_use("raw-a")),
+            assistant(1_310, 4, "req-b", tool_use("raw-b1")),
+            tool_result(1_320, 5, "raw-b1"),
+            tool_result(1_400, 6, "raw-a"),
+            assistant(1_500, 7, "req-b", tool_use("raw-b2")),
+            tool_result(1_600, 8, "raw-b2"),
+            assistant(1_700, 9, "req-c", json!({"type":"text","text":"done"})),
+        ];
+        let mut sessions = FxHashMap::default();
+        sessions.insert("session-1".to_string(), records.clone());
+        let oracle = build_source_fidelity_oracle(&sessions).unwrap();
+
+        let mut builder = SessionTurnBuilder::new("session-1".to_string(), records, true);
+        let mut turns = Vec::new();
+        while let Some(turn) = builder.next_turn(&mut StubTokenizer).unwrap() {
+            turns.push(turn);
+        }
+
+        let requests = turns
+            .iter()
+            .map(|turn| turn.source_request_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(requests, ["req-a", "req-b", "req-c"]);
+        for turn in &turns {
+            let expected =
+                &oracle.requests[&("session-1".to_string(), turn.source_request_id.clone())];
+            assert_eq!(
+                (turn.request_start_ms, turn.assistant_end_ms),
+                (expected.request_start_ms, expected.assistant_end_ms),
+                "{}",
+                turn.source_request_id
+            );
+        }
+        let tool_ends = |turn: &super::TurnDraft| {
+            turn.tools
+                .iter()
+                .map(|tool| tool.ended_at_ms)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(tool_ends(&turns[0]), [1_400]);
+        assert_eq!(tool_ends(&turns[1]), [1_320, 1_600]);
+        // req-b started before req-a's result, so only req-c can consume either result.
+        assert!(
+            turns[..2]
+                .iter()
+                .flat_map(|turn| &turn.tools)
+                .all(|tool| tool.consumer_turn_index == Some(2))
+        );
+        assert_eq!(turns[2].request_start_ms, 1_600);
+        assert_eq!(oracle.paired_tools, 3);
     }
 
     #[test]
