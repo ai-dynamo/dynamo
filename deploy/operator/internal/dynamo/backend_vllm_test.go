@@ -476,11 +476,6 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			expectProbesRemoved: true,
 		},
 		{
-			// updateVLLMMultinodeArgs reads the container through getExpandedArgs, a
-			// separate entry point from the getExpandedCommandLine one the detection
-			// helpers use. These two rows are the only coverage that the sizing path
-			// normalizes at all: without them, deleting normalizeVLLMFlags from
-			// getExpandedArgs leaves the whole suite green.
 			name:          "multinode leader sizes from short -tp alias",
 			numberOfNodes: 2,
 			role:          RoleLeader,
@@ -609,6 +604,58 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 				g.Expect(podIP).To(gomega.BeNil())
 			}
 		})
+	}
+}
+
+// Args stays non-empty independently of the injection, so the assertion cannot be
+// satisfied by the unrelated "container Args cannot be empty for LWS pod" precondition.
+func TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand(t *testing.T) {
+	backend := &VLLMBackend{}
+	container := &corev1.Container{
+		Command: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"},
+		Args:    []string{"--model", "test/model"},
+	}
+	require.NoError(t, backend.UpdateContainer(container, 2, RoleLeader, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(8)))
+
+	// TP 16 across 8 GPUs per node requires a distributed launch, which rewrites Args.
+	// Read as the default of 1 it would fit on one node and nothing would be injected.
+	joined := strings.Join(container.Args, " ")
+	if !strings.Contains(joined, distributedExecutorFlag) {
+		t.Errorf("Args = %q, want the multinode launch flags injected -- "+
+			"%s in Command was not read", joined, tensorParallelSizeFlag)
+	}
+}
+
+// TestVLLMBackend_UpdateContainer_LeavesShellScriptInCommandUntouched covers a launch
+// script held in a non-python Command. The injectors cannot extend such a script, and one
+// that manages its own multinode launch breaks if the operator puts a second Ray head in
+// front of it or replaces the worker command, so it must come through as written.
+func TestVLLMBackend_UpdateContainer_LeavesShellScriptInCommandUntouched(t *testing.T) {
+	scripts := map[string]string{
+		"self-managed ray": `if [ "$LWS_WORKER_INDEX" = 0 ]; then ray start --head --port=6379 && ` +
+			`exec python3 -m dynamo.vllm --tensor-parallel-size 16 --distributed-executor-backend ray; ` +
+			`else exec ray start --address=$LWS_LEADER_ADDRESS:6379 --block; fi`,
+		"self-managed elastic EP": `if [ "$LWS_WORKER_INDEX" = 0 ]; then ray start --head --port=6379 && ` +
+			`exec python3 -m dynamo.vllm --enable-elastic-ep --data-parallel-size 2 --data-parallel-backend ray; ` +
+			`else exec ray start --address=$LWS_LEADER_ADDRESS:6379 --block; fi`,
+	}
+	modes := map[string]map[string]string{
+		"no origin version": {},
+		"ray annotation":    {commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"},
+		"origin 1.0.0 (mp)": {commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0"},
+	}
+	for scriptName, script := range scripts {
+		for modeName, annotations := range modes {
+			for _, role := range []Role{RoleLeader, RoleWorker} {
+				t.Run(scriptName+"/"+modeName+"/"+string(role), func(t *testing.T) {
+					container := &corev1.Container{Command: []string{"sh", "-c", script}}
+					component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{Annotations: annotations})
+					require.NoError(t, (&VLLMBackend{}).UpdateContainer(container, 2, role, component, "test-service", &LWSMultinodeDeployer{}, staticContainerGPUCount(8)))
+					require.Equal(t, []string{"sh", "-c", script}, container.Command)
+					require.Empty(t, container.Args)
+				})
+			}
+		}
 	}
 }
 
