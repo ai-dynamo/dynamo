@@ -162,6 +162,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
+# Replace the FFmpeg builds shipped inside the base image's PyAV and
+# opencv-python-headless wheels. These pins bundle FFmpeg 8.1.2.
+# Rewrite the installed SGLang requirement metadata, including
+# sglang-*.dist-info/METADATA, so the declared PyAV and OpenCV versions
+# match these pins.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    --mount=type=bind,source=./container/deps/align_sglang_requirements.py,target=/tmp/align_sglang_requirements.py \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --upgrade --no-deps \
+        "av==18.1.0" \
+        "opencv-python-headless==4.14.0.94" && \
+    python3 /tmp/align_sglang_requirements.py
+
 {% if device == "cuda" %}
 
 # Patch stock DeepEP for Kimi K3, then rebuild a fat binary containing sm_90,
