@@ -226,7 +226,18 @@ impl HealthCheckManager {
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
-            let result = tokio::time::timeout(timeout, async {
+            let Some(default_deadline) = std::time::Instant::now().checked_add(timeout) else {
+                error!(
+                    endpoint = %endpoint_subject_owned,
+                    ?timeout,
+                    "Health check timeout exceeds the supported deadline range"
+                );
+                system_health
+                    .lock()
+                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                return;
+            };
+            let probe = async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
@@ -277,15 +288,32 @@ impl HealthCheckManager {
                         );
                     }
                 }
-            })
-            .await;
+            };
+            tokio::pin!(probe);
 
-            // Handle timeout
-            if result.is_err() {
-                warn!("Health check timeout for {}", endpoint_subject_owned);
-                system_health
+            loop {
+                let deadline = system_health
                     .lock()
-                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                    .canary_request_deadline(&endpoint_subject_owned, default_deadline);
+                if tokio::time::timeout_at(deadline.into(), &mut probe)
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+
+                // An RL operation may start while this probe is already waiting.
+                // Recheck its lease before publishing a timeout, keeping the same
+                // request in flight rather than cancelling and resending it.
+                let mut health = system_health.lock();
+                if health.canary_request_deadline(&endpoint_subject_owned, default_deadline)
+                    > std::time::Instant::now()
+                {
+                    continue;
+                }
+                warn!(endpoint = %endpoint_subject_owned, "Health check timeout");
+                health.set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                break;
             }
 
             debug!("Health check completed for {}", endpoint_subject_owned);
@@ -348,6 +376,110 @@ pub async fn get_health_check_status(
         "endpoints_checked": endpoint_subjects.len(),
         "endpoint_statuses": endpoint_statuses,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::AsyncEngine;
+    use crate::pipeline::{ManyOut, SingleIn};
+    use crate::protocols::annotated::Annotated;
+    use async_trait::async_trait;
+
+    type TestRequest = serde_json::Value;
+    type TestResponse = Annotated<serde_json::Value>;
+
+    struct BlockingCanaryEngine {
+        started: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for BlockingCanaryEngine
+    {
+        async fn generate(
+            &self,
+            _input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_canary_timeout_honors_in_flight_maintenance() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let drt = DistributedRuntime::new(
+                crate::Runtime::from_current().unwrap(),
+                crate::distributed::DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap();
+            let control = "test.canary_timeout_control";
+            let maintained = "test.canary_timeout_maintained";
+            let manager = HealthCheckManager::new(
+                drt.clone(),
+                HealthCheckConfig {
+                    canary_wait_time: Duration::from_millis(50),
+                    request_timeout: Duration::from_millis(300),
+                },
+            );
+
+            for endpoint in [control, maintained] {
+                let engine = Arc::new(BlockingCanaryEngine {
+                    started: tokio::sync::Notify::new(),
+                });
+                drt.local_endpoint_registry()
+                    .register(endpoint.to_string(), engine.clone());
+                // Start healthy so a missing timeout update cannot pass the test.
+                drt.system_health()
+                    .lock()
+                    .set_endpoint_health_status(endpoint, HealthStatus::Ready);
+                manager
+                    .send_health_check_request(endpoint, &serde_json::json!({}))
+                    .await
+                    .unwrap();
+                engine.started.notified().await;
+            }
+
+            // Both probes are already waiting on their original deadlines.
+            drt.system_health()
+                .lock()
+                .begin_canary_maintenance(maintained, Duration::from_secs(3))
+                .unwrap();
+
+            // Cross both original deadlines before checking that the lease held.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            for endpoint in [control, maintained] {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if drt
+                            .system_health()
+                            .lock()
+                            .get_endpoint_health_status(endpoint)
+                            == Some(HealthStatus::NotReady)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("blocked probe must eventually publish NotReady");
+                if endpoint == control {
+                    assert_eq!(
+                        drt.system_health()
+                            .lock()
+                            .get_endpoint_health_status(maintained),
+                        Some(HealthStatus::Ready),
+                        "an in-flight lease must defer the normal probe timeout",
+                    );
+                }
+            }
+        })
+        .await
+        .expect("canary timeout regression test must finish");
+    }
 }
 
 // ============================================================
