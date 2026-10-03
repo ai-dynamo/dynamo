@@ -709,7 +709,6 @@ async def test_image_request_with_default_sampling_params():
 
 @pytest.mark.asyncio
 async def test_routed_video_request_passes_negative_prompt_to_engine():
-    """A single-stage video pipeline reads the negative prompt from the engine prompt."""
     engine = _MockEngine()
     worker = OmniStageWorker(
         engine=engine,
