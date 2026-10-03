@@ -76,7 +76,7 @@ async def test_client_errors_propagate(error, monkeypatch) -> None:
     # request before video validation or fetching begins.
     video_validate = AsyncMock()
     video_fetch = AsyncMock()
-    monkeypatch.setattr(mmp, "validate_media_url", video_validate)
+    monkeypatch.setattr(mmp, "prepare_media_url", video_validate)
     monkeypatch.setattr(mmp, "fetch_bytes", video_fetch)
 
     request = {

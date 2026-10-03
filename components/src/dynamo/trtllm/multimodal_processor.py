@@ -33,7 +33,7 @@ from dynamo.common.http import HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
-    validate_media_url,
+    prepare_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
@@ -590,7 +590,7 @@ class MultimodalRequestProcessor:
                         400, "Local file access is not allowed for video", source
                     )
                 try:
-                    normalized_url = await validate_media_url(url, self._url_policy)
+                    normalized_url = await prepare_media_url(url, self._url_policy)
                     scheme = urlparse(normalized_url).scheme
                     if scheme in ("http", "https", "data"):
                         if scheme == "data":

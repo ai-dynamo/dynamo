@@ -12,7 +12,7 @@ from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_by
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
-    validate_media_url,
+    prepare_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
@@ -122,7 +122,7 @@ class AudioLoader:
 
     @_nvtx.annotate("mm:audio:load_with_vllm", color="cyan")
     async def _load_audio_with_vllm(self, audio_url: str) -> tuple[np.ndarray, float]:
-        normalized_url = await validate_media_url(audio_url, self._url_policy)
+        normalized_url = await prepare_media_url(audio_url, self._url_policy)
         media_io = self._create_vllm_audio_io()
 
         # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
