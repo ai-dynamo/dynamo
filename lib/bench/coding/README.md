@@ -161,7 +161,7 @@ The exporter:
 }
 ```
 
-Live request traces never write it. Agentic lowering adds each listed edge to the per-session sequence edges it always derives. A dependency must name a request in the trace that started no later than the dependent request. A session linked to another session by any listed edge skips timestamp-based spawn and join inference. Claude exports keep using `tool.claude` and do not write the field.
+Live request traces never write it. Agentic lowering adds each listed edge to the per-session sequence edges it always derives. A dependency must name a request in the trace that started no later than the dependent request. A completion dependency that ends after the dependent request started gets zero delay. Coding agents run tools while a response streams, so a spawned or messaged request can start just before the sending response completes. A child session explicitly linked to its declared parent skips timestamp-based spawn and join inference with that parent. Links to other sessions leave that inference in place. Claude exports keep using `tool.claude` and do not write the field.
 
 ## Replay Metadata Flow
 
