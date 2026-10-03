@@ -9,7 +9,9 @@
 //! rebound only when its worker is no longer a candidate. Requests without a session ID take the
 //! least-loaded worker and create no binding.
 //!
-//! Bindings idle longer than `max_idle_secs` are swept at most once per `eviction_interval_secs`.
+//! Session IDs and table size follow the session-affinity table's limits; requests that cannot be
+//! bound go to the least-loaded worker. Bindings idle longer than `max_idle_secs` are swept at most
+//! once per `eviction_interval_secs`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,6 +27,9 @@ use dynamo_kv_router::plugins::{
     WorkerSelectionPolicyRegistryError,
 };
 use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::services::selection::affinity::{
+    MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
+};
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-sticky-min-load";
@@ -70,6 +75,7 @@ struct StickyMinLoadPicker {
     max_idle: Duration,
     eviction_interval: Duration,
     last_sweep: Instant,
+    max_entries: usize,
     bindings: HashMap<String, Binding>,
 }
 
@@ -79,6 +85,7 @@ impl StickyMinLoadPicker {
             max_idle: Duration::from_secs(parameters.max_idle_secs),
             eviction_interval: Duration::from_secs(parameters.eviction_interval_secs),
             last_sweep: Instant::now(),
+            max_entries: MAX_SESSION_AFFINITY_ENTRIES,
             bindings: HashMap::new(),
         }
     }
@@ -93,7 +100,6 @@ impl StickyMinLoadPicker {
             .retain(|_, binding| now.saturating_duration_since(binding.last_access) <= max_idle);
     }
 
-    /// Select a row given `rows` candidates, each row's worker, and each row's active requests.
     fn select(
         &mut self,
         session_id: Option<&str>,
@@ -106,7 +112,8 @@ impl StickyMinLoadPicker {
             return None;
         }
         self.evict_idle(now);
-        let Some(session_id) = session_id else {
+        let Some(session_id) = session_id.filter(|id| id.len() <= MAX_SESSION_AFFINITY_ID_BYTES)
+        else {
             return Some(least_loaded(rows, &active_requests));
         };
         if let Some(binding) = self.bindings.get_mut(session_id) {
@@ -119,13 +126,16 @@ impl StickyMinLoadPicker {
             return Some(row);
         }
         let row = least_loaded(rows, &active_requests);
-        self.bindings.insert(
-            session_id.to_owned(),
-            Binding {
-                worker: worker(row),
-                last_access: now,
-            },
-        );
+        // A full table leaves new sessions unbound until the idle sweep frees entries.
+        if self.bindings.len() < self.max_entries {
+            self.bindings.insert(
+                session_id.to_owned(),
+                Binding {
+                    worker: worker(row),
+                    last_access: now,
+                },
+            );
+        }
         Some(row)
     }
 }
@@ -267,6 +277,28 @@ mod tests {
         assert_eq!(select(&mut picker, None, &[(A, 0), (B, 9)], now), A);
         assert_eq!(select(&mut picker, None, &[(A, 9), (B, 0)], now), B);
         assert!(picker.bindings.is_empty());
+    }
+
+    #[test]
+    fn overlong_session_ids_are_not_bound() {
+        let mut picker = picker();
+        let long = "s".repeat(MAX_SESSION_AFFINITY_ID_BYTES + 1);
+        assert_eq!(
+            select(&mut picker, Some(&long), &[(A, 0), (B, 9)], Instant::now()),
+            A
+        );
+        assert!(picker.bindings.is_empty());
+    }
+
+    #[test]
+    fn full_table_routes_new_sessions_unbound() {
+        let mut picker = picker();
+        picker.max_entries = 1;
+        let now = Instant::now();
+        assert_eq!(select(&mut picker, Some("s"), &[(A, 0), (B, 9)], now), A);
+        assert_eq!(select(&mut picker, Some("t"), &[(A, 9), (B, 0)], now), B);
+        assert_eq!(picker.bindings.len(), 1);
+        assert_eq!(select(&mut picker, Some("t"), &[(A, 0), (B, 9)], now), A);
     }
 
     #[test]

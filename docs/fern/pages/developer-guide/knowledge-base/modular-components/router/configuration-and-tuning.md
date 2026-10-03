@@ -243,7 +243,7 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 | `max_idle_secs` | `14400` | Seconds a session binding may go unused before it is dropped. Must be greater than `0`. |
 | `eviction_interval_secs` | `60` | Minimum seconds between sweeps for idle bindings. |
 
-Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently.
+Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently. The table holds at most 65,536 bindings and ignores session IDs longer than 256 bytes; requests that cannot be bound go to the least-loaded worker.
 
 #### Override the Selection
 
