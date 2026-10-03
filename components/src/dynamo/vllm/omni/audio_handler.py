@@ -8,6 +8,7 @@ OmniHandler holds an instance as ``self.audio`` (composition).
 """
 
 import logging
+import re
 from typing import Any, Dict, Union
 
 from transformers import AutoTokenizer
@@ -36,6 +37,19 @@ logger = logging.getLogger(__name__)
 # (MiMo-Audio, Qwen3-Omni, Stable Audio, etc.) use a plain text prompt.
 # Mirrors vLLM-Omni's _TTS_MODEL_STAGES in serving_speech.py.
 _TTS_MODEL_STAGES: set = {"qwen3_tts"}
+
+# The one task each Qwen3-TTS checkpoint variant serves, keyed by the
+# letters-only lowercase form of ``hf_config.tts_model_type``. Mirrors
+# vLLM-Omni's Qwen3TTSAdapter, which rejects other tasks before the engine.
+_TTS_VARIANTS = {
+    "customvoice": "CustomVoice",
+    "voicedesign": "VoiceDesign",
+    "base": "Base",
+}
+# Variant marker ending a model path component, for re-exports without metadata.
+_TTS_VARIANT_PATH_SUFFIX = re.compile(
+    r"(?:^|[-_.])(custom[-_.]?voice|voice[-_.]?design|base)$"
+)
 
 # Fallback language set used when model config is unavailable.
 _TTS_LANGUAGES_FALLBACK = {
@@ -135,6 +149,29 @@ class AudioGenerationHandler:
         except Exception as e:
             logger.warning("Could not load languages from model config: %s", e)
         return set()
+
+    def _tts_model_variant(self) -> str | None:
+        """Task served by the loaded Qwen3-TTS checkpoint, or None if unknown.
+
+        Checkpoint metadata wins. Only when it is absent or unrecognised are the
+        model path components inspected, leaf first, and a marker must end a
+        component so names like ``database`` do not read as ``Base``.
+        """
+        model_config = self.engine_client.model_config
+        configured = getattr(model_config.hf_config, "tts_model_type", None)
+        if isinstance(configured, str):
+            variant = _TTS_VARIANTS.get(re.sub(r"[^a-z]", "", configured.lower()))
+            if variant is not None:
+                return variant
+
+        model_path = getattr(model_config, "model", None)
+        if not isinstance(model_path, str):
+            return None
+        for component in reversed(re.split(r"[\\/]+", model_path.rstrip("/\\"))):
+            match = _TTS_VARIANT_PATH_SUFFIX.search(component.lower())
+            if match is not None:
+                return _TTS_VARIANTS[re.sub(r"[-_.]", "", match.group(1))]
+        return None
 
     # -- TTS model detection --------------------------------------------------
 
@@ -334,6 +371,16 @@ class AudioGenerationHandler:
                 f"Supported: {', '.join(sorted(_ALLOWED_TASK_TYPES))}"
             )
 
+        # A checkpoint serves one task. Submitting another reaches the engine
+        # and kills the stage, so refuse it here with a client error.
+        variant = self._tts_model_variant()
+        if variant is not None and task_type != variant:
+            raise ValueError(
+                f"Qwen3-TTS {variant} checkpoint does not support "
+                f"task_type='{task_type}'. Use task_type='{variant}' or load "
+                f"the matching {task_type} checkpoint."
+            )
+
         if req.language is not None:
             supported_langs = self._tts_supported_languages or {
                 lang.lower() for lang in _TTS_LANGUAGES_FALLBACK
@@ -456,7 +503,9 @@ class AudioGenerationHandler:
                 f"ref_audio is not readable audio ({len(audio_bytes)} bytes): "
                 "unrecognised format"
             ) from exc
-        return wav_data, int(sr)
+        # A plain list survives the trip to the engine process; a NumPy array
+        # nested in the prompt arrives there as a bare descriptor.
+        return wav_data.tolist(), int(sr)
 
     def _estimate_tts_prompt_len(self, tts_params: Dict[str, Any]) -> int:
         """Estimate Qwen3-TTS prompt length using its tokenizer.
