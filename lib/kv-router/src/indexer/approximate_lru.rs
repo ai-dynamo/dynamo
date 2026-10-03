@@ -16,13 +16,9 @@
 //! event fails to apply. The request release still makes its copies inactive,
 //! and later capacity pressure reconciles them through ordinary eviction.
 
-use std::{
-    cmp::Reverse,
-    collections::BTreeSet,
-    sync::{Arc, atomic::Ordering},
-    time::Instant,
-};
+use std::{cmp::Reverse, collections::BTreeSet, sync::Arc, time::Instant};
 
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use tokio::sync::oneshot;
 
@@ -251,7 +247,8 @@ struct ApproximateLruLeaseInner {
     worker: WorkerWithDpRank,
     incarnation: ApproximateLruIncarnation,
     attempt_id: AttemptId,
-    released: std::sync::atomic::AtomicBool,
+    // Serialize the completion check with enqueueing, so release cannot overtake acquire.
+    released: Mutex<bool>,
 }
 
 #[derive(Clone)]
@@ -286,7 +283,7 @@ impl ApproximateLruLease {
                 worker,
                 incarnation,
                 attempt_id,
-                released: std::sync::atomic::AtomicBool::new(false),
+                released: Mutex::new(false),
             }),
         }
     }
@@ -296,22 +293,27 @@ impl ApproximateLruLease {
         blocks: Vec<ApproximateLruBlock>,
         private_blocks: usize,
     ) -> Result<ApproximateAcquireMode, KvRouterError> {
-        if self.inner.released.load(Ordering::Acquire) {
-            return Err(KvRouterError::Unsupported(
-                "approximate LRU lease is already complete".to_string(),
-            ));
-        }
-        match send_acknowledged(
-            &self.inner.sink,
-            ApproximateLruCommand::Acquire {
-                worker: self.inner.worker,
-                incarnation: self.inner.incarnation,
-                attempt_id: self.inner.attempt_id,
-                blocks,
-                private_blocks,
-            },
-        )
-        .await?
+        let response = {
+            let released = self.inner.released.lock();
+            if *released {
+                return Err(KvRouterError::Unsupported(
+                    "approximate LRU lease is already complete".to_string(),
+                ));
+            }
+            enqueue_acknowledged(
+                &self.inner.sink,
+                ApproximateLruCommand::Acquire {
+                    worker: self.inner.worker,
+                    incarnation: self.inner.incarnation,
+                    attempt_id: self.inner.attempt_id,
+                    blocks,
+                    private_blocks,
+                },
+            )?
+        };
+        match response
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)??
         {
             ApproximateLruReply::Acquired(mode) => Ok(mode),
             _ => Err(KvRouterError::IndexerDroppedRequest),
@@ -325,7 +327,8 @@ impl ApproximateLruLease {
         start_position: usize,
         private_blocks: usize,
     ) -> Result<(), KvRouterError> {
-        if self.inner.released.load(Ordering::Acquire) {
+        let released = self.inner.released.lock();
+        if *released {
             return Ok(());
         }
         self.inner.sink.send(ApproximateLruTask::unacknowledged(
@@ -342,9 +345,11 @@ impl ApproximateLruLease {
     }
 
     pub fn begin_finish(&self) -> Result<Option<ApproximateLruReleaseAck>, KvRouterError> {
-        if self.inner.released.swap(true, Ordering::AcqRel) {
+        let mut released = self.inner.released.lock();
+        if *released {
             return Ok(None);
         }
+        *released = true;
         let (task, response) = ApproximateLruTask::acknowledged(ApproximateLruCommand::Release {
             worker: self.inner.worker,
             incarnation: self.inner.incarnation,
@@ -363,9 +368,11 @@ impl ApproximateLruLease {
 
     /// Synchronously enqueue an idempotent release without waiting for acknowledgement.
     pub fn release_now(&self) {
-        if self.inner.released.swap(true, Ordering::AcqRel) {
+        let mut released = self.inner.released.lock();
+        if *released {
             return;
         }
+        *released = true;
         let _ = self.inner.sink.send(ApproximateLruTask::unacknowledged(
             ApproximateLruCommand::Release {
                 worker: self.inner.worker,
@@ -378,7 +385,7 @@ impl ApproximateLruLease {
 
 impl Drop for ApproximateLruLeaseInner {
     fn drop(&mut self) {
-        if self.released.swap(true, Ordering::AcqRel) {
+        if *self.released.get_mut() {
             return;
         }
         let _ = self.sink.send(ApproximateLruTask::unacknowledged(
@@ -395,11 +402,18 @@ async fn send_acknowledged(
     sink: &Arc<dyn ApproximateLruCommandSink>,
     command: ApproximateLruCommand,
 ) -> Result<ApproximateLruReply, KvRouterError> {
-    let (task, response) = ApproximateLruTask::acknowledged(command);
-    sink.send(task)?;
-    response
+    enqueue_acknowledged(sink, command)?
         .await
         .map_err(|_| KvRouterError::IndexerDroppedRequest)?
+}
+
+fn enqueue_acknowledged(
+    sink: &Arc<dyn ApproximateLruCommandSink>,
+    command: ApproximateLruCommand,
+) -> Result<oneshot::Receiver<Result<ApproximateLruReply, KvRouterError>>, KvRouterError> {
+    let (task, response) = ApproximateLruTask::acknowledged(command);
+    sink.send(task)?;
+    Ok(response)
 }
 
 fn expect_applied(reply: ApproximateLruReply) -> Result<(), KvRouterError> {
@@ -1099,6 +1113,132 @@ mod tests {
                 state.assert_invariants();
             }
         }
+    }
+
+    struct PausedAcquireSink {
+        lane: parking_lot::Mutex<ApproximateLruLane>,
+        acquire_entered: std::sync::mpsc::Sender<()>,
+        release_sent: parking_lot::Mutex<std::sync::mpsc::Receiver<()>>,
+        release_signal: std::sync::mpsc::Sender<()>,
+    }
+
+    impl ApproximateLruCommandSink for PausedAcquireSink {
+        fn send(&self, task: ApproximateLruTask) -> Result<(), KvRouterError> {
+            if matches!(task.command, ApproximateLruCommand::Acquire { .. }) {
+                self.acquire_entered.send(()).unwrap();
+                // Give a concurrent finish the opportunity to overtake this acquire.
+                // A correctly serialized finish waits until this send completes.
+                let _ = self
+                    .release_sent
+                    .lock()
+                    .recv_timeout(Duration::from_millis(100));
+            }
+            let is_release = matches!(task.command, ApproximateLruCommand::Release { .. });
+            let output = self.lane.lock().apply(task.command)?;
+            if is_release {
+                self.release_signal.send(()).unwrap();
+            }
+            if let Some(response) = task.response {
+                let _ = response.send(Ok(output.reply));
+            }
+            Ok(())
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::release_now(false)]
+    #[case::begin_finish(true)]
+    #[tokio::test]
+    async fn concurrent_finish_cannot_overtake_acquire(#[case] acknowledged: bool) {
+        let (acquire_entered, entered_rx) = std::sync::mpsc::channel();
+        let (release_signal, release_sent) = std::sync::mpsc::channel();
+        let mut lane = ApproximateLruLane::default();
+        apply(
+            &mut lane,
+            ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: Some(1),
+            },
+        );
+        let sink = Arc::new(PausedAcquireSink {
+            lane: parking_lot::Mutex::new(lane),
+            acquire_entered,
+            release_sent: parking_lot::Mutex::new(release_sent),
+            release_signal,
+        });
+        let lease = ApproximateLruLease::new(sink.clone(), worker(), 1, attempt(1));
+        let acquiring = lease.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let acquire = std::thread::spawn(move || {
+            runtime
+                .block_on(acquiring.acquire(vec![block(1)], 1))
+                .unwrap()
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        if acknowledged {
+            let ack = lease.begin_finish().unwrap().unwrap();
+            ack.wait().await.unwrap();
+        } else {
+            lease.release_now();
+        }
+        assert_eq!(acquire.join().unwrap(), ApproximateAcquireMode::Lru);
+        drop(lease);
+        let stats = sink.lane.lock().stats();
+        assert_eq!(stats.leases, 0, "acknowledged={acknowledged}");
+        assert_eq!(stats.active_blocks, 0);
+        assert_eq!(stats.private_blocks, 0);
+        assert_eq!(stats.overcapacity_blocks, 0);
+    }
+
+    struct QueuedLruSink(tokio::sync::mpsc::UnboundedSender<ApproximateLruTask>);
+
+    impl ApproximateLruCommandSink for QueuedLruSink {
+        fn send(&self, task: ApproximateLruTask) -> Result<(), KvRouterError> {
+            self.0.send(task).map_err(|_| KvRouterError::IndexerOffline)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_acquire_releases_without_waiting_for_acknowledgement() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let lease = ApproximateLruLease::new(Arc::new(QueuedLruSink(tx)), worker(), 1, attempt(1));
+        let acquiring = lease.clone();
+        let acquire = tokio::spawn(async move { acquiring.acquire(vec![block(1)], 1).await });
+        let acquire_task = rx.recv().await.unwrap();
+        assert!(matches!(
+            acquire_task.command,
+            ApproximateLruCommand::Acquire { .. }
+        ));
+        lease.release_now();
+        let release_task = rx.try_recv().unwrap();
+        acquire.abort();
+        assert!(acquire.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            release_task.command,
+            ApproximateLruCommand::Release { .. }
+        ));
+        let mut lane = ApproximateLruLane::default();
+        apply(
+            &mut lane,
+            ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: Some(1),
+            },
+        );
+        apply(&mut lane, acquire_task.command);
+        apply(&mut lane, release_task.command);
+        let stats = lane.stats();
+        assert_eq!(stats.leases, 0);
+        assert_eq!(stats.active_blocks, 0);
+        assert_eq!(stats.private_blocks, 0);
+        assert_eq!(stats.overcapacity_blocks, 0);
+        assert!(lease.acquire(vec![block(2)], 0).await.is_err());
+        assert!(lease.begin_finish().unwrap().is_none());
+        lease.materialize(Some(1), vec![block(2)], 1, 0).unwrap();
+        drop(lease);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
