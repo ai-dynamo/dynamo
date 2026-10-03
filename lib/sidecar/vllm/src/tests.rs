@@ -294,6 +294,15 @@ impl pb::inference_server::Inference for FakeVllm {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for FakeVllm {
+    async fn shutdown(
+        &self,
+        _: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented(
+            "shutdown is not supported by the test server",
+        ))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,
@@ -982,6 +991,102 @@ async fn generation_preserves_empty_engine_text_while_stop_text_is_buffered() {
         );
         engine.cleanup().await.expect("cleanup");
     }
+}
+
+/// A tool-closing EOS is absent from native text but remains in native token IDs.
+/// Returning text (even empty text) would bypass Dynamo's visible-stop decoder.
+#[tokio::test]
+async fn visible_stop_tokens_use_frontend_decode_without_losing_the_delimiter() {
+    let server = FakeServer::start(FakeVllm {
+        sequence_outputs: Some(vec![pb::SequenceOutput {
+            token_ids: vec![42],
+            num_tokens: 1,
+            finish_info: Some(pb::FinishInfo {
+                num_output_tokens: 1,
+                finish_reason: pb::finish_info::FinishReason::Stop as i32,
+                stop_reason: Some(pb::finish_info::StopReason::EosTokenId(42)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    })
+    .await;
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
+        let engine = engine(&server.endpoint, mode, 1, model_info());
+        engine.start(0).await.unwrap();
+        let mut request = if mode.is_decode() {
+            decode_request()
+        } else {
+            minimal_request()
+        };
+        request.stop_conditions.stop_token_ids_visible = Some(vec![42]);
+        request.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
+        request.stop_conditions.stop_token_ids = None;
+        request.output_options = OutputOptions {
+            skip_special_tokens: Some(false),
+            ..Default::default()
+        };
+        let outputs = collect(&engine, request).await;
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].token_ids, [42]);
+        assert!(
+            outputs[0].text.is_none(),
+            "frontend must decode the retained delimiter"
+        );
+        assert_eq!(outputs[0].finish_reason, Some(FinishReason::Stop));
+        let requests = server.service.requests.lock().await;
+        let wire = requests.last().unwrap();
+        assert_eq!(wire.stopping.as_ref().unwrap().stop_token_ids, [2, 42]);
+        let response = wire.response.as_ref().unwrap();
+        assert_eq!(response.output_text, Some(false));
+        assert!(response.output_token_ids);
+        drop(requests);
+        engine.cleanup().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reasoning_controls_cross_grpc_preserving_false_and_zero() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let (engine, _) = engine_from_args(&server.endpoint).await;
+    engine.start(0).await.unwrap();
+    for control in [
+        "reasoning_parser_kwargs",
+        "reasoning_ended",
+        "thinking_token_budget",
+    ] {
+        let mut request = minimal_request();
+        match control {
+            "reasoning_parser_kwargs" => {
+                request.extra_args = Some(json!({
+                    "reasoning_parser_kwargs": {"chat_template_kwargs": {"enable_thinking": false}}
+                }))
+            }
+            "reasoning_ended" => request.extra_args = Some(json!({"reasoning_ended": false})),
+            _ => request.stop_conditions.max_thinking_tokens = Some(0),
+        }
+        collect_result(&engine, request).await.unwrap();
+        let requests = server.service.requests.lock().await;
+        let wire = requests.last().unwrap();
+        match control {
+            "reasoning_parser_kwargs" => assert_eq!(
+                struct_to_json_v14(
+                    wire.reasoning_parser_kwargs.clone().unwrap(),
+                    "vLLM",
+                    "reasoning_parser_kwargs",
+                )
+                .unwrap(),
+                json!({"chat_template_kwargs": {"enable_thinking": false}}),
+            ),
+            "reasoning_ended" => assert_eq!(wire.reasoning_ended, Some(false)),
+            _ => assert_eq!(
+                wire.stopping.as_ref().unwrap().thinking_token_budget,
+                Some(0)
+            ),
+        }
+    }
+    engine.cleanup().await.unwrap();
 }
 
 #[tokio::test]

@@ -104,6 +104,7 @@ pub(crate) fn sequence_response(
                 kv_transfer_params,
                 ec_transfer_params: None,
             }),
+            ..Default::default()
         }),
     }
 }
@@ -139,6 +140,7 @@ pub(crate) fn encode_response(
                 kv_transfer_params: None,
                 ec_transfer_params,
             }),
+            ..Default::default()
         }),
     }
 }
