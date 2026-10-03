@@ -223,10 +223,11 @@ impl CarrierRouter {
             hub.ref_count = hub.ref_count.saturating_sub(1);
             remove_hub = hub.ref_count == 0;
         }
-        if remove_hub && let Some(hub) = state.hubs.remove(&binding.hub_url) {
-            if let Some(cancel) = hub.cancel {
-                cancel.cancel();
-            }
+        if remove_hub
+            && let Some(hub) = state.hubs.remove(&binding.hub_url)
+            && let Some(cancel) = hub.cancel
+        {
+            cancel.cancel();
         }
         true
     }
