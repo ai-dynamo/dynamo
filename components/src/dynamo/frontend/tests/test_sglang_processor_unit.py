@@ -5357,3 +5357,310 @@ class TestThinkingControlParity:  # FRONTEND.10
             reasoning_parser_name=None,
         )
         assert result.request.get("chat_template_kwargs", {}) == case.expected
+
+
+# Harmony's wire-format markers (GPT-OSS) are single special tokens in its own
+# vocabulary; register them so the Qwen tokenizer encodes them the same way.
+HARMONY_MARKERS = [
+    "<|start|>",
+    "<|channel|>",
+    "<|message|>",
+    "<|end|>",
+    "<|return|>",
+    "<|call|>",
+]
+
+
+@pytest.fixture(scope="module")
+def reasoning_tokenizer():
+    tokenizer = copy.deepcopy(get_tokenizer(MODEL))
+    # Register channel markers as atomic tokens, as in their model vocabularies.
+    tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": HARMONY_MARKERS
+            + [
+                "<|START_TEXT|>",
+                "<|END_TEXT|>",
+                "<|START_ACTION|>",
+                "<|END_ACTION|>",
+                "<|open|>",
+                "<|close|>",
+                "<|sep|>",
+                "<|inner_prefix|>",
+                "<|inner_suffix|>",
+                "<|tools_prefix|>",
+                "<|tools_suffix|>",
+                "<|content_thinking|>",
+                "<|content_text|>",
+                "<|content_invoke_tool_json|>",
+                "<|content_invoke_tool_text|>",
+                "<|content_model_end_sampling|>",
+                "<|end_message|>",
+            ]
+        }
+    )
+    return tokenizer
+
+
+class TestReasoningTokenUsage:
+    REASONING = "Let me think about it."
+    ANALYSIS = f"<|channel|>analysis<|message|>{REASONING}<|end|>"
+    FINAL = "<|start|>assistant<|channel|>final<|message|>It is 4.<|return|>"
+
+    @staticmethod
+    def _post(tokenizer, reasoning_parser_name, force_reasoning=False):
+        _, reasoning_parser = create_parsers(
+            {},
+            tool_call_parser_name=None,
+            reasoning_parser_name=reasoning_parser_name,
+            force_reasoning=force_reasoning,
+        )
+        return SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=reasoning_parser,
+        )
+
+    @staticmethod
+    def _feed(post, token_ids, *, step=1, finish_reason="stop"):
+        for start in range(0, len(token_ids), step):
+            last = start + step >= len(token_ids)
+            post.process_output(
+                {
+                    "token_ids": token_ids[start : start + step],
+                    "finish_reason": finish_reason if last else None,
+                    "stop_terminated": False,
+                }
+            )
+
+    @staticmethod
+    def _ids(tokenizer, text):
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    def _count(self, tokenizer, parser_name, text, **feed_kwargs):
+        post = self._post(tokenizer, parser_name)
+        self._feed(post, self._ids(tokenizer, text), **feed_kwargs)
+        return post.reasoning_token_count
+
+    @pytest.mark.parametrize(
+        ("parser_name", "prefix", "suffix", "force_reasoning"),
+        [
+            ("qwen3", "<think>", '<tool_call>{"name":"f"}</tool_call>', False),
+            (
+                "inkling",
+                "<|content_thinking|>",
+                "<|content_text|>It is 4.<|end_message|>",
+                False,
+            ),
+            (
+                "inkling",
+                "<|content_thinking|>",
+                '<|content_invoke_tool_json|>{"name":"f"}<|end_message|>',
+                False,
+            ),
+            (
+                "inkling",
+                "<|content_thinking|>",
+                "<|content_invoke_tool_text|>f()<|end_message|>",
+                False,
+            ),
+            (
+                "kimi_k3",
+                "<|open|>think<|sep|>",
+                "<|open|>response<|sep|>It is 4.<|close|>response<|sep|>",
+                False,
+            ),
+            (
+                "kimi_k3",
+                "",
+                "<|open|>response<|sep|>It is 4.<|close|>response<|sep|>",
+                True,
+            ),
+            (
+                "cohere_command4",
+                "",
+                "<|START_TEXT|>The answer is 4.<|END_TEXT|>",
+                True,
+            ),
+            (
+                "cohere_command4",
+                "",
+                '<|START_ACTION|>{"name":"f"}<|END_ACTION|>',
+                True,
+            ),
+        ],
+        ids=[
+            "qwen3",
+            "inkling-text",
+            "inkling-tool-json",
+            "inkling-tool-text",
+            "kimi-k3-response",
+            "forced-kimi-k3-response",
+            "cohere-text",
+            "cohere-action",
+        ],
+    )
+    def test_implicit_reasoning_end_excludes_normal_tokens(
+        self, reasoning_tokenizer, parser_name, prefix, suffix, force_reasoning
+    ):
+        tokenizer = reasoning_tokenizer
+        reasoning_ids = self._ids(tokenizer, prefix + self.REASONING)
+        ids = reasoning_ids + self._ids(tokenizer, suffix)
+        for step in range(1, len(ids) + 1):
+            post = self._post(tokenizer, parser_name, force_reasoning)
+            self._feed(post, ids, step=step)
+            assert post.reasoning_token_count == len(reasoning_ids), step
+
+    def test_apertus_inner_tool_span_is_excluded(self, reasoning_tokenizer):
+        tokenizer = reasoning_tokenizer
+        before = self._ids(tokenizer, "<|inner_prefix|>" + self.REASONING)
+        tool = self._ids(tokenizer, "<|tools_prefix|>[") + self._ids(
+            tokenizer, '{"name":"f"}]<|tools_suffix|>'
+        )
+        after = self._ids(tokenizer, "Check again.<|inner_suffix|>")
+        ids = before + tool + after + self._ids(tokenizer, "It is 4.")
+        for step in range(1, len(ids) + 1):
+            post = self._post(tokenizer, "apertus2509")
+            self._feed(post, ids, step=step)
+            assert post.reasoning_token_count == len(before) + len(after), step
+
+    def test_tool_marker_ignored_by_detector_remains_reasoning(self, tokenizer):
+        reasoning = f"<think>{self.REASONING}<tool_call>literal</think>"
+        assert self._count(tokenizer, "deepseek-r1", reasoning + "It is 4.") == len(
+            self._ids(tokenizer, reasoning)
+        )
+
+    def test_forced_reasoning_counts_from_first_token(self, tokenizer):
+        post = self._post(tokenizer, "qwen3", force_reasoning=True)
+        self._feed(post, self._ids(tokenizer, f"{self.REASONING}</think>\n\nIt is 4."))
+        assert post.reasoning_token_count == len(
+            self._ids(tokenizer, f"{self.REASONING}</think>")
+        )
+
+    def test_generation_ending_inside_reasoning_counts_every_token(self, tokenizer):
+        ids = self._ids(tokenizer, f"<think>{self.REASONING} And more")
+        post = self._post(tokenizer, "qwen3")
+        self._feed(post, ids, step=2, finish_reason="length")
+        assert post.reasoning_token_count == len(ids)
+
+    COMMENTARY = "<|start|>assistant<|channel|>commentary<|message|>Checking.<|end|>"
+    SECOND = "<|start|>assistant<|channel|>analysis<|message|>Check again.<|end|>"
+    THIRD = "<|start|>assistant<|channel|>analysis<|message|>And once more.<|end|>"
+
+    def test_count_is_identical_for_every_chunk_size(self, reasoning_tokenizer):
+        blocks = (self.ANALYSIS, self.COMMENTARY, self.SECOND, self.THIRD, self.FINAL)
+        text = "".join(blocks)
+        expected = sum(
+            len(self._ids(reasoning_tokenizer, block))
+            for block in blocks
+            if "analysis" in block
+        )
+        size = len(self._ids(reasoning_tokenizer, text))
+        counts = {
+            step: self._count(reasoning_tokenizer, "gpt-oss", text, step=step)
+            for step in range(1, size + 1)
+        }
+        assert set(counts.values()) == {expected}, counts
+
+    def test_empty_harmony_reasoning_counts_zero(self, reasoning_tokenizer):
+        text = "<|channel|>analysis<|message|><|end|>" + self.FINAL
+        assert self._count(reasoning_tokenizer, "gpt-oss", text, step=2) == 0
+
+    @pytest.mark.parametrize(
+        "unmapped_normal", [False, True], ids=["raises", "unmapped-normal"]
+    )
+    def test_unreliable_parser_withdraws_the_count(
+        self, reasoning_tokenizer, unmapped_normal
+    ):
+        class FailingParser:
+            detector = types.SimpleNamespace(
+                think_start_token="<|channel|>analysis<|message|>",
+                think_end_token="<|end|>",
+            )
+
+            def parse_stream_chunk(self, text):
+                if unmapped_normal:
+                    return "reasoning", "unmapped normal output"
+                raise ValueError("malformed output")
+
+        counter = sglang_prepost_module._ReasoningTokenCounter(
+            reasoning_tokenizer,
+            FailingParser(),
+            start_marker_ids=self._ids(
+                reasoning_tokenizer, "<|channel|>analysis<|message|>"
+            ),
+            end_marker_ids=self._ids(reasoning_tokenizer, "<|end|>"),
+        )
+        counter.observe(
+            self._ids(reasoning_tokenizer, self.ANALYSIS + self.FINAL), finished=True
+        )
+        assert counter.total is None
+
+    def test_no_reasoning_parser_reports_nothing(self, tokenizer):
+        assert self._count(tokenizer, None, "It is 4.") is None
+
+    def _final_usage(self, tokenizer, backend_usage):
+        ids = self._ids(tokenizer, f"<think>{self.REASONING}</think>\n\nIt is 4.")
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {"token_ids": [token_id], "finish_reason": None}
+                for token_id in ids[:-1]
+            ]
+            + [
+                {
+                    "token_ids": ids[-1:],
+                    "finish_reason": "stop",
+                    "completion_usage": backend_usage,
+                }
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+            eos_token_ids=None,
+            stream_interval=1,
+        )
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-reasoning",
+                    {"model": MODEL},
+                    {},
+                    [1, 2],
+                    self._post(tokenizer, "qwen3"),
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+        usage_chunks = [chunk for chunk in chunks if "usage" in chunk]
+        assert len(usage_chunks) == 1
+        return usage_chunks[0]["usage"]
+
+    @pytest.mark.parametrize(
+        "backend_details",
+        [None, {"reasoning_tokens": 0}, {"reasoning_tokens": 12}],
+        ids=["no-backend-count", "backend-zero", "backend-count"],
+    )
+    def test_final_usage_carries_frontend_count(self, tokenizer, backend_details):
+        usage = {"prompt_tokens": 2, "completion_tokens": 14, "total_tokens": 16}
+        if backend_details is not None:
+            usage["completion_tokens_details"] = backend_details
+        details = self._final_usage(tokenizer, usage)["completion_tokens_details"]
+        assert details == {
+            "reasoning_tokens": len(
+                self._ids(tokenizer, f"<think>{self.REASONING}</think>")
+            )
+        }
+
+    def test_final_usage_never_exceeds_completion_tokens(self, tokenizer):
+        usage = self._final_usage(
+            tokenizer,
+            {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        )
+        assert usage["completion_tokens"] == 3
+        assert usage["completion_tokens_details"] == {"reasoning_tokens": 3}
