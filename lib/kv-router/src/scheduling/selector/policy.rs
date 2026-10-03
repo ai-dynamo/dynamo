@@ -262,6 +262,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
                 preferred_taint_multiplier,
                 state.scorer_picker_inputs,
             );
+            input.track_kept_candidate(worker);
             state.push_candidate(candidate);
             false
         });
@@ -317,6 +318,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             additional_inputs,
         );
         let candidate = filter_candidate.with_inputs_from(&additional, state.scorer_picker_inputs);
+        input.track_kept_candidate(worker);
         state.push_candidate(candidate);
         false
     });
@@ -893,6 +895,71 @@ mod tests {
             )),
             Err(KvSchedulerError::AllEligibleWorkersFiltered)
         ));
+    }
+
+    #[test]
+    fn best_eligible_cache_reuse_skips_filtered_workers() {
+        struct RejectWorker(WorkerWithDpRank);
+        impl WorkerFilter for RejectWorker {
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(candidate.worker() != self.0)
+            }
+        }
+
+        struct ZeroScorer;
+        impl WorkerScorer for ZeroScorer {
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                costs.fill(0.0);
+                Ok(())
+            }
+        }
+
+        let rejected = WorkerWithDpRank::from_worker_id(0);
+        let kept = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".into(),
+        };
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(rejected, 6);
+        request.overlap.tier_overlap_blocks.device.insert(kept, 1);
+        let policy = WorkerSelectionPolicy::new_with_filters(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(RejectWorker(rejected))],
+            vec![Box::new(ZeroScorer)],
+            Box::new(FirstPicker),
+        );
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+
+        assert_eq!(selected.worker, kept);
+        // The rejected worker's 96 cached tokens must not count as available reuse.
+        assert_eq!(selected.max_raw_cached_tokens, Some(16));
+        assert_eq!(selected.selected_raw_cached_tokens, Some(16));
     }
 
     #[test]
