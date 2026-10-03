@@ -13,6 +13,67 @@ def is_truthy(val: str) -> bool:
     return val.strip().lower() in ("1", "true", "on", "yes")
 
 
+# Keep in sync with DEFAULT_LEADER_ZMQ_PUB_PORT in
+# lib/bindings/kvbm/src/block_manager/distributed/utils.rs.
+DEFAULT_LEADER_ZMQ_PUB_PORT = 56001
+
+
+def get_port_from_env(key: str, default_port: int) -> int:
+    """Return the TCP port configured in ``key``, or ``default_port``.
+
+    Mirrors the Rust reader in
+    ``lib/bindings/kvbm/src/block_manager/distributed/utils.rs``: a value
+    that is unset, blank, or not a port in 1-65535 falls back to the
+    documented default rather than raising. ``os.getenv(key, default)`` is
+    not enough on its own, because a variable that is set but empty yields
+    ``""`` instead of the default.
+    """
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default_port
+
+    try:
+        port = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r. Falling back to %d.", key, raw, default_port)
+        return default_port
+
+    if not 1 <= port <= 65535:
+        logger.warning(
+            "%s=%d is outside 1-65535. Falling back to %d.", key, port, default_port
+        )
+        return default_port
+
+    return port
+
+
+CONSOLIDATOR_PORT_OFFSET = 1000
+
+
+def derive_consolidator_port() -> tuple[int, int]:
+    """The KVBM leader pub port and the consolidator output port derived from it.
+
+    Both integrations derive the same pair with the same offset, so it lives
+    here. Keeping two copies in step by comment is what let the TRT-LLM path
+    ship without the range check the vLLM path already had.
+
+    Raises:
+        ValueError: the derived port is above 65535. ``get_port_from_env``
+                    accepts any base in 1-65535, so a base above 64535 passes
+                    it and then overflows the offset.
+    """
+    base = get_port_from_env(
+        "DYN_KVBM_LEADER_ZMQ_PUB_PORT", DEFAULT_LEADER_ZMQ_PUB_PORT
+    )
+    output_port = base + CONSOLIDATOR_PORT_OFFSET
+    if output_port > 65535:
+        raise ValueError(
+            f"Derived consolidator port {output_port} exceeds maximum (65535). "
+            f"KVBM port {base} is too high. Use a lower base port."
+        )
+    return base, output_port
+
+
 def get_consolidator_mode() -> str:
     """Return the KV event consolidator mode from DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE.
 

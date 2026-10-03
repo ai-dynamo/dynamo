@@ -8,7 +8,12 @@ Helper functions for KV Event Consolidator configuration for TensorRT-LLM.
 import logging
 import os
 
-from kvbm.utils import get_consolidator_mode, is_truthy
+from kvbm.utils import (
+    DEFAULT_LEADER_ZMQ_PUB_PORT,
+    get_consolidator_mode,
+    get_port_from_env,
+    is_truthy,
+)
 
 __all__ = [
     "get_consolidator_endpoints",
@@ -96,9 +101,10 @@ def get_consolidator_endpoints() -> tuple[str, str, str]:
     Returns:
         Tuple of (trtllm_endpoint, output_bind_endpoint, output_connect_endpoint)
     """
-    # Get KVBM leader ZMQ pub port (default 56001, matching vLLM)
-    kvbm_pub_port_str = os.getenv("DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001")
-    kvbm_pub_port = int(kvbm_pub_port_str)
+    # Get KVBM leader ZMQ pub port (matching vLLM)
+    kvbm_pub_port = get_port_from_env(
+        "DYN_KVBM_LEADER_ZMQ_PUB_PORT", DEFAULT_LEADER_ZMQ_PUB_PORT
+    )
 
     # Check for explicit TRTLLM port override
     trtllm_port_env = os.getenv("DYN_KVBM_TRTLLM_ZMQ_PORT")
