@@ -1068,6 +1068,7 @@ class SglangEngineFactory:
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
+        assert preprocess_workers is not None  # Resolved by FrontendConfig.validate().
         if preprocess_workers > 0:
             logger.info(
                 "Creating SGLang preprocess worker pool with %d workers for %s",
