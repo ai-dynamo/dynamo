@@ -4,6 +4,8 @@
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 
+use super::MediaDelivery;
+
 mod aggregator;
 mod nvext;
 
@@ -37,7 +39,7 @@ pub struct NvCreateVideoRequest {
     /// Delivery mode of the generated video. If absent, the worker applies its
     /// own default.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<VideoResponseFormat>,
+    pub response_format: Option<MediaDelivery>,
 
     /// Output container format: "mp4", "webm", "gif", etc.
     /// This field is used as model hint and the model may not
@@ -68,18 +70,6 @@ pub struct NvCreateVideoRequest {
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
-}
-
-/// Delivery mode of the generated video.
-///
-/// The set has two values. A request with an unknown value fails to parse.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum VideoResponseFormat {
-    /// The response carries a URL to the video file.
-    Url,
-    /// The response carries the video bytes as base64 text.
-    B64Json,
 }
 
 impl NvCreateVideoRequest {
@@ -258,7 +248,7 @@ mod tests {
     fn video_request_response_format_round_trips() {
         let json = r#"{"prompt":"cat","model":"wan","response_format":"b64_json"}"#;
         let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.response_format, Some(VideoResponseFormat::B64Json));
+        assert_eq!(req.response_format, Some(MediaDelivery::B64Json));
 
         let out = serde_json::to_string(&req).unwrap();
         assert!(out.contains("\"response_format\":\"b64_json\""));

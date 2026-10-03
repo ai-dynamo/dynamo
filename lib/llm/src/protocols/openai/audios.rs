@@ -5,6 +5,7 @@ use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+use super::MediaDelivery;
 use crate::engines::ValidateRequest;
 
 mod aggregator;
@@ -29,12 +30,12 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
 
-    /// Delivery mode of the generated audio. Absent means [`AudioDataSource::B64Json`].
+    /// Delivery mode of the generated audio. Absent means [`MediaDelivery::B64Json`].
     /// Image and video generation use `response_format` for this choice. The
     /// OpenAI audio API uses `response_format` for the codec. Audio uses a
     /// separate field for the delivery mode.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_source: Option<AudioDataSource>,
+    pub data_source: Option<MediaDelivery>,
 
     /// Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,19 +94,6 @@ pub struct NvCreateAudioSpeechRequest {
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
-}
-
-/// Delivery mode of the generated audio.
-///
-/// The frontend reads this field to select the delivery mode. The set has two
-/// values. A request with an unknown value fails to parse.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AudioDataSource {
-    /// The response carries a URL to the audio file.
-    Url,
-    /// The response carries the audio bytes as base64 text.
-    B64Json,
 }
 
 impl NvCreateAudioSpeechRequest {
@@ -238,7 +226,7 @@ mod tests {
     fn audio_request_data_source_url_round_trips() {
         let json = r#"{"input":"hello","data_source":"url"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source, Some(AudioDataSource::Url));
+        assert_eq!(req.data_source, Some(MediaDelivery::Url));
 
         let out = serde_json::to_string(&req).unwrap();
         assert!(out.contains("\"data_source\":\"url\""));
@@ -248,14 +236,14 @@ mod tests {
     fn audio_request_data_source_b64_json_round_trips() {
         let json = r#"{"input":"hi","data_source":"b64_json"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source, Some(AudioDataSource::B64Json));
+        assert_eq!(req.data_source, Some(MediaDelivery::B64Json));
     }
 
     #[test]
     fn audio_request_data_source_and_response_format_coexist() {
         let json = r#"{"input":"hi","data_source":"url","response_format":"mp3"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.data_source, Some(AudioDataSource::Url));
+        assert_eq!(req.data_source, Some(MediaDelivery::Url));
         assert_eq!(req.response_format.as_deref(), Some("mp3"));
     }
 
