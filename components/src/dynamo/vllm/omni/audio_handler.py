@@ -157,8 +157,9 @@ class AudioGenerationHandler:
         model path components inspected, leaf first, and a marker must end a
         component so names like ``database`` do not read as ``Base``.
         """
-        model_config = self.engine_client.model_config
-        configured = getattr(model_config.hf_config, "tts_model_type", None)
+        model_config = getattr(self.engine_client, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        configured = getattr(hf_config, "tts_model_type", None)
         if isinstance(configured, str):
             variant = _TTS_VARIANTS.get(re.sub(r"[^a-z]", "", configured.lower()))
             if variant is not None:

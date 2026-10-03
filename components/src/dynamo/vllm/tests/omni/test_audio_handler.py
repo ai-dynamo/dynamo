@@ -210,6 +210,20 @@ class TestCheckpointVariant:
         with pytest.raises(ValueError, match="does not support"):
             handler._validate_tts_request(self._request(task))
 
+    @pytest.mark.parametrize(
+        "model, restricted",
+        [("/models/Qwen3-TTS-12Hz-0.6B-CustomVoice", True), (None, False)],
+    )
+    def test_missing_hf_config_falls_back_to_the_model_path(self, model, restricted):
+        handler = self._handler()
+        handler.engine_client.model_config = SimpleNamespace(model=model)
+        req = self._request("Base")
+        if restricted:
+            with pytest.raises(ValueError, match="does not support"):
+                handler._validate_tts_request(req)
+        else:
+            handler._validate_tts_request(req)
+
     def test_unknown_variant_is_not_restricted(self):
         # "database" must not read as a Base checkpoint.
         handler = self._handler(tts_model_type="other", model="/data/database")
