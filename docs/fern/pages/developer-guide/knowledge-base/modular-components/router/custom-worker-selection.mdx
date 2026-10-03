@@ -24,7 +24,7 @@ flowchart LR
     Validate --> Reserve["Accounting and reservation"]
 ```
 
-For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
+For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). The [ported routing policies](https://github.com/ai-dynamo/dynamo/tree/main/lib/router-plugins/builtin/src) show `prefix_hashes()`, `policy_class()`, and `worker_capacity()` in use. Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
 
 ## Use a Built-In Policy First
 
@@ -579,4 +579,4 @@ worker_selection:
         router_temperature: 0.0
 ```
 
-The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. If no shared-cache multiplier is set, the default policy uses `0.5` when shared cache is enabled. Values must be finite and non-negative. Per-request score and temperature overrides do not apply to this policy. The builtin skips cache inputs at zero overlap credit and for plain disaggregated decode.
+The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`, plus an optional integer `seed` that makes tie-breaks and temperature sampling reproducible, for example in offline replay. Omitted parameters inherit router configuration. If no shared-cache multiplier is set, the default policy uses `0.5` when shared cache is enabled. Values must be finite and non-negative. Per-request score and temperature overrides do not apply to this policy. The builtin skips cache inputs at zero overlap credit and for plain disaggregated decode.

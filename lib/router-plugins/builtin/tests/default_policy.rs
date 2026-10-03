@@ -331,6 +331,8 @@ fn named_default_parameters_resolve_and_reject_invalid_values() {
     for (parameter, succeeds) in [
         ("overlap_score_credit: 2.0", true),
         ("overlap_score_credit: -1.0", false),
+        ("seed: 7", true),
+        ("seed: -1", false),
         ("unknown: 1", false),
     ] {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -478,6 +480,92 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
         );
         if parameters == "{}" {
             assert_eq!(select(default_policy(config, "prefill")), expected_worker);
+        }
+    }
+}
+
+fn yaml_default_policy(
+    parameters: &str,
+    config: KvRouterConfig,
+) -> (
+    impl Fn() -> WorkerSelectionPolicy,
+    KvRouterConfig,
+    tempfile::NamedTempFile,
+) {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), format!(
+        "worker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters: {parameters}\n"
+    )).unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(file.path().display().to_string()),
+        ..config
+    };
+    let mut registry = default_registry();
+    dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+    let factory = registry.resolve(&config).unwrap().unwrap();
+    let factory_config = config.clone();
+    let build = move || {
+        factory(
+            &factory_config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        )
+    };
+    (build, config, file)
+}
+
+#[test]
+fn yaml_seed_gives_each_policy_instance_the_seeded_selector_stream() {
+    // Equal costs everywhere, so every pick is a tie-break or a uniform softmax draw.
+    let (workers, mut request) = fixture(8, 64);
+    request.worker_loads.clear();
+    request.overlap = Default::default();
+    for temperature in [0.0, 0.7] {
+        let (build, config, _file) = yaml_default_policy(
+            "{seed: 42}",
+            KvRouterConfig {
+                router_temperature: temperature,
+                ..Default::default()
+            },
+        );
+        let (first, second) = (build(), build());
+        let reference = DefaultWorkerSelector::new_seeded(Some(config), "decode", 42);
+        let mut picks = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let input = support::selection_input(&workers, &request, 16);
+            let expected = reference.select_worker(input).unwrap().worker;
+            assert_eq!(first.select_worker(input).unwrap().worker, expected);
+            assert_eq!(second.select_worker(input).unwrap().worker, expected);
+            picks.insert(expected);
+        }
+        assert!(
+            picks.len() > 1,
+            "temperature={temperature}: equal costs must exercise the seeded draw"
+        );
+    }
+}
+
+#[test]
+fn yaml_without_seed_keeps_the_unseeded_default() {
+    let (workers, mut request) = fixture(8, 64);
+    request.worker_loads.clear();
+    request.overlap = Default::default();
+    for temperature in [0.0, 0.7] {
+        let config = KvRouterConfig {
+            router_temperature: temperature,
+            ..Default::default()
+        };
+        let (build, config, _file) = yaml_default_policy("{}", config);
+        let plugin = build();
+        let builtin = default_policy(config, "decode");
+        for seed in 0..64 {
+            let input = support::selection_input(&workers, &request, 16);
+            fastrand::seed(seed);
+            let expected = builtin.select_worker(input).unwrap().worker;
+            let next_random = fastrand::u64(..);
+            fastrand::seed(seed);
+            assert_eq!(plugin.select_worker(input).unwrap().worker, expected);
+            assert_eq!(fastrand::u64(..), next_random);
         }
     }
 }

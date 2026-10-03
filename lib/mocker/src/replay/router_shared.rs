@@ -5,14 +5,18 @@ use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::{MockEngineArgs, WorkerType as EngineWorkerType};
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicy};
 use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
-use dynamo_kv_router::{ActiveSequencesMultiWorker, LocalScheduler, SequencePublisher};
+use dynamo_kv_router::{
+    ActiveSequencesMultiWorker, KvSchedulerError, LocalScheduler, RoutingPartitionRef,
+    SequencePublisher, WorkerSelectionInput, WorkerSelector, WorkerType,
+};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;
@@ -54,7 +58,43 @@ impl WorkerConfigLike for ReplayWorkerConfig {
 }
 
 pub(super) type ReplayScheduler =
-    LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, DefaultWorkerSelector>;
+    LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, ReplaySelector>;
+
+/// Dynamo's default selector, or a worker-selection policy from the builtin catalog.
+// Each replay router holds one long-lived selector, so the variant size gap costs nothing.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum ReplaySelector {
+    Default(DefaultWorkerSelector),
+    Policy(WorkerSelectionPolicy),
+}
+
+impl<C: WorkerConfigLike + Sync> WorkerSelector<C> for ReplaySelector {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        match self {
+            Self::Default(selector) => WorkerSelector::<C>::required_worker_inputs(selector),
+            Self::Policy(policy) => WorkerSelector::<C>::required_worker_inputs(policy),
+        }
+    }
+
+    fn uses_exclusive_affinity_target(&self) -> bool {
+        match self {
+            Self::Default(selector) => {
+                WorkerSelector::<C>::uses_exclusive_affinity_target(selector)
+            }
+            Self::Policy(policy) => WorkerSelector::<C>::uses_exclusive_affinity_target(policy),
+        }
+    }
+
+    fn select_worker(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        match self {
+            Self::Default(selector) => selector.select_worker(input),
+            Self::Policy(policy) => policy.select_worker(input),
+        }
+    }
+}
 
 pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
@@ -65,6 +105,15 @@ pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWo
         total_kv_blocks: args.num_gpu_blocks as u64,
         data_parallel_start_rank: 0,
         data_parallel_size: args.dp_size.max(1),
+    }
+}
+
+/// Replay validation guarantees each pool's engine role, so it also names the router's role.
+pub(super) fn replay_router_role(args: &MockEngineArgs) -> WorkerType {
+    match args.worker_type {
+        EngineWorkerType::Aggregated => WorkerType::Aggregated,
+        EngineWorkerType::Prefill => WorkerType::Prefill,
+        EngineWorkerType::Decode => WorkerType::Decode,
     }
 }
 
@@ -106,31 +155,52 @@ pub(super) fn replay_slots(
     ))
 }
 
-pub(super) fn replay_selector(config: &KvRouterConfig) -> anyhow::Result<DefaultWorkerSelector> {
-    replay_selector_with_seed(config, None)
+pub(super) fn replay_selector(
+    config: &KvRouterConfig,
+    worker_type: WorkerType,
+) -> anyhow::Result<ReplaySelector> {
+    replay_selector_with_seed(config, None, worker_type)
 }
 
+/// The seed applies only to Dynamo's default selector; a catalog policy owns its randomness.
 pub(super) fn replay_selector_with_seed(
     config: &KvRouterConfig,
     selector_seed: Option<u64>,
-) -> anyhow::Result<DefaultWorkerSelector> {
+    worker_type: WorkerType,
+) -> anyhow::Result<ReplaySelector> {
     if config.request_classifier_config()?.is_some() {
         anyhow::bail!("offline replay does not support request_classifier plugins");
     }
     if let Some(instance) = config
-        .selected_worker_selection_policy_instance()
+        .selected_worker_selection_policy_instance_for(worker_type)
         .map_err(anyhow::Error::from)?
+        .filter(|instance| instance != "default")
     {
-        anyhow::bail!("custom worker-selection policy {instance:?} is not supported by replay");
+        let mut registry = dynamo_custom_policy_builtin::default_registry();
+        dynamo_custom_policy_builtin::register(&mut registry)?;
+        // One self-contained message: Python bindings display only the outermost error.
+        let factory = registry
+            .resolve_for_worker_type(config, worker_type)
+            .map_err(|error| {
+                anyhow::anyhow!("resolving worker-selection policy {instance:?}: {error}")
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!("worker-selection policy {instance:?} did not resolve")
+            })?;
+        return Ok(ReplaySelector::Policy(factory(
+            config,
+            worker_type,
+            RoutingPartitionRef::new("replay", "default"),
+        )));
     }
 
-    Ok(match selector_seed {
+    Ok(ReplaySelector::Default(match selector_seed {
         #[cfg(feature = "replay-bench")]
         Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
         #[cfg(not(feature = "replay-bench"))]
         Some(_) => unreachable!("canonical KV Router replay requires the replay-bench feature"),
         None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
-    })
+    }))
 }
 
 pub(crate) fn replay_router_config(
@@ -156,7 +226,7 @@ mod tests {
             router_policy_config: Some(policy.path().display().to_string()),
             ..Default::default()
         };
-        let Err(error) = replay_selector(&config) else {
+        let Err(error) = replay_selector(&config, WorkerType::Aggregated) else {
             panic!("classifier ignored")
         };
         assert!(
@@ -166,11 +236,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_selector_rejects_custom_worker_selection() {
+    fn policy_config(yaml: &str) -> (tempfile::NamedTempFile, KvRouterConfig) {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            policy_file.path(),
+        std::fs::write(policy_file.path(), yaml).unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        (policy_file, config)
+    }
+
+    #[test]
+    fn replay_selector_resolves_catalog_policies_per_role() {
+        let (_file, config) = policy_config(
+            r#"
+worker_selection:
+  prefill: two-tier
+  instances:
+    - name: two-tier
+      type: dynamo-two-tier-cost-fn
+"#,
+        );
+
+        assert!(matches!(
+            replay_selector(&config, WorkerType::Prefill).unwrap(),
+            ReplaySelector::Policy(_)
+        ));
+        assert!(matches!(
+            replay_selector(&config, WorkerType::Aggregated).unwrap(),
+            ReplaySelector::Default(_)
+        ));
+    }
+
+    #[test]
+    fn replay_selector_rejects_a_policy_type_outside_the_builtin_catalog() {
+        let (_file, config) = policy_config(
             r#"
 worker_selection:
   aggregated: custom
@@ -179,21 +279,14 @@ worker_selection:
       type: test
       parameters: {}
 "#,
-        )
-        .unwrap();
-        let config = KvRouterConfig {
-            router_policy_config: Some(policy_file.path().display().to_string()),
-            ..Default::default()
-        };
+        );
 
-        let error = match replay_selector(&config) {
-            Err(error) => error,
-            Ok(_) => panic!("replay must reject a custom worker selector it cannot execute"),
+        let Err(error) = replay_selector(&config, WorkerType::Aggregated) else {
+            panic!("replay must reject a worker-selection policy it cannot build");
         };
         assert!(
-            error
-                .to_string()
-                .contains("custom worker-selection policy \"custom\" is not supported by replay")
+            format!("{error:#}").contains("test"),
+            "the error should name the unknown policy type: {error:#}"
         );
     }
 }

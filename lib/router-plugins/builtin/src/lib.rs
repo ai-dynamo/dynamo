@@ -4,11 +4,20 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default, two-tier, and ThunderAgent providers through `register`. The default
-//! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
+//! catalog adds the named default, two-tier, ThunderAgent, and ported routing policies through
+//! `register`. The default itself uses the same public candidate inputs and scorer/picker
+//! dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
+mod chwbl;
 mod default;
+mod dualmap;
+mod llm_d;
+mod lmetric;
+mod ramjet;
+mod signals;
+#[cfg(test)]
+mod test_support;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{DefaultWorkerSelector, default_factory, default_policy};
@@ -29,6 +38,11 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     default::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
+    lmetric::register(registry)?;
+    ramjet::register(registry)?;
+    llm_d::register(registry)?;
+    dualmap::register(registry)?;
+    chwbl::register(registry)?;
     Ok(())
 }
 
@@ -87,6 +101,42 @@ worker_selection:
             WorkerType::Decode,
         ] {
             factory(&config, worker_type, partition);
+        }
+    }
+
+    /// Every ported policy resolves with its default parameters for every worker role.
+    #[test]
+    fn ported_policies_resolve_with_defaults() {
+        for policy_type in [
+            chwbl::POLICY_TYPE,
+            dualmap::POLICY_TYPE,
+            llm_d::optimized_baseline::POLICY_TYPE,
+            llm_d::precise_prefix::POLICY_TYPE,
+            lmetric::POLICY_TYPE,
+            ramjet::POLICY_TYPE,
+        ] {
+            let (config, resolved) = resolve(&format!(
+                r#"
+worker_selection:
+  aggregated: ported
+  prefill: ported
+  decode: ported
+  instances:
+    - name: ported
+      type: {policy_type}
+"#
+            ));
+            let factory = resolved
+                .unwrap_or_else(|error| panic!("{policy_type}: {error}"))
+                .expect("a configured instance resolves to a factory");
+            let partition = RoutingPartitionRef::new("model", "default");
+            for worker_type in [
+                WorkerType::Aggregated,
+                WorkerType::Prefill,
+                WorkerType::Decode,
+            ] {
+                factory(&config, worker_type, partition);
+            }
         }
     }
 
