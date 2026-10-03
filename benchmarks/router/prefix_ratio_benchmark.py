@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import subprocess
-from typing import Dict, Optional
 
 import matplotlib
 
@@ -18,6 +17,8 @@ from common import (
     get_common_aiperf_flags,
     resolve_tokenizer,
     setup_logger,
+    validate_worker_participation,
+    worker_participation_requested,
 )
 
 logger = setup_logger(__name__)
@@ -36,13 +37,13 @@ def get_aiperf_cmd(
     artifact_dir,
     url="http://localhost:8888",
     use_expected_osl=False,
+    capture_worker_participation=False,
 ):
     """Build aiperf command based on prefix ratio"""
     prefix_length = int(isl * prefix_ratio)
     synthetic_input_length = int(isl * (1 - prefix_ratio))
 
-    if use_expected_osl:
-        nvext_json = json.dumps({"nvext": {"agent_hints": {"osl": osl}}})
+    nvext = {"agent_hints": {"osl": osl}} if use_expected_osl else None
 
     cmd = [
         "aiperf",
@@ -78,9 +79,12 @@ def get_aiperf_cmd(
         "--dataset-sampling-strategy",
         "shuffle",
     ]
-    if use_expected_osl:
-        cmd.extend(["--extra-inputs", nvext_json])
-    cmd.extend(get_common_aiperf_flags())
+    cmd.extend(
+        get_common_aiperf_flags(
+            capture_worker_participation,
+            nvext=nvext,
+        )
+    )
     return cmd
 
 
@@ -114,7 +118,10 @@ def run_benchmark(
     output_dir,
     url,
     use_expected_osl=False,
-) -> Optional[Dict]:
+    verify_worker_participation=False,
+    minimum_prefill_workers=0,
+    minimum_decode_workers=0,
+) -> dict | None:
     """Run aiperf benchmark for a specific prefix ratio"""
     logger.info(
         f"Running benchmark with prefix_ratio={prefix_ratio}, seed={seed}, url={url}"
@@ -136,6 +143,7 @@ def run_benchmark(
         artifact_dir,
         url,
         use_expected_osl,
+        verify_worker_participation,
     )
 
     logger.info(f"Command: {' '.join(aiperf_cmd)}")
@@ -143,6 +151,13 @@ def run_benchmark(
     try:
         subprocess.run(aiperf_cmd, check=True)
         logger.info("AIPerf profiling completed successfully")
+        if verify_worker_participation:
+            validate_worker_participation(
+                artifact_dir,
+                minimum_prefill_workers,
+                minimum_decode_workers,
+                logger,
+            )
         return get_aiperf_result(artifact_dir)
     except subprocess.CalledProcessError as e:
         logger.error(f"AIPerf failed with error code: {e.returncode}")
@@ -177,6 +192,7 @@ def main():
 
     args = parser.parse_args()
     resolve_tokenizer(args)
+    verify_worker_participation = worker_participation_requested(args)
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -207,6 +223,9 @@ def main():
             args.output_dir,
             args.url,
             args.use_expected_osl,
+            verify_worker_participation,
+            args.minimum_prefill_workers,
+            args.minimum_decode_workers,
         )
 
         if result is not None:

@@ -23,6 +23,8 @@ from common import (
     resolve_tokenizer,
     setup_logger,
     tag_requests_with_priority,
+    validate_worker_participation,
+    worker_participation_requested,
 )
 
 logger = setup_logger(__name__)
@@ -98,7 +100,11 @@ def run_concurrent_streams(
         trace_path = os.path.join(tier_dir, "trace.jsonl")
         requests = tier_requests[tier]
         if tag_priority:
-            requests = tag_requests_with_priority(requests, priority)
+            requests = tag_requests_with_priority(
+                requests,
+                priority,
+                worker_participation_requested(args),
+            )
         write_trace_file(requests, trace_path)
 
         artifact_dir = os.path.join(tier_dir, "aiperf_artifacts")
@@ -112,6 +118,7 @@ def run_concurrent_streams(
             seed if seed is not None else args.seed,
             args.block_size,
             args.url,
+            worker_participation_requested(args),
         )
         cmd.extend(["--log-level", "WARNING", "--ui-type", "none"])
 
@@ -143,6 +150,14 @@ def run_concurrent_streams(
         logger.error(f"Failed tiers in {label} run: {', '.join(failed)}")
         logger.error("Check the aiperf.log files in each tier directory for details")
         raise SystemExit(1)
+
+    if worker_participation_requested(args):
+        validate_worker_participation(
+            run_dir,
+            args.minimum_prefill_workers,
+            args.minimum_decode_workers,
+            logger,
+        )
 
 
 def load_ttft(run_dir, tier):

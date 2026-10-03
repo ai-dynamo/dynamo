@@ -14,6 +14,8 @@ from common import (
     prepare_trace_dataset,
     resolve_tokenizer,
     setup_logger,
+    validate_worker_participation,
+    worker_participation_requested,
 )
 
 logger = setup_logger(__name__)
@@ -27,6 +29,9 @@ def run_benchmark_with_trace(
     url,
     seed,
     block_size,
+    verify_worker_participation=False,
+    minimum_prefill_workers=0,
+    minimum_decode_workers=0,
 ):
     """Run aiperf benchmark with a trace dataset"""
     aiperf_cmd = get_aiperf_cmd_for_trace(
@@ -37,6 +42,7 @@ def run_benchmark_with_trace(
         seed,
         block_size,
         url,
+        verify_worker_participation,
     )
 
     logger.info(f"Running aiperf with trace dataset: {trace_dataset}")
@@ -47,6 +53,13 @@ def run_benchmark_with_trace(
         subprocess.run(aiperf_cmd, check=True)
 
         logger.info("AIPerf profiling completed successfully")
+        if verify_worker_participation:
+            validate_worker_participation(
+                artifact_dir,
+                minimum_prefill_workers,
+                minimum_decode_workers,
+                logger,
+            )
 
     except subprocess.CalledProcessError as e:
         logger.error(f"AIPerf failed with error code: {e.returncode}")
@@ -64,6 +77,7 @@ def main():
 
     args = parser.parse_args()
     resolve_tokenizer(args)
+    verify_worker_participation = worker_participation_requested(args)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -80,6 +94,9 @@ def main():
         args.url,
         args.seed,
         args.block_size,
+        verify_worker_participation,
+        args.minimum_prefill_workers,
+        args.minimum_decode_workers,
     )
 
     logger.info(f"Results saved to: {artifact_dir}")
