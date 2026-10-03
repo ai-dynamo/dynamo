@@ -3,6 +3,7 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::MediaDelivery;
 
@@ -16,7 +17,7 @@ pub use nvext::NvExt;
 /// The OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`.
 /// `model` and `size` are free text, because the OpenAI type accepts any
 /// string there.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvCreateImageRequest {
     pub prompt: String,
 
@@ -84,11 +85,12 @@ pub struct NvCreateImageRequest {
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
+    #[schema(ignore)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Quality of the generated images
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageQuality {
     Standard,
@@ -100,7 +102,7 @@ pub enum ImageQuality {
 }
 
 /// File format of the generated images
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageOutputFormat {
     Png,
@@ -109,7 +111,7 @@ pub enum ImageOutputFormat {
 }
 
 /// Content-moderation level of the generation
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageModeration {
     Auto,
@@ -117,7 +119,7 @@ pub enum ImageModeration {
 }
 
 /// Requested background of the generated images
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageBackground {
     Auto,
@@ -126,7 +128,7 @@ pub enum ImageBackground {
 }
 
 /// Style of the generated images
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageStyle {
     Vivid,
@@ -145,7 +147,7 @@ impl NvCreateImageRequest {
 ///
 /// Keeps the wire format of the OpenAI `ImagesResponse`, which writes every
 /// absent optional field as null.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvImagesResponse {
     /// Unix timestamp of creation
     pub created: u32,
@@ -166,7 +168,7 @@ pub struct NvImagesResponse {
 }
 
 /// One generated image. The worker sets one of `url` and `b64_json`.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct ImageData {
     /// URL of the generated image (if response_format is "url")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,7 +183,7 @@ pub struct ImageData {
 }
 
 /// Actual background of the generated images
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageResponseBackground {
     Transparent,

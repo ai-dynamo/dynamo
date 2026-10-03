@@ -64,7 +64,7 @@ pub(crate) fn nest_media_passthrough(
 /// base64 text.
 ///
 /// The set has two values. A request with an unknown value fails to parse.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaDelivery {
     /// The response carries a URL to the media file.

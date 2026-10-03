@@ -3,6 +3,7 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 use super::MediaDelivery;
@@ -17,7 +18,7 @@ pub use nvext::NvExt;
 ///
 /// Follows vLLM-Omni's OpenAICreateSpeechRequest format with TTS-specific
 /// parameters as top-level fields.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateAudioSpeechRequest {
     /// The text to synthesize into speech (required)
     pub input: String,
@@ -93,6 +94,7 @@ pub struct NvCreateAudioSpeechRequest {
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
+    #[schema(ignore)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -105,7 +107,7 @@ impl NvCreateAudioSpeechRequest {
 }
 
 /// Audio data in response
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct AudioData {
     /// Actual codec used for this audio: "wav", "mp3", "pcm", "flac", "aac", "opus"
     pub output_format: String,
@@ -120,13 +122,14 @@ pub struct AudioData {
 }
 
 /// Response structure for audio speech generation
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvAudioSpeechResponse {
     /// Unique identifier for the response
     pub id: String,
 
     /// Object type (always "audio.speech")
     #[serde(default = "default_object_type")]
+    #[schema(default = default_object_type)]
     pub object: String,
 
     /// Model used for generation
@@ -134,10 +137,12 @@ pub struct NvAudioSpeechResponse {
 
     /// Status of the generation ("completed", "failed", etc.)
     #[serde(default = "default_status")]
+    #[schema(default = default_status)]
     pub status: String,
 
     /// Progress percentage (0-100)
     #[serde(default = "default_progress")]
+    #[schema(default = default_progress)]
     pub progress: i32,
 
     /// Unix timestamp of creation
@@ -145,6 +150,7 @@ pub struct NvAudioSpeechResponse {
 
     /// Generated audio data
     #[serde(default)]
+    #[schema(default = json!([]))]
     pub data: Vec<AudioData>,
 
     /// Error message if generation failed
