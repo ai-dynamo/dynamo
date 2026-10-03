@@ -1,15 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""process_openai_request must let client-error types from image loading
-propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
+"""process_openai_request must let client-error types from image and embedding
+loading propagate (so the frontend returns a 4xx) instead of swallowing them to
+None."""
 
 import base64
+import http.server
 import json
+import threading
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 import torch
+from safetensors.torch import save as safetensors_save
 
 # multimodal_processor imports tensorrt_llm, whose import needs CUDA. -m selection
 # happens after collection, so this module is still imported on the CPU-only step;
@@ -20,8 +26,11 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
-from dynamo.common.http import HttpStatusError
-from dynamo.common.http.url_validator import UrlValidationError
+import dynamo.common.http as dynamo_http
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
+from dynamo.common.http.aiohttp_client import AiohttpClient
+from dynamo.common.http.base import HttpClient
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.trtllm import multimodal_processor as mmp
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 
@@ -774,3 +783,321 @@ def test_extract_prompt_and_media_from_request_empty_or_malformed_mm_data() -> N
         assert text == "hi"
         assert image_urls == [fallback]
         assert embedding_paths == []
+
+
+# --- Embedding URLs: the shared HTTP client applies the destination policy ---
+
+_EMBEDDING = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+_PUBLIC_URL = "https://8.8.8.8/emb.safetensors"
+_EGRESS_ENV = (
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "DYN_MM_ALLOW_INTERNAL",
+    "DYN_MM_TRUST_EGRESS_PROXY",
+    "DYN_HTTP_TIMEOUT",
+)
+
+
+def _embedding_processor(max_file_size_mb: int = 10) -> MultimodalRequestProcessor:
+    return MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=max_file_size_mb,
+        tokenizer=MagicMock(),
+    )
+
+
+def _embedding_request(url: str) -> dict:
+    return {
+        "multi_modal_data": {"image_url": [{"Url": url}]},
+        "extra_args": {"formatted_prompt": "describe"},
+        "token_ids": [1],
+    }
+
+
+@pytest.fixture
+def clean_egress_env(monkeypatch):
+    """No ambient proxy, internal-access opt-in, or timeout override."""
+    for name in _EGRESS_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest_asyncio.fixture
+async def shared_client(monkeypatch, clean_egress_env):
+    """A fresh real client in place of the process-wide one."""
+    client = AiohttpClient()
+    monkeypatch.setattr(dynamo_http, "_default", client)
+    yield client
+    await client.close()
+
+
+@pytest.fixture
+def embedding_server():
+    """Serve one body on loopback and record each requested path."""
+    state = SimpleNamespace(
+        body=safetensors_save({"mm_embeddings": _EMBEDDING}), hits=[], url=""
+    )
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            state.hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(state.body)))
+            self.end_headers()
+            try:
+                self.wfile.write(state.body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the client stopped reading at its size cap
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    ).start()
+    state.url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class _ScriptedClient(HttpClient):
+    """The real policy checks and redirect loop of HttpClient, over a scripted
+    network: ``responses`` maps a URL to ``(body, redirect_to)``."""
+
+    def __init__(self, responses):
+        super().__init__()
+        self.responses = responses
+        self.calls = []
+
+    async def _fetch_simple(self, url, timeout, *, max_bytes=None, policy=None):
+        raise AssertionError("an embedding fetch must carry a policy")
+
+    async def _fetch_body_or_redirect(
+        self, url, timeout, *, max_bytes=None, policy=None
+    ):
+        self.calls.append((url, timeout, max_bytes))
+        return self.responses[url]
+
+    async def close(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_embedding_url_loads_from_an_allowed_host(
+    embedding_server, shared_client
+) -> None:
+    """Control for the next test: the same server and client, a looser policy."""
+    processor = _embedding_processor()
+    processor._url_policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+    loaded = await processor.load_tensor_from_path_or_url(
+        f"{embedding_server.url}/emb.safetensors"
+    )
+
+    assert torch.equal(loaded, _EMBEDDING)
+    assert embedding_server.hits == ["/emb.safetensors"]
+
+
+@pytest.mark.asyncio
+async def test_embedding_url_to_a_blocked_address_is_rejected(
+    embedding_server, shared_client
+) -> None:
+    processor = _embedding_processor()
+    processor._url_policy = UrlValidationPolicy(allow_http=True)
+
+    with pytest.raises(UrlValidationError, match="blocked range"):
+        await processor.load_tensor_from_path_or_url(
+            f"{embedding_server.url}/emb.safetensors"
+        )
+    assert embedding_server.hits == []
+
+
+@pytest.mark.asyncio
+async def test_embedding_over_the_size_cap_is_rejected(
+    embedding_server, shared_client
+) -> None:
+    embedding_server.body = b"\0" * (2 * 1024 * 1024)
+    processor = _embedding_processor(max_file_size_mb=1)
+    processor._url_policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+    with pytest.raises(UrlValidationError, match="1048576 byte download limit"):
+        await processor.load_tensor_from_path_or_url(
+            f"{embedding_server.url}/big.safetensors"
+        )
+
+
+@pytest.mark.asyncio
+async def test_embedding_url_to_a_public_address_loads(
+    monkeypatch, clean_egress_env
+) -> None:
+    body = safetensors_save({"mm_embeddings": _EMBEDDING})
+    client = _ScriptedClient({_PUBLIC_URL: (body, None)})
+    monkeypatch.setattr(dynamo_http, "_default", client)
+
+    loaded = await _embedding_processor().load_tensor_from_path_or_url(_PUBLIC_URL)
+
+    assert torch.equal(loaded, _EMBEDDING)
+    # One whole-request budget, and the processor's size cap.
+    assert client.calls == [(_PUBLIC_URL, 300.0, 10 * 1024 * 1024)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_file_size_mb", "budget_s"),
+    # 300 s up to an 18.75 MiB cap. Above it, the cap at 64 KiB/s.
+    [(1, 300.0), (18, 300.0), (19, 304.0), (50, 800.0)],
+)
+async def test_embedding_fetch_budget_scales_with_the_size_cap(
+    monkeypatch, clean_egress_env, max_file_size_mb, budget_s
+) -> None:
+    body = safetensors_save({"mm_embeddings": _EMBEDDING})
+    client = _ScriptedClient({_PUBLIC_URL: (body, None)})
+    monkeypatch.setattr(dynamo_http, "_default", client)
+
+    await _embedding_processor(max_file_size_mb).load_tensor_from_path_or_url(
+        _PUBLIC_URL
+    )
+
+    cap = max_file_size_mb * 1024 * 1024
+    assert client.calls == [(_PUBLIC_URL, budget_s, cap)]
+
+
+@pytest.mark.asyncio
+async def test_embedding_redirect_to_a_public_address_is_followed(
+    monkeypatch, clean_egress_env
+) -> None:
+    final = "https://9.9.9.9/emb.safetensors"
+    body = safetensors_save({"mm_embeddings": _EMBEDDING})
+    client = _ScriptedClient({_PUBLIC_URL: (None, final), final: (body, None)})
+    monkeypatch.setattr(dynamo_http, "_default", client)
+
+    loaded = await _embedding_processor().load_tensor_from_path_or_url(_PUBLIC_URL)
+
+    assert torch.equal(loaded, _EMBEDDING)
+    assert [call[0] for call in client.calls] == [_PUBLIC_URL, final]
+
+
+@pytest.mark.asyncio
+async def test_embedding_redirect_to_a_blocked_address_is_rejected(
+    monkeypatch, clean_egress_env
+) -> None:
+    blocked = "https://127.0.0.1/emb.safetensors"
+    body = safetensors_save({"mm_embeddings": _EMBEDDING})
+    client = _ScriptedClient({_PUBLIC_URL: (None, blocked), blocked: (body, None)})
+    monkeypatch.setattr(dynamo_http, "_default", client)
+
+    with pytest.raises(UrlValidationError, match="blocked range"):
+        await _embedding_processor().load_tensor_from_path_or_url(_PUBLIC_URL)
+    assert [call[0] for call in client.calls] == [_PUBLIC_URL]
+
+
+@pytest.mark.asyncio
+async def test_embedding_url_must_name_a_safetensors_file(monkeypatch) -> None:
+    fetch = AsyncMock()
+    monkeypatch.setattr(mmp, "fetch_bytes", fetch)
+    processor = _embedding_processor()
+
+    for url in ("https://8.8.8.8/e.pt", "https://8.8.8.8/e.bin", "https://8.8.8.8/e"):
+        with pytest.raises(RuntimeError):
+            await processor.load_tensor_from_path_or_url(url)
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rejected_embedding_url_is_a_client_error_in_the_aggregated_path(
+    embedding_server, shared_client
+) -> None:
+    """It must leave process_openai_request, not become a None return.
+
+    The bridge maps a ValueError, such as UrlValidationError, to
+    InvalidArgument (a 4xx). A None return becomes a RuntimeError (a 500).
+    """
+    processor = _embedding_processor()
+    processor._url_policy = UrlValidationPolicy(allow_http=True)
+    url = f"{embedding_server.url}/{'a' * 200_000}.safetensors"
+
+    with pytest.raises(UrlValidationError) as excinfo:
+        await processor.process_openai_request(
+            _embedding_request(url), embeddings=None, ep_disaggregated_params=None
+        )
+
+    assert isinstance(excinfo.value, ValueError)
+    assert len(str(excinfo.value)) < 1000
+    assert embedding_server.hits == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_fault_is_a_server_error_in_the_aggregated_path(
+    monkeypatch, shared_client
+) -> None:
+    """With neither a ValueError base nor a status, the bridge reports a 500."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+    url = f"https://8.8.8.8/{'a' * 200_000}.safetensors"
+
+    with pytest.raises(HttpConfigurationError) as excinfo:
+        await _embedding_processor().process_openai_request(
+            _embedding_request(url), embeddings=None, ep_disaggregated_params=None
+        )
+
+    assert not isinstance(excinfo.value, ValueError)
+    assert not hasattr(excinfo.value, "status")
+    assert len(str(excinfo.value)) < 1000
+
+
+@pytest.mark.asyncio
+async def test_rejected_embedding_url_is_raised_by_the_encode_worker(
+    embedding_server, shared_client
+) -> None:
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    processor = _embedding_processor()
+    processor._url_policy = UrlValidationPolicy(allow_http=True)
+
+    with pytest.raises(UrlValidationError):
+        async for _ in EncodeHelper.process_encode_request(
+            request=_embedding_request(f"{embedding_server.url}/emb.safetensors"),
+            multimodal_processor=processor,
+            connector=MagicMock(),
+        ):
+            pass
+    assert embedding_server.hits == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_fault_is_an_error_payload_from_the_encode_worker(
+    monkeypatch, shared_client
+) -> None:
+    """The prefill worker reads an exception from the encode worker as a
+    ValueError, which the client gets as a 400. It turns an error payload into
+    a RuntimeError, which the client gets as a 500."""
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+    url = f"https://8.8.8.8/{'a' * 200_000}.safetensors"
+
+    responses = [
+        response
+        async for response in EncodeHelper.process_encode_request(
+            request=_embedding_request(url),
+            multimodal_processor=_embedding_processor(),
+            connector=MagicMock(),
+        )
+    ]
+
+    assert len(responses) == 1
+    assert "DYN_MM_TRUST_EGRESS_PROXY" in responses[0]["error"]
+    assert len(responses[0]["error"]) < 1000
+    with pytest.raises(RuntimeError, match="EncodeHandler error"):
+        await EncodeHelper.read_embeddings_from_encode_response(
+            responses[0], MagicMock()
+        )
