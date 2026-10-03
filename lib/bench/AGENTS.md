@@ -11,6 +11,8 @@ Benchmarks and trace-export entrypoints for Dynamo. Hosts:
   request traces for direct replay.
 - `request_trace_to_mooncake` — opt-in export of Dynamo request traces to
   Mooncake replay JSONL.
+- `shadow_consumer` — reads one shadow tap topic and keeps running token and
+  outcome totals; the stand-in shadow for `shadow/demo.sh`.
 - `request_trace_to_satf` — opt-in export of Dynamo request traces to SATF 2.0.
 
 ## Guardrails
