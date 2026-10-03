@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/perf.yaml
+
+# Keep validation intentionally small: one concurrency with short synthetic
+# sequences. The upstream exhaustive 8K/1K sweep remains unchanged.
+patches:
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+      name: dsv4-pro-disagg-bench
+    patch: |-
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: dsv4-pro-disagg-bench
+      spec:
+        activeDeadlineSeconds: 1800
+        template:
+          spec:
+            containers:
+              - name: bench
+                env:
+                  - name: ISL
+                    value: "128"
+                  - name: OSL
+                    value: "16"
+                  - name: CONCURRENCIES
+                    value: "1"
+                  - name: ARTIFACT_ROOT
+                    value: /tmp/aiperf/deepseek-v4-pro-smoke
+            volumes:
+              - name: model-cache
+                persistentVolumeClaim:
+                  claimName: shared-model-cache
