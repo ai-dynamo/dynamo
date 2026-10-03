@@ -12,12 +12,14 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_kv_router::WorkerType as RouterRole;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::scheduling::RouterPolicyConfig;
 use dynamo_mocker::common::protocols::{
     EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
 };
@@ -376,8 +378,14 @@ impl RouterPolicy {
     fn load(path: &Path, args: &Args) -> Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("failed to read router policy config at {path:?}"))?;
+        let yaml = std::str::from_utf8(&bytes)
+            .with_context(|| format!("router policy config at {path:?} is not UTF-8"))?;
+        let parsed = RouterPolicyConfig::from_yaml(yaml)
+            .with_context(|| format!("invalid router policy config at {path:?}"))?;
+        // Seed the cache from the hashed bytes so the config never re-reads the path.
         let mut config = KvRouterConfig {
             router_policy_config: Some(path.display().to_string()),
+            policy_config_cache: OnceLock::from(parsed),
             ..router_config(args)?.unwrap_or_default()
         };
         config.apply_policy_config().map_err(anyhow::Error::msg)?;
