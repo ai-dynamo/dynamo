@@ -62,6 +62,29 @@ func (m *MockShellDeployer) NeedsDNSWait() bool {
 	return true
 }
 
+func TestSGLangBackend_RoleTemplateMultinodePreservesUserLaunchArguments(t *testing.T) {
+	backend := &SGLangBackend{roleLaunchOwnership: roleLaunchOwnedByPodTemplate}
+	container := &corev1.Container{
+		Command:        []string{"python3"},
+		Args:           []string{"-m", "dynamo.sglang", "--nnodes=2", "--node-rank=1", "--dist-init-addr=leader:29500"},
+		LivenessProbe:  &corev1.Probe{},
+		ReadinessProbe: &corev1.Probe{},
+		StartupProbe:   &corev1.Probe{},
+	}
+	wantCommand := append([]string(nil), container.Command...)
+	wantArgs := append([]string(nil), container.Args...)
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+
+	require.NoError(t, backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+	require.Equal(t, wantCommand, container.Command)
+	require.Equal(t, wantArgs, container.Args)
+	require.Nil(t, container.LivenessProbe)
+	require.Nil(t, container.ReadinessProbe)
+	require.Nil(t, container.StartupProbe)
+}
+
 func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 	backend := &SGLangBackend{}
 
