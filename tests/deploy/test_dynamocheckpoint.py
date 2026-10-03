@@ -5,6 +5,7 @@
 
 import asyncio
 import copy
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from typing import Any, Callable
 import aiohttp
 import pytest
 import requests
+from kubernetes_asyncio import watch
 from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
@@ -368,6 +370,153 @@ async def _get_snapshot_resource(
     )
 
 
+class _SnapshotLogDeployment(ManagedDeployment):
+    """Preserve short-lived capture-source logs until deployment cleanup."""
+
+    _source_log_collector: asyncio.Task[None] | None = None
+
+    async def _stream_source_logs(self, pod_name: str, container: str) -> bool:
+        assert self._core_api is not None
+        directory = Path(self.log_dir) / "snapshot-sources"
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            async with watch.Watch() as stream:
+                with (directory / f"{pod_name}.{container}.log").open(
+                    "a", encoding="utf-8"
+                ) as output:
+                    async for line in stream.stream(
+                        self._core_api.read_namespaced_pod_log,
+                        name=pod_name,
+                        namespace=self.namespace,
+                        container=container,
+                        timestamps=True,
+                    ):
+                        # Watch yields an unbuffered API error as a log line.
+                        # Real container logs carry the requested timestamp;
+                        # an unprefixed Status failure means attachment failed.
+                        if line.startswith("{"):
+                            try:
+                                status = json.loads(line)
+                            except json.JSONDecodeError:
+                                status = None
+                            if (
+                                isinstance(status, dict)
+                                and status.get("kind") == "Status"
+                                and status.get("apiVersion") == "v1"
+                                and status.get("status") == "Failure"
+                            ):
+                                logger.warning(
+                                    "Could not attach capture source %s/%s: %s",
+                                    pod_name,
+                                    container,
+                                    status.get("message", status),
+                                )
+                                return False
+                        output.write(line)
+                        output.flush()
+            return True
+        except TRANSIENT_K8S_EXCEPTIONS as exc:
+            logger.warning("Could not stream capture source %s: %s", pod_name, exc)
+            return False
+
+    async def _collect_source_logs(self) -> None:
+        assert self._core_api is not None
+        assert self._custom_api is not None
+        streams: dict[tuple[str, str], asyncio.Task[bool]] = {}
+        directory = Path(self.log_dir) / "snapshot-sources"
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            while True:
+                try:
+                    # The SnapshotJob CRD prunes labels from podTemplate.metadata.
+                    # Use its top-level DGD label, then the owner label that the
+                    # snapshot operator adds to source pods after reading the job.
+                    jobs = await self._custom_api.list_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=SNAPSHOT_JOB_PLURAL,
+                        label_selector=(
+                            "nvidia.com/dynamo-graph-deployment-name="
+                            f"{self.deployment_spec.name}"
+                        ),
+                    )
+                    for job in jobs.get("items", []):
+                        pods = await self._core_api.list_namespaced_pod(
+                            self.namespace,
+                            label_selector=(
+                                f"{SNAPSHOT_JOB_OWNER_LABEL}="
+                                f"{job['metadata']['name']}"
+                            ),
+                        )
+                        for pod in pods.items:
+                            pod_name = pod.metadata.name
+                            serialized = (
+                                self._core_api.api_client.sanitize_for_serialization(
+                                    pod
+                                )
+                            )
+                            (directory / f"{pod_name}.json").write_text(
+                                json.dumps(serialized, indent=2) + "\n",
+                                encoding="utf-8",
+                            )
+                            container_statuses = {
+                                status.name: status
+                                for status in (
+                                    (
+                                        pod.status.container_statuses
+                                        if pod.status
+                                        else None
+                                    )
+                                    or []
+                                )
+                            }
+                            for container in pod.spec.containers:
+                                status = container_statuses.get(container.name)
+                                if (
+                                    status is None
+                                    or status.state is None
+                                    or not (
+                                        status.state.running or status.state.terminated
+                                    )
+                                ):
+                                    continue
+                                key = (pod_name, container.name)
+                                task = streams.get(key)
+                                if task is None or (task.done() and not task.result()):
+                                    streams[key] = asyncio.create_task(
+                                        self._stream_source_logs(
+                                            pod_name, container.name
+                                        )
+                                    )
+                except TRANSIENT_K8S_EXCEPTIONS as exc:
+                    logger.warning("Could not inspect capture sources: %s", exc)
+                await asyncio.sleep(2)
+        finally:
+            for task in streams.values():
+                task.cancel()
+            await asyncio.gather(*streams.values(), return_exceptions=True)
+
+    async def _wait_for_ready(self, timeout=1800, sleep=1, log_interval=60):
+        # __aenter__ waits for readiness before the test body can run. Start
+        # collection here so capture-source failures are recorded before cleanup.
+        if self._source_log_collector is None:
+            self._source_log_collector = asyncio.create_task(
+                self._collect_source_logs()
+            )
+        return await super()._wait_for_ready(timeout, sleep, log_interval)
+
+    async def _cleanup(self):
+        collector = self._source_log_collector
+        if collector is not None:
+            collector.cancel()
+            result = (await asyncio.gather(collector, return_exceptions=True))[0]
+            if isinstance(result, Exception):
+                logger.warning("Capture-source log collection failed: %s", result)
+            self._source_log_collector = None
+        await super()._cleanup()
+
+
 async def _wait_for_checkpoint_ready(
     deployment: ManagedDeployment,
     backend: CheckpointBackendConfig,
@@ -658,7 +807,7 @@ async def test_dgd_checkpoint_restore_deploy(
         model_cache_mount=request.config.getoption("--model-cache-mount") or None,
     )
 
-    async with ManagedDeployment(
+    async with _SnapshotLogDeployment(
         log_dir=request.node.name,
         deployment_spec=deployment_spec,
         namespace=namespace,
