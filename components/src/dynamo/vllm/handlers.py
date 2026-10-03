@@ -780,6 +780,18 @@ def _serialize_routed_experts(
     }
 
 
+def _rerun_post_init(sampling_params: SamplingParams) -> None:
+    """Apply vLLM's SamplingParams.__post_init__ to the setattr overlays.
+
+    setattr skips its temperature clamp, _verify_args, and greedy reset. vLLM
+    validates the params (for example min_p under speculative decoding) before
+    the process_inputs clone that reruns them, so rerun them here. A direct
+    call runs the same steps in vLLM's order without a second deep copy, and
+    each step gives the same result when it runs again.
+    """
+    sampling_params.__post_init__()
+
+
 def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
@@ -942,6 +954,7 @@ def build_sampling_params(
     sampling_params.detokenize = False
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
 
+    _rerun_post_init(sampling_params)
     return sampling_params
 
 
@@ -1043,6 +1056,7 @@ def build_sampling_params_openai(
     ):
         sampling_params.thinking_token_budget = thinking_token_budget
 
+    _rerun_post_init(sampling_params)
     return sampling_params
 
 
@@ -4281,9 +4295,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         _apply_nvext_cache_salt(request, prompt)
 
-        # Build sampling params from request using shared utility
+        # Prefill generates only 1 token. Cap it before the builder, whose vLLM
+        # checks reject a client min_tokens above max_tokens=1.
+        stop_conditions = {
+            **(request.get("stop_conditions") or {}),
+            "max_tokens": 1,
+            "min_tokens": 1,
+        }
         sampling_params = build_sampling_params(
-            request,
+            {**request, "stop_conditions": stop_conditions},
             self.default_sampling_params,
             self.model_max_len,
             enable_rl=self.config.enable_rl,
@@ -4299,9 +4319,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             kv_protocol.prefill_request_kv_transfer_params(),
             preserve_kv_hint=True,
         )
-        # Override for prefill: only generate 1 token
-        sampling_params.max_tokens = 1
-        sampling_params.min_tokens = 1
 
         # Extract LoRA request if present
         model_name = request.get("model")
