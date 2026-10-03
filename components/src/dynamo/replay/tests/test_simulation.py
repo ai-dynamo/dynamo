@@ -32,6 +32,7 @@ from dynamo.replay import (
 )
 from dynamo.replay import api as replay_api
 from dynamo.replay import run_trace_replay, simulation
+from dynamo.router.simulation.config import RouterPredictionConfig
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -347,7 +348,10 @@ def test_dynamo_runner_defers_target_model_validation_until_trace_load(
     assert seen["execution_model"] is None
 
 
-def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
+@pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
+def test_runner_forwards_and_retains_requested_telemetry(
+    monkeypatch, router_mode
+) -> None:
     seen = {}
     sample = {"sample_ordinal": 0, "kind": "baseline", "sampled_at_ms": 0.0}
 
@@ -365,11 +369,24 @@ def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "KvRouterConfig", _FakeRouterConfig)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
         goal={"target": "throughput"},
+        adapters={
+            "dynamo.router": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.router",
+                        kind="placement_policy",
+                        api_version=1,
+                        config={"router_mode": router_mode, "router_config": {}},
+                    ),
+                )
+            ),
+        },
     )
 
     report = (
@@ -384,6 +401,7 @@ def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
         )
     )
 
+    assert seen["router_mode"] == router_mode
     assert seen["telemetry_options"] == TelemetryOptions(sample_interval_ms=2_500.0)
     assert "native_report" not in report.metadata
     assert report.metadata["telemetry"] == {
@@ -745,7 +763,7 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     ).backend_deployment
     args = simulation.DynamoReplayRunner._engine_args(deployment.agg_engine_args)
     metadata = deployment.performance_model_metadata["aggregated"]["config"]
-    assert "model_path" in metadata
+    assert metadata["model"] == raw["engine"]["model"]
     config = _ais_session_kwargs(metadata, args)["config"]
     assert config == args.ais_perf_config
     assert config["database_mode"] == "SOL"
@@ -824,3 +842,176 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     assert args.ais_perf_config is None
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
     assert report.metrics["completed_requests"] == raw["traffic"]["stop"]["requests"]
+
+
+@pytest.mark.parametrize("mode", ["session", "sibling_group"])
+def test_affinity_is_separate_from_kv_selection(mode) -> None:
+    config = RouterPredictionConfig.model_validate(
+        {"policy": "kv_router", "affinity": {"mode": mode, "ttl_seconds": 1.5}}
+    )
+    assert config.affinity.mode == mode
+    assert config.affinity.ttl_seconds == 1.5
+    assert config.overlap_score_credit == 1.0
+
+
+@pytest.mark.parametrize("ttl", [True, "3600", 0, float("inf"), 31_536_001])
+def test_affinity_rejects_invalid_ttl(ttl) -> None:
+    with pytest.raises(ValueError):
+        RouterPredictionConfig.model_validate(
+            {"policy": "kv_router", "affinity": {"mode": "session", "ttl_seconds": ttl}}
+        )
+
+
+def test_affinity_rejects_round_robin() -> None:
+    with pytest.raises(ValueError, match="requires policy='kv_router'"):
+        RouterPredictionConfig.model_validate(
+            {"policy": "round_robin", "affinity": {"mode": "session"}}
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"extra_engine_args": object()},
+        {"planner_config": {}},
+        {"max_sim_time_ms": 1},
+        {"agentic_lanes": 2},
+        {"num_workers": 2},
+        {"arrival_speedup_ratio": 2},
+        {"capture_per_request": True},
+        {"execution_model": "example/model"},
+        {"weka_nested_timestamp_basis": "relative"},
+        {"telemetry_options": TelemetryOptions()},
+    ],
+)
+def test_canonical_entry_rejects_conflicting_legacy_arguments(extra) -> None:
+    with pytest.raises(ValueError, match="legacy replay arguments"):
+        run_trace_replay([], router_mode="kv_router", replay_spec_json="{}", **extra)
+
+
+def test_canonical_entry_preserves_payload_and_native_resource_error(
+    monkeypatch,
+) -> None:
+    payload = (
+        '{"spec":{"version":1},"traffic":{"agentic_profile":{"duration_seconds":1.5}}}'
+    )
+    seen = {}
+
+    def failed_native(*args, **kwargs):
+        seen.update(kwargs)
+        raise MemoryError("native report storage exhausted")
+
+    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", failed_native)
+    monkeypatch.setattr(
+        replay_api._core, "AISIMULATE_CORE_VERSION", "0.13.0", raising=False
+    )
+    monkeypatch.setattr(
+        replay_api._core, "AISIMULATE_REPLAY_API_VERSION", 1, raising=False
+    )
+    monkeypatch.setattr(replay_api, "version", lambda name: "0.13.0")
+    with pytest.raises(MemoryError, match="native report storage"):
+        run_trace_replay(
+            [],
+            router_mode="kv_router",
+            replay_spec_json=payload,
+            affinity={"mode": "session", "ttl_seconds": 1.5},
+        )
+    assert seen["replay_spec_json"] == payload
+    assert json.loads(seen["affinity_json"])["ttl_seconds"] == 1.5
+
+
+@pytest.mark.parametrize(
+    "compiled,api",
+    [(None, None), ("0.12.0", 1), ("0.13.0", True), ("0.13.0-dev.20260923", 1)],
+)
+def test_canonical_entry_requires_matching_native_runtime(monkeypatch, compiled, api):
+    monkeypatch.setattr(
+        replay_api._core, "AISIMULATE_CORE_VERSION", compiled, raising=False
+    )
+    monkeypatch.setattr(
+        replay_api._core, "AISIMULATE_REPLAY_API_VERSION", api, raising=False
+    )
+    monkeypatch.setattr(replay_api, "version", lambda name: "0.13.0")
+    with pytest.raises(ValueError, match="matching AISimulate Python.*compiled core"):
+        run_trace_replay([], router_mode="kv_router", replay_spec_json="{}")
+
+
+def test_canonical_entry_accepts_equivalent_dev_version_spelling(monkeypatch):
+    monkeypatch.setattr(
+        replay_api._core,
+        "AISIMULATE_CORE_VERSION",
+        "0.13.0-dev.20260923",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        replay_api._core, "AISIMULATE_REPLAY_API_VERSION", 1, raising=False
+    )
+    monkeypatch.setattr(replay_api, "version", lambda name: "0.13.0.dev20260923")
+    monkeypatch.setattr(
+        replay_api, "_run_mocker_trace_replay", lambda *args, **kwargs: "{}"
+    )
+    assert run_trace_replay([], router_mode="kv_router", replay_spec_json="{}") == "{}"
+
+
+def test_explicit_empty_profile_uses_canonical_path():
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(), workload={"agentic_profile": {}}, goal={}
+    )
+    assert simulation.DynamoReplayRunner._requires_canonical_replay(spec, None)
+
+
+@pytest.mark.parametrize("include_raw_report", [False, True])
+@pytest.mark.parametrize("has_goodput", [False, True])
+def test_canonical_runner_enforces_goodput_contract(
+    monkeypatch, include_raw_report, has_goodput
+) -> None:
+    closed = []
+    metrics = {"output_throughput_tok_s": 42.0}
+    if has_goodput:
+        metrics["goodput_output_throughput_tok_s"] = 40.0
+
+    class FakeCanonicalRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, spec, *, output_requirements):
+            return simulation.ReplayReport(
+                metrics=metrics,
+                metadata={"native_report": {}} if include_raw_report else {},
+            )
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(simulation, "EngineReplayRunner", FakeCanonicalRunner)
+    monkeypatch.setattr(simulation, "KvRouterConfig", _FakeRouterConfig)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "tiny.jsonl"},
+        goal={"target": "goodput", "sla": {"ttft_ms": 100.0}},
+        adapters={
+            "dynamo.router": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.router",
+                        kind="placement_policy",
+                        api_version=1,
+                        config={
+                            "router_mode": "kv_router",
+                            "router_config": {},
+                            "affinity": {"mode": "session"},
+                        },
+                    ),
+                )
+            ),
+        },
+    )
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+    requirements = ReplayOutputRequirements(include_raw_report=include_raw_report)
+    if has_goodput:
+        report = runner.run(spec, output_requirements=requirements)
+        assert report.metrics["goodput_output_throughput_tok_s"] == 40.0
+    else:
+        with pytest.raises(RuntimeError, match="did not emit goodput"):
+            runner.run(spec, output_requirements=requirements)
+    assert closed == [True]

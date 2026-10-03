@@ -18,7 +18,8 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.runner import EngineReplayRunnerFactory
+from aisimulate.resources import ResourceLimitError
+from aisimulate.runner import EngineReplayRunner, EngineReplayRunnerFactory
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -36,6 +37,7 @@ from dynamo.replay.api import (
     run_trace_replay,
 )
 from dynamo.replay.config import lower_upstream_engine_args
+from dynamo.router.simulation.config import ConversationAffinityConfig
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -93,6 +95,12 @@ class DynamoReplayRunnerFactory:
                 if topology in ("agg", "disagg")
             ),
             supported_agentic_backends=engine_capabilities.supported_agentic_backends,
+            supports_state_cache=True,
+            supports_agentic_snapshots=True,
+            supports_agentic_warmup=True,
+            supports_agentic_profile=True,
+            supports_agentic_host_offload=False,
+            supports_agentic_speculative_decoding=False,
             agentic_qualification="functional_only",
         )
 
@@ -132,7 +140,53 @@ class DynamoReplayRunner:
             router_mode,
             router_config,
             ais_perf_config,
+            affinity,
         ) = self._resolve_hooks(spec.runtime_hooks)
+        if self._requires_canonical_replay(spec, affinity):
+            if planner_config is not None:
+                raise ValueError(
+                    "conversation affinity, AgentX profiles and state-cache "
+                    "replay require static worker pools without a Planner"
+                )
+            if router_mode != "kv_router":
+                raise ValueError(
+                    "Dynamo AgentX profile/affinity and state-cache replay "
+                    "require router.policy='kv_router'"
+                )
+            if spec.backend_deployment.backend not in {"vllm", "sglang"}:
+                raise ValueError("Dynamo conversation replay supports vllm or sglang")
+            runner = EngineReplayRunner(
+                worker_id=self.worker_id,
+                capabilities=self.capabilities,
+                trace_block_size=self.trace_block_size,
+                runtime=_CanonicalReplayRuntime(
+                    router_config, ais_perf_config, affinity
+                ),
+            )
+            try:
+                report = runner.run(spec, output_requirements=output_requirements)
+            finally:
+                runner.close()
+            self._require_goodput_metric(report.metrics, spec)
+            native = report.metadata.get("native_report")
+            if isinstance(native, dict):
+                # Retain the existing Dynamo report envelope while preserving
+                # canonical diagnostics and routing evidence at the top level.
+                native = {
+                    **native,
+                    "summary": dict(report.metrics),
+                    "coverage": {
+                        "capture_per_request": output_requirements.capture_per_request,
+                        "capture_planner_details": output_requirements.include_raw_report,
+                        "per_request_records": len(native.get("per_request") or []),
+                    },
+                    "planner": None,
+                }
+                return ReplayReport(
+                    metrics=report.metrics,
+                    metadata={**report.metadata, "native_report": native},
+                )
+            return report
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
@@ -158,11 +212,17 @@ class DynamoReplayRunner:
             **self._goodput_sla_kwargs(spec),
         }
 
-        if self._is_trace(spec):
-            report = self._run_trace(spec, common, execution_model=execution_model)
-        else:
-            common.update(self._synthetic_kwargs(spec))
-            report = self._run_synthetic(spec, common)
+        try:
+            if self._is_trace(spec):
+                report = self._run_trace(spec, common, execution_model=execution_model)
+            else:
+                common.update(self._synthetic_kwargs(spec))
+                report = self._run_synthetic(spec, common)
+        except MemoryError as error:
+            failure = ResourceLimitError(str(error))
+            if hasattr(error, "fpm_query_coverage"):
+                setattr(failure, "fpm_query_coverage", error.fpm_query_coverage)
+            raise failure from error
 
         metrics, metadata = self._normalize_report(report, output_requirements)
         trace_format = spec.workload.get("trace_format")
@@ -186,6 +246,32 @@ class DynamoReplayRunner:
         """
 
     @staticmethod
+    def _requires_canonical_replay(
+        spec: ReplaySpec, affinity: dict[str, JSONValue] | None
+    ) -> bool:
+        if (
+            affinity is not None
+            or any(
+                spec.workload.get(key) is not None
+                for key in ("agentic_snapshot", "agentic_profile")
+            )
+            or spec.workload.get("agentic_warmup") is True
+        ):
+            return True
+        deployment = spec.backend_deployment
+        for args in (
+            deployment.agg_engine_args,
+            deployment.prefill_engine_args,
+            deployment.decode_engine_args,
+        ):
+            if args is None:
+                continue
+            rank = args.get("rank", args)
+            if isinstance(rank, dict) and rank.get("state_cache") is not None:
+                return True
+        return False
+
+    @staticmethod
     def _resolve_hooks(
         hooks: tuple[RuntimeHookSpec, ...],
     ) -> tuple[
@@ -193,11 +279,13 @@ class DynamoReplayRunner:
         str,
         KvRouterConfig | None,
         AisPerfConfig | None,
+        dict[str, JSONValue] | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
         ais_perf_config: AisPerfConfig | None = None
+        affinity: dict[str, JSONValue] | None = None
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -227,6 +315,11 @@ class DynamoReplayRunner:
                         "Dynamo Router hook config requires a router_config mapping"
                     )
                 router_config = KvRouterConfig.from_json(json.dumps(raw_config))
+                raw_affinity = hook.config.get("affinity")
+                if raw_affinity is not None:
+                    affinity = ConversationAffinityConfig.model_validate(
+                        raw_affinity
+                    ).model_dump(mode="json")
                 raw_ais = hook.config.get("ais_perf_config")
                 if raw_ais is not None:
                     if not isinstance(raw_ais, dict):
@@ -239,7 +332,7 @@ class DynamoReplayRunner:
                 f"unsupported Dynamo runtime hook "
                 f"{hook.provider}:{hook.kind}@{hook.api_version}"
             )
-        return planner_config, router_mode, router_config, ais_perf_config
+        return planner_config, router_mode, router_config, ais_perf_config, affinity
 
     @staticmethod
     def _is_trace(spec: ReplaySpec) -> bool:
@@ -459,12 +552,14 @@ class DynamoReplayRunner:
             "request_count": request_count,
             "request_rate": rate if load_type == "poisson" else None,
             "arrival_interval_ms": (
-                arrival_interval_ms
-                if arrival_interval_ms is not None
-                else (1000.0 / rate if rate is not None else None)
-            )
-            if load_type != "poisson"
-            else None,
+                (
+                    arrival_interval_ms
+                    if arrival_interval_ms is not None
+                    else (1000.0 / rate if rate is not None else None)
+                )
+                if load_type != "poisson"
+                else None
+            ),
             "arrival_seed": _int_value(
                 workload.get("arrival_seed", 42), "arrival_seed"
             ),
@@ -546,6 +641,25 @@ class DynamoReplayRunner:
             "Dynamo replay did not emit goodput_output_throughput_tok_s for a "
             "goodput objective; install a replay version with per-request SLA "
             "accounting"
+        )
+
+
+@dataclass(frozen=True)
+class _CanonicalReplayRuntime:
+    """Use the existing Dynamo entry point with AISimulate's neutral lowering."""
+
+    router_config: KvRouterConfig | None
+    ais_perf_config: AisPerfConfig | None
+    affinity: dict[str, JSONValue] | None
+
+    def run_replay_json(self, execution_spec_json: str) -> str:
+        return run_trace_replay(
+            [],
+            router_mode="kv_router",
+            router_config=self.router_config,
+            ais_perf_config=self.ais_perf_config,
+            replay_spec_json=execution_spec_json,
+            affinity=self.affinity,
         )
 
 

@@ -241,10 +241,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source $HOME/.
 # Create venv and build
 uv venv dynamo && source dynamo/bin/activate
 uv pip install pip 'maturin[patchelf]'
-cd lib/bindings/python && maturin develop --uv && cd $PROJECT_ROOT
+(cd lib/bindings/python && maturin develop --uv)
 uv pip install -e lib/gpu_memory_service
-uv pip install -e .
+uv pip install -r container/deps/requirements.aisimulate.txt -e .
 ```
+
+The source requirements build the existing AISimulate package from the same
+immutable commit as the Rust dependency. Its matching `0.13.0` release is not
+yet available on PyPI, so retain `-r` when installing this checkout on Python
+3.11–3.13. This uses normal dependency resolution and needs the Rust build
+tools above; it does not require a container or a prebuilt local wheelhouse.
 
 > VSCode/Cursor users: see the [`.devcontainer`](.devcontainer/README.md) for a pre-configured dev environment.
 

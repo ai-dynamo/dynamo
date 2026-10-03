@@ -810,7 +810,7 @@ fn replay_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, replay_spec_json=None, affinity_json=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -847,7 +847,91 @@ pub fn run_mocker_trace_replay(
     telemetry_sample_interval_ms: f64,
     telemetry_callback: Option<Py<PyAny>>,
     telemetry_jsonl_path: Option<PathBuf>,
+    replay_spec_json: Option<String>,
+    affinity_json: Option<String>,
 ) -> PyResult<PyObject> {
+    if let Some(payload) = replay_spec_json {
+        if replay_mode != "offline" || router_mode != "kv_router" {
+            return Err(PyValueError::new_err(
+                "canonical replay requires offline kv_router mode",
+            ));
+        }
+        if !trace_files.is_empty()
+            || extra_engine_args.is_some()
+            || prefill_engine_args.is_some()
+            || decode_engine_args.is_some()
+            || scaling_policy.is_some()
+            || replay_concurrency.is_some()
+            || agentic_lanes.is_some()
+            || max_sim_time_ms.is_some()
+            || report_jsonl_path.is_some()
+            || model_name.is_some()
+            || sla_ttft_ms.is_some()
+            || sla_itl_ms.is_some()
+            || sla_e2e_ms.is_some()
+            || capture_per_request
+            || num_workers != 1
+            || num_prefill_workers != 1
+            || num_decode_workers != 1
+            || arrival_speedup_ratio != 1.0
+            || trace_block_size.is_some()
+            || trace_format != "mooncake"
+            || trace_shared_prefix_ratio != 0.0
+            || trace_num_prefix_groups != 0
+            || !capture_planner_details
+            || execution_model.is_some()
+            || weka_nested_timestamp_basis.is_some()
+            || capture_telemetry
+            || telemetry_sample_interval_ms != 1_000.0
+            || telemetry_callback.is_some()
+            || telemetry_jsonl_path.is_some()
+        {
+            return Err(PyValueError::new_err(
+                "replay_spec_json owns traffic, engine and capture controls; legacy replay arguments cannot be combined with it",
+            ));
+        }
+        #[cfg(not(feature = "ais-forward-pass"))]
+        {
+            let _ = (payload, affinity_json);
+            return Err(PyValueError::new_err(
+                "canonical Dynamo replay requires a runtime built with the ais-forward-pass feature",
+            ));
+        }
+        #[cfg(feature = "ais-forward-pass")]
+        {
+            let affinity = affinity_json
+                .as_deref()
+                .map(serde_json::from_str::<dynamo_mocker::replay::ReplayAffinityConfig>)
+                .transpose()
+                .map_err(|error| {
+                    PyValueError::new_err(format!("invalid router affinity: {error}"))
+                })?;
+            let prefill_load_estimator = load_replay_prefill_load_estimator(
+                py,
+                dynamo_mocker::replay::ReplayRouterMode::KvRouter,
+                router_config.as_ref(),
+                ais_perf_config,
+            )?;
+            let router_config = load_replay_router_config(router_config, None)?;
+            let report = py
+                .allow_threads(move || {
+                    dynamo_mocker::replay::run_canonical_replay_json(
+                        &payload,
+                        router_config,
+                        prefill_load_estimator,
+                        affinity,
+                    )
+                })
+                .map_err(aisimulate_core::replay_python_error)?;
+            return pythonize(py, &report).map(Bound::unbind).map_err(to_pyerr);
+        }
+    }
+    if affinity_json.is_some() {
+        return Err(PyValueError::new_err(
+            "affinity_json requires a canonical replay_spec_json payload",
+        ));
+    }
+
     if telemetry_jsonl_path.as_deref().is_some_and(|path| {
         report_jsonl_path
             .as_deref()
@@ -2591,8 +2675,8 @@ fn take_runtime_observers(
 
 /// Convert a replay error back into a `PyErr`, preserving the original Python
 /// exception (its type and traceback) when a scaling or telemetry callback
-/// failed. Non-Python errors (e.g. a simulation dead-end) fall back to the
-/// generic conversion.
+/// failed. AISim replay errors retain their resource/coverage classification
+/// when the AISim integration is enabled.
 fn replay_run_err_to_pyerr(
     err: anyhow::Error,
     callback_error: Option<&PyCallbackErrorSlot>,
@@ -2606,7 +2690,16 @@ fn replay_run_err_to_pyerr(
     }
     match err.downcast::<PyErr>() {
         Ok(py_err) => py_err,
-        Err(other) => to_pyerr(other),
+        Err(other) => {
+            #[cfg(feature = "ais-forward-pass")]
+            {
+                aisimulate_core::replay_python_error(other)
+            }
+            #[cfg(not(feature = "ais-forward-pass"))]
+            {
+                to_pyerr(other)
+            }
+        }
     }
 }
 

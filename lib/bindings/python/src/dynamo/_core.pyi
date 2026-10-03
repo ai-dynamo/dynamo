@@ -2486,8 +2486,20 @@ class _OfflineReplayResult:
 @overload
 def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
+    *,
+    replay_spec_json: str,
+    affinity_json: Optional[str] = None,
+    router_config: Optional[KvRouterConfig] = None,
+    ais_perf_config: Optional[AisPerfConfig] = None,
+    router_mode: Literal["kv_router"] = "kv_router",
+) -> str: ...
+
+@overload
+def run_mocker_trace_replay(
+    trace_files: Sequence[str | os.PathLike[str]],
     *args: Any,
     replay_mode: Literal["offline"] = "offline",
+    replay_spec_json: None = None,
     **kwargs: Any,
 ) -> _OfflineReplayResult: ...
 
@@ -2496,6 +2508,7 @@ def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
     *args: Any,
     replay_mode: Literal["online"],
+    replay_spec_json: None = None,
     **kwargs: Any,
 ) -> Dict[str, Any]: ...
 
@@ -2543,6 +2556,8 @@ def run_mocker_trace_replay(
     telemetry_sample_interval_ms: float = 1_000.0,
     telemetry_callback: Optional[ReplayTelemetryCallback] = None,
     telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
+    replay_spec_json: None = None,
+    affinity_json: None = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 

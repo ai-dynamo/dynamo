@@ -32,7 +32,7 @@ def _offline_ais(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
 
-def _config() -> PlannerConfig:
+def _config(tp: int = 1) -> PlannerConfig:
     return PlannerConfig.model_construct(
         ais_perf_model=AISPerfModelSpec(
             roles={
@@ -42,6 +42,7 @@ def _config() -> PlannerConfig:
                     "backend": "vllm",
                     "backend_version": "current",
                     "worker_type": role,
+                    "tp": tp,
                 }
                 for role in ("prefill", "decode")
             }
@@ -64,13 +65,14 @@ def _capabilities() -> EngineCapabilities:
     )
 
 
-def test_planner_uses_native_ais_for_estimates_and_capacity() -> None:
+@pytest.mark.parametrize("tp", [1, 2])
+def test_planner_uses_native_ais_for_estimates_and_capacity(tp: int) -> None:
     assert compile_engine
     prefill_model = PlannerEnginePerfModel(
-        worker_type="prefill", config=_config(), capabilities=_capabilities()
+        worker_type="prefill", config=_config(tp), capabilities=_capabilities()
     )
     decode_model = PlannerEnginePerfModel(
-        worker_type="decode", config=_config(), capabilities=_capabilities()
+        worker_type="decode", config=_config(tp), capabilities=_capabilities()
     )
 
     for model in (prefill_model, decode_model):
@@ -114,9 +116,12 @@ def test_planner_uses_native_ais_for_estimates_and_capacity() -> None:
     assert decode_capacity is not None and decode_capacity.rps > 0.0
 
 
-def test_planner_uses_real_ais_regression_fallback_after_tuning() -> None:
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_planner_uses_real_ais_regression_fallback_after_tuning(backend: str) -> None:
     config = PlannerConfig.model_construct(
         ais_perf_model=None,
+        backend=backend,
+        model_name="observation-only/model",
         max_num_fpm_samples=16,
         load_min_observations=2,
         fpm_sample_bucket_size=16,
@@ -131,6 +136,9 @@ def test_planner_uses_real_ais_regression_fallback_after_tuning() -> None:
     diagnostics = model._engine_diagnostics()
     assert diagnostics["source"] == "fallback_regression"
     assert diagnostics["readiness"] == "insufficient_data"
+    identity = diagnostics["provenance"]["config"]
+    assert identity["backend"] == backend
+    assert identity["model"] == "observation-only/model"
 
     for counter_id, (requests, kv_tokens, wall_time) in enumerate(
         ((1, 100, 0.01), (2, 200, 0.02)),
