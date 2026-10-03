@@ -336,6 +336,7 @@
 /deploy/operator/docs/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/hack/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /examples/deployments/                                                                                  @ai-dynamo/dynamo-operator-codeowners
+/examples/many-models/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /deploy/CONTRIBUTING.md                                                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/pre-deployment/                                                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/config/                                                                                @ai-dynamo/dynamo-operator-codeowners

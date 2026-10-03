@@ -107,3 +107,7 @@
 # canonical blob/main and tree/main links 404 from CI until they reach main.
 # Remove this entry once the recipe is on main.
 ^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/(recipes/motif-3|docs/fern/pages/recipes/model-recipes/motif-3\.mdx)
+
+# examples/many-models is added in the same PR as the many-model-serving docs
+# that link to it on main. Remove this rule once that PR merges.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/many-models
