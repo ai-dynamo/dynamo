@@ -1220,6 +1220,13 @@ class HandlerBase(BaseGenerativeHandler):
         prefill_prompt_tokens_details = (
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
+        num_input_tokens = len(request.get("token_ids", []))
+        prompt_tokens_details = (
+            dict(prefill_prompt_tokens_details)
+            if prefill_prompt_tokens_details
+            else None
+        )
+        early_usage_attached = False
 
         # Build trace headers for distributed tracing
         trace_headers = context.trace_headers()
@@ -1444,7 +1451,26 @@ class HandlerBase(BaseGenerativeHandler):
                             if params_dict is not None:
                                 out["disaggregated_params"] = params_dict
 
-                        if out.get("finish_reason") or res.finished:
+                        # Publish prompt details once they are safe to show.
+                        # The Rust frontend may stop_generating() before the
+                        # finishing chunk, which used to drop the only
+                        # completion_usage (#15386). Generation-only waits for
+                        # KV reuse metrics so transferred prompt KV is not
+                        # reported as local cache reuse.
+                        if prompt_tokens_details is None:
+                            is_generation_only = (
+                                getattr(disaggregated_params, "request_type", None)
+                                == "generation_only"
+                            )
+                            prompt_tokens_details = _early_prompt_tokens_details(
+                                res, num_input_tokens, is_generation_only
+                            )
+
+                        is_finished_chunk = bool(
+                            out.get("finish_reason") or res.finished
+                        )
+
+                        if is_finished_chunk:
                             if not out.get("finish_reason"):
                                 out["finish_reason"] = "unknown"
                                 logging.warning(
@@ -1457,7 +1483,6 @@ class HandlerBase(BaseGenerativeHandler):
                                     "prompt_logprobs"
                                 ] = prompt_logprobs_payload
 
-                            num_input_tokens = len(request.get("token_ids", []))
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )
@@ -1505,6 +1530,26 @@ class HandlerBase(BaseGenerativeHandler):
                                 ),
                                 "prompt_tokens_details": prompt_tokens_details,
                             }
+                        elif (
+                            not early_usage_attached
+                            and prompt_tokens_details is not None
+                        ):
+                            # Sparse early usage matches the other backends.
+                            # Count tokens already yielded plus this delta so
+                            # later choices in this response are not included
+                            # before they are yielded.
+                            total_completion_tokens = _streamed_completion_tokens(
+                                output_tokens_per_choice, len(out["token_ids"])
+                            )
+                            out["completion_usage"] = {
+                                "prompt_tokens": int(num_input_tokens),
+                                "completion_tokens": int(total_completion_tokens),
+                                "total_tokens": int(
+                                    num_input_tokens + total_completion_tokens
+                                ),
+                                "prompt_tokens_details": prompt_tokens_details,
+                            }
+                            early_usage_attached = True
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
@@ -1745,6 +1790,35 @@ def _prompt_tokens_details(res, num_input_tokens: int, generation_only: bool) ->
     details["cached_tokens"] = min(max(num_input_tokens - 1, 0), from_kv)
     details["_engine_reported"] = engine_reported
     return details
+
+
+def _early_prompt_tokens_details(
+    res, num_input_tokens: int, generation_only: bool
+) -> Optional[dict]:
+    """Prompt details that are safe to attach before the finishing chunk.
+
+    Returns None for a generation-only response until KV reuse block counters
+    have rewritten cached_tokens. `_prompt_tokens_details` records that rewrite
+    by setting `_engine_reported`. Without it, cached_tokens is the transferred
+    prompt length, not local reuse, and an early stop would keep the wrong value.
+    """
+    details = _prompt_tokens_details(res, num_input_tokens, generation_only)
+    reuse_metrics_applied = "_engine_reported" in details
+    details.pop("_engine_reported", None)
+    if generation_only and not reuse_metrics_applied:
+        return None
+    return details
+
+
+def _streamed_completion_tokens(
+    yielded_tokens_per_choice: dict[int, int], current_delta: int
+) -> int:
+    """Tokens already sent to the client, including this chunk's delta.
+
+    yielded_tokens_per_choice holds each choice's cumulative length and is
+    updated after the chunk is yielded, so it does not include current_delta.
+    """
+    return sum(yielded_tokens_per_choice.values()) + current_delta
 
 
 def _call_signature_accepts_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> bool:
