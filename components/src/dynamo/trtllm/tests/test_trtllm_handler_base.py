@@ -994,6 +994,28 @@ class TestGenerateLocally:
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
 
     @pytest.mark.asyncio
+    async def test_routing_priority_maps_to_trtllm_priority(self):
+        """nvext.agent_hints.priority arrives as routing.priority and reaches TRT-LLM."""
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {"temperature": 0.7},
+            "routing": {"priority": 1},
+        }
+
+        context = self._make_context()
+        chunks = [c async for c in handler.generate_locally(request, context)]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["priority"] == 0.5 + 2**-24
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "error",
         [
