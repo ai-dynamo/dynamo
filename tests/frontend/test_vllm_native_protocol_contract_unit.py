@@ -4,9 +4,11 @@
 
 import copy
 import json
+from types import SimpleNamespace
 
 import pytest
 
+from tests.frontend import test_vllm_mixed_release_http as mixed_release
 from tests.frontend.test_vllm_mixed_release_http import assert_full_vocab_boundary
 from tests.frontend.test_vllm_native_protocol_http import (
     _assert_native_prompt_count,
@@ -223,3 +225,38 @@ def test_duplicate_choice_indices_are_not_silently_merged():
         _generated_logprobs([duplicate], "completions", stream=True)
     with pytest.raises(AssertionError):
         _generated_logprobs([record, record], "completions")
+
+
+@pytest.mark.parametrize("pending_checks", [0, 2])
+def test_container_removal_wait_observes_eventual_absence(monkeypatch, pending_checks):
+    responses = iter(
+        [SimpleNamespace(returncode=0, stderr="")] * pending_checks
+        + [SimpleNamespace(returncode=1, stderr="Error: No such object: owned-test")]
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        mixed_release.subprocess, "run", lambda *a, **k: next(responses)
+    )
+    monkeypatch.setattr(mixed_release.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(mixed_release.time, "sleep", sleeps.append)
+    mixed_release._wait_for_container_removal("owned-test")
+    assert sleeps == [0.1] * pending_checks
+
+
+@pytest.mark.parametrize("daemon_failure", [False, True])
+def test_container_removal_wait_does_not_mask_leaks_or_daemon_failure(
+    monkeypatch, daemon_failure
+):
+    clock = iter([0, 31])
+    response = SimpleNamespace(
+        returncode=1 if daemon_failure else 0,
+        stderr="Cannot connect to the Docker daemon" if daemon_failure else "",
+    )
+    monkeypatch.setattr(mixed_release.subprocess, "run", lambda *a, **k: response)
+    monkeypatch.setattr(mixed_release.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        mixed_release.time, "sleep", lambda _: pytest.fail("must fail without sleeping")
+    )
+    message = "cannot verify" if daemon_failure else "was not removed"
+    with pytest.raises(RuntimeError, match=message):
+        mixed_release._wait_for_container_removal("owned-test")

@@ -15,6 +15,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -165,11 +166,29 @@ def release_process(pin, args, env, matrix, case_dir, label, ready):
             capture_output=True,
             timeout=30,
         )
+        _wait_for_container_removal(name)
+
+
+def _wait_for_container_removal(name):
+    """Docker stop can return before --rm finishes; require observed removal."""
+    deadline = time.monotonic() + 30
+    while True:
         remaining = subprocess.run(
-            ["docker", "inspect", name], check=False, capture_output=True, timeout=10
+            ["docker", "inspect", name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-        if remaining.returncode == 0:
+        if remaining.returncode != 0:
+            diagnostic = remaining.stderr.lower()
+            if "no such object:" in diagnostic or "no such container:" in diagnostic:
+                return
+            # A daemon/access failure is not proof that the container vanished.
+            raise RuntimeError(f"cannot verify test container removal: {name}")
+        if time.monotonic() >= deadline:
             raise RuntimeError(f"test container was not removed: {name}")
+        time.sleep(0.1)
 
 
 def release_cases():
