@@ -14,8 +14,9 @@ pub enum NamespaceFilter {
     Global,
     /// Discover models only from an exact namespace match
     Exact(String),
-    /// Discover models from namespaces starting with the given prefix
-    /// (e.g., prefix "ns" matches "ns", "ns-abc123", "ns-def456")
+    /// Discover models from the prefix namespace and its hyphen-delimited
+    /// worker generations (e.g., prefix "ns" matches "ns", "ns-abc123",
+    /// "ns-def456", but not "ns2")
     Prefix(String),
 }
 
@@ -45,11 +46,24 @@ impl NamespaceFilter {
     }
 
     /// Check if a given namespace matches this filter.
+    ///
+    /// A prefix scope stops at a namespace boundary. A bare `starts_with` also
+    /// admits a sibling deployment whose name merely begins with the prefix:
+    /// `ComputeDynamoNamespace` builds `<k8s namespace>-<deployment name>`, so
+    /// under `DYN_NAMESPACE_PREFIX=myns-dgd` a bare match would take in
+    /// `myns-dgd2`, a different deployment in the same Kubernetes namespace.
+    /// The scope is the prefix itself plus the hyphen-delimited worker
+    /// generations beneath it — the shape `DYN_NAMESPACE_WORKER_SUFFIX`
+    /// produces. A prefix ending in `-` already includes that boundary.
     pub fn matches(&self, namespace: &str) -> bool {
         match self {
             NamespaceFilter::Global => true,
             NamespaceFilter::Exact(target) => namespace == target,
-            NamespaceFilter::Prefix(prefix) => namespace.starts_with(prefix),
+            NamespaceFilter::Prefix(prefix) => {
+                namespace.strip_prefix(prefix.as_str()).is_some_and(|rest| {
+                    prefix.ends_with('-') || rest.is_empty() || rest.starts_with('-')
+                })
+            }
         }
     }
 
@@ -125,6 +139,14 @@ mod tests {
         assert!(filter.matches("ns-def456"));
         assert!(!filter.matches("other-ns"));
         assert!(!filter.matches(""));
+        assert!(!filter.matches("ns2"));
+        assert!(!filter.matches("nsother-abc123"));
+
+        let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
+        assert!(filter.matches("myns-dgd"));
+        assert!(filter.matches("myns-dgd-abc123"));
+        assert!(!filter.matches("myns-dgd2"));
+        assert!(!filter.matches("myns"));
     }
 
     #[test]
