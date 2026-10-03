@@ -1,0 +1,56 @@
+diff --git a/python/sglang/srt/disaggregation/mooncake/conn.py b/python/sglang/srt/disaggregation/mooncake/conn.py
+index 66ac63b..562e34a 100644
+--- a/python/sglang/srt/disaggregation/mooncake/conn.py
++++ b/python/sglang/srt/disaggregation/mooncake/conn.py
+@@ -1258,8 +1258,15 @@ class MooncakeKVManager(CommonKVManager):
+         )
+ 
+     def _requires_exact_state_index_match(self, st: StateType) -> bool:
+-        """State types whose page lists are positional and must not be truncated."""
+-        return st in (StateType.SWA_RING, StateType.C128_STATE)
++        """State types whose page lists are positional and must not be truncated.
++
++        DSA is included here: its indexer page list is request-scoped and
++        length-matched to origin_input_len on the decode side. Silently
++        truncating a prefill/decode length mismatch mis-aligns the indexer
++        rows and corrupts generated tokens (observed on GLM-5.3 PD with
++        prefix-cache hits that make extend_range != origin_input_len).
++        """
++        return st in (StateType.SWA_RING, StateType.C128_STATE, StateType.DSA)
+ 
+     def maybe_send_extra(
+         self,
+@@ -1399,6 +1406,9 @@ class MooncakeKVManager(CommonKVManager):
+                     # truncating silently misaligns rows and corrupts KV.
+                     # Paged SWA/DSA tolerate a 1-page drift -> keep the
+                     # lenient truncation below.
++                    logger.warning(
++                        f"PD state index length mismatch: state_type={st}, prefill_len={len(src_indices)}, decode_len={len(dst_indices_local)}"
++                    )
+                     if self._requires_exact_state_index_match(st):
+                         raise RuntimeError(
+                             f"{st.upper()} state index length mismatch: "
+diff --git a/python/sglang/srt/disaggregation/prefill.py b/python/sglang/srt/disaggregation/prefill.py
+index 5c44bb1..876455b 100644
+--- a/python/sglang/srt/disaggregation/prefill.py
++++ b/python/sglang/srt/disaggregation/prefill.py
+@@ -1213,8 +1213,18 @@ class SchedulerDisaggregationPrefillMixin:
+                 return kv_to_page_indices(window_kv_indices_swa, page_size)
+ 
+             def _dsa_payload():
++                # DSA indexer state is request-scoped and position-indexed over
++                # the full origin_input_len (decode side registers destination
++                # pages for :origin_input_len). On last_chunk, extend_range.end
++                # >= origin_input_len, so widening to transfer_input_len is
++                # safe and keeps the prefill payload length in lock-step with
++                # the decode side (see decode.py _dsa_payload: seq_len =
++                # origin_input_len). Prefix pages are populated by whichever
++                # request originally produced them, so reading indexer state
++                # at :extend_range.start is valid.
++                dsa_seq_len = transfer_input_len
+                 kv_indices_full = self.req_to_token_pool.req_to_token[
+-                    req.req_pool_idx, :seq_len
++                    req.req_pool_idx, :dsa_seq_len
+                 ]
+                 return kv_to_page_indices(kv_indices_full, page_size)
+ 
