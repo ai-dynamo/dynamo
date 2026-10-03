@@ -7,6 +7,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, AsyncIterator
 
 from dynamo._core import Context
@@ -39,6 +40,14 @@ def _cancel_and_detach(task: asyncio.Task[Any]) -> None:
     """Request cancellation without allowing resistant iterators to block cleanup."""
     task.cancel()
     task.add_done_callback(_consume_detached_task)
+
+
+@dataclass
+class ResponseStreamState:
+    """Separate response progress from engine ID discovery and abort ownership."""
+
+    response_processed: bool = False
+    ordered_abort_task: asyncio.Task[Any] | None = None
 
 
 class CancellationMixin:
@@ -248,6 +257,7 @@ class CancellationMixin:
         context: Context,
         submitted_request_id: str | None = None,
         request_ids: set[str] | None = None,
+        stream_state: ResponseStreamState | None = None,
     ) -> asyncio.Task[Any] | None:
         """Wait for cancellation, then order an exact SGLang abort."""
         logging.debug("Cancellation monitor started for Context: %s", context.id())
@@ -279,6 +289,8 @@ class CancellationMixin:
                         registry,
                         context.id(),
                     )
+                    if stream_state is not None:
+                        stream_state.ordered_abort_task = ordered_abort_task
                 elif request_ids is not None:
                     self._abort_requests(request_ids, context)
                 else:
@@ -413,17 +425,21 @@ class CancellationMixin:
         context: Context,
         submitted_request_id: str | None = None,
         request_ids: set[str] | None = None,
+        stream_state: ResponseStreamState | None = None,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """Own the cancellation monitor task for one response stream."""
         logging.debug(
             "Creating cancellation monitor task for Context: %s", context.id()
         )
+        if stream_state is None:
+            stream_state = ResponseStreamState()
         cancellation_task = asyncio.create_task(
             self._handle_cancellation(
                 request_id_future,
                 context,
                 submitted_request_id,
                 request_ids,
+                stream_state,
             )
         )
 
@@ -431,9 +447,50 @@ class CancellationMixin:
             yield cancellation_task
         finally:
             request_id = self._resolved_request_id(request_id_future)
-            ordered_abort_task = None
+            ordered_abort_task = stream_state.ordered_abort_task
             try:
                 if not cancellation_task.done():
+                    if (
+                        submitted_request_id is not None
+                        and not stream_state.response_processed
+                        and ordered_abort_task is None
+                    ):
+                        # Submit before cancelling the monitor can yield control
+                        # to engine cleanup and remove its registered state.
+                        tokenizer_manager = getattr(
+                            self.engine, "tokenizer_manager", None
+                        )
+                        registry = self._request_registry(
+                            tokenizer_manager, submitted_request_id
+                        )
+                        state = (
+                            registry.get(submitted_request_id)
+                            if registry is not None
+                            else None
+                        )
+                        if getattr(
+                            getattr(state, "time_stats", None),
+                            "api_server_dispatch_finish_time",
+                            None,
+                        ):
+                            try:
+                                await self._abort_sglang_request(
+                                    tokenizer_manager,
+                                    submitted_request_id,
+                                    registry,
+                                    context.id(),
+                                )
+                            except Exception:
+                                logging.exception(
+                                    "Failed to abort SGLang request during stream cleanup: %s, Context: %s",
+                                    submitted_request_id,
+                                    context.id(),
+                                )
+                        # An empty engine chunk may already have exposed the ID.
+                        # Do not duplicate this abort (or bypass the dispatch guard)
+                        # through the legacy response-ID fallback below.
+                        if state is not None and request_ids is not None:
+                            request_ids.discard(submitted_request_id)
                     logging.debug(
                         "Cancelling cancellation monitor task for SGLang Request ID %s, Context: %s",
                         request_id,
