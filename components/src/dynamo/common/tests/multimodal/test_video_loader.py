@@ -147,6 +147,17 @@ async def test_load_video_batch_rejects_decoded_variant_without_frontend_decodin
 
 
 @pytest.mark.asyncio
+async def test_load_video_batch_rejects_later_malformed_item_before_loading():
+    loader = VideoLoader()
+    loader.load_video = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="index 1"):
+        await loader.load_video_batch([{"Url": "https://example.com/one.mp4"}, {}])
+
+    loader.load_video.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "client_error",
     [
