@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::carrier_routing::CarrierWorkerConfig;
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::kv_hints::KvHint;
 use crate::protocols::{
@@ -155,6 +156,8 @@ pub struct WorkerCatalogRecord {
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<CarrierWorkerConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_schedulable_reasons: Vec<String>,
 }
@@ -185,6 +188,7 @@ impl WorkerCatalogRecord {
             router_hint_worker_type: req.router_hint_worker_type,
             router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
             kv_event_source_mode: req.kv_event_source_mode,
+            carrier: req.carrier,
             not_schedulable_reasons: Vec::new(),
         }
     }
@@ -285,6 +289,7 @@ impl Default for WorkerRequest {
             router_hint_worker_type: None,
             router_hint_source_control_endpoints: HashMap::new(),
             kv_event_source_mode: None,
+            carrier: None,
         }
     }
 }
@@ -324,6 +329,8 @@ pub struct WorkerRequest {
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<CarrierWorkerConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -350,6 +357,8 @@ pub struct WorkerPatchRequest {
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<CarrierWorkerConfig>,
 }
 
 impl WorkerCatalogRecord {
@@ -413,6 +422,9 @@ impl WorkerCatalogRecord {
         }
         if patch.kv_event_source_mode.is_some() {
             self.kv_event_source_mode = patch.kv_event_source_mode;
+        }
+        if patch.carrier.is_some() {
+            self.carrier = patch.carrier;
         }
     }
 }
@@ -681,6 +693,31 @@ pub struct ModelLoadResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_catalog_copies_and_patches_carrier_config() {
+        let carrier = CarrierWorkerConfig {
+            hub_url: "http://hub".to_string(),
+            manifest: "00".repeat(32),
+            block_size: 16,
+            instance_ids: HashMap::from([(0, "7".to_string())]),
+        };
+        let mut record = WorkerCatalogRecord::new(WorkerRequest {
+            carrier: Some(carrier.clone()),
+            ..WorkerRequest::default()
+        });
+        assert_eq!(record.carrier, Some(carrier.clone()));
+        record.apply_patch(WorkerPatchRequest {
+            carrier: None,
+            ..serde_json::from_value(serde_json::json!({})).unwrap()
+        });
+        assert_eq!(record.carrier, Some(carrier.clone()));
+        record.apply_patch(WorkerPatchRequest {
+            carrier: Some(carrier.clone()),
+            ..serde_json::from_value(serde_json::json!({})).unwrap()
+        });
+        assert_eq!(record.carrier, Some(carrier));
+    }
 
     #[test]
     fn select_request_deserializes_structured_session_context() {

@@ -3,6 +3,8 @@
 
 use std::collections::HashSet;
 
+use crate::carrier_feed::FeedKind;
+use crate::carrier_routing::CarrierMatchDetails;
 use crate::config::KvRouterConfig;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
@@ -25,6 +27,39 @@ pub struct OverlapSignals {
     pub tier_overlap_blocks: TierOverlapBlocks,
     pub effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
     pub effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
+}
+
+pub(crate) fn apply_carrier_matches(
+    signals: &mut OverlapSignals,
+    carrier: &CarrierMatchDetails,
+    block_size: u32,
+) {
+    for (worker, kind) in &carrier.bound {
+        let Some(kind) = kind else {
+            continue;
+        };
+        let depth = carrier.depth_blocks.get(worker).copied().unwrap_or(0);
+        let cached_tokens = (depth as usize).saturating_mul(block_size as usize);
+        match kind {
+            FeedKind::Carrier => {
+                signals
+                    .effective_overlap_blocks
+                    .insert(*worker, depth as f64);
+                signals
+                    .effective_cached_tokens
+                    .insert(*worker, cached_tokens);
+            }
+            FeedKind::Block => {
+                let overlap = signals
+                    .effective_overlap_blocks
+                    .entry(*worker)
+                    .or_insert(0.0);
+                *overlap = overlap.max(depth as f64);
+                let cached = signals.effective_cached_tokens.entry(*worker).or_insert(0);
+                *cached = (*cached).max(cached_tokens);
+            }
+        }
+    }
 }
 
 impl OverlapSignals {
@@ -503,5 +538,46 @@ mod tests {
         assert_eq!(snapshot.gpu_blocks, u32::MAX);
         assert_eq!(snapshot.host_pinned_blocks, u32::MAX);
         assert_eq!(snapshot.disk_blocks, u32::MAX);
+    }
+
+    #[test]
+    fn carrier_matches_fold_without_changing_tier_facts() {
+        let carrier_worker = WorkerWithDpRank::new(1, 0);
+        let block_worker = WorkerWithDpRank::new(2, 0);
+        let unknown_worker = WorkerWithDpRank::new(3, 0);
+        let deep_carrier_worker = WorkerWithDpRank::new(4, 0);
+        let mut signals = OverlapSignals::default();
+        signals.tier_overlap_blocks.device.insert(carrier_worker, 5);
+        signals.effective_overlap_blocks.insert(carrier_worker, 5.0);
+        signals.effective_cached_tokens.insert(carrier_worker, 20);
+        signals.effective_overlap_blocks.insert(block_worker, 3.5);
+        signals.effective_cached_tokens.insert(block_worker, 30);
+        signals.effective_overlap_blocks.insert(unknown_worker, 9.5);
+        signals.effective_cached_tokens.insert(unknown_worker, 80);
+        let carrier = CarrierMatchDetails {
+            bound: FxHashMap::from_iter([
+                (carrier_worker, Some(FeedKind::Carrier)),
+                (block_worker, Some(FeedKind::Block)),
+                (unknown_worker, None),
+                (deep_carrier_worker, Some(FeedKind::Carrier)),
+            ]),
+            depth_blocks: FxHashMap::from_iter([
+                (carrier_worker, 0),
+                (block_worker, 4),
+                (deep_carrier_worker, 3),
+            ]),
+        };
+
+        apply_carrier_matches(&mut signals, &carrier, 16);
+
+        assert_eq!(signals.tier_overlap_blocks.device[&carrier_worker], 5);
+        assert_eq!(signals.effective_overlap_blocks[&carrier_worker], 0.0);
+        assert_eq!(signals.effective_cached_tokens[&carrier_worker], 0);
+        assert_eq!(signals.effective_overlap_blocks[&deep_carrier_worker], 3.0);
+        assert_eq!(signals.effective_cached_tokens[&deep_carrier_worker], 48);
+        assert_eq!(signals.effective_overlap_blocks[&block_worker], 4.0);
+        assert_eq!(signals.effective_cached_tokens[&block_worker], 64);
+        assert_eq!(signals.effective_overlap_blocks[&unknown_worker], 9.5);
+        assert_eq!(signals.effective_cached_tokens[&unknown_worker], 80);
     }
 }

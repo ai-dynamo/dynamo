@@ -8,6 +8,11 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
+use crate::carrier_feed::{
+    CARRIER_FEED_VERSION, CarrierFeedReplica, CarrierFeedSnapshot, FeedKind, HolderSnapshot,
+    ManifestSnapshot,
+};
+use crate::carrier_routing::{CarrierFeedConnector, CarrierWorkerConfig};
 use crate::protocols::ActiveSequenceEventData;
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
@@ -77,6 +82,7 @@ fn core_with(
         SelectionCacheConfig::default(),
         tracking_hash,
         indexer_policy,
+        None,
         affinity,
     )
 }
@@ -137,6 +143,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_worker_type: None,
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
+        carrier: None,
     }
 }
 
@@ -144,6 +151,22 @@ fn worker_with_kv_events(worker_id: WorkerId) -> WorkerRequest {
     WorkerRequest {
         kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
         ..worker(worker_id)
+    }
+}
+
+#[derive(Clone, Default)]
+struct CarrierTestConnector {
+    replicas: Arc<parking_lot::Mutex<Vec<Arc<CarrierFeedReplica>>>>,
+}
+
+impl CarrierFeedConnector for CarrierTestConnector {
+    fn connect(
+        &self,
+        _hub_url: &str,
+        replica: Arc<CarrierFeedReplica>,
+        _cancel: CancellationToken,
+    ) {
+        self.replicas.lock().push(replica);
     }
 }
 
@@ -159,6 +182,100 @@ fn prompt() -> PromptRequest {
         cache_namespace: None,
         is_eagle: None,
     }
+}
+
+#[tokio::test]
+async fn carrier_scoring_uses_deeper_replica_matches() {
+    let connector = Arc::new(CarrierTestConnector::default());
+    let core = local_core(test_config(false));
+    core.set_carrier_connector(connector.clone());
+    let manifest = "00".repeat(32);
+    for (worker_id, holder) in [(1, 5), (2, 6)] {
+        let mut request = worker(worker_id);
+        request.carrier = Some(CarrierWorkerConfig {
+            hub_url: "http://hub".to_string(),
+            manifest: manifest.clone(),
+            block_size: 4,
+            instance_ids: HashMap::from([(0, holder.to_string())]),
+        });
+        core.upsert_worker(request).await.unwrap();
+    }
+    let replica = {
+        let replicas = connector.replicas.lock();
+        assert_eq!(replicas.len(), 1);
+        Arc::clone(&replicas[0])
+    };
+    let hashes = dynamo_kv_hashing::Request::builder()
+        .tokens(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        .build()
+        .unwrap()
+        .positional_lineage_hashes(4)
+        .unwrap();
+    replica
+        .install_snapshot(CarrierFeedSnapshot {
+            version: CARRIER_FEED_VERSION,
+            epoch: 1,
+            seq: 0,
+            manifests: vec![ManifestSnapshot {
+                manifest: [0; 32],
+                kind: FeedKind::Carrier,
+                max_positions: 8,
+                holders: vec![
+                    HolderSnapshot {
+                        holder: 5,
+                        hashes: hashes[..1].to_vec(),
+                    },
+                    HolderSnapshot {
+                        holder: 6,
+                        hashes: hashes.clone(),
+                    },
+                ],
+            }],
+        })
+        .unwrap();
+
+    let entry = core
+        .entry(&RoutingPartitionId::new("model", "default"))
+        .unwrap();
+    let mut request = prompt();
+    request.token_ids = Some((1..=12).collect());
+    let mut lookup = None;
+    let prepared = core
+        .prepare_selection_inputs(&entry, &request.view(), None, false, false, &mut lookup)
+        .await
+        .unwrap();
+    assert!(prepared.carrier_scored);
+    assert_eq!(
+        prepared.overlap.effective_overlap_blocks[&WorkerWithDpRank::new(2, 0)],
+        3.0
+    );
+    let mut request = select_request();
+    request.prompt.token_ids = Some((1..=12).collect());
+    assert_eq!(core.select(request).await.unwrap().worker_id, 2);
+    core.delete_worker(2).await.unwrap();
+    let matches = entry.carrier.find_matches(&hashes).unwrap();
+    assert!(matches.bound.contains_key(&WorkerWithDpRank::new(1, 0)));
+    assert!(!matches.bound.contains_key(&WorkerWithDpRank::new(2, 0)));
+    core.shutdown();
+}
+
+#[tokio::test]
+async fn invalid_carrier_config_does_not_make_worker_unschedulable() {
+    let connector = Arc::new(CarrierTestConnector::default());
+    let core = local_core(test_config(false));
+    core.set_carrier_connector(connector.clone());
+    let mut request = worker(1);
+    request.carrier = Some(CarrierWorkerConfig {
+        hub_url: "http://hub".to_string(),
+        manifest: "invalid".to_string(),
+        block_size: 4,
+        instance_ids: HashMap::from([(0, "5".to_string())]),
+    });
+
+    let record = core.upsert_worker(request).await.unwrap();
+    assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
+    assert!(connector.replicas.lock().is_empty());
+    core.shutdown();
 }
 
 fn select_request() -> SelectRequest {

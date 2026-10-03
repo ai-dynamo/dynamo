@@ -57,6 +57,7 @@ use futures::stream;
 pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
 
+pub mod carrier_feed_nats;
 pub(crate) mod embedded;
 pub mod encoder_router;
 pub mod indexer;

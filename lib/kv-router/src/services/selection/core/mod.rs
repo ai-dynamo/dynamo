@@ -18,6 +18,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use crate::carrier_routing::CarrierFeedConnector;
+use crate::carrier_routing::CarrierRouter;
 use crate::identity::RoutingPartitionId;
 use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
@@ -129,6 +131,7 @@ struct SelectionEntry {
     replica_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
+    carrier: Arc<CarrierRouter>,
 }
 
 impl SelectionEntry {
@@ -286,6 +289,9 @@ pub struct SelectionCore {
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
     session_affinity: Option<SessionAffinityConfig>,
+    carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
+    #[cfg(test)]
+    carrier_connector_override: parking_lot::Mutex<Option<Arc<dyn CarrierFeedConnector>>>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
     /// mutation, so membership tests can exercise per-worker error paths.
     #[cfg(test)]
@@ -350,6 +356,7 @@ impl SelectionCore {
             tracking_hash,
             indexer_policy,
             None,
+            None,
         ))
     }
 
@@ -370,6 +377,7 @@ impl SelectionCore {
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
         indexer_policy: IndexerPolicy,
+        carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
         session_affinity: Option<SessionAffinityConfig>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
@@ -399,6 +407,9 @@ impl SelectionCore {
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
             session_affinity,
+            carrier_feed_connector,
+            #[cfg(test)]
+            carrier_connector_override: parking_lot::Mutex::new(None),
             #[cfg(test)]
             fail_upsert_for: parking_lot::Mutex::default(),
             #[cfg(test)]
@@ -406,6 +417,38 @@ impl SelectionCore {
             #[cfg(test)]
             after_affinity_invalidation: None,
         }
+    }
+
+    fn carrier_router(&self) -> Arc<CarrierRouter> {
+        #[cfg(test)]
+        if let Some(connector) = self.carrier_connector_override.lock().clone() {
+            return Arc::new(CarrierRouter::new(Some(connector)));
+        }
+        let enabled = std::env::var("DYN_ROUTER_CARRIER_INDEX")
+            .ok()
+            .and_then(|value| dynamo_truthy::parse_bool_opt(&value))
+            != Some(false);
+        if !enabled {
+            return Arc::new(CarrierRouter::new(None));
+        }
+        if let Some(connector) = &self.carrier_feed_connector {
+            return Arc::new(CarrierRouter::new(Some(Arc::clone(connector))));
+        }
+        #[cfg(feature = "standalone-indexer")]
+        {
+            Arc::new(CarrierRouter::new(Some(Arc::new(
+                crate::carrier_feed_client::ZmqCarrierFeedConnector::default(),
+            ))))
+        }
+        #[cfg(not(feature = "standalone-indexer"))]
+        {
+            Arc::new(CarrierRouter::new(None))
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_carrier_connector(&self, connector: Arc<dyn CarrierFeedConnector>) {
+        *self.carrier_connector_override.lock() = Some(connector);
     }
 
     /// Cancel core-scoped tasks (KV-event listeners, scheduling, replica sync,
