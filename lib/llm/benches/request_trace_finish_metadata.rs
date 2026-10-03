@@ -78,6 +78,8 @@ impl AsyncEngineContext for MockContext {
 
 fn chat_request() -> NvCreateChatCompletionRequest {
     NvCreateChatCompletionRequest {
+        add_generation_prompt: None,
+        continue_final_message: None,
         inner: CreateChatCompletionRequest {
             model: "bench-model".to_string(),
             messages: vec![ChatCompletionRequestMessage::User(

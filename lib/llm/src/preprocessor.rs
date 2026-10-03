@@ -7805,7 +7805,7 @@ mod extra_args_media_copy_tests {
         assert!(assistant.as_str().ends_with("Answer:"));
 
         request.inner.messages.pop();
-        request.common.continue_final_message = Some(false);
+        request.continue_final_message = Some(false);
         let ordinary = preprocessor.apply_template(&request).unwrap().unwrap();
         assert_eq!(ordinary.as_str().matches("<｜deepseek_image｜>").count(), 2);
     }

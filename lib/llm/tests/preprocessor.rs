@@ -257,6 +257,8 @@ impl Request {
         let inner = inner.build().unwrap();
 
         NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -946,6 +948,8 @@ mod context_length_validation {
         }
         let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner,
             common: Default::default(),
             nvext: None,
@@ -1326,6 +1330,8 @@ mod embedding_without_chat_template {
             .build()
             .unwrap();
         NvCreateChatCompletionRequest {
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner,
             common: Default::default(),
             nvext: None,

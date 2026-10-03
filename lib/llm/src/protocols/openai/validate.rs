@@ -1031,12 +1031,14 @@ pub fn validate_continue_final_message(
 }
 
 /// Chat-template generation controls are meaningless on `/v1/completions`.
-/// Reject them so they are not silently ignored after landing on `CommonExt`.
+/// Reject their presence, including null/false, before the generic ignore policy.
+/// They are owned by the chat request, not by the shared extension struct.
 pub fn validate_chat_only_generation_flags(
-    add_generation_prompt: Option<bool>,
-    continue_final_message: Option<bool>,
+    extra_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
-    if add_generation_prompt.is_some() || continue_final_message.is_some() {
+    if extra_fields.contains_key("add_generation_prompt")
+        || extra_fields.contains_key("continue_final_message")
+    {
         anyhow::bail!(
             "`add_generation_prompt` and `continue_final_message` are only supported on /v1/chat/completions"
         );

@@ -278,10 +278,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         // incompatible with appending a new generation prompt. Validation already
         // rejects the omitted/true add_generation_prompt combination; keep this
         // guard so internal callers that skip ValidateRequest still match HF.
-        if self.common.continue_final_message == Some(true) {
+        if self.continue_final_message == Some(true) {
             return false;
         }
-        self.common.add_generation_prompt.unwrap_or(true)
+        self.add_generation_prompt.unwrap_or(true)
     }
 
     fn extract_text(&self) -> Option<TextInput> {

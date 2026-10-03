@@ -93,6 +93,17 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(flatten, default)]
     pub common: CommonExt,
 
+    /// Append an assistant generation prompt after the last message. Defaults
+    /// to true when omitted; incompatible with `continue_final_message=true`.
+    /// This chat-only field stays at the public JSON root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_generation_prompt: Option<bool>,
+
+    /// Leave the last message open for continuation instead of starting a new
+    /// turn. Requires explicit `add_generation_prompt=false` when true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_final_message: Option<bool>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
@@ -435,6 +446,10 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to common extension fields.
 impl CommonExtProvider for NvCreateChatCompletionRequest {
+    fn get_continue_final_message(&self) -> Option<bool> {
+        self.continue_final_message
+    }
+
     /// Returns a reference to the CommonExt struct.
     fn common_ext(&self) -> Option<&CommonExt> {
         Some(&self.common)
@@ -653,8 +668,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // Cross-field validation
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
         validate::validate_continue_final_message(
-            self.common.add_generation_prompt,
-            self.common.continue_final_message,
+            self.add_generation_prompt,
+            self.continue_final_message,
         )?;
 
         Ok(())

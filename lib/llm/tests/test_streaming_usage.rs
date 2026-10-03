@@ -203,6 +203,8 @@ fn create_chat_request(
     };
 
     NvCreateChatCompletionRequest {
+        add_generation_prompt: None,
+        continue_final_message: None,
         inner,
         common: Default::default(),
         nvext: None,
@@ -796,6 +798,8 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
     };
 
     NvCreateChatCompletionRequest {
+        add_generation_prompt: None,
+        continue_final_message: None,
         inner,
         common: Default::default(),
         nvext: None,
