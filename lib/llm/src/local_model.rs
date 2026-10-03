@@ -529,7 +529,23 @@ impl LocalModel {
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
+    ///
+    /// A reference carrying the `oci://` scheme is instead pulled from an OCI
+    /// registry as a CNCF ModelPack artifact (see [`super::hub::oci`]). Every
+    /// other reference shape — a Hugging Face repo id above all — is left to
+    /// the Hugging Face path unchanged. `ignore_weights` has no effect on an
+    /// `oci://` reference: a ModelPack image is pulled as a whole, so there is
+    /// no cheaper config-only fetch to ask for.
     pub async fn fetch(remote_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
+        if super::hub::oci::is_oci_ref(remote_name) {
+            if ignore_weights {
+                tracing::debug!(
+                    "ignore_weights has no effect for the OCI reference '{remote_name}': \
+                     a ModelPack image is pulled whole"
+                );
+            }
+            return super::hub::oci::from_oci(remote_name).await;
+        }
         super::hub::from_hf(remote_name, ignore_weights).await
     }
 
@@ -696,8 +712,7 @@ impl LocalModel {
                 .context("move_to_self_host")?;
         }
 
-        let source_path = PathBuf::from(self.card.source_path());
-        if !source_path.exists() {
+        if is_remote_repo_source(self.card.source_path()) {
             // The consumers of MDC (frontend) might not have the same local path as us, so
             // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
             //
@@ -879,6 +894,13 @@ fn internal_endpoint(engine: &str) -> EndpointId {
     }
 }
 
+/// True if `source` names a remote Hugging Face repo rather than something on
+/// disk. An `oci://` source resolves to a local directory, so like a local
+/// model it must not be rewritten to a `hf://` URL.
+fn is_remote_repo_source(source: &str) -> bool {
+    !Path::new(source).exists() && !super::hub::oci::is_oci_ref(source)
+}
+
 /// `None` when `system_status_server` isn't running (no `DYN_SYSTEM_PORT`)
 /// — lets default-on behavior degrade gracefully without erroring.
 pub(crate) fn self_host_base_url(
@@ -953,6 +975,19 @@ mod self_host_metadata_default_tests {
         let info = dynamo_runtime::SystemStatusServerInfo::new("[::1]:8080".parse().unwrap(), None);
 
         assert_eq!(system_status_base_url(&info), "http://[::1]:8080");
+    }
+}
+
+#[cfg(test)]
+mod is_remote_repo_source_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_missing_non_oci_source_is_a_remote_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(is_remote_repo_source("Qwen/Qwen3-0.6B"));
+        assert!(!is_remote_repo_source(dir.path().to_str().unwrap()));
+        assert!(!is_remote_repo_source("oci://ghcr.io/org/model:tag"));
     }
 }
 
