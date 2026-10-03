@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: DeepSeek V4 Pro Aggregated Perf
+name: Kimi K2.5 Aggregated Smoke
 
 on:
   workflow_call:
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Published ACR vLLM nightly tag (<version>-ci-<sha>-vllm-runtime-nightly)'
+        description: 'Published ACR TensorRT-LLM nightly tag (<version>-ci-<sha>-trtllm-runtime-nightly)'
         type: string
         required: true
       preflight_only:
@@ -27,16 +27,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: deepseek-v4-pro-nightly
+  group: kimi-k25-nightly
   cancel-in-progress: false
-  queue: max
 
 jobs:
   perf:
-    name: DeepSeek V4 Pro aggregated perf
+    name: Kimi K2.5 aggregated
     uses: ./.github/workflows/shared-recipe-perf.yml
     with:
-      recipe: deepseek-v4-pro-agg
+      recipe: kimi-k25-agg
       source_ref: ${{ inputs.source_ref || github.sha }}
       image_tag: ${{ inputs.image_tag }}
       preflight_only: ${{ inputs.preflight_only || false }}

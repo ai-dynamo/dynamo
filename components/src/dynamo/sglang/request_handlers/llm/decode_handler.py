@@ -174,6 +174,34 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     return False
 
 
+def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build the final-chunk cache-hit report read by the KV router.
+
+    SGLang reports one ``cached_tokens`` count per request, with any HiCache
+    host hits folded in, so there is no per-tier split.
+    """
+    prompt_tokens = meta_info.get("prompt_tokens")
+    if prompt_tokens is None:
+        return {}
+    return {
+        "prompt_tokens": prompt_tokens,
+        "reused_tokens": meta_info.get("cached_tokens") or 0,
+    }
+
+
+def _has_parallel_prefix_warmup(sampling_params: Any) -> bool:
+    """Whether SGLang caches the prompt with a zero-token request before sampling.
+
+    For n > 1 every sample's cached_tokens then includes that warm-up hit, so
+    none of them measures reuse from before the request.
+    """
+    if isinstance(sampling_params, list):
+        sampling_params = sampling_params[0] if sampling_params else {}
+    if not isinstance(sampling_params, Mapping):
+        return False
+    return (sampling_params.get("n") or 1) > 1
+
+
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     """Extract sampling options that SGLang accepts as sampling params."""
     params = {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
@@ -568,6 +596,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         return native_generate_stream(self.engine, native_request)
 
+    @property
+    def _reports_kv_cache_hit(self) -> bool:
+        # Disaggregated decode copies the prefill worker's cached_tokens into its
+        # own meta_info, so only the prefill attempt reports cache reuse.
+        return self.serving_mode != DisaggregationMode.DECODE
+
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -633,6 +667,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 submitted_request_id=submitted_request_id,
                 internal_request_id=sglang_request_id,
                 response_request_id=native_payload.get("rid") or context.id(),
+                report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                    native_payload.get("sampling_params")
+                ),
             ):
                 yield output
             return
@@ -713,6 +750,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        sampling_params
+                    ),
                 ):
                     yield out
             else:
@@ -803,6 +843,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        sampling_params
+                    ),
                 ):
                     yield out
             else:
@@ -823,6 +866,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         submitted_request_id: str | None = None,
         internal_request_id: str | None = None,
         response_request_id: str | list[str] | None = None,
+        report_kv_cache_hit: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -877,6 +921,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 "sglang_response": public_response,
                             },
                         }
+                if (
+                    report_kv_cache_hit
+                    and self._reports_kv_cache_hit
+                    and isinstance(meta_info, dict)
+                    and meta_info.get("finish_reason")
+                ):
+                    # Native Generate is routed too; the frontend forwards only
+                    # sglang_response, so this sibling key stays router-only.
+                    kv_cache_hit = _kv_cache_hit_engine_data(meta_info)
+                    if kv_cache_hit:
+                        output = {
+                            **output,
+                            "engine_data": {
+                                **output["engine_data"],
+                                "kv_cache_hit": kv_cache_hit,
+                            },
+                        }
                 if not context.is_stopped():
                     yield output
 
@@ -888,6 +949,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
         submitted_request_id: str | None = None,
+        report_kv_cache_hit: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -993,6 +1055,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if prompt_payload is not None and metadata_uploader is None:
                         engine_data["prompt_logprobs"] = prompt_payload
+                    # Router-facing, so kept even when metadata is uploaded instead.
+                    kv_cache_hit = (
+                        _kv_cache_hit_engine_data(meta_info)
+                        if report_kv_cache_hit and self._reports_kv_cache_hit
+                        else {}
+                    )
+                    if kv_cache_hit:
+                        engine_data["kv_cache_hit"] = kv_cache_hit
                     input_tokens = meta_info.get("prompt_tokens")
                     completion_tokens = meta_info.get("completion_tokens")
                     cached_tokens = meta_info.get("cached_tokens")
