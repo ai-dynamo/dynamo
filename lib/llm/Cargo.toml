@@ -113,6 +113,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 strum = { workspace = true }
+sysinfo = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tmq = { workspace = true }
