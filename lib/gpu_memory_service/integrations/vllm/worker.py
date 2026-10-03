@@ -200,6 +200,7 @@ class GMSWorker(Worker):
         return available
 
     def _determine_available_memory_before_gms_publish(self) -> int:
+        """Use vLLM for explicit KV sizes; otherwise measure scratch-KV capacity."""
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 

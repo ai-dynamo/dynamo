@@ -54,15 +54,19 @@ class _FakeTorchDevice:
     """The few ``torch.cuda`` calls the measured scratch-KV path makes."""
 
     def __init__(self, torch_peak: int):
+        """Store the peak allocation to report for the selected worker role."""
         self._torch_peak = torch_peak
 
     def reset_peak_memory_stats(self) -> None:
+        """Keep the supplied peak unchanged when profiling starts."""
         pass
 
     def synchronize(self) -> None:
+        """Do nothing because this fake device has no asynchronous work."""
         pass
 
     def max_memory_allocated(self) -> int:
+        """Return the supplied peak allocation in bytes."""
         return self._torch_peak
 
 
