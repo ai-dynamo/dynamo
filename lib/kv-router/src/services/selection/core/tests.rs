@@ -83,6 +83,7 @@ fn core_with(
         tracking_hash,
         indexer_policy,
         None,
+        None,
         affinity,
     )
 }

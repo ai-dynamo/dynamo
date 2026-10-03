@@ -26,6 +26,7 @@ use super::types::{
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerType;
+use crate::carrier_lookup::CarrierLookupSource;
 use crate::carrier_routing::CarrierFeedConnector;
 use crate::plugins::RouterPluginRegistry;
 
@@ -43,6 +44,7 @@ pub struct SelectionServiceBuilder {
     session_affinity_ttl: Option<Duration>,
     host_manages_request_lifecycle: bool,
     carrier_feed_connector: Option<Arc<dyn CarrierFeedConnector>>,
+    carrier_lookup_source: Option<Arc<dyn CarrierLookupSource>>,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -85,6 +87,7 @@ impl SelectionServiceBuilder {
             session_affinity_ttl: None,
             host_manages_request_lifecycle: false,
             carrier_feed_connector: None,
+            carrier_lookup_source: None,
         }
     }
 
@@ -114,6 +117,11 @@ impl SelectionServiceBuilder {
     /// Use the supplied transport to connect carrier feeds from indexer hubs.
     pub fn carrier_feed_connector(mut self, connector: Arc<dyn CarrierFeedConnector>) -> Self {
         self.carrier_feed_connector = Some(connector);
+        self
+    }
+
+    pub fn carrier_lookup_source(mut self, source: Arc<dyn CarrierLookupSource>) -> Self {
+        self.carrier_lookup_source = Some(source);
         self
     }
 
@@ -207,6 +215,7 @@ impl SelectionServiceBuilder {
             tracking_hash,
             indexer_policy,
             self.carrier_feed_connector,
+            self.carrier_lookup_source,
             self.session_affinity_ttl.map(SessionAffinityConfig::new),
         ));
 
