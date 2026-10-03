@@ -1,0 +1,8 @@
+[
+ {"builtin": "default"},
+ {"builtin": "round_robin"},
+ {"name": "learned-choice@theta0", "router_mode": "kv_router", "type": "learned-choice",
+  "parameters": {"feature_set": "v1", "theta": [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "temperature": 0.0},
+  "router_config": {},
+  "notes": "CONTRACT parity anchor: theta = -e0, rank 0, temperature 0 reproduces the default cost fn's argmin"}
+]

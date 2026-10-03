@@ -1,0 +1,145 @@
+diff --git a/components/src/dynamo/vllm/errors.py b/components/src/dynamo/vllm/errors.py
+--- a/components/src/dynamo/vllm/errors.py
++++ b/components/src/dynamo/vllm/errors.py
+@@ -3,20 +3,29 @@
+ 
+ """Translate vLLM request errors into Dynamo's HTTP error boundary."""
+ 
+-from vllm.exceptions import (
+-    VLLMClientError,
+-    VLLMNotFoundError,
+-    VLLMUnprocessableEntityError,
+-)
++from vllm import exceptions as vllm_exceptions
+ 
+ from dynamo.llm.exceptions import HttpError
+ 
++_CLIENT_ERROR = getattr(vllm_exceptions, "VLLMClientError", None)
++_UNPROCESSABLE_ENTITY_ERROR = getattr(
++    vllm_exceptions, "VLLMUnprocessableEntityError", None
++)
++# Older vLLM versions (0.24) have the concrete errors without a common client base.
++VLLM_CLIENT_ERRORS = (
++    (_CLIENT_ERROR,)
++    if _CLIENT_ERROR is not None
++    else (vllm_exceptions.VLLMValidationError, vllm_exceptions.VLLMNotFoundError)
++)
++
+ 
+-def vllm_client_error_to_http_error(exc: VLLMClientError) -> HttpError:
++def vllm_client_error_to_http_error(exc: Exception) -> HttpError:
+     """Preserve the HTTP status assigned by vLLM's client-error hierarchy."""
+-    if isinstance(exc, VLLMUnprocessableEntityError):
++    if _UNPROCESSABLE_ENTITY_ERROR is not None and isinstance(
++        exc, _UNPROCESSABLE_ENTITY_ERROR
++    ):
+         status_code = 422
+-    elif isinstance(exc, VLLMNotFoundError):
++    elif isinstance(exc, vllm_exceptions.VLLMNotFoundError):
+         status_code = 404
+     else:
+         status_code = 400
+diff --git a/components/src/dynamo/vllm/handlers.py b/components/src/dynamo/vllm/handlers.py
+--- a/components/src/dynamo/vllm/handlers.py
++++ b/components/src/dynamo/vllm/handlers.py
+@@ -103,6 +103,7 @@
+     publish_engine_generate_capability,
+ )
+ from .engine_monitor import VllmEngineMonitor
++from .errors import VLLM_CLIENT_ERRORS, vllm_client_error_to_http_error
+ from .lora_state import LoRAState
+ from .multimodal_utils.custom_encoder import (
+     AsyncVisionEncoder,
+@@ -134,6 +135,7 @@
+ BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+ 
+ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
++_GENERATE_SESSION_SUPPORT_CACHE_ATTR = "_dynamo_generate_session_support"
+ _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+ _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
+ _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+@@ -1045,6 +1047,41 @@
+     return sampling_params
+ 
+ 
++def _engine_generate_session_support(engine_client: Any) -> bool:
++    """Whether this vLLM's ``generate`` accepts ``session_id`` (absent in vLLM 0.24)."""
++    cached = getattr(engine_client, _GENERATE_SESSION_SUPPORT_CACHE_ATTR, None)
++    if isinstance(cached, bool):
++        return cached
++
++    try:
++        parameters = inspect.signature(engine_client.generate).parameters
++    except (TypeError, ValueError):
++        logger.debug("Unable to inspect vLLM generate signature; omitting session_id")
++        supports_session = False
++    else:
++        parameter = parameters.get("session_id")
++        supports_session = (
++            parameter is not None
++            and parameter.kind != inspect.Parameter.POSITIONAL_ONLY
++        ) or any(
++            param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
++        )
++
++    try:
++        setattr(engine_client, _GENERATE_SESSION_SUPPORT_CACHE_ATTR, supports_session)
++    except (AttributeError, TypeError):
++        logger.debug("Unable to cache vLLM generate session_id support")
++    return supports_session
++
++
++def _engine_generate_session_kwargs(
++    engine_client: Any, session_id: str | None
++) -> dict[str, Any]:
++    if _engine_generate_session_support(engine_client):
++        return {"session_id": session_id}
++    return {}
++
++
+ def _engine_generate_reasoning_kwargs(
+     engine_client: Any,
+     reasoning_ended: bool | None,
+@@ -1146,14 +1183,10 @@
+     generator: AsyncIterator[ResponseT],
+ ) -> AsyncIterator[ResponseT]:
+     """Keep request-side vLLM errors client-visible on worker endpoints."""
+-    from vllm.exceptions import VLLMClientError
+-
+-    from .errors import vllm_client_error_to_http_error
+-
+     try:
+         async for chunk in generator:
+             yield chunk
+-    except VLLMClientError as exc:
++    except VLLM_CLIENT_ERRORS as exc:
+         raise vllm_client_error_to_http_error(exc) from exc
+ 
+ 
+@@ -3417,7 +3450,7 @@
+                     data_parallel_rank=data_parallel_rank,
+                     trace_headers=trace_headers,
+                     priority=priority,
+-                    session_id=session_id,
++                    **_engine_generate_session_kwargs(self.engine_client, session_id),
+                     **_engine_generate_reasoning_kwargs(
+                         self.engine_client,
+                         reasoning_ended,
+@@ -4099,7 +4132,7 @@
+                     data_parallel_rank=dp_rank,
+                     trace_headers=trace_headers,
+                     priority=priority,
+-                    session_id=session_id,
++                    **_engine_generate_session_kwargs(self.engine_client, session_id),
+                 )
+ 
+                 async for res in gen:
+@@ -4298,7 +4331,7 @@
+                         lora_request=admitted_lora_request,
+                         trace_headers=trace_headers,
+                         priority=priority,
+-                        session_id=session_id,
++                        **_engine_generate_session_kwargs(self.engine_client, session_id),
+                         **_engine_generate_reasoning_kwargs(
+                             self.engine_client,
+                             reasoning_ended,

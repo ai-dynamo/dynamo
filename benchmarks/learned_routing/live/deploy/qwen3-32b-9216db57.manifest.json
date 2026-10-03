@@ -1,0 +1,135 @@
+{
+ "schema": "learned-routing.model-manifest.v1",
+ "repo": "Qwen/Qwen3-32B",
+ "revision": "9216db5781bf21249d130ec9da846c4624c16137",
+ "source": "https://huggingface.co/api/models/Qwen/Qwen3-32B/revision/9216db5781bf21249d130ec9da846c4624c16137?blobs=true (fetched 2026-10-03)",
+ "note": "LFS files verify by sha256; small files by git blob sha1 = sha1(b'blob <size>\\0' + bytes). config.json is verified before the node-local YaRN patch.",
+ "files": [
+  {
+   "path": "LICENSE",
+   "size": 11343,
+   "git_blob_sha1": "6634c8cc3133b3848ec74b9f275acaaa1ea618ab"
+  },
+  {
+   "path": "config.json",
+   "size": 728,
+   "git_blob_sha1": "d66d65fbc7960c2b3c254293f74df73b47fef6d3"
+  },
+  {
+   "path": "generation_config.json",
+   "size": 239,
+   "git_blob_sha1": "20a8a9156fc8c3f25295ca067f61fdf120d517c5"
+  },
+  {
+   "path": "merges.txt",
+   "size": 1671853,
+   "git_blob_sha1": "31349551d90c7606f325fe0f11bbb8bd5fa0d7c7"
+  },
+  {
+   "path": "model-00001-of-00017.safetensors",
+   "size": 3957109648,
+   "sha256": "52562b2ff97b61764260273e71bf5b4cf8a66f569399398f26dec0300fcf1316"
+  },
+  {
+   "path": "model-00002-of-00017.safetensors",
+   "size": 3900791760,
+   "sha256": "e26764b2c6878e3fb7198895fa833ec62838d84a19665e6abfbae43c6daf02b3"
+  },
+  {
+   "path": "model-00003-of-00017.safetensors",
+   "size": 3900791760,
+   "sha256": "6c5ba7bed9c52bc121e75cbe8a7be46936d0006cc80f42a6d5886ed40b4c2a62"
+  },
+  {
+   "path": "model-00004-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "f736f6ac4d8c30866107fb1185a05b3c3cfce9717720082f466fa44e691bcec8"
+  },
+  {
+   "path": "model-00005-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "a52ed375c083209c54d42ac510afeb1fbb5af4f193be2dc7d103f665a0f212d3"
+  },
+  {
+   "path": "model-00006-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "37fae28990b0e4a70228549d040c0393e87bee3820d59e58e47844974d8dff5b"
+  },
+  {
+   "path": "model-00007-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "37776006aeaba29eca8bc73b2b963fe3477e1c2e3f6a27cb9527be75b905e1bf"
+  },
+  {
+   "path": "model-00008-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "73e74e9129674fe330948005075d70ab4fa0b92b68fb220c5a693f9cea553730"
+  },
+  {
+   "path": "model-00009-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "a044b3602a01bd8ea62ff51badf9cc038ab1d73d97399480e6a55b4c86fa7fa6"
+  },
+  {
+   "path": "model-00010-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "9966612ba7ecfc2cd2e592fb95224b86d743271ff88e172cc272a4b26382aa75"
+  },
+  {
+   "path": "model-00011-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "e2a058a0ac7d4b992b731c29221ecfb4b76b8a48d9004d0e8a62ba44f699845c"
+  },
+  {
+   "path": "model-00012-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "58a1aa89093fea07325f787072a468e3482a470ff4b7fe5ead5f749683907c40"
+  },
+  {
+   "path": "model-00013-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "35f3381bab31a23370c37d922290aeecdf603418336058fb86fe42d8f51ac40c"
+  },
+  {
+   "path": "model-00014-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "8713b062ddc178acf5917610b7f4b64eede833b2ea4aa37bd562dcf2f3a3339d"
+  },
+  {
+   "path": "model-00015-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "bec439d23931821a236d8f62fa79deecf5551bd25602278aa2ae0ce432b378cf"
+  },
+  {
+   "path": "model-00016-of-00017.safetensors",
+   "size": 3900791800,
+   "sha256": "e569139fadd61fe7c8f9eb1c976d9a627cae48c57ddf228cfbd0593c59c64ff7"
+  },
+  {
+   "path": "model-00017-of-00017.safetensors",
+   "size": 3055341992,
+   "sha256": "1f47c318fcd7797c0f85b4233cb754438b10e795b8bc874889090c416a94bd38"
+  },
+  {
+   "path": "model.safetensors.index.json",
+   "size": 58330,
+   "git_blob_sha1": "2bc093f8069057e0b28f628398a05a273efd1297"
+  },
+  {
+   "path": "tokenizer.json",
+   "size": 11422654,
+   "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+  },
+  {
+   "path": "tokenizer_config.json",
+   "size": 9732,
+   "git_blob_sha1": "417d038a63fa3de29cfde265caedae14d1a58d92"
+  },
+  {
+   "path": "vocab.json",
+   "size": 2776833,
+   "git_blob_sha1": "4783fe10ac3adce15ac8f358ef5462739852c569"
+  }
+ ],
+ "total_bytes": 65540280272
+}
