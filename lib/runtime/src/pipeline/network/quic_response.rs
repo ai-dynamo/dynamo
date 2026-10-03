@@ -13,7 +13,7 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -1730,6 +1730,11 @@ impl QuicResponseClientPool {
         }
         let connection = self.connect(&key).await?;
         entry.current.store(Some(connection.clone()));
+        tokio::spawn(retire_closed_client_bundle(
+            Arc::downgrade(&entry),
+            Arc::downgrade(&connection),
+            connection.connections[0].clone(),
+        ));
         Ok(connection)
     }
 
@@ -1828,6 +1833,21 @@ impl QuicResponseClientPool {
             endpoints.push(quinn::Endpoint::client(bind)?);
         }
         Ok(endpoints)
+    }
+}
+
+async fn retire_closed_client_bundle(
+    entry: Weak<ClientPoolEntry>,
+    bundle: Weak<ClientConnectionBundle>,
+    connection: quinn::Connection,
+) {
+    // Any lane failure closes every physical connection in the bundle. This
+    // also observes a failure that happened before the bundle was published.
+    connection.closed().await;
+    if let (Some(entry), Some(bundle)) = (entry.upgrade(), bundle.upgrade()) {
+        // A reconnect may already have published a replacement. Only release
+        // this generation's endpoint owners, without evicting its reconnect lock.
+        entry.current.compare_and_swap(&Some(bundle), None);
     }
 }
 
@@ -2807,6 +2827,101 @@ mod tests {
         let mut receiver = provider.await.unwrap().unwrap();
         assert!(receiver.rx.recv().await.is_none());
         assert!(only_bundle(&pool).is_healthy());
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn failed_frontend_releases_cached_client_endpoints_without_reconnect() {
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
+        let context = PipelineContext::new(());
+        let registered = server.register_response(context.context());
+        let (info, provider) = registered.into_parts();
+        let mut sender = pool.sender(context.context(), info).await.unwrap();
+        sender.send_prologue(None).await.unwrap();
+        let _receiver = provider.await.unwrap().unwrap();
+
+        let bundle = only_bundle(&pool);
+        assert_eq!(
+            bundle._endpoints.len(),
+            BULK_CONNECTIONS + PRIORITY_CONNECTIONS
+        );
+        let retired_bundle = Arc::downgrade(&bundle);
+        let retired_endpoints = Arc::downgrade(&bundle._endpoints);
+        drop(bundle);
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), context.context().killed())
+            .await
+            .expect("frontend shutdown should fail the client bundle");
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while retired_bundle.upgrade().is_some() || retired_endpoints.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a failed frontend must release its cached bundle without another request");
+    }
+
+    #[tokio::test]
+    async fn closed_bundle_is_retired_when_published_after_connection_failure() {
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
+        let key = ConnectionKey {
+            address: server.advertised_address.to_string(),
+            frontend_id: server.frontend_id.clone(),
+            certificate_sha256: server.certificate_sha256.clone(),
+        };
+        let bundle = pool.connect(&key).await.unwrap();
+        bundle.connections[0].close(CLOSE_CODE_INVARIANT, b"failure before publication");
+        bundle.connections[0].closed().await;
+
+        let entry = Arc::new(ClientPoolEntry::new());
+        entry.current.store(Some(bundle.clone()));
+        retire_closed_client_bundle(
+            Arc::downgrade(&entry),
+            Arc::downgrade(&bundle),
+            bundle.connections[0].clone(),
+        )
+        .await;
+        assert!(entry.current.load().is_none());
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn delayed_bundle_retirement_preserves_replacement_and_healthy_reuse() {
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
+        let key = ConnectionKey {
+            address: server.advertised_address.to_string(),
+            frontend_id: server.frontend_id.clone(),
+            certificate_sha256: server.certificate_sha256.clone(),
+        };
+        let old = pool.connection(key.clone()).await.unwrap();
+        let entry = pool.connections.get(&key).unwrap().clone();
+        let delayed_retirement = retire_closed_client_bundle(
+            Arc::downgrade(&entry),
+            Arc::downgrade(&old),
+            old.connections[0].clone(),
+        );
+        old.connections[0].close(CLOSE_CODE_INVARIANT, b"old generation failed");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while old.is_healthy() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lane failure should mark the old bundle unhealthy");
+
+        let replacement = pool.connection(key.clone()).await.unwrap();
+        assert!(!Arc::ptr_eq(&old, &replacement));
+        delayed_retirement.await;
+        let cached = entry.current.load_full().unwrap();
+        assert!(Arc::ptr_eq(&cached, &replacement));
+        let reused = pool.connection(key).await.unwrap();
+        assert!(Arc::ptr_eq(&reused, &replacement));
+        assert!(replacement.is_healthy());
         shutdown.cancel();
     }
 
