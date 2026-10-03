@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Qwen3-TTS text-to-audio serving with vLLM-Omni. This is the Kubernetes
+# equivalent of launch/agg_omni_audio.sh.
+#
+# Experimental: validated on September 18, 2026 with the following matched images:
+# Frontend: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20260826-27f09d5
+# Worker: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260826-27f09d5
+# Both contain Dynamo 1.5.0.dev20260826; the worker contains vLLM 0.27.1 and
+# vLLM-Omni 0.27.0rc1. The Helm chart/operator remained at 1.4.2.
+# Stock Dynamo 1.4.2 serving images return only the initial silent audio chunk.
+# Replace BOTH image placeholders with the tested pair above. If using another
+# matched build, set each runtimeVersionOverride to that image's Dynamo version
+# (MAJOR.MINOR.PATCH), not the operator version. Other builds need validation.
+# For response_format=wav and data_source=b64_json, the speech endpoint returns
+# raw WAV bytes; save them with curl -o output.wav.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-omni-audio-agg
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    runtimeVersionOverride: "1.5.0"
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: my-registry/dynamo-frontend:my-tag
+  - name: OmniAudioWorker
+    type: worker
+    replicas: 1
+    runtimeVersionOverride: "1.5.0"
+    sharedMemorySize: 16Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: my-registry/vllm-runtime:my-tag
+          command:
+          - python3
+          - -m
+          - dynamo.vllm.omni
+          args:
+          - --model
+          - Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+          - --output-modalities
+          - audio
+          - --media-output-fs-url
+          - file:///tmp/dynamo_media
+          - --trust-remote-code
+          - --enforce-eager
+          env:
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: "1"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: media-output
+            mountPath: /tmp/dynamo_media
+        volumes:
+        - name: media-output
+          emptyDir:
+            sizeLimit: 20Gi
