@@ -73,8 +73,8 @@ class DynamoRuntimeConfig(ConfigBase):
     dyn_default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     dyn_enable_structural_tag: Optional[bool] = None
-    dyn_structural_tag_scope: Optional[str] = None
-    dyn_structural_tag_schema: Optional[str] = None
+    dyn_structural_tag_scope: Optional[Literal["auto", "always"]] = None
+    dyn_structural_tag_schema: Optional[Literal["auto", "strict"]] = None
     dyn_structural_tag: Optional[StructuralTagConfig | bool] = None
     structural_tag: Optional[dict[str, object]] = None
     custom_jinja_template: Optional[str] = None
