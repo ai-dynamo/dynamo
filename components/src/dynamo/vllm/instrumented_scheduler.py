@@ -107,7 +107,7 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 from vllm.v1.request import Request, RequestStatus
 
 from dynamo.common.forward_pass_metrics import (
@@ -2748,7 +2748,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 len(warmup_points),
             )
         self._bench_expected_points = len(self._bench_grid) - len(warmup_points)
-        # Finalize execution order BEFORE numbering: IDs then follow execution
+        # Native plans need a distinct key for every execution, including eager
+        # replicas and duplicate coordinates. These temporary IDs are translated
+        # to the public IDs after warm-up planning finalizes execution order.
+        for execution_id, point in enumerate(self._bench_grid, start=1):
+            point.benchmark_id = execution_id
+        # Finalize execution order BEFORE public numbering: IDs follow execution
         # order, so a soft-timeout artifact holds the contiguous prefix 1..k
         # the native-artifact contract requires, and the grid digest covers
         # the order every rank will actually run.
@@ -2760,13 +2765,29 @@ class InstrumentedScheduler(AsyncScheduler):
         # ID order are independent.
         real_id = 0
         warmup_id = self._bench_expected_points
+        public_ids = {}
         for point in self._bench_grid:
+            execution_id = point.benchmark_id
             if EAGER_WARMUP_REASON in point.sample_reasons:
                 warmup_id += 1
                 point.benchmark_id = warmup_id
             else:
                 real_id += 1
                 point.benchmark_id = real_id
+            public_ids[execution_id] = point.benchmark_id
+        if self._kvwarm_native and getattr(self, "_kvwarm_plan", None):
+            # Rebase from the old dictionary in one pass: updating it in place
+            # could overwrite another execution's key during the permutation.
+            # Attention-DP removes uncovered points from the grid
+            # (``_kvwarm_prepare``): drop their plan entries and keep their
+            # capacity fallbacks without a public ID.
+            self._kvwarm_plan = {
+                (public_ids[execution_id], batch, kv_tokens): depth
+                for (execution_id, batch, kv_tokens), depth in self._kvwarm_plan.items()
+                if execution_id in public_ids
+            }
+            for fallback in self._kvwarm_meta.get("capacity_fallbacks", []):
+                fallback["benchmark_id"] = public_ids.get(fallback["benchmark_id"])
         grid_payload = json.dumps(
             [asdict(point) for point in self._bench_grid],
             sort_keys=True,
@@ -4126,6 +4147,8 @@ class InstrumentedScheduler(AsyncScheduler):
             [rid for rid in self._bench_active_req_ids if rid in self.requests]
         )
         self._bench_active_req_ids.clear()
+        self._kvwarm_native_active = False
+        self._kvwarm_native_resume_ids = set()
         self._schedule_times.clear()
         self._bench_extra_steps_left = 0
 
@@ -4781,8 +4804,15 @@ class InstrumentedScheduler(AsyncScheduler):
     # Socket-level timeout: a stalled endpoint must fail the download (and
     # with it the warm-up) instead of blocking the scheduler indefinitely.
     _KVWARM_DOWNLOAD_TIMEOUT_S = 60
+    _kvwarm_native: bool = False
+    # Only the current fleet resumed from a ready native stage has this guarantee.
+    _kvwarm_native_active: bool = False
+    _kvwarm_stage_point: BenchmarkPoint | None = None
+    _kvwarm_native_resume_ids: set[str] | None = None
     _kvwarm_stage_t0: float | None
     _kvwarm_stage_batch: int | None
+    # Stage depth by ``_kvwarm_plan_key``: a batch rung, or one native execution.
+    _kvwarm_plan: dict
     # Local outcome ``(batch, ok, detail)`` of the active stage once this
     # rank's build has closed, held until the group's round says every rank
     # is done (``_kvwarm_stage_round``).
@@ -4829,6 +4859,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 "stages": [],
                 "points_real_kv": 0,
                 "points_fake_fallback": 0,
+                "points_gate_skipped": 0,
                 "giant_kv_threshold": self._kvwarm_giant_threshold(),
                 "giant_kv_repeats": self._kvwarm_giant_repeats(),
             }
@@ -4836,10 +4867,11 @@ class InstrumentedScheduler(AsyncScheduler):
         return meta
 
     def _kvwarm_state_layer_groups(self) -> list[str]:
-        """Recurrent groups whose state must never be borrowed from a chain.
+        """Recurrent groups, whose exact state no shared chain can provide.
 
-        Random-state mode gives shadows private slots; without that mode,
-        these groups remain ineligible for the real-KV warm-up.
+        Native exact-context warm-up admits them: each point computes its own
+        state. The shared-chain path still needs random-state mode (private
+        synthetic slots) or live-state mode (the chain's deeper live state).
         """
         manager = getattr(self, "kv_cache_manager", None)
         config = getattr(manager, "kv_cache_config", None)
@@ -4850,6 +4882,42 @@ class InstrumentedScheduler(AsyncScheduler):
             if "Mamba" in spec_name:
                 names.append(spec_name)
         return names
+
+    @staticmethod
+    def _kvwarm_is_state_spec(spec) -> bool:
+        """Recurrent (Mamba/KDA) state group; same predicate as live-state mode."""
+        return isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__
+
+    def _kvwarm_native_layout(self) -> bool:
+        """Layouts whose decode state must come from each point's own prefill.
+
+        A deep parked chain may have evicted the history a shallower point
+        needs (finite windows, including Inkling's convolution cache), and a
+        recurrent state cannot be borrowed from a chain at another depth.
+        Native allocation and forward execution build both exactly. Necessary,
+        not sufficient: the gate also requires experts or state layers.
+        """
+        specs = [
+            group.kv_cache_spec
+            for group in self.kv_cache_manager.kv_cache_config.kv_cache_groups
+        ]
+
+        def finite_window(spec) -> bool:
+            return isinstance(spec, SlidingWindowSpec) and spec.sliding_window > 0
+
+        return (
+            not self._bench_random_kda
+            and any(
+                finite_window(spec) or self._kvwarm_is_state_spec(spec)
+                for spec in specs
+            )
+            and all(
+                isinstance(spec, FullAttentionSpec)
+                or finite_window(spec)
+                or self._kvwarm_is_state_spec(spec)
+                for spec in specs
+            )
+        )
 
     def _kvwarm_seed_regime(self, point) -> str:
         """Row-level KV seed provenance for artifact consumers.
@@ -4907,10 +4975,14 @@ class InstrumentedScheduler(AsyncScheduler):
                 setattr(self, attr, None)
 
     def _kvwarm_warm_eligible(self) -> bool:
-        """Select real attention-KV warm-up for EP MoE or explicit random-state mode.
+        """Select native exact-context or shared-prefix attention-KV warm-up.
 
         Random-state mode also admits hybrid MoE without EP: its attention
         prefixes are real, while recurrent states remain private and synthetic.
+        Native warm-up instead prefills and continues each point's own requests
+        for models with experts or recurrent-state layers whose layout
+        qualifies (``_kvwarm_native_layout``); this needs neither expert
+        parallelism nor prefix caching.
 
         The verdict travels in the capacity envelope (see
         ``_bench_make_local_capacity``), so every host-local input the stage
@@ -4952,7 +5024,24 @@ class InstrumentedScheduler(AsyncScheduler):
                     False,
                 )
             )
-            if not has_experts:
+            # Native for MoE with or without EP, or recurrent-state layers; dense
+            # attention-only stays synthetic. TP-only MoE with a qualifying layout
+            # stays native, not balanced by construction: Inkling's convolution cache
+            # is a SlidingWindowSpec that the layout cannot tell apart from other
+            # finite windows, and must stay exact.
+            self._kvwarm_native = self._kvwarm_native_layout() and (
+                has_experts or bool(self._kvwarm_state_layer_groups())
+            )
+            if self._kvwarm_native:
+                if self._bench_hybrid_live_state:
+                    logger.info(
+                        "KVWARM: native exact-context warm-up computes the "
+                        "recurrent state; --benchmark-hybrid-live-state is unused"
+                    )
+                reason = self._kvwarm_probe_content()
+                eligible = reason is None
+                meta["initialization_strategy"] = "native_exact_context"
+            elif not has_experts:
                 reason = "dense_model_content_insensitive"
             elif not ep_enabled and not self._bench_random_kda:
                 reason = "moe_tp_balanced_by_construction"
@@ -5030,7 +5119,9 @@ class InstrumentedScheduler(AsyncScheduler):
         token), so the cap keeps drift headroom below the model length. The
         negotiated length applies once it exists; before negotiation the
         local length stands in, an upper bound of the group's."""
-        return self._bench_capacity_limit("max_model_len") - 4
+        return self._bench_capacity_limit("max_model_len") - (
+            3 if self._kvwarm_native else 4
+        )
 
     # ------- Dataset: three-tier resolution + even-half pool + lazy tokenize -------
 
@@ -5224,114 +5315,151 @@ class InstrumentedScheduler(AsyncScheduler):
         # ``_kvwarm_point_need`` and the block check in
         # ``_kvwarm_register_shadow``, otherwise a covered point's shadow can
         # need one block more than its chain holds.
-        repeats = self._kvwarm_giant_repeats()
-        margin = 1 + repeats
-        plan: dict = {}
-        rung_ctxs: dict = {}
-        for p in decode_pts:
-            ctxs = self._bench_decode_context_lengths(
-                p.total_kv_read_tokens, p.batch_size
-            )
-            want = min(max(ctxs) + margin, self._kvwarm_depth_cap())
-            plan[p.batch_size] = max(plan.get(p.batch_size, 0), want)
-            rung_ctxs.setdefault(p.batch_size, set()).update(int(c) for c in ctxs)
-        # Shadows own private tail blocks (the admission write plus the steady
-        # headroom) on top of the shared chain prefix, drawn from the same pool
-        # while the chains are parked. Reserve them per request and per KV
-        # group; otherwise a rung whose chains fill the pool dies at injection
-        # ("Cannot get N free blocks from the pool").
-        # The pool figure is the group's negotiated one (the smallest rank's;
-        # local before negotiation), like the depth cap: the plan decides
-        # which rung every rank builds and which points it warms, and the
-        # stage round (``_kvwarm_stage_round``) relies on every rank
-        # agreeing on both.
-        worst_case_tail = self._kvwarm_shadow_tail_blocks(repeats)
-        for batch, depth in list(plan.items()):
-            # Reserve the tails the rung's OWN points take (exact per-group arithmetic
-            # at each measured context), bounded by the worst case; the worst case alone
-            # (two blocks per group) over-reserves on hybrids.
-            shadow_tail_blocks = min(
-                worst_case_tail,
-                max(
-                    (
-                        # the shadow is admitted at ctx - 1 with ``repeats`` steady
-                        # steps (``_bench_step_decode`` / ``_kvwarm_inject_borrowed``);
-                        # the recurrent read slot can cross a block boundary between
-                        # ctx and ctx - 1, so reserve at the admission geometry
-                        self._kvwarm_shadow_tail_blocks_for(
-                            max(1, ctx - 1), max(1, repeats)
-                        )
-                        for ctx in rung_ctxs.get(batch, ())
+        if self._kvwarm_native:
+            plan: dict = {}
+            for point in decode_pts:
+                contexts = self._bench_decode_context_lengths(
+                    point.total_kv_read_tokens, point.batch_size
+                )
+                injected = [max(1, context - 1) for context in contexts]
+                required = self._kvwarm_native_required_blocks(injected)
+                usable = self._bench_grid_usable_blocks(
+                    point.batch_size, reserve_watermark=True
+                )
+                depth = max(injected)
+                plan[self._kvwarm_plan_key(point)] = (
+                    depth
+                    if required <= usable and depth <= self._kvwarm_depth_cap()
+                    else 0
+                )
+                if required > usable:
+                    meta.setdefault("capacity_fallbacks", []).append(
+                        {
+                            "benchmark_id": point.benchmark_id,
+                            "batch": point.batch_size,
+                            "total_kv_read_tokens": point.total_kv_read_tokens,
+                            "depth": depth,
+                            "required_blocks": required,
+                            "usable_blocks": usable,
+                        }
+                    )
+                    logger.warning(
+                        "KVWARM: native point batch=%d kv=%d needs %d blocks, "
+                        "pool has %d; using fake-KV fallback",
+                        point.batch_size,
+                        point.total_kv_read_tokens,
+                        required,
+                        usable,
+                    )
+        else:
+            repeats = self._kvwarm_giant_repeats()
+            margin = 1 + repeats
+            plan = {}
+            rung_ctxs: dict = {}
+            for p in decode_pts:
+                ctxs = self._bench_decode_context_lengths(
+                    p.total_kv_read_tokens, p.batch_size
+                )
+                want = min(max(ctxs) + margin, self._kvwarm_depth_cap())
+                plan[p.batch_size] = max(plan.get(p.batch_size, 0), want)
+                rung_ctxs.setdefault(p.batch_size, set()).update(int(c) for c in ctxs)
+            # Shadows own private tail blocks (the admission write plus the steady
+            # headroom) on top of the shared chain prefix, drawn from the same pool
+            # while the chains are parked. Reserve them per request and per KV
+            # group; otherwise a rung whose chains fill the pool dies at injection
+            # ("Cannot get N free blocks from the pool").
+            # The pool figure is the group's negotiated one (the smallest rank's;
+            # local before negotiation), like the depth cap: the plan decides
+            # which rung every rank builds and which points it warms, and the
+            # stage round (``_kvwarm_stage_round``) relies on every rank
+            # agreeing on both.
+            worst_case_tail = self._kvwarm_shadow_tail_blocks(repeats)
+            for batch, depth in list(plan.items()):
+                # Reserve the tails the rung's OWN points take (exact per-group arithmetic
+                # at each measured context), bounded by the worst case; the worst case alone
+                # (two blocks per group) over-reserves on hybrids.
+                shadow_tail_blocks = min(
+                    worst_case_tail,
+                    max(
+                        (
+                            # the shadow is admitted at ctx - 1 with ``repeats`` steady
+                            # steps (``_bench_step_decode`` / ``_kvwarm_inject_borrowed``);
+                            # the recurrent read slot can cross a block boundary between
+                            # ctx and ctx - 1, so reserve at the admission geometry
+                            self._kvwarm_shadow_tail_blocks_for(
+                                max(1, ctx - 1), max(1, repeats)
+                            )
+                            for ctx in rung_ctxs.get(batch, ())
+                        ),
+                        default=worst_case_tail,
                     ),
-                    default=worst_case_tail,
-                ),
-            )
-            usable = self._bench_grid_usable_blocks(batch, reserve_watermark=True)
-            # Plan against a margin of the pool: the per-request footprint estimate is a
-            # lower bound (block-boundary rounding, transient Mamba boundary blocks),
-            # and a stage whose chains do not ALL fit loses its real coverage, so a
-            # small margin buys full stages. Under attention-DP every rank must build
-            # the same stages: leave more headroom (a per-rank stall would desynchronize
-            # the ranks) -- 15% for DP>1, 5% otherwise.
-            pool_margin = 0.85 if getattr(self, "_bench_dp_size", 1) > 1 else 0.95
-            pool = int(usable * pool_margin)
-            while depth > 8 and (
-                (
+                )
+                usable = self._bench_grid_usable_blocks(batch, reserve_watermark=True)
+                # Plan against a margin of the pool: the per-request footprint estimate is a
+                # lower bound (block-boundary rounding, transient Mamba boundary blocks),
+                # and a stage whose chains do not ALL fit loses its real coverage, so a
+                # small margin buys full stages. Under attention-DP every rank must build
+                # the same stages: leave more headroom (a per-rank stall would desynchronize
+                # the ranks) -- 15% for DP>1, 5% otherwise.
+                pool_margin = 0.85 if getattr(self, "_bench_dp_size", 1) > 1 else 0.95
+                pool = int(usable * pool_margin)
+                while depth > 8 and (
+                    (
+                        self._bench_blocks_per_req(
+                            depth, apply_admission_cap=True, resident_chain=True
+                        )
+                        + shadow_tail_blocks
+                    )
+                    * batch
+                    > pool
+                ):
+                    depth -= 1
+                required = (
                     self._bench_blocks_per_req(
                         depth, apply_admission_cap=True, resident_chain=True
                     )
                     + shadow_tail_blocks
-                )
-                * batch
-                > pool
-            ):
-                depth -= 1
-            required = (
-                self._bench_blocks_per_req(
-                    depth, apply_admission_cap=True, resident_chain=True
-                )
-                + shadow_tail_blocks
-            ) * batch
-            # The margin only steers the depth trim above; whether a stage is built at
-            # all is decided against the full pool, as upstream does (a rung already at
-            # the depth floor is not demoted by the margin).
-            if required > usable:
-                # Reaching the depth floor does not prove the fleet fits.
-                # This also covers an initially short chain below the floor.
-                # Preserve the points with explicit fake-KV provenance, but
-                # do not build a stage that violates the warmup pool budget.
-                meta.setdefault("capacity_fallbacks", []).append(
-                    {
-                        "batch": batch,
-                        "depth": depth,
-                        "required_blocks": required,
-                        "usable_blocks": usable,
-                    }
-                )
-                logger.warning(
-                    "KVWARM: batch=%d depth=%d needs %d blocks including "
-                    "shadow reserves, pool has %d; using fake-KV fallback",
-                    batch,
-                    depth,
-                    required,
-                    usable,
-                )
-                depth = 0
-            plan[batch] = depth
-        # Slot budget: a stage parks ``batch`` chains on the worker and measures each of
-        # its points by injecting ``batch`` shadow requests on top, so ``2 * batch``
-        # request slots must exist (worker asserts "No free indices" otherwise). Rungs
-        # above that fall back to fake injection (measured after the chains are
-        # released). On models whose max_num_seqs is memory-capped (Mamba/KDA state
-        # blocks) this bites at batch > max_num_seqs / 2.
-        try:
-            slots = int(self._bench_capacity_limit("max_num_running_reqs"))
-        except (AttributeError, TypeError, ValueError):
-            # capacity unknown (e.g. partially constructed scheduler): leave the plan alone
-            slots = 0
-        if slots > 0:
-            for batch in [b for b in plan if 2 * b > slots]:
-                plan.pop(batch)
+                ) * batch
+                # The margin only steers the depth trim above; whether a stage is built at
+                # all is decided against the full pool, as upstream does (a rung already at
+                # the depth floor is not demoted by the margin).
+                if required > usable:
+                    # Reaching the depth floor does not prove the fleet fits.
+                    # This also covers an initially short chain below the floor.
+                    # Preserve the points with explicit fake-KV provenance, but
+                    # do not build a stage that violates the warmup pool budget.
+                    meta.setdefault("capacity_fallbacks", []).append(
+                        {
+                            "batch": batch,
+                            "depth": depth,
+                            "required_blocks": required,
+                            "usable_blocks": usable,
+                        }
+                    )
+                    logger.warning(
+                        "KVWARM: batch=%d depth=%d needs %d blocks including "
+                        "shadow reserves, pool has %d; using fake-KV fallback",
+                        batch,
+                        depth,
+                        required,
+                        usable,
+                    )
+                    depth = 0
+                plan[batch] = depth
+            # Slot budget: a stage parks ``batch`` chains on the worker and measures each of
+            # its points by injecting ``batch`` shadow requests on top, so ``2 * batch``
+            # request slots must exist (worker asserts "No free indices" otherwise). Rungs
+            # above that fall back to fake injection (measured after the chains are
+            # released). On models whose max_num_seqs is memory-capped (Mamba/KDA state
+            # blocks) this bites at batch > max_num_seqs / 2.
+            try:
+                slots = int(self._bench_capacity_limit("max_num_running_reqs"))
+            except (AttributeError, TypeError, ValueError):
+                # capacity unknown (e.g. partially constructed scheduler): leave the plan alone
+                slots = 0
+            if slots > 0:
+                for batch in [b for b in plan if 2 * b > slots]:
+                    plan.pop(batch)
         self._kvwarm_plan = plan
         # Second reordering: all warmed points first, fake fallbacks last --
         # fake injection fills the whole pool and evicts the chains' cached
@@ -5357,7 +5485,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 raise RuntimeError(
                     "KVWARM: attention-DP runs measure real-KV points only, and the "
                     f"warm-up plan cannot cover explicit decode point(s) {coords} "
-                    "(rung depth trimmed by the per-rank pool / slot budget); lower "
+                    "(rung depth trimmed by the per-rank pool / slot budget, or a "
+                    "native point's footprint exceeds the per-rank pool); lower "
                     "the requested batch or context, or run without attention-DP"
                 )
             logger.warning(
@@ -5394,6 +5523,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._kvwarm_chain_prompts: dict = {}
         self._kvwarm_borrowed_ids: set = set()
         self._kvwarm_stage_batch = None
+        self._kvwarm_stage_point = None
+        self._kvwarm_native_resume_ids = set()
         self._kvwarm_building = False
         self._kvwarm_stage_local = None
         self._kvwarm_round_seq = 0
@@ -5514,15 +5645,71 @@ class InstrumentedScheduler(AsyncScheduler):
             for manager in managers
         )
 
+    def _kvwarm_plan_key(self, point) -> int | tuple[int, int, int]:
+        if self._kvwarm_native:
+            return (
+                point.benchmark_id,
+                point.batch_size,
+                self._bench_decode_steady_kv_tokens(
+                    point.batch_size, point.total_kv_read_tokens
+                ),
+            )
+        return point.batch_size
+
+    def _kvwarm_native_required_blocks(self, context_lengths: list[int]) -> int:
+        """Native fleet peak, including admission and repeated steady writes.
+
+        Each align-mode state group adds one block per stage: a prefill that
+        ends on a hash boundary inside a Mamba block registers its own partial
+        tail in that group's manager, and the first decode's admission check
+        then asks the group for one block more than it allocates. The
+        coordinator sums the asks over groups.
+        """
+        repeats = min(
+            self._kvwarm_giant_repeats(),
+            max(
+                1,
+                self._bench_capacity_limit("max_model_len") - 2 - max(context_lengths),
+            ),
+        )
+        align_headroom = sum(
+            getattr(manager, "mamba_cache_mode", None) == "align"
+            for manager in self.kv_cache_manager.coordinator.single_type_managers
+        )
+        return align_headroom + sum(
+            self._bench_blocks_per_req(
+                context + 1 + repeats + self.num_lookahead_tokens,
+                apply_admission_cap=True,
+            )
+            for context in context_lengths
+        )
+
+    def _kvwarm_native_pool_shortfall(self) -> int:
+        """Check the remaining native allocation headroom before ranks agree."""
+        manager = self.kv_cache_manager
+        contexts = [
+            len(self._kvwarm_chain_prompts[req_id]) for req_id in self._kvwarm_chain_ids
+        ]
+        resident = sum(
+            not block.is_null
+            for group in manager.coordinator.single_type_managers
+            for req_id in self._kvwarm_chain_ids
+            for block in group.req_to_blocks[req_id]
+        )
+        required = self._kvwarm_native_required_blocks(contexts)
+        return max(0, required - resident - manager.block_pool.get_num_free_blocks())
+
     def _kvwarm_plan_covers(self, point) -> bool:
         """Plan-level coverage decision (independent of live chains): the shared
         source of truth for chain building and injection dispatch."""
         plan = getattr(self, "_kvwarm_plan", None)
         if not plan:
             return False
-        depth = plan.get(point.batch_size, 0)
+        depth = plan.get(self._kvwarm_plan_key(point), 0)
         if not depth:
             return False
+        if self._kvwarm_native:
+            return True
         ctxs = self._bench_decode_context_lengths(
             point.total_kv_read_tokens, point.batch_size
         )
@@ -5591,19 +5778,47 @@ class InstrumentedScheduler(AsyncScheduler):
             if self._kvwarm_chain_ids:
                 self._kvwarm_shed_chains()
             return self._bench_frees_pending()
-        if self._kvwarm_stage_batch != nxt.batch_size:
+        new_native_point = self._kvwarm_native and (
+            not self._kvwarm_chain_ids
+            or self._kvwarm_stage_point is None
+            or self._kvwarm_plan_key(self._kvwarm_stage_point)
+            != self._kvwarm_plan_key(nxt)
+        )
+        if self._kvwarm_stage_batch != nxt.batch_size or new_native_point:
             self._kvwarm_shed_chains()
             if self._bench_frees_pending():
                 return True  # the next fleet would draw from blocks still fenced
-            self._kvwarm_start_stage(nxt.batch_size, self._kvwarm_plan[nxt.batch_size])
+            if self._kvwarm_native:
+                self._kvwarm_start_stage(
+                    nxt.batch_size,
+                    self._kvwarm_plan[self._kvwarm_plan_key(nxt)],
+                    point=nxt,
+                )
+            else:
+                self._kvwarm_start_stage(
+                    nxt.batch_size, self._kvwarm_plan[nxt.batch_size]
+                )
             return True
         return False
 
-    def _kvwarm_start_stage(self, batch: int, depth: int) -> None:
-        """Launch chain prefills for one ``(batch, depth)`` warm-up stage."""
+    def _kvwarm_start_stage(
+        self, batch: int, depth: int, *, point: BenchmarkPoint | None = None
+    ) -> None:
+        """Launch real prefills, at each admission context for finite windows."""
+        depths = [depth] * batch
+        if self._kvwarm_native:
+            if point is None:
+                raise ValueError("native KV warm-up requires an exact benchmark point")
+            depths = [
+                max(1, context - 1)
+                for context in self._bench_decode_context_lengths(
+                    point.total_kv_read_tokens, batch
+                )
+            ]
+        self._kvwarm_stage_point = point
         t0 = time.monotonic()
-        for i in range(batch):
-            tokens = self._kvwarm_chain_token_ids(i, depth)
+        for i, request_depth in enumerate(depths):
+            tokens = self._kvwarm_chain_token_ids(i, request_depth)
             req_id = f"__kvwarm_chain_{self._kvwarm_seq}"
             self._kvwarm_seq += 1
             req = Request(
@@ -5612,9 +5827,13 @@ class InstrumentedScheduler(AsyncScheduler):
                 sampling_params=SamplingParams(max_tokens=100_000, ignore_eos=True),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
-                # Salts are stable per (rank, chain index): a new generation's chain
-                # hits the old chain's cached blocks and computes only the extension
-                cache_salt=f"__kvwarm_{self._fpm_dp_rank}_{i}",
+                # Only shared-prefix stages reuse salts across generations.
+                # Native points own all writable blocks, including partial tails.
+                cache_salt=(
+                    f"__kvwarm_native_{self._fpm_dp_rank}_{req_id}"
+                    if self._kvwarm_native
+                    else f"__kvwarm_{self._fpm_dp_rank}_{i}"
+                ),
             )
             self.add_request(req)
             self._kvwarm_chain_ids.append(req_id)
@@ -5638,7 +5857,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
                 vanished.append(req_id)
                 continue
-            if req.num_computed_tokens >= len(self._kvwarm_chain_prompts[req_id]):
+            target = len(self._kvwarm_chain_prompts[req_id])
+            if self._kvwarm_native and req.num_computed_tokens > target:
+                return self._kvwarm_stage_outcome(False, {"context_overshoot": req_id})
+            if req.num_computed_tokens >= target:
                 running = self.running  # type: ignore[has-type]
                 if any(r.request_id == req_id for r in running):
                     # Park: leave the scheduler's view; blocks and requests
@@ -5653,20 +5875,29 @@ class InstrumentedScheduler(AsyncScheduler):
             else:
                 pending = True
         if vanished:
-            # A partially built fleet cannot serve its rung: surviving chains
-            # would only pin KV that fake injection needs. Fail the whole
-            # stage (every point of this rung takes the fake-injection
-            # fallback) and release the survivors.
+            # A partially built fleet cannot serve its stage: surviving chains
+            # would only pin KV that the next stage or fake injection needs. Fail
+            # the whole stage and release the survivors. The points the stage
+            # served lose real-KV coverage: every point of the batch rung for
+            # shared chains, the one point for native prefills. Outside
+            # attention-DP they take the fake-injection fallback; under
+            # attention-DP they are skipped, because fake injection is not
+            # rank-consistent.
             logger.warning(
                 "KVWARM: %d chain(s) of stage batch=%s vanished during the "
-                "build; failing the stage, its points fall back to fake injection",
+                "build; failing the stage, its points fall back to fake injection "
+                "(skipped under attention-DP)",
                 len(vanished),
                 self._kvwarm_stage_batch,
             )
             return self._kvwarm_stage_outcome(False, {"vanished": len(vanished)})
         if pending:
             return True
-        if self._bench_synchronizer is not None:
+        if self._kvwarm_native:
+            shortfall = self._kvwarm_native_pool_shortfall()
+            if shortfall:
+                return self._kvwarm_stage_outcome(False, {"pool_shortfall": shortfall})
+        elif self._bench_synchronizer is not None:
             # Under attention-DP the rung's verdict is shared, so the pool
             # check injection repeats per point runs here for the whole rung
             # first: a rank skipping one point on its own would fork the
@@ -5702,6 +5933,12 @@ class InstrumentedScheduler(AsyncScheduler):
         (``_kvwarm_stage_round``). True either way: the step is idle.
         """
         batch = self._kvwarm_stage_batch
+        if self._kvwarm_native and self._kvwarm_stage_point is not None:
+            detail = {
+                "benchmark_id": self._kvwarm_stage_point.benchmark_id,
+                "total_kv_read_tokens": self._kvwarm_stage_point.total_kv_read_tokens,
+                **detail,
+            }
         self._kvwarm_building = False
         if not ok:
             self._kvwarm_shed_chains()
@@ -5763,9 +6000,12 @@ class InstrumentedScheduler(AsyncScheduler):
         return True
 
     def _kvwarm_stage_settle(self, batch: int | None, ok: bool, detail: dict) -> None:
-        """Record the final outcome of a stage. A failed rung has its plan
-        depth zeroed so every point of the rung takes the fake-injection
-        fallback (``_kvwarm_plan_covers`` reads the plan)."""
+        """Record the final outcome of a stage. A failed stage has its plan
+        depth zeroed, so the points it served lose coverage
+        (``_kvwarm_plan_covers`` reads the plan): the whole batch rung for
+        shared chains, the one point for native prefills. Outside attention-DP
+        they take the fake-injection fallback; under attention-DP they are
+        skipped, because fake injection is not rank-consistent."""
         meta = self._kvwarm_meta_init()
         if ok:
             meta["stages"].append({"batch": batch, **detail})
@@ -5775,12 +6015,14 @@ class InstrumentedScheduler(AsyncScheduler):
                 detail.get("build_seconds", 0.0),
             )
             return
-        if batch is not None:
+        if self._kvwarm_native and self._kvwarm_stage_point is not None:
+            self._kvwarm_plan[self._kvwarm_plan_key(self._kvwarm_stage_point)] = 0
+        elif batch is not None:
             self._kvwarm_plan[batch] = 0
         meta["stages"].append({"batch": batch, "failed": True, **detail})
         logger.warning(
             "KVWARM: stage batch=%s failed (%s); its points fall back to fake "
-            "injection",
+            "injection (skipped under attention-DP)",
             batch,
             detail,
         )
@@ -5821,6 +6063,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._kvwarm_chain_prompts = {}
         self._kvwarm_stage_batch = None
         self._kvwarm_building = False
+        # Preserve the exact point until its local/group outcome settles:
+        # failed native stages retire only that point's plan entry.
 
     # ------- Shadow injection: borrow chain blocks, original two-step flow -------
 
@@ -5843,6 +6087,19 @@ class InstrumentedScheduler(AsyncScheduler):
         chains = self._kvwarm_chain_ids
         if len(chains) < point.batch_size:
             return False
+        if self._kvwarm_native:
+            return (
+                self._kvwarm_stage_point is not None
+                and self._kvwarm_plan_key(self._kvwarm_stage_point)
+                == self._kvwarm_plan_key(point)
+                and all(
+                    (request := self.requests.get(chains[i])) is not None
+                    and request.num_computed_tokens == injected
+                    and request.num_output_placeholders == 0
+                    and len(self._kvwarm_chain_prompts[chains[i]]) == injected
+                    for i, injected in enumerate(injected_lengths)
+                )
+            )
         need = self._kvwarm_point_need()
         return all(
             injected + need <= len(self._kvwarm_chain_prompts[chains[i]])
@@ -6128,6 +6385,17 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         return output
 
+    def _kvwarm_resume_native(self) -> SchedulerOutput | None:
+        """Continue the prefills themselves; their private window state is exact."""
+        req_ids = self._kvwarm_chain_ids
+        self._kvwarm_native_active = True
+        self._kvwarm_native_resume_ids = set(req_ids)
+        self._bench_active_req_ids.update(req_ids)
+        self.running.extend(self.requests[req_id] for req_id in req_ids)
+        self._kvwarm_chain_ids = []
+        self._kvwarm_chain_prompts = {}
+        return self._bench_make_steady_step()
+
     def _bench_make_steady_step(self) -> SchedulerOutput | None:
         """One production-shaped decode step for the injected requests.
 
@@ -6155,29 +6423,56 @@ class InstrumentedScheduler(AsyncScheduler):
             return None
         kvwarm_borrowed: set[str] = getattr(self, "_kvwarm_borrowed_ids", set())
         new_blocks: dict[str, Any] = {}
-        for request in reqs:
-            if request.request_id in kvwarm_borrowed:
-                # KVWARM shadow: blocks borrowed from a parked chain; depth headroom
-                # already covers the steady write -- zero allocation.
-                new_blocks[request.request_id] = None
-                continue
-            blocks = self.kv_cache_manager.allocate_slots(
-                request,
-                1,
-                num_lookahead_tokens=getattr(self, "num_lookahead_tokens", 0),
-                delay_cache_blocks=True,
-            )
-            if blocks is None:
-                return None
-            new_blocks[request.request_id] = blocks
+        try:
+            for request in reqs:
+                if request.request_id in kvwarm_borrowed:
+                    # KVWARM shadow: blocks borrowed from a parked chain; depth headroom
+                    # already covers the steady write -- zero allocation.
+                    new_blocks[request.request_id] = None
+                    continue
+                blocks = self.kv_cache_manager.allocate_slots(
+                    request,
+                    1,
+                    num_lookahead_tokens=getattr(self, "num_lookahead_tokens", 0),
+                    delay_cache_blocks=True,
+                )
+                if blocks is None:
+                    if self._kvwarm_native_active:
+                        # The stage already proved fleet headroom on every rank.
+                        # A partial allocation cannot be retried safely or skipped
+                        # on one rank while peers execute a collective.
+                        raise RuntimeError(
+                            "native KV warm-up allocation failed after stage readiness"
+                        )
+                    if self._kvwarm_native:
+                        self._kvwarm_take_cow_copies()
+                    return None
+                new_blocks[request.request_id] = blocks
+        except Exception:
+            if self._kvwarm_native:
+                self._kvwarm_take_cow_copies()
+            raise
+        native_resumes = self._kvwarm_native_resume_ids or set()
+        # V1 dropped parked requests from its persistent batch. Restore their
+        # full native tables and sampled token history. V2 retains the table
+        # until finish and only accepts appended block deltas.
+        resumed = (
+            native_resumes if native_resumes and not self.use_v2_model_runner else set()
+        )
         cached = CachedRequestData(
             req_ids=[request.request_id for request in reqs],
-            resumed_req_ids=set(),
+            resumed_req_ids=resumed,
             new_token_ids=[],
-            all_token_ids={},
+            all_token_ids={
+                request.request_id: request.all_token_ids.copy()
+                for request in reqs
+                if request.request_id in native_resumes
+            },
             new_block_ids=[
                 (
-                    new_blocks[request.request_id].get_block_ids(allow_none=True)
+                    self.kv_cache_manager.get_block_ids(request.request_id)
+                    if request.request_id in resumed
+                    else new_blocks[request.request_id].get_block_ids(allow_none=True)
                     if new_blocks[request.request_id] is not None
                     else None
                 )
@@ -6205,6 +6500,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 else None
             ),
         )
+        if self._kvwarm_native:
+            copies, retained = self.kv_cache_manager.take_kv_cache_block_copies()
+            if copies:
+                self._free_cow_retained_blocks(retained, self.sched_step_seq + 1)
+                output.kv_cache_block_copies = copies
+        self._kvwarm_native_resume_ids = set()
         if self.connector is not None:
             output.kv_connector_metadata = self.connector.build_connector_meta(output)
         if self.ec_connector is not None:
@@ -6300,17 +6601,23 @@ class InstrumentedScheduler(AsyncScheduler):
             return None
         if self._kvwarm_flag_on():
             meta = self._kvwarm_meta_init()
+            stamp: str | None
             if kvwarm_real:
                 meta["points_real_kv"] += 1
+                stamp = "kvwarm_real_kv"
+            elif meta.get("warm_eligible") is False:
+                # The gate rejected the whole configuration, so every point uses
+                # synthetic KV and none fell back: no real-KV attempt existed. The
+                # row regime reads skip:<reason> (``_kvwarm_seed_regime``); the
+                # reason says why, for example dense_model_content_insensitive
+                # (synthetic KV is correct by construction) or dataset_empty.
+                meta["points_gate_skipped"] += 1
+                stamp = None
             else:
                 meta["points_fake_fallback"] += 1
-            point = replace(
-                point,
-                sample_reasons=[
-                    *point.sample_reasons,
-                    "kvwarm_real_kv" if kvwarm_real else "kvwarm_fake_fallback",
-                ],
-            )
+                stamp = "kvwarm_fake_fallback"
+            if stamp is not None:
+                point = replace(point, sample_reasons=[*point.sample_reasons, stamp])
         self._bench_current_point = point
         self._bench_current_fpms = []
         self._bench_extra_steps_left = 1
@@ -6330,8 +6637,12 @@ class InstrumentedScheduler(AsyncScheduler):
             # Model-length cap: after step k, total = ctx+k <= max_model_len,
             # and runner bookkeeping writes through +1 (points at the cap
             # fall back to the legacy single steady step automatically).
+            # Use the negotiated limit so every DP rank executes the same steps.
             max_ctx = max(injected_lengths) + 1
-            repeats = min(repeats, max(1, self.max_model_len - 1 - max_ctx))
+            repeats = min(
+                repeats,
+                max(1, self._bench_capacity_limit("max_model_len") - 1 - max_ctx),
+            )
             if not kvwarm_real:
                 multi = sum(
                     self._bench_blocks_per_req(
@@ -6351,15 +6662,17 @@ class InstrumentedScheduler(AsyncScheduler):
             point.batch_size,
         )
         output = (
-            self._kvwarm_inject_borrowed(injected_lengths)
+            self._kvwarm_resume_native()
+            if kvwarm_real and self._kvwarm_native
+            else self._kvwarm_inject_borrowed(injected_lengths)
             if kvwarm_real
             else self._bench_inject_fake_decode(injected_lengths)
         )
-        if output.total_num_scheduled_tokens != point.batch_size:
+        if output is None or output.total_num_scheduled_tokens != point.batch_size:
             logger.warning(
                 "Skipping benchmark decode point after request injection produced "
                 "%d of %d requests: %s",
-                output.total_num_scheduled_tokens,
+                output.total_num_scheduled_tokens if output is not None else 0,
                 point.batch_size,
                 point,
             )
@@ -6606,10 +6919,12 @@ class InstrumentedScheduler(AsyncScheduler):
             # all-or-nothing publish gate. The admission step has the same total, so
             # the correction requires a recorded steady sample (``kvwarm_steady_sample``,
             # set by both save paths): a point that hit its deadline with the admission
-            # FPM alone stays a validation skip.
+            # FPM alone stays a validation skip. Fake means any warm-up point without
+            # real KV: gate-skipped points take the same path but carry no stamp.
             measured = scheduled.get("sum_decode_kv_tokens")
             if (
-                "kvwarm_fake_fallback" in (point.sample_reasons or ())
+                self._kvwarm_flag_on()
+                and "kvwarm_real_kv" not in (point.sample_reasons or ())
                 and point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
                 and measured == point.total_kv_read_tokens - point.batch_size
                 and bool(fpm.get("kvwarm_steady_sample"))

@@ -490,8 +490,9 @@ class DynamoVllmArgGroup(ArgGroup):
                 "recurrent-state groups forked from the parked chain's live state block "
                 "instead of skipping the warm-up. Attention KV is the chain's real prefix; "
                 "the recurrent state is a valid but deeper-context state (shallow points "
-                "read a few percent fast). Mutually exclusive with "
-                "--benchmark-randomize-kda-state."
+                "read a few percent fast). Applies only to layouts that do not qualify "
+                "for native exact-context warm-up, which takes precedence. Mutually "
+                "exclusive with --benchmark-randomize-kda-state."
             ),
         )
         add_argument(
