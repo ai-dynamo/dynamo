@@ -15,6 +15,7 @@ use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
+use crate::plugins::worker_selection::experimental::KvTransferPolicy;
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
     WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
@@ -57,6 +58,7 @@ pub struct WorkerSelectionPolicy {
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
     exclusive_affinity: bool,
+    kv_transfer: Option<Box<dyn KvTransferPolicy>>,
 }
 
 impl WorkerSelectionPolicy {
@@ -107,6 +109,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            kv_transfer: None,
             state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
@@ -130,6 +133,17 @@ impl WorkerSelectionPolicy {
         self
     }
 
+    pub(crate) fn with_kv_transfer_policy(mut self, transfer: Box<dyn KvTransferPolicy>) -> Self {
+        self.kv_transfer = Some(transfer);
+        self
+    }
+
+    /// Move the fetch-hint policy to the host that builds KV hints.
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) fn take_kv_transfer_policy(&mut self) -> Option<Box<dyn KvTransferPolicy>> {
+        self.kv_transfer.take()
+    }
+
     /// Construct the native reference implementation for parity tests and benchmarks.
     ///
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
@@ -140,6 +154,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            kv_transfer: None,
             state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
     }
@@ -329,7 +344,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     Ok(has_eligible_worker)
 }
 
-impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+impl<C: WorkerConfigLike + Sync> WorkerSelector<C> for WorkerSelectionPolicy {
     fn uses_exclusive_affinity_target(&self) -> bool {
         #[cfg(any(test, feature = "bench"))]
         if matches!(&self.state, WorkerSelectionPolicyState::Reference(..)) {
@@ -381,8 +396,8 @@ mod tests {
     use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::SessionContext;
     use std::{
-        cell::Cell,
         collections::{HashMap, HashSet},
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     use rustc_hash::FxHashMap;
@@ -512,6 +527,161 @@ mod tests {
     }
 
     #[test]
+    fn worker_metadata_reaches_policy_components() {
+        struct AdvertisedConfig {
+            total_kv_blocks: Option<u64>,
+            max_num_batched_tokens: Option<u64>,
+            taints: HashSet<String>,
+            topology_domains: HashMap<String, String>,
+            kv_transfer_domain: Option<String>,
+        }
+
+        impl WorkerConfigLike for AdvertisedConfig {
+            fn data_parallel_start_rank(&self) -> u32 {
+                0
+            }
+
+            fn data_parallel_size(&self) -> u32 {
+                1
+            }
+
+            fn max_num_batched_tokens(&self) -> Option<u64> {
+                self.max_num_batched_tokens
+            }
+
+            fn total_kv_blocks(&self) -> Option<u64> {
+                self.total_kv_blocks
+            }
+
+            fn taints(&self) -> &HashSet<String> {
+                &self.taints
+            }
+
+            fn topology_domains(&self) -> Option<&HashMap<String, String>> {
+                Some(&self.topology_domains)
+            }
+
+            fn kv_transfer_domain(&self) -> Option<&str> {
+                self.kv_transfer_domain.as_deref()
+            }
+        }
+
+        struct MetadataScorer;
+
+        impl WorkerScorer for MetadataScorer {
+            fn score(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    let metadata = context.worker(candidate.worker()).expect("known worker");
+                    *cost = if metadata.total_kv_blocks().is_some() {
+                        0.0
+                    } else {
+                        1.0
+                    };
+                }
+                Ok(())
+            }
+        }
+
+        struct LowestCostPicker;
+
+        impl WorkerPicker for LowestCostPicker {
+            fn pick(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert!(
+                    context
+                        .worker(WorkerWithDpRank::from_worker_id(9))
+                        .is_none()
+                );
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
+                    .map(|(row, _)| row)
+                    .expect("eligible candidate"))
+            }
+        }
+
+        let workers = HashMap::from([
+            (
+                0,
+                AdvertisedConfig {
+                    total_kv_blocks: Some(0),
+                    max_num_batched_tokens: None,
+                    taints: HashSet::new(),
+                    topology_domains: HashMap::new(),
+                    kv_transfer_domain: None,
+                },
+            ),
+            (
+                1,
+                AdvertisedConfig {
+                    total_kv_blocks: Some(4096),
+                    max_num_batched_tokens: Some(8192),
+                    taints: HashSet::from(["b200".to_string()]),
+                    topology_domains: HashMap::from([("rack".to_string(), "r1".to_string())]),
+                    kv_transfer_domain: Some("nvl72-a".to_string()),
+                },
+            ),
+        ]);
+        let request = base_request(16);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            vec![Box::new(MetadataScorer)],
+            Box::new(LowestCostPicker),
+        );
+
+        // Worker 0 advertises zero capacity, which reads as unknown, so worker 1 wins.
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(1));
+
+        let context = WorkerSelectionContext {
+            workers: Some(&workers),
+            ..MaterializedSelectionInput::new(&request, 16).context
+        };
+        let advertised = context
+            .worker(WorkerWithDpRank::from_worker_id(1))
+            .expect("known worker");
+        assert_eq!(advertised.total_kv_blocks(), Some(4096));
+        assert_eq!(advertised.max_num_batched_tokens(), Some(8192));
+        assert!(advertised.taints().contains("b200"));
+        assert_eq!(
+            advertised
+                .topology_domains()
+                .and_then(|domains| domains.get("rack"))
+                .map(String::as_str),
+            Some("r1")
+        );
+        assert_eq!(advertised.kv_transfer_domain(), Some("nvl72-a"));
+        let unadvertised = context
+            .worker(WorkerWithDpRank::from_worker_id(0))
+            .expect("known worker");
+        assert_eq!(unadvertised.total_kv_blocks(), None);
+        assert_eq!(unadvertised.max_num_batched_tokens(), None);
+        assert!(
+            context
+                .worker(WorkerWithDpRank::from_worker_id(9))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn preferred_taints_are_materialized_only_when_requested() {
         struct PreferenceScorer;
 
@@ -587,7 +757,7 @@ mod tests {
     fn custom_policy_skips_undeclared_preferred_taints() {
         struct CountingTaintConfig {
             taints: HashSet<String>,
-            taint_reads: Cell<usize>,
+            taint_reads: AtomicUsize,
         }
 
         impl WorkerConfigLike for CountingTaintConfig {
@@ -608,7 +778,7 @@ mod tests {
             }
 
             fn taints(&self) -> &HashSet<String> {
-                self.taint_reads.set(self.taint_reads.get() + 1);
+                self.taint_reads.fetch_add(1, Ordering::Relaxed);
                 &self.taints
             }
         }
@@ -630,7 +800,7 @@ mod tests {
             0,
             CountingTaintConfig {
                 taints: HashSet::from(["preferred".to_string()]),
-                taint_reads: Cell::new(0),
+                taint_reads: AtomicUsize::new(0),
             },
         )]);
         let mut request = base_request(16);
@@ -653,7 +823,7 @@ mod tests {
             .unwrap();
         // Eligibility checks required taints once. The preference multiplier must not perform a
         // second lookup when no policy component declares it.
-        assert_eq!(workers[&0].taint_reads.get(), 1);
+        assert_eq!(workers[&0].taint_reads.load(Ordering::Relaxed), 1);
     }
 
     #[test]

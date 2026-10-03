@@ -4,6 +4,10 @@
 //! The KV transfer hint attached to a booked selection.
 
 use super::*;
+use crate::plugins::worker_selection::experimental::{
+    KvTransferAction, KvTransferInput, KvTransferPolicy,
+};
+use parking_lot::Mutex;
 
 /// Pick the best router-hint source for `target`: a same-role worker (or
 /// cache owner) holding a longer root-aligned prefix than the target's own
@@ -24,6 +28,7 @@ pub(super) fn transfer_hint_for_selection(
     target: WorkerWithDpRank,
     target_cached_prefix_blocks: u32,
     candidates: Option<&KvTransferCandidates>,
+    transfer_policy: Option<&Mutex<Box<dyn KvTransferPolicy>>>,
 ) -> Option<KvSourceLocationsPayload> {
     let candidates = candidates?;
     let target_config = configs.get(&target.worker_id)?;
@@ -56,6 +61,25 @@ pub(super) fn transfer_hint_for_selection(
                         && !source.metadata.source_control_endpoint.is_empty()
                 }),
         })?;
+    if let Some(transfer_policy) = transfer_policy {
+        let input = KvTransferInput {
+            worker: target,
+            local_prefix_blocks: target_cached_prefix_blocks,
+            source_prefix_blocks: u32::try_from(block_hashes.len()).unwrap_or(u32::MAX),
+        };
+        let action = transfer_policy.lock().decide(input);
+        tracing::debug!(
+            worker_id = target.worker_id,
+            dp_rank = target.dp_rank,
+            local_prefix_blocks = input.local_prefix_blocks,
+            source_prefix_blocks = input.source_prefix_blocks,
+            ?action,
+            "KV transfer policy decision"
+        );
+        if action == KvTransferAction::Skip {
+            return None;
+        }
+    }
     let source_control_endpoint = match source {
         KvTransferCandidateSource::Worker(worker) => configs
             .get(&worker.worker_id)?
