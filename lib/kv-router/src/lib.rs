@@ -10,6 +10,7 @@ mod active_set;
 pub mod carrier_feed;
 #[cfg(feature = "standalone-indexer")]
 pub mod carrier_feed_client;
+pub mod carrier_lookup;
 pub mod carrier_routing;
 pub(crate) mod cleanup;
 pub mod conditional_disagg;

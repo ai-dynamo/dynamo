@@ -268,43 +268,47 @@ impl EmbeddedSelection {
 
         // The registry is only consulted when no factory is set; `policy_factory`
         // always is, so the builder never reads it.
-        let service = SelectionServiceBuilder::new(
+        let mut builder = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),
             worker_type,
             RouterPluginRegistry::default(),
         )
-        .worker_selection_policy_factory(args.policy_factory)
-        .carrier_feed_connector(carrier_feed_connector)
-        .host_manages_request_lifecycle()
-        .indexer_threads(1)
-        .host(SelectionHost {
-            load: HostLoad {
-                prefill_estimator: args.prefill_load_estimator,
-                overloaded_workers: Some(args.overloaded_worker_provider),
-                available_workers: Some(args.available_worker_provider),
-            },
-            cache: HostCache {
-                shared: args.shared_cache,
-                index: KvIndexSource::Owned(args.ingress),
-            },
-            eligibility: HostEligibility {
-                lora_worker_filter: args.lora_worker_filter,
-            },
-            telemetry: HostTelemetry {
-                scheduler_load: Some(Arc::new(SenderLoadSink {
-                    sender: args.scheduler_load,
-                    worker_type: args.metric_worker_type,
-                })),
-            },
-            replication: HostReplication {
-                channels: replica_sync,
-                request_leases,
-                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-            },
-        })
-        .build()
-        .await
-        .context("failed to start embedded selection service")?;
+        .worker_selection_policy_factory(args.policy_factory);
+        if let Some(source) = super::embedder::carrier_lookup_source() {
+            builder = builder.carrier_lookup_source(source);
+        }
+        let service = builder
+            .carrier_feed_connector(carrier_feed_connector)
+            .host_manages_request_lifecycle()
+            .indexer_threads(1)
+            .host(SelectionHost {
+                load: HostLoad {
+                    prefill_estimator: args.prefill_load_estimator,
+                    overloaded_workers: Some(args.overloaded_worker_provider),
+                    available_workers: Some(args.available_worker_provider),
+                },
+                cache: HostCache {
+                    shared: args.shared_cache,
+                    index: KvIndexSource::Owned(args.ingress),
+                },
+                eligibility: HostEligibility {
+                    lora_worker_filter: args.lora_worker_filter,
+                },
+                telemetry: HostTelemetry {
+                    scheduler_load: Some(Arc::new(SenderLoadSink {
+                        sender: args.scheduler_load,
+                        worker_type: args.metric_worker_type,
+                    })),
+                },
+                replication: HostReplication {
+                    channels: replica_sync,
+                    request_leases,
+                    replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                },
+            })
+            .build()
+            .await
+            .context("failed to start embedded selection service")?;
         let service = Arc::new(service);
         let partition = service
             .core()

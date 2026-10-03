@@ -57,6 +57,12 @@ pub(crate) fn apply_carrier_matches(
                 *overlap = overlap.max(depth as f64);
                 let cached = signals.effective_cached_tokens.entry(*worker).or_insert(0);
                 *cached = (*cached).max(cached_tokens);
+                let device = signals
+                    .tier_overlap_blocks
+                    .device
+                    .entry(*worker)
+                    .or_insert(0);
+                *device = (*device).max(depth as usize);
             }
         }
     }
@@ -579,5 +585,42 @@ mod tests {
         assert_eq!(signals.effective_cached_tokens[&block_worker], 64);
         assert_eq!(signals.effective_overlap_blocks[&unknown_worker], 9.5);
         assert_eq!(signals.effective_cached_tokens[&unknown_worker], 80);
+    }
+
+    #[test]
+    fn block_carrier_depth_updates_device_overlap_without_reducing_it() {
+        let block_worker = WorkerWithDpRank::new(1, 0);
+        let higher_device_worker = WorkerWithDpRank::new(2, 0);
+        let mut signals = OverlapSignals::default();
+        signals
+            .tier_overlap_blocks
+            .device
+            .insert(higher_device_worker, 5);
+        let carrier = CarrierMatchDetails {
+            bound: FxHashMap::from_iter([
+                (block_worker, Some(FeedKind::Block)),
+                (higher_device_worker, Some(FeedKind::Block)),
+            ]),
+            depth_blocks: FxHashMap::from_iter([(block_worker, 3), (higher_device_worker, 3)]),
+        };
+
+        apply_carrier_matches(&mut signals, &carrier, 16);
+
+        assert_eq!(signals.tier_overlap_blocks.device[&block_worker], 3);
+        assert_eq!(signals.tier_overlap_blocks.device[&higher_device_worker], 5);
+    }
+
+    #[test]
+    fn carrier_kind_does_not_change_device_overlap() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut signals = OverlapSignals::default();
+        let carrier = CarrierMatchDetails {
+            bound: FxHashMap::from_iter([(worker, Some(FeedKind::Carrier))]),
+            depth_blocks: FxHashMap::from_iter([(worker, 3)]),
+        };
+
+        apply_carrier_matches(&mut signals, &carrier, 16);
+
+        assert!(!signals.tier_overlap_blocks.device.contains_key(&worker));
     }
 }
