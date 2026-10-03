@@ -1036,6 +1036,7 @@ impl ControllerHost for ModelWatcher {
 
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
         normalize_legacy_prefill_topology(&mut card);
+        card.runtime_config.normalize_structural_tag_compatibility();
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
         anyhow::ensure!(
@@ -3110,6 +3111,64 @@ request_classifier:
         assert_eq!(legacy.card.needs, vec![vec![WorkerType::Decode]]);
         assert_eq!(legacy.group_key, current.group_key);
         assert_eq!(legacy.mdc_checksum, current.mdc_checksum);
+    }
+
+    #[tokio::test]
+    async fn discovery_normalizes_legacy_and_future_structural_tag_fields() {
+        use crate::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+
+        let card = serde_json::to_value(ModelDeploymentCard::with_name_only("model")).unwrap();
+        let mut legacy_card = card.clone();
+        let legacy_runtime = legacy_card["runtime_config"].as_object_mut().unwrap();
+        legacy_runtime.insert("structural_tag_mode".into(), serde_json::json!("on"));
+        legacy_runtime.insert("structural_tag_scope".into(), serde_json::json!("always"));
+
+        let mut future_card = card;
+        future_card["runtime_config"]["structural_tag"] = serde_json::json!({
+            "scope": "always",
+            "future_option": true
+        });
+
+        let normalize = |instance_id, card_json| {
+            watcher
+                .normalize(
+                    DiscoveryInstance::Model {
+                        namespace: "ns1".to_string(),
+                        component: "workers".to_string(),
+                        endpoint: "generate".to_string(),
+                        instance_id,
+                        card_json,
+                        model_suffix: None,
+                    },
+                    &NamespaceFilter::Global,
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let legacy = normalize(1, legacy_card);
+        let future = normalize(2, future_card);
+        let expected = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            ..Default::default()
+        });
+
+        assert_eq!(legacy.card.runtime_config.structural_tag, expected);
+        assert_eq!(future.card.runtime_config.structural_tag, expected);
     }
 
     #[test]
