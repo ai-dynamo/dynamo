@@ -22,7 +22,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import torch
 import uvloop
@@ -38,9 +38,14 @@ from fastvideo.api import (
     QuantizationConfig,
     SamplingConfig,
 )
-from pydantic import BaseModel, Field
 
 from dynamo.common.configuration import add_negatable_bool_argument
+from dynamo.common.protocols.video_protocol import (
+    NvCreateVideoRequest,
+    NvVideosResponse,
+    VideoData,
+    VideoNvExt,
+)
 from dynamo.llm import ModelInput, ModelType, register_llm  # type: ignore[attr-defined]
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
@@ -120,65 +125,11 @@ def _get_worker_namespace() -> str:
     return namespace
 
 
-class NvExtVideoCreateRequest(BaseModel):
-    fps: int | None = Field(default=None, description="Frames per second")
-    num_frames: int | None = Field(
-        default=None, description="Total frames; overrides fps * seconds"
-    )
-    num_inference_steps: int | None = Field(
-        default=None, description="Diffusion inference steps"
-    )
-    guidance_scale: float | None = Field(
-        default=None, description="Classifier-free guidance scale"
-    )
-    guidance_scale_2: float | None = Field(
-        default=None, description="Secondary classifier-free guidance scale"
-    )
-    boundary_ratio: float | None = Field(
-        default=None, description="Expert switching boundary ratio"
-    )
-    seed: int | None = Field(default=None, description="RNG seed")
-    negative_prompt: str | None = Field(
-        default=None, description="Text to avoid in generation"
-    )
-
-
-class VideoCreateRequest(BaseModel):
-    prompt: str = Field(description="Text description of the desired video")
-    model: str = Field(description="HuggingFace model path")
-    input_reference: str | None = Field(default=None)
-    size: str | None = Field(default=None, description="Frame dimensions as 'WxH'")
-    seconds: int | None = Field(default=None)
-    user: str | None = Field(default=None)
-    response_format: Literal["url", "b64_json"] | None = Field(default=None)
-    output_format: str | None = Field(default=None)
-    stream: bool | None = Field(default=None)
-    nvext: NvExtVideoCreateRequest | None = Field(default=None)
-
-
-class VideoData(BaseModel):
-    output_format: str
-    url: str | None = None
-    b64_json: str | None = None
-
-
-class VideoCreateResponse(BaseModel):
-    id: str
-    object: str = "video"
-    model: str
-    status: str = "completed"
-    progress: int = 100
-    created: int
-    data: list[VideoData] = Field(default_factory=list)
-    error: str | None = None
-    inference_time_s: float | None = None
-
-
 @dataclass
 class ResolvedRequestParams:
     """Request parameters after validation and default resolution."""
 
-    nvext: NvExtVideoCreateRequest
+    nvext: VideoNvExt
     width: int
     height: int
     fps: int
@@ -359,8 +310,8 @@ class FastVideoBackend:
 
     def _compute_num_frames(
         self,
-        request: VideoCreateRequest,
-        nvext: NvExtVideoCreateRequest,
+        request: NvCreateVideoRequest,
+        nvext: VideoNvExt,
     ) -> int:
         if nvext.num_frames is not None:
             num_frames = nvext.num_frames
@@ -411,7 +362,7 @@ class FastVideoBackend:
         num_inference_steps: int,
         guidance_scale: float,
         seed: int | None,
-        nvext: NvExtVideoCreateRequest,
+        nvext: VideoNvExt,
     ) -> GenerationRequest:
         sampling_kwargs: dict[str, Any] = {
             "height": height,
@@ -461,7 +412,7 @@ class FastVideoBackend:
         num_inference_steps: int,
         guidance_scale: float,
         seed: int | None,
-        nvext: NvExtVideoCreateRequest,
+        nvext: VideoNvExt,
     ) -> tuple[Path, float | None]:
         if self.generator is None:
             raise RuntimeError("Generator is not initialized")
@@ -544,7 +495,7 @@ class FastVideoBackend:
         error: str,
         started_at: float,
     ) -> dict[str, Any]:
-        return VideoCreateResponse(
+        return NvVideosResponse(
             id=video_id,
             created=created_ts,
             model=model,
@@ -556,7 +507,7 @@ class FastVideoBackend:
         ).model_dump()
 
     def _resolve_request_params(
-        self, request: VideoCreateRequest
+        self, request: NvCreateVideoRequest
     ) -> ResolvedRequestParams:
         """Validate the request and resolve defaults.
 
@@ -571,7 +522,7 @@ class FastVideoBackend:
                 "(image-to-video) requests"
             )
 
-        nvext = request.nvext or NvExtVideoCreateRequest()
+        nvext = request.nvext or VideoNvExt()
         width, height = self._parse_size(request.size)
         fps = nvext.fps if nvext.fps is not None else self.args.default_fps
         if fps <= 0:
@@ -612,8 +563,8 @@ class FastVideoBackend:
 
     # ── Dynamo endpoint ───────────────────────────────────────────────────────
 
-    @dynamo_endpoint(VideoCreateRequest, VideoCreateResponse)
-    async def create_video(self, request: VideoCreateRequest):
+    @dynamo_endpoint(NvCreateVideoRequest, NvVideosResponse)
+    async def create_video(self, request: NvCreateVideoRequest):
         """Generate one video clip and yield a single /v1/videos response."""
         started_at = time.time()
         video_id = f"video_{uuid.uuid4().hex}"
@@ -716,7 +667,7 @@ class FastVideoBackend:
                 )
             logger.info("[%s] Request finished in %.2fs", video_id, elapsed)
 
-            yield VideoCreateResponse(
+            yield NvVideosResponse(
                 id=video_id,
                 created=created_ts,
                 model=request.model,
@@ -739,7 +690,7 @@ class FastVideoBackend:
             # is a generation fault. Deliberately broad without re-raise:
             # FastVideo internals can raise arbitrary exception types, and
             # re-raising would surface to /v1/videos clients as an opaque
-            # transport error instead of the documented VideoCreateResponse
+            # transport error instead of the documented NvVideosResponse
             # with status="failed".
             logger.exception("[%s] Generation failed", video_id)
             yield self._failed_response(
