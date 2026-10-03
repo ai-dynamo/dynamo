@@ -283,11 +283,10 @@ The repository-managed environment is `.cursor/environment.json` (install:
   `~/.cache/huggingface/hub`). Offline worker registration works with the
   install-generated `.cursor/demo-model/` and `--model-path` pointing at that
   directory.
-- **Personal skills:** `bash .cursor/setup-personal-skills.sh` links skills from
-  `/cursor/stores/user/skills` into `~/.cursor/skills/` (`github-affiliation`,
-  `one-slide`, `blog-figures-workspace`). `github-affiliation` needs `gh auth`
-  and API egress; `one-slide` needs Chrome/Chromium (`google-chrome` on this
-  image).
+- **Personal skills (optional):** `bash .cursor/setup-personal-skills.sh` links
+  your Cursor personal skills from `/cursor/stores/user/skills` into
+  `~/.cursor/skills/` so skill-local scripts resolve. Install also pulls in `gh`
+  for skills that use the GitHub CLI; slide-rendering skills need Chrome/Chromium.
 
 Set `CXX=g++` if `maturin develop` fails building `zmq-sys` with missing C++
 headers (clang default vs GCC 14 headers).
