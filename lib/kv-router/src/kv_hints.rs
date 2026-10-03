@@ -3,16 +3,12 @@
 
 //! Typed KV-cache hints attached to selected backend requests.
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::{
-    ExternalSequenceBlockHash, ResidencyOwnerKey, ResidencyRoutingSnapshot, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    ExternalSequenceBlockHash, ResidencyOwnerKey, ResidencyRoutingSnapshot, WorkerWithDpRank,
 };
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
@@ -122,22 +118,8 @@ impl KvTransferCandidates {
     pub fn best_source<F>(
         &self,
         prefix_blocks_to_beat: usize,
-        is_eligible_source: F,
-    ) -> Option<(KvTransferCandidateSource, Vec<ExternalSequenceBlockHash>)>
-    where
-        F: FnMut(KvTransferCandidateSource) -> bool,
-    {
-        let (source, prefix_blocks) =
-            self.best_source_prefix(prefix_blocks_to_beat, is_eligible_source)?;
-        Some((source, self.block_hashes.get(..prefix_blocks)?.to_vec()))
-    }
-
-    /// [`Self::best_source`] without copying the prefix hashes.
-    fn best_source_prefix<F>(
-        &self,
-        prefix_blocks_to_beat: usize,
         mut is_eligible_source: F,
-    ) -> Option<(KvTransferCandidateSource, usize)>
+    ) -> Option<(KvTransferCandidateSource, Vec<ExternalSequenceBlockHash>)>
     where
         F: FnMut(KvTransferCandidateSource) -> bool,
     {
@@ -153,49 +135,8 @@ impl KvTransferCandidates {
                     .cmp(right_blocks)
                     .then_with(|| right_source.cmp(left_source))
             })?;
-        (prefix_blocks <= self.block_hashes.len()).then_some((source, prefix_blocks))
-    }
 
-    /// The router-hint source for `target`: the longest prefix beyond the target's own
-    /// cached prefix, held by a source with the target's hint worker type and a control
-    /// endpoint, other than the target itself.
-    pub(crate) fn best_hint_source<C: WorkerConfigLike>(
-        &self,
-        workers: &HashMap<WorkerId, C>,
-        target: WorkerWithDpRank,
-        target_cached_prefix_blocks: u32,
-    ) -> Option<(KvTransferCandidateSource, usize)> {
-        let target_worker_type = workers
-            .get(&target.worker_id)?
-            .kv_hint_transfer_metadata_for_dp_rank(target.dp_rank)?
-            .worker_type;
-        let prefix_blocks_to_beat =
-            usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
-        self.best_source_prefix(prefix_blocks_to_beat, |source| match source {
-            KvTransferCandidateSource::Worker(worker) => {
-                worker != target
-                    && workers
-                        .get(&worker.worker_id)
-                        .and_then(|config| {
-                            config.kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)
-                        })
-                        .is_some_and(|metadata| {
-                            metadata.worker_type == target_worker_type
-                                && metadata
-                                    .source_control_endpoint
-                                    .is_some_and(|endpoint| !endpoint.is_empty())
-                        })
-            }
-            KvTransferCandidateSource::CacheOwner(owner) => self
-                .routing_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.router_hint_source(owner))
-                .is_some_and(|source| {
-                    source.attached_worker != Some(target)
-                        && source.metadata.worker_type == target_worker_type
-                        && !source.metadata.source_control_endpoint.is_empty()
-                }),
-        })
+        Some((source, self.block_hashes.get(..prefix_blocks)?.to_vec()))
     }
 }
 

@@ -324,11 +324,15 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let selector = (self.worker_selection_policy_factory)(
+                let mut selector = (self.worker_selection_policy_factory)(
                     &self.kv_router_config,
                     self.worker_type,
                     key.as_ref(),
                 );
+                // The scheduler owns the selector; the fetch-hint policy runs where hints are built.
+                let kv_transfer_policy = selector
+                    .take_kv_transfer_policy()
+                    .map(parking_lot::Mutex::new);
                 let profile = self
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))
@@ -361,6 +365,7 @@ impl SelectionCore {
                     replica_inbox,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
+                    kv_transfer_policy,
                 }))
             })?
             .clone();

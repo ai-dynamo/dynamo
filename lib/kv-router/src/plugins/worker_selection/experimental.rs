@@ -6,7 +6,7 @@
 //! Items in this module have no compatibility guarantee. They may change or be removed in any
 //! release.
 
-use super::{WorkerSelectionContext, WorkerSelectionPolicy};
+use super::WorkerSelectionPolicy;
 use crate::protocols::WorkerWithDpRank;
 
 /// What the router does with its KV fetch hint for the selected worker.
@@ -52,14 +52,12 @@ impl KvTransferInput {
 }
 
 /// Decides whether to keep the router's KV fetch hint for one selection.
+///
+/// Each routing partition owns one instance. Concurrent selections call it one at a time.
 pub trait KvTransferPolicy: Send {
     /// Called once per booked selection after the picker, only when the router would attach a
     /// fetch hint. The decision does not change the selected worker.
-    fn decide(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
-        input: KvTransferInput,
-    ) -> KvTransferAction;
+    fn decide(&mut self, input: KvTransferInput) -> KvTransferAction;
 }
 
 /// Attach a fetch-hint policy to a worker-selection policy.

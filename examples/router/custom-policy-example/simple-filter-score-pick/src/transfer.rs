@@ -3,7 +3,6 @@
 
 //! KV fetch-hint policy for the `simple-filter-score-pick` policy.
 
-use dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext;
 use dynamo_kv_router::plugins::worker_selection::experimental::{
     KvTransferAction, KvTransferInput, KvTransferPolicy,
 };
@@ -14,11 +13,7 @@ pub(crate) struct MinimumFetchPolicy {
 }
 
 impl KvTransferPolicy for MinimumFetchPolicy {
-    fn decide(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        input: KvTransferInput,
-    ) -> KvTransferAction {
+    fn decide(&mut self, input: KvTransferInput) -> KvTransferAction {
         if input.additional_blocks() >= self.min_fetch_blocks {
             KvTransferAction::Default
         } else {

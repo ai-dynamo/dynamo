@@ -19,7 +19,6 @@ pub use crate::plugins::worker_selection::{
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
-use crate::plugins::worker_selection::experimental::KvTransferAction;
 use crate::plugins::worker_selection::{CacheSnapshot, CandidateData, WorkerCacheData};
 pub use policy::WorkerSelectionPolicy;
 use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
@@ -49,20 +48,6 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
-
-    /// What to do with the router's KV fetch hint for `selected`. Hosts call this once after a
-    /// successful selection. Experimental; see [`crate::plugins::worker_selection::experimental`].
-    #[doc(hidden)]
-    fn kv_transfer_action(
-        &self,
-        _workers: &HashMap<WorkerId, C>,
-        _request: &SchedulingRequest,
-        _selected: WorkerWithDpRank,
-        _local_prefix_blocks: u32,
-        _block_size: u32,
-    ) -> KvTransferAction {
-        KvTransferAction::Default
-    }
 }
 
 /// Inputs supplied by the selector's host.

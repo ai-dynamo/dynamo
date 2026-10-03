@@ -592,11 +592,7 @@ struct FixedKvTransferPolicy {
 }
 
 impl KvTransferPolicy for FixedKvTransferPolicy {
-    fn decide(
-        &mut self,
-        _context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
-        input: KvTransferInput,
-    ) -> KvTransferAction {
+    fn decide(&mut self, input: KvTransferInput) -> KvTransferAction {
         self.decisions.lock().push((
             input.worker(),
             input.local_prefix_blocks(),
@@ -3304,8 +3300,13 @@ fn hint_source_endpoint_follows_the_source_dp_rank() {
         ),
     )]);
     let candidates = hint_candidates(&[101, 102], vec![(WorkerWithDpRank::new(7, 1).into(), 2)]);
-    let hint =
-        transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+    let hint = transfer_hint_for_selection(
+        &configs,
+        WorkerWithDpRank::new(7, 0),
+        0,
+        Some(&candidates),
+        None,
+    );
     assert_eq!(
         hint.map(|payload| payload.source_control_endpoint),
         Some("tcp://127.0.0.1:23281".to_string())
@@ -3328,14 +3329,24 @@ fn hint_source_must_share_the_target_worker_type() {
         ],
     );
     // The longer decode prefix is skipped for a prefill target.
-    let prefill =
-        transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
-            .expect("prefill hint");
+    let prefill = transfer_hint_for_selection(
+        &configs,
+        WorkerWithDpRank::new(7, 0),
+        0,
+        Some(&candidates),
+        None,
+    )
+    .expect("prefill hint");
     assert_eq!(prefill.source_control_endpoint, "tcp://127.0.0.1:23281");
     assert_eq!(prefill.block_hashes.len(), 2);
-    let decode =
-        transfer_hint_for_selection(&configs, WorkerWithDpRank::new(10, 0), 0, Some(&candidates))
-            .expect("decode hint");
+    let decode = transfer_hint_for_selection(
+        &configs,
+        WorkerWithDpRank::new(10, 0),
+        0,
+        Some(&candidates),
+        None,
+    )
+    .expect("decode hint");
     assert_eq!(decode.source_control_endpoint, "tcp://127.0.0.1:23282");
     assert_eq!(decode.block_hashes.len(), 3);
 }
@@ -3388,8 +3399,13 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
             None,
         )],
     )));
-    let hint =
-        transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
-            .expect("hint");
+    let hint = transfer_hint_for_selection(
+        &configs,
+        WorkerWithDpRank::new(7, 0),
+        0,
+        Some(&candidates),
+        None,
+    )
+    .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
 }

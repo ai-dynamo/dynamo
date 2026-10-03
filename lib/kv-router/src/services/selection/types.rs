@@ -113,15 +113,13 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         if worker_type.is_empty() {
             return None;
         }
-        // A `state_agent_v2` worker can be a hint target but never a hint source.
-        let can_serve_as_source = self.kv_event_source_mode.as_deref() != Some("state_agent_v2");
         Some(KvHintTransferWorkerMetadata {
             worker_type,
             source_control_endpoint: self
                 .router_hint_source_control_endpoints
                 .get(&dp_rank)
                 .map(String::as_str)
-                .filter(|endpoint| can_serve_as_source && !endpoint.is_empty()),
+                .filter(|endpoint| !endpoint.is_empty()),
         })
     }
 }
