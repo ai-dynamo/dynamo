@@ -242,6 +242,8 @@ pub(crate) struct ErrorMessage {
     code: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Box<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    param: Option<String>,
     #[serde(skip)]
     metric_error_type: Option<ErrorType>,
 }
@@ -490,6 +492,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: None,
             }),
         )
@@ -530,6 +533,7 @@ impl ErrorMessage {
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
@@ -551,6 +555,7 @@ impl ErrorMessage {
                 error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
@@ -573,6 +578,7 @@ impl ErrorMessage {
                 error_type: reason,
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: Some(ErrorType::Cancelled),
             }),
         )
@@ -597,6 +603,7 @@ impl ErrorMessage {
                 error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: Some(ErrorType::Internal),
             }),
         )
@@ -624,6 +631,7 @@ impl ErrorMessage {
                 error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: Some(ErrorType::Internal),
             }),
         )
@@ -672,6 +680,7 @@ impl ErrorMessage {
                 error_type,
                 code: status.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type,
             }),
         )
@@ -712,6 +721,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: None,
             }),
         )
@@ -734,6 +744,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: Some(ErrorType::NotImplemented),
             }),
         )
@@ -750,6 +761,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: None,
             }),
         )
@@ -811,6 +823,7 @@ impl ErrorMessage {
                     })
                     .and_then(|details| serde_json::to_value(details).ok())
                     .map(Box::new),
+                param: None,
                 metric_error_type: Some(metric_error_type_for_class(error.class())),
             }),
         ))
@@ -831,6 +844,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
+                    param: None,
                     metric_error_type: None,
                 }),
             );
@@ -846,6 +860,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
+                    param: None,
                     metric_error_type: Some(ErrorType::Cancelled),
                 }),
             );
@@ -926,6 +941,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
+                    param: None,
                     metric_error_type: None,
                 }),
             ),
@@ -982,6 +998,7 @@ impl From<HttpError> for ErrorMessage {
             ),
             code: err.code,
             details: None,
+            param: None,
             metric_error_type: None,
         }
     }
@@ -1016,6 +1033,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 error_type: bad_request_error_type(),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: None,
             }),
         )
@@ -2463,15 +2481,14 @@ async fn handler_chat_completions(
             return Err(error);
         }
     };
-    let mut request: NvCreateChatCompletionRequest =
-        match parse_json_request("chat completions", &body) {
-            Ok(request) => request,
-            Err(error) => {
-                lifecycle_request.record_session(&request_id, None);
-                terminal.finish(terminal_outcome_for_error_response(&error));
-                return Err(error);
-            }
-        };
+    let mut request: NvCreateChatCompletionRequest = match parse_chat_json_request(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2600,7 +2617,44 @@ async fn handler_chat_completions(
     response
 }
 
+fn parse_chat_json_request(body: &[u8]) -> Result<NvCreateChatCompletionRequest, ErrorResponse> {
+    deserialize_json_request("chat completions", body).map_err(|original_error| {
+        let is_data_error = original_error.is_data();
+        let mut error = json_deserialize_error(original_error);
+        // Preserve syntax/EOF errors and wrapper-owned duplicate-field precedence.
+        if !is_data_error
+            || error.1.message.starts_with(
+                "Failed to deserialize the JSON body into the target type: duplicate field `",
+            )
+        {
+            return error;
+        }
+
+        // Diagnose the base schema directly: serde(flatten) loses its field paths.
+        // Diagnose the original bytes so duplicate fields retain their precedence.
+        if let Err(source) = serde_path_to_error::deserialize::<
+            _,
+            dynamo_protocols::types::CreateChatCompletionRequest,
+        >(&mut serde_json::Deserializer::from_slice(body))
+            && source.inner().is_data()
+            && let Some(serde_path_to_error::Segment::Map { key }) = source.path().iter().next()
+        {
+            // Nested map keys and deserializer messages can contain user input.
+            error.1.message = format!("Invalid value for parameter '{key}'.");
+            error.1.param = Some(key.clone());
+        }
+        error
+    })
+}
+
 fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
+where
+    T: DeserializeOwned,
+{
+    deserialize_json_request(endpoint, body).map_err(json_deserialize_error)
+}
+
+fn deserialize_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
 where
     T: DeserializeOwned,
 {
@@ -2616,12 +2670,10 @@ where
                         );
                         Ok(request)
                     }
-                    Err(_) => parse_json_request_lossy(endpoint, body)
-                        .map_err(|_| json_deserialize_error(original_error)),
+                    Err(_) => parse_json_request_lossy(endpoint, body).map_err(|_| original_error),
                 }
             } else {
-                parse_json_request_lossy(endpoint, body)
-                    .map_err(|_| json_deserialize_error(original_error))
+                parse_json_request_lossy(endpoint, body).map_err(|_| original_error)
             }
         }
     }
@@ -3247,6 +3299,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
                     error_type: map_error_code_to_error_type(status),
                     code: status.as_u16(),
                     details: None,
+                    param: None,
                     metric_error_type: None,
                 }),
             )
@@ -4629,6 +4682,7 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> ErrorRespo
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
+            param: None,
             metric_error_type: None,
         }),
     )
@@ -6164,6 +6218,67 @@ mod tests {
         assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
+    #[tokio::test]
+    async fn test_parse_chat_completion_request_identifies_schema_parameters() {
+        for (param, invalid) in [
+            ("messages", serde_json::json!("private-input-canary")),
+            (
+                "messages",
+                serde_json::json!({"private-input-canary": "secret"}),
+            ),
+            ("messages", serde_json::Value::Null),
+            ("tools", serde_json::json!("private-input-canary")),
+            ("temperature", serde_json::json!("private-input-canary")),
+            ("stream", serde_json::json!({"private-input-canary": true})),
+            ("max_tokens", serde_json::json!(-1)),
+        ] {
+            let mut value = serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            value[param] = invalid;
+            let body = serde_json::to_vec(&value).unwrap();
+            let response = parse_chat_json_request(&body)
+                .expect_err("request should fail")
+                .into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()["content-type"], "application/json");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            // Exact equality also rules out leaking rejected values in other fields.
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({
+                    "message": format!("Invalid value for parameter '{param}'."),
+                    "type": "Bad Request",
+                    "code": 400,
+                    "param": param,
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_preserves_unclassified_errors() {
+        for body in [
+            br#"{"model":"test-model","messages":"private-input-canary""#.as_slice(),
+            br#"{"model":"test-model"}"#,
+            br#"[]"#,
+            br#"{"model":"test-model","chat_template_args":false,"temperature":invalid}"#,
+            br#"{"model":"test-model","messages":42,"chat_template_args":{},"chat_template_args":{}}"#,
+        ] {
+            let error = parse_chat_json_request(body).expect_err("request should fail");
+            let original =
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body)
+                    .expect_err("request should fail");
+            assert_eq!(error.0, original.0);
+            let serialized = serde_json::to_value(error.1.0).unwrap();
+            assert_eq!(serialized, serde_json::to_value(original.1.0).unwrap());
+            assert!(serialized.get("param").is_none());
+        }
+    }
+
     #[test]
     fn test_parse_completion_stream_options_null_flags() {
         for (options, expected) in [
@@ -6195,8 +6310,7 @@ mod tests {
                 "messages": [{"role": "user", "content": "hello"}],
             });
             let chat: NvCreateChatCompletionRequest =
-                parse_json_request("chat completions", &serde_json::to_vec(&payload).unwrap())
-                    .unwrap();
+                parse_chat_json_request(&serde_json::to_vec(&payload).unwrap()).unwrap();
             payload.as_object_mut().unwrap().remove("messages");
             payload["prompt"] = serde_json::json!("hello");
             let completion: NvCreateCompletionRequest =
@@ -6225,9 +6339,7 @@ mod tests {
             }))
             .unwrap();
             assert_eq!(
-                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", &body)
-                    .unwrap_err()
-                    .0,
+                parse_chat_json_request(&body).unwrap_err().0,
                 StatusCode::BAD_REQUEST
             );
             assert_eq!(
@@ -6240,9 +6352,7 @@ mod tests {
         let body =
             br#"{"model":"test-model","messages":42,"stream_options":{"include_usage":null}}"#;
         assert_eq!(
-            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body)
-                .unwrap_err()
-                .0,
+            parse_chat_json_request(body).unwrap_err().0,
             StatusCode::BAD_REQUEST
         );
     }
@@ -6255,9 +6365,7 @@ mod tests {
             "messages":[{"role":"user","content":"hello"}],
             "stream_options":{"include_usage":null}
         }"#;
-        let chat_error =
-            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", chat_body)
-                .unwrap_err();
+        let chat_error = parse_chat_json_request(chat_body).unwrap_err();
         assert_eq!(chat_error.0, StatusCode::BAD_REQUEST);
         assert!(chat_error.1.message.contains("duplicate field `model`"));
     }
@@ -6267,7 +6375,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"log \x1b[33mPK\x03\x04\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_chat_json_request(body).expect("request should parse");
 
         let message = request
             .inner
@@ -6288,7 +6396,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"raw \xff data\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_chat_json_request(body).expect("request should parse");
 
         let message = request
             .inner
@@ -6309,7 +6417,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"slash \\\nnext\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_chat_json_request(body).expect("request should parse");
 
         let message = request
             .inner
@@ -6326,23 +6434,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_chat_completion_request_keeps_schema_errors() {
+    fn test_parse_chat_completion_request_identifies_nested_schema_errors() {
         let body = br#"{"model":"test-model","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"working"}]}]}"#;
 
-        let err =
-            match parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body) {
-                Ok(_) => panic!("schema should still fail"),
-                Err(err) => err,
-            };
+        let err = match parse_chat_json_request(body) {
+            Ok(_) => panic!("schema should still fail"),
+            Err(err) => err,
+        };
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(
-            err.1
-                .message
-                .contains("ChatCompletionRequestAssistantMessageContent"),
-            "unexpected error: {}",
-            err.1.message
-        );
+        assert_eq!(err.1.param.as_deref(), Some("messages"));
+        assert_eq!(err.1.message, "Invalid value for parameter 'messages'.");
     }
 
     #[test]
@@ -6350,7 +6452,7 @@ mod tests {
         let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""},"uuid":"image-42"}]}]}"#;
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_chat_json_request(body).expect("request should parse");
         let request = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(request["messages"][0]["content"][0]["uuid"], "image-42");
         assert_eq!(
@@ -6386,7 +6488,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_chat_json_request(body).expect("request should parse");
         let request = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(
             request["messages"][0]["content"][0]["text"],
@@ -6671,6 +6773,7 @@ mod tests {
             error_type: "Unprocessable Entity".to_string(),
             code: 422,
             details: None,
+            param: None,
             metric_error_type: None,
         })
         .unwrap();
@@ -7239,6 +7342,7 @@ mod tests {
                 error_type: "service_unavailable".to_string(),
                 code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 details: None,
+                param: None,
                 metric_error_type: Some(ErrorType::Overload),
             }),
         );
