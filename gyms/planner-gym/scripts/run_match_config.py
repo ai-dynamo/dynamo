@@ -19,9 +19,12 @@ def main() -> int:
     from autoscaling_arena.match_config import MatchConfigError, load_match_config
     from autoscaling_arena.match_runner import (
         MatchPublishError,
+        _matrix_dict,
         execute_match_config,
         format_match_matrix,
+        load_published_report,
         match_replay_sha256,
+        merge_match_reports,
         preflight_publish_destinations,
         publish_match_results,
     )
@@ -50,6 +53,26 @@ def main() -> int:
         action="append",
         default=[],
         help="run only this expanded matrix cell (repeatable)",
+    )
+    parser.add_argument(
+        "--autoscaler",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "run every expanded cell of this backend.autoscalers entry "
+            "(repeatable; combines with --run-id)"
+        ),
+    )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help=(
+            "fold the selected cells into the existing JSON destination: "
+            "matching run ids are replaced, every other saved result is kept, "
+            "and the HTML report is re-rendered from the merged results "
+            "(implies overwriting the JSON/HTML destinations)"
+        ),
     )
     parser.add_argument(
         "--no-publish",
@@ -96,6 +119,37 @@ def main() -> int:
     unknown_ids = sorted(selected_ids - available_ids)
     if unknown_ids:
         parser.error("unknown --run-id: " + ", ".join(unknown_ids))
+    if args.autoscaler:
+        known_autoscalers = {entry.name for entry in config.backend.autoscalers}
+        unknown_autoscalers = sorted(set(args.autoscaler) - known_autoscalers)
+        if unknown_autoscalers:
+            parser.error(
+                "unknown --autoscaler: "
+                + ", ".join(unknown_autoscalers)
+                + "; known: "
+                + ", ".join(sorted(known_autoscalers))
+            )
+        selected_ids.update(
+            item.run_id for item in matrix if item.autoscaler in set(args.autoscaler)
+        )
+    json_destination = next(
+        (
+            destination.path
+            for destination in config.publish.destinations
+            if destination.type == "json" and destination.path is not None
+        ),
+        None,
+    )
+    if args.merge:
+        if args.no_publish:
+            parser.error("--merge cannot be combined with --no-publish")
+        if json_destination is None:
+            parser.error("--merge needs a JSON publish destination in the Match Config")
+        if not json_destination.is_file():
+            parser.error(
+                f"--merge needs existing published results at {json_destination}; "
+                "run without --merge first"
+            )
     selected_matrix = (
         [item for item in matrix if item.run_id in selected_ids]
         if selected_ids
@@ -134,9 +188,10 @@ def main() -> int:
     if args.validate_only:
         return 0
 
+    overwrite = args.overwrite or args.merge
     if not args.no_publish:
         try:
-            preflight_publish_destinations(config, force_overwrite=args.overwrite)
+            preflight_publish_destinations(config, force_overwrite=overwrite)
         except MatchPublishError as exc:
             print(f"Publish error: {exc}", file=sys.stderr)
             return 2
@@ -183,9 +238,22 @@ def main() -> int:
         written = []
     else:
         try:
-            written = publish_match_results(
-                config, report, force_overwrite=args.overwrite
-            )
+            if args.merge:
+                assert json_destination is not None
+                base = load_published_report(json_destination)
+                report = merge_match_reports(
+                    base, report, matrix=[_matrix_dict(item) for item in matrix]
+                )
+                latest = report["provenance"]["merged_sessions"][-1]
+                print(
+                    f"Merged into {json_destination}: "
+                    f"{len(latest['replaced_run_ids'])} replaced, "
+                    f"{len(latest['added_run_ids'])} added, "
+                    f"{len(latest['renumbered_run_ids'])} renumbered, "
+                    f"{report['summary']['executed_runs']} total results",
+                    flush=True,
+                )
+            written = publish_match_results(config, report, force_overwrite=overwrite)
         except MatchPublishError as exc:
             print(f"Publish error: {exc}", file=sys.stderr)
             return 2
