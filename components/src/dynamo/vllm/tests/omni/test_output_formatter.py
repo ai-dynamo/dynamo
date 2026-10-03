@@ -4,6 +4,7 @@
 """Tests for output_formatter.py — modality-specific formatters."""
 
 import base64
+import json
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,12 @@ import pytest
 try:
     import torch
 
+    from dynamo.common.utils.cmaf_video import (
+        CMAF_INIT_TAG,
+        CMAF_METADATA_TAG,
+        CMAF_SEGMENT_TAG_PREFIX,
+        segment_tag,
+    )
     from dynamo.vllm.omni.output_formatter import (
         AudioAggregateState,
         AudioFormatter,
@@ -235,6 +242,7 @@ class TestDiffusionFormatterVideo:
 
     @pytest.mark.asyncio
     async def test_error_returns_failed_status(self):
+        """An encoder failure surfaces as a failed response, not an exception."""
         from unittest.mock import patch
 
         f = _make_diffusion_formatter()
@@ -385,7 +393,7 @@ class TestDiffusionFormatterVideo:
 
     @pytest.mark.asyncio
     async def test_rejects_non_positive_fallback_fps_before_encoding(self):
-        with patch("dynamo.vllm.omni.output_formatter.encode_to_video_bytes") as encode:
+        with patch("dynamo.vllm.omni.output_formatter.encode_video") as encode:
             result = await _make_diffusion_formatter()._encode_video(
                 [np.zeros((2, 4, 4, 3), dtype=np.float32)],
                 "req-invalid-fps",
@@ -398,13 +406,13 @@ class TestDiffusionFormatterVideo:
         encode.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_silent_video_keeps_vp9_encoder(self):
+    async def test_silent_video_uses_the_shared_encoder(self):
         f = _make_diffusion_formatter()
         with (
             patch(
-                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                "dynamo.vllm.omni.output_formatter.encode_video",
                 return_value=b"vp9-mp4",
-            ) as vp9,
+            ) as encode,
             patch("dynamo.vllm.omni.output_formatter.mux_video_audio_bytes") as mux,
         ):
             result = await f._encode_video(
@@ -416,7 +424,7 @@ class TestDiffusionFormatterVideo:
 
         assert result["status"] == "completed"
         assert result["data"][0]["audio_sample_rate"] is None
-        vp9.assert_called_once()
+        encode.assert_called_once()
         mux.assert_not_called()
 
     @pytest.mark.asyncio
@@ -437,7 +445,7 @@ class TestDiffusionFormatterVideo:
         video = torch.zeros((2, 3, 8, 10), dtype=torch.float32)
 
         with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            "dynamo.vllm.omni.output_formatter.encode_video",
             return_value=b"vp9-mp4",
         ) as encode:
             result = await f._encode_video(
@@ -458,7 +466,7 @@ class TestDiffusionFormatterVideo:
         videos = torch.zeros((2, 2, 3, 8, 10), dtype=torch.float32)
 
         with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            "dynamo.vllm.omni.output_formatter.encode_video",
             return_value=b"vp9-mp4",
         ) as encode:
             result = await f._encode_video(
@@ -481,7 +489,7 @@ class TestDiffusionFormatterVideo:
         videos = [np.zeros((2, 2, 8, 10, 3), dtype=np.float32)]
 
         with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            "dynamo.vllm.omni.output_formatter.encode_video",
             return_value=b"vp9-mp4",
         ) as encode:
             result = await f._encode_video(
@@ -508,7 +516,7 @@ class TestDiffusionFormatterVideo:
             video = torch.from_numpy(video)
 
         with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            "dynamo.vllm.omni.output_formatter.encode_video",
             return_value=b"vp9-mp4",
         ) as encode:
             result = await f._encode_video(
@@ -1357,20 +1365,19 @@ class TestDiffusionFormatterVideoOutputFormat:
     """_encode_video always sets VideoData.output_format='mp4'."""
 
     def _patches(self):
+        """Patch the encoder and file writes so no ffmpeg or disk is touched."""
         from unittest.mock import patch as _patch
+
+        import numpy as np
 
         return (
             _patch(
-                "dynamo.vllm.omni.output_formatter.normalize_video_frames",
-                return_value=[MagicMock()],
+                "dynamo.vllm.omni.output_formatter.DiffusionFormatter._video_to_numpy_frames",
+                return_value=np.zeros((2, 4, 4, 3), dtype=np.uint8),
             ),
             _patch(
-                "dynamo.vllm.omni.output_formatter.frames_to_numpy",
-                return_value=MagicMock(),
-            ),
-            _patch(
-                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
-                return_value=b"video-bytes",
+                "dynamo.vllm.omni.output_formatter.encode_video",
+                return_value=b"bytes",
             ),
             _patch(
                 "dynamo.vllm.omni.output_formatter.upload_to_fs",
@@ -1384,6 +1391,7 @@ class TestDiffusionFormatterVideoOutputFormat:
 
     @pytest.mark.asyncio
     async def test_video_url_response_format(self):
+        """``response_format=url`` returns a file URL."""
         from dynamo.common.utils.output_modalities import RequestType
         from dynamo.vllm.omni.output_formatter import DiffusionFormatter
 
@@ -1391,8 +1399,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4, p5 = self._patches()
-        with p1, p2, p3, p4 as mock_upload, p5:
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
             result = await f.format(
                 stage,
                 "r5",
@@ -1409,6 +1417,7 @@ class TestDiffusionFormatterVideoOutputFormat:
 
     @pytest.mark.asyncio
     async def test_video_b64_response_format(self):
+        """``response_format=b64_json`` returns the encoded bytes inline."""
         import base64
 
         from dynamo.common.utils.output_modalities import RequestType
@@ -1418,8 +1427,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4, p5 = self._patches()
-        with p1, p2, p3, p4 as mock_upload, p5:
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
             result = await f.format(
                 stage,
                 "r6",
@@ -1445,8 +1454,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4, p5 = self._patches()
-        with p1, p2, p3, p4 as mock_upload, p5:
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
             result = await f.format(
                 stage, "r7", request_type=RequestType.VIDEO_GENERATION, fps=16
             )
@@ -1454,3 +1463,272 @@ class TestDiffusionFormatterVideoOutputFormat:
         assert result is not None
         assert result["data"][0]["url"] == "http://x/v.mp4"
         mock_upload.assert_called_once()
+
+
+# ── DiffusionFormatter — to_canonical converter + encode adapter ────────────
+
+
+class TestVllmVideoToCanonical:
+    """to_canonical() maps stage_output.images to canonical frames losslessly."""
+
+    def test_roundtrip_is_bit_exact(self):
+        """vLLM-OMNI output round-trips through ``to_canonical`` bit-exact."""
+        import numpy as np
+
+        from dynamo.vllm.omni.video_convert import to_canonical
+
+        # Distinctive per-pixel values catch axis / channel-order bugs.
+        truth = np.arange(2 * 4 * 5 * 3, dtype=np.uint8).reshape(2, 4, 5, 3)
+        native = [truth[None]]  # list holding one (1, T, H, W, C) array
+
+        out = to_canonical(native)
+
+        assert out.dtype == np.uint8
+        assert np.array_equal(out, truth)
+
+    @pytest.mark.asyncio
+    async def test_encode_video_receives_canonical_frames_and_fps_only(self):
+        """The encoder is handed canonical frames and fps, nothing else."""
+        from unittest.mock import patch as _patch
+
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import DiffusionFormatter
+
+        f = DiffusionFormatter(model_name="test", media_fs=None, media_http_url=None)
+        stage = MagicMock()
+        stage.images = [MagicMock()]
+        canonical = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+
+        with _patch(
+            "dynamo.vllm.omni.output_formatter.DiffusionFormatter._video_to_numpy_frames",
+            return_value=canonical,
+        ), _patch(
+            "dynamo.vllm.omni.output_formatter.encode_video", return_value=b"bytes"
+        ) as m_enc, _patch(
+            "dynamo.vllm.omni.output_formatter.upload_to_fs",
+            return_value="http://x/v.mp4",
+        ), _patch(
+            "dynamo.vllm.omni.output_formatter.asyncio.to_thread",
+            side_effect=lambda fn, *a, **kw: fn(*a, **kw),
+        ):
+            await f.format(
+                stage,
+                "r8",
+                request_type=RequestType.VIDEO_GENERATION,
+                fps=16,
+                response_format="url",
+            )
+
+        args, kwargs = m_enc.call_args
+        assert args[0] is canonical
+        assert args[1] == 16
+        # The container is no longer a caller choice: encode_video always emits mp4.
+        assert "container" not in kwargs
+        assert "codec" not in kwargs
+
+
+# ── CMAF streaming ──────────────────────────────────────────
+
+
+class _FakeCmafEncoder:
+    """Stands in for StreamingCmafEncoder: same call shape, no ffmpeg process.
+
+    Emits the init segment with the first chunk and one fragment per chunk, plus
+    the muxer's last fragment on finish().
+    """
+
+    def __init__(self, fps, width, height, *, gop_frames=None, **kwargs):
+        """Record the session parameters."""
+        self.gop_frames = gop_frames
+        self.chunk_sizes = []
+        self.started = False
+        self.closed = False
+
+    async def start(self):
+        """Mark the session started."""
+        self.started = True
+
+    async def aclose(self):
+        """Mark the session closed."""
+        self.closed = True
+
+    def codec_string(self):
+        """A fixed VP9 codec string."""
+        return "vp09.00.10.08"
+
+    async def push(self, frames):
+        """Emit init with the first chunk, then one fragment per chunk."""
+        self.chunk_sizes.append(len(frames))
+        if len(self.chunk_sizes) == 1:
+            yield CMAF_INIT_TAG, b"ftyp-moov"
+        yield segment_tag(len(self.chunk_sizes)), b"moof-mdat"
+
+    async def finish(self):
+        """Emit the muxer's last fragment."""
+        yield segment_tag(len(self.chunk_sizes) + 1), b"last-moof-mdat"
+
+
+class TestDiffusionFormatterCmafFrames:
+    """The tagged response the frontend route deserializes."""
+
+    def test_frame_carries_the_tag_and_the_payload(self):
+        """A frame carries its tag and payload, base64 on the internal hop."""
+        f = _make_diffusion_formatter()
+        frame = f.cmaf_frame("req-1", CMAF_INIT_TAG, b"\x00\x01ftyp")
+
+        assert frame["cmaf"] == CMAF_INIT_TAG
+        assert frame["status"] == "completed"
+        # base64 for the internal hop only; the frontend emits the raw bytes.
+        assert base64.b64decode(frame["data"][0]["b64_json"]) == b"\x00\x01ftyp"
+
+    def test_error_frame_is_a_failed_response(self):
+        """After a failure a bare end of stream would look like success."""
+        f = _make_diffusion_formatter()
+        frame = f.cmaf_error("req-1", "ffmpeg exited 1")
+
+        assert frame["status"] == "failed"
+        assert frame["error"] == "ffmpeg exited 1"
+        assert frame["data"] == []
+        assert frame["cmaf"] is None
+
+
+class TestDiffusionFormatterStreamCmaf:
+    """Frame order and encoder lifecycle, with the encoder faked out."""
+
+    def _patched(self, holder):
+        """Patch away the frames and the encoder, keeping the instance built."""
+
+        def make(*args, **kwargs):
+            """Build the fake encoder and keep a handle on it."""
+            holder["enc"] = holder["cls"](*args, **kwargs)
+            return holder["enc"]
+
+        canonical = patch(
+            "dynamo.vllm.omni.output_formatter.DiffusionFormatter._video_to_numpy_frames",
+            return_value=np.zeros((20, 8, 8, 3), dtype=np.uint8),
+        )
+        encoder = patch(
+            "dynamo.vllm.omni.output_formatter.StreamingCmafEncoder", new=make
+        )
+        return canonical, encoder
+
+    @pytest.mark.asyncio
+    async def test_metadata_leads_then_init_then_segments(self):
+        """Metadata leads, then init, then only segments."""
+        f = _make_diffusion_formatter()
+        holder = {"cls": _FakeCmafEncoder}
+        canonical, encoder = self._patched(holder)
+
+        with canonical, encoder:
+            out = [
+                frame
+                async for frame in f.stream_cmaf(
+                    [MagicMock()], "req-1", fps=16, gop_frames=8
+                )
+            ]
+
+        tags = [frame["cmaf"] for frame in out]
+        # The client needs the codec string before it can append anything, and
+        # the codec string is read out of the init segment.
+        assert tags[0] == CMAF_METADATA_TAG
+        assert tags[1] == CMAF_INIT_TAG
+        assert all(tag.startswith(CMAF_SEGMENT_TAG_PREFIX) for tag in tags[2:])
+
+        meta = json.loads(base64.b64decode(out[0]["data"][0]["b64_json"]))
+        assert meta["mime_type"] == 'video/mp4; codecs="vp09.00.10.08"'
+        assert (meta["width"], meta["height"], meta["fps"]) == (8, 8, 16)
+        assert meta["target_duration"] == 0.5
+        assert meta["segment_count"] == 3  # 20 frames at 8: 8 + 8 + 4
+
+    @pytest.mark.asyncio
+    async def test_metadata_still_leads_when_init_only_surfaces_in_finish(self):
+        """push() drains only what ffmpeg has already written; on a short clip or
+        a slow encoder every fragment, init included, can arrive in finish()."""
+
+        class _LateInit(_FakeCmafEncoder):
+            async def push(self, frames):
+                """Accept the chunk and emit nothing."""
+                self.chunk_sizes.append(len(frames))
+                return
+                yield  # unreachable; keeps push an async generator
+
+            async def finish(self):
+                """Emit init and the only fragment."""
+                yield CMAF_INIT_TAG, b"ftyp-moov"
+                yield segment_tag(1), b"moof-mdat"
+
+        f = _make_diffusion_formatter()
+        holder = {"cls": _LateInit}
+        canonical, encoder = self._patched(holder)
+
+        with canonical, encoder:
+            out = [
+                frame
+                async for frame in f.stream_cmaf(
+                    [MagicMock()], "req-1", fps=16, gop_frames=8
+                )
+            ]
+
+        tags = [frame["cmaf"] for frame in out]
+        assert tags == [CMAF_METADATA_TAG, CMAF_INIT_TAG, segment_tag(1)]
+        meta = json.loads(base64.b64decode(out[0]["data"][0]["b64_json"]))
+        assert meta["mime_type"] == 'video/mp4; codecs="vp09.00.10.08"'
+
+    @pytest.mark.asyncio
+    async def test_chunks_follow_the_gop_and_the_last_fragment_comes_from_finish(self):
+        """Chunks follow the GOP and the last fragment comes from ``finish()``."""
+        f = _make_diffusion_formatter()
+        holder = {"cls": _FakeCmafEncoder}
+        canonical, encoder = self._patched(holder)
+
+        with canonical, encoder:
+            out = [
+                frame
+                async for frame in f.stream_cmaf(
+                    [MagicMock()], "req-1", fps=16, gop_frames=8
+                )
+            ]
+
+        assert holder["enc"].chunk_sizes == [8, 8, 4]
+        assert holder["enc"].gop_frames == 8
+        # Three pushed fragments plus the one the muxer can only close on EOF.
+        assert sum(1 for frame in out if frame["cmaf"].startswith("cmaf:segment:")) == 4
+        assert holder["enc"].started and holder["enc"].closed
+
+    @pytest.mark.asyncio
+    async def test_the_encoder_is_closed_when_encoding_fails(self):
+        """The exception is the caller's to report, but ffmpeg must not outlive it."""
+
+        class _Failing(_FakeCmafEncoder):
+            async def push(self, frames):
+                """Fail like an ffmpeg exit."""
+                raise RuntimeError("ffmpeg exited 1")
+                yield  # unreachable; keeps push an async generator
+
+        f = _make_diffusion_formatter()
+        holder = {"cls": _Failing}
+        canonical, encoder = self._patched(holder)
+
+        with canonical, encoder:
+            with pytest.raises(RuntimeError, match="ffmpeg exited 1"):
+                async for _ in f.stream_cmaf([MagicMock()], "req-1", fps=16):
+                    pass
+
+        assert holder["enc"].closed
+
+
+class TestOutputFormatterStreamCmaf:
+    @pytest.mark.asyncio
+    async def test_an_empty_payload_is_an_error_not_an_empty_stream(self):
+        """No frames is an error, not an empty successful stream."""
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        f = OutputFormatter(model_name="test-model")
+        stage = MagicMock()
+        stage.images = []
+
+        with pytest.raises(RuntimeError, match="No video frames to stream"):
+            async for _ in f.stream_cmaf(stage, "req-1", fps=16):
+                pass
