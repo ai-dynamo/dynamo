@@ -19,7 +19,9 @@ pub use crate::plugins::worker_selection::{
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
-use crate::plugins::worker_selection::{CacheSnapshot, CandidateData, WorkerCacheData};
+use crate::plugins::worker_selection::{
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacityInput,
+};
 pub use policy::WorkerSelectionPolicy;
 use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
 #[cfg(any(test, feature = "bench"))]
@@ -136,8 +138,17 @@ struct MaterializedSelectionInput<'a> {
     cache_snapshot: CacheSnapshot<'a>,
 }
 
+#[cfg(test)]
+fn no_worker_capacity(_: WorkerId) -> Option<WorkerCapacityInput> {
+    None
+}
+
 impl<'a> MaterializedSelectionInput<'a> {
-    fn new(request: &'a SchedulingRequest, block_size: u32) -> Self {
+    fn new(
+        request: &'a SchedulingRequest,
+        block_size: u32,
+        worker_capacity: &'a (dyn Fn(WorkerId) -> Option<WorkerCapacityInput> + Sync),
+    ) -> Self {
         Self {
             request,
             cache_snapshot: CacheSnapshot {
@@ -148,6 +159,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             },
             context: WorkerSelectionContext {
                 request,
+                worker_capacity,
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
@@ -358,7 +370,7 @@ fn log_selection<C: WorkerConfigLike>(
 #[inline(always)]
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
-fn select_worker_with_policy<C: WorkerConfigLike>(
+fn select_worker_with_policy<C: WorkerConfigLike + Sync>(
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
     workers: &HashMap<WorkerId, C>,
@@ -380,7 +392,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
     }
 
-    let mut input = MaterializedSelectionInput::new(request, block_size);
+    let worker_capacity = |worker_id: WorkerId| {
+        workers
+            .get(&worker_id)
+            .map(WorkerCapacityInput::from_config)
+    };
+    let mut input = MaterializedSelectionInput::new(request, block_size, &worker_capacity);
     input.context.pinned_worker = eligibility.pinned_worker();
     let selected = match state {
         #[cfg(any(test, feature = "bench"))]
@@ -573,7 +590,7 @@ mod cache_reuse_tests {
             .insert(first, 1);
         request.overlap.tier_overlap_blocks.device.insert(second, 4);
         request.overlap.tier_overlap_blocks.disk.insert(second, 2);
-        let input = MaterializedSelectionInput::new(&request, 16);
+        let input = MaterializedSelectionInput::new(&request, 16, &no_worker_capacity);
 
         input.track_kept_candidate(first);
         input.track_kept_candidate(second);
@@ -591,7 +608,7 @@ mod cache_reuse_tests {
         request.mode = crate::scheduling::ScheduleMode::QueryOnly { request_id: None };
         let worker = WorkerWithDpRank::from_worker_id(1);
         request.overlap.effective_cached_tokens.insert(worker, 96);
-        let input = MaterializedSelectionInput::new(&request, 16);
+        let input = MaterializedSelectionInput::new(&request, 16, &no_worker_capacity);
 
         input.track_kept_candidate(worker);
 
@@ -642,7 +659,7 @@ mod cache_reuse_tests {
             .tier_overlap_blocks
             .device
             .insert(invalid_rank, 6);
-        let input = MaterializedSelectionInput::new(&request, 16);
+        let input = MaterializedSelectionInput::new(&request, 16, &no_worker_capacity);
         let eligibility = request.eligibility();
 
         eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
