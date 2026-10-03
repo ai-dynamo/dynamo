@@ -50,6 +50,9 @@ python3 scripts/collect_dynamo_debug_bundle.py \
   --deployment-name <deployment-name>
 ```
 
+This scopes the pod inventory, descriptions, and logs to that deployment.
+Services, jobs, PVCs, events, and other summaries remain namespace-wide.
+
 Do not collect Kubernetes secrets. Do not print Hugging Face tokens.
 
 ### 2. Classify The Failure
