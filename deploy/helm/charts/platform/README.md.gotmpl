@@ -46,6 +46,20 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### v1.6.0
+
+#### Runtime Compatibility
+
+##### Operator Namespace Discovery Isolation
+
+**Change:** The operator enables strict namespace-prefix matching for frontend and EPP components using runtime 1.6.0 or later. For example, a frontend scoped to `default-foo` excludes `default-foo-bar` and its workers.
+
+**Affected:** Operator-managed frontend and EPP components.
+
+**Action:** Use runtime images containing this fix. For custom images, set `runtimeVersionOverride` when the image tag does not identify the Dynamo runtime version. If retaining a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on frontend and EPP components.
+
+**Existing deployments:** An operator-only upgrade does not fix isolation for older runtime images. With an updated operator, upgrading a component to a supported runtime enables strict matching and rolls that component. Manual namespace prefixes retain literal matching unless strict mode is enabled.
+
 ### v1.5.0
 
 #### CRD and admission breaking changes

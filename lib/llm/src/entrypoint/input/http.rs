@@ -16,7 +16,7 @@ use crate::{
     kv_router::plugins::RouterPluginBuilder,
     local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
-    namespace::NamespaceFilter,
+    namespace::{NamespaceFilter, NamespacePrefixMode},
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -376,6 +376,7 @@ async fn run_watcher(
         metrics.clone(),
         plugins,
     );
+    watch_obj.set_namespace_prefix_mode(NamespacePrefixMode::from_env());
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
