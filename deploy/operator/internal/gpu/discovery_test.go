@@ -527,6 +527,26 @@ func TestInferHardwareSystem(t *testing.T) {
 			input:    "B200 SXM",
 			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
 		},
+		{
+			name:     "RTX PRO 6000 Blackwell Server Edition",
+			input:    "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+			expected: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server,
+		},
+		{
+			name:     "RTX PRO 6000 Blackwell Workstation Edition",
+			input:    "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+			expected: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server,
+		},
+		{
+			name:     "RTX PRO 6000 bare",
+			input:    "RTX PRO 6000",
+			expected: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server,
+		},
+		{
+			name:     "RTX PRO 6000 dashed (DCGM format)",
+			input:    "NVIDIA-RTX-PRO-6000-Blackwell-Server-Edition",
+			expected: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server,
+		},
 
 		// --- Hopper ---
 		{
@@ -705,6 +725,34 @@ func TestInferHardwareSystem(t *testing.T) {
 				t.Errorf("InferHardwareSystem(%q) = %v, want %v",
 					tt.input, result, tt.expected)
 			}
+		})
+	}
+}
+
+func TestDiscoverGPUsFiltered_RTXPRO6000ProductLabels(t *testing.T) {
+	for _, product := range []string{
+		"NVIDIA RTX PRO 6000 Blackwell Server Edition",
+		"NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+		"RTX PRO 6000",
+		"NVIDIA-RTX-PRO-6000-Blackwell-Server-Edition",
+	} {
+		t.Run(product, func(t *testing.T) {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "rtx-pro-6000-node",
+					Labels: map[string]string{
+						LabelGPUCount:   "1",
+						LabelGPUProduct: product,
+						LabelGPUMemory:  "98304",
+					},
+				},
+			}
+
+			info, err := DiscoverGPUsFiltered(context.Background(), newFakeClient(node), nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server)
+			require.NoError(t, err)
+			require.NotNil(t, info)
+			assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server, info.System)
+			assert.Equal(t, 1, info.NodesWithGPUs)
 		})
 	}
 }

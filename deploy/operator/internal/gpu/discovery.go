@@ -86,23 +86,27 @@ const (
 
 // --- GPU model tokens ---
 const (
-	tokenGB200  = "GB200"
-	tokenGB10   = "GB10"
-	tokenB300   = "B300"
-	tokenB200   = "B200"
-	tokenH200   = "H200"
-	tokenH100   = "H100"
-	tokenA100   = "A100"
-	tokenA30    = "A30"
-	tokenL40S   = "L40S"
-	tokenL40    = "L40"
-	tokenL4     = "L4"
-	tokenV100   = "V100"
-	tokenT4     = "T4"
-	tokenMI300  = "MI300"
-	tokenMI250  = "MI250"
-	tokenMI200  = "MI200"
-	LabelNVLink = "nvlink"
+	tokenGB200 = "GB200"
+	tokenGB10  = "GB10"
+	tokenB300  = "B300"
+	tokenB200  = "B200"
+	// RTX PRO 6000 Blackwell product strings normalize to "RTXPRO6000..."
+	// (normalize strips spaces and dashes), so a single token covers
+	// server, workstation, bare, and dashed product variants.
+	tokenRTXPRO6000 = "RTXPRO6000"
+	tokenH200       = "H200"
+	tokenH100       = "H100"
+	tokenA100       = "A100"
+	tokenA30        = "A30"
+	tokenL40S       = "L40S"
+	tokenL40        = "L40"
+	tokenL4         = "L4"
+	tokenV100       = "V100"
+	tokenT4         = "T4"
+	tokenMI300      = "MI300"
+	tokenMI250      = "MI250"
+	tokenMI200      = "MI200"
+	LabelNVLink     = "nvlink"
 )
 
 // awsInstanceTypePrefixes matches known GPU/accelerator instance families on EKS. See: https://aws.amazon.com/ec2/instance-types/
@@ -133,6 +137,7 @@ var gpuRules = []gpuRule{
 	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
 	{token: tokenB300, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM},
 	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
+	{token: tokenRTXPRO6000, singleSKU: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server},
 
 	// Hopper
 	{token: tokenH200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeH200SXM},
