@@ -385,7 +385,7 @@ class TestDiffusionFormatterVideo:
 
     @pytest.mark.asyncio
     async def test_rejects_non_positive_fallback_fps_before_encoding(self):
-        with patch("dynamo.vllm.omni.output_formatter.encode_to_video_bytes") as encode:
+        with patch("dynamo.vllm.omni.output_formatter.encode_video") as encode:
             result = await _make_diffusion_formatter()._encode_video(
                 [np.zeros((2, 4, 4, 3), dtype=np.float32)],
                 "req-invalid-fps",
@@ -398,13 +398,13 @@ class TestDiffusionFormatterVideo:
         encode.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_silent_video_keeps_vp9_encoder(self):
+    async def test_silent_video_uses_the_shared_encoder(self):
         f = _make_diffusion_formatter()
         with (
             patch(
-                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                "dynamo.vllm.omni.output_formatter.encode_video",
                 return_value=b"vp9-mp4",
-            ) as vp9,
+            ) as encode,
             patch("dynamo.vllm.omni.output_formatter.mux_video_audio_bytes") as mux,
         ):
             result = await f._encode_video(
@@ -416,7 +416,7 @@ class TestDiffusionFormatterVideo:
 
         assert result["status"] == "completed"
         assert result["data"][0]["audio_sample_rate"] is None
-        vp9.assert_called_once()
+        encode.assert_called_once()
         mux.assert_not_called()
 
     @pytest.mark.asyncio
@@ -437,7 +437,7 @@ class TestDiffusionFormatterVideo:
         video = torch.zeros((2, 3, 8, 10), dtype=torch.float32)
 
         with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            "dynamo.vllm.omni.output_formatter.encode_video",
             return_value=b"vp9-mp4",
         ) as encode:
             result = await f._encode_video(
@@ -458,7 +458,7 @@ class TestDiffusionFormatterVideo:
         videos = torch.zeros((2, 2, 3, 8, 10), dtype=torch.float32)
 
         with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            "dynamo.vllm.omni.output_formatter.encode_video",
             return_value=b"vp9-mp4",
         ) as encode:
             result = await f._encode_video(
@@ -481,7 +481,7 @@ class TestDiffusionFormatterVideo:
         videos = [np.zeros((2, 2, 8, 10, 3), dtype=np.float32)]
 
         with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            "dynamo.vllm.omni.output_formatter.encode_video",
             return_value=b"vp9-mp4",
         ) as encode:
             result = await f._encode_video(
@@ -508,7 +508,7 @@ class TestDiffusionFormatterVideo:
             video = torch.from_numpy(video)
 
         with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            "dynamo.vllm.omni.output_formatter.encode_video",
             return_value=b"vp9-mp4",
         ) as encode:
             result = await f._encode_video(
@@ -1359,18 +1359,16 @@ class TestDiffusionFormatterVideoOutputFormat:
     def _patches(self):
         from unittest.mock import patch as _patch
 
+        import numpy as np
+
         return (
             _patch(
-                "dynamo.vllm.omni.output_formatter.normalize_video_frames",
-                return_value=[MagicMock()],
+                "dynamo.vllm.omni.output_formatter.DiffusionFormatter._video_to_numpy_frames",
+                return_value=np.zeros((2, 4, 4, 3), dtype=np.uint8),
             ),
             _patch(
-                "dynamo.vllm.omni.output_formatter.frames_to_numpy",
-                return_value=MagicMock(),
-            ),
-            _patch(
-                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
-                return_value=b"video-bytes",
+                "dynamo.vllm.omni.output_formatter.encode_video",
+                return_value=b"bytes",
             ),
             _patch(
                 "dynamo.vllm.omni.output_formatter.upload_to_fs",
@@ -1391,8 +1389,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4, p5 = self._patches()
-        with p1, p2, p3, p4 as mock_upload, p5:
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
             result = await f.format(
                 stage,
                 "r5",
@@ -1418,8 +1416,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4, p5 = self._patches()
-        with p1, p2, p3, p4 as mock_upload, p5:
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
             result = await f.format(
                 stage,
                 "r6",
@@ -1445,8 +1443,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4, p5 = self._patches()
-        with p1, p2, p3, p4 as mock_upload, p5:
+        p1, p2, p3, p4 = self._patches()
+        with p1, p2, p3 as mock_upload, p4:
             result = await f.format(
                 stage, "r7", request_type=RequestType.VIDEO_GENERATION, fps=16
             )
@@ -1454,3 +1452,65 @@ class TestDiffusionFormatterVideoOutputFormat:
         assert result is not None
         assert result["data"][0]["url"] == "http://x/v.mp4"
         mock_upload.assert_called_once()
+
+
+# ── DiffusionFormatter — to_canonical converter + encode adapter ────────────
+
+
+class TestVllmVideoToCanonical:
+    """to_canonical() maps stage_output.images to canonical frames losslessly."""
+
+    def test_roundtrip_is_bit_exact(self):
+        import numpy as np
+
+        from dynamo.vllm.omni.video_convert import to_canonical
+
+        # Distinctive per-pixel values catch axis / channel-order bugs.
+        truth = np.arange(2 * 4 * 5 * 3, dtype=np.uint8).reshape(2, 4, 5, 3)
+        native = [truth[None]]  # list holding one (1, T, H, W, C) array
+
+        out = to_canonical(native)
+
+        assert out.dtype == np.uint8
+        assert np.array_equal(out, truth)
+
+    @pytest.mark.asyncio
+    async def test_encode_video_receives_canonical_frames_and_fps_only(self):
+        from unittest.mock import patch as _patch
+
+        import numpy as np
+
+        from dynamo.common.utils.output_modalities import RequestType
+        from dynamo.vllm.omni.output_formatter import DiffusionFormatter
+
+        f = DiffusionFormatter(model_name="test", media_fs=None, media_http_url=None)
+        stage = MagicMock()
+        stage.images = [MagicMock()]
+        canonical = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+
+        with _patch(
+            "dynamo.vllm.omni.output_formatter.DiffusionFormatter._video_to_numpy_frames",
+            return_value=canonical,
+        ), _patch(
+            "dynamo.vllm.omni.output_formatter.encode_video", return_value=b"bytes"
+        ) as m_enc, _patch(
+            "dynamo.vllm.omni.output_formatter.upload_to_fs",
+            return_value="http://x/v.mp4",
+        ), _patch(
+            "dynamo.vllm.omni.output_formatter.asyncio.to_thread",
+            side_effect=lambda fn, *a, **kw: fn(*a, **kw),
+        ):
+            await f.format(
+                stage,
+                "r8",
+                request_type=RequestType.VIDEO_GENERATION,
+                fps=16,
+                response_format="url",
+            )
+
+        args, kwargs = m_enc.call_args
+        assert args[0] is canonical
+        assert args[1] == 16
+        # The container is no longer a caller choice: encode_video always emits mp4.
+        assert "container" not in kwargs
+        assert "codec" not in kwargs

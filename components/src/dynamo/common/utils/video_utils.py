@@ -10,6 +10,8 @@ video frames to MP4 format.
 import io
 import logging
 import os
+import subprocess
+import tempfile
 from typing import Tuple
 
 import numpy as np
@@ -255,3 +257,326 @@ def encode_to_video_bytes(
     except Exception as e:
         logger.error(f"Failed to encode video to bytes: {e}")
         raise RuntimeError(f"Video encoding to bytes failed: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Unified video encoding
+#
+# A single shared entry point (``encode_video``) that all backends call with a
+# canonical frame array -- ``np.ndarray (T, H, W, 3) uint8`` RGB. Each backend
+# owns a ``to_canonical()`` converter (next to its handler) that maps its native
+# output into this format, composed from the canonical-domain primitives below
+# (``ensure_uint8_rgb`` / ``pil_frames_to_array`` / ``drop_alpha``).
+#
+# There are exactly two encoders, and both are royalty-free:
+#
+#   * ``libvpx-vp9`` in software, via imageio -- the default, and the only video
+#     encoder the in-tree LGPL ffmpeg carries. Matches what the runtime images
+#     already ship.
+#   * ``av1_vaapi`` in hardware, via the ffmpeg CLI -- used only when the
+#     operator points ``DYN_XPU_FFMPEG_PATH`` at an ffmpeg built with VA-API.
+#
+# No H.264 or H.265 in any form. Those are the codecs the shipped images
+# deliberately exclude (see tests/dependencies/test_no_software_video_codecs.py).
+# Intel media engines can encode them, but doing so would put a royalty-bearing
+# codec surface back into a distributed image; AV1 gives us hardware encode
+# without that problem. VP9 is decode-only on current Intel silicon, so it has
+# no hardware path.
+#
+# Selection is deliberately not auto-detected. ``ffmpeg -encoders`` advertises
+# wrappers the driver cannot actually run -- ``vp9_vaapi`` lists cleanly and then
+# fails at runtime with "No usable encoding entrypoint found" -- so capability
+# probing yields false positives. The operator declares hardware support by
+# setting the path, and we take them at their word.
+# ---------------------------------------------------------------------------
+
+# Path to an ffmpeg built with VA-API and the AV1 encoder. Its presence is the
+# only switch that selects hardware encoding.
+ENV_XPU_FFMPEG_PATH = "DYN_XPU_FFMPEG_PATH"
+
+# DRM render node used for VA-API hardware encoding.
+ENV_XPU_VIDEO_DEVICE = "DYN_XPU_VIDEO_DEVICE"
+DEFAULT_XPU_VIDEO_DEVICE = "/dev/dri/renderD128"
+
+# The only container we emit. Every backend already rejects anything else during
+# request validation, so this is not a narrowing of behaviour.
+VIDEO_CONTAINER = "mp4"
+
+# The two encoders.
+SW_VIDEO_ENCODER = "libvpx-vp9"
+HW_VIDEO_ENCODER = "av1_vaapi"
+
+# VA-API quality level, set explicitly so output does not depend on the driver's
+# built-in default (the iHD driver logs "No quality level set; using default
+# (25)"). 25 matches that default, so this pins current behaviour rather than
+# changing it.
+HW_VIDEO_GLOBAL_QUALITY = 25
+
+
+def xpu_video_device() -> str:
+    """DRM render node for VA-API encoding (env: ``DYN_XPU_VIDEO_DEVICE``)."""
+    return (
+        os.environ.get(ENV_XPU_VIDEO_DEVICE) or ""
+    ).strip() or DEFAULT_XPU_VIDEO_DEVICE
+
+
+def hw_ffmpeg_path() -> str | None:
+    """Resolve the hardware-encode ffmpeg, or ``None`` to encode in software.
+
+    Returns the path from ``DYN_XPU_FFMPEG_PATH`` when it is set and usable, or
+    ``None`` when the variable is unset -- meaning software VP9.
+
+    Raises:
+        RuntimeError: If the variable is set but does not name an executable
+            file. A misconfigured path is a deployment error, not a reason to
+            silently fall back to software: the operator asked for hardware
+            encoding and should hear that they did not get it.
+    """
+    path = (os.environ.get(ENV_XPU_FFMPEG_PATH) or "").strip()
+    if not path:
+        return None
+    if not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise RuntimeError(
+            f"{ENV_XPU_FFMPEG_PATH}={path!r} is not an executable file. Point it "
+            f"at an ffmpeg built with VA-API support and the {HW_VIDEO_ENCODER} "
+            f"encoder, or unset it to encode with software {SW_VIDEO_ENCODER}."
+        )
+    return path
+
+
+def validate_video_encoder_config() -> None:
+    """Resolve and log the video encoder configuration.
+
+    Safe to call at worker startup so a misconfigured ``DYN_XPU_FFMPEG_PATH`` is
+    reported before the first request rather than on it. ``encode_video`` performs
+    the same resolution, so calling this is optional.
+
+    Raises:
+        RuntimeError: If ``DYN_XPU_FFMPEG_PATH`` is set but unusable.
+    """
+    path = hw_ffmpeg_path()
+    if path is None:
+        logger.info(
+            "Video encoding: software %s (%s not set)",
+            SW_VIDEO_ENCODER,
+            ENV_XPU_FFMPEG_PATH,
+        )
+    else:
+        logger.info(
+            "Video encoding: hardware %s via %s on %s",
+            HW_VIDEO_ENCODER,
+            path,
+            xpu_video_device(),
+        )
+
+
+def drop_alpha(frames: np.ndarray) -> np.ndarray:
+    """Drop a trailing alpha channel (RGBA -> RGB) when present."""
+    if frames.shape[-1] == 4:
+        return frames[..., :3]
+    return frames
+
+
+def ensure_uint8_rgb(frames: np.ndarray) -> np.ndarray:
+    """Normalize an RGB frame array to contiguous ``(T, H, W, 3) uint8``.
+
+    Drops a trailing alpha channel and scales floating-point values in
+    ``[0, 1]`` up to ``[0, 255]``. Channel order and axis layout are assumed to
+    be RGB / ``(T, H, W, C)`` already; this operates purely in the canonical
+    domain and carries no backend-specific knowledge.
+    """
+    frames = drop_alpha(frames)
+    if np.issubdtype(frames.dtype, np.floating):
+        frames = np.clip(frames * 255.0, 0, 255).round()
+    return np.ascontiguousarray(frames, dtype=np.uint8)
+
+
+def pil_frames_to_array(frames) -> np.ndarray:
+    """Stack a list of per-frame images into a single ``(T, H, W, C)`` array.
+
+    Each element may be a ``PIL.Image`` or an ``np.ndarray``; PIL images are
+    converted to RGB numpy arrays first.
+    """
+    per_frame = []
+    for frame in frames:
+        if isinstance(frame, np.ndarray):
+            per_frame.append(frame)
+        else:
+            per_frame.append(np.array(frame.convert("RGB")))
+    return np.stack(per_frame, axis=0)
+
+
+def _validate_canonical_frames(frames) -> None:
+    """Validate the canonical encoder input contract.
+
+    Raises ``ValueError`` unless ``frames`` is an ``np.ndarray`` of shape
+    ``(T, H, W, 3)`` with dtype ``uint8``.
+    """
+    if not isinstance(frames, np.ndarray):
+        raise ValueError(
+            "encode_video expects canonical frames as np.ndarray (T, H, W, 3) "
+            f"uint8; got {type(frames).__name__}. Convert backend output with "
+            "the backend's to_canonical() first."
+        )
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError(f"encode_video expects shape (T, H, W, 3); got {frames.shape}")
+    if frames.dtype != np.uint8:
+        raise ValueError(f"encode_video expects dtype uint8; got {frames.dtype}")
+
+
+def _encode_vp9_imageio(frames: np.ndarray, fps: int) -> bytes:
+    """Encode canonical frames to VP9-in-mp4 with the software encoder.
+
+    Goes through imageio, which resolves the ffmpeg shipped with the runtime
+    image -- the royalty-free LGPL build carrying ``libvpx-vp9`` and no H.264.
+    This is the default path, and the only one exercised when
+    ``DYN_XPU_FFMPEG_PATH`` is unset.
+    """
+    try:
+        import imageio.v3 as iio
+    except ImportError:
+        try:
+            import imageio as iio  # type: ignore[no-redef]
+        except ImportError as err:
+            raise ImportError(
+                "imageio is required for video encoding. "
+                "Install with: pip install imageio[ffmpeg]"
+            ) from err
+
+    buffer = io.BytesIO()
+    if hasattr(iio, "imwrite"):
+        iio.imwrite(
+            buffer,
+            frames,
+            extension=f".{VIDEO_CONTAINER}",
+            fps=fps,
+            codec=SW_VIDEO_ENCODER,
+        )
+    else:
+        writer = iio.get_writer(  # type: ignore[attr-defined]
+            buffer, format="FFMPEG", mode="I", fps=fps, codec=SW_VIDEO_ENCODER
+        )
+        try:
+            for frame in frames:
+                writer.append_data(frame)
+        finally:
+            writer.close()
+    return buffer.getvalue()
+
+
+def _encode_av1_vaapi(frames: np.ndarray, fps: int, ffmpeg: str, device: str) -> bytes:
+    """Encode canonical frames to AV1-in-mp4 on the VA-API hardware encoder.
+
+    Pipes raw RGB to the operator-supplied ffmpeg. mp4 needs a seekable output
+    for the moov atom, so we encode to a temp file and read the bytes back.
+
+    Raises:
+        RuntimeError: If ffmpeg exits non-zero. Its stderr is included, and no
+            software fallback is attempted -- see ``hw_ffmpeg_path``.
+    """
+    num_frames, height, width, _ = frames.shape
+
+    with tempfile.NamedTemporaryFile(suffix=f".{VIDEO_CONTAINER}", delete=False) as tmp:
+        output_path = tmp.name
+    try:
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-vaapi_device",
+            device,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
+            # hwupload moves frames onto the VA-API surface; nv12 is 4:2:0, which
+            # is what the encoder consumes and what players expect.
+            "-vf",
+            "format=nv12,hwupload",
+            "-c:v",
+            HW_VIDEO_ENCODER,
+            "-global_quality",
+            str(HW_VIDEO_GLOBAL_QUALITY),
+            "-movflags",
+            "+faststart",
+            "-f",
+            VIDEO_CONTAINER,
+            output_path,
+        ]
+
+        logger.info(
+            "Encoding %d frames (%dx%d @ %d fps) via %s on %s",
+            num_frames,
+            width,
+            height,
+            fps,
+            HW_VIDEO_ENCODER,
+            device,
+        )
+        proc = subprocess.run(
+            cmd,
+            input=frames.tobytes(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"ffmpeg {HW_VIDEO_ENCODER} encode failed "
+                f"(exit {proc.returncode}): {stderr}"
+            )
+        with open(output_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+
+
+def encode_video(frames: np.ndarray, fps: int = DEFAULT_VIDEO_FPS) -> bytes:
+    """Unified video encoder: encode canonical frames to mp4 bytes.
+
+    ``frames`` must already be canonical -- an ``np.ndarray`` of shape
+    ``(T, H, W, 3)``, dtype ``uint8``, RGB. Each backend converts its native
+    output with its own ``to_canonical()`` before calling this.
+
+    The codec is not a caller choice. Hardware AV1 is used when
+    ``DYN_XPU_FFMPEG_PATH`` names a VA-API-capable ffmpeg; otherwise frames are
+    encoded with software VP9. Both are royalty-free, and the container is
+    always mp4.
+
+    Args:
+        frames: Canonical ``np.ndarray (T, H, W, 3) uint8`` RGB frames.
+        fps: Frames per second for the output video.
+
+    Returns:
+        Encoded mp4 bytes.
+
+    Raises:
+        ValueError: If ``frames`` is not the canonical ``(T, H, W, 3) uint8`` array.
+        RuntimeError: If ``DYN_XPU_FFMPEG_PATH`` is set but unusable, or if a
+            hardware encode fails. Neither case falls back to software.
+    """
+    _validate_canonical_frames(frames)
+
+    ffmpeg = hw_ffmpeg_path()
+    if ffmpeg is None:
+        logger.info(
+            "Encoding %d frames -> %s (%s) at %d fps",
+            len(frames),
+            VIDEO_CONTAINER,
+            SW_VIDEO_ENCODER,
+            fps,
+        )
+        return _encode_vp9_imageio(frames, fps)
+
+    return _encode_av1_vaapi(frames, fps, ffmpeg, xpu_video_device())

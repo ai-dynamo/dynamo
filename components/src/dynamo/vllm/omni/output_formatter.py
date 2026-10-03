@@ -70,7 +70,7 @@ from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.common.utils.video_utils import (
-    encode_to_video_bytes,
+    encode_video,
     frames_to_numpy,
     normalize_video_frames,
 )
@@ -304,13 +304,11 @@ class DiffusionFormatter:
             ):
                 frames_np = self._video_to_numpy_frames(video)
                 if audio is None:
-                    # The codec-compliant standard image retains its existing
-                    # royalty-free VP9 path for silent video models.
+                    # Silent video takes the shared encoder every backend uses:
+                    # hardware AV1 when DYN_XPU_FFMPEG_PATH is set, software VP9
+                    # otherwise, always mp4. Audio needs the PyAV mux below.
                     video_bytes = await asyncio.to_thread(
-                        encode_to_video_bytes,
-                        frames_np,
-                        fps=resolved_fps,
-                        output_format=output_format,
+                        encode_video, frames_np, resolved_fps
                     )
                 else:
                     if mux_video_audio_bytes is None:
