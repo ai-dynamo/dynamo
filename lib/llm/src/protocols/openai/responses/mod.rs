@@ -900,6 +900,17 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
     /// Convert a Responses request using one alias map for tools, history, and choices.
     /// Return an error for tool types or choices that Chat Completions cannot represent.
     fn try_from(resp: NvCreateResponse) -> Result<Self, Self::Error> {
+        resp.into_chat_completion_with_tool_names()
+            .map(|(request, _)| request)
+    }
+}
+
+impl NvCreateResponse {
+    /// Convert the request and retain the aliases needed to restore response tool identities.
+    pub fn into_chat_completion_with_tool_names(
+        self,
+    ) -> anyhow::Result<(NvCreateChatCompletionRequest, ToolNameMap)> {
+        let resp = self;
         let names = ToolNameMap::new(
             resp.inner.tools.as_deref().unwrap_or_default(),
             Some(&resp.inner.input),
@@ -1006,37 +1017,40 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Map service_tier
         let service_tier = resp.inner.service_tier.as_ref().map(convert_service_tier);
 
-        Ok(NvCreateChatCompletionRequest {
-            inner: CreateChatCompletionRequest {
-                messages,
-                model: resp.inner.model.unwrap_or_default(),
-                temperature: resp.inner.temperature,
-                top_p: resp.inner.top_p,
-                max_completion_tokens: resp.inner.max_output_tokens,
-                store: resp.inner.store,
-                parallel_tool_calls: resp.inner.parallel_tool_calls,
-                top_logprobs,
-                metadata: resp
-                    .inner
-                    .metadata
-                    .map(|m| serde_json::to_value(m).unwrap_or_default()),
-                stream,
-                tools,
-                tool_choice,
-                reasoning_effort,
-                response_format,
-                service_tier,
-                ..Default::default()
+        Ok((
+            NvCreateChatCompletionRequest {
+                inner: CreateChatCompletionRequest {
+                    messages,
+                    model: resp.inner.model.unwrap_or_default(),
+                    temperature: resp.inner.temperature,
+                    top_p: resp.inner.top_p,
+                    max_completion_tokens: resp.inner.max_output_tokens,
+                    store: resp.inner.store,
+                    parallel_tool_calls: resp.inner.parallel_tool_calls,
+                    top_logprobs,
+                    metadata: resp
+                        .inner
+                        .metadata
+                        .map(|m| serde_json::to_value(m).unwrap_or_default()),
+                    stream,
+                    tools,
+                    tool_choice,
+                    reasoning_effort,
+                    response_format,
+                    service_tier,
+                    ..Default::default()
+                },
+                common: Default::default(),
+                nvext: resp.nvext,
+                chat_template_args: resp.chat_template_args,
+                thinking: None,
+                thinking_token_budget: resp.thinking_token_budget,
+                media_io_kwargs: None,
+                return_tokens_as_token_ids: None,
+                unsupported_fields: Default::default(),
             },
-            common: Default::default(),
-            nvext: resp.nvext,
-            chat_template_args: resp.chat_template_args,
-            thinking: None,
-            thinking_token_budget: resp.thinking_token_budget,
-            media_io_kwargs: None,
-            return_tokens_as_token_ids: None,
-            unsupported_fields: Default::default(),
-        })
+            names,
+        ))
     }
 }
 
