@@ -196,6 +196,10 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub metadata_upload: Option<MetadataUpload>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub routed_experts_start_len: Option<u32>,
+
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_worker_id: Option<u64>,
@@ -260,6 +264,7 @@ impl NvExt {
             cache_salt: _,
             extra_fields,
             metadata_upload,
+            routed_experts_start_len,
             prefill_worker_id,
             decode_worker_id,
             dp_rank,
@@ -278,6 +283,7 @@ impl NvExt {
             || max_thinking_tokens.is_some()
             || extra_fields.is_some()
             || metadata_upload.is_some()
+            || routed_experts_start_len.is_some()
             || prefill_worker_id.is_some()
             || decode_worker_id.is_some()
             || dp_rank.is_some()
