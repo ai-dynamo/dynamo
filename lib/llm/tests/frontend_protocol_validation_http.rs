@@ -82,9 +82,14 @@ impl ExpectedError {
 }
 
 async fn assert_openai_error(response: reqwest::Response, expected: ExpectedError, message: &str) {
+    let nested = matches!(
+        response.url().path(),
+        "/v1/chat/completions" | "/v1/completions"
+    );
     let status = expected.status();
     assert_eq!(response.status(), status);
     let body: Value = response.json().await.unwrap();
+    let body = if nested { &body["error"] } else { &body };
     assert_eq!(body["code"].as_u64(), Some(u64::from(status.as_u16())));
     assert!(
         body["message"].as_str().is_some_and(|actual| actual

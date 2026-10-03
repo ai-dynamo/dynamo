@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass};
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, PublicParameter};
 use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -135,6 +135,33 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
 );
 
+/// Shared mapping for explicitly public Dynamo exceptions. Generic Python
+/// exceptions never enter this path. InvalidArgument's optional `param` is an
+/// explicit public field identity, checked independently of its message.
+pub(crate) fn py_exception_to_dynamo_error(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    let (backend, message) = py_exception_to_backend_error(py, err)?;
+    let mut builder = DynamoError::builder()
+        .error_type(ErrorClass::Backend(backend))
+        .diagnostic(message.clone());
+    if backend == BackendError::InvalidArgument {
+        builder = match python_public_parameter(py, err) {
+            Some(parameter) => builder.public_message_with_parameter(message, parameter),
+            None => builder.public_message(message),
+        };
+    }
+    Some(builder.build())
+}
+
+fn python_public_parameter(py: Python<'_>, err: &PyErr) -> Option<PublicParameter> {
+    let value = err
+        .value(py)
+        .getattr("param")
+        .ok()?
+        .extract::<String>()
+        .ok()?;
+    PublicParameter::new(value)
+}
+
 /// Preserve explicitly public validation errors across Rust-to-Python streams.
 /// Other errors retain the iterator's existing `ValueError` behavior; diagnostic
 /// text must never be promoted into a public `InvalidArgument` message.
@@ -145,7 +172,15 @@ pub(crate) fn check_response_error<R>(response: Annotated<R>) -> PyResult<Annota
             .as_ref()
             .and_then(public_invalid_request_message)
     {
-        return Err(InvalidArgument::new_err(message.to_owned()));
+        let error = InvalidArgument::new_err(message.to_owned());
+        if let Some(parameter) = response
+            .error
+            .as_ref()
+            .and_then(DynamoError::public_parameter)
+        {
+            Python::with_gil(|py| error.value(py).setattr("param", parameter.as_str()))?;
+        }
+        return Err(error);
     }
 
     response
@@ -213,20 +248,51 @@ pub fn error_class_for_http_status(code: u16) -> ErrorClass {
 
 pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
     let (code, message) = extract_http_like_error(py, err)?;
-    Some(build_http_like_error(code, message))
+    // Duck-typed HTTP errors remain diagnostic-only. Only the explicit HttpError
+    // API can supply public parameter context, and only for request validation.
+    let parameter = (code == 400)
+        .then(|| {
+            let class = PyModule::import(py, "dynamo.llm.exceptions")
+                .ok()?
+                .getattr("HttpError")
+                .ok()?;
+            if !err.value(py).is_instance(&class).ok()? {
+                return None;
+            }
+            python_public_parameter(py, err)
+        })
+        .flatten();
+    Some(build_http_like_error_with_parameter(
+        code, message, parameter,
+    ))
 }
 
+#[cfg(test)]
 fn build_http_like_error(code: u16, message: String) -> DynamoError {
+    build_http_like_error_with_parameter(code, message, None)
+}
+
+fn build_http_like_error_with_parameter(
+    code: u16,
+    message: String,
+    parameter: Option<PublicParameter>,
+) -> DynamoError {
     let legacy_message = serde_json::json!({
         "message": message,
         "code": code,
     })
     .to_string();
 
-    DynamoError::builder()
+    let mut builder = DynamoError::builder()
         .class(error_class_for_http_status(code))
-        .diagnostic(legacy_message)
-        .build()
+        .diagnostic(legacy_message);
+    if code == 400
+        && let Some(parameter) = parameter
+    {
+        // Carry the public identity without promoting native diagnostic text.
+        builder = builder.public_message_with_parameter("Invalid request", parameter);
+    }
+    builder.build()
 }
 
 #[cfg(test)]
@@ -303,5 +369,33 @@ mod tests {
             assert_eq!(legacy_http.code, code);
             assert_eq!(legacy_http.message, "private backend detail");
         }
+    }
+
+    #[test]
+    fn public_http_parameter_never_promotes_diagnostic_text() {
+        let error = build_http_like_error_with_parameter(
+            400,
+            "private native message".to_owned(),
+            PublicParameter::new("reasoning_effort"),
+        );
+        assert_eq!(error.public_message(), Some("Invalid request"));
+        assert_eq!(
+            error.public_parameter().unwrap().as_str(),
+            "reasoning_effort"
+        );
+        let wire = serde_json::to_value(&error).unwrap();
+        let legacy: LegacyDynamoError = serde_json::from_value(wire.clone()).unwrap();
+        let legacy_http: LegacyHttpError = serde_json::from_str(&legacy.message).unwrap();
+        assert_eq!(legacy_http.code, 400);
+        assert_eq!(legacy_http.message, "private native message");
+        let current: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(current.public_parameter(), error.public_parameter());
+        assert_eq!(current.public_message(), Some("Invalid request"));
+        let server_error = build_http_like_error_with_parameter(
+            500,
+            "private server message".to_owned(),
+            PublicParameter::new("model"),
+        );
+        assert!(server_error.public_details().is_none());
     }
 }
