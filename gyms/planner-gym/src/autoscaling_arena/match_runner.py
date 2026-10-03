@@ -13,6 +13,7 @@ import platform
 import subprocess
 import tempfile
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -252,6 +253,223 @@ def _execute_match_matrix(
         "results": results,
     }
     return _sanitize_json(_redact_report_paths(report, config, context))
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _sequence(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _result_identity_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("backend"),
+        row.get("autoscaler"),
+        row.get("workload"),
+        row.get("sla"),
+        row.get("repetition"),
+        row.get("seed"),
+    )
+
+
+def merge_match_reports(
+    base: Mapping[str, Any],
+    update: Mapping[str, Any],
+    *,
+    matrix: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Fold a partial rerun into a previously published normalized report.
+
+    Results are matched on their identity (backend, autoscaler, workload, SLA,
+    repetition, seed), not on ``run_id``: run ids carry a matrix position that
+    shifts whenever an autoscaler or workload is added to the config. Every
+    result in ``update`` replaces the ``base`` result with the same identity;
+    identities that only exist in ``update`` are appended. Everything else in
+    ``base`` is kept verbatim, so a rerun of one autoscaler does not cost a
+    rerun of the others.
+
+    ``matrix`` is the *current* config's full expanded matrix (as returned by
+    ``format_match_matrix``'s source, ``config.iter_runs()``, in dict form).
+    When given, merged results and matrix rows are renumbered to it so
+    ``--run-id`` reproduction keeps working after the config changed; base rows
+    whose identity is no longer in the config are kept (with their old matrix
+    rows) rather than silently dropped. Without ``matrix`` the base matrix is
+    extended with the update's rows.
+
+    Both reports redact their own artifact session as ``<artifact-session>``.
+    Because the merge spans two sessions, that placeholder is rewritten to
+    ``<artifact-root>/<session-id>`` on every result so each row still points
+    at its real artifact directory.
+    """
+
+    base_backend = _mapping(base.get("match")).get("backend")
+    update_backend = _mapping(update.get("match")).get("backend")
+    if base_backend != update_backend:
+        raise ValueError(
+            f"cannot merge a {update_backend!r} report into a "
+            f"{base_backend!r} report"
+        )
+    base_provenance = dict(_mapping(base.get("provenance")))
+    update_provenance = _mapping(update.get("provenance"))
+
+    def qualify(
+        results: Sequence[Mapping[str, Any]], session_id: Any
+    ) -> list[dict[str, Any]]:
+        session = f"<artifact-root>/{session_id}" if session_id else "<artifact-root>"
+
+        def rewrite(value: Any) -> Any:
+            if isinstance(value, str):
+                return value.replace("<artifact-session>", session)
+            if isinstance(value, dict):
+                return {key: rewrite(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [rewrite(item) for item in value]
+            return value
+
+        return [rewrite(dict(result)) for result in results]
+
+    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for result in qualify(
+        _sequence(base.get("results")), base_provenance.get("session_id")
+    ):
+        merged[_result_identity_key(result)] = result
+    replaced: list[str] = []
+    added: list[str] = []
+    for result in qualify(
+        _sequence(update.get("results")), update_provenance.get("session_id")
+    ):
+        key = _result_identity_key(result)
+        (replaced if key in merged else added).append(str(result["run_id"]))
+        merged[key] = result
+
+    # Matrix: the current config's full matrix when supplied, else base ∪ update.
+    if matrix is not None:
+        rows = [dict(row) for row in matrix]
+    else:
+        rows = [dict(row) for row in _sequence(base.get("matrix"))]
+        known = {_result_identity_key(row) for row in rows}
+        for row in _sequence(update.get("matrix")):
+            if _result_identity_key(row) not in known:
+                rows.append(dict(row))
+                known.add(_result_identity_key(row))
+    row_by_key = {_result_identity_key(row): row for row in rows}
+    # Keep base rows for identities the current config no longer expands.
+    stale_rows = [
+        dict(row)
+        for row in _sequence(base.get("matrix"))
+        if _result_identity_key(row) not in row_by_key
+    ]
+    for row in stale_rows:
+        row_by_key[_result_identity_key(row)] = row
+    rows = rows + stale_rows
+    order = {_result_identity_key(row): index for index, row in enumerate(rows)}
+
+    renumbered: list[str] = []
+    results: list[dict[str, Any]] = []
+    for key, result in merged.items():
+        row = row_by_key.get(key)
+        if row is not None and row.get("run_id") != result.get("run_id"):
+            # Only the id changes; ``artifacts`` keep naming the on-disk run
+            # directory, which was created under the old id.
+            renumbered.append(f"{result.get('run_id')} -> {row.get('run_id')}")
+            result = {**result, "run_id": row["run_id"]}
+        results.append(result)
+    results.sort(key=lambda result: order.get(_result_identity_key(result), len(order)))
+
+    failed = sum(result.get("status") != "ok" for result in results)
+    skipped = len(rows) - len(results)
+    base_summary = dict(_mapping(base.get("summary")))
+    update_summary = _mapping(update.get("summary"))
+    summary = {
+        **base_summary,
+        "status": "ok" if failed == 0 and skipped <= 0 else "failed",
+        "planned_runs": len(rows),
+        "executed_runs": len(results),
+        "succeeded_runs": len(results) - failed,
+        "failed_runs": failed,
+        "skipped_runs": max(skipped, 0),
+        "rank_by": update_summary.get("rank_by", base_summary.get("rank_by")),
+        "metrics": list(update_summary.get("metrics", base_summary.get("metrics", []))),
+    }
+
+    merged_sessions = list(base_provenance.get("merged_sessions") or [])
+    if not merged_sessions:
+        merged_sessions.append(
+            {
+                "session_id": base_provenance.get("session_id"),
+                "config_sha256": base_provenance.get("config_sha256"),
+                "finished_at": base_provenance.get("finished_at"),
+                "run_ids": sorted(
+                    str(result["run_id"]) for result in _sequence(base.get("results"))
+                ),
+            }
+        )
+    merged_sessions.append(
+        {
+            "session_id": update_provenance.get("session_id"),
+            "config_sha256": update_provenance.get("config_sha256"),
+            "finished_at": update_provenance.get("finished_at"),
+            "run_ids": sorted(replaced + added),
+            "replaced_run_ids": sorted(replaced),
+            "added_run_ids": sorted(added),
+            "renumbered_run_ids": sorted(renumbered),
+        }
+    )
+    provenance = {
+        **base_provenance,
+        "finished_at": update_provenance.get(
+            "finished_at", base_provenance.get("finished_at")
+        ),
+        "duration_s": (
+            _number_or_zero(base_provenance.get("duration_s"))
+            + _number_or_zero(update_provenance.get("duration_s"))
+        ),
+        "artifact_root": "<artifact-root>",
+        "merged_sessions": merged_sessions,
+    }
+    if update_provenance.get("config_sha256") != base_provenance.get("config_sha256"):
+        provenance["config_sha256_latest"] = update_provenance.get("config_sha256")
+
+    return {
+        **{key: value for key, value in base.items()},
+        "match": dict(_mapping(update.get("match")) or _mapping(base.get("match"))),
+        "summary": summary,
+        "provenance": provenance,
+        "resolved_config": dict(
+            _mapping(update.get("resolved_config"))
+            or _mapping(base.get("resolved_config"))
+        ),
+        "matrix": rows,
+        "results": results,
+    }
+
+
+def _number_or_zero(value: Any) -> float:
+    return (
+        float(value)
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        else 0.0
+    )
+
+
+def load_published_report(path: Path) -> dict[str, Any]:
+    """Load a previously published normalized JSON report."""
+
+    try:
+        data = json.loads(Path(path).read_text())
+    except OSError as exc:
+        raise MatchPublishError(f"cannot read published results {path}: {exc}") from exc
+    except ValueError as exc:
+        raise MatchPublishError(
+            f"published results are not valid JSON: {path}: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise MatchPublishError(
+            f"published results are not a normalized Match Config report: {path}"
+        )
+    return data
 
 
 def publish_match_results(
@@ -592,6 +810,8 @@ def _run_sim_item(
                 },
             },
         }
+    if autoscaler.type in _TELEMETRY_RL_TYPES:
+        factory_options = {"decision_log": run_dir / "rl-decisions.jsonl"}
     factory = _build_sim_factory(
         autoscaler, topology=backend.topology, **factory_options
     )
@@ -714,6 +934,11 @@ def _run_sim_item(
 
         result["artifacts"]["jev_decisions"] = str(run_dir / "jev-decisions.jsonl")
         result["runtime"]["jev"] = summarize_decisions(run_dir / "jev-decisions.jsonl")
+    if autoscaler.type in _TELEMETRY_RL_TYPES:
+        # One record per decision: encoded state, current and target replicas
+        # (per pool for disagg). Replaying telemetry.jsonl through the encoder
+        # must reproduce these states (offline/serving parity).
+        result["artifacts"]["rl_decisions"] = str(run_dir / "rl-decisions.jsonl")
     return result
 
 
@@ -1120,6 +1345,14 @@ def _sim_performance_model_metadata(
     return metadata
 
 
+# Telemetry-driven CloudAI RL adapters (consume the replay telemetry stream
+# and write an rl-decisions.jsonl artifact per run).
+_TELEMETRY_RL_TYPES = {
+    "cloudai_rl_lstm": "CloudAIRLAutoscaleLSTM",
+    "cloudai_rl_disagg": "CloudAIRLDisaggAutoscaler",
+}
+
+
 def _build_sim_factory(
     autoscaler: SimAutoscalerConfig,
     *,
@@ -1173,6 +1406,49 @@ def _build_sim_factory(
             del config
             return ReactiveAutoscaler(
                 mode=topology, capabilities=capabilities, **parameters
+            )
+
+        return factory
+    if autoscaler.type == "cloudai_mpc_v3":
+        from autoscaling_arena.adapters import cloudai_mpc_v3 as mpc_v3_module
+
+        capacity_spec = dict(parameters.pop("forward_model"))
+        capacity_type = capacity_spec.pop("type")
+
+        def factory(config, capabilities):
+            del config
+            decode_caps = getattr(capabilities, "decode", None)
+            caps_kwargs = {
+                "max_kv_tokens": getattr(decode_caps, "max_kv_tokens", None),
+                "max_num_seqs": getattr(decode_caps, "max_num_seqs", None),
+            }
+            if capacity_type == "ais":
+                capacity_model = mpc_v3_module.AISCapacityModel(
+                    config=capacity_spec["config"], **caps_kwargs
+                )
+            else:
+                capacity_model = mpc_v3_module.RooflineCapacityModel(**caps_kwargs)
+            return mpc_v3_module.CloudAIMPCV3Autoscaler(
+                capacity_model=capacity_model,
+                mode=topology,
+                capabilities=capabilities,
+                **parameters,
+            )
+
+        return factory
+    if autoscaler.type in _TELEMETRY_RL_TYPES:
+        import importlib
+
+        adapter_registry = importlib.import_module("autoscaling_arena.adapters")
+        rl_class = getattr(adapter_registry, _TELEMETRY_RL_TYPES[autoscaler.type])
+
+        def factory(config, capabilities):
+            del config
+            return rl_class(
+                mode=topology,
+                capabilities=capabilities,
+                decision_log=decision_log,
+                **parameters,
             )
 
         return factory

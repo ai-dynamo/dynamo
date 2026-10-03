@@ -58,6 +58,7 @@ telemetry are under `runs/quickstart/artifacts/`.
 | Compare running deployments | [Endpoint benchmarking](docs/usage.md#user-guide-benchmark-live-endpoints) | AIPerf and existing endpoints |
 | Add an autoscaler | [Extension guide](docs/usage.md#add-an-offline-autoscaler) | Dynamo's engine interface |
 | Use the hosted Jev decision engine | [Jev guide](docs/jev.md) | Simulation environment and a TypeSafe API key |
+| Compare the CloudAI MPC and RL planners | [CloudAI autoscalers](docs/cloudai_autoscalers.md), [published results](results/README.md) | Simulation environment, the `cloudai` extra (numpy, torch) and the bundled checkpoints |
 
 All commands run from `gyms/planner-gym`. Relative paths inside a Match Config
 resolve from the YAML file's directory. The scripts are source-checkout tools;
@@ -74,7 +75,9 @@ python scripts/run_match_config.py configs/match.quickstart.yaml --validate-only
 ```
 
 The base dependencies are PyYAML and Plotly. The `test` and `jev` extras add
-pytest and the optional HTTP client; `sim` adds the Planner's Python dependencies.
+pytest and the optional HTTP client; `sim` adds the Planner's Python dependencies;
+`cloudai` adds numpy and torch for the CloudAI MPC and RL planners and `xlsx`
+adds openpyxl for the evaluation workbook.
 Dynamo's native runtime and AIPerf are installed separately.
 
 ## Metrics
