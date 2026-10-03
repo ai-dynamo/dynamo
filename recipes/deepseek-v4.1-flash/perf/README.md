@@ -19,6 +19,7 @@ Set `ENDPOINT` and `CONCURRENCY` in [`perf.yaml`](perf.yaml):
 | GB200 aggregated | `dsv41-flash-vllm-gb200-agg-agentic-frontend:8000` | 168 |
 | GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-agentic-frontend:8000` | 168 |
 | H200 aggregated | `dsv41-flash-vllm-h200-agg-agentic-frontend:8000` | 80 |
+| H200 disaggregated | `dsv41-flash-vllm-h200-disagg-agentic-frontend:8000` | 64 |
 
 Run one target per namespace. The benchmark Job is scheduled on the same node
 as the frontend.
@@ -60,8 +61,9 @@ See the [Dynamo recipe documentation](https://docs.nvidia.com/dynamo/dev/recipes
 
 ### 2. Stage the trace on the PVC
 
-Download the Git LFS trace file, then copy it through a helper pod that
-mounts `shared-model-cache`:
+The Flash trace links to a shared Git LFS file under `deepseek-v4`. Pull that
+file, then copy the resolved trace through a helper pod that mounts
+`shared-model-cache`:
 
 ```bash
 git lfs pull --include='recipes/deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
@@ -72,7 +74,7 @@ kubectl run pvc-helper -n ${NAMESPACE} \
   --command -- sleep 86400
 
 kubectl wait --for=condition=Ready pod/pvc-helper -n "${NAMESPACE}" --timeout=300s
-TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+TRACE_SOURCE="$(realpath "$(git rev-parse --show-toplevel)/recipes/deepseek-v4.1-flash/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl")"
 kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /shared-model-cache/traces
 kubectl cp "${TRACE_SOURCE}" \
   "${NAMESPACE}/pvc-helper:/shared-model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
@@ -104,7 +106,7 @@ kubectl delete job dsv41-flash-vllm-bench -n "${NAMESPACE}"
 ## Measured Results
 
 Results for the agentic workload (64K input tokens, 400 output tokens), using
-eight B200/GB200 GPUs or 16 H200 GPUs. Output throughput includes reasoning tokens.
+eight B200/GB200 GPUs, 16 H200 GPUs for aggregated serving, or eight H200 GPUs for disaggregated serving. Output throughput includes reasoning tokens.
 
 Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
 
@@ -115,6 +117,7 @@ Each run completed 3,526 requests with 15 over-context errors (AIPerf 0.10.0).
 | Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | GB200 | 168 | 953.08 | 51.83 | 286.75 |
 | Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | GB200 | 168 | 1,154.87 | 80.85 | 169.02 |
 | Agentic (64K input, 400 output) | Aggregated (4 × TP4) | vLLM | H200 | 80 | 209.18 | 51.32 | 171.29 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | H200 | 64 | 359.41 | 50.63 | 177.59 |
 
 ### TTFT Distribution
 
@@ -127,6 +130,7 @@ Milliseconds across successful requests:
 | GB200 aggregated | 1,601.63 | 286.75 | 951.37 | 3,524.82 | 6,980.67 | 26,793.16 | 52,808.90 |
 | GB200 disaggregated | 12,149.79 | 169.02 | 1,126.26 | 57,116.54 | 100,309.52 | 124,167.34 | 160,272.44 |
 | H200 aggregated | 2,314.58 | 171.29 | 1,365.00 | 6,368.76 | 11,694.66 | 30,075.76 | 108,304.39 |
+| H200 disaggregated | 7,957.03 | 177.59 | 514.62 | 35,043.23 | 54,419.43 | 82,772.24 | 118,023.32 |
 
 ### ITL Distribution
 
@@ -139,8 +143,8 @@ Milliseconds, calculated from each request's average interval between tokens.
 | GB200 aggregated | 26.40 | 19.29 | 27.22 | 48.76 | 83.17 | 110.46 | 321.77 |
 | GB200 disaggregated | 13.19 | 12.37 | 14.61 | 17.75 | 21.14 | 30.59 | 81.71 |
 | H200 aggregated | 29.33 | 19.49 | 29.90 | 54.01 | 84.55 | 183.57 | 381.82 |
+| H200 disaggregated | 20.19 | 19.75 | 21.64 | 24.00 | 26.56 | 34.31 | 53.45 |
 
-The measured disaggregated configurations have higher output throughput and
-lower inter-token latency (ITL), with longer time-to-first-token (TTFT) tails. GB200 records 21% higher
-output tok/s/GPU and 56% higher p50 output tok/s/user; TTFT p90 rises from
+For GB200 at the selected concurrency, disaggregated serving delivers 21%
+more output tok/s/GPU and 56% more p50 user tok/s. TTFT p90 rises from
 3.52 s to 57.12 s.

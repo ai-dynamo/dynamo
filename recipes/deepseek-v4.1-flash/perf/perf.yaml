@@ -33,6 +33,7 @@ spec:
                 - dsv41-flash-vllm-gb200-agg-agentic
                 - dsv41-flash-vllm-gb200-disagg-agentic
                 - dsv41-flash-vllm-h200-agg-agentic
+                - dsv41-flash-vllm-h200-disagg-agentic
             topologyKey: kubernetes.io/hostname
       containers:
       - name: perf

@@ -18,7 +18,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-18f6f66a7bc6a1fbad77362007ac88582a94bc6a-vllm-runtime@sha256:08a32bbe954b133ecbbdc977d3d2d5997e4a6af4720a7f765ebc1312e257565f
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-ef99c7685d7f2336fd1d10ab5ff1492745f9ed8b-vllm-runtime@sha256:ce6f8c5d1d3cf4977c386c4cad85122744586d1622e677ba3739bf1580a13e88
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -50,7 +50,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-18f6f66a7bc6a1fbad77362007ac88582a94bc6a-vllm-runtime@sha256:08a32bbe954b133ecbbdc977d3d2d5997e4a6af4720a7f765ebc1312e257565f
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-ef99c7685d7f2336fd1d10ab5ff1492745f9ed8b-vllm-runtime@sha256:ce6f8c5d1d3cf4977c386c4cad85122744586d1622e677ba3739bf1580a13e88
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -85,7 +85,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-18f6f66a7bc6a1fbad77362007ac88582a94bc6a-vllm-runtime@sha256:08a32bbe954b133ecbbdc977d3d2d5997e4a6af4720a7f765ebc1312e257565f
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-ef99c7685d7f2336fd1d10ab5ff1492745f9ed8b-vllm-runtime@sha256:ce6f8c5d1d3cf4977c386c4cad85122744586d1622e677ba3739bf1580a13e88
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -117,7 +117,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-18f6f66a7bc6a1fbad77362007ac88582a94bc6a-vllm-runtime@sha256:08a32bbe954b133ecbbdc977d3d2d5997e4a6af4720a7f765ebc1312e257565f
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-ef99c7685d7f2336fd1d10ab5ff1492745f9ed8b-vllm-runtime@sha256:ce6f8c5d1d3cf4977c386c4cad85122744586d1622e677ba3739bf1580a13e88
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -152,7 +152,7 @@ targets:
     count: 16
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-18f6f66a7bc6a1fbad77362007ac88582a94bc6a-vllm-runtime@sha256:08a32bbe954b133ecbbdc977d3d2d5997e4a6af4720a7f765ebc1312e257565f
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-ef99c7685d7f2336fd1d10ab5ff1492745f9ed8b-vllm-runtime@sha256:ce6f8c5d1d3cf4977c386c4cad85122744586d1622e677ba3739bf1580a13e88
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -176,6 +176,38 @@ targets:
     summary: 'Concurrency 80, 209.18 output tok/s/GPU, output per user
       p50 51.32 tok/s; TTFT p50/p99 171.29/30075.76 ms, per-request mean ITL p50/p99
       19.49/183.57 ms.'
+- id: vllm-disagg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vllm
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-ef99c7685d7f2336fd1d10ab5ff1492745f9ed8b-vllm-runtime@sha256:ce6f8c5d1d3cf4977c386c4cad85122744586d1622e677ba3739bf1580a13e88
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - 1p1d
+  - pd-kv-transfer
+  - kv-aware-routing
+  - dspark-speculative-decoding
+  - expert-parallel
+  - eplb
+  - tp4-per-role
+  - prefix-caching
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 1P1D over NIXL/UCX on InfiniBand'
+    sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
+  deploy:
+    asset: recipes/deepseek-v4.1-flash/vllm/disagg-h200-agentic/kustomization.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'Concurrency 64, 359.41 output tok/s/GPU, output per user p50 50.63 tok/s, TTFT p50/p90/p99 177.59/35043.23/82772.24 ms, per-request mean ITL p50/p99 19.75/34.31 ms.'
 - id: sglang-agg-gb200
   recommended: false
   hardware:
