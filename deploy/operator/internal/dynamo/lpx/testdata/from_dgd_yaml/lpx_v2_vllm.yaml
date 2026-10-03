@@ -139,36 +139,36 @@ data:
     part-15
     part-16
   topologies: |-
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
+    test-topology
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-lpu-e586b76cc8ccd9a1
+  name: dgd-lpx-v2-vllm-94cd-lpu-0a822a56d11eef9a
   namespace: inference-engine
 ---
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:2dee1b45ea0f0fffdb728d5efb43410c0af10a321700032b9a6ee7b91670dbf6
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:28cf3bd866ed1f8b1db32c9274e3d411bd86be823798ae3be78e9b2506ba7d79
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
@@ -181,9 +181,9 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-        nvidia.com/extra-resources-hash: e586b76cc8ccd9a1ed2e1b0297032eb1da420881dcfdcb632a4f00f4971308ff
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:33c761dab1229a1a6680cb87e3b9045e4717e863c2645dd909430e23f5759eca
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:edce2257831c38e1802491589b04e99a1dc8054af1d03e31d2939addfa712c2c
+        nvidia.com/extra-resources-hash: 0a822a56d11eef9a4801ba22c816fede0b14421ad64dce8da134d083af23ea97
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ddd723d746da78065c032312c775dd3ad545eb3ddddaf6d3d81fb04bd4d849ba
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:e5619faa09aca781333e12dfaa13e6c6489d2e3a08f1296a1735b173e706ff75
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
@@ -383,14 +383,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-vllm-94cd-lpu-e586b76cc8ccd9a1
+              name: dgd-lpx-v2-vllm-94cd-lpu-0a822a56d11eef9a
             name: config
         replicas: 17
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         nvidia.com/extra-resources-hash: 54f76f5c988eb748803edb9e69ca144c7be656c2028d23217ef3135cbb8fe463
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:edce2257831c38e1802491589b04e99a1dc8054af1d03e31d2939addfa712c2c
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:e5619faa09aca781333e12dfaa13e6c6489d2e3a08f1296a1735b173e706ff75
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -570,7 +570,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:edce2257831c38e1802491589b04e99a1dc8054af1d03e31d2939addfa712c2c
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:e5619faa09aca781333e12dfaa13e6c6489d2e3a08f1296a1735b173e706ff75
       cliqueNames:
       - agt
       - cond
