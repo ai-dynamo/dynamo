@@ -132,6 +132,81 @@ _KEDA_CONFIG_KEYS = frozenset(
         "scale_down_stabilization_s",
     }
 )
+_CLOUDAI_MPC_CONFIG_KEYS = frozenset(
+    {
+        "forward_model",
+        "poll_interval_s",
+        "horizon",
+        "slo_ttft_ms",
+        "slo_itl_ms",
+        "violation_weight",
+        "gpu_cost_per_s",
+        "gpus_per_worker",
+        "scale_up_penalty",
+        "scale_down_penalty",
+        "headroom_decay_ticks",
+        "max_rps_per_worker",
+        "smoothing_alpha",
+        "reactive_queue_threshold",
+        "reactive_rps_jump_ratio",
+        "kv_pressure_threshold",
+        "min_replicas",
+        "max_replicas",
+    }
+)
+# CloudAI RL planner, agg (telemetry-driven LSTM): the observation settings must
+# match the checkpoint, so the keys are the SLO, bounds and cold start only.
+_CLOUDAI_RL_LSTM_CONFIG_KEYS = frozenset(
+    {
+        "checkpoint_path",
+        "poll_interval_s",
+        "slo_ttft_ms",
+        "slo_itl_ms",
+        "min_replicas",
+        "max_replicas",
+        "cold_start_s",
+        "hidden_dim",
+        "num_blocks",
+    }
+)
+# CloudAI RL planner, disagg: per-pool bounds and the settings its checkpoint
+# was trained with.
+_CLOUDAI_RL_DISAGG_CONFIG_KEYS = frozenset(
+    {
+        "checkpoint_path",
+        "poll_interval_s",
+        "slo_ttft_ms",
+        "slo_itl_ms",
+        "min_prefill",
+        "max_prefill",
+        "min_decode",
+        "max_decode",
+        "cold_start_s",
+        "smoothing_alpha",
+        "prefill_gpus_per_worker",
+        "decode_gpus_per_worker",
+        "hidden_dim",
+        "num_blocks",
+    }
+)
+_CLOUDAI_FORWARD_MODELS = frozenset({"ais", "roofline"})
+_CLOUDAI_MPC_TYPES = frozenset({"cloudai_mpc_v3"})
+_CLOUDAI_RL_TYPES = frozenset({"cloudai_rl_lstm", "cloudai_rl_disagg"})
+# Telemetry-driven RL types bound to one topology.
+_CLOUDAI_RL_AGG_ONLY_TYPES = frozenset({"cloudai_rl_lstm"})
+# Single-replica-count CloudAI types (one count drives every pool).
+_CLOUDAI_REPLICA_TYPES = _CLOUDAI_MPC_TYPES | frozenset({"cloudai_rl_lstm"})
+_CLOUDAI_TYPES = _CLOUDAI_MPC_TYPES | _CLOUDAI_RL_TYPES
+_SIM_AUTOSCALER_TYPES = (
+    "planner",
+    "keda",
+    "reactive",
+    "static",
+    "jev",
+    "cloudai_mpc_v3",
+    "cloudai_rl_lstm",
+    "cloudai_rl_disagg",
+)
 _ENGINE_LAYER_KEYS = frozenset(
     {
         "system",
@@ -207,6 +282,58 @@ _KEDA_DEFAULTS = {
     "scale_up_stabilization_s": 0.0,
     "scale_down_stabilization_s": 300.0,
 }
+# CloudAI MPC defaults: the published ``cloudai-mpc`` tuning. ``gpus_per_worker``
+# is resolved from the backend engines when omitted, so it has no literal default.
+_CLOUDAI_MPC_DEFAULTS = {
+    "forward_model": "ais",
+    "poll_interval_s": 5.0,
+    "horizon": 5,
+    "slo_ttft_ms": 300.0,
+    "slo_itl_ms": 50.0,
+    "violation_weight": 50.0,
+    "gpu_cost_per_s": 100.0,
+    "scale_up_penalty": 1.5,
+    "scale_down_penalty": 10.0,
+    "headroom_decay_ticks": 4,
+    "max_rps_per_worker": 20.0,
+    "smoothing_alpha": 0.4,
+    "reactive_queue_threshold": 6.0,
+    "reactive_rps_jump_ratio": 1.8,
+    "kv_pressure_threshold": 0.75,
+    "min_replicas": 1,
+    "max_replicas": 8,
+}
+# The agg RL planner decides at the five-second telemetry cadence its checkpoint
+# was trained at; ``cold_start_s`` defaults to the aggregate engine's
+# ``runtime.cold_start_delay_s`` and the SLO to the training SLO.
+_CLOUDAI_RL_LSTM_DEFAULTS = {
+    "poll_interval_s": 5.0,
+    "slo_ttft_ms": 2000.0,
+    "slo_itl_ms": 50.0,
+    "min_replicas": 1,
+    "max_replicas": 8,
+    "hidden_dim": 256,
+    "num_blocks": 4,
+}
+# Disagg: the trainer's DEFAULT_SETTINGS (prefill 1-16, decode 1-8, EMA alpha
+# 0.4); cold start and GPUs per worker come from the engines.
+_CLOUDAI_RL_DISAGG_DEFAULTS = {
+    "poll_interval_s": 5.0,
+    "slo_ttft_ms": 2000.0,
+    "slo_itl_ms": 50.0,
+    "min_prefill": 1,
+    "max_prefill": 16,
+    "min_decode": 1,
+    "max_decode": 8,
+    "smoothing_alpha": 0.4,
+    "hidden_dim": 256,
+    "num_blocks": 4,
+}
+
+# The RL types take an explicit ``checkpoint_path`` (relative paths resolve
+# against the Match Config's directory). The bundled exports are
+# checkpoints/cql_autoscaler_best_{v3_lstm,disagg_v3_lstm}.pt, the leaderboard
+# entry ``cloudai-rl``.
 
 
 class MatchConfigError(ValueError):
@@ -766,6 +893,9 @@ def _parse_sim_backend(data: Mapping[str, Any], *, base_dir: Path) -> SimBackend
             gpu_budget=gpu_budget,
             prefill_num_gpus=prefill_num_gpus,
             decode_num_gpus=decode_num_gpus,
+            base_dir=base_dir,
+            model=model,
+            engines=engines,
         )
         for i, item in enumerate(items)
     )
@@ -1051,15 +1181,19 @@ def _parse_sim_autoscaler(
     gpu_budget: int,
     prefill_num_gpus: int,
     decode_num_gpus: int,
+    base_dir: Path,
+    model: ModelConfig,
+    engines: SimEnginesConfig,
 ) -> SimAutoscalerConfig:
     path = f"backend.autoscalers[{index}]"
     data = _mapping(value, path)
     _only_keys(data, {"name", "type", "start", "config"}, path)
     name = _name(_required(data, "name", path), f"{path}.name")
     autoscaler_type = _string(_required(data, "type", path), f"{path}.type")
-    if autoscaler_type not in {"planner", "keda", "reactive", "static", "jev"}:
+    if autoscaler_type not in _SIM_AUTOSCALER_TYPES:
+        expected = ", ".join(_SIM_AUTOSCALER_TYPES[:-1])
         raise MatchConfigError(
-            f"{path}.type: expected planner, keda, reactive, static, or jev"
+            f"{path}.type: expected {expected}, or {_SIM_AUTOSCALER_TYPES[-1]}"
         )
     adapter_config = dict(_mapping(data.get("config", {}), f"{path}.config"))
 
@@ -1074,7 +1208,26 @@ def _parse_sim_autoscaler(
             "reactive": _REACTIVE_CONFIG_KEYS,
             "keda": _KEDA_CONFIG_KEYS,
             "jev": frozenset(_JEV_DEFAULTS),
+            "cloudai_mpc_v3": _CLOUDAI_MPC_CONFIG_KEYS
+            | {
+                "cold_start_s",
+                "rho_min",
+                "rho_window_s",
+                "prefill_gpus_per_worker",
+                "kv_transfer_gbps",
+                "kv_bytes_per_token",
+            },
+            "cloudai_rl_lstm": _CLOUDAI_RL_LSTM_CONFIG_KEYS,
+            "cloudai_rl_disagg": _CLOUDAI_RL_DISAGG_CONFIG_KEYS,
         }[autoscaler_type]
+        if autoscaler_type in _CLOUDAI_RL_AGG_ONLY_TYPES and topology != "agg":
+            raise MatchConfigError(
+                f"{path}.type: {autoscaler_type} supports the agg topology only"
+            )
+        if autoscaler_type == "cloudai_rl_disagg" and topology != "disagg":
+            raise MatchConfigError(
+                f"{path}.type: cloudai_rl_disagg supports the disagg topology only"
+            )
         _only_keys(adapter_config, allowed, f"{path}.config")
         _validate_adapter_values(
             adapter_config, path=f"{path}.config", autoscaler_type=autoscaler_type
@@ -1099,6 +1252,16 @@ def _parse_sim_autoscaler(
         effective_config = _sim_autoscaler_defaults(autoscaler_type, topology=topology)
         effective_config.update(adapter_config)
         adapter_config = effective_config
+        if autoscaler_type in _CLOUDAI_TYPES:
+            _resolve_cloudai_config(
+                adapter_config,
+                autoscaler_type=autoscaler_type,
+                path=f"{path}.config",
+                topology=topology,
+                base_dir=base_dir,
+                model=model,
+                engines=engines,
+            )
 
     if autoscaler_type == "static":
         if "start" in data:
@@ -1154,8 +1317,12 @@ def _parse_sim_autoscaler(
             prefill = 0
         start = ReplicaCounts(prefill=prefill, decode=decode)
 
-    if autoscaler_type in {"keda", "reactive", "jev"}:
+    if autoscaler_type in {"keda", "reactive", "jev", "cloudai_rl_disagg"}:
         _validate_start_against_adapter(
+            start, adapter_config, topology=topology, path=path
+        )
+    if autoscaler_type in _CLOUDAI_REPLICA_TYPES:
+        _validate_start_against_replica_bounds(
             start, adapter_config, topology=topology, path=path
         )
     initial_gpus = start.prefill * prefill_num_gpus + start.decode * decode_num_gpus
@@ -1164,7 +1331,7 @@ def _parse_sim_autoscaler(
             f"{path}: starting fleet requires {initial_gpus} GPUs, exceeding "
             f"backend.gpu_budget={gpu_budget}"
         )
-    if autoscaler_type in {"keda", "reactive", "jev"}:
+    if autoscaler_type in {"keda", "reactive", "jev", "cloudai_rl_disagg"}:
         max_decode = int(adapter_config.get("max_decode", 8))
         max_prefill = (
             int(adapter_config.get("max_prefill", 16)) if topology == "disagg" else 0
@@ -1175,6 +1342,17 @@ def _parse_sim_autoscaler(
                 f"{path}.config: configured/default maximum fleet requires "
                 f"{maximum_gpus} GPUs, exceeding backend.gpu_budget={gpu_budget}; "
                 "set max_prefill/max_decode to a budget-safe combination"
+            )
+    if autoscaler_type in _CLOUDAI_REPLICA_TYPES:
+        # One CloudAI replica count drives every pool, so the ceiling costs
+        # (prefill + decode) GPUs per replica in disagg (prefill is 0 in agg).
+        max_replicas = int(adapter_config["max_replicas"])
+        maximum_gpus = max_replicas * (prefill_num_gpus + decode_num_gpus)
+        if maximum_gpus > gpu_budget:
+            raise MatchConfigError(
+                f"{path}.config: configured/default maximum fleet requires "
+                f"{maximum_gpus} GPUs, exceeding backend.gpu_budget={gpu_budget}; "
+                "set max_replicas to a budget-safe value"
             )
     return SimAutoscalerConfig(
         name=name, type=autoscaler_type, start=start, config=adapter_config
@@ -1226,7 +1404,135 @@ def _sim_autoscaler_defaults(autoscaler_type: str, *, topology: str) -> dict[str
         if topology == "disagg":
             keys.update({"kv_threshold", "min_prefill", "max_prefill"})
         return {key: _KEDA_DEFAULTS[key] for key in keys}
+    if autoscaler_type in _CLOUDAI_MPC_TYPES:
+        return dict(_CLOUDAI_MPC_DEFAULTS)
+    if autoscaler_type == "cloudai_rl_lstm":
+        return dict(_CLOUDAI_RL_LSTM_DEFAULTS)
+    if autoscaler_type == "cloudai_rl_disagg":
+        return dict(_CLOUDAI_RL_DISAGG_DEFAULTS)
     return {}
+
+
+def _resolve_cloudai_config(
+    config: dict[str, Any],
+    *,
+    autoscaler_type: str,
+    path: str,
+    topology: str,
+    base_dir: Path,
+    model: ModelConfig,
+    engines: SimEnginesConfig,
+) -> None:
+    """Fill the backend-derived CloudAI settings in place.
+
+    MPC: ``forward_model`` is expanded from its short name into the fully
+    resolved predictor spec (the AIS identity is pinned to the prefill engine,
+    because TTFT is a prefill-side quantity) and ``gpus_per_worker`` defaults to
+    the decode engine's GPU count. RL: ``checkpoint_path`` is required and
+    relative paths resolve against the Match Config's directory; the cold start
+    and per-pool GPU counts come from the engines.
+    """
+    if autoscaler_type in _CLOUDAI_REPLICA_TYPES and int(config["min_replicas"]) > int(
+        config["max_replicas"]
+    ):
+        raise MatchConfigError(f"{path}: min_replicas must be <= max_replicas")
+
+    if autoscaler_type in _CLOUDAI_MPC_TYPES:
+        if topology == "disagg":
+            assert engines.prefill is not None and engines.decode is not None
+            ttft_engine, cost_engine = engines.prefill, engines.decode
+        else:
+            assert engines.aggregate is not None
+            ttft_engine = cost_engine = engines.aggregate
+        config.setdefault("gpus_per_worker", cost_engine.num_gpus)
+        if topology == "disagg":
+            # Point 6: the prefill pool's GPU cost and KV-transfer parameters.
+            config.setdefault("prefill_gpus_per_worker", ttft_engine.num_gpus)
+            if ttft_engine.runtime.kv_transfer_bandwidth_gbps is not None:
+                config.setdefault(
+                    "kv_transfer_gbps", ttft_engine.runtime.kv_transfer_bandwidth_gbps
+                )
+            if ttft_engine.runtime.kv_bytes_per_token is not None:
+                config.setdefault(
+                    "kv_bytes_per_token", ttft_engine.runtime.kv_bytes_per_token
+                )
+        kind = config["forward_model"]
+        if kind == "ais":
+            # The canonical AIS identity of the TTFT engine, as Match Config
+            # renders it into that engine's ``ais_perf_config``.
+            perf_config = {
+                "model": model.ais_model_path,
+                "system": ttft_engine.system,
+                "backend": ttft_engine.ais_backend,
+                "backend_version": ttft_engine.ais_backend_version,
+                "tp": ttft_engine.tp_size,
+                "moe_tp_size": ttft_engine.moe_tp_size,
+                "moe_ep_size": ttft_engine.moe_ep_size,
+                "attention_dp": ttft_engine.attention_dp_size,
+                "nextn": ttft_engine.extra_args.get("ais_nextn"),
+                "worker_type": "prefill" if topology == "disagg" else "aggregated",
+                "estimation_mode": "auto",
+                "fallback_policy": "deny",
+            }
+            config["forward_model"] = {
+                "type": "ais",
+                "config": {
+                    key: value
+                    for key, value in perf_config.items()
+                    if value is not None
+                },
+            }
+        else:
+            config["forward_model"] = {"type": kind}
+        return
+
+    if autoscaler_type in _CLOUDAI_RL_AGG_ONLY_TYPES:
+        assert engines.aggregate is not None
+        cold_start = engines.aggregate.runtime.cold_start_delay_s
+        if cold_start is not None:
+            config.setdefault("cold_start_s", cold_start)
+        elif "cold_start_s" not in config:
+            raise MatchConfigError(
+                f"{path}.cold_start_s: required when the aggregate engine "
+                "declares no runtime.cold_start_delay_s"
+            )
+    elif autoscaler_type == "cloudai_rl_disagg":
+        assert engines.prefill is not None and engines.decode is not None
+        cold_starts = {
+            engine.runtime.cold_start_delay_s
+            for engine in (engines.prefill, engines.decode)
+            if engine.runtime.cold_start_delay_s is not None
+        }
+        if len(cold_starts) > 1:
+            raise MatchConfigError(
+                f"{path}.cold_start_s: prefill and decode engines declare different "
+                "runtime.cold_start_delay_s; the disagg policy assumes one cold start"
+            )
+        if cold_starts:
+            config.setdefault("cold_start_s", cold_starts.pop())
+        elif "cold_start_s" not in config:
+            raise MatchConfigError(
+                f"{path}.cold_start_s: required when the engines declare no "
+                "runtime.cold_start_delay_s"
+            )
+        config.setdefault("prefill_gpus_per_worker", engines.prefill.num_gpus)
+        config.setdefault("decode_gpus_per_worker", engines.decode.num_gpus)
+        if int(config["min_prefill"]) > int(config["max_prefill"]) or int(
+            config["min_decode"]
+        ) > int(config["max_decode"]):
+            raise MatchConfigError(f"{path}: pool minimums must be <= their maximums")
+    raw_checkpoint = config.get("checkpoint_path")
+    if raw_checkpoint is None:
+        raise MatchConfigError(
+            f"{path}.checkpoint_path: required for {autoscaler_type}"
+        )
+    checkpoint = _resolve_path(raw_checkpoint, base_dir)
+    if not checkpoint.is_file():
+        raise MatchConfigError(
+            f"{path}.checkpoint_path: {checkpoint} does not exist; set it to an "
+            "existing CQL checkpoint (the bundled exports live in checkpoints/)"
+        )
+    config["checkpoint_path"] = str(checkpoint)
 
 
 def _validate_adapter_values(
@@ -1246,12 +1552,41 @@ def _validate_adapter_values(
         "num_decode",
         "history_ticks",
         "max_calls",
+        # CloudAI
+        "horizon",
+        "headroom_decay_ticks",
+        "gpus_per_worker",
+        "prefill_gpus_per_worker",
+        "decode_gpus_per_worker",
+        "kv_bytes_per_token",
+        "min_replicas",
+        "max_replicas",
+        "hidden_dim",
+        "num_blocks",
+    }
+    nonnegative_integer_fields = {
+        "prefill_queue_up",
+        "prefill_queue_down",
+        "agg_queue_up",
+        "agg_queue_down",
+        "headroom_decay_ticks",
     }
     positive_float_fields = {
         "poll_interval_s",
         "queue_threshold",
         "kv_threshold",
         "timeout_s",
+        # CloudAI
+        "slo_ttft_ms",
+        "slo_itl_ms",
+        "max_rps_per_worker",
+        "smoothing_alpha",
+        "reactive_queue_threshold",
+        "reactive_rps_jump_ratio",
+        "cold_start_s",
+        "rho_min",
+        "rho_window_s",
+        "kv_transfer_gbps",
     }
     nonnegative_float_fields = {
         "decode_kv_up",
@@ -1260,6 +1595,12 @@ def _validate_adapter_values(
         "scale_up_stabilization_s",
         "scale_down_stabilization_s",
         "min_confidence",
+        # CloudAI
+        "violation_weight",
+        "gpu_cost_per_s",
+        "scale_up_penalty",
+        "scale_down_penalty",
+        "kv_pressure_threshold",
     }
     for key, value in config.items():
         key_path = f"{path}.{key}"
@@ -1267,25 +1608,22 @@ def _validate_adapter_values(
             _integer(
                 value,
                 key_path,
-                positive=key
-                not in {
-                    "prefill_queue_up",
-                    "prefill_queue_down",
-                    "agg_queue_up",
-                    "agg_queue_down",
-                },
-                nonnegative=key
-                in {
-                    "prefill_queue_up",
-                    "prefill_queue_down",
-                    "agg_queue_up",
-                    "agg_queue_down",
-                },
+                positive=key not in nonnegative_integer_fields,
+                nonnegative=key in nonnegative_integer_fields,
             )
         elif key in positive_float_fields:
             _number(value, key_path, positive=True)
         elif key in nonnegative_float_fields:
             _number(value, key_path, nonnegative=True)
+        elif key == "forward_model":
+            kind = _string(value, key_path)
+            if kind not in _CLOUDAI_FORWARD_MODELS:
+                raise MatchConfigError(
+                    f"{key_path}: expected one of "
+                    f"{sorted(_CLOUDAI_FORWARD_MODELS)}, got {kind!r}"
+                )
+        elif key == "checkpoint_path":
+            _string(value, key_path)
     if autoscaler_type == "jev":
         if "model" in config:
             _string(config["model"], f"{path}.model")
@@ -1300,6 +1638,8 @@ def _validate_adapter_values(
         "tolerance",
         "kv_threshold",
         "min_confidence",
+        "smoothing_alpha",
+        "kv_pressure_threshold",
     ):
         if key in config and float(config[key]) > 1.0:
             raise MatchConfigError(f"{path}.{key}: must be <= 1")
@@ -1311,6 +1651,26 @@ def _validate_adapter_values(
         ):
             if upper in config and lower in config and config[lower] > config[upper]:
                 raise MatchConfigError(f"{path}: {lower} must be <= {upper}")
+
+
+def _validate_start_against_replica_bounds(
+    start: ReplicaCounts,
+    config: Mapping[str, Any],
+    *,
+    topology: str,
+    path: str,
+) -> None:
+    """Check a single-replica-count adapter's start fleet against its bounds."""
+    minimum = int(config["min_replicas"])
+    maximum = int(config["max_replicas"])
+    if not minimum <= start.decode <= maximum:
+        raise MatchConfigError(
+            f"{path}.start.decode: must be within [{minimum}, {maximum}]"
+        )
+    if topology == "disagg" and not minimum <= start.prefill <= maximum:
+        raise MatchConfigError(
+            f"{path}.start.prefill: must be within [{minimum}, {maximum}]"
+        )
 
 
 def _validate_start_against_adapter(
