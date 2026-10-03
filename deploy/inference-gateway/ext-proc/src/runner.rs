@@ -137,6 +137,17 @@ pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Resu
     run_inner(mode, policy_registry.unwrap_or_default()).await
 }
 
+/// The role split is a deployment-level limitation until pair selection lands:
+/// the prefill catalog is populated but nothing selects from it yet.
+fn warn_if_disaggregated_incomplete(cfg: &EppStandaloneConfig) {
+    if cfg.topology_mode.is_disaggregated() {
+        tracing::warn!(
+            "DYN_EPP_TOPOLOGY_MODE=disaggregated: prefill/decode pair selection is not implemented \
+             yet, so decode workers still perform the whole prefill"
+        );
+    }
+}
+
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -278,6 +289,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
     let result = async {
         if standalone {
             let selector_cfg = EppStandaloneConfig::from_env()?;
+            warn_if_disaggregated_incomplete(&selector_cfg);
             tracing::info!(
                 inference_pool_name = %selector_cfg.inference_pool_name,
                 model_name = %selector_cfg.model_name,
