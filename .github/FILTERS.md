@@ -22,6 +22,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `docs`                                                  | Docs Lint, Fern Configuration, Docs Website Composition, and Fern Broken Links checks; Fern preview or publish workflow                                                              |
 | `fern_components`                                       | Parse custom MDX components (a step inside Fern Configuration Check)                                                                                                                 |
 | `examples`                                              | Recipe Kustomize generation and docs-artifact unit checks                                                                                                                            |
+| `planner_gym` | Planner Gym CPU tests and package builds (Python 3.10 and 3.12) |
 | `ignore`                                                | Nothing (classification only)                                                                                                                                                        |
 | `rust`                                                  | Rust pre merge checks                                                                                                                                                                |
 
