@@ -16,6 +16,50 @@ use validator::Validate;
 pub mod env_config;
 pub mod environment_names;
 
+/// Parser generation shared by startup validation and frontend routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParserVersion {
+    Auto,
+    V1,
+    V2,
+}
+
+impl TryFrom<Option<&str>> for ParserVersion {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Option<&str>) -> Result<Self> {
+        use environment_names::llm::DYN_PARSER_VERSION;
+        match value {
+            Some("v1" | "1") => Ok(Self::V1),
+            Some("v2" | "2") => Ok(Self::V2),
+            Some("auto") | None => Ok(Self::Auto),
+            Some(value) => anyhow::bail!(
+                "{DYN_PARSER_VERSION} must be unset, auto, 1, v1, 2, or v2; got {value:?}"
+            ),
+        }
+    }
+}
+
+/// Read parser startup configuration once so request routing cannot diverge from it.
+pub fn selected_parser_version() -> Result<ParserVersion> {
+    use environment_names::llm::DYN_PARSER_VERSION;
+    static VERSION: OnceLock<Result<ParserVersion, String>> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let parsed = match std::env::var(DYN_PARSER_VERSION) {
+                Ok(value) => ParserVersion::try_from(Some(value.as_str())),
+                Err(std::env::VarError::NotPresent) => ParserVersion::try_from(None),
+                Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+                    "{DYN_PARSER_VERSION} must be unset, auto, 1, v1, 2, or v2; value is not valid UTF-8"
+                )),
+            };
+            parsed.map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .copied()
+        .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
 /// Default system host for health and metrics endpoints
 const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
 
@@ -320,6 +364,8 @@ impl RuntimeConfig {
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
         use environment_names::runtime::system as env_system;
+        Self::reject_deprecated_parser_env()?;
+        selected_parser_version()?;
         // Check for deprecated environment variables
         if std::env::var(env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).is_ok() {
             tracing::warn!(
@@ -340,6 +386,17 @@ impl RuntimeConfig {
         let config: RuntimeConfig = Self::figment().extract()?;
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn reject_deprecated_parser_env() -> Result<()> {
+        use environment_names::llm::DYN_PARSER_VERSION;
+
+        if std::env::var_os("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2").is_some() {
+            anyhow::bail!(
+                "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported; remove it. The latest compatible parser is selected by default. Set {DYN_PARSER_VERSION}=1 or v1, or 2 or v2 to select an explicit parser generation."
+            );
+        }
+        Ok(())
     }
 
     /// Check if System server should be enabled
@@ -562,6 +619,27 @@ mod tests {
             let config = RuntimeConfig::from_settings().expect("from_settings failed");
             assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
             assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
+        });
+    }
+
+    #[test]
+    fn test_rejects_deprecated_v2_parser_env() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::test_rejects_deprecated_v2_parser_env"),
+            &[],
+        ) {
+            return;
+        }
+
+        temp_env::with_var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2", Some("1"), || {
+            let error = RuntimeConfig::reject_deprecated_parser_env()
+                .expect_err("the deprecated parser switch must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported")
+            );
+            assert!(error.to_string().contains("DYN_PARSER_VERSION"));
         });
     }
 

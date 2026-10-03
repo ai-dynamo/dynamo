@@ -54,6 +54,10 @@ pub mod block_manager;
 pub mod cuda;
 
 #[cfg(test)]
+#[path = "../../runtime/src/test_utils.rs"]
+mod test_utils;
+
+#[cfg(test)]
 mod file_json_field_tests {
     use super::file_json_field;
     use serde::Deserialize;

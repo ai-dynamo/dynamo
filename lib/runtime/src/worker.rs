@@ -79,6 +79,7 @@ impl Worker {
 
     /// Create a new [`Worker`] instance from a provided [`RuntimeConfig`]
     pub fn from_config(config: RuntimeConfig) -> anyhow::Result<Worker> {
+        RuntimeConfig::reject_deprecated_parser_env()?;
         // if the runtime is already initialized, return an error
         if RT.get().is_some() {
             return Err(anyhow::anyhow!("Worker already initialized"));
@@ -123,6 +124,7 @@ impl Worker {
     /// Exists because the pyo3 bridge needs a `&'static tokio::runtime::Runtime`, which
     /// [`Worker::from_config`] cannot provide — it errors when a runtime already exists.
     pub fn ensure_process_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+        RuntimeConfig::reject_deprecated_parser_env()?;
         // Fast path — `get_or_try_init` below would also return it, just less cheaply.
         if let Some(rt) = RT.get() {
             return Ok(rt);
