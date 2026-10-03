@@ -32,6 +32,9 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
+use crate::admission::{
+    RouterRejection, RouterRejectionExt, classify_router_error, record_rejection,
+};
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
@@ -522,7 +525,7 @@ impl Router {
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<(WorkerWithDpRank, u32)> {
+    ) -> std::result::Result<(WorkerWithDpRank, u32), PickError> {
         let config_override = decode_router_config_override(is_disaggregated);
 
         let outcome = self
@@ -546,7 +549,12 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+            .map_err(|error| {
+                // Classify while the router's error is still typed.
+                let rejection = classify_router_error(&error);
+                record_rejection(rejection, &error);
+                rejection.into_pick_error()
+            })?;
 
         match outcome {
             FindBestMatchOutcome::Routed {
@@ -554,8 +562,10 @@ impl Router {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
+            // An outcome, not an error, so it is classified here.
             FindBestMatchOutcome::QueueRejected { rejection } => {
-                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
+                record_rejection(RouterRejection::QueueRejected, &rejection);
+                Err(RouterRejection::QueueRejected.into_pick_error())
             }
         }
     }
@@ -1488,8 +1498,7 @@ impl EndpointPicker for Router {
                 allowed_worker_ids,
                 routing_constraints,
             )
-            .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+            .await?;
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
