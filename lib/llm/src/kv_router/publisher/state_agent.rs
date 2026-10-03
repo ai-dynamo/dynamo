@@ -42,7 +42,7 @@ use dynamo_kv_router::{
         KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
         RouterEvent, RouterHintSourceMetadata, StorageTier, WorkerWithDpRank,
     },
-    zmq_wire::{KvEventOwnership, ZmqEventNormalizer},
+    zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer},
 };
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
@@ -1679,10 +1679,10 @@ fn normalize_raw_batch(
     framework_normalizer: &mut ZmqEventNormalizer,
     cache_owner_normalizer: &mut ZmqEventNormalizer,
 ) -> NormalizedRawBatch {
-    // KVCR is the placement authority. vLLM only enriches committed KVCR
-    // transitions with canonical routing metadata and serializes them on this
-    // versioned stream. Any failure on that path quarantines CacheOwner below;
-    // silently omitting a KVCR transition would make retained ownership lie.
+    // Index main-attention prefixes, as for framework routing. Known non-main
+    // groups are intentionally filtered, not evidence of a broken owner stream.
+    // This is advisory: vLLM must still verify all required groups before reuse.
+    // Unknown events and incompatible main-attention geometry remain fail-closed.
     let mut events = Vec::with_capacity(raw_events.len().min(MAX_INGRESS_EVENTS));
     let mut source_fault = None;
     let mut cache_owner_fault = None;
@@ -1713,6 +1713,23 @@ fn normalize_raw_batch(
             cache_owner_fault.get_or_insert("KVCR ownership has an unsupported storage medium");
             continue;
         }
+        let normalizer = match ownership {
+            KvEventOwnership::Framework => &mut *framework_normalizer,
+            KvEventOwnership::Kvcr => &mut *cache_owner_normalizer,
+        };
+        let raw_event = match normalizer.preprocess_residency_with_reason(raw_event, worker) {
+            Ok(raw_event) => raw_event,
+            Err(
+                ZmqEventFilterReason::NonMainAttentionKind
+                | ZmqEventFilterReason::NonMainAttentionGroup,
+            ) => continue,
+            Err(reason) if ownership == KvEventOwnership::Kvcr => {
+                tracing::warn!(?reason, "KVCR event enrichment failed");
+                cache_owner_fault.get_or_insert("KVCR event enrichment failed");
+                continue;
+            }
+            Err(_) => continue,
+        };
         if ownership == KvEventOwnership::Kvcr
             && raw_event
                 .block_size()
@@ -1721,20 +1738,6 @@ fn normalize_raw_batch(
             cache_owner_fault.get_or_insert("KVCR block size is incompatible");
             continue;
         }
-
-        let normalizer = match ownership {
-            KvEventOwnership::Framework => &mut *framework_normalizer,
-            KvEventOwnership::Kvcr => &mut *cache_owner_normalizer,
-        };
-        let raw_event = match normalizer.preprocess_residency_with_reason(raw_event, worker) {
-            Ok(raw_event) => raw_event,
-            Err(reason) if ownership == KvEventOwnership::Kvcr => {
-                tracing::warn!(?reason, "KVCR event enrichment failed");
-                cache_owner_fault.get_or_insert("KVCR event enrichment failed");
-                continue;
-            }
-            Err(_) => continue,
-        };
         let Some(mut event) = normalizer.normalize_preprocessed(raw_event, 0, worker) else {
             if ownership == KvEventOwnership::Kvcr {
                 cache_owner_fault.get_or_insert("KVCR event canonicalization failed");
@@ -1961,6 +1964,98 @@ mod tests {
             locality: None,
             ownership: ownership.map(str::to_owned),
             session_id: None,
+        }
+    }
+
+    #[test]
+    fn hybrid_cache_owner_projection_keeps_full_attention() {
+        use dynamo_kv_router::zmq_wire::KvCacheSpecKind;
+        let worker = WorkerWithDpRank::new(17, 0);
+        for kind in [KvCacheSpecKind::Mamba, KvCacheSpecKind::SlidingWindow] {
+            let mut recurrent = raw_store(Some("CPU"), Some("kvcr"), 100);
+            if let RawKvEvent::BlockStored {
+                group_idx,
+                kv_cache_spec_kind,
+                block_size,
+                token_ids,
+                ..
+            } = &mut recurrent
+            {
+                *group_idx = Some(0);
+                *kv_cache_spec_kind = Some(kind);
+                *block_size = 0;
+                token_ids.clear();
+            }
+            let mut full = raw_store(Some("CPU"), Some("kvcr"), 101);
+            if let RawKvEvent::BlockStored {
+                group_idx,
+                kv_cache_spec_kind,
+                ..
+            } = &mut full
+            {
+                *group_idx = Some(3);
+                *kv_cache_spec_kind = Some(KvCacheSpecKind::FullAttention);
+            }
+            // Decode the producer's named-map removal, including before first store.
+            let removed: RawKvEvent = serde_json::from_value(serde_json::json!({
+                "type": "BlockRemoved", "block_hashes": [100], "medium": "CPU",
+                "group_idx": 0, "kv_cache_spec_kind": kind, "ownership": "kvcr"
+            }))
+            .unwrap();
+            let mut learned_removal = removed.clone();
+            if let RawKvEvent::BlockRemoved {
+                kv_cache_spec_kind, ..
+            } = &mut learned_removal
+            {
+                *kv_cache_spec_kind = None;
+            }
+            let normalized = normalize_raw_batch(
+                vec![removed, recurrent, full, learned_removal],
+                worker,
+                4,
+                KvStateIngressProtocol::VllmResidencyV1,
+                &mut ZmqEventNormalizer::new(4),
+                &mut ZmqEventNormalizer::new(4),
+            );
+            assert_eq!(normalized.cache_owner_fault, None);
+            assert_eq!(normalized.source_fault, None);
+            assert_eq!(normalized.events.len(), 1);
+            assert_eq!(
+                normalized.events[0].placement.residency_domain,
+                ResidencyDomain::CacheOwner
+            );
+        }
+    }
+
+    #[test]
+    fn hybrid_projection_still_rejects_bad_owner_events() {
+        use dynamo_kv_router::zmq_wire::KvCacheSpecKind;
+        for (kind, size, medium) in [
+            (Some(KvCacheSpecKind::FullAttention), 0, "CPU"),
+            (Some(KvCacheSpecKind::Unknown), 4, "CPU"),
+            (None, 0, "CPU"),
+            (Some(KvCacheSpecKind::Mamba), 0, "GPU"),
+        ] {
+            let mut raw = raw_store(Some(medium), Some("kvcr"), 100);
+            if let RawKvEvent::BlockStored {
+                kv_cache_spec_kind,
+                block_size,
+                ..
+            } = &mut raw
+            {
+                *kv_cache_spec_kind = kind;
+                *block_size = size;
+            }
+            let normalized = normalize_raw_batch(
+                vec![raw],
+                WorkerWithDpRank::new(17, 0),
+                4,
+                KvStateIngressProtocol::VllmResidencyV1,
+                &mut ZmqEventNormalizer::new(4),
+                &mut ZmqEventNormalizer::new(4),
+            );
+            assert!(normalized.cache_owner_fault.is_some());
+            assert!(normalized.events.is_empty());
         }
     }
 
