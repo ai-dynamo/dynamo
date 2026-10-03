@@ -76,6 +76,9 @@ def _install_sglang_stubs(install_module):
     class _JsonArrayParser:
         pass
 
+    class _GptOssDetector:
+        pass
+
     class _ReasoningParser:
         pass
 
@@ -147,6 +150,7 @@ def _install_sglang_stubs(install_module):
         ReasoningParser=_ReasoningParser,
         KimiK3Detector=_KimiK3Detector,
         InklingDetector=type("InklingDetector", (), {}),
+        GptOssDetector=_GptOssDetector,
     )
     _install_module(install_module, "sglang.srt.utils")
     _install_module(

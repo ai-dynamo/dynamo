@@ -18,7 +18,9 @@ const (
 	maxTCPPort = 65535
 )
 
-type SGLangBackend struct{}
+type SGLangBackend struct {
+	roleLaunchOwnership roleLaunchOwnership
+}
 
 // isPythonCommand checks if the command is a Python interpreter
 func isPythonCommand(cmd string) bool {
@@ -58,6 +60,9 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		container.LivenessProbe = nil
 		container.ReadinessProbe = nil
 		container.StartupProbe = nil
+	}
+	if b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate {
+		return nil
 	}
 
 	// Generate the flags to add

@@ -9,6 +9,7 @@
 //! `response.output_text.done` -> `response.content_part.done` ->
 //! `response.output_item.done` -> `response.completed` -> `[DONE]`
 
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
@@ -42,6 +43,8 @@ pub struct ResponseStreamConverter {
     response_id: String,
     model: String,
     params: ResponseParams,
+    tool_names: super::ToolNameMap,
+    allowed_names: Option<HashSet<String>>,
     /// Preserved Responses API-specific request context for faithful response reconstruction.
     api_context: Option<ResponsesContext>,
     created_at: u64,
@@ -95,6 +98,7 @@ struct FunctionCallState {
     call_id: String,
     name: String,
     namespace: Option<String>,
+    is_allowed: bool,
     accumulated_args: String,
     pending_arg_deltas: Vec<String>,
     output_index: Option<u32>,
@@ -109,15 +113,24 @@ impl FunctionCallState {
 }
 
 impl ResponseStreamConverter {
-    pub fn new(model: String, params: ResponseParams) -> Self {
+    /// Initialize a response stream with its tool aliases and resolve allowed backend
+    /// names once for use across all chunks.
+    pub fn new(model: String, mut params: ResponseParams) -> Self {
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
+        let tool_names = params.tool_names.take().unwrap_or_else(|| {
+            super::ToolNameMap::new(params.tools.as_deref().unwrap_or_default(), None)
+        });
+        let allowed_names = params.allowed_backend_names(&tool_names);
+
         Self {
             response_id: format!("resp_{}", Uuid::new_v4().simple()),
             model,
+            tool_names,
+            allowed_names,
             params,
             api_context: None,
             created_at,
@@ -511,6 +524,7 @@ impl ResponseStreamConverter {
                             call_id: String::new(),
                             name: String::new(),
                             namespace: None,
+                            is_allowed: false,
                             accumulated_args: String::new(),
                             pending_arg_deltas: Vec::new(),
                             output_index: None,
@@ -525,9 +539,14 @@ impl ResponseStreamConverter {
                     }
                     if let Some(func) = &tc.function {
                         if let Some(name) = &func.name {
-                            self.function_call_items[tc_index].name = name.clone();
+                            self.function_call_items[tc_index].is_allowed = self
+                                .allowed_names
+                                .as_ref()
+                                .is_none_or(|allowed| allowed.contains(name));
+                            let (namespace, original_name) = self.tool_names.decode(name);
+                            self.function_call_items[tc_index].name = original_name.to_owned();
                             self.function_call_items[tc_index].namespace =
-                                self.params.namespace_for_function(name);
+                                namespace.map(str::to_owned);
                         }
                         if let Some(args) = &func.arguments {
                             self.function_call_items[tc_index]
@@ -550,7 +569,7 @@ impl ResponseStreamConverter {
                     let (should_start, disallowed_name) = {
                         let state = &self.function_call_items[tc_index];
                         let has_identity = state.has_identity();
-                        let is_allowed = self.params.function_is_allowed(&state.name);
+                        let is_allowed = state.is_allowed;
                         (
                             !state.started && has_identity && is_allowed,
                             (has_identity && !is_allowed).then(|| state.name.clone()),
@@ -1668,6 +1687,62 @@ mod tests {
             panic!("expected function call");
         };
         assert_eq!(call.namespace.as_deref(), Some("agents"));
+    }
+
+    /// Colliding tool names retain their namespaces from initial stream events
+    /// through the completed response.
+    #[test]
+    fn test_colliding_namespaces_restore_streamed_tool_identity() {
+        let tools = serde_json::from_value(serde_json::json!([
+            {"type": "namespace", "name": "crm", "description": "CRM", "tools": [
+                {"type": "function", "name": "lookup"}
+            ]},
+            {"type": "namespace", "name": "billing", "description": "Billing", "tools": [
+                {"type": "function", "name": "lookup"}
+            ]}
+        ]))
+        .unwrap();
+        let params = ResponseParams {
+            tools: Some(tools),
+            ..default_params()
+        };
+        let names = params.tool_name_map().into_owned();
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let mut added = Vec::new();
+        for (index, namespace) in ["crm", "billing"].into_iter().enumerate() {
+            added.extend(conv.process_chunk(&tool_call_chunk(
+                index as u32,
+                Some(&format!("call-{index}")),
+                Some(&names.encode(Some(namespace), "lookup")),
+                Some("{}"),
+            )));
+        }
+        let done = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+        for (events, kind) in [
+            (&added, "response.output_item.added"),
+            (&done, "response.output_item.done"),
+        ] {
+            let calls: Vec<_> = events
+                .iter()
+                .filter(|event| event_type(event) == kind)
+                .collect();
+            assert_eq!(calls.len(), 2);
+            for (event, namespace) in calls.iter().zip(["crm", "billing"]) {
+                let json = format!("{event:?}");
+                assert!(
+                    json.contains(&format!(r#"\"namespace\":\"{namespace}\""#)),
+                    "{json}"
+                );
+                assert!(json.contains(r#"\"name\":\"lookup\""#), "{json}");
+            }
+        }
+        for (item, namespace) in conv.completed_output().iter().zip(["crm", "billing"]) {
+            let OutputItem::FunctionCall(call) = item else {
+                panic!("expected function call");
+            };
+            assert_eq!(call.name, "lookup");
+            assert_eq!(call.namespace.as_deref(), Some(namespace));
+        }
     }
 
     #[test]

@@ -128,13 +128,6 @@ impl VllmSidecarEngine {
     }
 
     fn validate_args(args: &Args) -> Result<Option<RlAdminBaseUrl>, DynamoError> {
-        if args.sidecar.common.dyn_tool_call_parser.is_some()
-            || args.sidecar.common.dyn_reasoning_parser.is_some()
-        {
-            return Err(client::invalid_argument(
-                "vLLM gRPC does not preserve the request options required by Dynamo tool-call and reasoning parsers",
-            ));
-        }
         // Reject overflow before runtime connections, but start the actual
         // engine deadline only when the bootstrap future is polled.
         client::startup_deadline(args.sidecar.grpc.config().startup_deadline)?;
@@ -205,9 +198,8 @@ impl VllmSidecarEngine {
             custom_jinja_template: args.sidecar.common.custom_jinja_template,
             model_name: model.source.clone(),
             served_model_name: Some(model.served_name.clone()),
-            // gRPC cannot yet preserve the parser request semantics.
-            tool_call_parser: None,
-            reasoning_parser: None,
+            tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
+            reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
@@ -1470,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_omits_parsers_and_preserves_encode_options() {
+    fn worker_defaults_omit_parsers_and_preserve_encode_options() {
         for mode in ["aggregated", "prefill", "decode", "encode"] {
             let (_, config) = worker(mode);
             assert!(config.tool_call_parser.is_none());
@@ -1492,25 +1484,27 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_parsers_and_encode_models_are_rejected() {
-        for flag in ["--dyn-tool-call-parser", "--dyn-reasoning-parser"] {
-            let error = VllmSidecarEngine::from_args(Some(vec![
-                "sidecar".into(),
-                "--grpc-endpoint".into(),
-                "127.0.0.1:12345".into(),
-                flag.into(),
-                "parser".into(),
-            ]))
-            .err()
-            .expect("unsupported parser");
-            assert_eq!(
-                error.error_type(),
-                dynamo_backend_common::ErrorType::Backend(
-                    dynamo_backend_common::BackendError::InvalidArgument
-                )
-            );
-            assert!(error.to_string().contains("does not preserve"));
-        }
+    fn worker_advertises_configured_parsers() {
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--dyn-tool-call-parser",
+            "qwen3_coder",
+            "--dyn-reasoning-parser",
+            "qwen3",
+        ])
+        .unwrap();
+        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
+        // Native parser names differ from the explicit Dynamo configuration.
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let (_, config) = VllmSidecarEngine::from_discovered(args, model, vllm_http_url).unwrap();
+        assert_eq!(config.tool_call_parser.as_deref(), Some("qwen3_coder"));
+        assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn encode_requires_multimodal_model() {
         let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
         let error = VllmSidecarEngine::from_discovered(args("encode"), model, None)
             .err()
