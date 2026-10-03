@@ -222,6 +222,7 @@ mod tests {
             strict_priority: 0,
             policy_class: None,
             session_context: None,
+            do_not_queue: false,
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,

@@ -933,6 +933,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap();
@@ -956,6 +957,7 @@ mod tests {
                         None,
                         None,
                         RoutingConstraints::default(),
+                        false,
                     )
                     .await
                     .expect("prefill reservation must remain routable");
