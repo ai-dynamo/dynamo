@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+worker_selection:
+  aggregated: fetch-to-idle
+  instances:
+    - name: fetch-to-idle
+      type: fetch-to-idle
+      parameters:
+        busy_active_requests: 1
+        min_fetch_blocks: 64
