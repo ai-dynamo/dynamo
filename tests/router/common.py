@@ -903,6 +903,11 @@ def _test_remote_indexer_decisions(
         expected_query_instances: int,
         expected_record_instances: int,
     ) -> tuple[set[int], set[int]]:
+        """Wait for a topology safe to exercise, then return its instance IDs.
+
+        Event-driven owners expose query endpoints only and may be replicated;
+        approximate owners require a co-located singleton query/record pair.
+        """
         query_endpoint = runtime.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
         )
@@ -931,6 +936,12 @@ def _test_remote_indexer_decisions(
         raise TimeoutError("Timed out waiting for served indexer endpoints to register")
 
     async def run_test(runtimes):
+        """Verify independent consumers share the served indexer's decisions.
+
+        In approximate mode, one consumer records a forced decision and another
+        must eventually observe it and reverse its independently computed choice.
+        The write acknowledgement is not a read-after-write visibility fence.
+        """
         endpoint_path = (
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
