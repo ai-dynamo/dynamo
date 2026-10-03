@@ -5,7 +5,7 @@
 
 import importlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import huggingface_hub.constants
 import pytest
@@ -27,7 +27,6 @@ pytestmark = [
 async def test_ngc_is_resolved_before_offline_engine_args(
     monkeypatch, tmp_path, load_format
 ):
-    """Resolve NGC sources offline for native and ModelExpress weight loaders."""
     model = "ngc://example/team/model:1"
     fetch = AsyncMock(return_value=str(tmp_path))
     monkeypatch.setattr(vllm_args, "fetch_model", fetch)
@@ -38,7 +37,7 @@ async def test_ngc_is_resolved_before_offline_engine_args(
         ["--model", model, "--load-format", load_format]
     )
 
-    fetch.assert_awaited_once_with(model)
+    fetch.assert_awaited_once_with(model, ignore_weights=True)
     assert config.model == model
     assert config.engine_args.model == str(tmp_path)
     assert config.served_model_name == model
@@ -51,7 +50,6 @@ async def test_ngc_is_resolved_before_offline_engine_args(
 
 @pytest.mark.asyncio
 async def test_ngc_preserves_explicit_served_names(monkeypatch, tmp_path):
-    """Keep the requested public model name and aliases after resolving NGC."""
     monkeypatch.setattr(vllm_args, "fetch_model", AsyncMock(return_value=str(tmp_path)))
 
     config = await vllm_args.parse_args_with_model_fetch(
@@ -71,7 +69,6 @@ async def test_ngc_preserves_explicit_served_names(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_hf_model_keeps_engine_and_registration_source(monkeypatch):
-    """Leave HF acquisition to the existing path and retain the repository ID."""
     model = "Qwen/Qwen3-0.6B"
     fetch = AsyncMock()
     monkeypatch.setattr(vllm_args, "fetch_model", fetch)
@@ -83,3 +80,57 @@ async def test_hf_model_keeps_engine_and_registration_source(monkeypatch):
     assert config.model == model
     assert config.engine_args.model == model
     assert config.model_source_path == model
+
+
+@pytest.mark.parametrize("load_format", ["auto", "mx", "modelexpress"])
+async def test_ngc_worker_fetches_weights_before_engine_setup(
+    monkeypatch, tmp_path, load_format
+):
+    model = "ngc://example/team/model:1"
+    metadata_path = tmp_path / "metadata"
+    metadata_path.mkdir()
+    weights_path = tmp_path / "weights"
+    weights_path.mkdir()
+    fetch = AsyncMock(side_effect=[str(metadata_path), str(weights_path)])
+    vllm_main = importlib.import_module("dynamo.vllm.main")
+    setup = AsyncMock(side_effect=RuntimeError("stop before engine setup"))
+    monkeypatch.setattr(vllm_args, "fetch_model", fetch)
+    monkeypatch.setattr(vllm_main, "fetch_model", fetch)
+    monkeypatch.setattr(vllm_main, "prepare_snapshot_engine", setup)
+
+    with pytest.raises(RuntimeError, match="stop before engine setup"):
+        await vllm_main.worker(["--model", model, "--load-format", load_format])
+
+    assert fetch.await_args_list == [call(model, ignore_weights=True), call(model)]
+    config = setup.call_args.args[0]
+    assert config.engine_args.model == str(weights_path)
+    assert config.model == model
+
+
+@pytest.mark.parametrize(
+    "extra_args,snapshot,error",
+    [
+        (["--realtime", "--enable-lora"], False, "--enable-lora"),
+        (
+            ["--embedding-worker", "--embedding-worker-processes", "2"],
+            True,
+            "checkpoint mode",
+        ),
+        (["--enable-rl", "--logprobs-mode", "raw_logits"], False, "logprobs_mode"),
+    ],
+)
+async def test_ngc_invalid_worker_config_does_not_fetch_weights(
+    monkeypatch, tmp_path, extra_args, snapshot, error
+):
+    model = "ngc://example/team/model:1"
+    fetch = AsyncMock(return_value=str(tmp_path))
+    vllm_main = importlib.import_module("dynamo.vllm.main")
+    monkeypatch.setattr(vllm_args, "fetch_model", fetch)
+    monkeypatch.setattr(vllm_main, "fetch_model", fetch)
+    if snapshot:
+        monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", str(tmp_path / "snapshot"))
+
+    with pytest.raises(ValueError, match=error):
+        await vllm_main.worker(["--model", model, *extra_args])
+
+    fetch.assert_awaited_once_with(model, ignore_weights=True)

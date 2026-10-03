@@ -98,9 +98,8 @@ def parse_args(argv: list[str] | None = None) -> Config:
 async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
     """Parse worker arguments, resolving NGC sources before engine validation.
 
-    NGC weights are fetched even with the ModelExpress loader so its native
-    fallback can use the local directory. Hugging Face sources retain their
-    existing acquisition path, including ModelExpress P2P.
+    Only metadata is fetched here; worker startup fetches weights after
+    validation. Hugging Face sources retain their existing acquisition path.
 
     Args:
         argv: Command-line arguments. ``None`` means ``sys.argv[1:]``.
@@ -110,7 +109,7 @@ async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
     """
     dynamo_config, vllm_args = _parse_cli_args(argv)
     if needs_local_model_path(dynamo_config.model):
-        vllm_args.model = await fetch_model(dynamo_config.model)
+        vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
         if not vllm_args.served_model_name:
             vllm_args.served_model_name = [dynamo_config.model]
     return _build_config(dynamo_config, vllm_args)
@@ -165,7 +164,6 @@ def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]
 
 
 def _build_config(dynamo_config: Config, vllm_args: argparse.Namespace) -> Config:
-    """Construct engine arguments and validate and reconcile both configurations."""
     enable_kv_cache_metadata_compat()
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 

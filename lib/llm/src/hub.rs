@@ -8,7 +8,7 @@ use hf_hub::Cache;
 use modelexpress_client::{
     Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider,
 };
-use modelexpress_common::{cache as mx_cache, download as mx};
+use modelexpress_common::{cache as mx_cache, download as mx, envs as mx_envs};
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
@@ -20,7 +20,6 @@ pub(crate) use huggingface::{
 
 const NGC_URI_PREFIX: &str = "ngc://";
 
-/// Pick the ModelExpress provider from the model name's URI scheme, defaulting to Hugging Face.
 fn provider_for(model_name: &str) -> MxModelProvider {
     if model_name.starts_with(NGC_URI_PREFIX) {
         MxModelProvider::Ngc
@@ -39,7 +38,7 @@ fn get_cached_model_path(
     provider: MxModelProvider,
     ignore_weights: bool,
 ) -> Option<PathBuf> {
-    let cache_dir = get_model_express_cache_dir();
+    let cache_dir = get_model_express_cache_dir(provider);
     match provider {
         MxModelProvider::HuggingFace => {
             get_cached_model_path_in(model_name, ignore_weights, cache_dir)
@@ -48,7 +47,6 @@ fn get_cached_model_path(
     }
 }
 
-/// Look up a model in the HuggingFace hub cache directory using hf-hub's Cache API.
 fn get_cached_model_path_in(
     model_name: &str,
     ignore_weights: bool,
@@ -74,7 +72,6 @@ fn get_cached_provider_model_path_in(
     cached_model_dir(model_name, model_dir, ignore_weights)
 }
 
-/// Return and log the cached directory only when it satisfies the requested download.
 fn cached_model_dir(model_name: &str, dir: PathBuf, ignore_weights: bool) -> Option<PathBuf> {
     if !has_required_model_files(&dir, ignore_weights) {
         return None;
@@ -186,6 +183,9 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     }
 
     let mut config: MxClientConfig = MxClientConfig::default();
+    if provider == MxModelProvider::Ngc {
+        config.cache.local_path = get_model_express_cache_dir(provider);
+    }
     if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
         config = config.with_endpoint(endpoint);
     }
@@ -244,13 +244,18 @@ async fn mx_download_direct(
     provider: MxModelProvider,
     ignore_weights: bool,
 ) -> anyhow::Result<PathBuf> {
-    let cache_dir = get_model_express_cache_dir();
+    let cache_dir = get_model_express_cache_dir(provider);
     mx::download_model(model_name, provider, Some(cache_dir), ignore_weights).await
 }
 
 // TODO: remove in the future. This is a temporary workaround to find common
 // cache directory between client and server.
-fn get_model_express_cache_dir() -> PathBuf {
+fn get_model_express_cache_dir(provider: MxModelProvider) -> PathBuf {
+    if provider == MxModelProvider::Ngc {
+        // ModelExpress 0.6 adds the provider's `ngc/` layout beneath this root.
+        return mx_envs::cache_directory()
+            .unwrap_or_else(|| mx_envs::home_dir_or_cwd().join(".cache"));
+    }
     cache_dir_from_values(
         env::var(env_model::huggingface::HF_HUB_CACHE).ok(),
         env::var(env_model::huggingface::HF_HOME).ok(),
@@ -533,27 +538,49 @@ mod tests {
     #[serial_test::serial]
     #[tokio::test]
     async fn test_from_hf_ngc_cache_first() {
-        let temp = TempDir::new().unwrap();
-        let model_dir = build_ngc_cache(
-            temp.path(),
-            &["config.json", "tokenizer.json", "model.safetensors"],
-        );
+        for explicit_cache in [true, false] {
+            let temp = TempDir::new().unwrap();
+            let home = temp.path().join("home");
+            let hf_cache = temp.path().join("hf");
+            let cache_root = if explicit_cache {
+                temp.path().join("mx")
+            } else {
+                home.join(".cache")
+            };
+            let model_dir = build_ngc_cache(
+                &cache_root,
+                &["config.json", "tokenizer.json", "model.safetensors"],
+            );
 
-        temp_env::async_with_vars(
-            [
-                (
-                    env_model::huggingface::HF_HUB_CACHE,
-                    Some(temp.path().to_str().unwrap()),
-                ),
-                (env_model::huggingface::HF_HOME, None),
-                (env_model::model_express::MODEL_EXPRESS_CACHE_PATH, None),
-            ],
-            async {
-                let result = from_hf(PathBuf::from(NGC_TEST_MODEL), false).await;
-
-                assert_eq!(result.ok().as_deref(), Some(model_dir.as_path()));
-            },
-        )
-        .await;
+            temp_env::async_with_vars(
+                [
+                    (
+                        mx_envs::MODEL_EXPRESS_CACHE_DIRECTORY,
+                        explicit_cache.then(|| cache_root.to_str().unwrap()),
+                    ),
+                    (mx_envs::HOME, home.to_str()),
+                    (env_model::huggingface::HF_HUB_CACHE, hf_cache.to_str()),
+                    (env_model::huggingface::HF_HOME, hf_cache.to_str()),
+                    (
+                        env_model::model_express::MODEL_EXPRESS_CACHE_PATH,
+                        hf_cache.to_str(),
+                    ),
+                ],
+                async {
+                    assert_eq!(
+                        get_cached_model_path(NGC_TEST_MODEL, MxModelProvider::Ngc, false)
+                            .as_deref(),
+                        Some(model_dir.as_path())
+                    );
+                    assert_eq!(
+                        get_model_express_cache_dir(MxModelProvider::HuggingFace),
+                        hf_cache
+                    );
+                    let result = from_hf(PathBuf::from(NGC_TEST_MODEL), false).await;
+                    assert_eq!(result.ok().as_deref(), Some(model_dir.as_path()));
+                },
+            )
+            .await;
+        }
     }
 }

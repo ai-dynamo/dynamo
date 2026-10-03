@@ -165,7 +165,6 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
 
 
 async def worker(argv: list[str] | None = None) -> None:
-    """Resolve the model source, configure the engine, and serve a Dynamo worker."""
     if argv is None:
         argv = sys.argv[1:]
     config = await parse_args_with_model_fetch(argv)
@@ -201,13 +200,11 @@ async def worker(argv: list[str] | None = None) -> None:
     # fetch_model returns, because vllm will send that name to its Ray
     # pipeline-parallel workers, which may not have the local path.
     # vllm will attempt to download the model again, but find it in the HF cache.
-    # NGC was resolved before constructing engine_args, including in embedding
-    # children and with the ModelExpress plugin enabled.
-    if (
-        not embedding_process_child
-        and not needs_local_model_path(config.model)
-        and should_prefetch_model(config)
-    ):
+    # NGC metadata was resolved before constructing engine_args; fetch weights
+    # after validation even with ModelExpress so its native fallback can load them.
+    if needs_local_model_path(config.model):
+        config.engine_args.model = await fetch_model(config.model)
+    elif not embedding_process_child and should_prefetch_model(config):
         await fetch_model(config.model)
 
     # Snapshot mode: load engine before runtime creation so there are no
