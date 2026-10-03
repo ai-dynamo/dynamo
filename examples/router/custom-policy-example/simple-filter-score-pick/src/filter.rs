@@ -3,7 +3,7 @@
 
 //! Device-cache filter for the `simple-filter-score-pick` policy.
 
-use dynamo_kv_router::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
 
@@ -22,7 +22,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let cache = candidate
             .cache()

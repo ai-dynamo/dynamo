@@ -38,7 +38,7 @@ spec:
     type: frontend
   - modelRef:
       name: Qwen/Qwen3-VL-2B-Instruct
-    name: VllmWorker
+    name: worker
     podTemplate:
       spec:
         containers:

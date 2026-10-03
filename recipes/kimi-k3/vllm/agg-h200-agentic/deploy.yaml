@@ -40,7 +40,7 @@ spec:
             requests:
               cpu: "16"
               memory: 128Gi
-  - name: Worker
+  - name: worker
     type: worker
     replicas: 1
     multinode:

@@ -390,6 +390,7 @@ mod tests {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -457,6 +458,7 @@ mod tests {
             })),
             encoder_result: None,
             routing_data: None,
+            jailed_text: None,
         }
     }
 
@@ -756,6 +758,7 @@ mod tests {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -781,6 +784,7 @@ mod tests {
                 "prefill_compute_time_ms": 45.6
             })),
             routing_data: None,
+            jailed_text: None,
         }
     }
 
@@ -1013,6 +1017,7 @@ mod tests {
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
             routing_data: None,
+            jailed_text: None,
         };
 
         let response = generator

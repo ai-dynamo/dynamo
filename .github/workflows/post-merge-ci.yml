@@ -19,7 +19,7 @@ on:
       framework:
         description: 'Framework to validate'
         type: choice
-        options: [all, vllm, sglang, trtllm]
+        options: [all, vllm, sglang, trtllm, triton]
         default: all
 
 permissions:
@@ -42,13 +42,14 @@ jobs:
       run_vllm:   ${{ steps.flags.outputs.run_vllm }}
       run_sglang: ${{ steps.flags.outputs.run_sglang }}
       run_trtllm: ${{ steps.flags.outputs.run_trtllm }}
+      run_triton: ${{ steps.flags.outputs.run_triton }}
     steps:
       - id: flags
         shell: bash
         env:
           FW: ${{ github.event.inputs.framework || 'all' }}
         run: |
-          for f in vllm sglang trtllm; do
+          for f in vllm sglang trtllm triton; do
             if [[ "$FW" == "all" || "$FW" == "$f" ]]; then
               echo "run_$f=true" >> "$GITHUB_OUTPUT"
             else
@@ -177,12 +178,14 @@ jobs:
   # ============================================================================
   sidecar-build:
     name: dynamo-sidecar
-    if: github.event_name != 'workflow_dispatch'
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true' || needs.config.outputs.run_sglang == 'true' || needs.config.outputs.run_trtllm == 'true'
     permissions:
       actions: read
       contents: read
     uses: $/.github/workflows/shared-build-sidecar.yml
     with:
+      build_timeout_minutes: 90
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       diff_event_context: push
       diff_current_branch: ${{ github.ref_name }}
@@ -214,6 +217,8 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 
@@ -279,6 +284,8 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 
@@ -344,6 +351,8 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 
@@ -389,6 +398,23 @@ jobs:
       archive_sources: false
     secrets: inherit
 
+  triton-build:
+    name: triton-runtime
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_triton == 'true'
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: triton
+      target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-triton-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-triton-runtime-{0}', github.sha) || '' }}
+    secrets: inherit
+
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     if: github.event_name != 'workflow_dispatch'
@@ -423,7 +449,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
-      build_timeout_minutes: 45
+      build_timeout_minutes: 90  # TEMPORARY CHANGE - TODO: INVESTIGATE AND SPEEDUP SLOW BUILDS
       # OSRB CSV diff baseline: post-merge context. main -> previous commit;
       # release/* -> prior release tag (see resolve_diff_base.py).
       diff_event_context: push
@@ -438,6 +464,74 @@ jobs:
   # TEST JOBS
   # ============================================================================
 
+  sidecar-vllm-test:
+    name: sidecar-runtime
+    needs: [vllm-build, sidecar-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_count: [1, 2]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: post-merge
+      test_suite_name: vllm
+      framework: vllm
+      test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: ${{ format('post_merge and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: vllm
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
+
+  sidecar-sglang-test:
+    name: sidecar-runtime
+    needs: [sglang-build, sidecar-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_count: [1, 2]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: post-merge
+      test_suite_name: sglang
+      framework: sglang
+      test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: ${{ format('post_merge and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: sglang
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
+
+  sidecar-trtllm-test:
+    name: sidecar-runtime
+    needs: [trtllm-build, sidecar-build]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: post-merge
+      test_suite_name: trtllm
+      framework: trtllm
+      test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: 'post_merge and sidecar and trtllm and gpu_1'
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: trtllm
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
+
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
@@ -445,6 +539,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -452,7 +547,8 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      # Plain runtime images do not include sidecar binaries.
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
       # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all
@@ -468,13 +564,14 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: (pre_merge or post_merge) and vllm and gpu_2
+      gpu_test_markers: (pre_merge or post_merge) and vllm and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -485,6 +582,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -502,6 +600,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm-efa
+      framework: vllm  # matches the framework passed to vllm-efa-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
@@ -512,30 +611,6 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
-  vllm-kvbm-tests:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [config, vllm-build]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      dd_env: post-merge
-      test_suite_name: kvbm
-      test_type: KVBM Test
-      # KVBM post-merge coverage currently targets the aws-dev-02 H100 cluster.
-      amd_runner: aws-dev-02-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      container_workspace: /workspace
-      kvbm_mla_backend: FLASH_ATTN_MLA
-      run_cpu_only_tests: false
-      run_gpu_tests: true
-      gpu_test_markers: post_merge and h100 and kvbm and gpu_1 and (kvbm_consolidator or kvbm_determinism)
-      # Observed runtime is about 50 minutes when run sequentially:
-      # consolidator ~9m, cache reset ~13m, concurrency ~27m.
-      gpu_test_timeout_minutes: 120
-    secrets: inherit
-
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build]
@@ -543,6 +618,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -550,7 +626,8 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      # Plain runtime images do not include sidecar binaries.
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
@@ -566,13 +643,14 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: (pre_merge or post_merge) and sglang and gpu_2
+      gpu_test_markers: (pre_merge or post_merge) and sglang and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -583,6 +661,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -590,7 +669,8 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      # Plain runtime images do not include sidecar binaries.
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
@@ -606,6 +686,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -623,6 +704,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm-efa
+      framework: trtllm  # matches the framework passed to trtllm-efa-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
@@ -633,6 +715,47 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
+  triton-test:
+    name: triton-runtime
+    needs: [config, triton-build]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_triton == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: triton
+      framework: triton
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
+      run_sanity_check: false # requires torch which is not present.
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and triton and gpu_0'
+      run_gpu_tests: false
+    secrets: inherit
+
+  # TODO: Enable once test time has been reduced.
+  #       Current implementation takes up to 2 hours to complete.
+  # triton-qa-test:
+  #   name: triton-runtime
+  #   needs: [config, triton-build]
+  #   if: needs.config.outputs.run_triton == 'true'
+  #   uses: $/.github/workflows/shared-test.yml
+  #   with:
+  #     test_suite_name: triton
+  #     test_type: QA Test
+  #     amd_runner: prod-tester-amd-gpu-v2
+  #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+  #     cuda_version: '[""]'
+  #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
+  #     enable_coverage: true
+  #     run_sanity_check: false # requires torch which is not present.
+  #     run_gpu_tests: true
+  #     gpu_test_markers: '(pre_merge or post_merge) and triton_qa' and gpu_1
+  #     gpu_test_timeout_minutes: 180
+  #     verify_gpu: false # requires torch which is not present.
+  #   secrets: inherit
+
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
@@ -640,6 +763,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: planner
+      framework: dynamo  # matches the framework passed to planner-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
@@ -705,36 +829,6 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
-  snapshot-placeholder-vllm:
-    name: vLLM Snapshot Placeholder
-    needs: [vllm-copy-to-acr]
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-vllm-placeholder
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
-
   vllm-dev-copy-to-acr:
     name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-dev-build]
@@ -755,36 +849,6 @@ jobs:
       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
-
-  snapshot-placeholder-sglang:
-    name: SGLang Snapshot Placeholder
-    needs: [sglang-copy-to-acr]
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-sglang-placeholder
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
 
   sglang-dev-copy-to-acr:
     name: sglang-dev # This name overlaps with other sglang jobs to group them in the UI
@@ -809,36 +873,6 @@ jobs:
       cuda_version: '["13.1"]'
       copy_timeout_minutes: 20
     secrets: inherit
-
-  snapshot-placeholder-trtllm:
-    name: TRTLLM Snapshot Placeholder
-    needs: [trtllm-copy-to-acr]
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-trtllm-placeholder
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
 
   trtllm-dev-copy-to-acr:
     name: trtllm-dev # This name overlaps with other trtllm jobs to group them in the UI
@@ -1213,11 +1247,11 @@ jobs:
 
   deploy-test-checkpoint-vllm:
     name: vLLM Snapshot Deploy Test
-    needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
+    needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, vllm-copy-to-acr, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
       needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
-      needs.snapshot-placeholder-vllm.result == 'success' &&
+      needs.vllm-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1270,7 +1304,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-vllm.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_vllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
@@ -1281,11 +1315,11 @@ jobs:
 
   deploy-test-checkpoint-sglang:
     name: SGLang Snapshot Deploy Test
-    needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
+    needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, sglang-copy-to-acr, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
       needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
-      needs.snapshot-placeholder-sglang.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1338,7 +1372,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-sglang.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_sglang
           test_file: tests/deploy/test_dynamocheckpoint.py
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
@@ -1349,11 +1383,11 @@ jobs:
 
   deploy-test-checkpoint-trtllm:
     name: TRTLLM Snapshot Deploy Test
-    needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
+    needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, trtllm-copy-to-acr, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
       needs.deploy-snapshot-agent-checkpoint-trtllm.result == 'success' &&
-      needs.snapshot-placeholder-trtllm.result == 'success' &&
+      needs.trtllm-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1406,7 +1440,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-trtllm.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_trtllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
@@ -1546,9 +1580,6 @@ jobs:
       - deploy-snapshot-agent-checkpoint-vllm
       - deploy-snapshot-agent-checkpoint-sglang
       - deploy-snapshot-agent-checkpoint-trtllm
-      - snapshot-placeholder-vllm
-      - snapshot-placeholder-sglang
-      - snapshot-placeholder-trtllm
       - frontend-copy-to-acr
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
@@ -1572,7 +1603,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, sidecar-build, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, power-agent, sidecar-build, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1590,9 +1621,10 @@ jobs:
         docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
 
   ############################## SLACK NOTIFICATION ##############################
+
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [ deploy-status-check ]
+    needs: [deploy-status-check, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

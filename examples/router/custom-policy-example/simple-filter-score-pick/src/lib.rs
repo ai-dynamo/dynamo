@@ -12,12 +12,13 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerFilter, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::{KvRouterConfig, WorkerFilter, WorkerSelectionPolicy};
 use filter::MinimumDeviceOverlapFilter;
 use picker::RequestAwarePicker;
 use scorer::ActiveRequestsScorer;
@@ -64,9 +65,9 @@ fn provider(
 
 /// Register the `simple-filter-score-pick` policy type.
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("simple-filter-score-pick", Arc::new(provider))
+    registry.register_worker_selection("simple-filter-score-pick", Arc::new(provider))
 }
 
 #[cfg(test)]

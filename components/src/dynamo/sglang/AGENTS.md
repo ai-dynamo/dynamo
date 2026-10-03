@@ -30,6 +30,56 @@ support the current version plus 1 version back (N and N-1). The pattern:
 component files. Do not version-check with `sglang.__version__` -- import probing is
 more reliable since SGLang's internal layout doesn't always match the version string.
 
+## Multi-process gateway (`--gateway-workers N`)
+
+`gateway.py`. One `dynamo.sglang` process fronts every DP rank of its engine: SGLang's
+`TokenizerManager` intake and the Dynamo handler's token relay run on one GIL. With
+`--tokenizer-worker-num N > 1` SGLang puts a `MultiTokenizerRouter` in the engine process; it
+has no `generate_request`, so the leader (node rank 0) does not serve. Instead it publishes
+the launch data with SGLang's shared-memory contract (`write_data_for_multi_tokenizer`) and
+spawns N children, `python -m dynamo.sglang <same argv>` with `DYN_SGLANG_GATEWAY_PARENT_PID`
+and `DYN_SGLANG_GATEWAY_CHILD_INDEX` set. A child builds a `TokenizerWorker` registered with
+the router (`build_gateway_engine`), wraps it in `GatewayEngine` (what the handlers use of an
+`sgl.Engine`: `tokenizer_manager`, `server_args`, `port_args`, `async_generate`, scheduler
+info) and runs the ordinary `init_decode`/`init_prefill` path as its own endpoint instance
+(`attached_engine=`, distinct from `snapshot_engine=`), so the router sees N instances per
+engine. If SGLang exposes `Engine.attach_tokenizer_worker`, children use it instead of the
+facade.
+
+Configuration (`effective_gateway_workers`, `validate_gateway_mode`, applied in `main.py`
+before snapshot preparation and runtime creation): `--gateway-workers N` sets
+`tokenizer_worker_num` to N; `--tokenizer-worker-num N` alone means N gateways; a tokenizer count
+above 1 that differs from `--gateway-workers` is an error. Gateway mode is rejected for the direct-engine workers
+(embedding, rerank, multimodal, diffusion), with `--enable-lora` (dynamic LoRA state would
+live in one child), with `--enable-forward-pass-metrics` (the schedulers stamp FPM with the
+non-serving leader's identity) and in snapshot mode.
+
+Ports and metrics: the leader gives `DYN_SYSTEM_PORT` to child 0 and runs without a system
+status server; the other children bind a random system port (`DYN_SYSTEM_PORT=0`, logged by the
+runtime), because any fixed offset can collide with another worker group's configured port.
+Engine-target `--engine-routes` need `Engine.attach_tokenizer_worker`; the facade only exposes
+the tokenizer manager.
+The schedulers push KV metrics to one PULL socket: child 0 (`owns_engine_metrics()`) binds it
+and re-publishes every `KvMetrics` on an ipc PUB (`metrics_fanout_endpoint()`) that the other
+children subscribe to, so every gateway identity reports the engine's real KV usage. Every
+child republishes KV events under its own worker id, otherwise the router would see prefixes
+on instance 0 only; the cost is N copies of each KV event. On multi-node engines the
+non-leader nodes resolve all N leader instances by worker group id
+(`Client.wait_for_instances_by_runtime_data`) and attribute their remote-rank KV events to
+each. Only the metrics owner publishes the engine-level gauges (total blocks, cache
+usage, load time), so a scrape across children counts the engine once; every child still publishes
+its own routing usage. Each child's model card carries `dynamo.sglang.gateway_engine`
+(`host:leader_pid`) and `dynamo.sglang.gateway_workers`, so anything that counts workers or sums
+per-worker capacity from discovery can collapse the N instances of one engine. Only child 0's
+system port is fixed; sibling health lives on random ports, so fixed probes see one of N processes.
+
+Lifecycle: the leader owns the engine subprocesses and the shared memory, runs the deferred
+shutdown handlers, and terminates and reaps the children with the worker's own shutdown budget
+(`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` + drain + cleanup); a child exiting during shutdown is
+not an error. Children run a parent watchdog (`PR_SET_PDEATHSIG` plus a liveness poll) and
+SIGTERM themselves when the leader dies, since without the schedulers they would stay registered
+and fail every request.
+
 ## Entry Point
 
 `__main__.py` -> `main.py:main()` -> `main.py:worker()`
@@ -319,12 +369,27 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   metadata arrays positionally aligned when adapting the response.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Session identity**: SGLang 0.5.15 supports passive session-aware radix
-  ownership through the top-level `session_id` request field, but Dynamo does
-  not forward `agent_context.session_id` to it yet. Do not pass that value as
-  `session_params.id`; SGLang treats that field as an explicit session lifecycle
-  and rejects IDs that were not created through `open_session`. Session headers
-  remain available for tracing and router affinity.
+- **Session identity**: SGLang has *two* unrelated request fields whose names both say
+  "session", with opposite registration rules, and picking the wrong one is the trap:
+  - **top-level `session_id`** (sglang >= 0.5.15) is radix-native and *self-registering*.
+    When `--enable-session-radix-cache` is on, the scheduler calls
+    `ensure_session_generation`, which opens the session the first time it sees the id,
+    so an id the server has never heard of is fine. With the flag off (the default) the
+    id is stored on the request and nothing reads it.
+  - **`session_params.id`** is an explicit lifecycle handle. A request naming an id that
+    `open_session` did not create is rejected with "session id ... does not exist".
+
+  `agent_session.py` forwards `agent_context.session_id` and
+  `agent_context.parent_session_id` as top-level kwargs of the same name -- never as
+  `session_params.id`. That is why forwarding an arbitrary agent session id is safe:
+  the self-registering field has no "unknown id" failure mode.
+
+  Both kwargs are filtered against the engine signature, so a build declaring neither
+  receives neither -- `parent_session_id` is only consumed by builds implementing parent
+  keepalive. `GenerateReqInput` rejects `session_id` and `session_params` set together;
+  this backend never sends `session_params`, and anything that starts to must suppress
+  `session_id` on those requests. The native `sglang_tito` passthrough is excluded: that
+  body is client-owned, so a native caller sets the fields itself.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
@@ -373,6 +438,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 ```text
 sglang/
   _compat.py               # SGLang version compat shim (signature probing for async_generate kwargs)
+  agent_session.py         # agent_context session ids -> async_generate kwargs
   __main__.py              # Entry point
   main.py                  # Worker dispatch
   args.py                  # Config parsing (ServerArgs vs SimpleNamespace)

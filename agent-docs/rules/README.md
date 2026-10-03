@@ -38,3 +38,13 @@ define shared contracts.
 - [`implausible-speedup.md`](verification/implausible-speedup.md) — investigate implausible gains.
 - [`overlap.md`](verification/overlap.md) — interpret overlap and optional confidence evidence.
 - [`stack-verdict.md`](verification/stack-verdict.md) — retain verified gains that are too small to promote alone.
+
+## Reporting defects in these documents
+
+If any rule, guide, or skill in this pack contradicts another (`contradiction`), points at something that does
+not exist (`dead-reference`), cannot be executed as written (`unexecutable`), makes a claim about a tool or flag
+that verification falsifies (`factual-error`), assumes something your environment class does not satisfy
+(`environment-mismatch`), or gives no guidance for a component or situation it plainly should cover
+(`missing-coverage`), do not silently route around it: invoke the `report-skillpack-issue` skill
+(`.agents/skills/report-skillpack-issue/`) to draft a sanitized GitHub issue for operator approval. Defect
+reports from running agents are the primary telemetry that keeps this pack correct.

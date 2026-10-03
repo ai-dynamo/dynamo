@@ -30,7 +30,7 @@ Use `round-robin`, `random`, `power-of-two`, `least-loaded`, or `device-aware-we
 
 The Frontend's `--router-mode` sets the default routing configuration. A worker set can advertise its own router configuration, which replaces the Frontend configuration for requests routed to that set.
 
-A worker set contains replicas with the same namespace, component, endpoint, model, and worker type. Every replica in a set must publish the same router configuration. If replicas disagree, Dynamo treats the set as a conflict and does not admit any of its instances.
+A worker set contains replicas with the same namespace, component, endpoint, model, and worker type. The first valid model deployment card observed by a Frontend reserves the set's configuration. Replicas with a different MDC checksum receive no traffic and cannot disrupt the incumbent, including during construction or retries. Once all incumbent workers disappear, the oldest remaining configuration becomes eligible for a fresh pipeline. See [Worker-Set Admission and Succession](configuration-and-tuning.md#worker-set-admission-and-succession) for checksum compatibility, rolling updates, and readiness behavior.
 
 Worker-set configuration replaces rather than merges with the Frontend configuration. When a worker advertises `--router-mode kv`, restate every non-default router setting that it needs; omitting a setting selects that setting's default instead of inheriting the Frontend value. See [Configuration Scope and Precedence](configuration-and-tuning.md#configuration-scope-and-precedence) for examples and environment-variable implications.
 

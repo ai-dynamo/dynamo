@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# This recipe references an upstream third-party vLLM container image. NVIDIA does not publish or distribute this image. Users should review the upstream image’s open-source license and codec terms before use or redistribution.
+#
 # Qwen3.8-Flash-Next on vLLM via Dynamo, aggregated, B200 (TP=4), agentic workload
 # (64K ISL / 400 OSL, 90% prefix reuse).
 #
@@ -120,7 +122,7 @@ spec:
                 readOnly: true
             - name: runtime-tmp
               emptyDir: {}
-    - name: VllmWorker
+    - name: worker
       type: worker
       replicas: 2
       runtimeVersionOverride: "1.4.2"

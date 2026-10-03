@@ -38,6 +38,9 @@ var (
 	// DynamoGraphDeploymentGVK is the v1alpha1 DynamoGraphDeployment kind.
 	DynamoGraphDeploymentGVK = GroupVersion.WithKind("DynamoGraphDeployment")
 
+	// LPXGraphDeploymentGVK identifies the operator-generated LPX child.
+	LPXGraphDeploymentGVK = GroupVersion.WithKind("LPXGraphDeployment")
+
 	// DynamoGraphDeploymentRequestGVK is the v1alpha1 DynamoGraphDeploymentRequest kind.
 	DynamoGraphDeploymentRequestGVK = GroupVersion.WithKind("DynamoGraphDeploymentRequest")
 
@@ -54,6 +57,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DynamoComponentDeploymentList{},
 		&DynamoGraphDeployment{},
 		&DynamoGraphDeploymentList{},
+		&LPXGraphDeployment{},
+		&LPXGraphDeploymentList{},
 		&DynamoGraphDeploymentRequest{},
 		&DynamoGraphDeploymentRequestList{},
 		&DynamoGraphDeploymentScalingAdapter{},
