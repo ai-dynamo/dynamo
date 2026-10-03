@@ -143,7 +143,7 @@ stream = await router.generate(
 )
 ```
 
-As of current Dynamo, the default worker-selection policy ignores per-request score and temperature overrides in `router_config_override`. Set its scoring weights in the default-policy parameters passed through `--router-policy-config`; see [Configure the Default Policy](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy).
+As of current Dynamo, the default worker-selection policy ignores per-request score and temperature overrides in `router_config_override`. Set its scoring weights and temperature in the default-policy parameters passed through `--router-policy-config`; see [Configure the Default Policy](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy).
 
 The [NeMo Agent Toolkit (NAT)](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration) team used these APIs to build a custom online-learning agentic router. Their router extracts session metadata from `nvext` annotations and feeds it to a [Thompson Sampling](https://en.wikipedia.org/wiki/Thompson_sampling) bandit style cost function that learns which workers perform best for which prefix patterns under load. Compared to Dynamo's default routing, they measured 4x reduction in p50 TTFT and 1.5x increase in p50 tokens-per-second. Priority tagging of latency-sensitive requests achieved up to 63% p50 TTFT reduction under moderate memory pressure. See the [NAT Dynamo integration example](https://github.com/NVIDIA/NeMo-Agent-Toolkit/tree/develop/examples/dynamo_integration) for implementation details. We will be making this available as a routing strategy in Dynamo soon.
 

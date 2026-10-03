@@ -138,7 +138,7 @@ worker_id, dp_rank, overlap = await router.best_worker(
 
 Because this call passes `request_id`, manage the request lifecycle as described in [Manual State Management](#2-manual-state-management-advanced).
 
-The default policy ignores the scoring fields `overlap_score_credit`, `prefill_load_scale`, `shared_cache_multiplier`, and `router_temperature` in `router_config_override`, so they do not change which worker it selects. Set scoring weights and temperature as default-policy parameters in the YAML file passed to `--router-policy-config`; see [Configure the Default Policy](configuration-and-tuning.md#configure-the-default-policy). A [custom worker-selection policy](custom-worker-selection.mdx) can read a per-request temperature through `router_temperature_override()`.
+The default policy ignores the scoring fields `overlap_score_credit`, `prefill_load_scale`, `shared_cache_multiplier`, and `router_temperature` in `router_config_override`, so they do not change which worker it selects. Set scoring weights and temperature as default-policy parameters in the YAML file passed to `--router-policy-config`, or to `KvRouterConfig(router_policy_config=...)` from Python; see [Configure the Default Policy](configuration-and-tuning.md#configure-the-default-policy). A [custom worker-selection policy](custom-worker-selection.mdx) can read a per-request temperature through `router_temperature_override()`.
 
 ## K8s Examples
 
