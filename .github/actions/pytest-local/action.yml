@@ -53,7 +53,7 @@ inputs:
     required: false
     default: 'auto'
   max_vram_gib:
-    description: 'Per-test VRAM budget in GiB. When set together with parallel_mode!=none, runs GPU tests as VRAM-aware concurrent subprocesses via the orchestrator in tests/utils/pytest_parallel_gpu.py. Tests without @pytest.mark.profiled_vram_gib(N) are deselected by tests/conftest.py.'
+    description: 'Per-test VRAM budget in GiB. When set together with parallel_mode!=none, runs GPU tests as VRAM-aware concurrent subprocesses via the orchestrator in tests/utils/pytest_parallel_gpu.py. Only gpu_1 tests whose @pytest.mark.profiled_vram_gib(N) fits the budget run; tests/conftest.py deselects the rest.'
     required: false
     default: ''
   cpu_limit:

@@ -144,7 +144,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--max-vram-gib",
         type=float,
         default=None,
-        help="Only run tests with @pytest.mark.profiled_vram_gib(N) that fit in N GiB. "
+        help="Only run gpu_1 tests with @pytest.mark.profiled_vram_gib(N) "
+        "that fit in N GiB. "
         "Without -n: runs tests sequentially. "
         "With -n N: runs N tests concurrently as subprocesses with VRAM-aware scheduling. "
         "With -n auto: calculates max concurrent slots from GPU VRAM / max_vram_gib.",
@@ -698,6 +699,7 @@ def pytest_collection_modifyitems(config, items):
     # Deselect tests based on --max-vram-gib:
     #   - Tests whose profiled VRAM exceeds the limit are removed
     #   - Tests WITHOUT a VRAM marker are also removed (unknown VRAM = unsafe)
+    #   - Tests not marked gpu_1 are removed: the orchestrator gives each test one GPU
     # Using deselect (not skip) so they never reach the xdist scheduler.
     # Skip all VRAM logic during --collect-only (just listing tests).
     vram_limit = config.getoption("--max-vram-gib", default=None)
@@ -706,7 +708,12 @@ def pytest_collection_modifyitems(config, items):
         deselected = []
         for item in items:
             vram_mark = item.get_closest_marker("profiled_vram_gib")
-            if vram_mark and vram_mark.args and vram_mark.args[0] <= vram_limit:
+            if (
+                vram_mark
+                and vram_mark.args
+                and vram_mark.args[0] <= vram_limit
+                and item.get_closest_marker("gpu_1")
+            ):
                 keep.append(item)
             else:
                 deselected.append(item)
