@@ -103,6 +103,12 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_DISCOVERY_BACKEND`
 </ParamField>
 
+<ParamField path="NATS_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
+  Maximum number of seconds that a NATS client spends establishing its initial connection. Dynamo retries temporary DNS, I/O, and timeout failures with exponential backoff from 1 second to a 5-second cap until this deadline. Each attempt has a maximum timeout of 5 seconds. Authentication, authorization, server-address parsing, and TLS errors fail immediately. Set a larger value when NATS can take longer to become available during deployment startup or recovery; set a smaller value when the process should fail fast. Values must be greater than `0`. Zero or invalid values log a warning and fall back to `120`.
+
+  A successful NATS connection lets initialization continue but does not make the process ready.
+</ParamField>
+
 <ParamField path="ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
   Maximum number of seconds that an etcd discovery client spends establishing its initial
   connection and primary lease. Dynamo retries with exponential backoff until this deadline. Set a
