@@ -1,141 +1,167 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Generated from lib/llm/src/protocols/openai/media_schemas/audio.json by
+# scripts/generate_media_protocols.py. Do not edit.
 
-"""Protocol types for audio generation (TTS).
+from __future__ import annotations
 
-These types follow the vLLM-Omni OpenAICreateSpeechRequest format,
-with TTS-specific parameters as top-level fields (not nested in nvext).
-
-Note: These Pydantic models mirror the Rust protocol types in
-lib/llm/src/protocols/openai/audios.rs. Ideally these should be
-code-generated from the Rust definitions; for now they are maintained
-manually and must be kept in sync.
-"""
-
-from typing import Any, Dict, Literal, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class AudioNvExt(BaseModel):
-    """NVIDIA extensions for audio generation requests."""
-
-    annotations: Optional[list[str]] = None
-    """Annotations for SSE stream events."""
-
-    frontend_accepts_audio_chunks: Optional[bool] = None
-    """Internal compatibility signal for frontends that accept audio chunks.
-
-    Workers must aggregate when this is absent or false. Remove after v1.4
-    leaves the N-2 compatibility window in v1.7.
-    """
-
-    cfg_scale: Optional[float] = None
-    """Classifier-free guidance strength (Audex only, which is why it is an
-    extension rather than a top-level OpenAI field; vLLM-Omni likewise takes it
-    under ``extra_params``). 1.0 disables guidance; 1.5 is the recommended TTS
-    quality setting, and 3.0 the official TTA setting (applied by default for
-    text-to-audio)."""
-
-
-class NvCreateAudioSpeechRequest(BaseModel):
-    """Request for audio speech generation (/v1/audio/speech endpoint).
-
-    Follows vLLM-Omni's OpenAICreateSpeechRequest format.
-    """
-
-    extra_args: Optional[Dict[str, Any]] = None
-    """Worker-boundary passthrough. The frontend nests unknown top-level
-    request fields (an OpenAI client's extra_body) under the
-    "media_passthrough" key."""
-
-    # Standard OpenAI params
-    input: str
-    """The text to synthesize into speech."""
-
-    model: Optional[str] = None
-    """The TTS model to use."""
-
-    voice: Optional[str] = None
-    """Voice/speaker name (e.g., 'vivian', 'ryan', 'aiden')."""
-
-    data_source: Optional[Literal["url", "b64_json"]] = None
-    """How the generated data should be returned: 'url' or 'b64_json'.
-    If unset, handlers default to 'b64_json'.
-    Note: image and video generation use 'response_format' for this; audio uses a
-    separate field because OpenAI's audio API already uses 'response_format' for codec."""
-
-    response_format: Optional[str] = None
-    """Output codec. If unset, handlers default to 'wav'."""
-
-    speed: Optional[float] = Field(default=None, ge=0.25, le=4.0)
-    """Speed factor. If unset, handlers default to 1.0."""
-
-    # Qwen3-TTS specific params (top-level, matching vLLM-Omni)
-    task_type: Optional[str] = None
-    """TTS task type. The handler for the model validates the value."""
-
-    language: Optional[str] = None
-    """Language: Auto, Chinese, English, Japanese, Korean, etc."""
-
-    instructions: Optional[str] = None
-    """Voice style/emotion instructions (for VoiceDesign)."""
-
-    ref_audio: Optional[str] = None
-    """Reference audio URL or base64 (for voice cloning with Base task)."""
-
-    ref_text: Optional[str] = None
-    """Reference transcript (for voice cloning with Base task)."""
-
-    max_new_tokens: Optional[int] = None
-    """Maximum tokens to generate (default: 2048)."""
-
-    user: Optional[str] = None
-    """Optional user identifier."""
-
-    nvext: Optional[AudioNvExt] = None
-    """NVIDIA extensions."""
-
-
 class AudioData(BaseModel):
-    """Audio data in response."""
+    """
+    Audio data in response
+    """
 
     output_format: str
-    """Actual codec used for this audio."""
+    """
+    Actual codec used for this audio: "wav", "mp3", "pcm", "flac", "aac", "opus"
+    """
+    url: str | None = None
+    """
+    URL of the generated audio (if data_source is "url")
+    """
+    b64_json: str | None = None
+    """
+    Base64-encoded audio data (if data_source is "b64_json")
+    """
 
-    url: Optional[str] = None
-    """URL of the generated audio (if data_source is 'url')."""
 
-    b64_json: Optional[str] = None
-    """Base64-encoded audio data (if data_source is 'b64_json')."""
+class AudioNvExt(BaseModel):
+    """
+    NVIDIA extensions to the Audio Speech API
+    """
+
+    annotations: list[str] | None = None
+    """
+    Annotations for SSE stream events
+    """
+    frontend_accepts_audio_chunks: bool | None = None
+    """
+    Internal frontend-to-worker compatibility signal.
+
+    New frontends set this before forwarding `/v1/audio/speech`. When absent
+    or false, workers must return one aggregated response so older frontends
+    do not decode only the first chunk during rolling upgrades.
+
+    TODO(v1.7): Remove after v1.4 leaves the N-2 compatibility window.
+    """
+    cfg_scale: float | None = None
+    """
+    Classifier-free guidance scale (Audex only, hence an extension rather
+    than a top-level OpenAI field). Unset or 1.0 decodes unguided; higher
+    values follow the prompt more closely. Declared here because serde drops
+    unknown `nvext` keys, so without the field the client's value never
+    reaches the worker and guidance is silently never applied.
+    """
 
 
 class NvAudioSpeechResponse(BaseModel):
-    """Response structure for audio speech generation."""
+    """
+    Response structure for audio speech generation
+    """
 
     id: str
-    """Unique identifier for the response."""
-
-    object: str = "audio.speech"
-    """Object type."""
-
+    """
+    Unique identifier for the response
+    """
+    object: str = 'audio.speech'
+    """
+    Object type (always "audio.speech")
+    """
     model: str
-    """Model used for generation."""
-
-    status: str = "completed"
-    """Generation status."""
-
+    """
+    Model used for generation
+    """
+    status: str = 'completed'
+    """
+    Status of the generation ("completed", "failed", etc.)
+    """
     progress: int = 100
-    """Progress percentage (0-100)."""
-
+    """
+    Progress percentage (0-100)
+    """
     created: int
-    """Unix timestamp of creation."""
+    """
+    Unix timestamp of creation
+    """
+    data: list[AudioData] = Field([], validate_default=True)
+    """
+    Generated audio data
+    """
+    error: str | None = None
+    """
+    Error message if generation failed
+    """
+    inference_time_s: float | None = None
+    """
+    Inference time in seconds
+    """
 
-    data: list[AudioData] = []
-    """List of generated audio data."""
 
-    error: Optional[str] = None
-    """Error message if generation failed."""
+class NvCreateAudioSpeechRequest(BaseModel):
+    """
+    Request for audio speech generation (/v1/audio/speech endpoint).
 
-    inference_time_s: Optional[float] = None
-    """Inference time in seconds."""
+    Follows vLLM-Omni's OpenAICreateSpeechRequest format with TTS-specific
+    parameters as top-level fields.
+    """
+
+    input: str
+    """
+    The text to synthesize into speech (required)
+    """
+    model: str | None = None
+    """
+    The TTS model to use
+    """
+    voice: str | None = None
+    """
+    Voice/speaker name (e.g., "vivian", "ryan", "aiden")
+    """
+    data_source: str | None = None
+    response_format: str | None = None
+    """
+    Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
+    """
+    speed: float | None = None
+    """
+    Speed factor. The frontend rejects a value outside 0.25 to 4.0.
+    Absent means 1.0.
+    """
+    task_type: str | None = None
+    """
+    TTS task type: "CustomVoice", "VoiceDesign", or "Base"
+    """
+    language: str | None = None
+    """
+    Language: "Auto", "Chinese", "English", "Japanese", etc.
+    """
+    instructions: str | None = None
+    """
+    Voice style/emotion instructions (for VoiceDesign)
+    """
+    ref_audio: str | None = None
+    """
+    Reference audio URL or base64 (for voice cloning with Base task)
+    """
+    ref_text: str | None = None
+    """
+    Reference transcript (for voice cloning with Base task)
+    """
+    max_new_tokens: int | None = None
+    """
+    Maximum tokens to generate (default: 2048)
+    """
+    user: str | None = None
+    """
+    Optional user identifier
+    """
+    nvext: AudioNvExt | None = None
+    extra_args: dict[str, Any] | None = None
+    """
+    Worker-boundary passthrough. The frontend nests unknown top-level request fields (an OpenAI client's extra_body) under the "media_passthrough" key.
+    """
