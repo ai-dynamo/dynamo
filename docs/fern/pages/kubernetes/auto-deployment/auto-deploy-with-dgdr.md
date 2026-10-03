@@ -7,7 +7,7 @@ subtitle: Deploy a model by intent — describe the model, workload, and SLA tar
 
 A **DynamoGraphDeploymentRequest (DGDR)** is Dynamo's deploy-by-intent path. Instead of hand-authoring a [DynamoGraphDeployment (DGD)](../model-deployment/deploy-with-dgd.md) with explicit parallelism, replica counts, and resource limits, you describe *what* you want to run — model, backend, workload, and optional latency targets — and Dynamo's profiler analyzes your cluster's GPUs, selects a configuration, and generates the DGD that serves traffic.
 
-This guide walks through authoring that request, starting from the smallest possible DGDR and layering on workload targets, search strategy, hardware sizing, model caching, runtime autoscaling, and review-before-deploy as you need them. Each step builds on the previous one. For the component relationships and guidance on choosing DGDR, see the [Auto Deployment overview](overview.mdx). For the full field table and lifecycle reference, see the [DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx); for ready-to-copy manifests, see [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx).
+This guide walks through authoring that request, starting from the smallest possible DGDR and layering on workload targets, search strategy, hardware sizing, model caching, runtime autoscaling, KV-aware routing, and review-before-deploy as you need them. Each step builds on the previous one. For the component relationships and guidance on choosing DGDR, see the [Auto Deployment overview](overview.mdx). For the full field table and lifecycle reference, see the [DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx); for ready-to-copy manifests, see [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx).
 
 > [!NOTE]
 > In a release installation, when you omit `spec.image`, the DGDR webhook selects
@@ -47,8 +47,8 @@ spec:
   # sla: { ... }                  # latency targets (Step 2)
   # hardware: { ... }             # override auto-detected GPUs (Step 4)
   # modelCache: { ... }           # mount cached weights (Step 5)
-  # features: { planner: { ... } }# runtime autoscaling (Step 6)
-  # overrides: { ... }            # customize the generated DGD (Step 7)
+  # features: { ... }             # runtime autoscaling (Step 6), KV routing (Step 7)
+  # overrides: { ... }            # customize the generated DGD (optional section)
 ```
 
 The steps below fill in these fields for progressively more demanding deployments. For the complete field reference and defaults, see the [DGDR Reference — Field Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#spec-reference).
@@ -247,6 +247,27 @@ The Planner's `sla` optimization target reads live TTFT/ITL from Prometheus, so 
 
 </Step>
 
+<Step title="Enable KV-aware routing">
+
+KV-aware routing makes the Frontend select the worker most likely to have the prompt prefix cached, balanced against worker load. To enable it in the generated deployment, set `features.kvRouter.enabled` to `true`. Available since v1.5.0.
+
+```yaml
+spec:
+  model: Qwen/Qwen3-0.6B
+  features:
+    kvRouter:
+      enabled: true
+```
+
+DGDR sets `DYN_ROUTER_MODE=kv` on the generated Frontend. You can combine `features.kvRouter` with `features.planner`. For how the Frontend selects workers, see [Using the Dynamo Frontend](../kv-aware-routing/dynamo-frontend.md).
+
+> [!NOTE]
+> `spec.overrides.dgd` takes precedence over `features.kvRouter`. An override that sets
+> `DYN_ROUTER_MODE` or passes `--router-mode` on the Frontend container replaces the routing mode
+> that this feature selects. See [Optional: Customize the generated DGD](#optional-customize-the-generated-dgd).
+
+</Step>
+
 <Step title="Review the generated DGD">
 
 For production, inspect the generated DGD before it deploys. Set `autoApply: false` so the DGDR stops at `Ready` and stores the config instead of deploying it.
@@ -370,12 +391,15 @@ Use `spec.overrides.dgd` when the generated DGD needs a field that DGDR does not
 Provide a partial `nvidia.com/v1beta1` DGD. DGDR merges matching components, containers, and
 environment variables by `name` after profiling selects a configuration.
 
-For example, enable KV-aware routing on the generated `Frontend` component:
+For example, set the KV router temperature on the generated `Frontend` component:
 
 ```yaml
 spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
+  features:
+    kvRouter:
+      enabled: true
   overrides:
     dgd:
       apiVersion: nvidia.com/v1beta1
@@ -388,8 +412,8 @@ spec:
               containers:
               - name: main
                 env:
-                - name: DYN_ROUTER_MODE
-                  value: kv
+                - name: DYN_ROUTER_TEMPERATURE
+                  value: "0.5"
 ```
 
 Add overrides before profiling starts, using the exact, case-sensitive component names generated
@@ -420,7 +444,7 @@ for the current profiler names by backend and topology.
 > overrides. Include the complete desired argument list for replacement, or use the append modifier
 > described below.
 
-For example, append KV routing flags to the generated frontend arguments:
+For example, append the KV router temperature flag to the generated frontend arguments:
 
 ```yaml
 spec:
@@ -438,8 +462,8 @@ spec:
                 $patch:
                   args: append
                 args:
-                - --router-mode
-                - kv
+                - --router-temperature
+                - "0.5"
 ```
 
 To add flags to a container with explicit generated arguments, set `$patch.args` to `append` on that
