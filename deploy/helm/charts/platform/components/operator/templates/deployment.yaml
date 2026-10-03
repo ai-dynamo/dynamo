@@ -64,6 +64,10 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.controllerManager.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if and (not .Values.namespaceRestriction.enabled) .Values.upgradeCRD }}
       initContainers:
       - name: crd-apply
