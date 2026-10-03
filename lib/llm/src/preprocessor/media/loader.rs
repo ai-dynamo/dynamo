@@ -17,7 +17,7 @@ use dynamo_runtime::error::{DynamoError, ErrorType};
 
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
+use super::rdma::{DataType, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent};
 use super::require_image_url;
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -642,6 +642,7 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
+        drain_nixl_notifications(&self.nixl_agent);
         let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
 
         // Insert into the cache on the way out. We only cache image inputs
