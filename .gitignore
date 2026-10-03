@@ -133,7 +133,11 @@ core.*
 # Ruler Generated Files
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
-/.cursor
+/.cursor/**
+!/.cursor/
+!/.cursor/environment.json
+!/.cursor/cloud-agent-install.sh
+!/.cursor/setup-personal-skills.sh
 /.claude/*
 !/.claude/skills
 /.agents/*
