@@ -1,0 +1,30 @@
+[
+ {
+  "class": "cpu-192t-768g",
+  "hours": 3.5,
+  "id": "slurm:node-a01",
+  "kind": "slurm",
+  "mem": "400G",
+  "node": "node-a01",
+  "partition": "cpu-partition-a",
+  "rank": 1
+ },
+ {
+  "class": "workstation",
+  "hours": 4.8,
+  "id": "ws:0",
+  "kind": "local",
+  "rank": 2,
+  "slots": 20
+ },
+ {
+  "class": "cpu-128t-256g",
+  "hours": 5.5,
+  "id": "slurm:node-b01",
+  "kind": "slurm",
+  "mem": "160G",
+  "node": "node-b01",
+  "partition": "cpu-partition-b",
+  "rank": 3
+ }
+]
