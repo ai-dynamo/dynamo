@@ -592,9 +592,9 @@ struct FixedKvTransferPolicy {
 }
 
 impl KvTransferPolicy for FixedKvTransferPolicy {
-    fn decide(&mut self, input: KvTransferInput) -> KvTransferAction {
+    fn decide(&mut self, input: KvTransferInput<'_>) -> KvTransferAction {
         self.decisions.lock().push((
-            input.worker(),
+            input.target(),
             input.local_prefix_blocks(),
             input.source_prefix_blocks(),
         ));
@@ -606,7 +606,9 @@ impl KvTransferPolicy for FixedKvTransferPolicy {
 async fn kv_transfer_policy_controls_the_router_hint() {
     for (action, expect_hint) in [
         (KvTransferAction::Default, true),
+        (KvTransferAction::FetchFrom(0), true),
         (KvTransferAction::Skip, false),
+        (KvTransferAction::FetchFrom(5), false),
     ] {
         let decisions = KvTransferDecisions::default();
         let factory_decisions = Arc::clone(&decisions);
@@ -634,6 +636,105 @@ async fn kv_transfer_policy_controls_the_router_hint() {
         assert!(response.kv_hint.is_none());
         assert_eq!(decisions.lock().len(), 1);
     }
+}
+
+type OfferedSources = Arc<parking_lot::Mutex<Vec<(Option<WorkerWithDpRank>, u32)>>>;
+
+/// Prefers a source in the selected worker's transfer domain, else keeps the router's choice.
+struct SameDomainPolicy {
+    offered: OfferedSources,
+}
+
+impl KvTransferPolicy for SameDomainPolicy {
+    fn decide(&mut self, input: KvTransferInput<'_>) -> KvTransferAction {
+        self.offered.lock().extend(
+            input
+                .sources()
+                .iter()
+                .map(|source| (source.worker(), source.prefix_blocks())),
+        );
+        let domain = |worker| {
+            input
+                .worker_metadata(worker)
+                .and_then(|metadata| metadata.kv_transfer_domain())
+        };
+        let Some(target_domain) = domain(input.target()) else {
+            return KvTransferAction::Default;
+        };
+        input
+            .sources()
+            .iter()
+            .position(|source| source.worker().and_then(domain) == Some(target_domain))
+            .map_or(KvTransferAction::Default, KvTransferAction::FetchFrom)
+    }
+}
+
+#[tokio::test]
+async fn kv_transfer_policy_chooses_among_sources() {
+    use crate::indexer::KvIndexerInterface;
+    use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+
+    let offered = OfferedSources::default();
+    let factory_offered = Arc::clone(&offered);
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, role, _| {
+        with_kv_transfer_policy(
+            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label()),
+            Box::new(SameDomainPolicy {
+                offered: Arc::clone(&factory_offered),
+            }),
+        )
+    });
+    let in_rack = |request: &mut WorkerRequest, rack: &str| {
+        hint_capable(request);
+        request.kv_transfer_domain = Some(rack.to_string());
+    };
+    // Worker 1 holds both blocks in rack b; worker 2 is the target in rack a.
+    let (core, entry, tokens) = hint_fixture_with_policy(
+        |request| {
+            in_rack(
+                request,
+                if request.worker_id == 1 {
+                    "rack-b"
+                } else {
+                    "rack-a"
+                },
+            )
+        },
+        factory,
+    )
+    .await;
+    // Worker 3 holds only the first block, in rack a.
+    let mut worker3 = worker_with_kv_events(3);
+    in_rack(&mut worker3, "rack-a");
+    core.upsert_worker(worker3).await.expect("worker upsert");
+    let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
+        .into_iter()
+        .map(|hash| hash.0)
+        .collect();
+    entry
+        .indexer
+        .apply_event_routed(store_event(3, 0, 1, &[], &hashes[..1], StorageTier::Device))
+        .await
+        .unwrap();
+    if let Indexer::Single { primary, .. } = &entry.indexer {
+        let _ = primary.flush().await;
+    }
+
+    let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+
+    // Both sources are offered, longest prefix first; the policy takes the same-rack one.
+    assert_eq!(
+        *offered.lock(),
+        vec![
+            (Some(WorkerWithDpRank::new(1, 0)), 2),
+            (Some(WorkerWithDpRank::new(3, 0)), 1),
+        ]
+    );
+    let hint = response.kv_hint.expect("hint from the chosen source");
+    let payload: KvSourceLocationsPayload =
+        serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap()).unwrap();
+    assert_eq!(payload.source_control_endpoint, "tcp://worker-3:9000");
+    assert_eq!(payload.block_hashes.len(), 1);
 }
 
 #[tokio::test]

@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::plugins::worker_selection::experimental::{
-    KvTransferAction, KvTransferInput, KvTransferPolicy,
+    KvTransferAction, KvTransferInput, KvTransferPolicy, KvTransferSource,
 };
 use parking_lot::Mutex;
 
@@ -35,51 +35,48 @@ pub(super) fn transfer_hint_for_selection(
     let target_metadata = target_config.kv_hint_transfer_metadata_for_dp_rank(target.dp_rank)?;
 
     let prefix_blocks_to_beat = usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
-    let (source, block_hashes) =
-        candidates.best_source(prefix_blocks_to_beat, |source| match source {
-            KvTransferCandidateSource::Worker(worker) => {
-                worker != target
-                    && configs.get(&worker.worker_id).is_some_and(|config| {
-                        config.kv_event_source_mode.as_deref() != Some("state_agent_v2")
-                            && config
-                                .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)
-                                .is_some_and(|source_metadata| {
-                                    source_metadata.worker_type == target_metadata.worker_type
-                                        && source_metadata
-                                            .source_control_endpoint
-                                            .is_some_and(|endpoint| !endpoint.is_empty())
-                                })
-                    })
-            }
-            KvTransferCandidateSource::CacheOwner(owner) => candidates
-                .routing_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.router_hint_source(owner))
-                .is_some_and(|source| {
-                    source.attached_worker != Some(target)
-                        && source.metadata.worker_type == target_metadata.worker_type
-                        && !source.metadata.source_control_endpoint.is_empty()
-                }),
-        })?;
-    if let Some(transfer_policy) = transfer_policy {
-        let input = KvTransferInput {
-            worker: target,
-            local_prefix_blocks: target_cached_prefix_blocks,
-            source_prefix_blocks: u32::try_from(block_hashes.len()).unwrap_or(u32::MAX),
-        };
-        let action = transfer_policy.lock().decide(input);
-        tracing::debug!(
-            worker_id = target.worker_id,
-            dp_rank = target.dp_rank,
-            local_prefix_blocks = input.local_prefix_blocks,
-            source_prefix_blocks = input.source_prefix_blocks,
-            ?action,
-            "KV transfer policy decision"
-        );
-        if action == KvTransferAction::Skip {
-            return None;
+    let is_eligible_source = |source| match source {
+        KvTransferCandidateSource::Worker(worker) => {
+            worker != target
+                && configs.get(&worker.worker_id).is_some_and(|config| {
+                    config.kv_event_source_mode.as_deref() != Some("state_agent_v2")
+                        && config
+                            .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)
+                            .is_some_and(|source_metadata| {
+                                source_metadata.worker_type == target_metadata.worker_type
+                                    && source_metadata
+                                        .source_control_endpoint
+                                        .is_some_and(|endpoint| !endpoint.is_empty())
+                            })
+                })
         }
-    }
+        KvTransferCandidateSource::CacheOwner(owner) => candidates
+            .routing_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.router_hint_source(owner))
+            .is_some_and(|source| {
+                source.attached_worker != Some(target)
+                    && source.metadata.worker_type == target_metadata.worker_type
+                    && !source.metadata.source_control_endpoint.is_empty()
+            }),
+    };
+    let (source, block_hashes) = match transfer_policy {
+        None => candidates.best_source(prefix_blocks_to_beat, is_eligible_source)?,
+        Some(transfer_policy) => {
+            let (source, prefix_blocks) = policy_source(
+                transfer_policy,
+                configs,
+                target,
+                target_cached_prefix_blocks,
+                candidates,
+                is_eligible_source,
+            )?;
+            (
+                source,
+                candidates.block_hashes.get(..prefix_blocks)?.to_vec(),
+            )
+        }
+    };
     let source_control_endpoint = match source {
         KvTransferCandidateSource::Worker(worker) => configs
             .get(&worker.worker_id)?
@@ -101,4 +98,77 @@ pub(super) fn transfer_hint_for_selection(
         source_control_endpoint,
         block_hashes,
     })
+}
+
+/// Let the partition's fetch-hint policy choose among every eligible source. Sources are offered
+/// longest prefix first, with the same tie-break as [`KvTransferCandidates::best_source`], so
+/// index 0 is the router's default choice.
+fn policy_source(
+    transfer_policy: &Mutex<Box<dyn KvTransferPolicy>>,
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    target: WorkerWithDpRank,
+    local_prefix_blocks: u32,
+    candidates: &KvTransferCandidates,
+    mut is_eligible_source: impl FnMut(KvTransferCandidateSource) -> bool,
+) -> Option<(KvTransferCandidateSource, usize)> {
+    let prefix_blocks_to_beat = usize::try_from(local_prefix_blocks).unwrap_or(usize::MAX);
+    let mut sources: Vec<KvTransferSource> = candidates
+        .owner_prefix_blocks
+        .iter()
+        .copied()
+        .filter(|(source, blocks)| {
+            *blocks > prefix_blocks_to_beat
+                && *blocks <= candidates.block_hashes.len()
+                && is_eligible_source(*source)
+        })
+        .map(|(source, prefix_blocks)| KvTransferSource {
+            source,
+            worker: match source {
+                KvTransferCandidateSource::Worker(worker) => Some(worker),
+                KvTransferCandidateSource::CacheOwner(owner) => candidates
+                    .routing_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.router_hint_source(owner))
+                    .and_then(|source| source.attached_worker),
+            },
+            prefix_blocks,
+        })
+        .collect();
+    if sources.is_empty() {
+        return None;
+    }
+    sources.sort_unstable_by(|left, right| {
+        right
+            .prefix_blocks
+            .cmp(&left.prefix_blocks)
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    let action = transfer_policy.lock().decide(KvTransferInput {
+        target,
+        local_prefix_blocks,
+        sources: &sources,
+        workers: configs,
+    });
+    let chosen = match action {
+        KvTransferAction::Skip => None,
+        KvTransferAction::FetchFrom(index) => sources.get(index),
+        KvTransferAction::Default => sources.first(),
+    };
+    tracing::debug!(
+        worker_id = target.worker_id,
+        dp_rank = target.dp_rank,
+        local_prefix_blocks,
+        source_count = sources.len(),
+        chosen_prefix_blocks = chosen.map(|source| source.prefix_blocks),
+        ?action,
+        "KV transfer policy decision"
+    );
+    if chosen.is_none() && action != KvTransferAction::Skip {
+        tracing::warn!(
+            ?action,
+            source_count = sources.len(),
+            "KV transfer policy chose a source out of range; attaching no hint"
+        );
+    }
+    chosen.map(|source| (source.source, source.prefix_blocks))
 }
