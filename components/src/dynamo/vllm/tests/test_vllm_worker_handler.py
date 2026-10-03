@@ -24,6 +24,8 @@ import dynamo.vllm.handlers as mod
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.vllm.health_check import VllmPrefillHealthCheckPayload
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
@@ -1302,6 +1304,134 @@ class TestDecodeWorkerMultimodalBranching:
             )
 
         assert exc_info.value is server_error
+
+
+@pytest.fixture
+def prefill_canary_handler():
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    handler.config = _make_config(disaggregation_mode="PREFILL")
+    handler.default_sampling_params = {}
+    handler.model_max_len = 4096
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._build_prompt_from_request = MagicMock(
+        return_value={"prompt_token_ids": [1]}
+    )
+
+    async def prepare_input(request, *args):
+        # Input preparation may replace the request without internal markers.
+        prepared = dict(request)
+        prepared.pop(HEALTH_CHECK_KEY, None)
+        return PreparedMultimodalInput(
+            request=prepared, multi_modal_data=None, mm_processor_kwargs=None
+        )
+
+    handler._multimodal_request_processor = SimpleNamespace(
+        validate_multimodal_request=MagicMock(),
+        prepare_input=AsyncMock(side_effect=prepare_input),
+        build_prefill_handoff=MagicMock(return_value={"embeddings": "handoff"}),
+    )
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler._abort_monitor = abort_monitor
+    response = _make_engine_response()
+    response.prompt_token_ids = [1]
+    response.outputs = [SimpleNamespace(token_ids=[2])]
+    response.num_cached_tokens = 0
+
+    async def generate(*args, **kwargs):
+        yield response
+
+    handler.engine_client = SimpleNamespace(
+        generate=MagicMock(side_effect=generate), vllm_config=object()
+    )
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom_payload", [False, True])
+async def test_prefill_canary_runs_locally_without_handoff(
+    prefill_canary_handler, monkeypatch, custom_payload
+):
+    handler = prefill_canary_handler
+    extra_args = {"kv_transfer_params": {"do_remote_decode": True}, "other": 7}
+    if custom_payload:
+        monkeypatch.setenv(
+            "DYN_HEALTH_CHECK_PAYLOAD",
+            json.dumps(
+                {
+                    "token_ids": [1],
+                    "sampling_options": {"extra_args": extra_args},
+                    "stop_conditions": {"max_tokens": 8},
+                }
+            ),
+        )
+    else:
+        monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    request = VllmPrefillHealthCheckPayload().to_dict()
+    original_extra_args = request.get("sampling_options", {}).get("extra_args")
+
+    with patch.object(mod, "make_kv_connector_protocol") as make_protocol:
+        chunks = [chunk async for chunk in handler.generate(request, MagicMock())]
+
+    make_protocol.assert_not_called()
+    handler.engine_client.generate.assert_called_once()
+    sampling = handler.engine_client.generate.call_args.args[1]
+    assert sampling.max_tokens == sampling.min_tokens == 1
+    assert "kv_transfer_params" not in (sampling.extra_args or {})
+    if custom_payload:
+        assert sampling.extra_args == {"other": 7}
+        assert sampling.extra_args is not original_extra_args
+        assert original_extra_args == extra_args
+    assert chunks[0]["token_ids"] == [2]
+    assert chunks[0]["completion_usage"]["completion_tokens"] == 1
+    assert chunks[0]["disaggregated_params"] is None
+    handler._multimodal_request_processor.build_prefill_handoff.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", [None, False, 1, "true"])
+@pytest.mark.parametrize(
+    "decode_params",
+    [{"remote_block_ids": [1]}, {"transfer_id": "mooncake-transfer"}, {}],
+    ids=["nixl", "mooncake", "lmcache"],
+)
+async def test_prefill_non_canary_keeps_protocol_handoff(
+    prefill_canary_handler, marker, decode_params
+):
+    handler = prefill_canary_handler
+    request = _make_raw_frontend_request()
+    if marker is not None:
+        request[HEALTH_CHECK_KEY] = marker
+    protocol = MagicMock(spec=mod.KvConnectorProtocol)
+    protocol.prefill_request_kv_transfer_params.return_value = {
+        "do_remote_decode": True
+    }
+    protocol.decode_request_kv_transfer_params.return_value = decode_params
+    with patch.object(mod, "make_kv_connector_protocol", return_value=protocol):
+        chunks = [chunk async for chunk in handler.generate(request, MagicMock())]
+
+    sampling = handler.engine_client.generate.call_args.args[1]
+    assert sampling.extra_args["kv_transfer_params"] == {"do_remote_decode": True}
+    protocol.prefill_request_kv_transfer_params.assert_called_once_with()
+    protocol.decode_request_kv_transfer_params.assert_called_once()
+    assert chunks[0]["disaggregated_params"] == {
+        "kv_transfer_params": decode_params,
+        "embedding_params": {"embeddings": "handoff"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_prefill_canary_preserves_engine_error(prefill_canary_handler):
+    handler = prefill_canary_handler
+    handler.engine_client.generate.side_effect = RuntimeError("engine failed")
+    with pytest.raises(RuntimeError, match="engine failed"):
+        async for _ in handler.generate(
+            {"token_ids": [1], HEALTH_CHECK_KEY: True}, MagicMock()
+        ):
+            pass
 
 
 @pytest.mark.asyncio
