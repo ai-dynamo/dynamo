@@ -58,13 +58,16 @@ def extract_from_completion_output(
     num_output_tokens_so_far: int,
     tokenizer: Any = None,
     *,
+    token_ids_delta: Optional[list[int]] = None,
     fallback_to_first_on_missing: bool = False,
     include_bytes: bool = False,
 ) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]]]:
     """Extract logprobs from a vLLM/TRT-LLM-shaped CompletionOutput.
 
     ``num_output_tokens_so_far`` slices the per-chunk window out of the
-    cumulative array. ``tokenizer`` decodes token ids when the engine
+    cumulative array. When ``token_ids_delta`` is supplied, it is the already
+    sliced token window for that chunk and the cumulative ``output.token_ids``
+    field is not read. ``tokenizer`` decodes token ids when the engine
     didn't populate ``decoded_token``. ``fallback_to_first_on_missing``
     falls back to the first dict entry when the selected token is
     absent (TRT-LLM corner case). ``include_bytes`` adds a UTF-8 byte
@@ -78,17 +81,22 @@ def extract_from_completion_output(
     """
     # An empty list here means the client asked for no logprobs -- TRT-LLM leaves
     # the field at `[]` rather than None. Testing `is None` would miss that case
-    # and run on to the `token_ids` copy below, which grows with the request and
-    # is discarded a few lines later.
+    # and run on to token-id handling below, where cumulative callers would copy
+    # the growing request history only to discard it a few lines later.
     if not getattr(output, "logprobs", None):
         return None, None
 
-    token_ids = list(getattr(output, "token_ids", None) or [])
-    if not token_ids or num_output_tokens_so_far >= len(token_ids):
-        return None, None
+    if token_ids_delta is None:
+        token_ids = list(getattr(output, "token_ids", None) or [])
+        if not token_ids or num_output_tokens_so_far >= len(token_ids):
+            return None, None
+        new_token_ids = token_ids[num_output_tokens_so_far:]
+    else:
+        new_token_ids = token_ids_delta
+        if not new_token_ids:
+            return None, None
 
     new_logprobs = output.logprobs[num_output_tokens_so_far:]
-    new_token_ids = token_ids[num_output_tokens_so_far:]
     new_logprobs = new_logprobs[: len(new_token_ids)]
     if not new_logprobs:
         return None, None
