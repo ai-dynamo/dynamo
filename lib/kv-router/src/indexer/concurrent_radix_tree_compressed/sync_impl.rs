@@ -17,6 +17,15 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         event_receiver: flume::Receiver<WorkerTask>,
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> anyhow::Result<()> {
+        self.worker_with_retention(event_receiver.into(), metrics)
+    }
+
+    #[cfg_attr(feature = "profile", inline(never))]
+    fn worker_with_retention(
+        &self,
+        mut event_receiver: crate::indexer::WorkerTaskReceiver,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
         let mut approximate_lru = ApproximateLruLane::default();
