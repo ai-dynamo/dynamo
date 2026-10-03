@@ -163,6 +163,7 @@ SKIP_CODEGEN = settings['skip_codegen']
 _crd_cmd = (
     'go run ./cmd/crd-apply --crds-dir=' + CRD_DIR +
     ' --version=' + OPERATOR_VERSION +
+    ' --lpx-enabled=' + str(HELM_VALUES.get('dynamo-operator.lpx.enabled', False)).lower() +
     ' --conversion-webhook-service-name=dynamo-dynamo-operator-webhook-service' +
     ' --conversion-webhook-service-namespace=' + NAMESPACE
 )
