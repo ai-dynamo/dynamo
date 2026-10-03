@@ -159,6 +159,102 @@ class TestValidateTtsRequest:
         handler._validate_tts_request(req)  # Should not raise
 
 
+class TestCheckpointVariant:
+    @staticmethod
+    def _handler(tts_model_type=None, model=None):
+        handler = _make_audio_handler()
+        handler.engine_client.model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(tts_model_type=tts_model_type), model=model
+        )
+        return handler
+
+    @staticmethod
+    def _request(task):
+        req = NvCreateAudioSpeechRequest(input="hello", task_type=task)
+        if task == "VoiceDesign":
+            req.instructions = "cheerful"
+        elif task == "Base":
+            req.ref_audio = "data:audio/wav;base64,AAAA"
+        return req
+
+    @pytest.mark.parametrize(
+        "configured, variant",
+        [
+            ("custom_voice", "CustomVoice"),
+            ("VoiceDesign", "VoiceDesign"),
+            ("base", "Base"),
+        ],
+    )
+    def test_the_checkpoint_task_is_accepted(self, configured, variant):
+        handler = self._handler(tts_model_type=configured)
+        handler._validate_tts_request(self._request(variant))
+
+    def test_another_task_is_refused(self):
+        handler = self._handler(tts_model_type="custom_voice")
+        with pytest.raises(ValueError, match="does not support"):
+            handler._validate_tts_request(self._request("Base"))
+
+    def test_reference_inputs_imply_base_without_task_type(self):
+        handler = self._handler(tts_model_type="base")
+        req = NvCreateAudioSpeechRequest(
+            input="hello", ref_audio="data:audio/wav;base64,AAAA"
+        )
+        handler._validate_tts_request(req)
+        assert handler._tts_task_type(req) == "Base"
+
+    def test_reference_inputs_without_task_type_are_refused_by_other_checkpoints(
+        self,
+    ):
+        handler = self._handler(tts_model_type="custom_voice")
+        req = NvCreateAudioSpeechRequest(input="hello", ref_text="hi")
+        with pytest.raises(ValueError, match="does not support"):
+            handler._validate_tts_request(req)
+
+    @pytest.mark.parametrize(
+        "model, task",
+        [
+            ("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", "Base"),
+            ("/models/Qwen3-TTS-12Hz-1.7B-Base/snapshots", "CustomVoice"),
+            ("/models/qwen3_tts.voice-design", "CustomVoice"),
+        ],
+    )
+    def test_model_path_is_used_without_metadata(self, model, task):
+        handler = self._handler(model=model)
+        with pytest.raises(ValueError, match="does not support"):
+            handler._validate_tts_request(self._request(task))
+
+    @pytest.mark.parametrize(
+        "model, restricted",
+        [("/models/Qwen3-TTS-12Hz-0.6B-CustomVoice", True), (None, False)],
+    )
+    def test_missing_hf_config_falls_back_to_the_model_path(self, model, restricted):
+        handler = self._handler()
+        handler.engine_client.model_config = SimpleNamespace(model=model)
+        req = self._request("Base")
+        if restricted:
+            with pytest.raises(ValueError, match="does not support"):
+                handler._validate_tts_request(req)
+        else:
+            handler._validate_tts_request(req)
+
+    def test_unknown_variant_is_not_restricted(self):
+        # "database" must not read as a Base checkpoint.
+        handler = self._handler(tts_model_type="other", model="/data/database")
+        handler._validate_tts_request(self._request("CustomVoice"))
+
+    def test_metadata_wins_over_the_model_path(self):
+        handler = self._handler(tts_model_type="base", model="/m/x-CustomVoice")
+        handler._validate_tts_request(self._request("Base"))
+
+    @pytest.mark.asyncio
+    async def test_mismatch_is_refused_before_ref_audio_is_fetched(self):
+        handler = self._handler(tts_model_type="custom_voice")
+        handler._resolve_ref_audio = fetch = MagicMock()
+        with pytest.raises(ValueError, match="does not support"):
+            await handler._engine_inputs_tts(self._request("Base"), stream_audio=False)
+        fetch.assert_not_called()
+
+
 class TestIsTtsModel:
     """Tests for _is_tts_model detection."""
 
@@ -643,6 +739,14 @@ class TestResolveRefAudio:
         wav = self._wav_bytes()
         data, rate = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
         assert len(data) == 1600 and rate == 16000
+
+    def test_returns_a_plain_list(self):
+        # A NumPy array nested in the prompt reaches the engine as a descriptor.
+        handler = _make_audio_handler()
+        data, _ = asyncio.run(
+            handler._resolve_ref_audio(self._data_uri(self._wav_bytes()))
+        )
+        assert type(data) is list and type(data[0]) is float
 
     def test_decodes_a_percent_encoded_payload(self):
         # A data URI that travelled through a URL has '+' and '/' escaped.
