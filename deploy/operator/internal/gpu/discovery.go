@@ -252,7 +252,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //
 // When filterSKU is non-empty, only nodes whose inferred SKU matches are
 // considered. When empty, the best node is selected first (highest GPU count,
-// then VRAM) and then only nodes with the same SKU are counted.
+// then VRAM) and then only nodes with the same inferred SKU or unknown model
+// are counted.
 //
 // The function performs the following:
 //
@@ -264,7 +265,7 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //  6. Selects the "best" GPU node (filtered by SKU when set) based on:
 //     - Highest GPU count
 //     - Highest VRAM per GPU (tie-breaker)
-//  7. Counts only nodes matching the selected SKU for NodesWithGPUs.
+//  7. Counts only nodes matching the selected GPU group for NodesWithGPUs.
 //  8. Caches the result per SKU for a short duration to avoid repeated scraping.
 //
 // Behavior Notes:
@@ -324,6 +325,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 	}
 }
 
+// discoverGPUsFromDCGMFilteredUncached scrapes running DCGM exporter pods and
+// aggregates the selected GPU group without reading from or writing to cache.
 func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
@@ -343,6 +346,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	type nodeInfo struct {
 		info     *GPUInfo
 		sku      nvidiacomv1beta1.GPUSKUType
+		groupKey string
 		nodeName string
 	}
 	allNodes := make([]nodeInfo, 0, len(dcgmPods))
@@ -359,7 +363,13 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 			continue
 		}
 
-		allNodes = append(allNodes, nodeInfo{info: info, sku: InferHardwareSystem(info.Model), nodeName: pod.Spec.NodeName})
+		sku := InferHardwareSystem(info.Model)
+		allNodes = append(allNodes, nodeInfo{
+			info:     info,
+			sku:      sku,
+			groupKey: gpuNodeGroupKey(sku, info.Model, pod.Spec.NodeName),
+			nodeName: pod.Spec.NodeName,
+		})
 	}
 
 	if len(allNodes) == 0 {
@@ -372,6 +382,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	// Select best node (only from matching SKU when filtered).
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
+	var bestGroupKey string
 	for _, n := range allNodes {
 		if filterSKU != "" && n.sku != filterSKU {
 			continue
@@ -382,6 +393,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 				n.info.VRAMPerGPU > bestNode.VRAMPerGPU) {
 			bestNode = n.info
 			bestSKU = n.sku
+			bestGroupKey = n.groupKey
 		}
 	}
 
@@ -392,15 +404,14 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 		return nil, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
 	}
 
-	// Count only nodes with the same SKU as the selected best node,
-	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
+	// Detect RDMA on matching nodes only. On a cold cache and a no-RDMA
 	// cluster, this performs one Node read per matching node; that keeps a
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
-		if n.sku != bestSKU {
+		if n.groupKey != bestGroupKey {
 			continue
 		}
 		nodesWithGPUs++
@@ -433,6 +444,21 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 
 	return bestNode, nil
 }
+
+// gpuNodeGroupKey groups recognized models by inferred SKU, unknown models by
+// normalized product name, and empty models by node name. This keeps distinct
+// unsupported models isolated while preserving grouping across known SKU
+// variants.
+func gpuNodeGroupKey(sku nvidiacomv1beta1.GPUSKUType, model, nodeName string) string {
+	if sku != "" {
+		return "sku:" + string(sku)
+	}
+	if normalizedModel := normalize(model); normalizedModel != "" {
+		return "model:" + normalizedModel
+	}
+	return "node:" + nodeName
+}
+
 func buildDCGMEndpoint(podIP string) string {
 	template := os.Getenv("DCGM_METRICS_ENDPOINT_TEMPLATE")
 	if template == "" {
@@ -781,7 +807,8 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 //
 // When filterSKU is non-empty, only nodes whose inferred SKU matches are
 // considered for selection and counting. When empty, the best node is selected
-// first and then only nodes with the same SKU are counted.
+// first and then only nodes with the same inferred SKU or unknown model are
+// counted.
 //
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
@@ -801,8 +828,9 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 
 	// Collect per-node GPU info with inferred SKU.
 	type nodeInfo struct {
-		info *GPUInfo
-		sku  nvidiacomv1beta1.GPUSKUType
+		info     *GPUInfo
+		sku      nvidiacomv1beta1.GPUSKUType
+		groupKey string
 	}
 	allNodes := make([]nodeInfo, 0, len(nodeList.Items))
 	for i := range nodeList.Items {
@@ -822,12 +850,17 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 			"model", gpuInfo.Model,
 			"vram", gpuInfo.VRAMPerGPU,
 			"sku", sku)
-		allNodes = append(allNodes, nodeInfo{info: gpuInfo, sku: sku})
+		allNodes = append(allNodes, nodeInfo{
+			info:     gpuInfo,
+			sku:      sku,
+			groupKey: gpuNodeGroupKey(sku, gpuInfo.Model, node.Name),
+		})
 	}
 
 	// Select best node (only from matching SKU when filtered).
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
+	var bestGroupKey string
 	for _, n := range allNodes {
 		if filterSKU != "" && n.sku != filterSKU {
 			continue
@@ -837,6 +870,7 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 			(n.info.GPUsPerNode == bestNode.GPUsPerNode && n.info.VRAMPerGPU > bestNode.VRAMPerGPU) {
 			bestNode = n.info
 			bestSKU = n.sku
+			bestGroupKey = n.groupKey
 		}
 	}
 	if bestNode == nil {
@@ -849,15 +883,14 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
 
-	// Count only nodes with the same SKU as the selected best node,
-	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
+	// Detect RDMA on matching nodes only. On a cold cache and a no-RDMA
 	// cluster, this performs one Node read per matching node; that keeps a
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
-		if n.sku == bestSKU {
+		if n.groupKey == bestGroupKey {
 			nodesWithGPUs++
 			if !rdmaDetected {
 				rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.info.NodeName)
