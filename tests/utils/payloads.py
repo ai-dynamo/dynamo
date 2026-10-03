@@ -219,8 +219,32 @@ class ChatPayload(BasePayload):
         )
 
 
+def _validate_chat_token_usage(result: Dict[str, Any]) -> None:
+    usage = result.get("usage")
+    assert isinstance(usage, dict), f"Missing usage: {result!r}"
+    nvext = result.get("nvext") or {}
+    for kind in ("completion", "prompt"):
+        count = usage.get(f"{kind}_tokens")
+        assert type(count) is int and count > 0, usage
+        field = f"{kind}_token_ids"
+        token_ids = nvext.get(field)
+        assert isinstance(token_ids, list) and all(
+            type(token) is int and token >= 0 for token in token_ids
+        ), f"Missing or invalid {field}: {token_ids!r}"
+        assert (
+            len(token_ids) == count
+        ), f"{field} count does not match usage: {token_ids!r}, {usage!r}"
+    assert usage.get("total_tokens") == (
+        usage["prompt_tokens"] + usage["completion_tokens"]
+    ), f"Inconsistent total token usage: {usage!r}"
+
+
+@dataclass
 class DisaggregatedChatPayload(ChatPayload):
     """Require a completed chat request served by distinct prefill and decode workers."""
+
+    expected_finish_reason: str | None = None
+    expected_completion_tokens: int | None = None
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
@@ -232,6 +256,10 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError("Completion is empty")
         if choices[0].get("finish_reason") not in {"stop", "length"}:
             raise AssertionError(f"Unexpected finish reason: {choices[0]!r}")
+        if self.expected_finish_reason is not None:
+            assert (
+                choices[0]["finish_reason"] == self.expected_finish_reason
+            ), f"Expected finish reason {self.expected_finish_reason!r}: {choices[0]!r}"
 
         usage = result.get("usage")
         if not isinstance(usage, dict):
@@ -244,6 +272,11 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError(
                 f"Expected decode to generate more than the prefill token: {usage!r}"
             )
+        if self.expected_completion_tokens is not None:
+            assert (
+                completion_tokens == self.expected_completion_tokens
+            ), f"Expected {self.expected_completion_tokens} completion tokens: {usage!r}"
+            _validate_chat_token_usage(result)
 
         workers = require_router_worker_id(result, context=type(self).__name__)
         for role in ("prefill_worker_id", "decode_worker_id"):
@@ -524,12 +557,14 @@ class GuidedDecodingChatPayload(ChatPayload):
         required_keys: Optional[List[str]] = None,
         expected_json: Optional[Dict[str, Any]] = None,
         expected_finish_reason: Optional[str] = None,
+        needs_token_ids: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.required_keys = required_keys or []
         self.expected_json = expected_json
         self.expected_finish_reason = expected_finish_reason
+        self.needs_token_ids = needs_token_ids
 
     def validate(self, response, content: str) -> None:
         try:
@@ -555,6 +590,9 @@ class GuidedDecodingChatPayload(ChatPayload):
             assert json.dumps(parsed, sort_keys=True) == json.dumps(
                 self.expected_json, sort_keys=True
             ), f"Expected JSON {self.expected_json!r}, got {parsed!r}"
+        if self.needs_token_ids:
+            _validate_chat_token_usage(response.json())
+        elif self.expected_json is not None:
             usage = response.json().get("usage")
             assert usage, "Missing structured-output usage"
             for key in ("prompt_tokens", "completion_tokens"):
