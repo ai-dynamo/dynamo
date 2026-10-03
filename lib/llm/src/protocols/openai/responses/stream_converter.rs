@@ -984,8 +984,18 @@ impl ResponseStreamConverter {
     /// `self.params` rather than hardcoded at each emit site.
     fn make_sse_event(&self, event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
         let event_type = get_event_type(event);
-        let data = self.serialize_event_data(event)?;
-        Ok(Event::default().event(event_type).data(data))
+        match event {
+            ResponseStreamEvent::ResponseCreated(_)
+            | ResponseStreamEvent::ResponseInProgress(_)
+            | ResponseStreamEvent::ResponseCompleted(_)
+            | ResponseStreamEvent::ResponseFailed(_)
+            | ResponseStreamEvent::ResponseIncomplete(_)
+            | ResponseStreamEvent::ResponseQueued(_) => {
+                let data = self.serialize_event_data(event)?;
+                Ok(Event::default().event(event_type).data(data))
+            }
+            _ => Ok(Event::default().event(event_type).json_data(event)?),
+        }
     }
 
     fn serialize_event_data(
