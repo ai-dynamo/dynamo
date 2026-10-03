@@ -454,6 +454,10 @@ class CachedTokensChatPayload(ChatPayload):
     after the first one (since identical prompts should hit the prefix cache).
     """
 
+    # Bound on waiting for R1's stored KV events to reach the router index.
+    stored_events_wait_s = 10.0
+    stored_events_poll_s = 0.1
+
     def __init__(
         self,
         body: dict,
@@ -513,6 +517,12 @@ class CachedTokensChatPayload(ChatPayload):
         # mixin/subclass.
         self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
         self._metrics_baseline: Optional[tuple[float, float]] = None
+        self._stored_events_before_r1: Optional[float] = None
+
+    def body_for_iteration(self, iteration: int) -> Dict[str, Any]:
+        if iteration == 0 and self.min_avg_kv_hit_rate > 0:
+            self._stored_events_before_r1 = self._scrape_stored_events_applied()
+        return super().body_for_iteration(iteration)
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -568,7 +578,61 @@ class CachedTokensChatPayload(ChatPayload):
             and self._request_count == 1
             and self.min_avg_kv_hit_rate > 0
         ):
+            self._wait_for_r1_stored_events()
             self._metrics_baseline = self._scrape_router_kv_hit_rate()
+
+    def _wait_for_r1_stored_events(self) -> None:
+        """Wait until the router has applied a stored KV event issued after R1.
+
+        The worker publishes KV events asynchronously (for TensorRT-LLM the
+        publisher thread only starts at the first token of the first request).
+        Without this wait R2 can be routed against an index that does not hold
+        R1's blocks yet, which scores overlap 0 even though the hashes match.
+        On timeout this only warns: the router_kv_hit_rate assertion stays the
+        judge.
+        """
+        before = self._stored_events_before_r1
+        if before is None:
+            logger.warning(
+                "No stored-KV-event count captured before R1; "
+                "not waiting for the router index."
+            )
+            return
+        start = time.monotonic()
+        while True:
+            applied = self._scrape_stored_events_applied()
+            if applied is not None and applied > before:
+                logger.info(
+                    "Router applied stored KV events after R1 in %.2fs (%s -> %s)",
+                    time.monotonic() - start,
+                    before,
+                    applied,
+                )
+                return
+            if time.monotonic() - start >= self.stored_events_wait_s:
+                logger.warning(
+                    "Router applied no new stored KV events within %.1fs of R1 "
+                    "(count still %s); sending R2 anyway.",
+                    self.stored_events_wait_s,
+                    applied,
+                )
+                return
+            time.sleep(self.stored_events_poll_s)
+
+    def _scrape_stored_events_applied(self) -> Optional[float]:
+        """Return the frontend's count of successfully applied stored KV
+        events, or ``None`` if /metrics is unreachable."""
+        text = self._scrape_metrics()
+        if text is None:
+            return None
+        # Label values match METRIC_EVENT_STORED / METRIC_STATUS_OK in
+        # lib/kv-router/src/indexer/metrics.rs.
+        return sum_metric_samples(
+            text,
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kvrouter.KV_CACHE_EVENTS_APPLIED}",
+            {"event_type": "stored", "status": "ok"},
+        )
 
     def _scrape_router_kv_hit_rate(self) -> Optional[tuple[float, float]]:
         """Return ``(sum, count)`` for ``router_kv_hit_rate`` from the
@@ -576,17 +640,8 @@ class CachedTokensChatPayload(ChatPayload):
         unreachable. The component MetricsHierarchy auto-prepends
         ``dynamo_component_`` to the exported name.
         """
-        url = f"http://localhost:{self.port}/metrics"
-        try:
-            text = requests.get(url, timeout=5).text
-        except requests.RequestException as e:
-            # Narrow to HTTP/network errors per .ai/python-guidelines.md:
-            # we expect transient endpoint flakes here (timeout, connection
-            # refused while the frontend is still binding /metrics) and
-            # the strong gate has its own `is None` guard. Programming
-            # errors propagate so they surface at test-time instead of
-            # being swallowed.
-            logger.warning("Failed to scrape %s: %s", url, e)
+        text = self._scrape_metrics()
+        if text is None:
             return None
         # Compose from canonical constants so a metric rename in
         # prometheus_names cascades here instead of silently breaking
@@ -599,6 +654,16 @@ class CachedTokensChatPayload(ChatPayload):
             sum_metric_samples(text, f"{full}_sum"),
             sum_metric_samples(text, f"{full}_count"),
         )
+
+    def _scrape_metrics(self) -> Optional[str]:
+        url = f"http://localhost:{self.port}/metrics"
+        try:
+            return requests.get(url, timeout=5).text
+        except requests.RequestException as e:
+            # Only network errors: /metrics may not be bound yet and callers
+            # handle None. Programming errors still propagate.
+            logger.warning("Failed to scrape %s: %s", url, e)
+            return None
 
     def final_validation(self) -> None:
         """Assert cached_tokens >= min_cached_tokens on at least one repeat
