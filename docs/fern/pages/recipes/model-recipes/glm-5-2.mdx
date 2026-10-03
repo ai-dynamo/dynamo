@@ -40,7 +40,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.3/5.2 tuned fo
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
 <span><b>GPUs</b> 4x B200 prefill + 8x B200 decode</span>
 <span><b>Parallelism</b> DEP4 prefill / DTP8 decode</span>
-<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+<span><b>Routing</b> KV-aware, Mooncake over IB</span>
 <span><b>Context</b> Up to 500K, HiCache CPU offload</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
@@ -56,7 +56,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's GLM-5.3/5.2 tuned fo
 <span><b>Precision</b> FP8 + FP8 KV cache</span>
 <span><b>GPUs</b> 8x H200 prefill + 8x H200 decode</span>
 <span><b>Parallelism</b> TP8/EP8 prefill / TP8/DP8/EP1 decode</span>
-<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+<span><b>Routing</b> KV-aware, Mooncake over IB</span>
 <span><b>Context</b> Up to 250K</span>
 </div>
 </div>
@@ -102,7 +102,7 @@ kubectl apply -f recipes/glm-5.2/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
-When serving GLM-5.3, update every `model-path` in the target DGD to `RadixArk/GLM-5.3-NVFP4` for B200 or `zai-org/GLM-5.3` for H200, and update every `served-model-name` to `zai-org/GLM-5.3`.
+When serving GLM-5.2, update every `model-path` in the target DGD to `nvidia/GLM-5.2-NVFP4` for B200 or `zai-org/GLM-5.2-FP8` for H200, and update every `served-model-name` to `zai-org/GLM-5.2`.
 
 Then deploy the target DGD:
 
@@ -195,7 +195,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 A single AIPerf trace-replay Job — `perf/perf.yaml` — covers all four DGDs. It replays a Mooncake-format agentic trace (64K ISL / 400 OSL, 90% KV cache hit rate) at one concurrency value and writes artifacts to the shared `model-cache` PVC. The benchmark pod is co-located with a DGD frontend through `podAffinity`.
 
-Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service, `SYNTHESIS_MAX_ISL` to its context limit, and `CONCURRENCY` to the value for that target. The `CONCURRENCY` values below reproduce the [Expected Performance (run on GLM-5.2)](#expected-performance-run-on-glm-52) numbers:
+Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service, `SYNTHESIS_MAX_ISL` to its context limit, and `CONCURRENCY` to the value for that target. The `CONCURRENCY` values below reproduce the [Expected Performance (run on GLM-5.3)](#expected-performance-run-on-glm-53) numbers:
 
 | Target | `ENDPOINT` | `SYNTHESIS_MAX_ISL` | `CONCURRENCY` |
 | --- | --- | --- | --- |
@@ -213,13 +213,13 @@ kubectl wait --for=condition=Complete job/glm52-bench -n ${NAMESPACE} --timeout=
 
 For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md).
 
-## Expected Performance (run on GLM-5.2)
+## Expected Performance (run on GLM-5.3)
 
 Measured on the 15% agentic trace subset. System throughput is per-GPU output tokens per second; user throughput is the P50 per-request output rate.
 
 | | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 |---|---|---|---|---|
-| <span data-sku="b200" data-variant="agg">**B200 aggregated** (4 workers)</span><span data-sku="b200" data-variant="disagg">**B200 disaggregated** (3P1D)</span><span data-sku="h200" data-variant="agg">**H200 aggregated** (3 workers)</span><span data-sku="h200" data-variant="disagg">**H200 disaggregated** (1P1D)</span> | <span data-sku="b200" data-variant="agg">64</span><span data-sku="b200" data-variant="disagg">128</span><span data-sku="h200" data-variant="agg">32</span><span data-sku="h200" data-variant="disagg">24</span> | <span data-sku="b200" data-variant="agg">176.420</span><span data-sku="b200" data-variant="disagg">320.907</span><span data-sku="h200" data-variant="agg">54.550</span><span data-sku="h200" data-variant="disagg">68.860</span> | <span data-sku="b200" data-variant="agg">57.493</span><span data-sku="b200" data-variant="disagg">65.105</span><span data-sku="h200" data-variant="agg">52.370</span><span data-sku="h200" data-variant="disagg">53.880</span> | <span data-sku="b200" data-variant="agg">355.555</span><span data-sku="b200" data-variant="disagg">1938.059</span><span data-sku="h200" data-variant="agg">1790.000</span><span data-sku="h200" data-variant="disagg">1874.000</span> |
+| <span data-sku="b200" data-variant="agg">**B200 aggregated** (4 workers)</span><span data-sku="b200" data-variant="disagg">**B200 disaggregated** (3P1D)</span><span data-sku="h200" data-variant="agg">**H200 aggregated** (3 workers)</span><span data-sku="h200" data-variant="disagg">**H200 disaggregated** (1P1D)</span> | <span data-sku="b200" data-variant="agg">64</span><span data-sku="b200" data-variant="disagg">128</span><span data-sku="h200" data-variant="agg">32</span><span data-sku="h200" data-variant="disagg">24</span> | <span data-sku="b200" data-variant="agg">190.048</span><span data-sku="b200" data-variant="disagg">323.821</span><span data-sku="h200" data-variant="agg">60.866</span><span data-sku="h200" data-variant="disagg">84.335</span> | <span data-sku="b200" data-variant="agg">61.923</span><span data-sku="b200" data-variant="disagg">63.133</span><span data-sku="h200" data-variant="agg">57.330</span><span data-sku="h200" data-variant="disagg">61.460</span> | <span data-sku="b200" data-variant="agg">228.700</span><span data-sku="b200" data-variant="disagg">1280.100</span><span data-sku="h200" data-variant="agg">1158.200</span><span data-sku="h200" data-variant="disagg">1309.600</span> |
 
 ## Compare All Targets
 
@@ -233,12 +233,14 @@ All four targets serve GLM-5.3/5.2 on SGLang with KV-aware routing and EAGLE-sty
 | **Parallelism** | DTP4 | DEP4 / DTP8 | TP8/EP8 | TP8/EP8 prefill / TP8/DP8/EP1 decode |
 | **KV offload** | HiCache CPU | HiCache CPU | None | None |
 | **Max context** | 500K | 500K | 250K | 250K |
+| **Image** | `sglang-runtime:1.5.0` | `sglang-runtime:1.5.0` | `sglang-runtime:1.5.0` | `sglang-runtime:1.5.0` |
 
 ## Notes
 
 - Speculative decoding uses EAGLE-style MTP with draft length 3, measured at a SpeedBench acceptance length of 2.69.
 - All four targets use KV-aware routing at the frontend. The B200 targets add HiCache CPU offload; the agentic traces are shaped to show the value of KV-aware routing and offloading.
-- The disaggregated targets transfer KV over NIXL/UCX on InfiniBand.
+- The disaggregated targets transfer KV over Mooncake on InfiniBand.
+- The H200 disaggregated decode worker uses `mem-fraction-static: 0.95`; at 0.88 the per-rank KV pool is smaller than one 250K-token request.
 
 ## Limitations
 

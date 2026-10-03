@@ -22,7 +22,9 @@ Dynamo + SGLang deployment profiles for the B200 and H200 agentic workload:
 | **Speculative decoding** | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) |
 | **Context length**       | 500,000                                    | 500,000                                    | 250,000                                    | 250,000                                    |
 | **KV cache offloading**  | HiCache CPU                                | HiCache CPU                                | None                                       | None                                       |
-| **KV transfer**          | N/A                                        | NIXL/UCX over IB                           | N/A                                        | NIXL/UCX over IB                           |
+| **KV transfer**          | N/A                                        | Mooncake over IB                           | N/A                                        | Mooncake over IB                           |
+
+All four variants run on `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0` (Dynamo 1.5.0, SGLang 0.5.18).
 
 
 ## Supported features
@@ -72,9 +74,9 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 ### 4. Deploy the DGD
 
-When serving GLM-5.3, update every `model-path` in the target DGD to
-`RadixArk/GLM-5.3-NVFP4` for B200 or `zai-org/GLM-5.3` for H200, and update every
-`served-model-name` to `zai-org/GLM-5.3`.
+When serving GLM-5.2, update every `model-path` in the target DGD to
+`nvidia/GLM-5.2-NVFP4` for B200 or `zai-org/GLM-5.2-FP8` for H200, and update every
+`served-model-name` to `zai-org/GLM-5.2`.
 
 Deploy the target DGD:
 
@@ -100,15 +102,15 @@ See [perf/README.md](perf/README.md) for the full benchmark workflow — trace s
 
 Modified Mooncake traces are provided to showcase the value of KV-aware routing and CPU offloading, see [perf/README.md](perf/README.md) for details.
 
-## Performance results (run on GLM-5.2)
+## Performance results (run on GLM-5.3)
 
 
-| Workload             | Recipe                 | SKU  | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
-| -------------------- | ---------------------- | ---- | ----------- | ----------------------- | ----------------------- | ------------- |
-| Agentic (15% subset) | Aggregated (4 workers) | B200 | 64          | 176.420                 | 57.493                  | 355.555       |
-| Agentic (15% subset) | Disaggregated (3P1D)   | B200 | 128         | 320.907                 | 65.105                  | 1938.059      |
-| Agentic (15% subset) | Aggregated (3 workers) | H200 | 32          | 54.550                  | 52.370                  | 1790.000      |
-| Agentic (15% subset) | Disaggregated (1P1D)   | H200 | 24          | 68.860                  | 53.880                  | 1874.000      |
+| Workload             | Framework | Recipe                 | SKU  | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| -------------------- | --------- | ---------------------- | ---- | ----------- | ----------------------- | ----------------------- | ------------- |
+| Agentic (15% subset) | SGLang    | Aggregated (4 workers) | B200 | 64          | 190.048                 | 61.923                  | 228.700       |
+| Agentic (15% subset) | SGLang    | Disaggregated (3P1D)   | B200 | 128         | 323.821                 | 63.133                  | 1280.100      |
+| Agentic (15% subset) | SGLang    | Aggregated (3 workers) | H200 | 32          | 60.866                  | 57.330                  | 1158.200      |
+| Agentic (15% subset) | SGLang    | Disaggregated (1P1D)   | H200 | 24          | 84.335                  | 61.460                  | 1309.600      |
 
 
 

@@ -183,7 +183,7 @@ spec:
           value: "64"
         # --- The remainder is shared across all four variants. ---
         - name: TARGET_MODEL
-          value: zai-org/GLM-5.2
+          value: zai-org/GLM-5.3
         - name: AIPERF_HTTP_CONNECTION_LIMIT
           value: "200"
         - name: AIPERF_HTTP_SO_RCVTIMEO
