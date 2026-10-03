@@ -149,7 +149,7 @@ Each framework selects the backend differently:
 | Framework       | How to select LIBFABRIC                                                                                                                       | Default if unset   |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
 | **SGLang**      | `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` env var                                                                                        | UCX → TCP fallback |
-| **vLLM**        | `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'` CLI flag | UCX → TCP fallback |
+| **vLLM**        | `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'` on prefill; use `kv_consumer` on decode | UCX → TCP fallback |
 | **TRT-LLM**     | `TRTLLM_NIXL_KVCACHE_BACKEND=LIBFABRIC` env var                                                                                               | UCX → TCP fallback |
 | **KVBM (Rust)** | `DYN_KVBM_NIXL_BACKEND_LIBFABRIC=true` env var                                                                                                | UCX → TCP fallback |
 
