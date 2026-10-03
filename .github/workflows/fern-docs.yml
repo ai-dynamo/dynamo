@@ -30,6 +30,9 @@
 #    - Creates fern/pages-vX.Y.Z/ directory on docs-website branch
 #    - Updates fern/docs.yml with new version entry
 #    - Publishes docs to Fern after releasing
+#    - dry_run (dispatch only) stops after validation; docs-release-dry-run.yml
+#      uses it with source_ref to check untagged release branches before tagging
+#    - A failure opens (or comments on) a GitHub issue
 #
 # Note: The publish step is included inline because pushes made with GITHUB_TOKEN
 # do not trigger other workflows (GitHub's anti-recursion guard), so we cannot
@@ -61,6 +64,15 @@ on:
         type: string
       force_rebuild:
         description: 'Overwrite an existing version snapshot (manual dispatch only). This replaces pages-$TAG and versions/$TAG.yml.'
+        required: false
+        default: false
+        type: boolean
+      source_ref:
+        description: 'Ref to snapshot instead of the tag, for a pre-tag check (e.g., release/1.6.0). Leave empty to snapshot the tag.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Build and validate the version snapshot without pushing to docs-website or publishing.'
         required: false
         default: false
         type: boolean
@@ -738,10 +750,23 @@ jobs:
       github.ref_type == 'tag' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.tag != null)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
     steps:
       - name: Determine version tag
         id: version
+        env:
+          SOURCE_REF: ${{ github.event.inputs.source_ref }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
+          # A snapshot built from anything but the tag must never publish as
+          # that tag.
+          if [ -n "$SOURCE_REF" ] && [ "$DRY_RUN" != "true" ]; then
+            echo "::error::source_ref ($SOURCE_REF) requires dry_run=true."
+            exit 1
+          fi
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ github.event.inputs.tag }}"
           else
@@ -767,7 +792,9 @@ jobs:
           # explicitly. This checkout provides the tagged docs, navigation, and
           # callout converter used to build the release snapshot, so a tag cut
           # from a release branch snapshots its own docs — never main's (#11140).
-          ref: ${{ steps.version.outputs.tag }}
+          # A pre-tag dry run passes the release branch as source_ref because
+          # the tag does not exist yet.
+          ref: ${{ github.event.inputs.source_ref || steps.version.outputs.tag }}
           path: source-checkout
           fetch-depth: 1
 
@@ -1142,6 +1169,7 @@ jobs:
           fern check
 
       - name: Commit and push changes
+        if: github.event.inputs.dry_run != 'true'
         working-directory: docs-checkout
         run: |
           TAG="${{ steps.version.outputs.tag }}"
@@ -1170,12 +1198,65 @@ jobs:
           Automated by fern-docs workflow
           Source tag: $TAG"
 
-          git push origin docs-website
+          # Every docs merge to main also pushes to docs-website, so this push
+          # can lose the race. The release commit only adds pages-$TAG and
+          # versions/$TAG.yml and edits docs.yml, so it normally rebases onto a
+          # dev sync; a real conflict fails the rebase and the step.
+          for attempt in 1 2 3; do
+            git push origin docs-website && break
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Push to docs-website was rejected 3 times; the $TAG snapshot was not published."
+              exit 1
+            fi
+            echo "::warning::Push to docs-website rejected (attempt $attempt); rebasing onto the new tip."
+            sleep $((attempt * 15))
+            git pull --rebase origin docs-website
+          done
 
           echo "Successfully released documentation for $TAG on docs-website branch"
 
       - name: Publish Docs
+        if: github.event.inputs.dry_run != 'true'
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
         working-directory: docs-checkout/fern
         run: fern generate --docs
+
+      - name: Open an issue if the version release failed
+        # A tag push has no pull request to report on, so without this a failed
+        # snapshot leaves the site on the previous version with nothing flagging
+        # it. One open issue per title; later failures comment on it. Rejected
+        # dispatch inputs fail the version step and report only in that run.
+        if: failure() && steps.version.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_REF: ${{ github.event.inputs.source_ref }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            title="Docs release dry run failed for $TAG"
+            body="The pre-tag docs snapshot check for \`$TAG\` (source \`${SOURCE_REF:-$TAG}\`) failed: $RUN_URL
+
+          Tagging \`$TAG\` now would fail the same way and leave the docs site on the previous version. After fixing the cause, re-run the check:
+
+          \`gh workflow run fern-docs.yml --ref main -f tag=$TAG -f source_ref=${SOURCE_REF:-$TAG} -f dry_run=true\`"
+          else
+            title="Docs release snapshot failed for $TAG"
+            body="The versioned docs snapshot for \`$TAG\` failed, so the docs site still serves the previous version: $RUN_URL
+
+          After fixing the cause, re-run the release:
+
+          \`gh workflow run fern-docs.yml --ref main -f tag=$TAG\`
+
+          Add \`-f force_rebuild=true\` if \`fern/pages-$TAG/\` already landed on docs-website."
+          fi
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number,title \
+            | jq -r --arg t "$title" '[.[] | select(.title == $t)][0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
