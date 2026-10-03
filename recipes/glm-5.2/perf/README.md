@@ -29,6 +29,13 @@ If you run more than one benchmark in the same namespace, also update
 `metadata.name` and `labels.app` so Jobs and artifact directories stay
 distinct.
 
+To reproduce the published throughput numbers, uncomment the
+`SGLANG_SIMULATE_ACC_LEN`, `SGLANG_SIMULATE_ACC_METHOD`, and
+`SGLANG_SIMULATE_ACC_TOKEN_MODE` environment variables in the worker (aggregated)
+or decode worker (disaggregated) `env` block of the target `deploy.yaml` before
+you deploy it. They fix the synthetic MTP acceptance length at 2.69. Leave them
+commented out for accuracy evaluation and production serving.
+
 ## Dataset
 
 The benchmark replays a
@@ -138,7 +145,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
 | `SYNTHESIS_MAX_ISL` | `500000` | Use `250000` for H200 recipes |
 | `CONCURRENCY` | `64` | Single value; reset server state between values |
-| `TARGET_MODEL` | `zai-org/GLM-5.2` | Must match `--served-model-name` |
+| `TARGET_MODEL` | `zai-org/GLM-5.3` | Must match `--served-model-name` |
 
 ## Artifacts
 

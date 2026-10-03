@@ -25,7 +25,7 @@ catalog_validate = load_catalog_validator("recipe_catalog_validate")
         ),
         (
             "glm-5-2",
-            ("nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1",),
+            (),
         ),
         (
             "inkling",
@@ -70,7 +70,10 @@ def test_recipe_specific_images_are_catalog_owned(
     expected_images: tuple[str, ...],
 ) -> None:
     document = yaml.safe_load((CATALOG / "recipes" / f"{recipe_id}.yaml").read_text())
-    assert tuple(document["artifacts"]["recipe_specific_images"]) == expected_images
+    assert (
+        tuple(document["artifacts"].get("recipe_specific_images", ()))
+        == expected_images
+    )
 
 
 @pytest.mark.parametrize(
@@ -94,6 +97,7 @@ def test_recipe_specific_images_are_catalog_owned(
                 {
                     "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1",
                     "source_revision": "9ab57d7ecefdd2a2af2e2a2c889724a157457cd6",
+                    "effective_to": "2026-10-04",
                     "source_kind": "github-release",
                     "release_tag": "v1.3.0-glm-5.2-dev.1",
                     "release_state": "prerelease",
