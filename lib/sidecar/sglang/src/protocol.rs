@@ -67,7 +67,25 @@ pub(crate) fn build_generate_request(
         }
     }
 
-    let guided = request.sampling_options.guided_decoding.as_ref();
+    let guided_decoding = request
+        .sampling_options
+        .guided_decoding
+        .as_ref()
+        .and_then(|guided| {
+            let constraint = if let Some(schema) = guided.json.as_ref() {
+                Some(pb::guided_decoding::Constraint::JsonSchema(
+                    json_value_to_string(schema),
+                ))
+            } else {
+                guided
+                    .regex
+                    .clone()
+                    .map(pb::guided_decoding::Constraint::Regex)
+            };
+            constraint.map(|constraint| pb::GuidedDecoding {
+                constraint: Some(constraint),
+            })
+        });
     let sampling_params = pb::SamplingParams {
         temperature: request.sampling_options.temperature,
         top_p: request.sampling_options.top_p,
@@ -82,10 +100,8 @@ pub(crate) fn build_generate_request(
         stop_token_ids,
         ignore_eos: request.stop_conditions.ignore_eos,
         n: request.sampling_options.n.map(i32::from),
-        json_schema: guided
-            .and_then(|value| value.json.as_ref())
-            .map(json_value_to_string),
-        regex: guided.and_then(|value| value.regex.clone()),
+        guided_decoding,
+        ..Default::default()
     };
 
     let output_options = &request.output_options;
@@ -137,6 +153,7 @@ pub(crate) fn build_generate_request(
             bootstrap_host,
             bootstrap_port,
         )?,
+        ..Default::default()
     })
 }
 
@@ -225,6 +242,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             .as_ref()
             .is_some_and(|value| !value.is_empty())
             || guided.grammar.is_some()
+            || (guided.json.is_some() && guided.regex.is_some())
             || guided
                 .backend
                 .as_ref()
@@ -233,7 +251,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             || guided.structural_tag.is_some())
     {
         return Err(client::invalid_request(
-            "the native SGLang gRPC proto currently supports only JSON-schema and regex guided decoding",
+            "the native SGLang gRPC proto currently supports only one of JSON-schema or regex guided decoding",
         ));
     }
     if request

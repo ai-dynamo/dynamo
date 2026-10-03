@@ -129,6 +129,8 @@ macro_rules! delegate_service {
             type GenerateStream = BoxStream<'static, Result<pb::GenerateResponse, Status>>;
             type ChatCompleteStream = <SglangMockerService as SglangService>::ChatCompleteStream;
             type CompleteStream = <SglangMockerService as SglangService>::CompleteStream;
+            type WatchEngineStateStream =
+                <SglangMockerService as SglangService>::WatchEngineStateStream;
 
             async fn generate(
                 &self,
@@ -137,6 +139,13 @@ macro_rules! delegate_service {
                 let opened = self.control.open(request.get_ref()).await?;
                 let response = self.inner.generate(request).await?;
                 Ok(Response::new(opened.wrap(response.into_inner())))
+            }
+
+            async fn watch_engine_state(
+                &self,
+                request: Request<pb::WatchEngineStateRequest>,
+            ) -> Result<Response<Self::WatchEngineStateStream>, Status> {
+                self.inner.watch_engine_state(request).await
             }
 
             $(
