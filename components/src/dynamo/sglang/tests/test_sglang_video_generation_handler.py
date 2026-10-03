@@ -108,3 +108,26 @@ async def test_t2v_passes_no_image_path(handler) -> None:
 
     args = handler.generator.generate.call_args[1]["sampling_params_kwargs"]
     assert "image_path" not in args
+
+
+async def test_generate_applies_the_defaults_for_unset_fields(handler) -> None:
+    """A request that sets only prompt and model gets the handler defaults."""
+    handler._generate_video = AsyncMock(return_value=b"mp4-bytes")
+    handler._upload_to_fs = AsyncMock(return_value="file:///tmp/videos/v.mp4")
+    context = MagicMock()
+    context.id.return_value = "req-1"
+
+    responses = [
+        response
+        async for response in handler.generate(
+            {"prompt": "a cat", "model": "wan"}, context
+        )
+    ]
+
+    kwargs = handler._generate_video.call_args.kwargs
+    assert (kwargs["width"], kwargs["height"]) == (832, 480)
+    # 24 fps for 4 seconds is 96 frames.
+    assert (kwargs["fps"], kwargs["num_frames"]) == (24, 96)
+    assert (kwargs["num_inference_steps"], kwargs["guidance_scale"]) == (50, 5.0)
+    assert responses[0]["status"] == "completed"
+    assert responses[0]["data"][0]["url"] == "file:///tmp/videos/v.mp4"
