@@ -17,7 +17,11 @@ import pytest
 import requests
 
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
-from tests.utils.network_canary import ConnectionCanary, running_canary
+from tests.utils.network_canary import (
+    ConnectionCanary,
+    assert_blocked_url_refused,
+    running_canary,
+)
 from tests.utils.port_utils import ServicePorts
 
 MODEL_NAME = "test-http-status-prop"
@@ -138,10 +142,7 @@ def test_python_backend_ssrf_rejection_is_4xx_with_zero_egress(
         timeout=30,
     )
 
-    assert 400 <= response.status_code < 500, response.text
-    assert response.json()["message"] == "Invalid request", response.text
-    assert "is in a blocked range" not in response.text, response.text
-    outbound_canary.assert_no_connection()
+    assert_blocked_url_refused(response, outbound_canary, "is in a blocked range")
 
 
 @pytest.mark.timeout(30)
