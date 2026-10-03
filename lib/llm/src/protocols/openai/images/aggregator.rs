@@ -21,20 +21,24 @@ impl StreamAggregable for NvImagesResponse {
     }
 
     fn merge(&mut self, next: Self) {
-        if next.inner.data.is_empty() {
+        if next.data.is_empty() {
             return;
         }
 
-        if self.inner.data.is_empty() {
-            self.inner.created = next.inner.created;
-            self.inner.output_format = next.inner.output_format;
-            self.inner.size = next.inner.size;
+        if self.data.is_empty() {
+            self.created = next.created;
+            self.background = next.background;
+            self.output_format = next.output_format;
+            self.size = next.size;
+            self.quality = next.quality;
         } else {
-            merge_if_consistent(&mut self.inner.output_format, next.inner.output_format);
-            merge_if_consistent(&mut self.inner.size, next.inner.size);
+            merge_if_consistent(&mut self.background, next.background);
+            merge_if_consistent(&mut self.output_format, next.output_format);
+            merge_if_consistent(&mut self.size, next.size);
+            merge_if_consistent(&mut self.quality, next.quality);
         }
 
-        self.inner.data.extend(next.inner.data);
+        self.data.extend(next.data);
     }
 }
 
