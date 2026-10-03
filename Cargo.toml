@@ -32,11 +32,13 @@ members = [
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
     "lib/sidecar/common",
+    "lib/sidecar/testkit",
     "lib/sidecar/vllm",
     "lib/mocker/servers/vllm",
     "lib/sidecar/sglang",
     "lib/mocker/servers/sglang",
     "lib/sidecar/trtllm",
+    "lib/mocker/servers/trtllm",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
@@ -57,14 +59,14 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.12.0" }
+aisimulate-core = { version = "=0.13.0-dev.202609300000000061" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
 dynamo-llm = { path = "lib/llm", version = "1.6.0" }
 dynamo-rl = { path = "lib/rl", version = "1.6.0" }
-dynamo-tokenizers = { version = "=1.9.1" }
-dynamo-renderer = { version = "=5.4.0" }
+dynamo-tokenizers = { version = "=2.0.0" }
+dynamo-renderer = { version = "=6.0.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.6.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.6.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.6.0" }
@@ -156,6 +158,7 @@ tmq = { version = "0.5.0" }
 tokio = { version = "=1.52.4", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 axum = { version = "=0.8.4", features = ["macros", "ws"] }
 axum-core = { version = "0.5.2" }

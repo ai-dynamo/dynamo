@@ -7,6 +7,7 @@ import importlib.util
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 pytestmark = [
     pytest.mark.unit,
@@ -316,13 +317,9 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
 def test_tito_adapter_rejects_asymmetric_image_feature_objects(features):
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
-    # vLLM 0.30 validates modality keys before Dynamo's image-list checks.
     with pytest.raises(
-        (TypeError, ValueError),
-        match=(
-            "hashes and placeholders must be lists"
-            "|mm_hashes and mm_placeholders must use the same modalities"
-        ),
+        ValidationError,
+        match="mm_hashes and mm_placeholders must use the same modalities",
     ):
         adapt_engine_generate_request(
             _request(features=features, sampling_params={"max_tokens": 1}),

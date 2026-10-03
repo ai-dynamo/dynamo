@@ -134,6 +134,13 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// Reject stored LPX graphs before provider selection or any workload writes.
+	if dynamoDeployment.HasLPXComponent() && !r.RuntimeConfig.Gate.Enabled(features.LPX) {
+		programResult := newWorkloadProgramResult(dynamoDeployment)
+		programResult.Fail(dynamoDeployment.Generation, "lpx_disabled", errors.New("LPX integration is disabled"))
+		return programResult.Result, r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult)
+	}
+
 	// Lock in the provider before allowing any other reconciliation effects.
 	provider, err := r.ensureWorkloadProvider(ctx, dynamoDeployment)
 
@@ -184,7 +191,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// Dispatch exclusively through the persisted provider.
 	program, err := r.selectWorkloadProgram(provider)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -270,7 +276,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			generationOrDeletionChangedPredicate(),
+			dgdPrimaryPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
@@ -351,6 +357,11 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
+	}
+
+	// LPX child status can wake the DGD only when its controller is enabled.
+	if r.RuntimeConfig.Gate.Enabled(features.LPX) {
+		ctrlBuilder = ctrlBuilder.Owns(&nvidiacomv1alpha1.LPXGraphDeployment{})
 	}
 
 	// Register Grove-owned workload watches only when the Grove feature is enabled.

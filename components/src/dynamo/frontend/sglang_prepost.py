@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeAlias
 
+from jinja2.exceptions import TemplateError
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.entrypoints.openai.protocol import ToolChoice as SglangToolChoice
@@ -26,7 +27,7 @@ from sglang.srt.parser.jinja_template_utils import (
     detect_jinja_template_content_format,
     process_content_for_template_format,
 )
-from sglang.srt.parser.reasoning_parser import ReasoningParser
+from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
@@ -297,6 +298,7 @@ def create_parsers(
     sglang_tools: list[SglangTool] | None = None,
     force_reasoning: bool = False,
     guided_decoding: dict[str, Any] | None = None,
+    tokenizer: Any | None = None,
 ) -> tuple[ToolCallParserType | None, ReasoningParser | None]:
     """Create tool call and reasoning parsers for a request.
 
@@ -325,6 +327,7 @@ def create_parsers(
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
             )
 
     reasoning_parser = None
@@ -337,6 +340,7 @@ def create_parsers(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
             force_reasoning=force_reasoning,
+            **_parser_tokenizer_kwargs(ReasoningParser, tokenizer),
         )
 
     return tool_call_parser, reasoning_parser
@@ -620,15 +624,21 @@ def _enforce_function_strict_level(parser: FunctionCallParser) -> None:
         parser.tool_strict_level = function_level
 
 
+def _parser_tokenizer_kwargs(parser: Any, tokenizer: Any) -> dict[str, Any]:
+    if tokenizer is not None and _callable_accepts_kwarg(parser, "tokenizer"):
+        return {"tokenizer": tokenizer}
+    return {}
+
+
 def build_tool_call_guided_decoding(
     request: dict[str, Any],
     *,
     tool_call_parser_name: str | None,
+    tokenizer: Any | None = None,
     sglang_tools: list[SglangTool] | None,
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
-    force_reasoning: bool = False,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
     if not sglang_tools:
@@ -691,6 +701,7 @@ def build_tool_call_guided_decoding(
             parser = FunctionCallParser(
                 tools=guidance_tools,
                 tool_call_parser=tool_call_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
             )
             # SGLang's AUTO level returns no structural tag when every tool is
             # strict:false. Dynamo's policy still requires the function envelope;
@@ -949,9 +960,14 @@ def preprocess_chat_request(
 
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 
-        prompt_token_ids = _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(template_messages, **template_kwargs)
-        )
+        try:
+            rendered = tokenizer.apply_chat_template(
+                template_messages, **template_kwargs
+            )
+        except (TemplateError, TypeError) as exc:
+            # Jinja filters such as tojson can raise TypeError for invalid inputs.
+            raise PreprocessError(str(exc)) from exc
+        prompt_token_ids = _normalize_prompt_token_ids(rendered)
 
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
@@ -961,7 +977,7 @@ def preprocess_chat_request(
         structural_tag_mode=structural_tag_mode,
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
-        force_reasoning=force_reasoning,
+        tokenizer=tokenizer,
     )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
@@ -1016,6 +1032,7 @@ def preprocess_chat_request(
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
         guided_decoding=guided_decoding,
+        tokenizer=tokenizer,
     )
 
     return SglangPreprocessResult(
@@ -1157,6 +1174,7 @@ class SglangStreamingPostProcessor:
         stop_strings: set[str] | None = None,
         stop_token_ids: set[int] | None = None,
         skip_special_tokens: bool | None = None,
+        guided_json_is_content: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1173,6 +1191,16 @@ class SglangStreamingPostProcessor:
         self._skip_special_tokens = resolve_skip_special_tokens(
             skip_special_tokens, has_parser=not self._fast_plain_text
         )
+        # Bare answer JSON is already structured by generation. Keep the original
+        # decoding policy, and retain the parser for forced tool-call JSON arrays.
+        if guided_json_is_content and not isinstance(tool_call_parser, JsonArrayParser):
+            self.tool_call_parser = tool_call_parser = None
+            # GPT-OSS still uses Harmony channels without the reasoning gate.
+            if reasoning_parser is None or not isinstance(
+                reasoning_parser.detector, GptOssDetector
+            ):
+                self.reasoning_parser = reasoning_parser = None
+            self._fast_plain_text = reasoning_parser is None
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
@@ -1757,6 +1785,9 @@ class SglangStreamingPostProcessor:
                             fcp = FunctionCallParser(
                                 tools=self._sglang_tools,
                                 tool_call_parser=self._tool_call_parser_name,
+                                **_parser_tokenizer_kwargs(
+                                    FunctionCallParser, self.tokenizer
+                                ),
                             )
                             _, final_calls = fcp.parse_non_stream(full_text)
                         except (
