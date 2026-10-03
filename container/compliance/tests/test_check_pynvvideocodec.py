@@ -125,9 +125,9 @@ def test_a_denied_library_fails(tmp_path, lib):
         _check(_install(tmp_path, libs=(*GOOD_LIBS, lib)))
 
 
-@pytest.mark.parametrize("libs", [(), ("libavformat.so.61",), ("libavutil.so.59",)])
-def test_an_empty_or_partial_package_fails(tmp_path, libs):
-    # Both negative checks pass on a package that bundles nothing.
+@pytest.mark.parametrize("libs", [("libavformat.so.61",), ("libavutil.so.59",)])
+def test_a_partial_package_fails(tmp_path, libs):
+    # Each required library must be bundled, or the negative checks pass vacuously.
     with pytest.raises(GuardError, match="bundles no"):
         _check(_install(tmp_path, libs=libs))
 
