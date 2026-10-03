@@ -321,7 +321,7 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[_disaggregated_chat_payload(has_exact_accounting=False)],
+        request_payloads=[_disaggregated_chat_payload()],
     ),
 }
 
@@ -413,6 +413,24 @@ def test_serve_deployment(
                         ),
                         probe_path=probe_path if backend == "vllm" else None,
                     )
+                    assert_native_handoff(
+                        backend=backend,
+                        namespace=engine_env["DYN_NAMESPACE"],
+                        model=config.model,
+                        prefill_http_port=int(
+                            engine_env[f"{backend.upper()}_PREFILL_HTTP_PORT"]
+                        ),
+                        decode_http_port=int(
+                            engine_env[f"{backend.upper()}_DECODE_HTTP_PORT"]
+                        ),
+                        bootstrap_port=int(
+                            engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"]
+                        )
+                        if backend == "sglang"
+                        else None,
+                        probe_path=probe_path if backend == "vllm" else None,
+                        discovery_backend=discovery_backend,
+                    )
 
                 transfer()
                 if backend == "sglang":
@@ -426,16 +444,6 @@ def test_serve_deployment(
                         discovery_backend=discovery_backend,
                     )
                     transfer()
-                if backend == "vllm":
-                    assert_native_handoff(
-                        backend=backend,
-                        namespace=engine_env["DYN_NAMESPACE"],
-                        model=config.model,
-                        prefill_http_port=int(engine_env["VLLM_PREFILL_HTTP_PORT"]),
-                        decode_http_port=int(engine_env["VLLM_DECODE_HTTP_PORT"]),
-                        probe_path=probe_path,
-                        discovery_backend=discovery_backend,
-                    )
 
             run_serve_deployment(
                 config,

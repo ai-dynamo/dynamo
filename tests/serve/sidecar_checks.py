@@ -251,6 +251,12 @@ def assert_sglang_transfer_wait_cancelled(
                     assert (
                         context.is_stopped()
                     ), f"Decode produced output without its prefill peer: {output}"
+                    assert_native_completion(
+                        [output],
+                        prompt_tokens=128,
+                        completion_tokens=0,
+                        finish_reason="cancelled",
+                    )
 
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=2)
