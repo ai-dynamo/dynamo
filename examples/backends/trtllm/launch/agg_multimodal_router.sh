@@ -28,6 +28,20 @@ export BLOCK_SIZE=${BLOCK_SIZE:-32}
 # Profiler/test-harness override: KvCacheConfig JSON when env var is set, empty otherwise.
 TRTLLM_OVERRIDE_ARGS=()
 OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+if [[ "${TRTLLM_USE_KV_CACHE_MANAGER_V2:-0}" == "1" ]]; then
+    # The test profiler supplies a complete kv_cache_config override. Merge the
+    # V2 selection into that same object so the profiler does not silently
+    # restore the default V1 cache manager.
+    OVERRIDE_JSON=$(python3 -c '
+import json
+import sys
+
+overrides = json.loads(sys.argv[1] or "{}")
+overrides.setdefault("kv_cache_config", {})["use_kv_cache_manager_v2"] = True
+print(json.dumps(overrides, separators=(",", ":")))
+' "$OVERRIDE_JSON")
+    echo "TensorRT-LLM KV cache manager V2 forced for multimodal routing test"
+fi
 if [[ -n "$OVERRIDE_JSON" ]]; then
     TRTLLM_OVERRIDE_ARGS=(--override-engine-args "$OVERRIDE_JSON")
 fi

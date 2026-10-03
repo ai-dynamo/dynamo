@@ -512,7 +512,8 @@ def _publisher_for_kv_event_test():
     pub.processing_initial_created_events = False
     pub.partial_block_hashes = set()
     pub.kv_block_size = 4
-    pub.max_window_size = None
+    pub.mm_token_id_offset = 1000
+    pub.max_window_size = 128
     return pub
 
 
