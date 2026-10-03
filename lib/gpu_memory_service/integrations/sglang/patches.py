@@ -59,7 +59,20 @@ def patch_torch_memory_saver() -> None:
         hook_mode = self._impl_ctor_kwargs.get("hook_mode")
         logger.info(f"[GMS] TorchMemorySaver initializing with hook_mode={hook_mode}")
 
-        if hook_mode is None or hook_mode == "gms":
+        if hook_mode == "torch":
+            # SGLang forces hook_mode="torch" at import time on Intel XPU
+            # (srt/utils/torch_memory_saver_adapter.py) because the LD_PRELOAD
+            # preload mode is CUDA/HIP-only. That leaves no way to request
+            # "gms" on XPU, so claim the saver here rather than falling through
+            # to upstream, which would leave GMSModelLoader with no impl and
+            # fail the load. On CUDA an explicit "torch" stays a real opt-out.
+            from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
+
+            use_gms = get_vmm_device_type() == VMMDeviceType.XPU
+        else:
+            use_gms = hook_mode is None or hook_mode == "gms"
+
+        if use_gms:
             # In GMS mode we install only the strict GMS implementation:
             # weights + kv_cache go through GMS, generic unsupported tags stay
             # no-ops/warnings, and cuda_graph remains unsupported.
@@ -148,6 +161,13 @@ def patch_model_runner() -> None:
     snapshot is lower by those weights. Add just those preloaded weight bytes
     back to the baseline. Do not adjust write mode: weights are loaded after
     the snapshot there, so upstream's formula already subtracts them correctly.
+
+    Only needed on SGLang builds that predate native preloaded-weight
+    accounting. SGLang >=0.5.21 ships ModelRunner.account_preloaded_weights(),
+    which Scheduler.init_target_memory_pool() calls with the value read from
+    GMSModelLoader.preloaded_weights_bytes. Applying both would add the weight
+    bytes to the baseline twice and oversize the KV cache, so skip the patch
+    whenever upstream owns the accounting.
     """
     global _model_runner_patched
 
@@ -158,6 +178,14 @@ def patch_model_runner() -> None:
         from sglang.srt.model_executor.model_runner import ModelRunner
     except ImportError:
         logger.warning("[GMS] Could not import ModelRunner, skipping patch")
+        return
+
+    if hasattr(ModelRunner, "account_preloaded_weights"):
+        _model_runner_patched = True
+        logger.info(
+            "[GMS] SGLang accounts for preloaded weights natively; "
+            "skipping ModelRunner.alloc_memory_pool patch"
+        )
         return
 
     if hasattr(ModelRunner, "_gms_patched"):
@@ -214,7 +242,16 @@ def patch_static_state_for_gms() -> None:
         return
 
     try:
-        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+        try:
+            # SGLang >=0.5.21.
+            from sglang.srt.managers.scheduler_components import (
+                weight_updater as _mixin,
+            )
+        except ImportError:
+            # SGLang <0.5.21 kept these on the scheduler mixin module.
+            from sglang.srt.managers import (
+                scheduler_update_weights_mixin as _mixin,  # type: ignore[no-redef]
+            )
 
         def _export_noop(model):
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""

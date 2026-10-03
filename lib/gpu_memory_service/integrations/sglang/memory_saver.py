@@ -97,11 +97,35 @@ class GMSMemorySaverImpl:
         )
 
     @contextmanager
-    def region(self, tag: str, enable_cpu_backup: bool):
-        """Use the tag's RW pool and publish pending weights after clean exit."""
-        if enable_cpu_backup:
+    def region(
+        self,
+        tag: str,
+        enable_cpu_backup: bool = False,
+        enable_disk_backup: bool = False,
+        **backup_options: object,
+    ):
+        """Use the tag's RW pool and publish pending weights after clean exit.
+
+        GMS owns the allocation itself, so none of torch_memory_saver's
+        ``enable_*_backup`` offload paths can be honoured. ``**backup_options``
+        absorbs flags added by newer torch_memory_saver releases (the ``region``
+        signature has grown over time) so that a version bump does not raise
+        ``TypeError`` from the entrypoint; any option actually turned on is
+        still rejected loudly below.
+        """
+        requested = [
+            name
+            for name, enabled in (
+                ("enable_cpu_backup", enable_cpu_backup),
+                ("enable_disk_backup", enable_disk_backup),
+                *backup_options.items(),
+            )
+            if enabled
+        ]
+        if requested:
             raise ValueError(
-                "SGLang with GMS does not support CPU backup for allocations."
+                "SGLang with GMS does not support backing up allocations; "
+                f"unsupported option(s) enabled: {', '.join(sorted(requested))}."
             )
 
         if tag not in _TAG_LOCK_TYPES:
@@ -159,7 +183,8 @@ class GMSMemorySaverImpl:
         stream,
         capture_error_mode,
         tag: str,
-        enable_cpu_backup: bool,
+        enable_cpu_backup: bool = False,
+        **backup_options: object,
     ):
         # The old hybrid path could delegate this to torch_memory_saver, but
         # strict GMS mode has no compatible pauseable CUDA-graph allocator hook.
