@@ -666,7 +666,7 @@ mod cached_multimodal_uuid {
                     {"type": "text", "text": "compare"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": "https://example.com/first.png"},
+                        "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="},
                         "uuid": "image-a"
                     },
                     {
