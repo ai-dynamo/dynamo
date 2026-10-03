@@ -240,8 +240,10 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 The ported policies accept these `parameters`. Defaults follow each source, and each policy rejects
 unknown keys and out-of-range values at startup. Offline replay runs the worker-selection policies
 above but not request classifiers, so a policy other than `thunderagent` can be compared with
-`default` on a recorded trace before deployment. In replay, `llm-d-precise-prefix` `class_weights`
-see only the policy class the trace supplies, never a classifier's override.
+`default` on a recorded trace before deployment. `dynamo-default-cost-fn` takes a `seed` parameter
+for reproducible replays; see [Configure the Default Policy](#configure-the-default-policy). In
+replay, `llm-d-precise-prefix` `class_weights` see only the policy class the trace supplies, never a
+classifier's override.
 
 | Policy type | Parameters (defaults) |
 |---|---|
