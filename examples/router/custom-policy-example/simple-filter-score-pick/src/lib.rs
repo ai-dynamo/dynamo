@@ -9,11 +9,13 @@
 mod filter;
 mod picker;
 mod scorer;
+mod transfer;
 
 use std::sync::Arc;
 
 use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::worker_selection::experimental::with_kv_transfer_policy;
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerFilter, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
@@ -22,11 +24,14 @@ use dynamo_kv_router::plugins::worker_selection::{
 use filter::MinimumDeviceOverlapFilter;
 use picker::RequestAwarePicker;
 use scorer::ActiveRequestsScorer;
+use transfer::MinimumFetchPolicy;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Parameters {
     min_device_overlap_blocks: f64,
+    #[serde(default)]
+    min_fetch_blocks: u32,
 }
 
 fn validate_min_device_overlap_blocks(
@@ -46,19 +51,21 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     validate_min_device_overlap_blocks(parameters.min_device_overlap_blocks)?;
     let min_device_overlap_blocks = parameters.min_device_overlap_blocks;
+    let min_fetch_blocks = parameters.min_fetch_blocks;
 
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
             let filters: Vec<Box<dyn WorkerFilter>> = vec![Box::new(MinimumDeviceOverlapFilter {
                 min_device_overlap_blocks,
             })];
-            WorkerSelectionPolicy::new_with_filters(
+            let policy = WorkerSelectionPolicy::new_with_filters(
                 config.clone(),
                 worker_type.as_str(),
                 filters,
                 vec![Box::new(ActiveRequestsScorer)],
                 Box::new(RequestAwarePicker),
-            )
+            );
+            with_kv_transfer_policy(policy, Box::new(MinimumFetchPolicy { min_fetch_blocks }))
         },
     ))
 }

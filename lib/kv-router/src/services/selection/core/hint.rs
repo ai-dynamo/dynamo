@@ -26,36 +26,9 @@ pub(super) fn transfer_hint_for_selection(
     candidates: Option<&KvTransferCandidates>,
 ) -> Option<KvSourceLocationsPayload> {
     let candidates = candidates?;
-    let target_config = configs.get(&target.worker_id)?;
-    let target_metadata = target_config.kv_hint_transfer_metadata_for_dp_rank(target.dp_rank)?;
-
-    let prefix_blocks_to_beat = usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
-    let (source, block_hashes) =
-        candidates.best_source(prefix_blocks_to_beat, |source| match source {
-            KvTransferCandidateSource::Worker(worker) => {
-                worker != target
-                    && configs.get(&worker.worker_id).is_some_and(|config| {
-                        config.kv_event_source_mode.as_deref() != Some("state_agent_v2")
-                            && config
-                                .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)
-                                .is_some_and(|source_metadata| {
-                                    source_metadata.worker_type == target_metadata.worker_type
-                                        && source_metadata
-                                            .source_control_endpoint
-                                            .is_some_and(|endpoint| !endpoint.is_empty())
-                                })
-                    })
-            }
-            KvTransferCandidateSource::CacheOwner(owner) => candidates
-                .routing_snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.router_hint_source(owner))
-                .is_some_and(|source| {
-                    source.attached_worker != Some(target)
-                        && source.metadata.worker_type == target_metadata.worker_type
-                        && !source.metadata.source_control_endpoint.is_empty()
-                }),
-        })?;
+    let (source, prefix_blocks) =
+        candidates.best_hint_source(configs, target, target_cached_prefix_blocks)?;
+    let block_hashes = candidates.block_hashes.get(..prefix_blocks)?.to_vec();
     let source_control_endpoint = match source {
         KvTransferCandidateSource::Worker(worker) => configs
             .get(&worker.worker_id)?

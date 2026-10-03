@@ -32,6 +32,7 @@ use super::types::{
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
+use crate::plugins::worker_selection::experimental::KvTransferAction;
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
     WorkerWithDpRank,
@@ -81,6 +82,8 @@ struct SelectedWorkerForRequest {
     selected_worker_tiers: SelectedWorkerTierSnapshot,
     selected_worker_load: AdvisoryWorkerLoad,
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
+    target_cached_prefix_blocks: u32,
+    kv_transfer_action: KvTransferAction,
 }
 
 fn non_max_overlap_selection<C: WorkerConfigLike>(
@@ -1673,11 +1676,22 @@ impl<
                         // admission/bypass decisions that require an exact or conservative bound.
                         total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
                     };
+                    let target_cached_prefix_blocks =
+                        target_cached_prefix_blocks(request, selection.worker);
+                    let kv_transfer_action = self.selector.kv_transfer_action(
+                        &workers,
+                        request,
+                        selection.worker,
+                        target_cached_prefix_blocks,
+                        self.block_size,
+                    );
                     SelectedWorkerForRequest {
                         selection,
                         selected_worker_tiers,
                         selected_worker_load,
                         non_max_overlap_selection,
+                        target_cached_prefix_blocks,
+                        kv_transfer_action,
                     }
                 })
         }
@@ -1690,8 +1704,6 @@ impl<
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         self.with_projected_loads(request, decay_now, |actor, request| {
             let selected = actor.select_worker_for_request(request)?;
-            let target_cached_prefix_blocks =
-                target_cached_prefix_blocks(request, selected.selection.worker);
 
             Ok(AdvisorySchedulingResponse {
                 selected_worker_load: selected.selected_worker_load,
@@ -1702,8 +1714,12 @@ impl<
                     max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
                     selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
                     selected_worker_tiers: selected.selected_worker_tiers,
-                    target_cached_prefix_blocks,
-                    kv_transfer_candidates: request.kv_transfer_candidates.take(),
+                    target_cached_prefix_blocks: selected.target_cached_prefix_blocks,
+                    // A skipped fetch hint leaves the host nothing to build it from.
+                    kv_transfer_candidates: match selected.kv_transfer_action {
+                        KvTransferAction::Skip => None,
+                        _ => request.kv_transfer_candidates.take(),
+                    },
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
                 },
             })
@@ -1739,8 +1755,6 @@ impl<
             }
         };
 
-        let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(request, selected.selection.worker);
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
@@ -1748,8 +1762,12 @@ impl<
             max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
             selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
-            target_cached_prefix_blocks,
-            kv_transfer_candidates: request.kv_transfer_candidates.take(),
+            target_cached_prefix_blocks: selected.target_cached_prefix_blocks,
+            // A skipped fetch hint leaves the host nothing to build it from.
+            kv_transfer_candidates: match selected.kv_transfer_action {
+                KvTransferAction::Skip => None,
+                _ => request.kv_transfer_candidates.take(),
+            },
             potential_decode_blocks: selected.selection.potential_decode_blocks,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;

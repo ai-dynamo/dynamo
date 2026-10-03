@@ -10,11 +10,14 @@ use super::{
     MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult};
+use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
+use crate::plugins::worker_selection::experimental::{
+    KvTransferAction, KvTransferInput, KvTransferPolicy,
+};
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
     WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
@@ -57,6 +60,7 @@ pub struct WorkerSelectionPolicy {
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
     exclusive_affinity: bool,
+    kv_transfer: Option<RefCell<Box<dyn KvTransferPolicy>>>,
 }
 
 impl WorkerSelectionPolicy {
@@ -107,6 +111,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            kv_transfer: None,
             state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
@@ -130,6 +135,11 @@ impl WorkerSelectionPolicy {
         self
     }
 
+    pub(crate) fn with_kv_transfer_policy(mut self, transfer: Box<dyn KvTransferPolicy>) -> Self {
+        self.kv_transfer = Some(RefCell::new(transfer));
+        self
+    }
+
     /// Construct the native reference implementation for parity tests and benchmarks.
     ///
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
@@ -140,6 +150,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            kv_transfer: None,
             state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
     }
@@ -372,6 +383,47 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             eligibility,
             block_size,
         )
+    }
+
+    fn kv_transfer_action(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        selected: WorkerWithDpRank,
+        local_prefix_blocks: u32,
+        block_size: u32,
+    ) -> KvTransferAction {
+        let Some(transfer) = &self.kv_transfer else {
+            return KvTransferAction::Default;
+        };
+        // Without an eligible source the host attaches no hint, so there is nothing to decide.
+        let Some((_, source_prefix_blocks)) =
+            request
+                .kv_transfer_candidates
+                .as_ref()
+                .and_then(|candidates| {
+                    candidates.best_hint_source(workers, selected, local_prefix_blocks)
+                })
+        else {
+            return KvTransferAction::Default;
+        };
+        let input = KvTransferInput {
+            worker: selected,
+            local_prefix_blocks,
+            source_prefix_blocks: u32::try_from(source_prefix_blocks).unwrap_or(u32::MAX),
+        };
+        let context = MaterializedSelectionInput::new(request, block_size).context;
+        let action = transfer.borrow_mut().decide(&context, input);
+        tracing::debug!(
+            request_id = request.mode.request_id().unwrap_or("-"),
+            worker_id = selected.worker_id,
+            dp_rank = selected.dp_rank,
+            local_prefix_blocks,
+            source_prefix_blocks = input.source_prefix_blocks,
+            ?action,
+            "KV transfer policy decision"
+        );
+        action
     }
 }
 

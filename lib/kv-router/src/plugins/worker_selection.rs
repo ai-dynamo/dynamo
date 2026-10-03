@@ -5,6 +5,7 @@
 
 mod config;
 mod context;
+pub mod experimental;
 mod inputs;
 
 pub use context::WorkerSelectionContext;
