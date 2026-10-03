@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 from unittest.mock import MagicMock
+from urllib.parse import quote
 
 import pytest
 
@@ -112,11 +113,57 @@ async def test_malformed_data_uri_rejected(url, match):
 
 
 @pytest.mark.parametrize("size", [3, 4, 5], ids=["no-padding", "two-pad", "one-pad"])
-def test_decode_data_uri_size_bound_is_exact(size):
-    url = "data:video/mp4;base64," + base64.b64encode(b"x" * size).decode()
-    assert decode_data_uri(url, max_bytes=size) == b"x" * size
+@pytest.mark.parametrize("escaped", [False, True], ids=["plain", "percent-escaped"])
+def test_decode_data_uri_size_bound_is_exact(size, escaped):
+    content = b"\xfb" * size
+    payload = base64.b64encode(content).decode()
+    if escaped:
+        payload = quote(payload, safe="")
+    url = "data:video/mp4;base64," + payload
+    assert decode_data_uri(url, max_bytes=size) == content
     with pytest.raises(UrlValidationError, match="maximum allowed size"):
         decode_data_uri(url, max_bytes=size - 1)
+
+
+@pytest.mark.parametrize("size", [3, 4, 5], ids=["no-padding", "two-pad", "one-pad"])
+def test_decode_data_uri_size_bound_accepts_fully_escaped_payload(size):
+    content = b"\xfb" * size
+    payload = "".join(f"%{byte:02X}" for byte in base64.b64encode(content))
+    url = "data:video/mp4;base64," + payload
+    assert decode_data_uri(url, max_bytes=len(content)) == content
+    with pytest.raises(UrlValidationError, match="maximum allowed size"):
+        decode_data_uri(url, max_bytes=len(content) - 1)
+
+
+def test_decode_data_uri_size_bound_accepts_lowercase_percent_escapes():
+    url = "data:video/mp4;base64,%2b%2fv7%2bw%3d%3d"
+    assert decode_data_uri(url, max_bytes=4) == b"\xfb" * 4
+
+
+@pytest.mark.parametrize("payload", ["%", "%2", "%GG", "%G1", "%1G", "%41%", "AAAA%2"])
+def test_decode_data_uri_malformed_percent_escape_rejected_before_unquote(
+    monkeypatch, payload
+):
+    spy = MagicMock(side_effect=AssertionError("unquote must not run"))
+    monkeypatch.setattr(media_source_module, "unquote", spy)
+    url = "data:video/mp4;base64," + payload
+    with pytest.raises(UrlValidationError, match="Malformed percent escape"):
+        decode_data_uri(url, max_bytes=1024)
+    spy.assert_not_called()
+
+
+def test_decode_data_uri_raw_size_bound_rejects_before_scanning(monkeypatch):
+    regex = MagicMock()
+    regex.search.side_effect = AssertionError("regex must not run")
+    monkeypatch.setattr(media_source_module, "re", regex)
+    spy = MagicMock(side_effect=AssertionError("unquote must not run"))
+    monkeypatch.setattr(media_source_module, "unquote", spy)
+    payload = "A" * 13
+    url = "data:video/mp4;base64," + payload
+    with pytest.raises(UrlValidationError, match="maximum allowed size"):
+        decode_data_uri(url, max_bytes=3)
+    regex.search.assert_not_called()
+    spy.assert_not_called()
 
 
 def test_decode_data_uri_size_bound_rejects_before_unquote(monkeypatch):
