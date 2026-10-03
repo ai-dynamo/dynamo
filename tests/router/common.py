@@ -903,6 +903,7 @@ def _test_remote_indexer_decisions(
         expected_query_instances: int,
         expected_record_instances: int,
     ) -> tuple[set[int], set[int]]:
+        """Wait for the expected remote-indexer query and record endpoints."""
         query_endpoint = runtime.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
         )
@@ -931,6 +932,7 @@ def _test_remote_indexer_decisions(
         raise TimeoutError("Timed out waiting for served indexer endpoints to register")
 
     async def run_test(runtimes):
+        """Exercise remote-indexer routing for the configured topology."""
         endpoint_path = (
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
