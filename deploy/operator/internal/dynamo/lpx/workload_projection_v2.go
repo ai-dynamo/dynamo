@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"sort"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
@@ -47,8 +46,20 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
 	}
 
+	// Remove GPU-local runtime partitions, with their chain members, before deriving LPU demand.
+	partitions, localPartitionIDs, err := selectRemotePartitions(intent.LocalPartitions, intent.Pipeline, &configured)
+	if err != nil {
+		return nil, err
+	}
+	if len(localPartitionIDs) > 0 {
+		encoded, _ := json.Marshal(localPartitionIDs)
+		for index := range transcripts {
+			transcripts[index].field("local-partition-ids", encoded)
+		}
+	}
+	configured.Partitions = partitions
+
 	// Bind validated physical partitions into projection identity while counting runtime endpoints.
-	partitions := configured.Partitions
 	agentReplicas := 0
 	for index, partition := range partitions {
 		compilerID := uint32(partition.SourcePartitionID)
@@ -64,7 +75,8 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 			transcripts[modelIndex].field("xt-shape", []byte(shape))
 		}
 	}
-	connectors, err := v2Connectors(connectorBuild, partitions)
+	connectors, connectorErr := v2Connectors(connectorBuild, partitions)
+	err = connectorErr
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +134,7 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 			partitions:             partitions,
 			connectors:             connectors,
 			agentReplicas:          agentReplicas,
+			localPartitionIDs:      localPartitionIDs,
 		})
 	}
 	return dst, nil
@@ -165,23 +178,22 @@ func v2Connectors(
 	// Scheduler output follows physical order, not chain declaration order.
 	slices.Sort(edgePositions)
 
-	// Rebase selected physical edges into the retained partition interval.
-	start := sort.Search(len(build.Partitions), func(index int) bool {
-		return build.Partitions[index].SourcePartitionID >= partitions[0].SourcePartitionID
-	})
+	// Rebase selected physical edges onto the retained partitions; both endpoints must remain.
+	retainedOrdinal := make(map[int]int, len(partitions))
+	for ordinal, partition := range partitions {
+		retainedOrdinal[partition.SourcePartitionID] = ordinal
+	}
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, 0, len(edgePositions))
 	for _, position := range edgePositions {
-		i := position - start
-		if i < 0 {
+		from, fromRetained := retainedOrdinal[build.Partitions[position].SourcePartitionID]
+		to, toRetained := retainedOrdinal[build.Partitions[position+1].SourcePartitionID]
+		if !fromRetained || !toRetained {
 			continue
-		}
-		if i+1 >= len(partitions) {
-			break
 		}
 		offset := int64(0)
 		connectors = append(connectors, lpxv1alpha1.PropSyncConnectorRequest{
-			FromPartitionID: fmt.Sprintf("partition-%03d", i),
-			ToPartitionID:   fmt.Sprintf("partition-%03d", i+1),
+			FromPartitionID: fmt.Sprintf("partition-%03d", from),
+			ToPartitionID:   fmt.Sprintf("partition-%03d", to),
 			Requirement: lpxv1alpha1.PropSyncConnectorRequirement{
 				Kind:                    lpxv1alpha1.PropSyncConnectorKindXt8888Gap,
 				MaxInterPartitionOffset: &offset,

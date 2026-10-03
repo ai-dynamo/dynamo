@@ -13,6 +13,31 @@ type LPXConfig struct {
 	// Omission means no deadline.
 	// +optional
 	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
+
+	// localPartitions selects partitions of a hybrid build that the Cyborg
+	// conductor runs on its own GPU. The operator schedules LPU Agents only for
+	// the remaining partitions, and schedules none when every partition is
+	// local. Omission runs every partition on LPUs.
+	// +optional
+	LocalPartitions *LPXLocalPartitions `json:"localPartitions,omitempty"`
+}
+
+// LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
+// Partition IDs are the compiler partition IDs of the build's runtime
+// partitions. A selected prop-sync chain is identified by its first partition.
+// +kubebuilder:validation:XValidation:rule="(has(self.all) && self.all) != has(self.ids)",message="set either all: true or ids"
+type LPXLocalPartitions struct {
+	// all runs every partition on the Cyborg GPU.
+	// +optional
+	All bool `json:"all,omitempty"`
+
+	// ids lists the compiler partition IDs that run on the Cyborg GPU.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Minimum=0
+	// +kubebuilder:validation:items:Maximum=4294967295
+	IDs []int64 `json:"ids,omitempty"`
 }
 
 // SchedulingSpec configures LPX scheduling attempts.
