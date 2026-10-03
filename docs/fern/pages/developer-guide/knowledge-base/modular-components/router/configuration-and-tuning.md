@@ -160,6 +160,8 @@ worker_selection:
 
 Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
 
+The optional `seed` parameter, a non-negative integer with no flag equivalent, makes selection reproducible. Each policy instance then draws its equal-cost tie-breaks and temperature samples from its own random stream seeded with that value, over candidates ordered by worker ID and data-parallel rank, so repeated runs on the same inputs, such as offline replays, pick the same workers. Without `seed`, the policy keeps its unseeded behavior. Leave it unset for live serving: router replicas configured with the same seed make the same tie-break choices.
+
 > [!WARNING]
 > The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
 
@@ -238,8 +240,10 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 The ported policies accept these `parameters`. Defaults follow each source, and each policy rejects
 unknown keys and out-of-range values at startup. Offline replay runs the worker-selection policies
 above but not request classifiers, so a policy other than `thunderagent` can be compared with
-`default` on a recorded trace before deployment. In replay, `llm-d-precise-prefix` `class_weights`
-see only the policy class the trace supplies, never a classifier's override.
+`default` on a recorded trace before deployment. `dynamo-default-cost-fn` takes a `seed` parameter
+for reproducible replays; see [Configure the Default Policy](#configure-the-default-policy). In
+replay, `llm-d-precise-prefix` `class_weights` see only the policy class the trace supplies, never a
+classifier's override.
 
 | Policy type | Parameters (defaults) |
 |---|---|

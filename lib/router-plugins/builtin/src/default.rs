@@ -42,7 +42,7 @@ fn policy_with_rng(
 /// Factory installed by routing hosts, including hosts without a custom catalog.
 pub fn default_factory() -> WorkerSelectionPolicyFactory {
     Arc::new(|config, role, _partition| {
-        policy_for_role(config.clone(), role, PolicyParameters::from(config))
+        policy_for_role(config.clone(), role, PolicyParameters::from(config), None)
     })
 }
 
@@ -50,6 +50,7 @@ fn policy_for_role(
     config: KvRouterConfig,
     role: dynamo_kv_router::WorkerType,
     parameters: PolicyParameters,
+    rng: Option<Arc<Mutex<fastrand::Rng>>>,
 ) -> WorkerSelectionPolicy {
     let is_plain_decode =
         role == dynamo_kv_router::WorkerType::Decode && !config.conditional_disagg_enabled;
@@ -57,7 +58,7 @@ fn policy_for_role(
         config,
         parameters,
         role.default_selector_label(),
-        None,
+        rng,
         is_plain_decode,
     )
 }
