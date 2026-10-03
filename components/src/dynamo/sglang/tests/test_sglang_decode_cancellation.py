@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, WorkerShutdown
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
@@ -45,7 +45,7 @@ async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
     request_id_future.set_result("sglang-request-id")
     context = SimpleNamespace(id=lambda: "request-id")
 
-    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+    with pytest.raises(WorkerShutdown, match="shut down during token generation"):
         async with handler._cancellation_monitor(request_id_future, context):
             await asyncio.sleep(0)
 
@@ -1186,5 +1186,7 @@ async def test_shutdown_survives_ordered_abort_cleanup(decode_cancellation_case)
     abort_task = next(iter(case.handler._abort_tasks))
     abort_task.cancel()
 
-    with pytest.raises(EngineShutdown):
+    with pytest.raises(EngineShutdown) as raised:
         await operation
+
+    assert isinstance(raised.value, WorkerShutdown)
