@@ -170,6 +170,8 @@ jobs:
       - name: Run runtime health-check integration tests
         env:
           NATS_SERVER: nats://127.0.0.1:4222
+          # The health-check test helpers register QUIC response servers.
+          DYN_RESPONSE_PLANE: quic
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_REGION: ${{ vars.AWS_DEFAULT_REGION }}
         shell: bash

@@ -575,8 +575,10 @@ mod push_handler_notify_tests {
             connection_info,
             &serde_json::json!({"prompt": "test"}),
         );
-        let result = ingress.handle_payload(payload, Some(request_id)).await;
-        assert!(result.is_ok(), "handle_payload should succeed");
+        ingress
+            .handle_payload(payload, Some(request_id))
+            .await
+            .expect("handle_payload should succeed");
     }
 
     /// Helper: assert endpoint health status.
