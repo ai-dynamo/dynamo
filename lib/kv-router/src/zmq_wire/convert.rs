@@ -83,6 +83,7 @@ pub fn convert_event(
             locality: _,
             ownership: _,
             session_id,
+            shared_cache_eligible,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -124,6 +125,11 @@ pub fn convert_event(
                         .map(BlockHashValue::into_u64)
                         .map(ExternalSequenceBlockHash::from),
                     start_position: None,
+                    shared_cache_eligible: shared_cache_eligible
+                        && is_eagle != Some(true)
+                        && block_mm_infos
+                            .as_ref()
+                            .is_none_or(|infos| infos.iter().all(Option::is_none)),
                     blocks: create_stored_blocks(
                         kv_block_size,
                         &token_ids,

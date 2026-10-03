@@ -1903,6 +1903,7 @@ mod tests {
             KvCacheEvent {
                 event_id: 0,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: parent.map(ExternalSequenceBlockHash),
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
@@ -1946,6 +1947,7 @@ mod tests {
 
     fn raw_store(medium: Option<&str>, ownership: Option<&str>, block: u64) -> RawKvEvent {
         RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(block)],
             parent_block_hash: None,
             token_ids: vec![10, 11, 12, 13],

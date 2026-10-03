@@ -59,6 +59,7 @@ fn apply_routing_decision_with_prune_tracking(
         .iter()
         .zip(routing_req.sequence_hashes.iter());
     let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
+        shared_cache_eligible: false,
         parent_hash: None,
         start_position: None,
         blocks: hashes
@@ -299,6 +300,7 @@ pub struct KvIndexerBuilder {
     metrics: Arc<KvIndexerMetrics>,
     retention: Option<ApproximateRetentionConfig>,
     delegate: Option<Arc<dyn super::KvIndexerDelegate>>,
+    shared_cache_provenance: bool,
 }
 
 impl KvIndexerBuilder {
@@ -309,6 +311,14 @@ impl KvIndexerBuilder {
 
     pub fn retention(mut self, retention: ApproximateRetentionConfig) -> Self {
         self.retention = Some(retention);
+        self
+    }
+
+    /// Keep per-block shared-cache eligibility so tree dumps can restore it.
+    /// Only needed when a dump consumer learns shared-cache identity from
+    /// replayed stores.
+    pub fn shared_cache_provenance(mut self, enabled: bool) -> Self {
+        self.shared_cache_provenance = enabled;
         self
     }
 
@@ -403,6 +413,7 @@ impl KvIndexer {
             metrics,
             retention: None,
             delegate: None,
+            shared_cache_provenance: false,
         }
     }
 
@@ -413,6 +424,7 @@ impl KvIndexer {
             metrics,
             retention,
             delegate,
+            shared_cache_provenance,
         } = builder;
         let (prune_config, approximate_lru_enabled) = match retention {
             Some(ApproximateRetentionConfig::Ttl(config)) => (Some(config), false),
@@ -463,6 +475,9 @@ impl KvIndexer {
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
                     let mut trie = delegate.map_or_else(RadixTree::new, RadixTree::new_with_delegate);
+                    if shared_cache_provenance {
+                        trie.enable_shared_cache_provenance();
+                    }
                     let mut approximate_lru_lane = ApproximateLruLane::default();
                     let approximate_lru_rx = approximate_lru_rx;
 
