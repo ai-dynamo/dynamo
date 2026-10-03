@@ -13,7 +13,8 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Debug)]
 pub struct TraceRecord {
@@ -89,6 +90,7 @@ pub struct TurnDraft {
     pub export_parent_session_id: Option<String>,
     pub turn_index: usize,
     pub model: String,
+    /// Rendered transcript, kept only for turns without usage, which replay it as tokens.
     pub input_text: String,
     pub prefix_pool_key: String,
     pub output_length: usize,
@@ -135,7 +137,8 @@ pub struct SourceFidelityOracle {
     pub background_tools: usize,
     pub background_agents: usize,
     pub background_completions_missing: usize,
-    pub background_titles: usize,
+    /// Distinct AI-title rows, which lack the timing and usage to replay as requests.
+    pub background_titles: BTreeSet<(String, String)>,
     pub unmatched_tool_calls: usize,
     pub unmatched_tool_results: usize,
 }
@@ -143,7 +146,6 @@ pub struct SourceFidelityOracle {
 #[derive(Debug)]
 struct PendingCompaction {
     metadata: CompactionMetadata,
-    prompt_text: String,
 }
 
 #[derive(Debug, Default)]
@@ -280,6 +282,19 @@ impl SessionTurnBuilder {
         }
     }
 
+    /// Whether every request carries usage, so no turn needs the rendered transcript.
+    pub fn requests_are_usage_shaped(&self) -> bool {
+        self.group_positions_by_key.values().all(|positions| {
+            positions.iter().any(|position| {
+                let record = &self.records[self.top_level_indices[*position]];
+                record.row_type == "assistant"
+                    && object_field(&record.raw, "message")
+                        .and_then(|message| message.get("usage"))
+                        .is_some_and(Value::is_object)
+            })
+        })
+    }
+
     pub fn next_turn(&mut self, tokenizer: &mut impl TokenizerWorker) -> Result<Option<TurnDraft>> {
         while self.top_level_cursor < self.top_level_indices.len() {
             if self.consumed_positions[self.top_level_cursor] {
@@ -293,10 +308,7 @@ impl SessionTurnBuilder {
                 if is_compact_boundary(record) {
                     let metadata = compaction_metadata(record, self.compaction_sequence)?;
                     self.compaction_sequence += 1;
-                    self.pending_compaction = Some(PendingCompaction {
-                        metadata,
-                        prompt_text: self.prompt_text.clone(),
-                    });
+                    self.pending_compaction = Some(PendingCompaction { metadata });
                 }
                 self.top_level_cursor += 1;
                 continue;
@@ -324,14 +336,6 @@ impl SessionTurnBuilder {
                     };
 
                     let output_length = tokenizer.encode(&summary_text)?.len();
-                    let input_text = if pending.prompt_text.is_empty() {
-                        "[system] Compact the conversation.".to_string()
-                    } else {
-                        format!(
-                            "{}\n[system] Compact the conversation.",
-                            pending.prompt_text
-                        )
-                    };
                     let source_request_id = format!("compact:{}", pending.metadata.sequence);
                     let mut sidecar = Map::new();
                     sidecar.insert(
@@ -379,7 +383,8 @@ impl SessionTurnBuilder {
                         turn_index: self.turn_index,
                         prefix_pool_key: prefix_pool_key("claude", &model, &self.cwd),
                         model,
-                        input_text,
+                        // Compaction replays its recorded input length, never a transcript.
+                        input_text: String::new(),
                         output_length,
                         observed_input_length: Some(pending.metadata.pre_tokens),
                         cache_read_input_tokens: None,
@@ -427,7 +432,13 @@ impl SessionTurnBuilder {
                 &mut self.normalizer,
                 tokenizer,
             )?;
-            let input_text = self.prompt_text.clone();
+            // Only a turn without usage replays its rendered transcript; skipping the copy for
+            // the rest keeps long sessions from allocating one transcript copy per turn.
+            let input_text = if group_summary.input_length.is_some() {
+                String::new()
+            } else {
+                self.prompt_text.clone()
+            };
             let request_start_ms = self
                 .request_received_ms_by_group_key
                 .get(&group_key)
@@ -626,110 +637,375 @@ impl SessionTurnBuilder {
     }
 }
 
-pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<FxHashMap<String, Vec<TraceRecord>>> {
-    let mut sessions: FxHashMap<String, Vec<TraceRecord>> = FxHashMap::default();
-    let mut source_order = 0_u64;
+/// Locates every session's rows in a set of Claude trace files without holding row content.
+///
+/// The export parses a session's rows only when its merge reaches them, so peak memory follows
+/// the sessions active at one time rather than the whole corpus. `source_order` numbers the
+/// non-empty lines of all files in discovery order.
+#[derive(Debug, Default)]
+pub struct TraceIndex {
+    files: Vec<IndexedFile>,
+    sessions: FxHashMap<String, IndexedSession>,
+    /// Sessions in order of their first row.
+    session_order: Vec<String>,
+    parent_by_session: FxHashMap<String, String>,
+}
 
-    for trace_file in trace_files {
-        let file = File::open(trace_file)?;
-        let reader = BufReader::new(file);
-        for (line_number, line) in reader.lines().enumerate() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let payload: Value = serde_json::from_str(&line).map_err(|error| {
-                anyhow::anyhow!(
-                    "invalid JSON in {}:{}: {}",
-                    trace_file.display(),
-                    line_number + 1,
-                    error
-                )
-            })?;
+#[derive(Debug)]
+struct IndexedFile {
+    path: PathBuf,
+    first_source_order: u64,
+    non_empty_lines: u64,
+}
 
-            let session_id = payload
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let agent_id = payload
-                .get("agentId")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let row_type = payload
-                .get("type")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let (Some(session_id), Some(row_type)) = (session_id, row_type) else {
-                source_order += 1;
-                continue;
-            };
-            let timestamp_ms = match payload.get("timestamp").and_then(Value::as_str) {
-                Some(timestamp) => match parse_utc_timestamp_ms(timestamp) {
-                    Ok(timestamp_ms) => timestamp_ms,
-                    Err(_) => {
-                        source_order += 1;
-                        continue;
-                    }
-                },
-                None if row_type == "ai-title" => 0,
-                None => {
-                    source_order += 1;
-                    continue;
-                }
-            };
+#[derive(Debug, Default)]
+struct IndexedSession {
+    /// Ascending source orders of the session's rows.
+    source_orders: Vec<u64>,
+    /// Ascending indices of the files holding those rows.
+    files: Vec<usize>,
+    request_start_lower_bound_ms: Option<i64>,
+    /// Agents whose completed results this session recorded, in source order.
+    child_session_ids: Vec<String>,
+}
 
-            let trace_id = agent_id.clone().unwrap_or_else(|| session_id.clone());
-            sessions.entry(trace_id).or_default().push(TraceRecord {
-                session_id,
-                parent_session_id: None,
-                row_type,
-                timestamp_ms,
-                source_order,
-                raw: payload,
+/// The parts of one row the index keeps.
+struct ScannedRow {
+    line_order: u64,
+    trace_id: String,
+    request_start_bound_ms: Option<i64>,
+    child_session_id: Option<String>,
+}
+
+struct ScannedFile {
+    non_empty_lines: u64,
+    rows: Vec<ScannedRow>,
+}
+
+impl TraceIndex {
+    /// Scans `trace_files` on up to `workers` threads.
+    pub fn build(trace_files: &[PathBuf], workers: usize) -> Result<Self> {
+        let next = AtomicUsize::new(0);
+        let mut scans = std::thread::scope(|scope| {
+            let handles = (0..workers.clamp(1, trace_files.len().max(1)))
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut scans = Vec::new();
+                        while let Some(path) = trace_files.get(next.fetch_add(1, Ordering::Relaxed))
+                        {
+                            scans.push((path, scan_trace_file(path)));
+                        }
+                        scans
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("trace scanner panicked"))
+                .collect::<Vec<_>>()
+        });
+        let position = trace_files
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path, index))
+            .collect::<FxHashMap<_, _>>();
+        scans.sort_by_key(|(path, _)| position[path]);
+
+        let mut index = Self::default();
+        let mut first_source_order = 0_u64;
+        for (path, scan) in scans {
+            let scan = scan?;
+            let file_index = index.files.len();
+            index.files.push(IndexedFile {
+                path: path.clone(),
+                first_source_order,
+                non_empty_lines: scan.non_empty_lines,
             });
-            source_order += 1;
+            for row in scan.rows {
+                if !index.sessions.contains_key(&row.trace_id) {
+                    index.session_order.push(row.trace_id.clone());
+                }
+                let session = index.sessions.entry(row.trace_id).or_default();
+                session
+                    .source_orders
+                    .push(first_source_order + row.line_order);
+                if session.files.last() != Some(&file_index) {
+                    session.files.push(file_index);
+                }
+                if let Some(bound) = row.request_start_bound_ms {
+                    session.request_start_lower_bound_ms = Some(
+                        session
+                            .request_start_lower_bound_ms
+                            .map_or(bound, |current| current.min(bound)),
+                    );
+                }
+                session.child_session_ids.extend(row.child_session_id);
+            }
+            first_source_order += scan.non_empty_lines;
         }
-    }
-
-    let mut parent_by_session = FxHashMap::default();
-    for (parent_session_id, records) in &sessions {
-        for record in records {
-            if let Some(child_session_id) = record
-                .raw
-                .get("toolUseResult")
-                .and_then(Value::as_object)
-                .and_then(|result| result.get("agentId"))
-                .and_then(Value::as_str)
-            {
-                parent_by_session
-                    .entry(child_session_id.to_string())
+        // A child recorded by several sessions, as after a resume, keeps the first parent found.
+        for (parent_session_id, session) in &index.sessions {
+            for child_session_id in &session.child_session_ids {
+                index
+                    .parent_by_session
+                    .entry(child_session_id.clone())
                     .or_insert_with(|| parent_session_id.clone());
             }
         }
+        Ok(index)
     }
 
-    for (session_id, records) in &mut sessions {
-        let parent_session_id = parent_by_session.get(session_id).cloned();
-        for record in records.iter_mut() {
-            record.parent_session_id.clone_from(&parent_session_id);
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+
+    /// Sessions in order of first appearance, with a lower bound on their request start times.
+    pub fn sessions(&self) -> impl Iterator<Item = (&str, Option<i64>)> + '_ {
+        self.session_order.iter().map(|trace_id| {
+            (
+                trace_id.as_str(),
+                self.sessions[trace_id].request_start_lower_bound_ms,
+            )
+        })
+    }
+
+    /// Parses one session's rows in source order.
+    pub fn load_session(&self, trace_id: &str) -> Result<Vec<TraceRecord>> {
+        let Some(session) = self.sessions.get(trace_id) else {
+            anyhow::bail!("unknown Claude session {trace_id}");
+        };
+        let parent_session_id = self.parent_by_session.get(trace_id);
+        let mut records = Vec::with_capacity(session.source_orders.len());
+        let mut wanted = session.source_orders.iter().copied().peekable();
+        for file_index in &session.files {
+            let file = &self.files[*file_index];
+            let reader = BufReader::new(File::open(&file.path)?);
+            let mut source_order = file.first_source_order;
+            for (line_number, line) in reader.lines().enumerate() {
+                let Some(&next_wanted) = wanted
+                    .peek()
+                    .filter(|order| **order < file.first_source_order + file.non_empty_lines)
+                else {
+                    break;
+                };
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if source_order == next_wanted {
+                    wanted.next();
+                    let payload = parse_trace_line(&line, &file.path, line_number)?;
+                    let Some((row_trace_id, mut record)) = trace_record(payload, source_order)
+                    else {
+                        anyhow::bail!(
+                            "{}:{} changed while exporting",
+                            file.path.display(),
+                            line_number + 1
+                        );
+                    };
+                    if row_trace_id != trace_id {
+                        anyhow::bail!(
+                            "{}:{} changed while exporting",
+                            file.path.display(),
+                            line_number + 1
+                        );
+                    }
+                    record.parent_session_id = parent_session_id.cloned();
+                    records.push(record);
+                }
+                source_order += 1;
+            }
         }
-        records.sort_by_key(|record| record.source_order);
+        if wanted.peek().is_some() {
+            anyhow::bail!("Claude session {trace_id} lost rows while exporting");
+        }
+        Ok(records)
     }
-
-    Ok(sessions)
 }
 
-pub fn build_source_fidelity_oracle(
+fn scan_trace_file(path: &Path) -> Result<ScannedFile> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut scan = ScannedFile {
+        non_empty_lines: 0,
+        rows: Vec::new(),
+    };
+    for (line_number, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let payload = parse_trace_line(&line, path, line_number)?;
+        let line_order = scan.non_empty_lines;
+        scan.non_empty_lines += 1;
+        let Some((trace_id, record)) = trace_record(payload, line_order) else {
+            continue;
+        };
+        let child_session_id = record
+            .raw
+            .get("toolUseResult")
+            .and_then(Value::as_object)
+            .and_then(|result| result.get("agentId"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        scan.rows.push(ScannedRow {
+            line_order,
+            trace_id,
+            request_start_bound_ms: request_start_bound_ms(&record),
+            child_session_id,
+        });
+    }
+    Ok(scan)
+}
+
+fn parse_trace_line(line: &str, path: &Path, line_number: usize) -> Result<Value> {
+    serde_json::from_str(line).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid JSON in {}:{}: {}",
+            path.display(),
+            line_number + 1,
+            error
+        )
+    })
+}
+
+/// Top-level row fields the export reads. Others, such as attachment payloads, are dropped.
+const ROW_FIELDS: &[&str] = &[
+    "agentId",
+    "aiTitle",
+    "compactMetadata",
+    "content",
+    "cwd",
+    "data",
+    "isCompactSummary",
+    "isMeta",
+    "isSidechain",
+    "message",
+    "operation",
+    "parentToolUseID",
+    "requestId",
+    "sessionId",
+    "subtype",
+    "timestamp",
+    "toolUseResult",
+    "type",
+    "uuid",
+];
+const TOOL_USE_RESULT_FIELDS: &[&str] = &["agentId", "backgroundTaskId", "isAsync"];
+
+/// Drops the parts of a row the export never reads, which dominate a parsed session's memory.
+///
+/// Tool results keep only their child-agent and background markers, and thinking blocks keep only
+/// their type because transcript rendering skips them.
+fn prune_row(payload: &mut Value) {
+    let Some(row) = payload.as_object_mut() else {
+        return;
+    };
+    row.retain(|key, _| ROW_FIELDS.contains(&key.as_str()));
+    match row.get_mut("toolUseResult") {
+        Some(Value::Object(result)) => {
+            result.retain(|key, _| TOOL_USE_RESULT_FIELDS.contains(&key.as_str()));
+        }
+        Some(_) => {
+            row.remove("toolUseResult");
+        }
+        None => {}
+    }
+    let Some(Value::Array(blocks)) = row
+        .get_mut("message")
+        .and_then(|message| message.get_mut("content"))
+    else {
+        return;
+    };
+    for block in blocks {
+        let Some(block) = block.as_object_mut() else {
+            continue;
+        };
+        if matches!(
+            block.get("type").and_then(Value::as_str),
+            Some("thinking" | "redacted_thinking")
+        ) {
+            block.retain(|key, _| key == "type");
+        }
+    }
+}
+
+/// The session a row belongs to and its record, or `None` for rows the export ignores.
+fn trace_record(mut payload: Value, source_order: u64) -> Option<(String, TraceRecord)> {
+    prune_row(&mut payload);
+    let session_id = payload
+        .get("sessionId")
+        .and_then(Value::as_str)?
+        .to_string();
+    let row_type = payload.get("type").and_then(Value::as_str)?.to_string();
+    let timestamp_ms = match payload.get("timestamp").and_then(Value::as_str) {
+        Some(timestamp) => parse_utc_timestamp_ms(timestamp).ok()?,
+        None if row_type == "ai-title" => 0,
+        None => return None,
+    };
+    let trace_id = payload
+        .get("agentId")
+        .and_then(Value::as_str)
+        .map_or_else(|| session_id.clone(), str::to_string);
+    Some((
+        trace_id,
+        TraceRecord {
+            session_id,
+            parent_session_id: None,
+            row_type,
+            timestamp_ms,
+            source_order,
+            raw: payload,
+        },
+    ))
+}
+
+/// No request built from this row can start earlier.
+///
+/// Requests start at a user, tool-result, or assistant row, except compaction requests, which
+/// start their recorded duration before the compact boundary.
+pub(crate) fn request_start_bound_ms(record: &TraceRecord) -> Option<i64> {
+    if !matches!(record.row_type.as_str(), "user" | "assistant" | "system") {
+        return None;
+    }
+    let compaction_start_ms = is_compact_boundary(record)
+        .then(|| compaction_metadata(record, 0).ok())
+        .flatten()
+        .map(|metadata| metadata.ended_at_ms.saturating_sub(metadata.duration_ms));
+    Some(compaction_start_ms.map_or(record.timestamp_ms, |start| start.min(record.timestamp_ms)))
+}
+
+#[cfg(test)]
+pub(crate) fn load_trace_records(
+    trace_files: &[PathBuf],
+) -> Result<FxHashMap<String, Vec<TraceRecord>>> {
+    let index = TraceIndex::build(trace_files, 2)?;
+    index
+        .sessions()
+        .map(|(trace_id, _)| Ok((trace_id.to_string(), index.load_session(trace_id)?)))
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn build_source_fidelity_oracle(
     sessions: &FxHashMap<String, Vec<TraceRecord>>,
 ) -> Result<SourceFidelityOracle> {
     let mut oracle = SourceFidelityOracle::default();
-    let mut tool_calls: FxHashMap<(String, String), String> = FxHashMap::default();
-    let mut background_titles = BTreeSet::new();
-    let mut background_tool_ids = BTreeSet::new();
-    let background_completions = sessions
-        .iter()
-        .flat_map(|(trace_id, records)| {
-            records.iter().filter_map(|record| {
+    for (trace_id, records) in sessions {
+        oracle.add_session(trace_id, records)?;
+    }
+    Ok(oracle)
+}
+
+impl SourceFidelityOracle {
+    /// Adds the expectations derived from one session's source rows.
+    pub fn add_session(&mut self, trace_id: &str, records: &[TraceRecord]) -> Result<()> {
+        let oracle = self;
+        let trace_id = &trace_id.to_string();
+        let mut tool_calls: FxHashMap<(String, String), String> = FxHashMap::default();
+        let mut background_tool_ids = BTreeSet::new();
+        let background_completions = records
+            .iter()
+            .filter_map(|record| {
                 let content = (record.row_type == "queue-operation"
                     && record.raw.get("operation").and_then(Value::as_str) == Some("enqueue"))
                 .then(|| record.raw.get("content").and_then(Value::as_str))
@@ -739,10 +1015,8 @@ pub fn build_source_fidelity_oracle(
                     !content.contains("<status>completed</status>"),
                 ))
             })
-        })
-        .collect::<FxHashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
 
-    for (trace_id, records) in sessions {
         let root_session_id = records
             .first()
             .map(|record| record.session_id.as_str())
@@ -758,7 +1032,9 @@ pub fn build_source_fidelity_oracle(
                     .get("aiTitle")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                background_titles.insert((record.session_id.clone(), title.to_string()));
+                oracle
+                    .background_titles
+                    .insert((record.session_id.clone(), title.to_string()));
                 continue;
             }
             if !is_top_level_row(record, is_subagent) {
@@ -852,7 +1128,7 @@ pub fn build_source_fidelity_oracle(
             let Some(message) = object_field(&record.raw, "message") else {
                 continue;
             };
-            if let Some(usage) = object_field(&Value::Object(message.clone()), "usage") {
+            if let Some(usage) = message.get("usage").and_then(Value::as_object) {
                 let input_length = [
                     "input_tokens",
                     "cache_creation_input_tokens",
@@ -911,15 +1187,13 @@ pub fn build_source_fidelity_oracle(
                 tool_calls.insert((trace_id.clone(), raw_id.to_string()), tool_class);
             }
         }
+        oracle.background_completions_missing += background_tool_ids
+            .iter()
+            .filter(|tool_id| !background_completions.contains_key(*tool_id))
+            .count();
+        oracle.unmatched_tool_calls += tool_calls.len();
+        Ok(())
     }
-
-    oracle.background_titles = background_titles.len();
-    oracle.background_completions_missing = background_tool_ids
-        .iter()
-        .filter(|tool_id| !background_completions.contains_key(*tool_id))
-        .count();
-    oracle.unmatched_tool_calls = tool_calls.len();
-    Ok(oracle)
 }
 
 fn queued_tool_id(content: &str) -> Option<&str> {
@@ -1475,7 +1749,7 @@ fn summarize_assistant_group(
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
-        if let Some(usage) = object_field(&Value::Object(message.clone()), "usage") {
+        if let Some(usage) = message.get("usage").and_then(Value::as_object) {
             let input_tokens = usage
                 .get("input_tokens")
                 .and_then(Value::as_u64)
@@ -2160,7 +2434,7 @@ mod tests {
             concat!(
                 "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.002Z\",\"compactMetadata\":{\"trigger\":\"manual\",\"preTokens\":10,\"postTokens\":3,\"durationMs\":1}}\n",
                 "{\"type\":\"user\",\"isCompactSummary\":true,\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.001Z\",\"message\":{\"content\":\"summary\"}}\n",
-                "{\"type\":\"assistant\",\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.003Z\",\"message\":{\"id\":\"msg-1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":{\"output_tokens\":1}}}\n"
+                "{\"type\":\"assistant\",\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.003Z\",\"message\":{\"id\":\"msg-1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n"
             ),
         )
         .unwrap();
@@ -2234,7 +2508,7 @@ mod tests {
                 "assistant",
                 2_000,
                 1,
-                json!({"type":"assistant","message":{"id":"assistant-1","content":[{"type":"text","text":"first answer"}],"usage":{"output_tokens":3}}}),
+                json!({"type":"assistant","message":{"id":"assistant-1","content":[{"type":"text","text":"first answer"}]}}),
             ),
             make_record(
                 "system",
@@ -2252,7 +2526,7 @@ mod tests {
                 "assistant",
                 4_000,
                 4,
-                json!({"type":"assistant","message":{"id":"assistant-2","content":[{"type":"text","text":"second answer"}],"usage":{"output_tokens":5}}}),
+                json!({"type":"assistant","message":{"id":"assistant-2","content":[{"type":"text","text":"second answer"}]}}),
             ),
         ];
 
@@ -2293,7 +2567,7 @@ mod tests {
                 "assistant",
                 2_000,
                 1,
-                json!({"type":"assistant","message":{"id":"assistant-1","content":[{"type":"text","text":"first answer"}],"usage":{"output_tokens":3}}}),
+                json!({"type":"assistant","message":{"id":"assistant-1","content":[{"type":"text","text":"first answer"}]}}),
             ),
             make_record(
                 "system",
@@ -2341,7 +2615,7 @@ mod tests {
                 "assistant",
                 4_000,
                 9,
-                json!({"type":"assistant","message":{"id":"assistant-2","content":[{"type":"text","text":"second answer"}],"usage":{"output_tokens":5}}}),
+                json!({"type":"assistant","message":{"id":"assistant-2","content":[{"type":"text","text":"second answer"}]}}),
             ),
         ];
 
@@ -2375,7 +2649,7 @@ mod tests {
                 "assistant",
                 2_000,
                 1,
-                json!({"type":"assistant","message":{"id":"assistant-1","content":[{"type":"text","text":"old answer"}],"usage":{"output_tokens":2}}}),
+                json!({"type":"assistant","message":{"id":"assistant-1","content":[{"type":"text","text":"old answer"}]}}),
             ),
             make_record(
                 "user",
@@ -2387,7 +2661,7 @@ mod tests {
                 "assistant",
                 4_000,
                 3,
-                json!({"type":"assistant","message":{"id":"assistant-2","content":[{"type":"text","text":"new answer"}],"usage":{"output_tokens":2}}}),
+                json!({"type":"assistant","message":{"id":"assistant-2","content":[{"type":"text","text":"new answer"}]}}),
             ),
         ];
 

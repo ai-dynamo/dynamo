@@ -70,7 +70,7 @@ cargo run -p dynamo-bench --bin claude_trace_export \
 - `--delta-overlap-words`: approximate tokenization by re-tokenizing only the final `N` words of the previous prompt plus the new delta; default is `50`
 - `--tokenizer-workers`: number of worker threads used for session-parallel tokenization
 
-The tokenizer only runs for turns without Claude usage and for compaction summaries. Usage-shaped turns, which are nearly all turns in recent sessions, skip transcript tokenization.
+The tokenizer only runs for turns without Claude usage and for compaction summaries, and is loaded only when one of them needs it. Usage-shaped turns, which are nearly all turns in recent sessions, skip transcript tokenization.
 
 ## Parsing Semantics
 
@@ -100,7 +100,7 @@ The exporter:
 - A session's first request takes its cached prefix from a synthetic prefix shared by sessions with the same harness, model, and working directory. Claude's usage shows that this prefix was already cached but not which session wrote it, so the exporter attributes it to the context those sessions share, such as the system prompt and tool definitions. Later requests take their cached prefix from the session's previous request. The fidelity report counts the shared blocks as `pooled_prefix_blocks`.
 - The synthetic compaction request keeps Claude's `preTokens` input length, reuses every recoverable pre-compaction prefix block, and reserves a synthetic suffix for the unknown instruction. Its duration and context sizes come from `compactMetadata`; output length comes from tokenizing `isCompactSummary` because `postTokens` is post-compaction context size, not summary output. The exporter omits `cached_tokens` because Claude does not record cache usage for this hidden request.
 - The first post-compaction request reuses exactly Claude's observed `cache_read_input_tokens`, writes the new summary suffix once, and makes that suffix available to later turns. A full cache reset and a zero-write summary are both intentionally avoided.
-- Rows are written incrementally as turns are merged across sessions.
+- Rows are written incrementally as turns are merged across sessions. The exporter first indexes every file without keeping row content. It parses a session only when the merge can reach its earliest request, builds the session's turns, and releases its rows. A session with turns lacking usage keeps its rows and builds turns one at a time, because each such turn carries the transcript so far. Peak memory therefore follows the sessions active at the same time rather than the corpus size, and every input file is read twice.
 - Every export runs a source-to-output fidelity verifier. Request and compaction cardinality/timing, usage, tool classes/errors, child links, pre-compaction and post-compaction cached-prefix hashes, and forward causal references fail the export on mismatch.
 - The verifier always prints non-fatal source limitations: synthetic KV hashes, unmatched tools, missing background completions, unresolved child sessions, and `ai-title` rows that lack enough timing/usage data to replay as requests.
 - `tool.claude` is exporter-only replay evidence, not a requirement for live request-trace or ZMQ tool-event producers. Direct replay consumes it while reconstructing the in-memory request graph and falls back to timestamps when it is absent.

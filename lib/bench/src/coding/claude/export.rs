@@ -7,17 +7,19 @@
 //! and global ordering across sessions.
 
 use crate::coding::claude::parser::{
-    SessionTurnBuilder, SourceFidelityOracle, TraceRecord, TurnDraft, build_source_fidelity_oracle,
+    SessionTurnBuilder, SourceFidelityOracle, TraceIndex, TraceRecord, TurnDraft,
+    request_start_bound_ms,
 };
 use crate::coding::replay::{
     AgentContext, HARNESS_EVENT_SOURCE, PrefixPool, REQUEST_TRACE_SCHEMA, ReplayBase, ReplayFields,
     RequestEndEvent, RequestFields, ToolEvent, ToolFields, TraceLine, synthetic_stream_seed,
     synthetic_token, usage_shaped_tokens,
 };
-use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker, last_word_overlap_start};
+use crate::coding::tokenizer::{
+    LazyTokenizer, TokenizerFactory, TokenizerWorker, last_word_overlap_start,
+};
 use anyhow::{Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use dynamo_data_gen::write_empty_files;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde_json::json;
@@ -154,14 +156,67 @@ struct ReadyTurn {
 #[derive(Debug)]
 struct HeadTurn {
     turn: TurnDraft,
+    sidecar_line: String,
     turn_key: u64,
     scheduled: bool,
     ready: Option<ReadyTurn>,
 }
 
+/// A turn waiting for the merge, with its sidecar row already serialized.
+#[derive(Debug)]
+struct QueuedTurn {
+    turn: TurnDraft,
+    sidecar_line: String,
+}
+
+impl QueuedTurn {
+    fn new(mut turn: TurnDraft) -> Result<Self> {
+        let sidecar_line = serde_json::to_string(&turn.sidecar)?;
+        turn.sidecar = serde_json::Value::Null;
+        // Usage-shaped turns replay synthetic hashes, so their transcript is never tokenized.
+        if turn.observed_input_length.is_some() {
+            turn.input_text = String::new();
+        }
+        Ok(Self { turn, sidecar_line })
+    }
+}
+
+/// Where a session's remaining turns come from.
+#[derive(Debug)]
+enum SessionTurns {
+    /// Built when the session opened, so its rows are already freed.
+    Built(VecDeque<QueuedTurn>),
+    /// Built one at a time, because each transcript-shaped turn carries the transcript so far.
+    Lazy(Box<SessionTurnBuilder>),
+}
+
+impl SessionTurns {
+    /// Builds every turn now unless some turn needs its transcript tokenized.
+    fn open(mut builder: SessionTurnBuilder, tokenizer: &mut impl TokenizerWorker) -> Result<Self> {
+        if !builder.requests_are_usage_shaped() {
+            return Ok(Self::Lazy(Box::new(builder)));
+        }
+        let mut turns = VecDeque::new();
+        while let Some(turn) = builder.next_turn(tokenizer)? {
+            turns.push_back(QueuedTurn::new(turn)?);
+        }
+        Ok(Self::Built(turns))
+    }
+
+    fn next(&mut self, tokenizer: &mut impl TokenizerWorker) -> Result<Option<QueuedTurn>> {
+        match self {
+            Self::Built(turns) => Ok(turns.pop_front()),
+            Self::Lazy(builder) => builder
+                .next_turn(tokenizer)?
+                .map(QueuedTurn::new)
+                .transpose(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SessionState {
-    builder: SessionTurnBuilder,
+    turns: SessionTurns,
     head: Option<HeadTurn>,
     overlap_base: Option<OverlapBase>,
     replay_base: Option<ReplayBase>,
@@ -557,7 +612,7 @@ impl FidelityVerifier {
             background_tools: self.background_tools,
             background_agents: self.background_agents,
             background_completions_missing: self.oracle.background_completions_missing,
-            background_titles_unreplayable: self.oracle.background_titles,
+            background_titles_unreplayable: self.oracle.background_titles.len(),
             cache_prefix_blocks_verified: self.cache_prefix_blocks_verified,
             compaction_prefix_blocks_verified: self.compaction_prefix_blocks_verified,
             post_compaction_prefix_blocks_verified: self.post_compaction_prefix_blocks_verified,
@@ -569,16 +624,58 @@ impl FidelityVerifier {
     }
 }
 
-pub fn write_streamed_request_trace_rows<F>(
+/// Claude sessions the export opens one at a time.
+pub trait SessionSource {
+    /// Every session, with a lower bound on when its requests can start when one is known.
+    fn session_bounds(&self) -> Vec<(String, Option<i64>)>;
+
+    /// The session's rows in source order.
+    fn take_session(&mut self, trace_id: &str) -> Result<Vec<TraceRecord>>;
+}
+
+impl SessionSource for TraceIndex {
+    fn session_bounds(&self) -> Vec<(String, Option<i64>)> {
+        self.sessions()
+            .map(|(trace_id, bound)| (trace_id.to_string(), bound))
+            .collect()
+    }
+
+    fn take_session(&mut self, trace_id: &str) -> Result<Vec<TraceRecord>> {
+        self.load_session(trace_id)
+    }
+}
+
+impl SessionSource for FxHashMap<String, Vec<TraceRecord>> {
+    fn session_bounds(&self) -> Vec<(String, Option<i64>)> {
+        self.iter()
+            .map(|(trace_id, records)| {
+                let bound = records.iter().filter_map(request_start_bound_ms).min();
+                (trace_id.clone(), bound)
+            })
+            .collect()
+    }
+
+    fn take_session(&mut self, trace_id: &str) -> Result<Vec<TraceRecord>> {
+        self.remove(trace_id)
+            .ok_or_else(|| anyhow!("unknown Claude session {trace_id}"))
+    }
+}
+
+/// Writes request-trace and sidecar rows in global request-start order.
+///
+/// A session is parsed only once the merge could reach its earliest request and is dropped after
+/// its last turn, so memory follows the sessions active at one time rather than the corpus.
+pub fn write_streamed_request_trace_rows<F, S>(
     output_path: &Path,
     sidecar_path: &Path,
-    sessions: FxHashMap<String, Vec<TraceRecord>>,
+    mut sessions: S,
     preserve_session_ids: bool,
     tokenizer_factory: F,
     config: ExportConfig,
 ) -> Result<ExportStats>
 where
     F: TokenizerFactory,
+    S: SessionSource,
 {
     if config.block_size == 0 {
         bail!("block_size must be greater than 0");
@@ -587,48 +684,18 @@ where
         bail!("tokenizer_workers must be greater than 0");
     }
 
-    let mut verifier = FidelityVerifier::new(build_source_fidelity_oracle(&sessions)?);
-    let mut parser_tokenizer = tokenizer_factory.create_worker()?;
+    let mut verifier = FidelityVerifier::new(SourceFidelityOracle::default());
+    let mut parser_tokenizer = LazyTokenizer::new(tokenizer_factory.clone());
     let mut states = FxHashMap::default();
     let mut heap = BinaryHeap::new();
     let mut unscheduled_sessions = VecDeque::new();
     let mut stats = ExportStats::default();
+    let mut unopened = sessions.session_bounds();
+    unopened.sort_by(|left, right| {
+        (left.1.unwrap_or(i64::MIN), &left.0).cmp(&(right.1.unwrap_or(i64::MIN), &right.0))
+    });
+    let mut unopened = unopened.into_iter().peekable();
 
-    for (session_id, records) in sessions {
-        let mut builder =
-            SessionTurnBuilder::new(session_id.clone(), records, preserve_session_ids);
-        let Some(first_turn) = builder.next_turn(&mut parser_tokenizer)? else {
-            continue;
-        };
-
-        let head = head_turn(first_turn, 0);
-        states.insert(
-            session_id.clone(),
-            SessionState {
-                builder,
-                head: Some(head),
-                overlap_base: None,
-                replay_base: None,
-                next_turn_key: 1,
-            },
-        );
-        push_heap_entry(&mut heap, &session_id, states.get(&session_id).unwrap());
-        unscheduled_sessions.push_back(session_id);
-    }
-
-    if states.is_empty() {
-        write_empty_files(output_path, Some(sidecar_path))?;
-        stats.fidelity = verifier.finish(0, 0, 0)?;
-        return Ok(stats);
-    }
-
-    stats.max_heap_len = heap.len();
-    let trace_start_ms = states
-        .values()
-        .filter_map(|state| state.head.as_ref())
-        .map(|head| head.turn.request_start_ms)
-        .min()
-        .unwrap_or_default();
     let mut output = create_writer(output_path)?;
     let mut sidecar = create_writer(sidecar_path)?;
 
@@ -641,10 +708,46 @@ where
         result_tx,
     );
 
+    let mut trace_start_ms = None;
     let mut prefix_pool = PrefixPool::default();
     let mut pooled_prefix_blocks = 0_usize;
     let mut inflight_jobs = 0_usize;
-    while !heap.is_empty() {
+    loop {
+        // Open every session whose requests could precede the earliest open head. Sessions open
+        // in bound order, so each remaining session starts after that head.
+        while let Some((_, bound)) = unopened.peek() {
+            let earliest_head_ms = heap
+                .peek()
+                .map(|Reverse(entry): &Reverse<HeapEntry>| entry.request_start_ms);
+            if let (Some(bound), Some(earliest_head_ms)) = (bound, earliest_head_ms)
+                && *bound > earliest_head_ms
+            {
+                break;
+            }
+            let (session_id, _) = unopened.next().expect("peeked session");
+            let records = sessions.take_session(&session_id)?;
+            verifier.oracle.add_session(&session_id, &records)?;
+            let builder =
+                SessionTurnBuilder::new(session_id.clone(), records, preserve_session_ids);
+            let mut turns = SessionTurns::open(builder, &mut parser_tokenizer)?;
+            let Some(first_turn) = turns.next(&mut parser_tokenizer)? else {
+                continue;
+            };
+            let state = SessionState {
+                turns,
+                head: Some(head_turn(first_turn, 0)),
+                overlap_base: None,
+                replay_base: None,
+                next_turn_key: 1,
+            };
+            push_heap_entry(&mut heap, &session_id, &state);
+            states.insert(session_id.clone(), state);
+            unscheduled_sessions.push_back(session_id);
+            stats.max_heap_len = stats.max_heap_len.max(heap.len());
+        }
+        if heap.is_empty() {
+            break;
+        }
         schedule_pending_jobs(
             &mut states,
             &mut unscheduled_sessions,
@@ -673,7 +776,7 @@ where
 
         let Reverse(entry) = heap.pop().unwrap();
         let session_id = entry.session_id.clone();
-        let (turn, ready_turn) = {
+        let (turn, sidecar_line, ready_turn) = {
             let state = states
                 .get_mut(&session_id)
                 .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
@@ -685,14 +788,15 @@ where
                 .ready
                 .take()
                 .ok_or_else(|| anyhow!("missing tokenized result for session {}", session_id))?;
-            (head.turn, ready_turn)
+            (head.turn, head.sidecar_line, ready_turn)
         };
 
+        let trace_start_ms = *trace_start_ms.get_or_insert(turn.request_start_ms);
         let next_turn = {
             let state = states
                 .get_mut(&session_id)
                 .ok_or_else(|| anyhow!("missing session state for {}", session_id))?;
-            state.builder.next_turn(&mut parser_tokenizer)?
+            state.turns.next(&mut parser_tokenizer)?
         };
         let replay = {
             let state = states
@@ -810,7 +914,8 @@ where
             write_json_line(&mut output, &tool_row)?;
             stats.tool_row_count += 1;
         }
-        write_json_line(&mut sidecar, &turn.sidecar)?;
+        sidecar.write_all(sidecar_line.as_bytes())?;
+        sidecar.write_all(b"\n")?;
         stats.row_count += 1;
         stats.sidecar_count += 1;
 
@@ -914,16 +1019,18 @@ fn materialize_replay_tokens(
 }
 
 /// Usage-shaped turns replay synthetic hashes, so only transcript-shaped turns are tokenized.
-fn head_turn(mut turn: TurnDraft, turn_key: u64) -> HeadTurn {
-    let ready = turn.observed_input_length.is_some().then(|| {
-        turn.input_text = String::new();
-        ReadyTurn {
+fn head_turn(queued: QueuedTurn, turn_key: u64) -> HeadTurn {
+    let ready = queued
+        .turn
+        .observed_input_length
+        .is_some()
+        .then(|| ReadyTurn {
             current_text: String::new(),
             tokens: Vec::new(),
-        }
-    });
+        });
     HeadTurn {
-        turn,
+        turn: queued.turn,
+        sidecar_line: queued.sidecar_line,
         turn_key,
         scheduled: false,
         ready,
@@ -1050,19 +1157,7 @@ where
             let result_tx = result_tx.clone();
             let factory = factory.clone();
             thread::spawn(move || {
-                let mut tokenizer = match factory.create_worker() {
-                    Ok(tokenizer) => tokenizer,
-                    Err(error) => {
-                        let _ = result_tx.send(TokenizeResponse {
-                            session_id: "__worker_init__".to_string(),
-                            turn_key: 0,
-                            outcome: Err(format!(
-                                "failed to initialize tokenizer worker: {error:#}"
-                            )),
-                        });
-                        return;
-                    }
-                };
+                let mut tokenizer = LazyTokenizer::new(factory);
                 while let Ok(job) = job_rx.recv() {
                     let outcome = tokenize_job(&mut tokenizer, &job)
                         .map(|tokens| ReadyTurn {
@@ -1111,10 +1206,10 @@ fn tokenize_job(tokenizer: &mut impl TokenizerWorker, job: &TokenizeJob) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportConfig, HeadTurn, ReadyTurn, SessionState, TurnDraft, apply_tokenize_response,
-        write_streamed_request_trace_rows,
+        ExportConfig, HeadTurn, ReadyTurn, SessionState, SessionTurns, TurnDraft,
+        apply_tokenize_response, write_streamed_request_trace_rows,
     };
-    use crate::coding::claude::parser::{SessionTurnBuilder, TraceRecord};
+    use crate::coding::claude::parser::TraceRecord;
     use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker};
     use anyhow::Result;
     use rustc_hash::FxHashMap;
@@ -1179,8 +1274,9 @@ mod tests {
         states.insert(
             "session-a".to_string(),
             SessionState {
-                builder: SessionTurnBuilder::new("session-a".to_string(), Vec::new(), true),
+                turns: SessionTurns::Built(std::collections::VecDeque::new()),
                 head: Some(HeadTurn {
+                    sidecar_line: String::new(),
                     turn: TurnDraft {
                         session_id: "session-a".to_string(),
                         source_request_id: "req-1".to_string(),
@@ -1343,6 +1439,117 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(first_hashes.as_slice(), &second_hashes[..2]);
+    }
+
+    #[test]
+    fn transcript_shaped_sessions_tokenize_during_the_merge() {
+        let temp = TempDir::new().unwrap();
+        let output_path = temp.path().join("trace.jsonl");
+        let sidecar_path = temp.path().join("trace.sidecar.jsonl");
+        let mut sessions = FxHashMap::default();
+        sessions.insert(
+            "session-u".to_string(),
+            vec![
+                make_record(
+                    "session-u",
+                    "user",
+                    1_000,
+                    0,
+                    json!({"type":"user","message":{"role":"user","content":"usage prompt"}}),
+                ),
+                make_record(
+                    "session-u",
+                    "assistant",
+                    1_100,
+                    1,
+                    json!({"type":"assistant","message":{"id":"u-1","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":4,"output_tokens":1}}}),
+                ),
+            ],
+        );
+        sessions.insert(
+            "session-t".to_string(),
+            vec![
+                make_record(
+                    "session-t",
+                    "user",
+                    1_050,
+                    2,
+                    json!({"type":"user","message":{"role":"user","content":"first t prompt"}}),
+                ),
+                make_record(
+                    "session-t",
+                    "assistant",
+                    1_200,
+                    3,
+                    json!({"type":"assistant","message":{"id":"t-1","content":[{"type":"text","text":"answer"}]}}),
+                ),
+                make_record(
+                    "session-t",
+                    "user",
+                    1_300,
+                    4,
+                    json!({"type":"user","message":{"role":"user","content":"second t"}}),
+                ),
+                make_record(
+                    "session-t",
+                    "assistant",
+                    1_400,
+                    5,
+                    json!({"type":"assistant","message":{"id":"t-2","content":[{"type":"text","text":"again"}]}}),
+                ),
+            ],
+        );
+        let factory = StubFactory::default();
+        let calls = factory.calls.clone();
+
+        let stats = write_streamed_request_trace_rows(
+            &output_path,
+            &sidecar_path,
+            sessions,
+            true,
+            factory,
+            ExportConfig {
+                block_size: 2,
+                delta_overlap_words: 50,
+                tokenizer_workers: 2,
+            },
+        )
+        .unwrap();
+
+        let rows = std::fs::read_to_string(&output_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(stats.row_count, 3);
+        let order = rows
+            .iter()
+            .map(|row| row["event"]["request"]["request_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            [
+                "claude:session-u:0",
+                "claude:session-t:0",
+                "claude:session-t:1"
+            ]
+        );
+        // The transcript-shaped turn replays its tokenized transcript: "[user] first t prompt".
+        assert_eq!(rows[1]["event"]["request"]["replay"]["input_length"], 4);
+        assert!(
+            rows[2]["event"]["request"]["replay"]["input_length"]
+                .as_u64()
+                .unwrap()
+                > 4
+        );
+        // The usage-shaped session never reaches the tokenizer.
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|text| !text.contains("usage prompt"))
+        );
     }
 
     #[test]
