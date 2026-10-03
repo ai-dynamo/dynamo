@@ -1,0 +1,78 @@
+{
+ "best_ever_train": {
+  "generation": 1,
+  "objective": 1.146649351289657,
+  "per_cell": {
+   "mooncake-w0-base-n8-open-L2": 1.1344541637008474,
+   "sessions-s0-base-n4-open-L2": 1.1588445388784667
+  },
+  "policy_sha": "c1bb0f9148e2988c7a7d9dfb7f743ea29a30ccab2994f543791ee38378bcb94e",
+  "spec": {
+   "name": "learned-choice-m1",
+   "parameters": {
+    "feature_set": "v1",
+    "temperature": 0.0,
+    "theta": [
+     -1.0,
+     1.074390460520453,
+     -0.8058484191233433,
+     -0.20198841203868856,
+     -0.6696540869477063,
+     -0.10252479241115786,
+     1.6296010746368754,
+     0.29516407055094973
+    ],
+    "tie_break": "one_draw"
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "learned-choice"
+  },
+  "values": {
+   "parameters.theta": [
+    -1.0,
+    1.074390460520453,
+    -0.8058484191233433,
+    -0.20198841203868856,
+    -0.6696540869477063,
+    -0.10252479241115786,
+    1.6296010746368754,
+    0.29516407055094973
+   ]
+  },
+  "z": [
+   0.5671494037825283,
+   0.44963447380479105,
+   0.48737572424758197,
+   0.45814661956576835,
+   0.49359220047430263,
+   0.6018500671648047,
+   0.5184477544094344
+  ]
+ },
+ "fevals": 12,
+ "generation": 2,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "ratio",
+  "popsize": 6,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 1,
+  "space_sha": "e34da13e6b7b73e757da1a1a3596348d961a2b9c3deac88b5b23250fb0806c4a",
+  "train_cells": [
+   "mooncake-w0-base-n8-open-L2",
+   "sessions-s0-base-n4-open-L2"
+  ],
+  "val_cells": [
+   "mooncake-w1-base-n4-open-L2"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": null,
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

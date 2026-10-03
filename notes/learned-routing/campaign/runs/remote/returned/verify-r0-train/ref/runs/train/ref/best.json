@@ -1,0 +1,99 @@
+{
+ "best_ever_train": {
+  "generation": 26,
+  "objective": 1.1017216773172618,
+  "per_cell": {
+   "mooncake-w0-base-n4-open-L3": 1.0983591487947233,
+   "mooncake-w2-islu1.5-n8-closed-L2": 1.1050842058398005
+  },
+  "policy_sha": "6468254319ba0309040654fa200b16c5bd882a7bf9f29bd6df7139c95917056d",
+  "spec": {
+   "name": "default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 7.027855768793058,
+    "overlap_score_credit": 3.370446390253289,
+    "overlap_score_credit_decay": 3.730519548941671,
+    "prefill_load_scale": 7.7083168909529896,
+    "router_temperature": 0.11362499162695842
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 7.027855768793058,
+   "parameters.overlap_score_credit": 3.370446390253289,
+   "parameters.overlap_score_credit_decay": 3.730519548941671,
+   "parameters.prefill_load_scale": 7.7083168909529896,
+   "parameters.router_temperature": 0.11362499162695842
+  },
+  "z": [
+   0.8426115975633223,
+   0.9326298872354177,
+   0.9434797801559089,
+   0.8784819710991323,
+   0.05681249581347921
+  ]
+ },
+ "fevals": 180,
+ "generation": 30,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "ratio",
+  "popsize": 6,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 3,
+  "space_sha": "7580b9ceed36298803a6e2a71f8ed56afc4c195cfc787b2d1e28387be13a176a",
+  "train_cells": [
+   "mooncake-w0-base-n4-open-L3",
+   "mooncake-w2-islu1.5-n8-closed-L2"
+  ],
+  "val_cells": [
+   "mooncake-w1-base-n6-open-L2"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": {
+  "generation": 25,
+  "policy_sha": "4eb06c9c1e63b3e47e80db8b88257dfa9d41db8a7b01d83b365c1938b32fd66b",
+  "spec": {
+   "name": "default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 6.924766078240374,
+    "overlap_score_credit": 3.3943549623224385,
+    "overlap_score_credit_decay": 3.843336718756019,
+    "prefill_load_scale": 7.386516095914743,
+    "router_temperature": 0.09459242363708462
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "val_objective": 1.0709880776778415,
+  "val_per_cell": {
+   "mooncake-w1-base-n6-open-L2": 1.0709880776778415
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 6.924766078240374,
+   "parameters.overlap_score_credit": 3.3943549623224385,
+   "parameters.overlap_score_credit_decay": 3.843336718756019,
+   "parameters.prefill_load_scale": 7.386516095914743,
+   "parameters.router_temperature": 0.09459242363708462
+  },
+  "which": "mean",
+  "z": [
+   0.8485887405806096,
+   0.9608341796890048,
+   0.9342198242662989,
+   0.8655957597800468,
+   0.04729621181854231
+  ]
+ },
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

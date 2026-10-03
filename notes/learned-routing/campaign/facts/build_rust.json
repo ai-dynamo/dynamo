@@ -1,0 +1,559 @@
+{
+ "base_head": "<commit-02> (changes uncommitted; the integrator commits)",
+ "bindings": {
+  "ais_still_in_effect_evidence": "mooncake1000 N=4 default_seed1 goodput 0.28109983761885743 equals setup's AIS value (polynomial gave 3.8429)",
+  "cargo_release_time": "2m 01s (incremental)",
+  "command": "cd WT/lib/bindings/python && VIRTUAL_ENV=WT/.venv maturin develop --uv --release --features ais-forward-pass",
+  "log": "<campaign-root>/runs/build-rust/logs/maturin_release_ais.log",
+  "so_sha256_after": "ecdd220263d980b64bfa56061ba9f99a63b5a6b4b6994440f102329a8ccb2f25",
+  "so_sha256_before": "2679f4dd069c90ab60f66703f64b6ef36f927a2ce5fc50b34f2c5143fec3ea9f"
+ },
+ "contract_extensions_and_deviations": [
+  "learned-choice: optional extra parameters tie_break, max_sessions, and context.sources (alternative to context.q); feature_set v2 (contract allows an optional v2). The contract's {p, q} schema is implemented exactly; nothing in the contract interface changed.",
+  "learned-choice: feature_set and theta are required; seed optional (absent -> fresh entropy, nondeterministic); harness must always pass seed.",
+  "learned-choice: feature 0 always uses KvRouterConfig::default() score weights (task directive), independent of router_config knobs; the role structure comes from the host config.",
+  "learned-choice and sticky-session: default tie-break is one_draw (LR-03), so theta0 matches the seeded default only up to ties; exact replay parity needs tie_break: reservoir (verified identical).",
+  "sticky-session: accepts seed and tie_break (not in the contract list) so the A1 protocol's policy seed k+1 applies; mode required; load_factor with mode hard is a startup error; bounded load_factor must be finite >= 1.0.",
+  "sticky-session: the fallback default cost fn uses the HOST config (router_config knobs such as overlap_score_credit and router_temperature tune it), mirroring dynamo-default-cost-fn.",
+  "Both new pickers, like the plugin default picker, ignore the per-request router_temperature override (see UPSTREAM_FOLLOWUPS #4); replay never sets one."
+ ],
+ "correction_fix_r0": {
+  "bindings": {
+   "build_id_after": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+   "cargo_release_time": "2m 00s (incremental)",
+   "log": "runs/build-fix-r0/logs/maturin_release_ais.log",
+   "so_sha256_after": "1d67c131deca024373a2eb4b96f70156e04eb32e1046c2cf7235ac50ddeb288b",
+   "so_sha256_before": "ecdd220263d980b64bfa56061ba9f99a63b5a6b4b6994440f102329a8ccb2f25"
+  },
+  "dynamic": "runs/build-fix-r0/hash_home: theta11=1 policy maps each first-block key to the same 2 workers in open and closed loop (was 2 vs 8)",
+  "finding": "audit build/leakage-features r0 F1 (v2 hash_home keyed on replay-synthesized closed-loop session IDs)",
+  "fixed_in": "WT <commit-08>: hash_home keys on the prefix hash of the first 256 prompt tokens only (as chwbl); no prefix hashes -> no home; session ID never used",
+  "tests": "cargo test -p dynamo-custom-policy-builtin 127 passed / 2 ignored; clippy -D warnings, fmt clean",
+  "written": "2026-10-02 16:13:14 PDT"
+ },
+ "files_changed": {
+  "added": [
+   "lib/router-plugins/builtin/src/choice.rs (seeded canonical-order chooser: one_draw | reservoir)",
+   "lib/router-plugins/builtin/src/session_map.rs (bounded LRU session -> worker)",
+   "lib/router-plugins/builtin/src/learned_choice/mod.rs",
+   "lib/router-plugins/builtin/src/learned_choice/parameters.rs",
+   "lib/router-plugins/builtin/src/learned_choice/features.rs",
+   "lib/router-plugins/builtin/src/learned_choice/tests.rs",
+   "lib/router-plugins/builtin/src/learned_choice/FEATURES.md",
+   "lib/router-plugins/builtin/src/sticky_session.rs"
+  ],
+  "modified": [
+   "lib/router-plugins/builtin/src/default.rs (pub(crate) cost_scorer and router_temperature helpers; re-export softmax_sample_index)",
+   "lib/router-plugins/builtin/src/default/picker.rs (softmax_sample_index made pub(crate), documented)",
+   "lib/router-plugins/builtin/src/lib.rs (modules; register learned-choice and sticky-session; test campaign_policies_resolve_for_every_role)",
+   "lib/router-plugins/builtin/src/test_support.rs (populate/populate_replay/select_populated/select_replay/in_session/resolve_policy fixtures; select() behavior unchanged)"
+  ],
+  "not_touched": "lib/kv-router, lib/mocker, lib/bindings/python: setup confirmed session_context already reaches policies and the default seed patch exists, so no replay plumbing was needed (end-to-end re-confirmed by the sticky-session smoke below)."
+ },
+ "lessons": {
+  "applied": {
+   "LR-03": "one draw per decision (tie_break one_draw default) in both policies; unit test that later draws stay aligned and that reservoir does not; the plugin API exposes no stable request id, so the counter-keyed alternative was not possible.",
+   "LR-05": "named-source context form {sources, p} (column-restricted LCL, linear in p, no gauge) added alongside the contract {p, q}; scale/gauge guidance for space.yaml in FEATURES.md.",
+   "LR-06": "v2 set-relative features use ratio-to-mean, strict-below fraction and relu excess (no z-scores, no x - min); N-stable named sources; duplication-invariance unit test (features, sources, argmax class); FEATURES.md advises q[6] = q[11] = 0 and freezing theta7 when isl_k is a source.",
+   "LR-07": "v2 adds log_ptok, log_bs, hash_home (+ log_new_prefill for the branch port) and the is_first_turn source; unit test proves theta = -(e_log_new_prefill + e_log_bs) reproduces the lmetric port (hotspot off) and -(e_log_ptok + e_log_bs) LMetric's queued-prefill product on tie-free tables.",
+   "LR-14": "information-parity section in FEATURES.md; features read only router-side state; no PREFILL_TIME / AIS input.",
+   "LR-15": "temperature 0 default; documented that learned-choice temperature is not range-normalized; parity tests only at temperature 0."
+  },
+  "rejected": {
+   "LR-01, LR-02, LR-08..LR-13": "harness, calibration, training and reporting lessons; outside the Rust policy stage.",
+   "LR-04": "paper-faithful lmetric-faithful/smetric baselines rejected per CONTRACT Amendment A2 point 5 (baselines as implemented); LMetric's queued-prefill product is nevertheless representable inside learned-choice v2.",
+   "LR-06 action 2 (drop v1 #7)": "rejected: the contract fixes v1's 8 features and the parallel harness builds against it; documented the redundancy instead."
+  }
+ },
+ "policies": {
+  "learned-choice": {
+   "composition": "WorkerSelectionPolicy::new(host config, role.default_selector_label(), [default cost scorer built by default::cost_scorer at KvRouterConfig::default() weights], LearnedChoicePicker).with_exclusive_affinity(true). Feature 0 is the composed scorer's cost, so CACHE, LOAD and PREFERRED_TAINT are handled by the default scorer's own code.",
+   "context_sources": [
+    "mean_kv_load_frac",
+    "mean_active_prefill_tokens_k",
+    "mean_active_requests_s",
+    "max_overlap_frac",
+    "isl_k",
+    "is_first_turn (1 when no remembered previous worker for the session, incl. no session)"
+   ],
+   "decision": "temperature 0: argmax u, ties by seeded RNG over canonical worker order; temperature > 0: sample softmax(u/temperature) with the seeded RNG; host pin wins (row of pinned worker) and rebinds the session; non-finite utility -> selection error",
+   "declared_inputs": "picker CACHE|LOAD; composed default scorer LOAD|PREFERRED_TAINT|CACHE. Never reads expected_output_tokens or PREFILL_TIME.",
+   "feature_set_v1": [
+    "0 default_logit_scaled = default cost (KvRouterConfig::default() weights, incl. preferred-taint multiplier) / max(request_blocks,1)",
+    "1 overlap_frac = accounting_cache_estimate().0 / max(request_blocks,1) (not clamped)",
+    "2 new_prefill_tokens_k = prompt_tokens.saturating_sub(accounting_cache_estimate().1) / 8192",
+    "3 active_prefill_tokens_k = active_prefill_tokens / 8192",
+    "4 kv_load_frac = decode_cost_blocks / worker_capacity().total_kv_blocks() (fallback 65536 when not advertised; replay advertises num_gpu_blocks per setup)",
+    "5 active_requests_s = active_requests / 32",
+    "6 session_affinity = 1 if this worker served the session's previous request (policy LRU map keyed by session_context().session_id(), bound max_sessions), else 0",
+    "7 isl_x_prefill_load = (prompt_tokens / 8192) * feature 3"
+   ],
+   "feature_set_v2_appended": [
+    "8 log_ptok = ln(max(active_prefill + new_prefill, 1)/1024)",
+    "9 log_new_prefill = ln(max(new_prefill, 1)/1024)",
+    "10 log_bs = ln(1 + active_requests)",
+    "11 hash_home = 1 if among the top-2 rendezvous weights (signals::rendezvous, seed 0) for key = FNV-1a(session_id) or else the prefix hash of the first 256 prompt tokens; all 1 when N <= 2; all 0 without a key",
+    "12-14 kv_load_ratio, active_prefill_ratio, active_requests_ratio = x/(eps + mean_S x) for features 4,3,5 with eps 0.01, 512/8192, 1/32",
+    "15-17 *_below_frac = #{j: x_j < x_i}/N for features 4,3,5",
+    "18-20 *_excess = max(x - mean_S x, 0) for features 4,3,5",
+    "21 new_prefill_x_requests = feature 2 * feature 5",
+    "22 prefill_attn = n(L - n/2)/8192^2, n = new prefill tokens, L = prompt tokens"
+   ],
+   "kv_capacity_fallback_used_in_replay": "no (per facts/setup.json next_stage_notes: worker_capacity().total_kv_blocks() = 18863 in replay); the 65536 fallback is code-path only",
+   "parameters": {
+    "context": "optional: {p, q} (contract pooled form, rank len(p)) or {p, sources} (named form); absent/{}/empty p = no context",
+    "feature_set": "required: v1 | v2",
+    "max_sessions": "optional, default 65536, >= 1",
+    "seed": "optional u64; absent = fresh entropy per policy instance (harness must pass it)",
+    "temperature": "optional, default 0.0, finite >= 0, NOT range-normalized",
+    "theta": "required: d finite floats",
+    "tie_break": "optional: one_draw (default) | reservoir"
+   },
+   "spec": "<worktree>/lib/router-plugins/builtin/src/learned_choice/FEATURES.md",
+   "type": "learned-choice",
+   "utility": "u_i = theta.x_i + sum_k c_k (p_k.x_i); c_k = q_k.mean_S(x) (pooled) or z_S[sources[k]] (named); computed as w = theta + sum_k c_k p_k, u_i = w.x_i; set aggregates summed in canonical worker order"
+  },
+  "sticky-session": {
+   "behavior": "no session id or first/forgotten session -> default cost fn choice (default scorer with the HOST config's weights; argmin, or the default's range-normalized softmax when host router_temperature > 0); hard -> bound worker whenever it is a candidate, else default choice + rebind; bounded -> bound worker unless its active_requests > load_factor * candidate mean active_requests, else default choice + rebind; host pin wins and rebinds; bounded LRU session map",
+   "composition": "default cost scorer (host weights) + StickySessionPicker (declares LOAD), with_exclusive_affinity(true)",
+   "parameters": {
+    "load_factor": "bounded only (given with hard -> startup error); default 1.25; finite >= 1.0",
+    "max_sessions": "default 65536, >= 1",
+    "mode": "required: hard | bounded",
+    "seed": "optional u64; absent = fresh entropy",
+    "tie_break": "one_draw (default) | reservoir"
+   },
+   "type": "sticky-session"
+  }
+ },
+ "schema": "learned-routing.build_rust.v1",
+ "smoke": {
+  "checks": {
+   "default_sessions_spread": {
+    "agentx": {
+     "requests_with_session": 85,
+     "sessions": 10,
+     "sessions_on_multiple_workers": 1
+    },
+    "mooncake_sessions": {
+     "requests_with_session": 60,
+     "sessions": 20,
+     "sessions_on_multiple_workers": 14
+    },
+    "synth_sessions": {
+     "requests_with_session": 180,
+     "sessions": 60,
+     "sessions_on_multiple_workers": 54
+    }
+   },
+   "lc_affinity_sessions_on_one_worker": {
+    "agentx": {
+     "requests_with_session": 85,
+     "sessions": 10,
+     "sessions_on_multiple_workers": 0
+    },
+    "mooncake_sessions": {
+     "requests_with_session": 60,
+     "sessions": 20,
+     "sessions_on_multiple_workers": 0
+    },
+    "synth_sessions": {
+     "requests_with_session": 180,
+     "sessions": 60,
+     "sessions_on_multiple_workers": 0
+    }
+   },
+   "lc_theta0_v1_repeat_identical": true,
+   "lc_theta0_v1_reservoir_equals_default_seed1": true,
+   "lc_theta0_v2_reservoir_equals_default_seed1": true,
+   "no_errors": true,
+   "sticky_hard_reservoir_equals_default_seed1_without_sessions": true,
+   "sticky_hard_sessions_on_one_worker": {
+    "agentx": {
+     "requests_with_session": 85,
+     "sessions": 10,
+     "sessions_on_multiple_workers": 0
+    },
+    "mooncake_sessions": {
+     "requests_with_session": 60,
+     "sessions": 20,
+     "sessions_on_multiple_workers": 0
+    },
+    "synth_sessions": {
+     "requests_with_session": 180,
+     "sessions": 60,
+     "sessions_on_multiple_workers": 0
+    }
+   }
+  },
+  "notes": [
+   "learned-choice theta0 v1/v2 with tie_break reservoir, seed 1, is request-for-request identical (canonical per-request sha256) to dynamo-default-cost-fn seed 1 on mooncake_trace_1000 N=4 open 1x.",
+   "learned-choice theta0 with the default one_draw tie-break gives the same goodput (0.28109983761885743) but 733/1000 differing assignments: per-worker request counts are a permutation of the default's (initial t=0 ties broken differently, i.e. a worker relabeling).",
+   "sticky-session hard and learned-choice with session_affinity weight 1e6 keep 0 sessions on multiple workers on multi-turn Mooncake (20 sessions), synthetic sessions (60) and AgentX weka (10), vs 14, 54 and 1 for the seeded default: session_context reaches policies end to end.",
+   "Smoke cells are uncalibrated setup cells; the goodput numbers are smoke evidence only, not campaign results."
+  ],
+  "out": "<campaign-root>/runs/build-rust/smoke/smoke_summary.json",
+  "policy_yamls": "<campaign-root>/runs/build-rust/policies/",
+  "runs": {
+   "agentx/default_seed1": {
+    "completed_requests": 85,
+    "goodput_request_throughput_rps": 0.04323735422852583,
+    "num_requests": 85,
+    "per_request_canonical_sha256": "e0bbdc8d1a48ef87418bb6946b2be1be6b1e5d024dcb71ba9cc407acb0752d54",
+    "session_spread": {
+     "requests_with_session": 85,
+     "sessions": 10,
+     "sessions_on_multiple_workers": 1
+    },
+    "wall_s": 0.9232416519989783
+   },
+   "agentx/lc_v1_affinity": {
+    "completed_requests": 85,
+    "goodput_request_throughput_rps": 0.04390254429358007,
+    "num_requests": 85,
+    "per_request_canonical_sha256": "dd6d78a72a223611bb68048519d0f95e7193152e809279bff10badfc1348b279",
+    "session_spread": {
+     "requests_with_session": 85,
+     "sessions": 10,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.8576994150007522
+   },
+   "agentx/sticky_hard": {
+    "completed_requests": 85,
+    "goodput_request_throughput_rps": 0.04390254429358007,
+    "num_requests": 85,
+    "per_request_canonical_sha256": "dd6d78a72a223611bb68048519d0f95e7193152e809279bff10badfc1348b279",
+    "session_spread": {
+     "requests_with_session": 85,
+     "sessions": 10,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.8464152450014808
+   },
+   "mooncake1000/default_seed1": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.28109983761885743,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "017146fd3f1598f8ef140d892132c8b715342d55cab755cca0fa39d3ea5971ce",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 1.1404166240008635
+   },
+   "mooncake1000/lc_theta0_v1": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.28109983761885743,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "53883a6749aa1df34d8fc5bd853b2701c9bd916957344d01e8a19047a27eab05",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5435983510014921
+   },
+   "mooncake1000/lc_theta0_v1_repeat": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.28109983761885743,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "53883a6749aa1df34d8fc5bd853b2701c9bd916957344d01e8a19047a27eab05",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5405025920008484
+   },
+   "mooncake1000/lc_theta0_v1_reservoir": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.28109983761885743,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "017146fd3f1598f8ef140d892132c8b715342d55cab755cca0fa39d3ea5971ce",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5419170709992613
+   },
+   "mooncake1000/lc_theta0_v2_reservoir": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.28109983761885743,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "017146fd3f1598f8ef140d892132c8b715342d55cab755cca0fa39d3ea5971ce",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5451483479992021
+   },
+   "mooncake1000/lc_v1_tau": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.35900362014330167,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "4d170db709963d29b214ac106efa9719c0585fc73e01530b14dc48e032a7f4a5",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5470389309994061
+   },
+   "mooncake1000/lc_v2_pooled": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.355469359960617,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "071cf8e75c17b8cb7a2bd54cb5543ff5f93bbb56b686aea180901b875d1d6412",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5435638439994364
+   },
+   "mooncake1000/lc_v2_sources": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.3335352835363938,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "d40a3f6260c74ae08d2ba1ae84c44b8bbbf68e5216ac7f1c6b491a0f042bd92e",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5386906359999557
+   },
+   "mooncake1000/sticky_bounded": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.28109983761885743,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "53883a6749aa1df34d8fc5bd853b2701c9bd916957344d01e8a19047a27eab05",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5440754489991377
+   },
+   "mooncake1000/sticky_hard_reservoir": {
+    "completed_requests": 1000,
+    "goodput_request_throughput_rps": 0.28109983761885743,
+    "num_requests": 1000,
+    "per_request_canonical_sha256": "017146fd3f1598f8ef140d892132c8b715342d55cab755cca0fa39d3ea5971ce",
+    "session_spread": {
+     "requests_with_session": 0,
+     "sessions": 0,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.5461204300008831
+   },
+   "mooncake_sessions/default_seed1": {
+    "completed_requests": 60,
+    "goodput_request_throughput_rps": 3.202633702112613,
+    "num_requests": 60,
+    "per_request_canonical_sha256": "49daffd648e793907513ee0d42d951950b7cb8f85dd5dd30e8d891b809106ca3",
+    "session_spread": {
+     "requests_with_session": 60,
+     "sessions": 20,
+     "sessions_on_multiple_workers": 14
+    },
+    "wall_s": 0.4023669809994317
+   },
+   "mooncake_sessions/lc_v1_affinity": {
+    "completed_requests": 60,
+    "goodput_request_throughput_rps": 3.2533975083777102,
+    "num_requests": 60,
+    "per_request_canonical_sha256": "18664895aeeb3d219fcc4cc5946e661ecd729a1ea1b13d662c0bccbd3fbabaf8",
+    "session_spread": {
+     "requests_with_session": 60,
+     "sessions": 20,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.40066024600128003
+   },
+   "mooncake_sessions/sticky_bounded": {
+    "completed_requests": 60,
+    "goodput_request_throughput_rps": 3.222920172878166,
+    "num_requests": 60,
+    "per_request_canonical_sha256": "24d00791a0e912afdc938a3ca176d81a545a6ff3ff14ee62a1c135c88b86cce3",
+    "session_spread": {
+     "requests_with_session": 60,
+     "sessions": 20,
+     "sessions_on_multiple_workers": 7
+    },
+    "wall_s": 0.4045052609999402
+   },
+   "mooncake_sessions/sticky_hard": {
+    "completed_requests": 60,
+    "goodput_request_throughput_rps": 3.2533975083777102,
+    "num_requests": 60,
+    "per_request_canonical_sha256": "18664895aeeb3d219fcc4cc5946e661ecd729a1ea1b13d662c0bccbd3fbabaf8",
+    "session_spread": {
+     "requests_with_session": 60,
+     "sessions": 20,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.40181836600095266
+   },
+   "synth_sessions/default_seed1": {
+    "completed_requests": 180,
+    "goodput_request_throughput_rps": 3.125169344380584,
+    "num_requests": 180,
+    "per_request_canonical_sha256": "09463c7ac68b552f1ad04a578a141e5a01db83f36caeffbc871a61b5cd35d5e1",
+    "session_spread": {
+     "requests_with_session": 180,
+     "sessions": 60,
+     "sessions_on_multiple_workers": 54
+    },
+    "wall_s": 0.4191858089998277
+   },
+   "synth_sessions/lc_v1_affinity": {
+    "completed_requests": 180,
+    "goodput_request_throughput_rps": 3.1105681443940307,
+    "num_requests": 180,
+    "per_request_canonical_sha256": "541d24407b0ecf4bd832db005d754d8522d9dfdeb54a6c5dbf75ac3bbfd0e1da",
+    "session_spread": {
+     "requests_with_session": 180,
+     "sessions": 60,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.4144763559997955
+   },
+   "synth_sessions/sticky_hard": {
+    "completed_requests": 180,
+    "goodput_request_throughput_rps": 3.1105681443940307,
+    "num_requests": 180,
+    "per_request_canonical_sha256": "541d24407b0ecf4bd832db005d754d8522d9dfdeb54a6c5dbf75ac3bbfd0e1da",
+    "session_spread": {
+     "requests_with_session": 180,
+     "sessions": 60,
+     "sessions_on_multiple_workers": 0
+    },
+    "wall_s": 0.4158784150004067
+   }
+  },
+  "script": "<campaign-root>/runs/build-rust/scripts/smoke_policies.py",
+  "slot_pool": "every replay held one slot of CR/slots via learned_routing.slots.SlotPool; 20 replays, sequential, one process"
+ },
+ "stage": "build B1 (Rust policies)",
+ "tests": {
+  "bindings_clippy": "not run: no bindings code changed (bindings crate unchanged; it only links builtin)",
+  "clippy": "cd WT/lib/router-plugins/builtin && cargo clippy --no-deps --all-targets -- -D warnings: clean",
+  "command": "cargo test -p dynamo-custom-policy-builtin (from WT root)",
+  "coverage_map": {
+   "context term": [
+    "learned_choice::tests::context_term_matches_the_bilinear_formula (pooled and named forms vs the literal formula, 100 random tables)",
+    "learned_choice::tests::duplicating_the_worker_set_keeps_features_sources_and_choice (LR-06)"
+   ],
+   "determinism under fixed seed": [
+    "learned_choice::tests::fixed_seed_reproduces_sampled_decisions",
+    "learned_choice::tests::one_draw_per_decision_keeps_later_draws_aligned (LR-03)",
+    "learned_choice::tests::reservoir_tie_break_reproduces_the_seeded_default",
+    "learned_choice::tests::temperature_samples_follow_the_softmax"
+   ],
+   "feature math": [
+    "learned_choice::tests::v1_features_follow_their_definitions",
+    "learned_choice::tests::v2_features_follow_their_definitions",
+    "learned_choice::tests::v2_represents_the_lmetric_products",
+    "learned_choice::tests::feature_zero_ignores_the_hosts_score_weights"
+   ],
+   "parameter validation": [
+    "learned_choice::tests::parameter_validation_is_strict (21 invalid, 5 valid, via the real registry YAML path)",
+    "sticky_session::tests::parameter_validation_is_strict (9 invalid, 3 valid)",
+    "tests::campaign_policies_resolve_for_every_role"
+   ],
+   "sticky semantics": [
+    "sticky_session::tests::requests_without_a_session_take_the_default_choice",
+    "sticky_session::tests::hard_mode_keeps_a_session_on_its_worker",
+    "sticky_session::tests::hard_mode_rebinds_when_its_worker_is_ineligible",
+    "sticky_session::tests::bounded_mode_leaves_a_worker_above_the_load_bound",
+    "sticky_session::tests::sessions_beyond_max_sessions_are_forgotten",
+    "sticky_session::tests::a_host_pin_wins_and_rebinds_the_session",
+    "session_map::tests::evicts_the_least_recently_used_session"
+   ],
+   "theta0 parity": [
+    "learned_choice::tests::theta0_picks_the_default_argmin (2000 random tables, 4 host input shapes, v1 and v2 via YAML; >=1500 tie-free required; also checks seeded dynamo-default-cost-fn agrees)"
+   ]
+  },
+  "fmt": "cargo fmt --check: clean",
+  "ignored_note": "the 2 ignored lib tests are pre-existing (not from this stage)",
+  "log": "<campaign-root>/runs/build-rust/logs/cargo_test_builtin.log",
+  "new_tests": [
+   "choice::tests::draw_mappings_stay_in_range",
+   "learned_choice::tests::a_host_pin_wins_and_rebinds_the_session",
+   "learned_choice::tests::eligibility_restricts_the_choice",
+   "learned_choice::tests::sessions_beyond_max_sessions_are_forgotten",
+   "learned_choice::tests::v1_features_follow_their_definitions",
+   "learned_choice::tests::v2_features_follow_their_definitions",
+   "session_map::tests::evicts_the_least_recently_used_session",
+   "sticky_session::tests::sessions_beyond_max_sessions_are_forgotten",
+   "sticky_session::tests::hard_mode_keeps_a_session_on_its_worker",
+   "sticky_session::tests::bounded_mode_leaves_a_worker_above_the_load_bound",
+   "tests::campaign_policies_resolve_for_every_role",
+   "sticky_session::tests::hard_mode_rebinds_when_its_worker_is_ineligible",
+   "learned_choice::tests::duplicating_the_worker_set_keeps_features_sources_and_choice",
+   "learned_choice::tests::one_draw_per_decision_keeps_later_draws_aligned",
+   "learned_choice::tests::feature_zero_ignores_the_hosts_score_weights",
+   "sticky_session::tests::parameter_validation_is_strict",
+   "sticky_session::tests::a_host_pin_wins_and_rebinds_the_session",
+   "learned_choice::tests::parameter_validation_is_strict",
+   "learned_choice::tests::context_term_matches_the_bilinear_formula",
+   "sticky_session::tests::requests_without_a_session_take_the_default_choice",
+   "learned_choice::tests::reservoir_tie_break_reproduces_the_seeded_default",
+   "learned_choice::tests::fixed_seed_reproduces_sampled_decisions",
+   "learned_choice::tests::v2_represents_the_lmetric_products",
+   "learned_choice::tests::theta0_picks_the_default_argmin",
+   "learned_choice::tests::temperature_samples_follow_the_softmax"
+  ],
+  "suites": [
+   {
+    "failed": 0,
+    "ignored": 2,
+    "passed": 101,
+    "result": "ok"
+   },
+   {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 5,
+    "result": "ok"
+   },
+   {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 1,
+    "result": "ok"
+   },
+   {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 2,
+    "result": "ok"
+   },
+   {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 14,
+    "result": "ok"
+   },
+   {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 4,
+    "result": "ok"
+   },
+   {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 0,
+    "result": "ok"
+   }
+  ]
+ },
+ "worktree": "<worktree>",
+ "written": "2026-10-02 14:39:23 PDT"
+}

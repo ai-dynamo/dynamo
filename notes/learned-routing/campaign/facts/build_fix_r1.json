@@ -1,0 +1,108 @@
+{
+ "base_head": "<commit-11>",
+ "bindings": {
+  "build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+  "rebuilt": false
+ },
+ "branch": "rupei/learned-routing-public",
+ "cells": {
+  "cells_version": "lr-cells-v3",
+  "diff": "runs/build-fix-r1/cells/diff_cells.json: only measure.end = full_occupancy on 49/49 completion-basis cells (27 closed loop, 22 lanes) and the AgentX measure_trace.note (non-content); traces, ids, splits unchanged; 0 new derived traces",
+  "files_sha256": {
+   "test": "4ba73c06aa7518049bd7bda0c6be9eac909f0d836acb2715912dab64bc9f1e78",
+   "train": "c7eb4cb7de2149a0fa3333b211307d195d2bb2c3a7dc7de698ca287cd1a6b598",
+   "val": "e0eaf74cd9c042e26934e1e39604e67f4be229e5104b2769bb7bc0896bc8e155"
+  },
+  "split_manifest_sha256": "c42dacea6133e29fc5389355d220ba02da89ef991100cd585ab557c5a83753a9",
+  "superseded_copy": "cells/superseded/build-r1/ (lr-cells-v2, SPLIT_MANIFEST 0f8ea452...)"
+ },
+ "commits": {
+  "<commit-12>": "fix(learned-routing): end completion windows at full occupancy"
+ },
+ "findings": {
+  "goodput-normalization/F1": {
+   "evidence": [
+    "runs/build-fix-r1/smoke/analysis.json",
+    "runs/build-fix-r1/smoke/boundary_variant.json",
+    "runs/build-fix-r1/a3_smoke/a3_full_occupancy.json",
+    "runs/build-fix-r1/candidates_check/summary.json",
+    "runs/build-fix-r1/cells/diff_cells.json"
+   ],
+   "note_on_claim": "measured dilution of deviations by the old window: round_robin k0 10.6%, round_robin k1 22.8%, lmetric k1 40.6%, lmetric k0 sign flip (audit said 23-41%)",
+   "status": "fixed (measure.end required on completion basis: full_occupancy | fixed; occupancy from play/session spans; over-cap, never-full and empty-window errors; plan-time rejection; half-open [start, end) completion windows; occupancy diagnostics; cells lr-cells-v3)",
+   "verdict": "valid"
+  },
+  "goodput-normalization/F2 (minor)": {
+   "status": "fixed by the same rule: sessions s2-think2.0 below-cap time 9.3-9.4% -> 0%, ratios move <= 0.0015"
+  }
+ },
+ "harness_version": {
+  "current": "lrh-3",
+  "note": "lrh-2 existed only in this fixer's intermediate smoke (inclusive end; runs/build-fix-r1/smoke/results_lrh2_inclusive_end.jsonl); every lrh-1/lrh-2 cache entry is unreachable",
+  "previous": "lrh-1"
+ },
+ "head": "<commit-12>",
+ "lessons": {
+  "applied": [
+   "LR-01 (full-occupancy window = its lanes hypothesis, verified)",
+   "LR-09",
+   "LR-03",
+   "LR-11"
+  ],
+  "rejected": [
+   "LR-01 action 2 (makespan goodput for closed/lanes): includes the drain; A2.3 requires a steady-state window"
+  ]
+ },
+ "next_stage_notes": [
+  "Supersedes facts/build_fix_r0.json next_stage_notes[1]. Completion-basis cells (closed loop, lanes) carry measure.end = full_occupancy: the window ends when fewer than load.value sessions or lanes stay occupied; calibration does not set their end.",
+  "Lanes cells (native or A3 lowered) need a replay-time measure.warmup_ms from calibration (sidecar suggestion: p90 over lanes of each lane's first-copy end); the identity rule (warmup_trace_ms) raises on weka/agentic_mooncake traces by design. Closed-loop cells keep warmup_trace_ms. Open-loop cells still need warmup_ms and window_ms.",
+  "A completion-basis cell without measure.end is a plan_error in lr-eval; full_occupancy errors if occupancy never reaches load.value (e.g. lanes >= plays) or if the warm-up outlasts full occupancy.",
+  "Native-Weka lanes candidates have tiny full-occupancy windows at B2's provisional loads (5-64% of the old window, 68-364 completions); per A3 (facts/agentx_lowered.json status ok) AgentX cells move to lowered traces: give them >= 8 copies per lane and measure {basis: completion, end: full_occupancy, warmup_ms}.",
+  "Lowered AgentX still needs harness integration by calibration: agentic_lanes for trace_format agentic_mooncake in cells.Cell.load_kwargs, and a CRN replicate for agentic_mooncake (sidecar suggestion: same GenSpec with seed = k).",
+  "Completion windows are half-open [start, end); completion-basis goodput_rps_window is good completions per second at full occupancy (attainment x throughput). Stratify gates and tables by load mode (LR-09).",
+  "Cells are lr-cells-v3 (SPLIT_MANIFEST c42dacea...); HARNESS_VERSION lrh-3, so every earlier cache entry is unreachable."
+ ],
+ "open_minor_findings_not_addressed": [
+  "goodput-normalization r1 F3, F4, F5, F6, F7, F8"
+ ],
+ "results": {
+  "a3_lowered_lanes": "train closed file 18d91a50... (64 copies), N4, 8 lanes, default-seed1 and round_robin: end == first lane exhaustion, peak 8, 64 units; ending at the last dispatch would add 51-54% below-cap time and move rr/default 0.9067 -> 0.9755 (provisional SLA I40 S3)",
+  "agentx_A2_ratio_vs_default_old_to_new": {
+   "auditor_full_occupancy_match": "6/6 at 4 decimals",
+   "lmetric k0": [
+    1.0003,
+    0.9858
+   ],
+   "lmetric k1": [
+    0.9412,
+    0.9009
+   ],
+   "round_robin k0": [
+    0.8471,
+    0.8289
+   ],
+   "round_robin k1": [
+    0.8483,
+    0.8033
+   ],
+   "sticky-hard k0": [
+    0.9983,
+    0.9901
+   ],
+   "sticky-hard k1": [
+    0.9995,
+    1.0074
+   ]
+  },
+  "auditor_cells_smoke": "48 replays (6 fx1- copies of the auditor's gn1 cells x 4 specs x k0,k1), 0 errors; rows == auditor lrh-1 rows minus new fields 48/48; pre-existing aggregates equal 48/48; open-loop windows unchanged 24/24; completion end == first lane exhaustion (lanes) / first session departure after the last admission (closed) 24/24; below-cap 0 (harness and independent) 24/24; --refresh reproduces 48/48",
+  "completion_candidates_at_provisional_loads": "49/49 completion-basis candidates, default k0, 0 errors, peak == cap 49/49, below-cap 0; full-occupancy window share of the old last-dispatch window: Mooncake/FAST25 closed 1.000-1.001, sessions closed 0.52-0.97, native-Weka lanes 0.05-0.64 (68-364 scored completions)"
+ },
+ "schema": "learned-routing.fix.v1",
+ "stage": "build fixer r1",
+ "tests": {
+  "pre_commit": "isort, black, flake8, ruff, codespell, DCO passed on changed files",
+  "pytest": "132 passed (114 + 11 sidecar + 7 new)"
+ },
+ "worktree": "<worktree>",
+ "written": "2026-10-02 17:00:07 PDT"
+}

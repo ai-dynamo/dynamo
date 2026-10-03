@@ -1,0 +1,97 @@
+{
+ "best_ever_train": {
+  "generation": 1,
+  "objective": 1.4239897329788769,
+  "per_cell": {
+   "smoke-mc-a": 1.4239897329788769
+  },
+  "policy_sha": "b5641253282636cc58efe66c4f894b389784fb6c215f89fb59f6a5c0f3307d03",
+  "spec": {
+   "name": "default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 0.5087038899847538,
+    "overlap_score_credit": 1.1610245464825952,
+    "overlap_score_credit_decay": 0.8161760638676876,
+    "prefill_load_scale": 0.9371975251756149,
+    "router_temperature": 0.6260644552515083
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 0.5087038899847538,
+   "parameters.overlap_score_credit": 1.1610245464825952,
+   "parameters.overlap_score_credit_decay": 0.8161760638676876,
+   "parameters.prefill_load_scale": 0.9371975251756149,
+   "parameters.router_temperature": 0.6260644552515083
+  },
+  "z": [
+   0.2902561366206488,
+   0.2040440159669219,
+   0.48591556655017415,
+   0.06358798624809422,
+   0.31303222762575417
+  ]
+ },
+ "fevals": 12,
+ "generation": 2,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "ratio",
+  "popsize": 6,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 5,
+  "space_sha": "7580b9ceed36298803a6e2a71f8ed56afc4c195cfc787b2d1e28387be13a176a",
+  "train_cells": [
+   "smoke-mc-a"
+  ],
+  "val_cells": [
+   "smoke-mc-b"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": {
+  "generation": 1,
+  "policy_sha": "feb257a87489e6b239c48294417843c64e1ff1342554650961b9ed7c1a237e94",
+  "spec": {
+   "name": "default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 0.9036097641197528,
+    "overlap_score_credit": 0.2774021788975071,
+    "overlap_score_credit_decay": 0.17135260568924673,
+    "prefill_load_scale": 1.2840778249803,
+    "router_temperature": 0.4009597080996429
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "val_objective": 0.958670220177945,
+  "val_per_cell": {
+   "smoke-mc-b": 0.958670220177945
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 0.9036097641197528,
+   "parameters.overlap_score_credit": 0.2774021788975071,
+   "parameters.overlap_score_credit_decay": 0.17135260568924673,
+   "parameters.prefill_load_scale": 1.2840778249803,
+   "parameters.router_temperature": 0.4009597080996429
+  },
+  "which": "mean",
+  "z": [
+   0.06935054472437678,
+   0.042838151422311684,
+   0.5542956730561521,
+   0.1129512205149691,
+   0.20047985404982144
+  ]
+ },
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

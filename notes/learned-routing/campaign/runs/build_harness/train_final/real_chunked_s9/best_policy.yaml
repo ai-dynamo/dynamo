@@ -1,0 +1,11 @@
+name: "default-tuned@real_chunked_s9"
+parameters:
+  decode_active_request_weight: 0.27143702960838123
+  overlap_score_credit: 0.9569016789746702
+  overlap_score_credit_decay: 0.36673980952002705
+  prefill_load_scale: 0.9782719324338995
+  router_temperature: 0.6379049633291762
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "dynamo-default-cost-fn"

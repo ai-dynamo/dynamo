@@ -1,0 +1,11 @@
+name: "default-tuned@real_straight"
+parameters:
+  decode_active_request_weight: 0.49793441928176174
+  overlap_score_credit: 0.2910082640356215
+  overlap_score_credit_decay: 0.18106150604250237
+  prefill_load_scale: 1.8874629769604747
+  router_temperature: 0.42224029310616995
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "dynamo-default-cost-fn"

@@ -1,0 +1,832 @@
+{
+ "bindings_so_sha256": {
+  "cells_validation": "ecdd220263d980b64bfa56061ba9f99a63b5a6b4b6994440f102329a8ccb2f25 (build B1 rebuild; B1 reports the seeded default unchanged)",
+  "cost_smoke": "2679f4dd069c90ab60f66703f64b6ef36f927a2ce5fc50b34f2c5143fec3ea9f (setup build) for every case except ax_all_raw_n16_lanes16, which started within seconds of build B1's rebuild (.so mtime 14:36:39 PDT; cost.json written 14:36:51)"
+ },
+ "cells": {
+  "agentx_play_subsets": {
+   "A1": {
+    "plays": 11,
+    "requests": 311,
+    "split": "train",
+    "subagent_plays": 2
+   },
+   "A2": {
+    "plays": 11,
+    "requests": 486,
+    "split": "train",
+    "subagent_plays": 2
+   },
+   "A3": {
+    "plays": 11,
+    "requests": 415,
+    "split": "train",
+    "subagent_plays": 2
+   },
+   "T1": {
+    "plays": 7,
+    "requests": 296,
+    "split": "test",
+    "subagent_plays": 2
+   },
+   "T2": {
+    "plays": 7,
+    "requests": 274,
+    "split": "test",
+    "subagent_plays": 2
+   },
+   "T3": {
+    "plays": 7,
+    "requests": 265,
+    "split": "test",
+    "subagent_plays": 1
+   },
+   "T4": {
+    "plays": 7,
+    "requests": 200,
+    "split": "test",
+    "subagent_plays": 1
+   },
+   "V1": {
+    "plays": 7,
+    "requests": 223,
+    "split": "val",
+    "subagent_plays": 2
+   },
+   "V2": {
+    "plays": 7,
+    "requests": 335,
+    "split": "val",
+    "subagent_plays": 2
+   },
+   "V3": {
+    "plays": 7,
+    "requests": 327,
+    "split": "val",
+    "subagent_plays": 2
+   }
+  },
+  "counts": {
+   "test": {
+    "by_family": {
+     "agentx": 10,
+     "fast25_conversation": 3,
+     "fast25_synthetic": 3,
+     "mooncake": 25,
+     "synthetic_sessions": 15
+    },
+    "by_holdout_axis": {
+     "agentx_plays": 4,
+     "family": 6,
+     "time_window": 6,
+     "transform_extrapolation": 10,
+     "worker_count": 26,
+     "workload_draw": 4
+    },
+    "by_level": {
+     "L1": 5,
+     "L2": 41,
+     "L3": 10
+    },
+    "by_load_mode": {
+     "agentic_lanes": 10,
+     "closed_concurrency": 15,
+     "open_speedup": 31
+    },
+    "by_num_workers": {
+     "16": 5,
+     "2": 8,
+     "32": 6,
+     "4": 13,
+     "6": 7,
+     "8": 17
+    },
+    "cells": 56,
+    "expected_cost_s_max": 4.01,
+    "expected_cost_s_total": 158.4
+   },
+   "train": {
+    "by_family": {
+     "agentx": 8,
+     "mooncake": 18,
+     "synthetic_sessions": 8
+    },
+    "by_holdout_axis": {
+     "none": 34
+    },
+    "by_level": {
+     "L1": 6,
+     "L2": 20,
+     "L3": 8
+    },
+    "by_load_mode": {
+     "agentic_lanes": 8,
+     "closed_concurrency": 8,
+     "open_speedup": 18
+    },
+    "by_num_workers": {
+     "4": 18,
+     "8": 16
+    },
+    "cells": 34,
+    "expected_cost_s_max": 5.42,
+    "expected_cost_s_total": 108.9
+   },
+   "val": {
+    "by_family": {
+     "agentx": 4,
+     "mooncake": 6,
+     "synthetic_sessions": 4
+    },
+    "by_holdout_axis": {
+     "none": 14
+    },
+    "by_level": {
+     "L1": 2,
+     "L2": 9,
+     "L3": 3
+    },
+    "by_load_mode": {
+     "agentic_lanes": 4,
+     "closed_concurrency": 4,
+     "open_speedup": 6
+    },
+    "by_num_workers": {
+     "4": 5,
+     "6": 4,
+     "8": 5
+    },
+    "cells": 14,
+    "expected_cost_s_max": 3.3,
+    "expected_cost_s_total": 40.7
+   }
+  },
+  "derived_traces": 57,
+  "files": {
+   "test": {
+    "cells": 56,
+    "path": "cells/test.candidates.jsonl",
+    "sha256": "fe9d9f11a3a37da839d59a047c2adb27ae0e8dab558040fd07e02e4c28501e4f"
+   },
+   "train": {
+    "cells": 34,
+    "path": "cells/train.candidates.jsonl",
+    "sha256": "55c9d2983860e76089bf67101e95b9da39bce8cf292aa8d563fb0a5c53f201a6"
+   },
+   "val": {
+    "cells": 14,
+    "path": "cells/val.candidates.jsonl",
+    "sha256": "4ef50c060b4bcc4f5adf8489b3e888aacac222f4d3553067709f42c2f426b09e"
+   }
+  },
+  "replay_check": {
+   "cells_checked": 104,
+   "errors": [],
+   "incomplete": [],
+   "missing": [],
+   "over_expected_cost": [],
+   "source": "<campaign-root>/runs/build_workloads/smoke/cells_validation.json",
+   "stale": [],
+   "wall_s_by_family": {
+    "agentx": {
+     "max": 3.6166,
+     "mean": 1.898,
+     "min": 1.1142,
+     "n": 22
+    },
+    "fast25_conversation": {
+     "max": 1.3903,
+     "mean": 1.25,
+     "min": 1.1011,
+     "n": 3
+    },
+    "fast25_synthetic": {
+     "max": 1.0441,
+     "mean": 1.011,
+     "min": 0.947,
+     "n": 3
+    },
+    "mooncake": {
+     "max": 2.1757,
+     "mean": 1.537,
+     "min": 0.9976,
+     "n": 49
+    },
+    "synthetic_sessions": {
+     "max": 2.4211,
+     "mean": 1.748,
+     "min": 1.321,
+     "n": 27
+    }
+   }
+  },
+  "segments_by_split": {
+   "test": [
+    "agentx:T1",
+    "agentx:T2",
+    "agentx:T3",
+    "agentx:T4",
+    "fast25_synthetic:x0",
+    "fast25_synthetic:x1",
+    "mooncake:w3",
+    "mooncake:w6",
+    "sessions:s6",
+    "sessions:s7",
+    "sessions:s8",
+    "sessions:s9"
+   ],
+   "train": [
+    "agentx:A1",
+    "agentx:A2",
+    "agentx:A3",
+    "mooncake:w0",
+    "mooncake:w2",
+    "mooncake:w4",
+    "sessions:s0",
+    "sessions:s1",
+    "sessions:s2",
+    "sessions:s3"
+   ],
+   "val": [
+    "agentx:V1",
+    "agentx:V2",
+    "agentx:V3",
+    "mooncake:w1",
+    "mooncake:w5",
+    "sessions:s4",
+    "sessions:s5"
+   ]
+  },
+  "split_manifest_sha256": "791d67872c85f436cb4d465754054ab98c9fa6234fc4499bcdc0e1527b669f3a"
+ },
+ "committed": false,
+ "correction_fix_r0": {
+  "closed_loop_measure": "every closed_concurrency cell carries measure.warmup_trace_ms = measure_trace.warmup_ms (identity warm-up rule, learned_routing.goodput)",
+  "counts": {
+   "test": 56,
+   "train": 34,
+   "val": 14
+  },
+  "fast25_conversation": "aligned to w3, w5",
+  "fast25_synthetic_windows": "x0 [0,8.5) min, x1 [8.5,17) min, 3-min warm-up each (were overlapping [0,10), [7,17))",
+  "files": {
+   "SPLIT_MANIFEST.json": "0f8ea45267c678534ebc44cd3bb12ef201d5583fb65bbc16d1e49807ec8d1d1d",
+   "test.candidates.jsonl": "f8fd8d39e7afa85873cb0861dcc3ae514a9cbf9677f6c3e0a5addf11ddab3113",
+   "train.candidates.jsonl": "4ca440c76d273b55dd2328caa8f113b6901480ad1b077b46302efdb9aaa73def",
+   "val.candidates.jsonl": "059ce9017b72a31187872af506abf40500df73a2efdbfb0aeb76fc8da01eee69"
+  },
+  "finding": "audit build/harness-robustness-splits r0 S1 (Mooncake windows overlapped across splits)",
+  "fixed_in": "WT <commit-10> (CELLS_VERSION lr-cells-v2)",
+  "hygiene": "runs/build-fix-r0/workloads/out/split_hygiene.json: 0 segment pairs share rows; all cross-split scored/trace overlaps 0; 54/54 windowed derived traces inside their slice",
+  "mooncake_windows": "six disjoint self-contained 10-min slices [10k,10k+10) min, warm-up 4 min, measure 6 min; train w0 w2 w4, val w1, test w3 w5",
+  "plan_changes": "val w5 open cells -> w1; val mooncake-w5-base-n4-closed-L1 -> sessions-s5-base-n4-closed-L1 (keeps 3 val segments per load mode); test w6 -> w5; conv:w6 -> conv:w5",
+  "replay_check": "runs/build-fix-r0/workloads/cells_validation.json: 104/104 cells at current trace sha (55 new replays at build 6955b0ee), 0 errors, all complete",
+  "superseded": "cells and SPLIT_MANIFEST above (SPLIT_MANIFEST 791d6787..., copies in cells/superseded/build-r0/)",
+  "written": "2026-10-02 16:13:14 PDT"
+ },
+ "cost_smoke": {
+  "ax8_n4_lanes2": {
+   "distinct_session_ids": 33,
+   "duration_ms": 10781149.023017894,
+   "error": null,
+   "load": {
+    "agentic_lanes": 2
+   },
+   "num_requests": 403,
+   "num_workers": 4,
+   "wall_s": 1.9997095569997327
+  },
+  "ax8_n4_lanes4": {
+   "distinct_session_ids": 33,
+   "duration_ms": 5856490.810647994,
+   "error": null,
+   "load": {
+    "agentic_lanes": 4
+   },
+   "num_requests": 403,
+   "num_workers": 4,
+   "wall_s": 2.9358371810012613
+  },
+  "ax8_n8_lanes8": {
+   "distinct_session_ids": 33,
+   "duration_ms": 3547523.526135989,
+   "error": null,
+   "load": {
+    "agentic_lanes": 8
+   },
+   "num_requests": 403,
+   "num_workers": 8,
+   "wall_s": 2.0064758919997985
+  },
+  "ax_all_n16_lanes16": {
+   "distinct_session_ids": 278,
+   "duration_ms": 11942324.901763208,
+   "error": null,
+   "load": {
+    "agentic_lanes": 16
+   },
+   "num_requests": 3132,
+   "num_workers": 16,
+   "wall_s": 15.411343617000966
+  },
+  "ax_all_raw_n16_lanes16": {
+   "distinct_session_ids": 281,
+   "duration_ms": 399658269.5959159,
+   "error": null,
+   "load": {
+    "agentic_lanes": 16
+   },
+   "num_requests": 3132,
+   "num_workers": 16,
+   "wall_s": 15.234999517999313
+  },
+  "conv_w3_n8_open": {
+   "distinct_session_ids": 1,
+   "duration_ms": 399513.9750828566,
+   "error": null,
+   "load": {
+    "arrival_speedup_ratio": 1.4
+   },
+   "num_requests": 1792,
+   "num_workers": 8,
+   "wall_s": 0.995265510999161
+  },
+  "f25s_x0_n8_open": {
+   "distinct_session_ids": 1,
+   "duration_ms": 552484.3822680014,
+   "error": null,
+   "load": {
+    "arrival_speedup_ratio": 1.0
+   },
+   "num_requests": 2038,
+   "num_workers": 8,
+   "wall_s": 1.07656482099992
+  },
+  "mc_w3_n2_open": {
+   "distinct_session_ids": 1,
+   "duration_ms": 2972227.652061955,
+   "error": null,
+   "load": {
+    "arrival_speedup_ratio": 0.181818
+   },
+   "num_requests": 3583,
+   "num_workers": 2,
+   "wall_s": 1.1506496249985503
+  },
+  "mc_w3_n32_open": {
+   "distinct_session_ids": 1,
+   "duration_ms": 211692.6468807226,
+   "error": null,
+   "load": {
+    "arrival_speedup_ratio": 2.909091
+   },
+   "num_requests": 3583,
+   "num_workers": 32,
+   "wall_s": 1.4934727050003858
+  },
+  "mc_w3_n8_closed": {
+   "distinct_session_ids": 3583,
+   "duration_ms": 573768.4085889999,
+   "error": null,
+   "load": {
+    "replay_concurrency": 32
+   },
+   "num_requests": 3583,
+   "num_workers": 8,
+   "wall_s": 1.3062521030005882
+  },
+  "mc_w3_n8_open": {
+   "distinct_session_ids": 1,
+   "duration_ms": 754709.8036334311,
+   "error": null,
+   "load": {
+    "arrival_speedup_ratio": 0.727273
+   },
+   "num_requests": 3583,
+   "num_workers": 8,
+   "wall_s": 2.0033721790005075
+  },
+  "syn0_n8_closed": {
+   "distinct_session_ids": 719,
+   "duration_ms": 1589487.7050380192,
+   "error": null,
+   "load": {
+    "replay_concurrency": 32
+   },
+   "num_requests": 3647,
+   "num_workers": 8,
+   "wall_s": 2.0851764979997824
+  },
+  "syn0_n8_open": {
+   "distinct_session_ids": 719,
+   "duration_ms": 1039230.2531020006,
+   "error": null,
+   "load": {
+    "arrival_speedup_ratio": 1.0
+   },
+   "num_requests": 3647,
+   "num_workers": 8,
+   "wall_s": 2.2632483830002457
+  }
+ },
+ "decisions": [
+  {
+   "decision": "toolagent is acquired and verified but excluded from every split",
+   "id": "D1",
+   "why": "it is a relabeled copy of mooncake_trace (audit r1 F1); as a family hold-out it would test nothing new, and as train data it would duplicate Mooncake segments (pseudo-replication)."
+  },
+  {
+   "decision": "FAST25 conversation_trace is a test-only held-out family; its windows align to Mooncake test windows w3, w6 (time x 3,536,999/3,600,000) and reuse their segment ids",
+   "id": "D2",
+   "why": "different prefix structure (reuse 0.384 vs 0.630, one root) but a shared arrival/length skeleton, so it is not an independent segment (audit r1 F1 fix 3)."
+  },
+  {
+   "decision": "FAST25 synthetic_trace (fetched at Mooncake commit 0d1a8040, no local copy existed) is a second test-only held-out family with two windows",
+   "id": "D3",
+   "why": "independent of Mooncake and conversation (<= 8 shared (ISL, OSL) pairs, 0 shared (ts, ISL, OSL) rows); caveat: only 22 of 3,993 rows tie on arrival, so crn-order-v1 replicates are near-degenerate there and its noise must come from segments."
+  },
+  {
+   "decision": "synthetic sessions come from a seeded multi-turn Mooncake generator (10 seeds = 10 segments), not the native synthetic-session source",
+   "id": "D4",
+   "why": "the native source cannot express a conversation through the Python API: constant ISL/OSL (LengthSpec stddev 0, lib/bindings/python/rust/llm/replay.rs:2292,2296), constant inter-turn delay (:2305), and later turns do not extend earlier context (aisimulate-core loadgen/trace.rs:845-852 draws fresh unique blocks per turn). Generated turns extend the full conversation, lengths are lognormal, think times exponential (completion-relative delay, causal per LR-09), arrivals Poisson floored to a 1 s grid so crn-order-v1 has ties to permute."
+  },
+  {
+   "decision": "every AgentX derived trace caps idle gaps at 300 s (think_cap_s), compressing longer idle gaps linearly to 300 s; the raw plays stay unchanged in traces/agentx/plays",
+   "id": "D5",
+   "why": "selected plays contain idle gaps up to 355,532 s and spans up to 366,695 s (median 2,922 s; median busy 284 s; runs/build_workloads/out/agentx_idle_gaps.json); uncapped, all 82 plays at N=16, 16 lanes simulate 399,658,270 ms vs 11,942,325 ms capped (runs/build_workloads/smoke/cost.json), leaving lanes idle for days. 140 of 2,666 gaps (56 of 82 plays) exceed 300 s; capped, the median span is 1,265 s and the maximum 7,093 s. The AgentX scenario also caps idle delays. Side effect: distinct session ids 281 -> 278 (the importer splices chains across gaps <= 3600 s, weka.rs:27,1372)."
+  },
+  {
+   "decision": "AgentX uses agentic_lanes only, and has no N=16/32 cells",
+   "id": "D6",
+   "why": "timestamp mode starts every play at t=0 (audit r1 F3), so it is not an open-loop arrival process. With 82 unique plays split three ways, a subset of 7-22 plays cannot load 16-32 workers at >= 1 lane per worker with lanes < plays; recycling plays would replay the same workload."
+  },
+  {
+   "decision": "Mooncake: seven 12-minute slices, each 4 min warm-up + 8 min measurement ([4+8k, 12+8k) min); train w0,w2,w4; val w1,w5; test w3,w6",
+   "id": "D7",
+   "why": "LR-01 warm-up before every open-loop window; ~4,250-5,020 requests per cell (1.0-2.2 s per replay in process, runs/build_workloads/smoke/cells_validation.json) while keeping 7 independent segments."
+  },
+  {
+   "decision": "prefix_root_mult keys families by the first block after each root's common segment, not by the first block",
+   "id": "D8",
+   "why": "Mooncake has 4 distinct first blocks and conversation 1, so keying by the first block keeps each root whole and the transform is a relabeling with no effect. Caveat: the realized effect on Mooncake stays small (w2 root2: roots 4 -> 8, reuse 0.602 -> 0.601) because its root segments are 1-12 blocks."
+  },
+  {
+   "decision": "isl_prefix_mult scales blocks that occur in >= 2 requests (the union of every request's shared-with-earlier prefix); isl_unique_mult scales the per-request unique suffix",
+   "id": "D9",
+   "why": "a block that is new in request A and reused by B must expand identically in both for hash identity to stay consistent; a per-request 'earlier' split cannot do that."
+  },
+  {
+   "decision": "context cap: drop Mooncake rows with ISL >= 131072 (replay rejects them for every policy) and clamp outputs to 131072 - ISL; Weka plays clamp outputs only",
+   "id": "D10",
+   "why": "replay silently truncates ISL + OSL > 131072 (setup.json long_context.notes); counts are in each derived meta (e.g. islu2.5 on w3 drops 36 of 4,832 rows; FAST25 synthetic windows drop 3 and 9)."
+  },
+  {
+   "decision": "test cells at N = 6 carry selection_exposed = true",
+   "id": "D11",
+   "why": "CONTRACT puts N = 6 in validation and test; LESSONS plan delta (LR-10/LR-11) asks for the label if 6 stays in validation."
+  },
+  {
+   "decision": "cell measure carries only basis; measure_trace carries the trace-time warm-up and window",
+   "id": "D12",
+   "why": "the harness's measure.warmup_ms/window_ms are replay milliseconds, which depend on the speedup calibration has not chosen; the harness rejects unknown measure keys (learned_routing/goodput.py:155)."
+  }
+ ],
+ "interface_notes": [
+  "cells use trace_files 'CR/...' (resolved by learned_routing.paths.Layout.resolve_path) and trace_sha256 = SHA-256 of the derived file, which learned_routing.cells.Cell.trace_content_sha checks; all 104 cells load with learned_routing.cells.load_cells, and replicates materialize for mooncake, sessions and weka cells",
+  "calibration must fill load.value, sla (itl_ms, e2e_slowdown) and, for open loop, measure.warmup_ms = measure_trace.warmup_ms / speedup and measure.window_ms = measure_trace.window_ms / speedup; for closed loop and lanes it fixes the steady-state rule",
+  "for session traces arrival_speedup_ratio also divides inter-turn delays (aisimulate-core loadgen/trace.rs speed_up_timing); to change load without changing think time, materialize think_mult = speedup with the transform tool",
+  "pyproject.toml lists packages = ['learned_routing']; a built wheel or sdist omits learned_routing.workloads unless packages use find or list the subpackage (editable install works)",
+  "unit tests live in learned_routing/workloads/tests (pytest testpaths is tests/, so run them by path or add the directory)",
+  "expected_cost_s is part of a cell's content SHA in learned_routing.cells (not in NON_CONTENT_KEYS), so re-estimating cost would change cache keys"
+ ],
+ "lessons": {
+  "applied": {
+   "LR-01": "warm-up slice before every open-loop window, arrival-basis measure windows (measure_trace)",
+   "LR-02": "every cell carries an independent workload segment id; 12 independent test segments, 7 validation",
+   "LR-09": "AgentX lanes only; session turns released by completion-relative delay; validation has >= 3 segments per load mode",
+   "LR-10": "N = 6 test cells labelled selection_exposed",
+   "LR-11": "segments as the unit of independence; FAST25 conversation shares Mooncake segment ids; toolagent excluded",
+   "LR-12": "per-cell cache-pressure numerator table (distinct block tokens per trace window) for calibration; Mooncake-format train traces span prefix reuse 0.555-0.844"
+  },
+  "rejected": {
+   "LR-03, LR-04, LR-05, LR-06, LR-07, LR-13, LR-14, LR-15": "out of scope for workloads (policy, harness, training or audit stages)",
+   "LR-08": "superseded by Amendment A2 (no TTFT SLO); ISL buckets are a reporting concern"
+  }
+ },
+ "reproduce": [
+  "cd WT/benchmarks/learned_routing && export LR_CAMPAIGN_ROOT=CR PYTHONDONTWRITEBYTECODE=1",
+  "PY -m learned_routing.workloads.acquire --skills-traces <traces> --fast25-local CR/runs/audit-setup/determinism-cost-context-r1/out/fast25 [--download]",
+  "PY -m learned_routing.workloads.cells --validation-json CR/runs/build_workloads/smoke/cells_validation.json",
+  "PY -m pytest -p no:cacheprovider learned_routing/workloads/tests   # 25 tests"
+ ],
+ "schema": "learned-routing.build-workloads.v1",
+ "stage": "build B2 (workloads)",
+ "traces": {
+  "agentx": {
+   "selection": {
+    "clipping": false,
+    "explicit_subagent_groups": 39,
+    "fallback_32k_needed": false,
+    "method_reference": "learned_routing/workloads/agentx.py",
+    "plays": 82,
+    "predicate": "every normal/streaming request, recursively including subagents, satisfies in + max(out, 1) <= 131072; whole play kept unchanged",
+    "relative_nested_timestamp_plays": 0,
+    "requests": 3132,
+    "scaling": false,
+    "single_model_plays": 59
+   },
+   "source": {
+    "bytes": 1847151435,
+    "dataset": "semianalysisai/cc-traces-weka-062126",
+    "path": "traces/agentx/source/traces.jsonl",
+    "plays": 393,
+    "requests": 98827,
+    "revision": "23f152f6f0f9399a85901b89a6458def0ef16729",
+    "sha256": "29b6a19e751ff5230771519aab755f80a0f43a4ba9cf96b72d3a6a437ec99276",
+    "url": "https://huggingface.co/datasets/semianalysisai/cc-traces-weka-062126/resolve/23f152f6f0f9399a85901b89a6458def0ef16729/traces.jsonl"
+   }
+  },
+  "fallback_32k": "not produced: facts/setup.json long_context.fallback_32k_needed = false",
+  "flat": {
+   "fast25_conversation": {
+    "block_size": 512,
+    "crn_units_in_ties": 12031,
+    "distinct_first_blocks": 1,
+    "format": "mooncake",
+    "isl_mean": 12035.1,
+    "mean_prefix_reuse_frac": 0.3843,
+    "osl_mean": 342.6,
+    "path": "traces/fast25/conversation_trace.jsonl",
+    "provenance": {
+     "expected_sha256": "b8cbb061a85206d729d91cdc2981f43c9e0d99209dce588d3af5f7934408b9df",
+     "local_copy_used": "<campaign-root>/runs/audit-setup/determinism-cost-context-r1/out/fast25/conversation_trace.jsonl",
+     "upstream_commit": "0d1a8040faebb7c127c8901840a38c2ff57e80c5",
+     "upstream_url": "https://raw.githubusercontent.com/kvcache-ai/Mooncake/0d1a8040faebb7c127c8901840a38c2ff57e80c5/FAST25-release/traces/conversation_trace.jsonl"
+    },
+    "rows": 12031,
+    "sha256": "b8cbb061a85206d729d91cdc2981f43c9e0d99209dce588d3af5f7934408b9df"
+   },
+   "fast25_synthetic": {
+    "block_size": 512,
+    "crn_units_in_ties": 22,
+    "distinct_first_blocks": 2211,
+    "format": "mooncake",
+    "isl_mean": 15325.5,
+    "mean_prefix_reuse_frac": 0.4232,
+    "osl_mean": 149.1,
+    "path": "traces/fast25/synthetic_trace.jsonl",
+    "provenance": {
+     "expected_sha256": "bd070915a98fc0ed264d7cfef2ce746002eb3076a695ec31ba2674c0111ec131",
+     "local_copy_used": null,
+     "upstream_commit": "0d1a8040faebb7c127c8901840a38c2ff57e80c5",
+     "upstream_url": "https://raw.githubusercontent.com/kvcache-ai/Mooncake/0d1a8040faebb7c127c8901840a38c2ff57e80c5/FAST25-release/traces/synthetic_trace.jsonl"
+    },
+    "rows": 3993,
+    "sha256": "bd070915a98fc0ed264d7cfef2ce746002eb3076a695ec31ba2674c0111ec131"
+   },
+   "mooncake": {
+    "block_size": 512,
+    "crn_units_in_ties": 23608,
+    "distinct_first_blocks": 4,
+    "format": "mooncake",
+    "isl_mean": 8590.0,
+    "mean_prefix_reuse_frac": 0.6298,
+    "osl_mean": 182.1,
+    "path": "traces/mooncake/mooncake_trace.jsonl",
+    "provenance": {
+     "contract": "_shared/benchmark-traces.md",
+     "expected_sha256": "b434f1816a707f4bac697235588184ebc374c9907cb981bb65fb0643471fe711",
+     "source": "<traces>/mooncake_trace.jsonl",
+     "upstream": "kvcache-ai/Mooncake (toolagent: FAST25-release/traces/toolagent_trace.jsonl, identical SHA)"
+    },
+    "rows": 23608,
+    "sha256": "b434f1816a707f4bac697235588184ebc374c9907cb981bb65fb0643471fe711"
+   },
+   "toolagent": {
+    "block_size": 512,
+    "crn_units_in_ties": 23608,
+    "distinct_first_blocks": 4,
+    "format": "mooncake",
+    "isl_mean": 8596.2,
+    "mean_prefix_reuse_frac": 0.6298,
+    "osl_mean": 182.1,
+    "path": "traces/toolagent/toolagent_trace.jsonl",
+    "provenance": {
+     "contract": "_shared/benchmark-traces.md",
+     "expected_sha256": "48a2db1a13d3bc05e6330140c64f604ba366df20d3c9e128b5c35a01c1fa5f71",
+     "source": "<traces>/toolagent_trace.jsonl",
+     "upstream": "kvcache-ai/Mooncake (toolagent: FAST25-release/traces/toolagent_trace.jsonl, identical SHA)"
+    },
+    "rows": 23608,
+    "sha256": "48a2db1a13d3bc05e6330140c64f604ba366df20d3c9e128b5c35a01c1fa5f71"
+   }
+  },
+  "identity_checks": {
+   "fast25_conversation_vs_mooncake": "different prefix structure (reuse 0.384 vs 0.630) on a mostly shared (ts, ISL, OSL) skeleton: 10,938/12,031 rows (audit r1 F1)",
+   "fast25_synthetic_evidence": "runs/build_workloads/out/identity_fast25_synth.json",
+   "fast25_synthetic_vs_mooncake_and_conversation": {
+    "conversation": {
+     "best_osl_match_in_200_rows_any_offset_le_2000": 4,
+     "isl_osl_multiset_overlap": 2,
+     "rowaligned_hash_bijection_conflict_frac": 0.44800761018919777,
+     "same_ts_isl_osl_rows": 0
+    },
+    "mooncake": {
+     "best_osl_match_in_200_rows_any_offset_le_2000": 6,
+     "isl_osl_multiset_overlap": 8,
+     "rowaligned_hash_bijection_conflict_frac": 0.3835995085995086,
+     "same_ts_isl_osl_rows": 0
+    },
+    "rows": 3993,
+    "rows_isl_ge_131072": 10,
+    "rows_isl_plus_osl_gt_131072": 10
+   },
+   "toolagent_vs_mooncake": "relabeled copy (audit setup/determinism-cost-context r1 F1: identical OSL 23,608/23,608, 0-conflict hash bijection over 409,356 blocks, reuse corr 0.9998)"
+  },
+  "manifest": {
+   "files": 96,
+   "path": "traces/MANIFEST.json",
+   "sha256": "9372f0a2b8aa84518ec768b1b7ef5b3965dab8f2639d81ec9c028fd75eed237d"
+  },
+  "synthetic_sessions": {
+   "generator": "learned_routing.workloads.synthetic (lr-synthetic-sessions-v1)",
+   "segments": [
+    {
+     "crn_units_in_ties": 465,
+     "delay_ms_mean": 7960.8,
+     "isl_max": 29073,
+     "isl_mean": 6277.0,
+     "mean_prefix_reuse_frac": 0.8252,
+     "osl_mean": 339.0,
+     "path": "traces/synthetic_sessions/sessions_seed0.jsonl",
+     "rows": 3647,
+     "sessions": 719,
+     "sha256": "7d3e21342e9816e7ceab03c9ae0574742187c587efad78c15dcb51239edb5f82",
+     "turns_mean": 5.072
+    },
+    {
+     "crn_units_in_ties": 436,
+     "delay_ms_mean": 7952.5,
+     "isl_max": 26625,
+     "isl_mean": 6721.2,
+     "mean_prefix_reuse_frac": 0.843,
+     "osl_mean": 338.1,
+     "path": "traces/synthetic_sessions/sessions_seed1.jsonl",
+     "rows": 3333,
+     "sessions": 698,
+     "sha256": "6a136cf2f4dd1ef33493960adec59c5b48940ec2101959751778ff41cd928c37",
+     "turns_mean": 4.775
+    },
+    {
+     "crn_units_in_ties": 469,
+     "delay_ms_mean": 7905.4,
+     "isl_max": 39636,
+     "isl_mean": 7786.6,
+     "mean_prefix_reuse_frac": 0.8442,
+     "osl_mean": 342.3,
+     "path": "traces/synthetic_sessions/sessions_seed2.jsonl",
+     "rows": 3708,
+     "sessions": 729,
+     "sha256": "a9df895a262e738384f46a48d003a61e6719a4cd83c63aa001df57145e60be4c",
+     "turns_mean": 5.086
+    },
+    {
+     "crn_units_in_ties": 479,
+     "delay_ms_mean": 8062.7,
+     "isl_max": 27162,
+     "isl_mean": 6395.2,
+     "mean_prefix_reuse_frac": 0.8383,
+     "osl_mean": 344.8,
+     "path": "traces/synthetic_sessions/sessions_seed3.jsonl",
+     "rows": 3670,
+     "sessions": 767,
+     "sha256": "ef7633308042a21b64332f5a6eaf1f8f7d9ac7dd75dbaf5255164cfece637131",
+     "turns_mean": 4.785
+    },
+    {
+     "crn_units_in_ties": 449,
+     "delay_ms_mean": 7991.7,
+     "isl_max": 23857,
+     "isl_mean": 6368.3,
+     "mean_prefix_reuse_frac": 0.8359,
+     "osl_mean": 343.5,
+     "path": "traces/synthetic_sessions/sessions_seed4.jsonl",
+     "rows": 3740,
+     "sessions": 723,
+     "sha256": "edf87e19d91efaaa7f2f82902b572df2a7566988d2547d6856bc586718f13603",
+     "turns_mean": 5.173
+    },
+    {
+     "crn_units_in_ties": 495,
+     "delay_ms_mean": 7917.0,
+     "isl_max": 27593,
+     "isl_mean": 5628.6,
+     "mean_prefix_reuse_frac": 0.792,
+     "osl_mean": 335.5,
+     "path": "traces/synthetic_sessions/sessions_seed5.jsonl",
+     "rows": 3872,
+     "sessions": 744,
+     "sha256": "962d74d47d32fc287f9958a281109562b4a46921ae09eb406bb466419be089f4",
+     "turns_mean": 5.204
+    },
+    {
+     "crn_units_in_ties": 443,
+     "delay_ms_mean": 7863.7,
+     "isl_max": 28911,
+     "isl_mean": 6304.1,
+     "mean_prefix_reuse_frac": 0.8187,
+     "osl_mean": 336.7,
+     "path": "traces/synthetic_sessions/sessions_seed6.jsonl",
+     "rows": 3385,
+     "sessions": 694,
+     "sha256": "bbb39b4a657f4f12138f6014b7bc04f49dbadf8ba024ce476469b99b72adc4cc",
+     "turns_mean": 4.878
+    },
+    {
+     "crn_units_in_ties": 428,
+     "delay_ms_mean": 7895.9,
+     "isl_max": 22249,
+     "isl_mean": 5953.4,
+     "mean_prefix_reuse_frac": 0.8256,
+     "osl_mean": 339.9,
+     "path": "traces/synthetic_sessions/sessions_seed7.jsonl",
+     "rows": 3562,
+     "sessions": 694,
+     "sha256": "6e441377a3e550986563981a772e5b2f2c86ef4708da6201c055346db9a41b05",
+     "turns_mean": 5.133
+    },
+    {
+     "crn_units_in_ties": 495,
+     "delay_ms_mean": 7947.0,
+     "isl_max": 32336,
+     "isl_mean": 7644.7,
+     "mean_prefix_reuse_frac": 0.8597,
+     "osl_mean": 351.0,
+     "path": "traces/synthetic_sessions/sessions_seed8.jsonl",
+     "rows": 3794,
+     "sessions": 749,
+     "sha256": "89d6ab739726af03f25c6a8bbcdf29f379e5287486929908227b03789baac742",
+     "turns_mean": 5.065
+    },
+    {
+     "crn_units_in_ties": 407,
+     "delay_ms_mean": 8014.6,
+     "isl_max": 35487,
+     "isl_mean": 6313.9,
+     "mean_prefix_reuse_frac": 0.8215,
+     "osl_mean": 335.9,
+     "path": "traces/synthetic_sessions/sessions_seed9.jsonl",
+     "rows": 3459,
+     "sessions": 677,
+     "sha256": "18812c0f25f6771df8f4f897d8ce807b85c8f4f4ec5a3428eafe68a124aee5ac",
+     "turns_mean": 5.109
+    }
+   ],
+   "spec_seed0": {
+    "arrival_grid_ms": 1000,
+    "block_size": 64,
+    "context_cap": 49152,
+    "duration_s": 720.0,
+    "first_user_median": 600.0,
+    "first_user_sigma": 1.0,
+    "group_zipf_s": 1.1,
+    "max_turns": 24,
+    "mean_turns": 5.0,
+    "num_prefix_groups": 16,
+    "output_median": 250.0,
+    "output_range": [
+     1,
+     2000
+    ],
+    "output_sigma": 0.8,
+    "seed": 0,
+    "session_rate": 1.0,
+    "system_tokens_median": 2000.0,
+    "system_tokens_range": [
+     256,
+     12000
+    ],
+    "system_tokens_sigma": 0.6,
+    "think_mean_ms": 8000.0,
+    "user_median": 250.0,
+    "user_range": [
+     8,
+     16000
+    ],
+    "user_sigma": 1.0
+   }
+  }
+ },
+ "worktree_files": [
+  "benchmarks/learned_routing/learned_routing/workloads/__init__.py",
+  "benchmarks/learned_routing/learned_routing/workloads/acquire.py",
+  "benchmarks/learned_routing/learned_routing/workloads/agentx.py",
+  "benchmarks/learned_routing/learned_routing/workloads/cells.py",
+  "benchmarks/learned_routing/learned_routing/workloads/common.py",
+  "benchmarks/learned_routing/learned_routing/workloads/synthetic.py",
+  "benchmarks/learned_routing/learned_routing/workloads/tests/test_workloads_synthetic_cells.py",
+  "benchmarks/learned_routing/learned_routing/workloads/tests/test_workloads_transform.py",
+  "benchmarks/learned_routing/learned_routing/workloads/transform.py"
+ ],
+ "written": "2026-10-02 14:52:01 PDT"
+}

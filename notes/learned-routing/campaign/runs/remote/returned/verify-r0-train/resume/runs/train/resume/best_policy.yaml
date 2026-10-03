@@ -1,0 +1,11 @@
+name: "default-tuned@resume"
+parameters:
+  decode_active_request_weight: 6.924766078240374
+  overlap_score_credit: 3.3943549623224385
+  overlap_score_credit_decay: 3.843336718756019
+  prefill_load_scale: 7.386516095914743
+  router_temperature: 0.09459242363708462
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "dynamo-default-cost-fn"

@@ -1,0 +1,1350 @@
+{
+ "schema": "learned-routing.pilot.v1",
+ "stage": "pilot (phase 3)",
+ "written": "2026-10-03 05:12:29 PDT",
+ "status": "ok",
+ "state": {
+  "harness_version": "lrh-4",
+  "bindings_build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+  "cells": "lr-cells-v5",
+  "test_jsonl_sha256": "7b998b8e7bd2c870da8e3701e468c3738655045b1a76a1f19110282ddfb3aa6f",
+  "test_jsonl_sha256_now": "7b998b8e7bd2c870da8e3701e468c3738655045b1a76a1f19110282ddfb3aa6f",
+  "worktree_head": "<commit-20>",
+  "harness_code_commit": "<commit-18> (later WT commits <commit-19>, <commit-20> touch notes/ only)",
+  "worktree_code_changes": "none by this stage (pilot scripts live in runs/pilot/scripts)",
+  "test_cells_touched": 0
+ },
+ "gate": {
+  "rule": "CONTRACT pilot gate as amended by A1/A9: (1) < 2% of replays error; (2) projected full-run cost feasible (CPU-cluster allowed); (3) some policy differs from default@defaults beyond noise on validation (|mean_k r - 1| > 3 pooled sd on some val cell AND |mean segment delta| > 2 SE over >= 3 independent segments; paired CRN replicates k = 3..10, not used by any selection)",
+  "condition_1_error_rate": {
+   "fresh_replays": 56552,
+   "errors": 0,
+   "rate": 0.0,
+   "pass": true
+  },
+  "condition_2_cost": {
+   "pass": true,
+   "basis": "projection.json: recommended plan (full train each evaluation, B = 400, M2 at equal budget B, plus test and robustness) = 16.8 M local-equivalent replay-s, 279 h on the workstation alone, 40 h wall on the 5 measured CPU cluster nodes + workstation (PROJECTION); every single lr-train run fits one CPU cluster node in 3.5 h (epyc9654p) / 5.5 h (epyc7702p)"
+  },
+  "condition_3_differs_beyond_noise": {
+   "pass": true,
+   "tuned_M1": true,
+   "tuned_M0": true,
+   "per_mode_tuned_M1": {
+    "agentic_lanes": true,
+    "closed_concurrency": true,
+    "open_speedup": true
+   },
+   "note": "M1, M0 and all three default-arm heuristics differ from default@defaults beyond noise, positively, in every load mode (LR-09 stratification); round_robin differs negatively. Against the val-best default-arm heuristic (llm-d-precise-prefix) no tuned or heuristic policy differs beyond noise overall (the segment clause fails; M1 vs ramjet passes in the closed-loop mode only)."
+  },
+  "escalate": true
+ },
+ "decisions": [
+  "Train subset (12 of 34 train cells, 30% of the full train replay cost): stratified by family (Mooncake 6, sessions 3, AgentX 3), N (4 and 8 within each family), load mode and level (Mooncake open L1/L2/L2-islp1.5/L3 + closed L2/L3; sessions open L1/L3 + closed L2; AgentX lanes L1/L2/L3), Mooncake segments w0/w2/w4 twice each; written longest-first so AgentX replays do not set the generation barrier (cells/train_subset.jsonl, sha256 2d44a0a8...).",
+  "Objective clipped_log_ratio of goodput_rps_window vs default@defaults on the same replicate (LR-01 action 3, pre-registered in HEADLINE_TEST.json; calibration audit r1 F1 recommends it because round_robin-like candidates collapse session cells); K = 2 CRN replicates per evaluation from a pool of 8 (A1), popsize 16 (LR-03: larger lambda under noise), UH-CMA-ES re-evaluation of the top 2 per generation on fresh replicates (r_lambda = 2/16, LR-03 action 3), validation every 5 generations on all 14 val cells k = 0..2 (best-so-far sample and CMA mean), equal budget 480 evaluations (30 generations) per run.",
+  "Restarts: 2 seeds per rung (LR-10 asks >= 3 in phase 2; the pilot measures restart spread). Rung config selected by val k = 0..2 over both seeds' validated candidates (LR-10): M0 = m0-s1 generation 25 best-so-far (0.12893 vs m0-s2 0.12830), M1 = m1-s2 generation 30 CMA mean (0.16454 vs m1-s1 0.16411).",
+  "M0 space (spaces/m0_default_tuned.yaml): overlap_score_credit [0, 4], overlap_score_credit_decay [0, 4], prefill_load_scale log [0.05, 50], decode_active_request_weight log [0.5, 4096] (0.5 stands in for the default 0, below one block per request), router_temperature [0, 1] as a catalog parameter (equivalent to the router_config sidecar); init = defaults; sigma0 0.15 internal = about 18% decision flips vs the defaults on reconstructed candidate tables.",
+  "M1 space (spaces/m1_learned_v1.yaml): learned-choice feature_set v1, rank 0, tie_break one_draw; theta[0] pinned at -1 (scale anchor, start theta0 = -e0 = default argmin; LR-05); temperature FIXED at 0, not tuned (LR-05 action 2, LR-15 action 3: at tau = 0 the pinned theta0 fixes the scale, so tau would only add a flat/gauge direction; tau > 0 is a separate named variant); bounds theta_j in +-4 s_j with s_j = sd(f0)/sd(f_j) from approximate candidate tables (s = 25.6, 17.7, 5.33, 80.8, 110, 21.2, 3.22: the build-stage placeholder bounds [-8, 8] could not let kv_load_frac or active_requests_s matter); sigma0 0.004 internal = 0.032 s_j physical, about 20% decision flips vs theta0 (LR-05 action 4 target 10-30%, a hypothesis range).",
+  "Placement: per CONTRACT A9 (binding; CPU-cluster lane status ok) every lr-train job projected above ~1 h local ran on the CPU cluster, one job per node (2 x epyc9654p EPYC 9654P --mem 400G, 2 x epyc7702p EPYC 7702P --mem 160G; seed-2 runs hit their 2:15 time limit at generation 29 and were resumed on epyc9654p). Short batches (heuristic screen, validation, warm-up check, one full-train generation) ran locally through CR/slots.",
+  "Two strong heuristics at defaults chosen on TRAIN data only (no val peeking): a defaults-arm screen of all 9 catalog heuristics on the pilot train subset (k = 0, 1) ranked llm-d-precise-prefix (+0.169) and ramjet (+0.166) first by mean clipped log-ratio; lmetric (+0.165) is within 0.0006 of ramjet (a tie), so it was evaluated on val as well. Calibration evidence (RR collapses on sessions and AgentX) pointed the same way: cache/affinity-aware policies.",
+  "Validation evaluation on fresh replicates k = 3..10 (8 per cell; k = 0..2 were used for lr-train's selection), all 14 val cells, every policy paired with default@defaults on the same replicate.",
+  "LR-15 drift check (L1-only vs L3-only, N4 vs N8 M1 runs and cross-play) deferred to early stage 4 and costed in the projection; it needs no new plumbing."
+ ],
+ "train_subset": {
+  "cells": [
+   "agentx-A3-base-n8-lanes-L2",
+   "agentx-A1-base-n4-lanes-L3",
+   "sessions-s1-base-n8-open-L1",
+   "agentx-A1-base-n4-lanes-L1",
+   "sessions-s0-base-n8-closed-L2",
+   "sessions-s1-base-n4-open-L3",
+   "mooncake-w4-islp1.5-n8-open-L2",
+   "mooncake-w4-base-n8-open-L1",
+   "mooncake-w0-base-n8-closed-L2",
+   "mooncake-w2-base-n4-open-L2",
+   "mooncake-w2-base-n4-closed-L3",
+   "mooncake-w0-base-n4-open-L3"
+  ],
+  "default_replay_s_per_replicate": {
+   "agentx-A3-base-n8-lanes-L2": 51.6,
+   "agentx-A1-base-n4-lanes-L3": 17.85,
+   "sessions-s1-base-n8-open-L1": 8.82,
+   "agentx-A1-base-n4-lanes-L1": 8.32,
+   "sessions-s0-base-n8-closed-L2": 5.42,
+   "sessions-s1-base-n4-open-L3": 4.84,
+   "mooncake-w4-islp1.5-n8-open-L2": 2.63,
+   "mooncake-w4-base-n8-open-L1": 2.6,
+   "mooncake-w0-base-n8-closed-L2": 2.4,
+   "mooncake-w2-base-n4-open-L2": 2.4,
+   "mooncake-w2-base-n4-closed-L3": 2.18,
+   "mooncake-w0-base-n4-open-L3": 2.09
+  },
+  "sum_default_replay_s_per_replicate": 111.1,
+  "full_train_sum_default_replay_s_per_replicate": 364.7
+ },
+ "heuristic_screen_train_subset": {
+  "file": "runs/pilot/screen/summary.json",
+  "replicates": [
+   0,
+   1
+  ],
+  "errors": 0,
+  "ranking": [
+   "llm-d-precise-prefix@defaults",
+   "ramjet@defaults",
+   "lmetric@defaults",
+   "two-tier@defaults",
+   "llm-d-optimized-baseline@throughput",
+   "sticky-bounded@defaults",
+   "sticky-hard@defaults",
+   "default@defaults",
+   "dualmap@defaults",
+   "chwbl@defaults",
+   "round_robin"
+  ],
+  "mean_clipped_log_ratio": {
+   "chwbl@defaults": -0.21350212144563516,
+   "default@defaults": 0.0,
+   "dualmap@defaults": -0.15048057662071324,
+   "llm-d-optimized-baseline@throughput": 0.12134028936946263,
+   "llm-d-precise-prefix@defaults": 0.16910276173363292,
+   "lmetric@defaults": 0.16525376119384835,
+   "ramjet@defaults": 0.16590787501130932,
+   "round_robin": -0.4806037138061309,
+   "sticky-bounded@defaults": 0.10768131317121289,
+   "sticky-hard@defaults": 0.09626776871056748,
+   "two-tier@defaults": 0.15383623286121564
+  },
+  "per_family": {
+   "chwbl@defaults": {
+    "agentx": -0.10652066088612866,
+    "mooncake": -0.16961616944639543,
+    "sessions": -0.4082554860036211
+   },
+   "default@defaults": {
+    "agentx": 0.0,
+    "mooncake": 0.0,
+    "sessions": 0.0
+   },
+   "dualmap@defaults": {
+    "agentx": -0.10734108134785297,
+    "mooncake": -0.1758781611500975,
+    "sessions": -0.14282490283480495
+   },
+   "llm-d-optimized-baseline@throughput": {
+    "agentx": -0.031078240417588623,
+    "mooncake": 0.07066832970553243,
+    "sessions": 0.3751027384843743
+   },
+   "llm-d-precise-prefix@defaults": {
+    "agentx": 0.09249506114754187,
+    "mooncake": 0.10121123228751387,
+    "sessions": 0.38149352121196206
+   },
+   "lmetric@defaults": {
+    "agentx": 0.08712983281866486,
+    "mooncake": 0.09194607734469522,
+    "sessions": 0.3899930572673382
+   },
+   "ramjet@defaults": {
+    "agentx": 0.0641275908175547,
+    "mooncake": 0.11436696717920027,
+    "sessions": 0.3707699748692821
+   },
+   "round_robin": {
+    "agentx": -0.5151180562553646,
+    "mooncake": -0.22919790081432287,
+    "sessions": -0.9489009973405134
+   },
+   "sticky-bounded@defaults": {
+    "agentx": 0.04652719719285667,
+    "mooncake": 0.0014000457405185672,
+    "sessions": 0.38139796401095777
+   },
+   "sticky-hard@defaults": {
+    "agentx": -0.006236032198006687,
+    "mooncake": 0.0014000457405185672,
+    "sessions": 0.38850701555923944
+   },
+   "two-tier@defaults": {
+    "agentx": 0.08705036254418598,
+    "mooncake": 0.06916610064086486,
+    "sessions": 0.3899623676189469
+   }
+  },
+  "sanity_note": "A2.5 brief sanity: every port ran without error; 7 of 9 beat default@defaults on the subset, dualmap (-0.15) and chwbl (-0.21) lose to it (hash-pinned policies on traffic whose hot prefixes are few); no port routes against its documented direction in these aggregates (no gross bug found)."
+ },
+ "feature_scaling": {
+  "feature_scales": "runs/pilot/screen/feature_scales.json",
+  "flip_rate_m1": "runs/pilot/screen/flip_rate.json",
+  "flip_rate_m0": "runs/pilot/screen/flip_rate_m0.json",
+  "pooled_within_set_sd": {
+   "default_logit_scaled": 6.607410627904016,
+   "overlap_frac": 0.2584520945310832,
+   "new_prefill_tokens_k": 0.374194143435924,
+   "active_prefill_tokens_k": 1.2388682431982376,
+   "kv_load_frac": 0.08173111115214103,
+   "active_requests_s": 0.06030930001422902,
+   "session_affinity": 0.3111430365043846,
+   "isl_x_prefill_load": 2.0534344384001617
+  },
+  "m1_flip_frac_by_c": {
+   "0.01": 0.09410334856793921,
+   "0.02": 0.15988977078557845,
+   "0.03": 0.19606625992283544,
+   "0.05": 0.2393409261561017,
+   "0.08": 0.30872497080897343,
+   "0.12": 0.39288911715202085
+  },
+  "m0_flip_frac_by_sigma0": {
+   "0.03": 0.05821918096869574,
+   "0.05": 0.09673515167801343,
+   "0.1": 0.14543688887704934,
+   "0.15": 0.17886627516138606,
+   "0.2": 0.2577312856318552
+  },
+  "caveat": "replay does not log candidate tables; tables are reconstructed approximately from default@defaults per-request rows (router-side load from arrivals/first tokens/completions, overlap only for the chosen worker and earlier turns of the same session); scale estimates, not policy inputs"
+ },
+ "runs": {
+  "m0-s1": {
+   "node": "CPU cluster epyc9654p EPYC 9654P (<node>), 96 slots",
+   "slurm_jobs": [
+    "<job>"
+   ],
+   "status": "done",
+   "generations": 30,
+   "fevals": 480,
+   "lr_train_wall_s": 4780.7,
+   "best_ever_train_objective": 0.15565845811643186,
+   "selected_by_val": {
+    "generation": 25,
+    "which": "best_so_far",
+    "val_objective_k0_2": 0.1289320385390155,
+    "policy_sha": "ebf5cb370db54fcad507b8b44fc247b12cf67022dd1d153397548025f91201e5",
+    "values": {
+     "parameters.decode_active_request_weight": 853.5892139894559,
+     "parameters.overlap_score_credit": 1.6176399246853186,
+     "parameters.overlap_score_credit_decay": 1.5253304958142595,
+     "parameters.prefill_load_scale": 24.823247712244612,
+     "parameters.router_temperature": 0.001969556841021884
+    }
+   },
+   "plateau_evals_val_within_0.005": 400,
+   "steady_gen_wall_s_median": 143.62041461054469,
+   "final_sigma": 10.75540542633635,
+   "final_axis_ratio": 39.799383885588746,
+   "uh_cmaes_top2_swaps": "8/30 generations",
+   "replay_records": 15615,
+   "fresh_replays": 13476,
+   "errors": 0,
+   "run_dir": "<campaign-root>/runs/remote/returned/pilot-epyc9654p/m0-s1/runs/train/m0-s1"
+  },
+  "m0-s2": {
+   "node": "CPU cluster epyc7702p EPYC 7702P (<node>), 64 slots, generations 0-28; generation 29 + final validation resumed on epyc9654p (<node>)",
+   "slurm_jobs": [
+    "<job>",
+    "<job>"
+   ],
+   "status": "done",
+   "generations": 30,
+   "fevals": 480,
+   "lr_train_wall_s": 7403.78,
+   "best_ever_train_objective": 0.1611166160907387,
+   "selected_by_val": {
+    "generation": 25,
+    "which": "mean",
+    "val_objective_k0_2": 0.12829946484653412,
+    "policy_sha": "d614e880d3758f3b52b09d33277d2bff848d6c7cea5aa4573bd25f5b01d4cb7f",
+    "values": {
+     "parameters.decode_active_request_weight": 1151.5206706006434,
+     "parameters.overlap_score_credit": 1.6536493804199253,
+     "parameters.overlap_score_credit_decay": 0.5756109793398994,
+     "parameters.prefill_load_scale": 16.87699717901442,
+     "parameters.router_temperature": 0.023810096257068966
+    }
+   },
+   "plateau_evals_val_within_0.005": 160,
+   "steady_gen_wall_s_median": 222.04807773104403,
+   "final_sigma": 0.22025042425138525,
+   "final_axis_ratio": 146.8225895114809,
+   "uh_cmaes_top2_swaps": "11/30 generations",
+   "replay_records": 16762,
+   "fresh_replays": 13560,
+   "errors": 0,
+   "run_dir": "<campaign-root>/runs/remote/returned/pilot-epyc7702p/m0-s2/runs/train/m0-s2"
+  },
+  "m1-s1": {
+   "node": "CPU cluster epyc9654p EPYC 9654P (<node>), 96 slots",
+   "slurm_jobs": [
+    "<job>"
+   ],
+   "status": "done",
+   "generations": 30,
+   "fevals": 480,
+   "lr_train_wall_s": 4724.93,
+   "best_ever_train_objective": 0.22856188117792328,
+   "selected_by_val": {
+    "generation": 25,
+    "which": "mean",
+    "val_objective_k0_2": 0.16410733559947985,
+    "policy_sha": "e63a22eb4cd6c051ebc58865d43b0299570c273391611f380c76be7138b79bb7",
+    "values": {
+     "parameters.theta": [
+      -1.0,
+      9.788499051257276,
+      -2.5289280025604057,
+      -0.8441762384205234,
+      1.208209739783797,
+      -44.59513777472864,
+      0.37776065027115635,
+      0.06631671653939541
+     ]
+    }
+   },
+   "plateau_evals_val_within_0.005": 240,
+   "steady_gen_wall_s_median": 141.09941163251642,
+   "final_sigma": 0.005904953859336204,
+   "final_axis_ratio": 8.929472376916056,
+   "uh_cmaes_top2_swaps": "7/30 generations",
+   "replay_records": 15374,
+   "fresh_replays": 13602,
+   "errors": 0,
+   "run_dir": "<campaign-root>/runs/remote/returned/pilot-epyc9654p/m1-s1/runs/train/m1-s1"
+  },
+  "m1-s2": {
+   "node": "CPU cluster epyc7702p EPYC 7702P (<node>), 64 slots, generations 0-28; generation 29 + final validation resumed on epyc9654p (<node>)",
+   "slurm_jobs": [
+    "<job>",
+    "<job>"
+   ],
+   "status": "done",
+   "generations": 30,
+   "fevals": 480,
+   "lr_train_wall_s": 7543.55,
+   "best_ever_train_objective": 0.22658163820505361,
+   "selected_by_val": {
+    "generation": 30,
+    "which": "mean",
+    "val_objective_k0_2": 0.16453538598797732,
+    "policy_sha": "ce9de9d9bfc9635c3b52d3c03ceec6694f61dfb228f5f8db4dbe22abef6bf7ff",
+    "values": {
+     "parameters.theta": [
+      -1.0,
+      13.59753164040562,
+      -8.705127090899701,
+      -0.5457252189236144,
+      -0.43414097886631,
+      -49.237255511617434,
+      0.9950981745668628,
+      0.04087465026353776
+     ]
+    }
+   },
+   "plateau_evals_val_within_0.005": 160,
+   "steady_gen_wall_s_median": 228.35164345009252,
+   "final_sigma": 0.008625816792845903,
+   "final_axis_ratio": 18.718586029639535,
+   "uh_cmaes_top2_swaps": "11/30 generations",
+   "replay_records": 16164,
+   "fresh_replays": 13476,
+   "errors": 0,
+   "run_dir": "<campaign-root>/runs/remote/returned/pilot-epyc7702p/m1-s2/runs/train/m1-s2"
+  }
+ },
+ "selected": {
+  "M0_tuned": {
+   "name": "m0-s1@sel-g25",
+   "spec": {
+    "name": "m0-default-tuned",
+    "parameters": {
+     "decode_active_request_weight": 853.5892139894559,
+     "overlap_score_credit": 1.6176399246853186,
+     "overlap_score_credit_decay": 1.5253304958142595,
+     "prefill_load_scale": 24.823247712244612,
+     "router_temperature": 0.001969556841021884
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "dynamo-default-cost-fn"
+   },
+   "values": {
+    "parameters.decode_active_request_weight": 853.5892139894559,
+    "parameters.overlap_score_credit": 1.6176399246853186,
+    "parameters.overlap_score_credit_decay": 1.5253304958142595,
+    "parameters.prefill_load_scale": 24.823247712244612,
+    "parameters.router_temperature": 0.001969556841021884
+   }
+  },
+  "M1_tuned": {
+   "name": "m1-s2@sel-g30",
+   "values": {
+    "parameters.theta": [
+     -1.0,
+     13.59753164040562,
+     -8.705127090899701,
+     -0.5457252189236144,
+     -0.43414097886631,
+     -49.237255511617434,
+     0.9950981745668628,
+     0.04087465026353776
+    ]
+   }
+  },
+  "specs": [
+   "runs/pilot/specs/selected_s1.jsonl",
+   "runs/pilot/specs/selected_s2.jsonl"
+  ]
+ },
+ "validation_k3_10_vs_default": {
+  "cells": 14,
+  "segments": 6,
+  "replicates": "k = 3..10 (8)",
+  "files": [
+   "runs/pilot/val/baselines.jsonl",
+   "runs/pilot/val/selected_s1.valonly.jsonl",
+   "runs/pilot/val/selected_s2.jsonl"
+  ],
+  "table": "runs/pilot/val/gate_vs_default.json",
+  "policies": {
+   "llm-d-precise-prefix@defaults": {
+    "mean_clipped_log_ratio": 0.13495097115032578,
+    "mean_ratio": 1.1525198591995935,
+    "cells_better": "14/14",
+    "mean_segment_delta": 0.13475858316745631,
+    "segment_se": 0.033793527542412306,
+    "segments": 6,
+    "pooled_sd": 0.02676730684284515,
+    "max_abs_cell_delta": 0.5863467858032676,
+    "cell_clause": true,
+    "segment_clause": true,
+    "differs_beyond_noise": true,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": true,
+     "open_speedup": true
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.06388227860092305,
+     "mooncake": 0.12424846249480288,
+     "synthetic_sessions": 0.20250843384537087
+    },
+    "worker_share_cap_exceeded_cells": 1
+   },
+   "lmetric@defaults": {
+    "mean_clipped_log_ratio": 0.13273283349722234,
+    "mean_ratio": 1.150202661632278,
+    "cells_better": "14/14",
+    "mean_segment_delta": 0.1323513481752935,
+    "segment_se": 0.03591261549740913,
+    "segments": 6,
+    "pooled_sd": 0.026638379492313045,
+    "max_abs_cell_delta": 0.5871612879002956,
+    "cell_clause": true,
+    "segment_clause": true,
+    "differs_beyond_noise": true,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": true,
+     "open_speedup": true
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.05978553644993196,
+     "mooncake": 0.1160191291324943,
+     "synthetic_sessions": 0.20780437549978265
+    },
+    "worker_share_cap_exceeded_cells": 0
+   },
+   "m0-s1@sel-g25": {
+    "mean_clipped_log_ratio": 0.12782796628755966,
+    "mean_ratio": 1.144266389525028,
+    "cells_better": "14/14",
+    "mean_segment_delta": 0.12108441252112616,
+    "segment_se": 0.037332157867670114,
+    "segments": 6,
+    "pooled_sd": 0.02544846716474852,
+    "max_abs_cell_delta": 0.5850942226461795,
+    "cell_clause": true,
+    "segment_clause": true,
+    "differs_beyond_noise": true,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": true,
+     "open_speedup": true
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.040565825970763025,
+     "mooncake": 0.12779208812889167,
+     "synthetic_sessions": 0.19767355669966497
+    },
+    "worker_share_cap_exceeded_cells": 0
+   },
+   "m0-s2@sel-g25": {
+    "mean_clipped_log_ratio": 0.1288760070647077,
+    "mean_ratio": 1.1451309715999698,
+    "cells_better": "14/14",
+    "mean_segment_delta": 0.1237078480484363,
+    "segment_se": 0.03510176434860587,
+    "segments": 6,
+    "pooled_sd": 0.02670894763136785,
+    "max_abs_cell_delta": 0.5828533154660647,
+    "cell_clause": true,
+    "segment_clause": true,
+    "differs_beyond_noise": true,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": true,
+     "open_speedup": true
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.04733900429068032,
+     "mooncake": 0.12946273679681478,
+     "synthetic_sessions": 0.19351887955182254
+    },
+    "worker_share_cap_exceeded_cells": 0
+   },
+   "m1-s1@sel-g25": {
+    "mean_clipped_log_ratio": 0.16219979843684304,
+    "mean_ratio": 1.187114162852298,
+    "cells_better": "13/14",
+    "mean_segment_delta": 0.14183556660510818,
+    "segment_se": 0.04355031932368331,
+    "segments": 6,
+    "pooled_sd": 0.025867607316178005,
+    "max_abs_cell_delta": 0.5853422698182937,
+    "cell_clause": true,
+    "segment_clause": true,
+    "differs_beyond_noise": true,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": true,
+     "open_speedup": true
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.042588862019673976,
+     "mooncake": 0.2201592587296873,
+     "synthetic_sessions": 0.19992908727773395
+    },
+    "worker_share_cap_exceeded_cells": 4
+   },
+   "m1-s2@sel-g30": {
+    "mean_clipped_log_ratio": 0.1647295605713491,
+    "mean_ratio": 1.1905152544661295,
+    "cells_better": "13/14",
+    "mean_segment_delta": 0.14664766518780853,
+    "segment_se": 0.043676045999597395,
+    "segments": 6,
+    "pooled_sd": 0.027015888412970392,
+    "max_abs_cell_delta": 0.5868145024607994,
+    "cell_clause": true,
+    "segment_clause": true,
+    "differs_beyond_noise": true,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": true,
+     "open_speedup": true
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.04490222881684814,
+     "mooncake": 0.22077646388952274,
+     "synthetic_sessions": 0.2045445226567763
+    },
+    "worker_share_cap_exceeded_cells": 5
+   },
+   "ramjet@defaults": {
+    "mean_clipped_log_ratio": 0.1346921052498483,
+    "mean_ratio": 1.1524615288188031,
+    "cells_better": "14/14",
+    "mean_segment_delta": 0.12236074487482436,
+    "segment_se": 0.038082333481848994,
+    "segments": 6,
+    "pooled_sd": 0.02634463375766349,
+    "max_abs_cell_delta": 0.5824196465977054,
+    "cell_clause": true,
+    "segment_clause": true,
+    "differs_beyond_noise": true,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": true,
+     "open_speedup": true
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.03760705880596229,
+     "mooncake": 0.15351884134879704,
+     "synthetic_sessions": 0.19353340630600835
+    },
+    "worker_share_cap_exceeded_cells": 0
+   },
+   "round_robin": {
+    "mean_clipped_log_ratio": -0.5768945702914029,
+    "mean_ratio": 0.5711357842476529,
+    "cells_better": "0/14",
+    "mean_segment_delta": -0.4732747360257627,
+    "segment_se": 0.06597621467875864,
+    "segments": 6,
+    "pooled_sd": 0.026782662293897388,
+    "max_abs_cell_delta": 0.8852845309620717,
+    "cell_clause": true,
+    "segment_clause": true,
+    "differs_beyond_noise": true,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": true,
+     "open_speedup": true
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": -0.5622313527227648,
+     "mooncake": -0.27316281284174065,
+     "synthetic_sessions": -0.8923569017959757
+    },
+    "worker_share_cap_exceeded_cells": 0
+   }
+  }
+ },
+ "validation_vs_best_heuristic": {
+  "llm-d-precise-prefix": {
+   "table": "runs/pilot/val/gate_vs_llm-d-precise-prefix.json",
+   "M1_tuned": {
+    "mean_clipped_log_ratio": 0.02977858942102335,
+    "mean_ratio": 1.031970179217284,
+    "cells_better": "10/14",
+    "mean_segment_delta": 0.009415505656430557,
+    "segment_se": 0.019075033808637645,
+    "segments": 6,
+    "pooled_sd": 0.015100904244396779,
+    "max_abs_cell_delta": 0.19467894130354435,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": -0.018980049784074922,
+     "mooncake": 0.09652800139471987,
+     "synthetic_sessions": 0.0020360888114054417
+    },
+    "worker_share_cap_exceeded_cells": 5
+   },
+   "M0_tuned": {
+    "mean_clipped_log_ratio": -0.007123004862766125,
+    "mean_ratio": 0.9930964082463161,
+    "cells_better": "3/14",
+    "mean_segment_delta": -0.01211001718773816,
+    "segment_se": 0.00550357210667711,
+    "segments": 6,
+    "pooled_sd": 0.01438464193342189,
+    "max_abs_cell_delta": 0.03667834213420684,
+    "cell_clause": false,
+    "segment_clause": true,
+    "differs_beyond_noise": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": -0.023316452630160057,
+     "mooncake": 0.003543625634088796,
+     "synthetic_sessions": -0.0048348771457059
+    },
+    "worker_share_cap_exceeded_cells": 0
+   }
+  },
+  "ramjet": {
+   "table": "runs/pilot/val/gate_vs_ramjet.json",
+   "M1_tuned": {
+    "mean_clipped_log_ratio": 0.03003745532150084,
+    "mean_ratio": 1.0314143642956266,
+    "cells_better": "12/14",
+    "mean_segment_delta": 0.020539903792970507,
+    "segment_se": 0.011095217571870233,
+    "segments": 6,
+    "pooled_sd": 0.011330639919168039,
+    "max_abs_cell_delta": 0.16426918808034685,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": true,
+     "open_speedup": false
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.00729517001088588,
+     "mooncake": 0.0672576225407257,
+     "synthetic_sessions": 0.011011116350767954
+    },
+    "worker_share_cap_exceeded_cells": 5
+   },
+   "M0_tuned": {
+    "mean_clipped_log_ratio": -0.006864138962288635,
+    "mean_ratio": 0.9933278272246641,
+    "cells_better": "7/14",
+    "mean_segment_delta": -0.0007633708093518647,
+    "segment_se": 0.005225924024927831,
+    "segments": 6,
+    "pooled_sd": 0.009707237012169393,
+    "max_abs_cell_delta": 0.04408489771827151,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": 0.0029587671648007466,
+     "mooncake": -0.02572675321990537,
+     "synthetic_sessions": 0.004140150393656595
+    },
+    "worker_share_cap_exceeded_cells": 0
+   }
+  },
+  "lmetric": {
+   "table": "runs/pilot/val/gate_vs_lmetric.json",
+   "M1_tuned": {
+    "mean_clipped_log_ratio": 0.031996727074126784,
+    "mean_ratio": 1.0344864588543101,
+    "cells_better": "6/14",
+    "mean_segment_delta": 0.01194800512919854,
+    "segment_se": 0.020285885728335853,
+    "segments": 6,
+    "pooled_sd": 0.012225405399959463,
+    "max_abs_cell_delta": 0.20481869837480993,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": -0.014883307633083813,
+     "mooncake": 0.10475733475702842,
+     "synthetic_sessions": -0.003259852843006376
+    },
+    "worker_share_cap_exceeded_cells": 5
+   },
+   "M0_tuned": {
+    "mean_clipped_log_ratio": -0.004904867209662676,
+    "mean_ratio": 0.9953027854420906,
+    "cells_better": "4/14",
+    "mean_segment_delta": -0.00975116092552348,
+    "segment_se": 0.005375245525836,
+    "segments": 6,
+    "pooled_sd": 0.010767561844722408,
+    "max_abs_cell_delta": 0.03471652880507792,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_family_mean_clipped_log_ratio": {
+     "agentx": -0.01921971047916895,
+     "mooncake": 0.011772958996397371,
+     "synthetic_sessions": -0.01013081880011771
+    },
+    "worker_share_cap_exceeded_cells": 0
+   }
+  }
+ },
+ "mde": {
+  "rule": "HEADLINE_TEST.json: max(1%, 2 x SE of the paired segment mean measured on validation at the pilot)",
+  "learned_vs_val_best_default_arm_heuristic": {
+   "comparator": "llm-d-precise-prefix@defaults (val-best default-arm heuristic by mean clipped log-ratio)",
+   "segment_se": 0.019075033808637648,
+   "mde": 0.038150067617275296
+  },
+  "learned_vs_default": {
+   "segment_se": 0.0436760459995974,
+   "mde": 0.0873520919991948
+  },
+  "note": "6 val segments; the SE is dominated by between-segment heterogeneity (M1's gain over the heuristic is concentrated in Mooncake), not by replicate noise (pooled paired sd 0.013-0.015)"
+ },
+ "warmup_doubling_check": {
+  "lesson": "LR-01 action 5",
+  "cells": "val open-loop session cells s4-base-n4-open-L2, s5-base-n8-open-L3, s5-think1.5-n6-open-L2 (arms w1x vs w2x from runs/calibrate-fix-r0/warm_check_r2, same in-window sessions), k = 0..3",
+  "file": "runs/pilot/warmcheck/summary.json",
+  "max_abs_delta_clipped_log_ratio": {
+   "llm-d-precise-prefix@defaults": 0.0012921426164180447,
+   "lmetric@defaults": 0.0017316953286356795,
+   "m0-s1@sel-g25": 0.0007705773248060863,
+   "m0-s2@sel-g25": 0.0015666796347360845,
+   "m1-s1@sel-g25": 0.00164920872033128,
+   "m1-s2@sel-g30": 0.0020337741820676686,
+   "ramjet@defaults": 0.0025299744436142746,
+   "round_robin": 0.027184375405450628
+  },
+  "verdict": "stable: Delta(policy - default) moves by <= 0.0025 for every tuned or heuristic policy (round_robin 0.027)"
+ },
+ "guards_LR13": {
+  "file": "runs/pilot/val/guards_summary.json",
+  "finding": "M1 tuned concentrates Mooncake traffic: max worker request share 0.37-0.51 on N8/N6 Mooncake val cells (cap min(2/N, 1/N + 0.25) = 0.25-0.33; default 0.15-0.19, llm-d-precise-prefix 0.16-0.28) while prefix reuse is about the heuristic's (0.376 vs 0.375 at w1-n8-open-L3); M1's Mooncake val gain over llm-d-precise-prefix (+0.097) comes with this concentration. HYPOTHESIS: hot-prefix segregation (LR-13 'segregation/concentration'); flagged for the stage-4 degenerate-policy audit and the staleness robustness check, not acted on here. M0 tuned and the default-arm heuristics exceed the cap on at most 1 cell.",
+  "m1_worker_share_max_mean": {
+   "agentx-V1-base-n4-lanes-L2": 0.2692409766454352,
+   "agentx-V2-base-n4-lanes-L3": 0.26165086887835703,
+   "agentx-V2-base-n6-lanes-L2": 0.18220115850447605,
+   "agentx-V3-base-n8-lanes-L1": 0.1387298066737288,
+   "mooncake-w1-base-n4-open-L2": 0.3717871485943775,
+   "mooncake-w1-base-n6-open-L2": 0.33119143239625165,
+   "mooncake-w1-base-n8-closed-L2": 0.3738955823293173,
+   "mooncake-w1-base-n8-open-L3": 0.5079986613119143,
+   "mooncake-w1-islu1.25-n6-closed-L2": 0.48628621244635195,
+   "sessions-s4-base-n4-open-L2": 0.2566181506849315,
+   "sessions-s4-base-n8-closed-L2": 0.13378709758551308,
+   "sessions-s5-base-n4-closed-L1": 0.26404547757790725,
+   "sessions-s5-base-n8-open-L3": 0.13569339409217246,
+   "sessions-s5-think1.5-n6-open-L2": 0.17226748133061778
+  },
+  "default_worker_share_max_mean": {
+   "agentx-V1-base-n4-lanes-L2": 0.2662685774946921,
+   "agentx-V2-base-n4-lanes-L3": 0.25785939968404425,
+   "agentx-V2-base-n6-lanes-L2": 0.17552659294365455,
+   "agentx-V3-base-n8-lanes-L1": 0.13426906779661016,
+   "mooncake-w1-base-n4-open-L2": 0.27734270414993306,
+   "mooncake-w1-base-n6-open-L2": 0.19407630522088354,
+   "mooncake-w1-base-n8-closed-L2": 0.1462182061579652,
+   "mooncake-w1-base-n8-open-L3": 0.15538821954484605,
+   "mooncake-w1-islu1.25-n6-closed-L2": 0.188975321888412,
+   "sessions-s4-base-n4-open-L2": 0.2558647260273973,
+   "sessions-s4-base-n8-closed-L2": 0.13073755030181086,
+   "sessions-s5-base-n4-closed-L1": 0.25611223714213327,
+   "sessions-s5-base-n8-open-L3": 0.12884994505849653,
+   "sessions-s5-think1.5-n6-open-L2": 0.1714641321565965
+  }
+ },
+ "measurements": {
+  "replay_error_rate": {
+   "fresh_replays": 56552,
+   "errors": 0,
+   "timeouts": 0,
+   "rate": 0.0,
+   "per_source": "runs/pilot/error_accounting.json"
+  },
+  "seconds_per_evaluation": {
+   "full_train_local": {
+    "what": "one M1 generation (16 m1-s1 generation-0 candidates) on all 34 train cells x K = 2, workstation 20-slot pool",
+    "lr_eval_wall_s": 591.43,
+    "wall_s_per_candidate_evaluation": 36.964375,
+    "replay_s_per_candidate_evaluation": 700.895219796193,
+    "max_single_replay_s": 81.26333487500233,
+    "local_capacity_replay_s_per_s": 18.96137077378403,
+    "file": "runs/pilot/fullgen/summary.json"
+   },
+   "subset_replay_s_per_candidate_evaluation": 204.19322135318998,
+   "subset_lr_train_generation_wall_s": {
+    "epyc9654p_96_slots_median": [
+     143.62041461054469,
+     141.09941163251642
+    ],
+    "epyc7702p_64_slots_median": [
+     222.04807773104403,
+     228.35164345009252
+    ],
+    "per_candidate_s_epyc9654p": 8.818713227032276,
+    "per_candidate_s_epyc7702p": 14.271977715630783
+   },
+   "lr_train_effective_rate_local_eq_replay_s_per_s": {
+    "epyc9654p": 25.820233243079784,
+    "epyc7702p": 16.324157775193942
+   },
+   "whole_run_wall_480_evals": {
+    "epyc9654p": [
+     4780.7,
+     4724.93
+    ],
+    "epyc7702p_then_epyc9654p": [
+     7403.78,
+     7543.55
+    ]
+   }
+  },
+  "subset_vs_full_objective": {
+   "spearman": 0.9470588235294117,
+   "pearson": 0.9876059893752572,
+   "n_candidates": 16,
+   "note": "M1 generation-0 candidates scored on the 12-cell subset (lr-train, CPU cluster) and on all 34 train cells (local); supports rotating-subset training as a cost lever"
+  },
+  "cross_host_bitwise": "384/384 records of the 16 generation-0 candidates on the 12 subset cells computed both locally (fullgen) and on the CPU cluster epyc9654p (m1-s1) are identical (goodput, window counts, makespan, per_request canonical sha256)",
+  "cma_progress_curves": {
+   "file": "runs/pilot/curves.json",
+   "figure": "runs/pilot/fig/progress.png",
+   "plateau": "runs/pilot/plateau.json",
+   "summary": "M1: train generation mean rises from -0.17 to 0.21-0.22 and the val CMA mean plateaus at 0.163-0.165 by 160-240 evaluations (within 0.005 of the run max); both seeds agree to 0.0004 on val. M0: best-so-far plateaus at 0.15-0.16 train within 80-160 evaluations; val 0.12-0.13; seed 1's sigma then diverged (0.18 -> 10.8 internal units, generation mean down to -0.23: flat directions in decode_active_request_weight/temperature, LR-05) while seed 2 stayed bounded (axis ratio up to 172); prefill_load_scale moved to 17-25 of a 50 upper bound."
+  }
+ },
+ "projection": {
+  "file": "runs/pilot/projection.json",
+  "status": "PROJECTION from measured pilot inputs (not measured)",
+  "inputs": {
+   "E_full_replay_s_per_eval": 700.895219796193,
+   "E_subset_replay_s_per_eval": 204.19322135318998,
+   "budget_evals_B": 400,
+   "lambda": 16,
+   "reeval_fraction": 0.125,
+   "val_overhead_replay_s_per_eval": 15.75,
+   "val_replay_s_per_policy_per_replicate": 210.0,
+   "test_replay_s_per_policy_per_replicate": 1385.1,
+   "capacities_sustained": {
+    "workstation_20_slots": 16.7,
+    "slurm_epyc9654p_96_slots": 37.6,
+    "slurm_epyc7702p_64_slots": 20.2
+   },
+   "lr_train_effective_rates": {
+    "epyc9654p": 25.820233243079784,
+    "epyc7702p": 16.324157775193942
+   },
+   "plateau": {
+    "method": "Evals-to-plateau and effective lr-train throughput from the pilot curves (inputs to projection.py).\n\nPlateau: the first validation checkpoint (every 5 generations = 80 evals) at which the run's\nvalidation objective max(best-so-far, CMA mean) on val k = 0..2 comes within TOL of the run's\nfinal maximum. Effective lr-train rate per node type: (lambda + 2 re-evaluations) x E_SUB local-equivalent\nreplay-seconds per steady-state generation (>= 4, reference cached) divided by the median\nmeasured generation wall (history.jsonl gen_wall_s) on that node type.\nusage: plateau.py curves.json OUT.json [RECOMMENDED_BUDGET_EVALS]\n",
+    "tolerance": 0.005,
+    "runs": {
+     "m0-s1": {
+      "val_by_generation": {
+       "5": 0.11909725893567501,
+       "10": 0.11990141408807631,
+       "15": 0.11725812729959509,
+       "20": 0.11601717612613868,
+       "25": 0.1289320385390155,
+       "30": 0.1289320385390155
+      },
+      "val_max": 0.1289320385390155,
+      "plateau_generation": 25,
+      "plateau_evals": 400,
+      "final_generation": 30,
+      "status_wall_s": 4780.7,
+      "steady_gen_wall_s_median": 143.62041461054469,
+      "steady_gen_wall_s_p90": 147.09095770430287,
+      "steady_gen_local_eq_replay_s": 3675.4779843574197,
+      "effective_gen_rate": 25.591612406385327,
+      "node": "epyc9654p"
+     },
+     "m0-s2": {
+      "val_by_generation": {
+       "5": 0.12243052317893166,
+       "10": 0.12733768037720278,
+       "15": 0.12790009191598095,
+       "20": 0.12817172499267834,
+       "25": 0.12829946484653412,
+       "30": 0.12637110037669172
+      },
+      "val_max": 0.12829946484653412,
+      "plateau_generation": 10,
+      "plateau_evals": 160,
+      "final_generation": 30,
+      "status_wall_s": 7403.78,
+      "steady_gen_wall_s_median": 222.04807773104403,
+      "steady_gen_wall_s_p90": 230.08941689596978,
+      "steady_gen_local_eq_replay_s": 3675.4779843574197,
+      "effective_gen_rate": 16.552622395629772,
+      "node": "epyc7702p"
+     },
+     "m1-s1": {
+      "val_by_generation": {
+       "5": 0.14613309102986077,
+       "10": 0.1554853869345723,
+       "15": 0.16059666395891461,
+       "20": 0.16379140976645795,
+       "25": 0.16410733559947985,
+       "30": 0.1634176721682492
+      },
+      "val_max": 0.16410733559947985,
+      "plateau_generation": 15,
+      "plateau_evals": 240,
+      "final_generation": 30,
+      "status_wall_s": 4724.93,
+      "steady_gen_wall_s_median": 141.09941163251642,
+      "steady_gen_wall_s_p90": 145.68038849368457,
+      "steady_gen_local_eq_replay_s": 3675.4779843574197,
+      "effective_gen_rate": 26.048854079774237,
+      "node": "epyc9654p"
+     },
+     "m1-s2": {
+      "val_by_generation": {
+       "5": 0.1553674638667013,
+       "10": 0.163876763755348,
+       "15": 0.16393700166341948,
+       "20": 0.16431532327819778,
+       "25": 0.16393700166341948,
+       "30": 0.16453538598797732
+      },
+      "val_max": 0.16453538598797732,
+      "plateau_generation": 10,
+      "plateau_evals": 160,
+      "final_generation": 30,
+      "status_wall_s": 7543.55,
+      "steady_gen_wall_s_median": 228.35164345009252,
+      "steady_gen_wall_s_p90": 235.2760063309921,
+      "steady_gen_local_eq_replay_s": 3675.4779843574197,
+      "effective_gen_rate": 16.095693154758113,
+      "node": "epyc7702p"
+     }
+    },
+    "effective_rate_local_eq_replay_s_per_s": {
+     "epyc9654p": 25.820233243079784,
+     "epyc7702p": 16.324157775193942
+    },
+    "recommended_budget_note": "set by the pilot stage after reading the curves",
+    "max_plateau_evals": 400,
+    "recommended_budget_evals": 400
+   }
+  },
+  "recommended_plan": {
+   "arm": "A_full_train",
+   "B": 400,
+   "m2_budget": "B",
+   "total_replay_s": 16767352.543931572,
+   "workstation_only_h": 278.89807957304674,
+   "wall_h_5_measured_slurm_nodes_plus_ws": 39.70233749443316,
+   "single_run_h_epyc9654p": 3.460925454593811,
+   "single_run_h_epyc7702p": 5.474212128133052,
+   "longest_run_h_epyc9654p": 3.460925454593811
+  },
+  "itemized_full_train_B400_M2_scaled": [
+   {
+    "item": "baselines_tuned (10 policies x 3 restarts)",
+    "runs": 30,
+    "evals_per_run": 400,
+    "replay_s": 9651085.467248607,
+    "note": "dynamo-default-cost-fn (M0), two-tier, lmetric, ramjet, dualmap, chwbl, llm-d-precise-prefix, llm-d-optimized-baseline (throughput), sticky-hard, sticky-bounded; equal budget B"
+   },
+   {
+    "item": "M1_full (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 400,
+    "replay_s": 965108.5467248607,
+    "note": "learned-choice v1 rank 0"
+   },
+   {
+    "item": "M2_rank2 (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 1315,
+    "replay_s": 3172794.3473579795,
+    "note": "named-source context, 23 free coords; budget scaled B x n/7 (hypothesis: linear in dimension, warm start from M1)"
+   },
+   {
+    "item": "M2_rank3 (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 1772,
+    "replay_s": 4275430.861991133,
+    "note": "named-source context, 31 free coords; budget scaled B x n/7 (hypothesis: linear in dimension, warm start from M1)"
+   },
+   {
+    "item": "M2_rank4 (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 2229,
+    "replay_s": 5378067.376624286,
+    "note": "named-source context, 39 free coords; budget scaled B x n/7 (hypothesis: linear in dimension, warm start from M1)"
+   },
+   {
+    "item": "ablation_a_queue_threshold (learned + best baseline, 3 restarts each)",
+    "runs": 6,
+    "evals_per_run": 400,
+    "replay_s": 1930217.0934497213,
+    "note": "+1 coordinate router_queue_threshold"
+   },
+   {
+    "item": "ablation_b_sim_only_features (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 400,
+    "replay_s": 965108.5467248607,
+    "note": "new feature set with engine waiting counts / KV usage; needs Rust + replay plumbing first"
+   },
+   {
+    "item": "LR-15 drift check (4 x M1 at B/4 on L1/L3/N4/N8 subsets)",
+    "runs": 4,
+    "evals_per_run": 100,
+    "replay_s": 98186.9496089355,
+    "note": "cross-play matrix before M2"
+   },
+   {
+    "item": "validation selection (each policy's final candidates, 8 replicates)",
+    "runs": null,
+    "evals_per_run": null,
+    "replay_s": 50400.0,
+    "note": "30 policy configs x 8 replicates x val pass"
+   },
+   {
+    "item": "test evaluation (3 replicates)",
+    "runs": null,
+    "evals_per_run": null,
+    "replay_s": 103882.5,
+    "note": "25 policies (10 baselines x defaults+tuned, RR, M1, M2, 2 ablations) x 3 replicates x 60 test cells (calibration estimate 1385.1 replay-s/policy/replicate)"
+   },
+   {
+    "item": "robustness (test cells, 3 replicates)",
+    "runs": null,
+    "evals_per_run": null,
+    "replay_s": 108037.79999999999,
+    "note": "lag 50/200 ms x 4 finalists + speedup_ratio/decode_speedup_ratio 0.8/1.2 x 4 finalists + 2 LR-14 variants (tau>0, hash_home)"
+   }
+  ],
+  "itemized_rotating_subset_B400_M2_scaled": [
+   {
+    "item": "baselines_tuned (10 policies x 3 restarts)",
+    "runs": 30,
+    "evals_per_run": 400,
+    "replay_s": 2945608.488268065,
+    "note": "dynamo-default-cost-fn (M0), two-tier, lmetric, ramjet, dualmap, chwbl, llm-d-precise-prefix, llm-d-optimized-baseline (throughput), sticky-hard, sticky-bounded; equal budget B"
+   },
+   {
+    "item": "M1_full (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 400,
+    "replay_s": 294560.84882680647,
+    "note": "learned-choice v1 rank 0"
+   },
+   {
+    "item": "M2_rank2 (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 1315,
+    "replay_s": 968368.7905181263,
+    "note": "named-source context, 23 free coords; budget scaled B x n/7 (hypothesis: linear in dimension, warm start from M1)"
+   },
+   {
+    "item": "M2_rank3 (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 1772,
+    "replay_s": 1304904.5603027528,
+    "note": "named-source context, 31 free coords; budget scaled B x n/7 (hypothesis: linear in dimension, warm start from M1)"
+   },
+   {
+    "item": "M2_rank4 (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 2229,
+    "replay_s": 1641440.330087379,
+    "note": "named-source context, 39 free coords; budget scaled B x n/7 (hypothesis: linear in dimension, warm start from M1)"
+   },
+   {
+    "item": "ablation_a_queue_threshold (learned + best baseline, 3 restarts each)",
+    "runs": 6,
+    "evals_per_run": 400,
+    "replay_s": 589121.6976536129,
+    "note": "+1 coordinate router_queue_threshold"
+   },
+   {
+    "item": "ablation_b_sim_only_features (3 restarts)",
+    "runs": 3,
+    "evals_per_run": 400,
+    "replay_s": 294560.84882680647,
+    "note": "new feature set with engine waiting counts / KV usage; needs Rust + replay plumbing first"
+   },
+   {
+    "item": "LR-15 drift check (4 x M1 at B/4 on L1/L3/N4/N8 subsets)",
+    "runs": 4,
+    "evals_per_run": 100,
+    "replay_s": 98186.9496089355,
+    "note": "cross-play matrix before M2"
+   },
+   {
+    "item": "validation selection (each policy's final candidates, 8 replicates)",
+    "runs": null,
+    "evals_per_run": null,
+    "replay_s": 50400.0,
+    "note": "30 policy configs x 8 replicates x val pass"
+   },
+   {
+    "item": "test evaluation (3 replicates)",
+    "runs": null,
+    "evals_per_run": null,
+    "replay_s": 103882.5,
+    "note": "25 policies (10 baselines x defaults+tuned, RR, M1, M2, 2 ablations) x 3 replicates x 60 test cells (calibration estimate 1385.1 replay-s/policy/replicate)"
+   },
+   {
+    "item": "robustness (test cells, 3 replicates)",
+    "runs": null,
+    "evals_per_run": null,
+    "replay_s": 108037.79999999999,
+    "note": "lag 50/200 ms x 4 finalists + speedup_ratio/decode_speedup_ratio 0.8/1.2 x 4 finalists + 2 LR-14 variants (tau>0, hash_home)"
+   }
+  ],
+  "sensitivity": [
+   {
+    "arm": "A_full_train",
+    "B": 320,
+    "m2_budget": "B x n/7",
+    "total_replay_s": 21411602.20605767,
+    "workstation_only_h": 356.14774128505775,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 50.69915807246001,
+    "single_run_h_epyc9654p": 2.768740363675049,
+    "single_run_h_epyc7702p": 4.379369702506442,
+    "longest_run_h_epyc9654p": 15.427075213851912
+   },
+   {
+    "arm": "A_full_train",
+    "B": 320,
+    "m2_budget": "B",
+    "total_replay_s": 13466346.095145255,
+    "workstation_only_h": 223.99111934706016,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 31.88609627462014,
+    "single_run_h_epyc9654p": 2.768740363675049,
+    "single_run_h_epyc7702p": 4.379369702506442,
+    "longest_run_h_epyc9654p": 2.768740363675049
+   },
+   {
+    "arm": "A_full_train",
+    "B": 400,
+    "m2_budget": "B x n/7",
+    "total_replay_s": 26698319.489730388,
+    "workstation_only_h": 444.08382384781083,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 63.2172364801328,
+    "single_run_h_epyc9654p": 3.460925454593811,
+    "single_run_h_epyc7702p": 5.474212128133052,
+    "longest_run_h_epyc9654p": 19.286007095724013
+   },
+   {
+    "arm": "A_full_train",
+    "B": 400,
+    "m2_budget": "B",
+    "total_replay_s": 16767352.543931572,
+    "workstation_only_h": 278.89807957304674,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 39.70233749443316,
+    "single_run_h_epyc9654p": 3.460925454593811,
+    "single_run_h_epyc7702p": 5.474212128133052,
+    "longest_run_h_epyc9654p": 3.460925454593811
+   },
+   {
+    "arm": "A_full_train",
+    "B": 480,
+    "m2_budget": "B x n/7",
+    "total_replay_s": 31985036.7734031,
+    "workstation_only_h": 532.0199064105639,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 75.73531488780556,
+    "single_run_h_epyc9654p": 4.153110545512573,
+    "single_run_h_epyc7702p": 6.569054553759662,
+    "longest_run_h_epyc9654p": 23.144938977596112
+   },
+   {
+    "arm": "A_full_train",
+    "B": 480,
+    "m2_budget": "B",
+    "total_replay_s": 20068358.99271788,
+    "workstation_only_h": 333.8050397990333,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 47.51857871424616,
+    "single_run_h_epyc9654p": 4.153110545512573,
+    "single_run_h_epyc7702p": 6.569054553759662,
+    "longest_run_h_epyc9654p": 4.153110545512573
+   },
+   {
+    "arm": "B_rotating_subset",
+    "B": 320,
+    "m2_budget": "B x n/7",
+    "total_replay_s": 6771869.591698402,
+    "workstation_only_h": 112.63921476544247,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 16.034675199526625,
+    "single_run_h_epyc9654p": 0.845047445152995,
+    "single_run_h_epyc7702p": 1.3366277412777439,
+    "longest_run_h_epyc9654p": 4.708498733461843
+   },
+   {
+    "arm": "B_rotating_subset",
+    "B": 320,
+    "m2_budget": "B",
+    "total_replay_s": 4346897.403731718,
+    "workstation_only_h": 72.3036826968017,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 10.292739257700685,
+    "single_run_h_epyc9654p": 0.845047445152995,
+    "single_run_h_epyc7702p": 1.3366277412777439,
+    "longest_run_h_epyc9654p": 0.845047445152995
+   },
+   {
+    "arm": "B_rotating_subset",
+    "B": 400,
+    "m2_budget": "B x n/7",
+    "total_replay_s": 8399072.814092485,
+    "workstation_only_h": 139.70513662828486,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 19.887625230740728,
+    "single_run_h_epyc9654p": 1.0563093064412437,
+    "single_run_h_epyc7702p": 1.6707846765971797,
+    "longest_run_h_epyc9654p": 5.88628361014383
+   },
+   {
+    "arm": "B_rotating_subset",
+    "B": 400,
+    "m2_budget": "B",
+    "total_replay_s": 5368041.679664645,
+    "workstation_only_h": 89.28878376022364,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 12.710641223283828,
+    "single_run_h_epyc9654p": 1.0563093064412437,
+    "single_run_h_epyc7702p": 1.6707846765971797,
+    "longest_run_h_epyc9654p": 1.0563093064412437
+   },
+   {
+    "arm": "B_rotating_subset",
+    "B": 480,
+    "m2_budget": "B x n/7",
+    "total_replay_s": 10026276.036486568,
+    "workstation_only_h": 166.7710584911272,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 23.740575261954838,
+    "single_run_h_epyc9654p": 1.2675711677294923,
+    "single_run_h_epyc7702p": 2.0049416119166157,
+    "longest_run_h_epyc9654p": 7.064068486825817
+   },
+   {
+    "arm": "B_rotating_subset",
+    "B": 480,
+    "m2_budget": "B",
+    "total_replay_s": 6389185.955597574,
+    "workstation_only_h": 106.2738848236456,
+    "wall_h_5_measured_slurm_nodes_plus_ws": 15.128543188866974,
+    "single_run_h_epyc9654p": 1.2675711677294923,
+    "single_run_h_epyc7702p": 2.0049416119166157,
+    "longest_run_h_epyc9654p": 1.2675711677294923
+   }
+  ],
+  "reading": "Equal budget B = 400 evaluations per run (M1 plateaus by 160-240, M0 by 80-400 on noisy val), 3 restarts per policy, full train each evaluation: 10 tuned baselines (30 runs) + M1 (3) + M2 ranks 2-4 (9) + ablations (queue threshold 6, simulator-only features 3) + LR-15 drift check + val selection + test (25 policies x 3 replicates x 60 cells) + robustness (lag 50/200 ms, speedup 0.8/1.2 on finalists, LR-14 variants). A2.1 requires the equal CMA-ES budget for every policy, learned or baseline, so the recommended plan runs M2 at B; the dimension-scaled M2 rule (B x n/7, a hypothesis) is a sensitivity bound. With M2 at equal budget B: 16.8 M replay-s, ~40 h wall on the 5 measured CPU cluster nodes + workstation, ~3.5 h per run on epyc9654p; with M2 budget scaled by dimension (n/7, hypothesis) 26.7 M replay-s and ~63 h, critical path a 19 h rank-4 run. Rotating 12-cell subsets per generation cut training cost ~3.4x (8.4 M / 5.4 M). Test and robustness together are ~0.2 M replay-s (<1.5%). Training dominates; the knobs are B, the M2 budget rule and rotating subsets."
+ },
+ "lessons": {
+  "applied": {
+   "LR-01": "clipped log-ratio objective (action 3); action 5 doubled-warm-up check of Delta(policy - default) on val session cells: stable (<= 0.0025)",
+   "LR-02": "CRN replicates + independent segments for every comparison; MDE computed from the paired segment SE on val (action 4)",
+   "LR-03": "CRN per generation (lr-train asserts), popsize 16, UH-CMA-ES re-evaluation r_lambda = 2/16 (top-2 swapped in 7-11 of 30 generations)",
+   "LR-05": "theta0 pinned at -1; tau not searched at tau = 0; per-coordinate scaling from estimated feature spreads; sigma0 set to ~20% decision flips; flat-direction sigma drift observed in M0 (recommend maxstd)",
+   "LR-09": "gate condition 3 reported per load mode",
+   "LR-10": "2 restarts per rung, selection by val over restarts and over best-so-far + CMA mean, gate on replicates not used for selection, progress curves reported",
+   "LR-13": "guard metrics (worker share, session split) read for every val policy; M1 Mooncake concentration flagged"
+  },
+  "deferred": {
+   "LR-15": "drift check deferred to early stage 4 (costed)",
+   "LR-07": "multi-start from theta_LMetric needs v2 features (log_ptok, log_bs); phase 2",
+   "LR-14": "timing randomization in training not adopted (A5: training unchanged); staleness at test",
+   "LR-11": "pre-registered; pilot supplies the MDE"
+  },
+  "rejected": {
+   "LR-04": "A2.5 (no paper-faithful variants)",
+   "LR-08 TTFT part": "A2 (no TTFT SLO)",
+   "LR-13 sign constraints for M1": "f0 (pinned -1) already carries the load anchor; concentration is monitored by guards instead"
+  }
+ },
+ "recommendations_for_phase2": [
+  "Equal budget B = 400 evaluations (25 generations x 16) per run, 3 restarts per policy (LR-10), full train each evaluation unless the wall-clock forces rotating subsets (--cells-per-gen 12; Spearman 0.95 subset vs full on 16 candidates).",
+  "Add cma maxstd (e.g. 0.3 internal units) to bounded spaces with possibly flat coordinates (M0 seed 1 sigma divergence); widen M0 prefill_load_scale to [0.05, 500] (tuned values 17-25 sit at 0.9 of the log range).",
+  "Keep M1 bounds from feature spreads; the selected theta uses overlap_frac 9.8-13.6 and active_requests_s -45 to -49, inside the +-100 / +-440 bounds.",
+  "Stage-4 audit should examine the M1 Mooncake concentration (worker share up to 0.51 at N8) for sim-artifact exploitation (LR-13) and check it under staleness (A5).",
+  "The headline bar is high: default-arm heuristics are already +0.133-0.135 clipped log-ratio over default@defaults on val, and pilot M1 beats the best of them by +0.030 (mean ratio 1.032) without a segment-level significant difference; tuned baselines may close the gap."
+ ],
+ "remote_allocations": {
+  "jobs": [
+   "<job>",
+   "<job>",
+   "<job>",
+   "<job>",
+   "<job>",
+   "<job>"
+  ],
+  "state": "all COMPLETED, none held (facts/remote.json allocations, refreshed)",
+  "cancel": "ssh <cpu-cluster> scancel <job_id> (not needed)"
+ },
+ "artifacts": [
+  "runs/pilot/ (scripts/, specs/, spaces/, cells/, screen/, fullgen/, val/, warmcheck/, curves.json, plateau.json, projection.json, error_accounting.json, fig/progress.png, jobs_epyc9654p.jsonl, jobs_epyc7702p.jsonl)",
+  "runs/remote/returned/pilot-epyc9654p/{m0-s1,m1-s1}/runs/train/<run>/ (history.jsonl, best.json, best_policy.yaml, checkpoint.pkl, results.jsonl)",
+  "runs/remote/returned/pilot-epyc7702p/{m0-s2,m1-s2}/runs/train/<run>/"
+ ]
+}

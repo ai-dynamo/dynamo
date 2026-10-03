@@ -1,0 +1,10 @@
+name: "learned-choice-m1@train_m1_tiny"
+parameters:
+  feature_set: "v1"
+  temperature: 0.0
+  theta: [-1.0, -0.0017362253896680002, -0.959413160082236, -0.5876163956978724, 0.39781224799467907, -1.0078916880060458, -1.2097447947725142, -1.535880412890517]
+  tie_break: "one_draw"
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

@@ -1,0 +1,61 @@
+{
+ "schema": "learned-routing.headline-test.v1",
+ "written": "2026-10-02 (calibration stage, before any training)",
+ "status": "pre-registered (LR-11); later stages may add detail but must not change the primary test after seeing test data",
+ "binding": "CONTRACT Amendment A2.1: the headline compares the learned model with the validation-selected best baseline (every policy one config tuned on pooled train data with the equal CMA-ES budget). Per-family best baselines and the per-cell oracle are secondary context only.",
+ "test_set": {
+  "file": "cells/test.jsonl",
+  "freeze": "facts/test_freeze.json",
+  "cells": 60,
+  "independent_segments": [
+   "mooncake:w3",
+   "mooncake:w5",
+   "sessions:s6",
+   "sessions:s7",
+   "sessions:s8",
+   "sessions:s9",
+   "agentx:T1",
+   "agentx:T2",
+   "agentx:T3",
+   "agentx:T4",
+   "fast25_synthetic:x0",
+   "fast25_synthetic:x1"
+  ],
+  "segment_note": "FAST25 conversation cells share segment ids mooncake:w3/w5 (same arrival and length skeleton, B2 decision D2), so they are averaged into those segments; cells at different N, level, transform or load mode of one segment are one workload (LR-11)."
+ },
+ "replicates": "3 CRN replicates per (policy, cell), k = 0, 1, 2 (Amendment A1), paired against the best baseline on the same replicate",
+ "per_cell_statistic": "mean over replicates of clip(log(goodput_rps_window(learned) / goodput_rps_window(best_baseline)), -log 3, +log 3) (LR-01 clipped log-ratio; eps as implemented by the harness)",
+ "per_segment_statistic": "mean of the per-cell statistic over the segment's test cells",
+ "primary_test": {
+  "test": "one-sided exact Wilcoxon signed-rank test over the 12 segment statistics, H1: median > 0",
+  "alpha": 0.05,
+  "power_note": "with 12 segments the exact one-sided test can reach p < 0.05; per-family claims have 2-4 segments and are descriptive only"
+ },
+ "effect_size": {
+  "metric": "P(learned > best baseline) over segments with a bootstrap 95% CI resampling segments (cluster bootstrap carrying all of a segment's cells)",
+  "significant_if": "CI lower bound > 0.5",
+  "meaningful_if": "CI upper bound > 0.75 (Bouthillier et al. gamma)",
+  "also_report": [
+   "IQM and geometric mean of segment ratios with CIs",
+   "arithmetic mean of per-cell ratios (contract objective form)",
+   "per-cell winner map and gap to the per-cell best tuned baseline"
+  ]
+ },
+ "stratification": {
+  "load_mode": "every table and the bootstrap are also reported per load mode (open loop, closed loop, lanes), LR-09",
+  "worker_count": "per-N results (N in 2, 4, 6, 8, 16, 32) with Holm correction across N for any per-N significance claim",
+  "transform_extrapolation": "the 10 transform_extrapolation cells are reported as their own stratum",
+  "family": "per-family results are descriptive only (fewer than 6 segments each)"
+ },
+ "parity_and_no_regression": {
+  "n2": "LR-12: |delta| within the minimum detectable effect at N = 2 counts as parity, not failure; N = 2 is reported separately",
+  "tost_margin": "+-0.5% normalized goodput for learned-choice@theta0 == default parity and for any 'no regression at unseen N' claim",
+  "mde": "max(1%, 2 x SE of the paired segment mean measured on validation at the pilot) (LR-02)"
+ },
+ "robustness_reported_not_tested": [
+  "SLO-scale re-scoring at 0.5, 0.75, 1, 1.5, 2, 3 x (I, S) from per_request rows (A2.2, LR-08); REPORT states where the headline flips",
+  "router-state lag 0, 50, 200 ms on the frozen test cells (Amendment A5)",
+  "timing perturbation speedup_ratio / decode_speedup_ratio 0.8 and 1.2 (PLAN stage 5)"
+ ],
+ "counting": "every learned-model variant (rung, rank, feature set, restart) evaluated on validation is counted and reported (LR-11 action 3)"
+}

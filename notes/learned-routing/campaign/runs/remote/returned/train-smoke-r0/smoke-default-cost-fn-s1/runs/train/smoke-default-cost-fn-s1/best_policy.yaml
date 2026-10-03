@@ -1,0 +1,11 @@
+name: "default-tuned@smoke-default-cost-fn-s1"
+parameters:
+  decode_active_request_weight: 3.7484100546615924
+  overlap_score_credit: 1.9728827387244585
+  overlap_score_credit_decay: 0.09298442868732347
+  prefill_load_scale: 1.4933866258924655
+  router_temperature: 0.2669023633992021
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "dynamo-default-cost-fn"

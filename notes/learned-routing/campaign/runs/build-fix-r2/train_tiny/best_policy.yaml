@@ -1,0 +1,11 @@
+name: "default-tuned@train_tiny"
+parameters:
+  decode_active_request_weight: 0.0015451505035055184
+  overlap_score_credit: 0.11583926122774274
+  overlap_score_credit_decay: 0.38947580771221996
+  prefill_load_scale: 4.264481418781339
+  router_temperature: 0.17338958635084034
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "dynamo-default-cost-fn"

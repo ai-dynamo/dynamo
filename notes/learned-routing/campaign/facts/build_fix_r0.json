@@ -1,0 +1,78 @@
+{
+ "base_head": "<commit-07>",
+ "bindings": {
+  "build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+  "note": "cache entries under the previous build id are unreachable (none were calibrated results)",
+  "previous_build_id": "4b4525a9914bd4beb598c8aae0519b1a062ed8b8877be2448c80ac15dd4a1313",
+  "so_sha256": "1d67c131deca024373a2eb4b96f70156e04eb32e1046c2cf7235ac50ddeb288b"
+ },
+ "branch": "rupei/learned-routing-public",
+ "cells": {
+  "cells_version": "lr-cells-v2",
+  "split_manifest_sha256": "0f8ea45267c678534ebc44cd3bb12ef201d5583fb65bbc16d1e49807ec8d1d1d",
+  "superseded_copy": "cells/superseded/build-r0/"
+ },
+ "commits": {
+  "<commit-09>": "fix(learned-routing): pair report ratios on cell content and verify bundles",
+  "<commit-10>": "fix(learned-routing): use disjoint workload windows and identity warm-up",
+  "<commit-08>": "fix(router-plugins): key learned-choice hash_home on the prompt prefix only"
+ },
+ "findings": {
+  "goodput-normalization/F1": {
+   "evidence": [
+    "runs/build-fix-r0/report_pairing/auditor_demo_after_fix.json",
+    "runs/build-fix-r0/report_pairing/mixed_builds.stderr"
+   ],
+   "status": "fixed (content-keyed pairing, MixedContentError, --build-id, --mixed-contents split, slim fields)",
+   "verdict": "valid"
+  },
+  "harness-robustness-splits/B1": {
+   "evidence": [
+    "runs/build-fix-r0/bundle/remote_checks.json",
+    "runs/build-fix-r0/bundle/site_check_without_packaging.json",
+    "runs/build-fix-r0/bundle/ingest.json",
+    "runs/build-fix-r0/bundle/b2/MANIFEST.json"
+   ],
+   "status": "fixed (packaging shipped, worker isolation flags, check_site)",
+   "verdict": "valid"
+  },
+  "harness-robustness-splits/S1": {
+   "evidence": [
+    "runs/build-fix-r0/workloads/out/split_hygiene.json",
+    "runs/build-fix-r0/workloads/cells_validation.json",
+    "runs/build-fix-r0/identity_smoke/analysis.json"
+   ],
+   "status": "fixed (disjoint self-contained windows, slice-overlap guard, closed-loop identity warm-up)",
+   "verdict": "valid"
+  },
+  "leakage-features/F1": {
+   "evidence": [
+    "runs/build-fix-r0/hash_home/out/hash_home_check.json",
+    "runs/build-fix-r0/hash_home/out/home_sets.json",
+    "runs/build-fix-r0/postbuild/parity.json"
+   ],
+   "status": "fixed (option b, prefix-only key)",
+   "verdict": "valid"
+  }
+ },
+ "head": "<commit-10>",
+ "next_stage_notes": [
+  "Calibration must use cells/{train,val,test}.candidates.jsonl at SPLIT_MANIFEST 0f8ea452... (lr-cells-v2), not the superseded copies.",
+  "Closed-loop cells already carry measure.warmup_trace_ms (identity warm-up); calibration sets only load.value, the SLA and open-loop warmup_ms/window_ms (measure_trace / speedup).",
+  "Mooncake windows are 10 min (4 warm-up + 6 measure); the LR-01 doubled-warm-up check must be a diagnostic copy, not a split cell.",
+  "lr-report refuses inputs spanning builds or cell contents; pass --build-id or --mixed-contents split deliberately.",
+  "hash_home (v2 #11) is prefix-keyed; Mooncake has 4 keys (about 85% of rows on 2): audit worker shares if theta11 is freed (LR-13).",
+  "Bundles now self-check; run.sh still defaults to a bundle-local slot pool on the campaign host (pass --slots-dir CR/slots)."
+ ],
+ "next_stage_notes_correction_fix_r1": "next_stage_notes[1] is superseded (build audit goodput-normalization r1 F1): completion-basis cells now carry measure.end = full_occupancy (harness lrh-3, cells lr-cells-v3); lanes cells additionally need a calibrated measure.warmup_ms; see facts/build_fix_r1.json next_stage_notes.",
+ "schema": "learned-routing.fix.v1",
+ "stage": "build fixer r0",
+ "tests": {
+  "cargo_builtin": "127 passed, 2 ignored",
+  "clippy_fmt": "clean",
+  "pre_commit": "isort, black, flake8, ruff, codespell passed on changed files",
+  "pytest": "114 passed (107 + 7 new)"
+ },
+ "worktree": "<worktree>",
+ "written": "2026-10-02 16:13:14 PDT"
+}

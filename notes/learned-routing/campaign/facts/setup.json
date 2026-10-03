@@ -1,0 +1,1285 @@
+{
+ "ais_active_evidence": {
+  "decode_step_ms_by_batch_and_context": {
+   "b128_ctx2048": 29.175794162743024,
+   "b128_ctx32768": 193.49652278011402,
+   "b128_ctx8192": 62.24682358110061,
+   "b1_ctx2048": 15.144028717304977,
+   "b1_ctx32768": 16.693511017344356,
+   "b1_ctx8192": 15.33666583452755,
+   "b256_ctx2048": 43.976306991086574,
+   "b256_ctx32768": 374.8726942334336,
+   "b256_ctx8192": 109.93493516482874,
+   "b32_ctx2048": 19.242923675730694,
+   "b32_ctx32768": 60.584676760606854,
+   "b32_ctx8192": 27.318176264289633,
+   "b64_ctx2048": 23.256207350845283,
+   "b64_ctx32768": 105.78722470175455,
+   "b64_ctx8192": 39.39225877957564,
+   "b8_ctx2048": 15.791883885977745,
+   "b8_ctx32768": 26.510589626253854,
+   "b8_ctx8192": 18.387143943521764
+  },
+  "estimator_vs_replay_ttft_ms": {
+   "1024": {
+    "estimator_prefill_ms": 55.4868010845058,
+    "replay_single_request_ttft_ms": 55.486801
+   },
+   "8192": {
+    "estimator_prefill_ms": 475.97461213209505,
+    "replay_single_request_ttft_ms": 475.97461200000004
+   }
+  },
+  "loaded_cell_ais_vs_polynomial": {
+   "kv_router_default": {
+    "ais": {
+     "completed_requests": 1000,
+     "error": null,
+     "goodput_completed_requests": 71,
+     "goodput_request_throughput_rps": 0.28109983761885743,
+     "mean_itl_ms": 72.66704649733538,
+     "mean_ttft_ms": 14267.54046817296,
+     "native_wall_time_ms": 537.8413509999999,
+     "num_requests": 1000,
+     "output_throughput_tok_s": 788.2039446832763,
+     "p50_ttft_ms": 10655.177507000073,
+     "p90_itl_ms": 30.41696884373727,
+     "p90_ttft_ms": 34720.367206999654,
+     "path": "<campaign-root>/runs/setup/smoke/b_kv_default",
+     "peak_rss_mib": 177.0625,
+     "prefix_cache_reused_ratio": 0.2529583753317749,
+     "spec": {
+      "arrival_speedup_ratio": 1.0,
+      "num_workers": 4,
+      "router_config": {},
+      "router_mode": "kv_router",
+      "sla_itl_ms": 50.0,
+      "sla_ttft_ms": 2000.0,
+      "trace": "<traces>/mooncake_trace_1000.jsonl",
+      "trace_block_size": 512,
+      "trace_format": "mooncake"
+     },
+     "wall_s": 1.2452360329998555
+    },
+    "polynomial": {
+     "completed_requests": 1000,
+     "error": null,
+     "goodput_completed_requests": 749,
+     "goodput_request_throughput_rps": 3.842919949608265,
+     "mean_itl_ms": 29.15619418369927,
+     "mean_ttft_ms": 470.181138198085,
+     "native_wall_time_ms": 121.336691,
+     "num_requests": 1000,
+     "output_throughput_tok_s": 1021.4470964590278,
+     "p50_ttft_ms": 357.0159860002459,
+     "p90_itl_ms": 32.75319986141551,
+     "p90_ttft_ms": 970.3250509998761,
+     "path": "<campaign-root>/runs/setup/smoke/d_poly_b_kv_default",
+     "peak_rss_mib": 104.9296875,
+     "prefix_cache_reused_ratio": 0.2871445451045391,
+     "spec": {
+      "arrival_speedup_ratio": 1.0,
+      "num_workers": 4,
+      "router_config": {},
+      "router_mode": "kv_router",
+      "sla_itl_ms": 50.0,
+      "sla_ttft_ms": 2000.0,
+      "timing": "polynomial",
+      "trace": "<traces>/mooncake_trace_1000.jsonl",
+      "trace_block_size": 512,
+      "trace_format": "mooncake"
+     },
+     "wall_s": 0.137695132000772
+    }
+   },
+   "round_robin": {
+    "ais": {
+     "completed_requests": 1000,
+     "error": null,
+     "goodput_completed_requests": 187,
+     "goodput_request_throughput_rps": 0.6366137762659821,
+     "mean_itl_ms": 62.76654460900482,
+     "mean_ttft_ms": 25790.50344334501,
+     "native_wall_time_ms": 430.292805,
+     "num_requests": 1000,
+     "output_throughput_tok_s": 677.7519627493946,
+     "p50_ttft_ms": 11565.112130999998,
+     "p90_itl_ms": 29.577106380952944,
+     "p90_ttft_ms": 60060.83713800006,
+     "path": "<campaign-root>/runs/setup/smoke/a_rr",
+     "peak_rss_mib": 169.58984375,
+     "prefix_cache_reused_ratio": 0.24740610476070846,
+     "spec": {
+      "arrival_speedup_ratio": 1.0,
+      "num_workers": 4,
+      "router_mode": "round_robin",
+      "sla_itl_ms": 50.0,
+      "sla_ttft_ms": 2000.0,
+      "trace": "<traces>/mooncake_trace_1000.jsonl",
+      "trace_block_size": 512,
+      "trace_format": "mooncake"
+     },
+     "wall_s": 1.09880527399946
+    },
+    "polynomial": {
+     "completed_requests": 1000,
+     "error": null,
+     "goodput_completed_requests": 765,
+     "goodput_request_throughput_rps": 3.7873360108516154,
+     "mean_itl_ms": 29.275621599038658,
+     "mean_ttft_ms": 1852.4880522471192,
+     "native_wall_time_ms": 73.09101799999999,
+     "num_requests": 1000,
+     "output_throughput_tok_s": 985.6183037704353,
+     "p50_ttft_ms": 380.584578,
+     "p90_itl_ms": 33.95379653506791,
+     "p90_ttft_ms": 3655.4337470002647,
+     "path": "<campaign-root>/runs/setup/smoke/d_poly_a_rr",
+     "peak_rss_mib": 95.18359375,
+     "prefix_cache_reused_ratio": 0.27389785366262154,
+     "spec": {
+      "arrival_speedup_ratio": 1.0,
+      "num_workers": 4,
+      "router_mode": "round_robin",
+      "sla_itl_ms": 50.0,
+      "sla_ttft_ms": 2000.0,
+      "timing": "polynomial",
+      "trace": "<traces>/mooncake_trace_1000.jsonl",
+      "trace_block_size": 512,
+      "trace_format": "mooncake"
+     },
+     "wall_s": 0.08992281099926913
+    }
+   }
+  },
+  "plausibility": "Short-context prefill ~55-60 ms per 1k tokens and ~15 ms decode step at batch 1 for Qwen3-32B BF16 TP2 H100 match a roofline estimate (64 GFLOP/token at ~1 PFLOP/s effective; 64 GB weights over 2x3.35 TB/s). Long-context prefill cost rises with attention (chunk at 114,688 prefix: ~250 ms per 1k tokens).",
+  "prefill_ms_per_1k_tokens": {
+   "chunk8192_after_prefix_tokens": {
+    "0": 59.49682651651188,
+    "114688": 249.58754408186388,
+    "32768": 113.59975762059965,
+    "65536": 167.99261960449638,
+    "8192": 72.8822126656004
+   },
+   "single_request_no_prefix": {
+    "1024": 55.4868010845058,
+    "4096": 56.02851985733639,
+    "8192": 59.49682651651188
+   }
+  },
+  "probe_file": "<campaign-root>/runs/setup/ais_probe/probe.json",
+  "single_request_ttft_ms_ais_vs_polynomial": {
+   "1024": {
+    "ais": 55.486801,
+    "polynomial": 32.490711999999995
+   },
+   "120000": {
+    "ais": 17815.540858999997,
+    "polynomial": 2476.952176
+   },
+   "32768": {
+    "ais": 2550.448617,
+    "polynomial": 676.547672
+   },
+   "65536": {
+    "ais": 6838.333688999999,
+    "polynomial": 1353.095344
+   },
+   "8192": {
+    "ais": 475.97461200000004,
+    "polynomial": 169.136918
+   }
+  }
+ },
+ "base_ref": "origin/rupei/router-policy-aic-ttft",
+ "base_sha": "2be8d9c43ac1b275fa6e5743caee9b01c0522463",
+ "branch": "rupei/learned-routing-public",
+ "determinism": {
+  "agentic_and_sessions": {
+   "agentx_default_seed1": {
+    "differing_summary_fields": [],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     0.04323735422852583,
+     0.04323735422852583
+    ],
+    "mean_ttft_ms": [
+     1298.749152752943,
+     1298.749152752943
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": true,
+    "wall_s": [
+     1.6142689770003926,
+     1.6089286779997565
+    ]
+   },
+   "agentx_kv_default": {
+    "differing_summary_fields": [],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     0.04323735422852583,
+     0.04323735422852583
+    ],
+    "mean_ttft_ms": [
+     1298.749152752943,
+     1298.749152752943
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": true,
+    "wall_s": [
+     1.6085823609992076,
+     1.613165368999944
+    ]
+   },
+   "synth_sessions_lmetric": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     3.125169344380584,
+     3.125169344380584
+    ],
+    "mean_ttft_ms": [
+     134.8937028318233,
+     134.89370283182333
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.0682753609999054,
+     1.0736310859992955
+    ]
+   }
+  },
+  "decision": "Patched: dynamo-default-cost-fn accepts parameters.seed (u64), which seeds tie-breaks and softmax sampling over candidates in worker order. The harness must express the default baseline as YAML type dynamo-default-cost-fn with a seed, never the no-YAML builtin default. Canonical-determinism mode (ordinal UUIDs) was not exposed in the Python API because UUIDs do not affect outcomes. The harness compares per-request rows as a sorted multiset without uuid and recomputes metrics from per_request; it must not compare native mean/std fields bit-for-bit.",
+  "noise_floor_correction": "Added by setup fixer r0 (audit F1). Superseded guidance: identical re-runs and tie seeds alone do not measure noise; rr, lmetric, two-tier and seeded default are deterministic per workload, yet the arbitrary order of simultaneous arrivals moves per-cell goodput 1.2-3.9% CV for every policy. Noise is measured only from CRN workload replicates (protocol crn-order-v1). See facts/noise.json.",
+  "seeded_default_cost_fn": {
+   "n4x1_default_seed1": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "std_e2e_latency_ms",
+     "std_tpot_ms",
+     "std_ttft_ms",
+     "std_ttst_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     0.28109983761885743,
+     0.28109983761885743
+    ],
+    "mean_ttft_ms": [
+     14267.540468172967,
+     14267.540468172952
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.2350292479995915,
+     1.2389241689998016
+    ]
+   },
+   "n8_default_seed1": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "std_e2e_latency_ms",
+     "std_ttst_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     2.868672871547336,
+     2.868672871547336
+    ],
+    "mean_ttft_ms": [
+     944.7000079890641,
+     944.7000079890632
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.7350630419996378,
+     1.6932767439993768
+    ]
+   },
+   "n8_default_seed2": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "std_e2e_latency_ms",
+     "std_tpot_ms",
+     "std_ttst_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     2.8180453202645364,
+     2.8180453202645364
+    ],
+    "mean_ttft_ms": [
+     945.1532549533476,
+     945.153254953347
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.6836527269997532,
+     1.689726266999969
+    ]
+   }
+  },
+  "source": "Unseeded fastrand tie-break and softmax draw in the default picker (lib/router-plugins/builtin/src/default/picker.rs:106,118; builtin no-YAML default uses the same unseeded path). Random UUID v4 request ids do not change simulated outcomes (round_robin, lmetric, two-tier, seeded default give identical per-request rows across runs); they only reorder per_request records, so native summary means and stds differ at float-summation level (~1e-15 relative). Counts and goodput are identical.",
+  "tie_noise_example": "Same N=8 cell, default cost fn: unseeded runs gave goodput 2.8832/2.8910 (builtin) and 2.8934/2.8290 (catalog); seeds 1 and 2 gave 2.8687 and 2.8180. Use several seeds (common random numbers) to measure tie noise.",
+  "unseeded": {
+   "n4x1_kv_default": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttst_ms",
+     "std_e2e_latency_ms",
+     "std_tpot_ms",
+     "std_ttft_ms",
+     "std_ttst_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     0.28109983761885743,
+     0.28109983761885743
+    ],
+    "mean_ttft_ms": [
+     14267.540468172947,
+     14267.540468172947
+    ],
+    "per_request_identical": false,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 937,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.1764975379992393,
+     1.1376762950003467
+    ]
+   },
+   "n4x1_lmetric": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "std_tpot_ms",
+     "std_ttst_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     0.478722708960933,
+     0.478722708960933
+    ],
+    "mean_ttft_ms": [
+     15739.679612804015,
+     15739.679612804022
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.1754502469993895,
+     1.1757663730004424
+    ]
+   },
+   "n4x1_rr": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "std_tpot_ms",
+     "std_ttft_ms",
+     "std_ttst_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     0.6366137762659821,
+     0.6366137762659821
+    ],
+    "mean_ttft_ms": [
+     25790.50344334503,
+     25790.503443345053
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.0937378380003793,
+     1.1277159250003024
+    ]
+   },
+   "n8_dynamo-default-cost-fn": {
+    "differing_summary_fields": [
+     "committed_prefill_tokens",
+     "decode_worker_seconds",
+     "duration_ms",
+     "first_admission_prefix_cache_reused_ratio",
+     "goodput_completed_requests",
+     "goodput_output_throughput_tok_s",
+     "goodput_request_throughput_rps",
+     "gpu_hours",
+     "input_throughput_tok_s",
+     "max_e2e_latency_ms",
+     "max_itl_ms",
+     "max_output_token_throughput_per_user",
+     "max_tpot_ms",
+     "max_ttst_ms",
+     "mean_e2e_latency_ms",
+     "mean_itl_ms",
+     "mean_output_token_throughput_per_user",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "median_e2e_latency_ms",
+     "median_itl_ms",
+     "median_output_token_throughput_per_user",
+     "median_tpot_ms",
+     "median_ttft_ms",
+     "median_ttst_ms",
+     "min_e2e_latency_ms",
+     "min_itl_ms",
+     "min_output_token_throughput_per_user",
+     "min_tpot_ms",
+     "min_ttft_ms",
+     "output_throughput_tok_s",
+     "p75_e2e_latency_ms",
+     "p75_output_token_throughput_per_user",
+     "p75_tpot_ms",
+     "p75_ttft_ms",
+     "p75_ttst_ms",
+     "p90_e2e_latency_ms",
+     "p90_itl_ms",
+     "p90_output_token_throughput_per_user",
+     "p90_tpot_ms",
+     "p90_ttft_ms",
+     "p90_ttst_ms",
+     "p95_e2e_latency_ms",
+     "p95_itl_ms",
+     "p95_output_token_throughput_per_user",
+     "p95_tpot_ms",
+     "p95_ttft_ms",
+     "p95_ttst_ms",
+     "p99_itl_ms",
+     "p99_output_token_throughput_per_user",
+     "p99_tpot_ms",
+     "p99_ttft_ms",
+     "p99_ttst_ms",
+     "prefix_cache_reused_ratio",
+     "request_throughput_rps",
+     "std_e2e_latency_ms",
+     "std_itl_ms",
+     "std_output_token_throughput_per_user",
+     "std_tpot_ms",
+     "std_ttft_ms",
+     "std_ttst_ms",
+     "total_throughput_tok_s"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     2.893357602188311,
+     2.8289573543080406
+    ],
+    "mean_ttft_ms": [
+     949.4448708800725,
+     939.9776861986111
+    ],
+    "per_request_identical": false,
+    "per_request_identical_ignoring_worker_labels": false,
+    "per_request_rows_differing": 1940,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.5848486929999126,
+     1.588950754000507
+    ]
+   },
+   "n8_dynamo-two-tier-cost-fn": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "std_e2e_latency_ms",
+     "std_ttft_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     3.2145089936290185,
+     3.2145089936290185
+    ],
+    "mean_ttft_ms": [
+     1296.772788798566,
+     1296.7727887985682
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.5702295360006246,
+     1.5688420630003748
+    ]
+   },
+   "n8_kv_default": {
+    "differing_summary_fields": [
+     "committed_prefill_tokens",
+     "decode_worker_seconds",
+     "duration_ms",
+     "first_admission_prefix_cache_reused_ratio",
+     "goodput_completed_requests",
+     "goodput_output_throughput_tok_s",
+     "goodput_request_throughput_rps",
+     "gpu_hours",
+     "input_throughput_tok_s",
+     "max_e2e_latency_ms",
+     "max_itl_ms",
+     "max_output_token_throughput_per_user",
+     "max_tpot_ms",
+     "max_ttft_ms",
+     "max_ttst_ms",
+     "mean_e2e_latency_ms",
+     "mean_itl_ms",
+     "mean_output_token_throughput_per_user",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "median_e2e_latency_ms",
+     "median_tpot_ms",
+     "median_ttft_ms",
+     "median_ttst_ms",
+     "min_e2e_latency_ms",
+     "min_itl_ms",
+     "min_output_token_throughput_per_user",
+     "min_tpot_ms",
+     "min_ttft_ms",
+     "min_ttst_ms",
+     "output_throughput_tok_s",
+     "p75_e2e_latency_ms",
+     "p75_output_token_throughput_per_user",
+     "p75_tpot_ms",
+     "p75_ttft_ms",
+     "p75_ttst_ms",
+     "p90_e2e_latency_ms",
+     "p90_itl_ms",
+     "p90_output_token_throughput_per_user",
+     "p90_tpot_ms",
+     "p90_ttft_ms",
+     "p90_ttst_ms",
+     "p95_e2e_latency_ms",
+     "p95_itl_ms",
+     "p95_output_token_throughput_per_user",
+     "p95_tpot_ms",
+     "p95_ttft_ms",
+     "p95_ttst_ms",
+     "p99_e2e_latency_ms",
+     "p99_itl_ms",
+     "p99_output_token_throughput_per_user",
+     "p99_tpot_ms",
+     "p99_ttft_ms",
+     "p99_ttst_ms",
+     "prefix_cache_reused_ratio",
+     "request_throughput_rps",
+     "std_e2e_latency_ms",
+     "std_itl_ms",
+     "std_output_token_throughput_per_user",
+     "std_tpot_ms",
+     "std_ttft_ms",
+     "std_ttst_ms",
+     "total_throughput_tok_s"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     2.8831934301565423,
+     2.8909674944452
+    ],
+    "mean_ttft_ms": [
+     927.4220143159478,
+     927.6736275559296
+    ],
+    "per_request_identical": false,
+    "per_request_identical_ignoring_worker_labels": false,
+    "per_request_rows_differing": 1995,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.5925565710003866,
+     1.5940637680005239
+    ]
+   },
+   "n8_lmetric": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "std_e2e_latency_ms",
+     "std_ttft_ms",
+     "std_ttst_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     3.153759121853308,
+     3.153759121853308
+    ],
+    "mean_ttft_ms": [
+     1310.4678307435715,
+     1310.4678307435706
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.5209267850004835,
+     1.568519689999448
+    ]
+   },
+   "n8_rr": {
+    "differing_summary_fields": [
+     "mean_e2e_latency_ms",
+     "mean_tpot_ms",
+     "mean_ttft_ms",
+     "mean_ttst_ms",
+     "std_ttst_ms"
+    ],
+    "errors": [
+     null,
+     null
+    ],
+    "goodput_rps": [
+     2.890342652363542,
+     2.890342652363542
+    ],
+    "mean_ttft_ms": [
+     1974.458229921814,
+     1974.458229921817
+    ],
+    "per_request_identical": true,
+    "per_request_identical_ignoring_worker_labels": true,
+    "per_request_rows_differing": 0,
+    "summary_identical_excluding_host_fields": false,
+    "wall_s": [
+     1.4251496199995017,
+     1.430862215000161
+    ]
+   }
+  }
+ },
+ "engine": {
+  "ais_readiness": "ready",
+  "ais_selected_estimation_mode": "op_level",
+  "backend": "vllm",
+  "backend_version": "0.24.0",
+  "hardware": "h100_sxm",
+  "how_to_load": {
+   "engine_args": "MockEngineArgs.from_json(json.dumps(engine['mock_engine_args']))",
+   "note": "Top-level run_trace_replay(ais_perf_config=...) is the router's AIS prefill-load estimator; it must stay None (no AIS coupling in routing). Engine timing comes only from mock_engine_args.ais_perf_config.",
+   "router_prefill_load_model": "none",
+   "top_level_ais_perf_config": null
+  },
+  "max_model_len": 131072,
+  "mock_engine_args": {
+   "ais_perf_config": {
+    "backend": "vllm",
+    "backend_version": "0.24.0",
+    "model": "Qwen/Qwen3-32B",
+    "system": "h100_sxm",
+    "tp": 2,
+    "worker_type": "aggregated"
+   },
+   "block_size": 16,
+   "decode_speedup_ratio": 1.0,
+   "dp_size": 1,
+   "enable_chunked_prefill": true,
+   "enable_prefix_caching": true,
+   "engine_type": "vllm",
+   "max_model_len": 131072,
+   "max_num_batched_tokens": 8192,
+   "max_num_seqs": 1024,
+   "num_gpu_blocks": 18863,
+   "speedup_ratio": 1.0,
+   "worker_type": "aggregated"
+  },
+  "mode": "aggregated",
+  "model": "Qwen/Qwen3-32B",
+  "path": "<campaign-root>/config/engine.json",
+  "sha256": "7b5ff164ea9b214dde07e9b9a486862f981fadaa82419f694d44e19e94cef31b",
+  "tp": 2
+ },
+ "entrypoint": {
+  "choice": "python_api",
+  "how_to_call": {
+   "do_not_pass": "top-level ais_perf_config (router AIS prefill estimator); keep router_prefill_load_model='none'",
+   "engine_args": "MockEngineArgs.from_json(json.dumps(json.load(open('CR/config/engine.json'))['mock_engine_args']))",
+   "env": "DYN_LOG=warn to silence per-request selector logs; PYTHONDONTWRITEBYTECODE=1",
+   "imports": "from dynamo.replay import run_trace_replay, run_synthetic_trace_replay; from dynamo.mocker import MockEngineArgs; from dynamo.llm import KvRouterConfig",
+   "read": "report.summary (dict), report.per_request (list of dicts)",
+   "round_robin": "router_mode='round_robin', router_config=None",
+   "runner_reference": "<campaign-root>/runs/setup/scripts/smoke_lib.py",
+   "synthetic_sessions_call": "run_synthetic_trace_replay(isl, osl, num_sessions, turns_per_session=K, request_rate=R, inter_turn_delay_ms=D, shared_prefix_ratio=p, num_prefix_groups=g, ...same common kwargs)",
+   "trace_call": "run_trace_replay(trace_path_or_weka_dir, extra_engine_args=engine_args, router_config=KvRouterConfig(router_policy_config=policy_yaml, **router_config_knobs), router_mode='kv_router', num_workers=N, trace_format='mooncake'|'weka', trace_block_size=512|64, arrival_speedup_ratio=S or replay_concurrency=C or agentic_lanes=L, execution_model='Qwen/Qwen3-32B' (weka only), sla_ttft_ms=T, sla_itl_ms=I, capture_per_request=True)"
+  },
+  "reasons": [
+   "AIS timing: only the Python bindings accept MockEngineArgs.ais_perf_config (ais-forward-pass); offline_replay_bench uses the mocker's builtin polynomial model and reports ais_forward_pass=false.",
+   "router_policy_config: KvRouterConfig(router_policy_config=path) works in the Python API; all catalog types resolve.",
+   "Formats: the Python API takes mooncake (single- and multi-turn), weka (directory of plays), agentic_mooncake, dynamo, applied_compute_agentic, and run_synthetic_trace_replay (turns_per_session sessions); offline_replay_bench takes a Mooncake file only.",
+   "per_request: capture_per_request=True returns per-request records with session_id, ttft, itl, worker indices and routing_history.",
+   "Seeding: via policy parameters (dynamo-default-cost-fn seed patch; learned-choice seed). Deterministic across fresh processes and in-process repeats.",
+   "Speed: ~1 s per 2000-request replay in process, ~1.5 s in a fresh process."
+  ]
+ },
+ "expected_output_tokens": {
+  "evidence": "lib/mocker/src/replay/offline/extensions/kv_router/mod.rs:459-463 max_output_tokens = request.effective_max_output_tokens() (trace output_length) and :920-923 expected_output_tokens = Some(max_output_tokens); per_request shows requested_output_length == output_length. Host load tracking stores it but does not use it (lib/kv-router/src/sequences/single.rs:260); no builtin policy reads it. learned-choice must not read WorkerSelectionContext::expected_output_tokens().",
+  "populated_from_true_osl": true
+ },
+ "head_sha": "<commit-01>",
+ "kv_capacity": {
+  "block_size": 16,
+  "num_gpu_blocks": 18863,
+  "source": "dynamo._internal.ais.estimate_canonical_num_gpu_blocks(block_size=16, max_num_batched_tokens=8192, max_num_seqs=1024); pinned so every replay uses identical capacity",
+  "tokens_per_worker": 301808
+ },
+ "long_context": {
+  "evidence": {
+   "agentx_plays": "<campaign-root>/runs/setup/traces/agentx_selected",
+   "agentx_weka_n2": {
+    "distinct_sessions": 10,
+    "max_input_length": 124480,
+    "max_ttft_ms": 8969.79673699988,
+    "metrics": {
+     "completed_requests": 85,
+     "error": null,
+     "goodput_completed_requests": 65,
+     "goodput_request_throughput_rps": 0.04323735422852583,
+     "mean_itl_ms": 20.994932633418177,
+     "mean_ttft_ms": 1298.749152752943,
+     "native_wall_time_ms": 821.255059,
+     "num_requests": 85,
+     "output_throughput_tok_s": 62.11145713437493,
+     "p50_ttft_ms": 635.9691910000984,
+     "p90_itl_ms": 24.508023808806044,
+     "p90_ttft_ms": 3145.6645109999517,
+     "path": "<campaign-root>/runs/setup/sessions/agentx_weka_kv_lanes2",
+     "peak_rss_mib": 129.09375,
+     "prefix_cache_reused_ratio": 0.8664214679049889,
+     "spec": {
+      "agentic_lanes": 2,
+      "execution_model": "Qwen/Qwen3-32B",
+      "num_workers": 2,
+      "router_config": {},
+      "router_mode": "kv_router",
+      "sla_itl_ms": 50.0,
+      "sla_ttft_ms": 2000.0,
+      "trace": "<campaign-root>/runs/setup/traces/agentx_selected",
+      "trace_block_size": 64,
+      "trace_format": "weka"
+     },
+     "wall_s": 1.563660341999821
+    },
+    "path": "<campaign-root>/runs/setup/sessions/agentx_weka_kv_lanes2",
+    "requests": 85,
+    "with_session_id": 85
+   },
+   "max_model_len_boundary": {
+    "131000": {
+     "completed": 1,
+     "error": null,
+     "output_length": 64,
+     "terminal_status": "completed",
+     "ttft_ms": 20617.163324999998
+    },
+    "140000": {
+     "completed": 0,
+     "error": null,
+     "output_length": 0,
+     "terminal_status": "rejected",
+     "ttft_ms": 0.0
+    }
+   },
+   "single_request_ttft_ms_ais": {
+    "1024": 55.486801,
+    "120000": 17815.540858999997,
+    "32768": 2550.448617,
+    "65536": 6838.333688999999,
+    "8192": 475.97461200000004
+   }
+  },
+  "fallback_32k_needed": false,
+  "notes": "Corrected by audit setup/determinism-cost-context r1 (was: 'Requests with ISL+OSL above 131072 are rejected'): only ISL >= 131072 is rejected (terminal_status rejected, completed 0, mean_ttft_ms reported as 0.0, per-request ttft_ms null); a request with ISL < 131072 and ISL+OSL > 131072 completes with output truncated to 131072 - ISL tokens (e.g. 130,900 + 500 -> 172 tokens, requested_output_length 500), so trace preparation must drop or flag ISL+OSL > 131072 explicitly (runs/audit-setup/determinism-cost-context-r0/out/long_context/mml_boundary.json, runs/audit-setup/determinism-cost-context-r1/out/mml/mml.json). Harness must count rejected requests as not good and never average a 0.0 TTFT from an empty set. Shared Mooncake/toolagent traces max ISL+OSL 125,878/126,527 fit.",
+  "ok": true
+ },
+ "policy_selection_evidence": {
+  "assignment_diffs": [
+   {
+    "a": "b_kv_default",
+    "b": "c_lmetric",
+    "differing_worker_assignments": 761,
+    "matched_requests": 1000
+   },
+   {
+    "a": "b_kv_default",
+    "b": "c_dynamo-two-tier-cost-fn",
+    "differing_worker_assignments": 767,
+    "matched_requests": 1000
+   },
+   {
+    "a": "c_lmetric",
+    "b": "c_dynamo-two-tier-cost-fn",
+    "differing_worker_assignments": 227,
+    "matched_requests": 1000
+   },
+   {
+    "a": "a_rr",
+    "b": "b_kv_default",
+    "differing_worker_assignments": 753,
+    "matched_requests": 1000
+   }
+  ],
+  "catalog_default_equals_builtin_default_at_n4x1": true,
+  "conclusion": "YAML policy types are resolved by replay (unknown type/param errors name the catalog) and change per-request worker assignments and goodput; the catalog dynamo-default-cost-fn reproduces the builtin default's summary at n4x1 (assignments differ only by a worker relabeling from t=0 ties).",
+  "goodput_rps": {
+   "a_rr": 0.6366137762659821,
+   "b_kv_default": 0.28109983761885743,
+   "c_dynamo-default-cost-fn": 0.28109983761885743,
+   "c_dynamo-two-tier-cost-fn": 0.48303954352654493,
+   "c_lmetric": 0.478722708960933
+  },
+  "negative_controls": {
+   "unknown_parameter": "Exception: placement policy error: resolving worker-selection policy \"candidate\": invalid parameters for worker-selection policy type \"lmetric\": unknown field `bogus_key`, expected one of `hotspot_detection`, `class_prefix_blocks`, `window_requests`",
+   "unknown_type": "Exception: placement policy error: resolving worker-selection policy \"candidate\": unknown worker-selection policy type \"no-such-policy\"; linked policy types: chwbl, dualmap, dynamo-default-cost-fn, dynamo-two-tier-cost-fn, llm-d-optimized-baseline, llm-d-precise-prefix, lmetric, ramjet, thunderagent"
+  }
+ },
+ "replay_cost": {
+  "fresh_process_runs": {
+   "closed_n16": {
+    "arrival_speedup_ratio": null,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 7.8972284979949,
+    "mean_ttft_ms": 574.5454745159965,
+    "native_wall_time_ms": 838.913339,
+    "peak_rss_mib": 192.17578125,
+    "replay_concurrency": 64,
+    "wall_s": 1.4996525719998317
+   },
+   "closed_n2": {
+    "arrival_speedup_ratio": null,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 1.2418638115563143,
+    "mean_ttft_ms": 583.8144595735045,
+    "native_wall_time_ms": 768.283728,
+    "peak_rss_mib": 148.45703125,
+    "replay_concurrency": 8,
+    "wall_s": 1.4507746420003969
+   },
+   "closed_n32": {
+    "arrival_speedup_ratio": null,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 13.044978133229211,
+    "mean_ttft_ms": 586.6347366260015,
+    "native_wall_time_ms": 842.5807239999999,
+    "peak_rss_mib": 252.53515625,
+    "replay_concurrency": 128,
+    "wall_s": 1.4965909659995305
+   },
+   "closed_n4": {
+    "arrival_speedup_ratio": null,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 2.348661865984339,
+    "mean_ttft_ms": 590.7619465960033,
+    "native_wall_time_ms": 780.1267290000001,
+    "peak_rss_mib": 151.125,
+    "replay_concurrency": 16,
+    "wall_s": 1.433574038000188
+   },
+   "closed_n8": {
+    "arrival_speedup_ratio": null,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 4.398072122634714,
+    "mean_ttft_ms": 575.1849218919953,
+    "native_wall_time_ms": 813.063941,
+    "peak_rss_mib": 174.65234375,
+    "replay_concurrency": 32,
+    "wall_s": 1.4691598280005564
+   },
+   "open_n16": {
+    "arrival_speedup_ratio": 1.454545,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 6.345520575091894,
+    "mean_ttft_ms": 741.5072780893918,
+    "native_wall_time_ms": 935.670278,
+    "peak_rss_mib": 248.52734375,
+    "replay_concurrency": null,
+    "wall_s": 1.6376194109998323
+   },
+   "open_n2": {
+    "arrival_speedup_ratio": 0.181818,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 0.2750648149891959,
+    "mean_ttft_ms": 2609.4973751014727,
+    "native_wall_time_ms": 769.190658,
+    "peak_rss_mib": 202.03515625,
+    "replay_concurrency": null,
+    "wall_s": 1.4802311800003736
+   },
+   "open_n32": {
+    "arrival_speedup_ratio": 2.909091,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 12.171746310623206,
+    "mean_ttft_ms": 666.2111274684399,
+    "native_wall_time_ms": 966.4213139999999,
+    "peak_rss_mib": 297.9609375,
+    "replay_concurrency": null,
+    "wall_s": 1.6660513859997081
+   },
+   "open_n4": {
+    "arrival_speedup_ratio": 0.363636,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 1.0384457024340772,
+    "mean_ttft_ms": 1380.4717093129445,
+    "native_wall_time_ms": 848.68236,
+    "peak_rss_mib": 207.890625,
+    "replay_concurrency": null,
+    "wall_s": 1.5576903970004423
+   },
+   "open_n8": {
+    "arrival_speedup_ratio": 0.727273,
+    "completed_requests": 2000,
+    "goodput_request_throughput_rps": 2.854959260168302,
+    "mean_ttft_ms": 944.1063537730395,
+    "native_wall_time_ms": 881.9314499999999,
+    "peak_rss_mib": 221.46484375,
+    "replay_concurrency": null,
+    "wall_s": 1.5903206920002049
+   }
+  },
+  "in_process_repeats": {
+   "closed_n32": {
+    "goodput_rps": 12.979983033700913,
+    "identical_across_in_process_repeats": true,
+    "in_process_wall_s": [
+     0.9508855579997544,
+     0.9899178719997508,
+     1.0003667800001494
+    ],
+    "per_request_canonical_sha256": [
+     "225b3580427dc0d2019398e5b8ff7c0240c3a29898ef23b3d172c9d9d46949e6",
+     "225b3580427dc0d2019398e5b8ff7c0240c3a29898ef23b3d172c9d9d46949e6",
+     "225b3580427dc0d2019398e5b8ff7c0240c3a29898ef23b3d172c9d9d46949e6"
+    ]
+   },
+   "note": "seeded dynamo-default-cost-fn (seed 1); three consecutive replays in one Python process",
+   "open_n8": {
+    "goodput_rps": 2.868672871547336,
+    "identical_across_in_process_repeats": true,
+    "in_process_wall_s": [
+     1.6032778830003735,
+     0.9674661099998048,
+     0.9469195659994512
+    ],
+    "per_request_canonical_sha256": [
+     "7edcc2fed45c656a69913c49a7cda6729a6c32a8f1b720fbd70bfb3bf50618ee",
+     "7edcc2fed45c656a69913c49a7cda6729a6c32a8f1b720fbd70bfb3bf50618ee",
+     "7edcc2fed45c656a69913c49a7cda6729a6c32a8f1b720fbd70bfb3bf50618ee"
+    ]
+   },
+   "peak_rss_mib": 278.48828125
+  },
+  "notes": "Each fresh-process replay includes ~0.4-0.6 s of import and AIS estimator construction; in-process repeats of a 2000-request replay take ~0.95-1.0 s. Cost is nearly flat in N from 2 to 32.",
+  "policy": "kv_router builtin default",
+  "trace": "<campaign-root>/runs/setup/traces/mooncake_first2000.jsonl"
+ },
+ "schema": "learned-routing.setup.v1",
+ "session_context": {
+  "caveats": [
+   "Single-turn traces (every session one turn, e.g. the shared Mooncake/toolagent corpus) are replayed without session metadata (driver.without_session_metadata()), so session_context is None there.",
+   "Mooncake rows group into sessions only with a session_id field; later turns use 'delay' (ms after the previous turn completes).",
+   "Weka per_request turn_index is null; session ids are per root or subagent (e.g. weka:<play>:session:subagent:...).",
+   "End-to-end confirmation through a policy that reads session_context is deferred to the sticky-session test in the build stage."
+  ],
+  "evidence": [
+   "lib/mocker/src/replay/offline/extensions/kv_router/mod.rs:454-473 place() forwards session_id to build_pending_request; :321-324 SchedulingRequest.session_context = SessionContext::new(session_id, ...); WorkerSelectionContext::session_context() returns it (lib/kv-router/src/plugins/worker_selection/context.rs:69).",
+   "Unit test session_identity_reaches_scheduling_request passed (runs/setup/build/cargo_test_mocker_session.log).",
+   "aisimulate-core agg.rs:667-690 passes the same session_id to placement.place() and to per-request session metadata; per_request.session_id is populated for every request in multi-turn Mooncake, synthetic sessions and weka/AgentX replays (below)."
+  ],
+  "passed": true,
+  "patch_needed": false,
+  "per_request_session_ids": {
+   "agentx_weka_kv_lanes2": {
+    "distinct_sessions": 10,
+    "max_input_length": 124480,
+    "max_ttft_ms": 8969.79673699988,
+    "path": "<campaign-root>/runs/setup/sessions/agentx_weka_kv_lanes2",
+    "requests": 85,
+    "with_session_id": 85
+   },
+   "sess_mooncake_kv": {
+    "distinct_sessions": 20,
+    "max_input_length": 50176,
+    "max_ttft_ms": 4291.408015999999,
+    "path": "<campaign-root>/runs/setup/sessions/sess_mooncake_kv",
+    "requests": 60,
+    "with_session_id": 60
+   },
+   "sess_synth_kv": {
+    "distinct_sessions": 60,
+    "max_input_length": 4096,
+    "max_ttft_ms": 249.37253042696284,
+    "path": "<campaign-root>/runs/setup/sessions/sess_synth_kv",
+    "requests": 180,
+    "with_session_id": 180
+   }
+  }
+ },
+ "smoke": {
+  "a_round_robin": {
+   "completed_requests": 1000,
+   "error": null,
+   "goodput_completed_requests": 187,
+   "goodput_request_throughput_rps": 0.6366137762659821,
+   "mean_itl_ms": 62.76654460900482,
+   "mean_ttft_ms": 25790.50344334501,
+   "native_wall_time_ms": 430.292805,
+   "num_requests": 1000,
+   "output_throughput_tok_s": 677.7519627493946,
+   "p50_ttft_ms": 11565.112130999998,
+   "p90_itl_ms": 29.577106380952944,
+   "p90_ttft_ms": 60060.83713800006,
+   "path": "<campaign-root>/runs/setup/smoke/a_rr",
+   "peak_rss_mib": 169.58984375,
+   "prefix_cache_reused_ratio": 0.24740610476070846,
+   "spec": {
+    "arrival_speedup_ratio": 1.0,
+    "num_workers": 4,
+    "router_mode": "round_robin",
+    "sla_itl_ms": 50.0,
+    "sla_ttft_ms": 2000.0,
+    "trace": "<traces>/mooncake_trace_1000.jsonl",
+    "trace_block_size": 512,
+    "trace_format": "mooncake"
+   },
+   "wall_s": 1.09880527399946
+  },
+  "b_kv_router_default": {
+   "completed_requests": 1000,
+   "error": null,
+   "goodput_completed_requests": 71,
+   "goodput_request_throughput_rps": 0.28109983761885743,
+   "mean_itl_ms": 72.66704649733538,
+   "mean_ttft_ms": 14267.54046817296,
+   "native_wall_time_ms": 537.8413509999999,
+   "num_requests": 1000,
+   "output_throughput_tok_s": 788.2039446832763,
+   "p50_ttft_ms": 10655.177507000073,
+   "p90_itl_ms": 30.41696884373727,
+   "p90_ttft_ms": 34720.367206999654,
+   "path": "<campaign-root>/runs/setup/smoke/b_kv_default",
+   "peak_rss_mib": 177.0625,
+   "prefix_cache_reused_ratio": 0.2529583753317749,
+   "spec": {
+    "arrival_speedup_ratio": 1.0,
+    "num_workers": 4,
+    "router_config": {},
+    "router_mode": "kv_router",
+    "sla_itl_ms": 50.0,
+    "sla_ttft_ms": 2000.0,
+    "trace": "<traces>/mooncake_trace_1000.jsonl",
+    "trace_block_size": 512,
+    "trace_format": "mooncake"
+   },
+   "wall_s": 1.2452360329998555
+  },
+  "c_dynamo_default_cost_fn_yaml": {
+   "completed_requests": 1000,
+   "error": null,
+   "goodput_completed_requests": 71,
+   "goodput_request_throughput_rps": 0.28109983761885743,
+   "mean_itl_ms": 72.66704649733538,
+   "mean_ttft_ms": 14267.540468172949,
+   "native_wall_time_ms": 545.815443,
+   "num_requests": 1000,
+   "output_throughput_tok_s": 788.2039446832763,
+   "p50_ttft_ms": 10655.177507000073,
+   "p90_itl_ms": 30.41696884373727,
+   "p90_ttft_ms": 34720.367206999654,
+   "path": "<campaign-root>/runs/setup/smoke/c_dynamo-default-cost-fn",
+   "peak_rss_mib": 177.5078125,
+   "prefix_cache_reused_ratio": 0.2529583753317749,
+   "spec": {
+    "arrival_speedup_ratio": 1.0,
+    "num_workers": 4,
+    "policy_yaml": "<campaign-root>/runs/setup/policies/dynamo-default-cost-fn.yaml",
+    "router_config": {},
+    "router_mode": "kv_router",
+    "sla_itl_ms": 50.0,
+    "sla_ttft_ms": 2000.0,
+    "trace": "<traces>/mooncake_trace_1000.jsonl",
+    "trace_block_size": 512,
+    "trace_format": "mooncake"
+   },
+   "wall_s": 1.251234569999724
+  },
+  "c_dynamo_two_tier_cost_fn": {
+   "completed_requests": 1000,
+   "error": null,
+   "goodput_completed_requests": 129,
+   "goodput_request_throughput_rps": 0.48303954352654493,
+   "mean_itl_ms": 65.53502487469108,
+   "mean_ttft_ms": 15858.865184830023,
+   "native_wall_time_ms": 539.364488,
+   "num_requests": 1000,
+   "output_throughput_tok_s": 745.4685618871215,
+   "p50_ttft_ms": 11607.223460999987,
+   "p90_itl_ms": 29.874361341528992,
+   "p90_ttft_ms": 34354.44430000073,
+   "path": "<campaign-root>/runs/setup/smoke/c_dynamo-two-tier-cost-fn",
+   "peak_rss_mib": 178.8359375,
+   "prefix_cache_reused_ratio": 0.2957654337251826,
+   "spec": {
+    "arrival_speedup_ratio": 1.0,
+    "num_workers": 4,
+    "policy_yaml": "<campaign-root>/runs/setup/policies/dynamo-two-tier-cost-fn.yaml",
+    "router_config": {},
+    "router_mode": "kv_router",
+    "sla_itl_ms": 50.0,
+    "sla_ttft_ms": 2000.0,
+    "trace": "<traces>/mooncake_trace_1000.jsonl",
+    "trace_block_size": 512,
+    "trace_format": "mooncake"
+   },
+   "wall_s": 1.254277648000425
+  },
+  "c_lmetric": {
+   "completed_requests": 1000,
+   "error": null,
+   "goodput_completed_requests": 132,
+   "goodput_request_throughput_rps": 0.478722708960933,
+   "mean_itl_ms": 66.27815039584668,
+   "mean_ttft_ms": 15739.679612803986,
+   "native_wall_time_ms": 534.574777,
+   "num_requests": 1000,
+   "output_throughput_tok_s": 722.0153923543817,
+   "p50_ttft_ms": 10639.281373000296,
+   "p90_itl_ms": 29.874361341528992,
+   "p90_ttft_ms": 40182.83074100013,
+   "path": "<campaign-root>/runs/setup/smoke/c_lmetric",
+   "peak_rss_mib": 177.94140625,
+   "prefix_cache_reused_ratio": 0.2872948714413661,
+   "spec": {
+    "arrival_speedup_ratio": 1.0,
+    "num_workers": 4,
+    "policy_yaml": "<campaign-root>/runs/setup/policies/lmetric.yaml",
+    "router_config": {},
+    "router_mode": "kv_router",
+    "sla_itl_ms": 50.0,
+    "sla_ttft_ms": 2000.0,
+    "trace": "<traces>/mooncake_trace_1000.jsonl",
+    "trace_block_size": 512,
+    "trace_format": "mooncake"
+   },
+   "wall_s": 1.2399379930002397
+  },
+  "cell": "N=4, arrival_speedup_ratio 1.0 (overloaded), SLA ttft 2000 ms / itl 50 ms",
+  "goodput_fields_present": true,
+  "trace": "<traces>/mooncake_trace_1000.jsonl (sha256 e2bec9bc...2510)"
+ },
+ "versions": {
+  "aisimulate_core_python": "ships inside the aisimulate wheel (same version)",
+  "aisimulate_core_rust_crate": "=0.13.0-dev.202609300000000061 (lib/bindings/python/Cargo.toml)",
+  "bindings_build": "maturin develop --uv --release --features ais-forward-pass",
+  "dynamo_core_so": "<worktree>/lib/bindings/python/src/dynamo/_core.abi3.so",
+  "dynamo_core_so_sha256": "2679f4dd069c90ab60f66703f64b6ef36f927a2ce5fc50b34f2c5143fec3ea9f",
+  "imports_verified": [
+   "dynamo._core",
+   "cma",
+   "lightgbm",
+   "scipy",
+   "numpy",
+   "pandas",
+   "matplotlib",
+   "pytest",
+   "aisimulate",
+   "aisimulate_core"
+  ],
+  "packages": {
+   "ai-dynamo": "1.6.0",
+   "ai-dynamo-runtime": "1.6.0",
+   "aisimulate": "0.13.0.dev202609300000000061",
+   "cma": "4.5.0",
+   "lightgbm": "4.7.0",
+   "matplotlib": "3.11.2",
+   "maturin": "1.15.0",
+   "numpy": "2.5.3",
+   "pandas": "3.0.6",
+   "pytest": "9.1.1",
+   "scipy": "1.18.1"
+  },
+  "pins_match_main_venv": true,
+  "python": "3.12.3",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)"
+ },
+ "worktree": "<worktree>"
+}

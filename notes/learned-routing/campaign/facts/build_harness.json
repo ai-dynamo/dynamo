@@ -1,0 +1,497 @@
+{
+ "cli": {
+  "lr-eval": {
+   "exit_codes": {
+    "0": "all evaluated, no errors",
+    "1": "usage/setup error",
+    "2": "all evaluated, some errored",
+    "3": "stopped by --max-wall-seconds (rerun to continue)"
+   },
+   "policy_spec": "JSON object/list, JSONL or YAML of {name, router_mode (kv_router|round_robin), type, parameters (no seed), router_config (KvRouterConfig knobs), seeded?}; the contract form {worker_selection, router_config} is accepted; builtin names: default (= default@defaults: dynamo-default-cost-fn, no parameters), round_robin",
+   "record_fields": [
+    "arrival_span_ms",
+    "build_id",
+    "cache_key",
+    "cached",
+    "cell_id",
+    "cell_sha",
+    "completed",
+    "completed_rows",
+    "duration_ms",
+    "e0_method",
+    "error",
+    "eval_wall_s",
+    "family",
+    "good",
+    "good_frac",
+    "good_frac_window",
+    "goodput_check_rel_err",
+    "goodput_rps",
+    "goodput_rps_itl",
+    "goodput_rps_report",
+    "goodput_rps_window",
+    "guards",
+    "harness_version",
+    "holdout_axis",
+    "incomplete",
+    "isl_buckets",
+    "itl_p50",
+    "itl_p90",
+    "itl_tok_p99",
+    "load_level",
+    "load_mode",
+    "load_value",
+    "makespan_ms",
+    "measure",
+    "missing_rows",
+    "native_wall_time_ms",
+    "num_requests",
+    "num_workers",
+    "per_request_canonical_sha256",
+    "per_request_path",
+    "per_request_rows",
+    "policy_name",
+    "policy_seed",
+    "policy_sha",
+    "policy_spec_path",
+    "policy_type",
+    "policy_yaml",
+    "prefix_reuse",
+    "repeat",
+    "replay_entrypoint",
+    "replicate_degenerate",
+    "replicate_protocol",
+    "replicate_seed",
+    "rescore",
+    "router_mode",
+    "run_id",
+    "segment",
+    "sla",
+    "slot",
+    "slowdown_p50",
+    "slowdown_p90",
+    "split",
+    "throughput_tok_s",
+    "timeout_s",
+    "total_throughput_tok_s",
+    "trace_content_sha256",
+    "trace_sha256",
+    "ttft_p50",
+    "ttft_p90",
+    "ttft_p99",
+    "wall_s",
+    "warmup_ms",
+    "window_basis",
+    "window_end_ms",
+    "window_fallback",
+    "window_good",
+    "window_requests",
+    "window_start_ms",
+    "worker_peak_rss_mib",
+    "worker_pid"
+   ],
+   "record_notes": {
+    "goodput_rps": "A2 good count / native makespan (integrity, contract field)",
+    "goodput_rps_itl": "recomputed token-form goodput / native duration; |rel diff| > 1e-6 vs report -> record error (never cached)",
+    "goodput_rps_report": "native goodput_request_throughput_rps of the replay, called with the token-form SLA (T, I) only",
+    "goodput_rps_window / good_frac_window": "A2 objective metric: windowed (A2.3) good = mean ITL <= I and e2e <= S*E0(ISL,OSL), TTFT only if sla.ttft_ms set",
+    "guards": "LR-13 guard metrics: worker_share_max (+ cap min(2/N,1/N+0.25)), workers_used, worker_prefill_max_over_mean, session_split_frac, session_workers_mean, frac_slowdown_gt_3S, slowdown_clip_mean, frac_ttft_gt_3T, queue_wait_p99_ms",
+    "isl_buckets": "n, good_frac, good_frac_window, ttft_p50/p90, worker_share_max per ISL bucket",
+    "itl_p50/itl_p90": "per-request mean ITL (e2e-ttft)/(osl-1); itl_tok_p99 = native per-token p99",
+    "per_request_path": "gzip JSONL of canonical-order compact rows (no UUID) next to the cache entry (lr-eval default; off in lr-train)",
+    "rescore": "good_frac_window, goodput_rps_window, good_frac at SLO scales 0.5,0.75,1,1.5,2,3 x (I, S[, T]) (LR-08, A2.2)"
+   },
+   "repeats": "CRN replicates k = O..O+K-1 (A1 crn-order-v1): replicate trace from learned_routing.replicates, policy seed k+1 injected as parameters.seed for seeded types (dynamo-default-cost-fn, learned-choice, sticky-session; override with seeded: true|false)",
+   "usage": "lr-eval --policy-spec SPEC... --cells CELLS.jsonl... --out results.jsonl [--repeats K] [--repeat-offset O] [--slots 20] [--num-slots 20] [--slots-dir DIR] [--max-wall-seconds S] [--timeout-s T] [--no-per-request] [--refresh] [--cell-filter RE] [--shard i/n] [--root CR] [--quiet] | --bundle-out DIR | --ingest DIR [--out F] [--ingest-any-build] | --slots-status"
+  },
+  "lr-report": {
+   "outputs": [
+    "report.md",
+    "summary.json",
+    "fig/policy_summary.png",
+    "fig/by_num_workers.png",
+    "fig/slo_scale_sweep.png"
+   ],
+   "statistics": "paired ratio to the reference on the same (cell, k); two-stage cluster bootstrap (clusters = cells or segments, then replicates), 95% percentile CI; IQM, geometric mean, wins/losses, dropped pairs; grouped tables; SLO-scale sweep; guard means; ISL buckets; per-cell winner map",
+   "usage": "lr-report --results R.jsonl... --out-dir DIR [--metric goodput_rps_window] [--reference NAME|SHA] [--cluster cell|segment] [--bootstrap 2000] [--seed 0] [--group-by split,holdout_axis,num_workers,family,load_mode] [--policy-filter S] [--split S] [--title T] [--no-figures]"
+  },
+  "lr-train": {
+   "budget": "--budget-evals counts CMA-ES candidate evaluations; a generation starts only if fevals + popsize <= budget; tasks_requested counts every (spec, cell, k) evaluation incl. reference, validation and re-evaluation",
+   "crn": "per generation one (cell subset, k set) shared by reference and all candidates; k = (g*K + j) mod P; asserted per record (cell_id, repeat, policy_sha)",
+   "exit_codes": {
+    "0": "done (budget spent or CMA-ES stop)",
+    "1": "error (incl. resume mismatch, reference replay error)",
+    "3": "paused by --max-wall-seconds (call again with the same args)"
+   },
+   "objective": "mean over cells of mean over k of (m+eps)/(m_ref+eps) [ratio, default] or clip(ln(.), +-ln 3) [clipped_log_ratio, LR-01]; m = --metric, ref = default@defaults on the same (cell, k)",
+   "outputs": [
+    "checkpoint.pkl",
+    "history.jsonl (gen lines + val lines)",
+    "best.json (best_ever_train, selected_by_val)",
+    "best_policy.yaml (harness spec, loadable by lr-eval)",
+    "status.json",
+    "identity.json",
+    "results.jsonl (slim records)",
+    "logs/"
+   ],
+   "space_yaml": "base spec + fixed dotted paths + params of kind float|int|vector|matrix|lowrank (context {p,q} rank r), bounds per element or null, scale linear|log, pinned elements (fixed: {i: v}), std (CMA_stds), unit; cma: {sigma0, pycma options}",
+   "usage": "lr-train --space space.yaml --cells train.jsonl... [--val val.jsonl...] --run-dir DIR --budget-evals N --max-wall-seconds S [--popsize L] [--seed s] [--replicates 2] [--replicate-pool 8] [--cells-per-gen M] [--val-every 5] [--val-replicates 3] [--objective ratio|clipped_log_ratio] [--metric goodput_rps_window] [--eps 1e-3] [--reference default|SPEC] [--reeval-frac r] [--slots 20] [--slots-dir DIR] [--keep-per-request] [--cell-filter RE] [--val-filter RE] [--fake-objective PATH=V,...]"
+  }
+ },
+ "committed": false,
+ "corrections_fix_r2": {
+  "e0": "superseded: method ais-chunked-estimator-v2 sums batch-1 decode steps at KV context ISL+j+2 (replay's convention: step j runs at sequence.len() = ISL+j+1 and the mocker's AIS callback evaluates one step at len+1). v1 (ISL+j+1) is unreachable (table file is keyed by method).",
+  "e0_accuracy": "the B3 claim 'E2E to <2e-6 relative' (5 probe pairs) understated v1's bias: over 17,233 isolated single-request replays v1 was -1.64e-5..+6.3e-9 relative; v2 is -1.97e-8..+1.65e-8 (runs/build-fix-r2/out/e0_v2_vs_isolated.json)",
+  "e2e_clause": "a2_good: e2e <= scale*S*E0*(1+1e-6) (goodput.E2E_REL_TOL); ITL clause unchanged (exact, native-comparable)",
+  "harness_version": "lrh-4 (all lrh-3 cache entries unreachable)",
+  "new_record_fields": [
+   "slowdown_p95",
+   "slowdown_atom_frac"
+  ],
+  "source": "audits/build/goodput-normalization-r2.md F1; audits/build/fix-r2.md; WT <commit-14>"
+ },
+ "decisions": [
+  "Replay YAML vs identity: the router policy parser rejects unknown top-level keys, so the canonical policy file (with router_mode and the router_config sidecar) is the identity at runs/policies/<policy_sha>.yaml, and replay consumes runs/policies/replay/<sha>.yaml holding only worker_selection with seed k+1.",
+  "Cache key adds the replicate protocol (A1) and keeps the policy seed out of policy_sha; the cell content SHA replaces paths by content hashes so bundles and split moves keep cache entries.",
+  "A2 scoring: native replay gets only the token-form thresholds (I, and T if set), so goodput_rps_report is the native ITL-only pass (A2.4) cross-checked at 1e-6; the A2 good set adds the E2E slowdown against E0.",
+  "E0 = AIS chunked estimator (ais-chunked-estimator-v1); against 5 single-request replays (ISL/OSL 1000/2, 7000/300, 20000/50, 100/1, 120000/20) it matched TTFT to <1e-8 and E2E to <2e-6 relative (runs/build_harness/measure/e0_probe.json); calibration records the E0 method in facts/calibration.json.",
+  "Windows default to arrival basis for open loop and completion basis for closed loop/lanes, through the last arrival; calibration sets warmup_ms and window_ms per cell (B2 cells provide measure_trace hints in trace time; divide by speedup).",
+  "lr-train objective default is the contract's mean normalized goodput (ratio) on goodput_rps_window; clipped_log_ratio (LR-01) is available and must be chosen and recorded by the training stage.",
+  "Errored evaluations are never cached; a reference error aborts the lr-train call (exit 1) rather than scoring candidates against nothing; candidate errors get the generation's worst objective minus 1.",
+  "Remote bundles ship the exact local _core.abi3.so in a frozen site/ tree instead of a separately built wheel, so build IDs and cache keys match; glibc floor 2.39 (Ubuntu 24.04) or a container on older nodes.",
+  "--max-wall-seconds stops launching replays at the deadline; running replays finish (bounded by their timeout); the first wave may start up to 2 s late and lr-train always attempts one evaluation per call, so short chunks never livelock (found and fixed in this stage).",
+  "Workers: one persistent subprocess per pool thread (setup: same-process repeats are deterministic and faster); idle exit 300 s and RSS recycle at 1536 MiB bound memory when several lr-* processes run."
+ ],
+ "head": "<commit-02>",
+ "interfaces": {
+  "build_id": "sha256({sha256 of dynamo._core .so, aisimulate version}); memoized by file stat in CR/runs/cache/build_ids.json; workers report theirs and a mismatch fails the job (bindings rebuilt mid-run)",
+  "bundle": "site/ = frozen copy of the exact local dynamo tree incl. _core.abi3.so (same build_id), learned_routing, aisimulate(+core), yaml, typing_extensions; wheels/ = learned_routing sdist+wheel; run.sh = python3.12 -S with PYTHONPATH=site (no venv), --shard i/n; ingest recomputes each key from the record's fields and checks harness_version and build_id",
+  "cache_key": "sha256(canonical JSON {policy_sha, cell_id, cell_sha, repeat, protocol, harness_version, build_id}); CR/runs/cache/results/<k[:2]>/<key>.json; atomic writes; errored records never cached",
+  "canonical_yaml": "sorted keys, repr floats ('.0' inserted before an exponent without a decimal point, e.g. 1.0e-05, so YAML 1.1 and 1.2 parse the same float), strings double-quoted",
+  "cell_extensions": "optional: sla {itl_ms, e2e_slowdown, ttft_ms}; measure {basis arrival|completion, warmup_ms, window_ms} in replay ms; engine_overrides (MockEngineArgs); replay_options (weka_nested_timestamp_basis, trace_shared_prefix_ratio, trace_num_prefix_groups); expected_cost_s; synthetic {...} with trace_format synthetic",
+  "cell_sha": "sha256 of the cell minus split/holdout labels and locations (split, holdout_axis, holdout_axes, selection_exposed, notes, segment, trace_files, engine_ref, trace_sha256, derived_meta) plus trace content sha and engine {mock_engine_args, model} sha; declared trace_sha256 is verified",
+  "e0": "method ais-chunked-estimator-v1: sum of AisSession.predict_prefill(1, new, done) over chunks of max_num_batched_tokens, plus batch-1 decode steps at ctx ISL+j+1 for j < OSL-1; cached in CR/runs/cache/e0/<engine16>-<method>.json (flock merge); nominal engine (engine_overrides do not change E0)",
+  "load_modes": "open_speedup -> arrival_speedup_ratio; open_rate -> request_rate (synthetic) or speedup = rate / native rate (mooncake); closed_concurrency -> replay_concurrency; agentic_lanes -> agentic_lanes (weka; execution_model = engine.json model)",
+  "policy_identity": "policy_sha = sha256(canonical YAML of {router_mode, router_config, worker_selection without seed}) -> CR/runs/policies/<policy_sha>.yaml; replay consumes CR/runs/policies/replay/<sha256>.yaml = {worker_selection} only, seed = k+1 (router parser rejects unknown top-level keys)",
+  "slot_pool": "20 flock files CR/slots/slot-NN.lock (flock is per open file description, so threads of one process also exclude each other; the kernel drops locks of dead holders); random order, non-blocking polling; holder line 'pid host label time'",
+  "timeouts": "per replay max(120 s, 20 x expected_cost_s) unless --timeout-s; expected cost from cell.expected_cost_s, else 2 s + 1 ms/row (mooncake, synthetic) or 5 s + bytes/5 MB/s (weka)",
+  "windows": "arrival basis (open default): requests arriving in [first+warmup, first+warmup+window_ms or last arrival], late finishers count, incomplete/missing = not good, goodput = good/window length; completion basis (closed/lanes default): good completions in window / window length; zero-length window -> [start, makespan] with window_fallback",
+  "workers": "one persistent `python -m learned_routing.worker` per pool thread, job per stdin line, ack + done protocol on a private stdout; timeout -> SIGKILL to that exact child PID and an error record; crash -> error record; idle exit after LR_WORKER_IDLE_EXIT_S (300 s); recycled after 400 jobs or 1536 MiB peak RSS; first wave of a run may start up to 2 s past --max-wall-seconds (progress guarantee)"
+ },
+ "known_limitations": [
+  "Parallel lr-* processes each keep up to --slots workers; with k concurrent lr-train restarts use --slots about 20/k to bound idle memory (full 23.6k-row Mooncake workers peak ~1.1 GiB per the setup audit).",
+  "Weka/AgentX replicate traces are materialized as play-per-line JSONL (A1); AgentX scoring paths (lanes, warm-up rebasing) were not exercised with real AgentX cells in this stage (B2's cells arrived during the build).",
+  "No key-level lock: two processes that need the same uncached (policy, cell, k) at the same moment both replay it and write identical records.",
+  "The report's figures cap line plots at 8 policies (the palette's 8 slots in fixed order); more policies appear in the tables only."
+ ],
+ "lessons": {
+  "applied": {
+   "LR-01": "windowed goodput fields (good_frac_window, goodput_rps_window, makespan_ms, arrival_span_ms, warmup_ms), late finishers counted, clipped_log_ratio objective option",
+   "LR-02": "noise comes only from CRN replicates; report pairs every ratio by (cell, k)",
+   "LR-03": "one CRN set per generation asserted record by record; resume-exact RNG; UH-CMA-ES re-evaluation diagnostic (--reeval-frac) logging rank changes",
+   "LR-05": "space pins (fixed elements, e.g. theta0 = -1), per-parameter std (CMA_stds), fixed temperature via base/fixed",
+   "LR-08": "SLO-scale rescoring at 0.5..3 from per_request (no extra replays), ISL-bucket good fractions",
+   "LR-09": "report groups by load_mode; windows differ by load mode",
+   "LR-10": "best.json records best-ever train and validation-selected (best-so-far and distribution mean), tasks_requested counts all evaluations; restarts via --seed",
+   "LR-11": "cluster bootstrap over segments (--cluster segment), IQM, geometric mean, per-cell winner map",
+   "LR-13": "guard metrics in every record; sign constraints via per-element bounds",
+   "LR-14": "per-cell engine_overrides for timing randomization"
+  },
+  "rejected_or_not_in_scope": {
+   "LR-04": "rejected by Amendment A2.5 (no paper-faithful baselines)",
+   "LR-06, LR-07, LR-15": "policy feature/model design, owned by B1 and the training stage",
+   "LR-12": "cell design and calibration (B2, calibration stage)"
+  }
+ },
+ "next_stage_notes": [
+  "Calibration: fill sla {itl_ms, e2e_slowdown} and measure {warmup_ms, window_ms} per cell (replay ms), then evaluate with lr-eval --repeats 8; filling them changes cell_sha, so earlier uncalibrated results are not reused (intended).",
+  "Use lr-eval --max-wall-seconds 540 in a loop until exit 0 (exit 3 = continue); lr-train likewise (exit 3 = paused).",
+  "Policies: pass seeds only through the harness (never in parameters); learned-choice/sticky-session with tie_break reservoir reproduce default at theta0 (verified); one_draw is the LR-03 default.",
+  "Closed-loop (replay_concurrency) Mooncake replays give every single-turn row its own session id request_N, while open-loop replays give none (per_request of smoke-mc-b vs smoke-mc-a in smoke/final_eval); session-keyed policy state sees one-turn sessions there.",
+  "Bindings rebuilds invalidate the whole cache (build_id); B1 rebuilt at 14:36:39 during this stage, so only post-rebuild results (build 4b4525a9...) are current."
+ ],
+ "overheads": {
+  "batch_20_replays_2000rows_N8_cold_e0": {
+   "elapsed": [
+    "Elapsed (wall clock) time (h:mm:ss or m:ss): 0:03.33"
+   ],
+   "errors": 0,
+   "native_check_rel_err_max": 0.0,
+   "replay_wall_s_max": 2.1070719079998526,
+   "replay_wall_s_median": 1.8129067384988957,
+   "replay_wall_s_min": 1.4657584889991995,
+   "replays": 20,
+   "scoring_overhead_s_max": 0.6727839350005524,
+   "scoring_overhead_s_median": 0.5911259479998989,
+   "source": "<campaign-root>/runs/build_harness/measure/batch20/results.jsonl",
+   "worker_peak_rss_mib_max": 230.00390625
+  },
+  "batch_20_replays_2000rows_N8_warm_e0": {
+   "errors": 0,
+   "lr_eval_summary": {
+    "build_id": "4b4525a9914bd4beb598c8aae0519b1a062ed8b8877be2448c80ac15dd4a1313",
+    "counts": {
+     "cached": 0,
+     "crashed": 0,
+     "done": 20,
+     "error": 0,
+     "skipped": 0,
+     "timeout": 0
+    },
+    "errors": 0,
+    "evaluated": 20,
+    "out": "measure/final/batch20.jsonl",
+    "skipped": 0,
+    "tasks": 20,
+    "wall_s": 2.98
+   },
+   "native_check_rel_err_max": 0.0,
+   "replay_wall_s_max": 2.0342841429992404,
+   "replay_wall_s_median": 1.7726277914998718,
+   "replay_wall_s_min": 1.4669582639999135,
+   "replays": 20,
+   "scoring_overhead_s_max": 0.2078510430001188,
+   "scoring_overhead_s_median": 0.18922893699982524,
+   "source": "<campaign-root>/runs/build_harness/measure/final/batch20.jsonl",
+   "worker_peak_rss_mib_max": 229.32421875
+  },
+  "batch_80_replays_2000rows_N4_N8": {
+   "errors": 0,
+   "lr_eval_summary": {
+    "build_id": "4b4525a9914bd4beb598c8aae0519b1a062ed8b8877be2448c80ac15dd4a1313",
+    "counts": {
+     "cached": 0,
+     "crashed": 0,
+     "done": 80,
+     "error": 0,
+     "skipped": 0,
+     "timeout": 0
+    },
+    "errors": 0,
+    "evaluated": 80,
+    "out": "measure/final/batch80.jsonl",
+    "skipped": 0,
+    "tasks": 80,
+    "wall_s": 6.98
+   },
+   "native_check_rel_err_max": 0.0,
+   "replay_wall_s_max": 2.163730537999072,
+   "replay_wall_s_median": 1.1642312104995653,
+   "replay_wall_s_min": 0.8723819349997939,
+   "replays": 80,
+   "replays_per_s": 11.46,
+   "scoring_overhead_s_max": 0.22443260800173448,
+   "scoring_overhead_s_median": 0.07842125499973918,
+   "source": "<campaign-root>/runs/build_harness/measure/final/batch80.jsonl",
+   "worker_peak_rss_mib_max": 234.64453125
+  },
+  "cache_hits_80": {
+   "build_id": "4b4525a9914bd4beb598c8aae0519b1a062ed8b8877be2448c80ac15dd4a1313",
+   "counts": {
+    "cached": 80,
+    "crashed": 0,
+    "done": 0,
+    "error": 0,
+    "skipped": 0,
+    "timeout": 0
+   },
+   "errors": 0,
+   "evaluated": 80,
+   "out": "measure/final/cached80.jsonl",
+   "skipped": 0,
+   "tasks": 80,
+   "wall_s": 0.11
+  },
+  "micro": {
+   "e0_cold_mc2000": {
+    "compute_s": 0.4375025950012059,
+    "distinct_pairs": 1829,
+    "session_s": 0.6496691450010985
+   },
+   "e0_cold_mooncake_full": {
+    "compute_s": 0.7722221910007647,
+    "distinct_pairs": 17185,
+    "session_s": 0.005706298999939463
+   },
+   "replicate_materialize_mooncake_full_s": 0.05904282499977853,
+   "replicate_mooncake_full_stats": {
+    "moved": 22402,
+    "tie_groups": 1180,
+    "units": 23608
+   },
+   "scratch_dir": "<campaign-root>/runs/build_harness/measure/lr-micro-ul6scxor",
+   "slot_acquire_release_uncontended_ms": 0.012295430499762006,
+   "source": "<campaign-root>/runs/build_harness/measure/micro.json",
+   "worker_first_job_s_incl_spawn": 0.028078212999389507,
+   "worker_reused_job_roundtrip_ms": [
+    0.5561340003623627,
+    0.4822119990421925
+   ]
+  },
+  "notes": [
+   "Replay wall at 20-way concurrency: median 1.77-1.81 s per 2000-request replay in 20-replay batches and 1.16 s in the 80-replay batch, vs setup's ~1.0 s sequential in-process; throughput ~11 replays/s for 2000-request cells.",
+   "Scoring overhead per replay (eval_wall_s - wall_s), warm E0 table: median 0.19 s (20-replay batch, one job per fresh worker) and 0.08 s (80-replay batch, reused workers); cold E0 table: median 0.59 s."
+  ]
+ },
+ "package": {
+  "dependencies": [
+   "pyyaml",
+   "cma",
+   "numpy",
+   "matplotlib (lr-report)",
+   "dynamo bindings + aisimulate (preinstalled)"
+  ],
+  "example_spaces": [
+   "default_cost_fn.yaml",
+   "learned_choice_m1.yaml",
+   "learned_choice_m2_pooled.yaml"
+  ],
+  "harness_version": "lrh-1",
+  "install": "editable in WT/.venv (uv pip install --python WT/.venv/bin/python -e benchmarks/learned_routing)",
+  "modules": [
+   "__init__",
+   "bundle",
+   "cache",
+   "canon",
+   "cells",
+   "e0",
+   "eval_cli",
+   "evaluate",
+   "goodput",
+   "noise",
+   "paths",
+   "policy",
+   "pool",
+   "replicates",
+   "report",
+   "report_cli",
+   "slots",
+   "space",
+   "train",
+   "train_cli",
+   "worker"
+  ],
+  "owned_by_B2_not_touched": "learned_routing/workloads/",
+  "path": "<worktree>/benchmarks/learned_routing"
+ },
+ "schema": "learned-routing.build_harness.v1",
+ "smoke": {
+  "b1_types_through_harness": {
+   "identical_rows_to_seeded_default_per_cell_k": {
+    "learned-choice@theta0-one_draw": false,
+    "learned-choice@theta0-reservoir": true,
+    "sticky-hard-reservoir": true
+   },
+   "note": "learned-choice theta0 and sticky-session hard with tie_break reservoir reproduce dynamo-default-cost-fn request-for-request on every (cell, k), confirming per-replicate seed injection; one_draw differs only in tie handling",
+   "source": "<campaign-root>/runs/build_harness/smoke/b1types/results.jsonl"
+  },
+  "bundle": {
+   "build_id_matches_local": true,
+   "bytes": 369778102,
+   "correction_fix_r0": {
+    "correction": "hermetic_run above was NOT hermetic: run.sh ran the parent with python3.12 -S, but pool.py started workers without -S, so they imported packaging (needed by aisimulate_core.sdk.common on every MockEngineArgs.from_json) from /usr/lib/python3/dist-packages. The bundle lacked packaging; with an interpreter without it every replay failed (audit: 88/88 ModuleNotFoundError).",
+    "finding": "audit build/harness-robustness-splits r0 B1",
+    "fixed_in": "WT <commit-09>: packaging + dist-info shipped in site/; workers inherit the parent's isolation flags (pool.isolation_flags); build_bundle runs check_site (python -S -s -P, PYTHONPATH=site only) and records MANIFEST.site_check",
+    "retest": "runs/build-fix-r0/bundle: 88 tasks (11 int- cells x 4 specs x 2 reps), build 6955b0ee; site_check 291 modules, 0 outside site/stdlib; without packaging the check fails; env -i + empty uv venv python3.12 under strace: 88/88 OK, worker execs carry -S, 88/88 == local (per_request sha + 12 metrics), ingest 0 rejected / 88 already cached",
+    "written": "2026-10-02 16:13:14 PDT"
+   },
+   "glibc_floor": "2.39",
+   "hermetic_run": "env -i PATH=/usr/bin:/bin bash run.sh (system python3.12 -S) --slots-dir CR/slots: 4/4 replays, 0 errors, same build_id",
+   "ingest": "4 ingested, 0 rejected; local lr-eval on the same tasks then 4/4 cache hits; second ingest 4 already cached",
+   "manifest": "<campaign-root>/runs/build_harness/bundle_test/b1/MANIFEST.json"
+  },
+  "cells": "<campaign-root>/runs/build_harness/smoke/cells.jsonl (ad hoc from mooncake_trace_1000.jsonl: rows 0-199 open speedup 1.0 N4; rows 200-399 closed concurrency 8 N4; SLA itl 30 ms, e2e_slowdown 10; not campaign cells)",
+  "e0_probe": {
+   "max_rel_err_e2e": 1.7352275734085023e-06,
+   "max_rel_err_ttft": 8.955832900528777e-09,
+   "method": "ais-chunked-estimator-v1",
+   "source": "<campaign-root>/runs/build_harness/measure/e0_probe.json"
+  },
+  "lr_eval_rr_default_k01_refresh": {
+   "errors": 0,
+   "goodput_rps_window": {
+    "default@defaults|smoke-mc-a|k0": 1.5556768558951966,
+    "default@defaults|smoke-mc-a|k1": 1.2827510917030567,
+    "default@defaults|smoke-mc-b|k0": 1.624630294220054,
+    "default@defaults|smoke-mc-b|k1": 1.716122162195801,
+    "round_robin|smoke-mc-a|k0": 2.3744541484716155,
+    "round_robin|smoke-mc-a|k1": 2.019650655021834,
+    "round_robin|smoke-mc-b|k0": 1.437931726965749,
+    "round_robin|smoke-mc-b|k1": 1.5915772861679374
+   },
+   "native_check_rel_err_max": 0.0,
+   "replays": 8,
+   "rows_identical_to_earlier_cached_runs": true,
+   "source": "<campaign-root>/runs/build_harness/smoke/final_eval/results.jsonl"
+  },
+  "lr_train_fake_2_generations": {
+   "best_train_objective": 1.4826780225516718,
+   "budget_evals": 16,
+   "fevals": 16,
+   "generation": 2,
+   "phase": "done",
+   "reason": "budget_evals",
+   "replays_fresh": 108,
+   "selected_val_objective": 1.8991306393810996,
+   "tasks_requested": 108,
+   "time": "2026-10-02T14:52:41-0700",
+   "wall_s": 0.01
+  },
+  "lr_train_real_tiny_cell": {
+   "chunked_equals_uninterrupted_best": true,
+   "chunked_equals_uninterrupted_history": true,
+   "chunked_run_calls_at_max_wall_0.5s": 7,
+   "fresh_generation_wall_s_seed5": {
+    "gen_wall_s": [
+     1.361990119999973,
+     0.554990346001432
+    ],
+    "source": "<campaign-root>/runs/build_harness/train_final/real_straight/history.jsonl"
+   },
+   "run_dir": "<campaign-root>/runs/build_harness/train_final2/real_straight",
+   "space": "<worktree>/benchmarks/learned_routing/spaces/default_cost_fn.yaml",
+   "status": {
+    "best_train_objective": 1.2929493673900267,
+    "budget_evals": 12,
+    "fevals": 12,
+    "generation": 2,
+    "phase": "done",
+    "reason": "budget_evals",
+    "replays_fresh": 0,
+    "selected_val_objective": 0.9667307975191067,
+    "tasks_requested": 46,
+    "time": "2026-10-02T14:53:03-0700",
+    "wall_s": 0.02
+   }
+  }
+ },
+ "stage": "build B3 (harness: lr-eval, lr-train, lr-report, remote bundles)",
+ "tests": {
+  "by_file": {
+   "tests/test_canon_policy_cache.py": 20,
+   "tests/test_goodput.py": 11,
+   "tests/test_replay_e2e.py": 2,
+   "tests/test_replicates.py": 11,
+   "tests/test_report_e0_bundle.py": 7,
+   "tests/test_slots_pool.py": 7,
+   "tests/test_space_train.py": 22
+  },
+  "command": "cd WT/benchmarks/learned_routing && PYTHONDONTWRITEBYTECODE=1 ../../.venv/bin/python -m pytest -v tests",
+  "coverage": {
+   "cache_keys": "every key component changes the key, cell_sha location/split independence and content sensitivity, declared trace sha check, replicate sharing across cells, atomic put/get, build_id tracks the extension",
+   "canonical_yaml_and_policy": "key-order independence, YAML 1.1/1.2 float round trip, NaN rejection, seed injection outside identity, contract form, round_robin rules, KvRouterConfig knob validation",
+   "cma_es": "convergence on a fake objective, resume after interruption at 6 cut points (incl. validation) equals an uninterrupted run, zero-wall-budget progress (livelock regression), CRN set per generation, resume refuses changed setup, 1-D spaces, re-evaluation diagnostic",
+   "goodput_math": "ITL definition and inclusive bounds, osl<=1 skip, rejected/incomplete never good, E2E slowdown and scaling, native cross-check, arrival/completion windows, missing rows, fallback, rescoring monotonicity, guards",
+   "replay_e2e": "real replays through CR/slots: native check, independent recomputation from stored rows, seeds 1/2, CRN trace sharing, cache hits, refresh reproduces rows; CLI exit codes, --refresh, progress at --max-wall-seconds 0",
+   "report_e0_ingest": "bootstrap seeding and clustering, IQM/geomean, paired normalization collapses shared replicate effects, dropped pairs, outputs; E0 = chunked prefill + decode steps, persistence, concurrent merge; ingest key recomputation and rejection",
+   "slot_pool": "6 processes x 3 slots and 6 threads x 2 slots never exceed capacity or share a slot, killed holder releases, status",
+   "space": "linear/log/int/unbounded transforms, clamping, pins, sign-constraint bounds, lowrank/matrix shapes, invalid specs, example spaces load",
+   "worker_pool": "timeouts and crashes become error records and the pool continues, worker reuse, idle exit, lost-job resend"
+  },
+  "failed": 0,
+  "log": "<campaign-root>/runs/build_harness/tests/pytest_final.txt",
+  "passed": 80
+ },
+ "worktree": "<worktree>",
+ "written": "2026-10-02T15:00:34-0700"
+}

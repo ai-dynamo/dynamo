@@ -1,0 +1,10 @@
+name: "learned-choice-m1@smoke-learned-choice-m1-s1"
+parameters:
+  feature_set: "v1"
+  temperature: 0.0
+  theta: [-1.0, 1.0743904605204637, -0.805848419123322, -0.20198841203870188, -0.6696540869476966, -0.10252479241114365, 1.629601074636886, 0.29516407055094085]
+  tie_break: "one_draw"
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

@@ -1,0 +1,2998 @@
+{
+ "all_graph_digests_equal": true,
+ "b2_cell_trace_check": {
+  "byte_identical": 7,
+  "plays_checked": 7
+ },
+ "base_dir": "<campaign-root>/traces/agentx_lowered/base_cap300_think4",
+ "helper": {
+  "binary": "<worktree>/benchmarks/learned_routing/tools/agentx_lower/target/release/agentx-lower",
+  "binary_sha256": "f6d1d98cbd135a2a14cf4d97bf164523ae9ecbdf68f96ef6b57f8daf0936c683",
+  "crate": "aisimulate-core =0.13.0-dev.202609300000000061",
+  "source": "benchmarks/learned_routing/tools/agentx_lower"
+ },
+ "max_model_len": 131072,
+ "plays": {
+  "0001-006c98de37d819e95b0840e25426bb7ca99d.json": {
+   "base_sha256": "161fa709ddf4b953b92b3c99b9e18978b66551facec341e01d9d3a28eed5aa59",
+   "dependency_edges": {
+    "sequence/completion": 32
+   },
+   "distinct_hashes": 1888,
+   "graph_digest_agentic": "307d293ce6f24d4442bfd5cbb6b6c2d2fa72acd0e812473c9223df7887c4206d",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "307d293ce6f24d4442bfd5cbb6b6c2d2fa72acd0e812473c9223df7887c4206d",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "0d2023c405ec90642a0ecb6bcb73ab6cb105dbe54ac84144f25a9d33337f78a2",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 33
+   },
+   "namespace": "weka:d7dc37733e17e922",
+   "raw_sha256": "a6212c87c61ccd936b74741bed9b76392c8270e7ede2f3eac2a1a1c64f277f77",
+   "roots": 1,
+   "rows": 33,
+   "sessions": 1,
+   "span_ms": 5995772.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "67c824979614126609f72e8ddaf509f48a654a46fe2e0aa83398383e6dca7170",
+   "zero_outputs": 0
+  },
+  "0007-04dba6fe621301a1d01fd63b8d02c9645c48.json": {
+   "base_sha256": "b8c3797c941694c7b2d65e4b1d481239666b53367c63e5bc396f746aa8c6395b",
+   "dependency_edges": {
+    "join/completion": 14,
+    "replay_barrier/completion": 50,
+    "sequence/completion": 10,
+    "spawn/completion": 1
+   },
+   "distinct_hashes": 2944,
+   "graph_digest_agentic": "399dc83e545e7b1becd68d3d7b5a80fb0a0dddd0ce0a0ea88625e95ade1647a4",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "399dc83e545e7b1becd68d3d7b5a80fb0a0dddd0ce0a0ea88625e95ade1647a4",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "4c96ecb2ce5ac706008665feb61f32688b80cbca12b69632e02c0302ef82c26e",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 25
+   },
+   "namespace": "weka:aa76236d17e506ec",
+   "raw_sha256": "e9a6e5078cf9477b918feb9dfdbf862232d07cfa4db50c310627a629ddf69766",
+   "roots": 1,
+   "rows": 25,
+   "sessions": 15,
+   "span_ms": 4070416.0,
+   "split": "test",
+   "subagent_sessions": 14,
+   "weka_sha256": "66b570f930f91ae5ccb2628fdfae17a3d8445c16bbf8ffec54473a3fad700875",
+   "zero_outputs": 0
+  },
+  "0009-05f72f78a037cfa5cd4e4541960a574701d9.json": {
+   "base_sha256": "67889496448de80d5c11641d9219211d6cb25598b73b7505b165ebff09242688",
+   "dependency_edges": {
+    "sequence/completion": 51
+   },
+   "distinct_hashes": 1977,
+   "graph_digest_agentic": "df678d23cc3ca2e8a89d226f36c0e69ba9448cae56a571321de3fb3bf4e92d2d",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "df678d23cc3ca2e8a89d226f36c0e69ba9448cae56a571321de3fb3bf4e92d2d",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "9ac6391b47c79ae4fabfe12133294f9c688505429cc02cf4901fcf604c1996b0",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 52
+   },
+   "namespace": "weka:ff631fd133cc3814",
+   "raw_sha256": "f7db62e30ffbb8d16060fe0ec2a26c42839e49b4f50acf0bb71552340a3ae149",
+   "roots": 1,
+   "rows": 52,
+   "sessions": 1,
+   "span_ms": 11788732.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "c506997dcdde2002c2a10827586e33fb680006c7d93dc0f07351669d183d38c8",
+   "zero_outputs": 0
+  },
+  "0010-063179eb93f4337a662e859c5a2c5638e03f.json": {
+   "base_sha256": "f7d7cca82c78dcdcadc98b37e9337af6c1385401e5279890ff7e41c8681aec7a",
+   "dependency_edges": {
+    "join/completion": 1,
+    "replay_barrier/completion": 70,
+    "sequence/completion": 69,
+    "spawn/completion": 1,
+    "spawn/dispatch": 2
+   },
+   "distinct_hashes": 3015,
+   "graph_digest_agentic": "682a3a3efcb20250ab371b979519cc43429f3e89c9d37422424fcf04c664d8b2",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "682a3a3efcb20250ab371b979519cc43429f3e89c9d37422424fcf04c664d8b2",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "7baf3dce7d2a9743639d4e61a0f4e2ff28f3c2b2169024dbd9969acc51140598",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 73
+   },
+   "namespace": "weka:d42ac663423e0642",
+   "raw_sha256": "c922de8ded3eb445574787f96d9183fc75bdb44fcde9910af4112bd5016ab28a",
+   "roots": 1,
+   "rows": 73,
+   "sessions": 4,
+   "span_ms": 4908624.0,
+   "split": "train",
+   "subagent_sessions": 1,
+   "weka_sha256": "a89bf80ee719fe8a176d399db98cc74e79658f74949e93fee8463b88d7d983bf",
+   "zero_outputs": 0
+  },
+  "0012-077ea9e6554f45bbad9c24a8462bae9a8512.json": {
+   "base_sha256": "ef83e4d62e133d2002b12e05fb64bbef0ce83e53c40af0f4ccbc5f2bfe2466df",
+   "dependency_edges": {
+    "replay_barrier/completion": 28,
+    "sequence/completion": 33
+   },
+   "distinct_hashes": 1757,
+   "graph_digest_agentic": "aaa12f0a5293d742f988b5fa3632c9a8f6cf4956c49804a30d5dae06910df439",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "aaa12f0a5293d742f988b5fa3632c9a8f6cf4956c49804a30d5dae06910df439",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "1651cde79160b8978247260cc954fc4d1acfa94a29a3053cda9b4b3e7cca08e5",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 35
+   },
+   "namespace": "weka:67f93983d6de8078",
+   "raw_sha256": "a0228eef730c1c321c0e9c91716f904f752db702c48a64920fca565d6d93e4de",
+   "roots": 1,
+   "rows": 35,
+   "sessions": 2,
+   "span_ms": 11640260.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "7a73e544af46c22806f7cc5b93b104f2f11a8311c78003ea114b11152e6b0576",
+   "zero_outputs": 0
+  },
+  "0013-07dd40536557a1d6440a923557c3129dc929.json": {
+   "base_sha256": "23c3e6509ee0bdaf0061adebe58042de0d3f343e68898114cf811e306d972f07",
+   "dependency_edges": {
+    "join/completion": 4,
+    "replay_barrier/completion": 7,
+    "sequence/completion": 114,
+    "spawn/completion": 1,
+    "spawn/dispatch": 3
+   },
+   "distinct_hashes": 5074,
+   "graph_digest_agentic": "453760c1acb5b6915d281a3f714b267e984650b15daafd7ec9874d49bbd2d586",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "453760c1acb5b6915d281a3f714b267e984650b15daafd7ec9874d49bbd2d586",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "448b332cc7175f3d5d443942ce8399e82fc49332553e7a59a3e5c4b2e6ccacb5",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 119
+   },
+   "namespace": "weka:53b104a7d86345bd",
+   "raw_sha256": "8c8e3c4b0f2803549ad862cd840a0e8cc786a9d2a0e3fca4dfb7ada3199bee09",
+   "roots": 1,
+   "rows": 119,
+   "sessions": 5,
+   "span_ms": 1946620.0,
+   "split": "test",
+   "subagent_sessions": 4,
+   "weka_sha256": "e98ffe6647bac0649b72e8d88c64aa8ce0d2351dec65ae31f6ef1fd25614a146",
+   "zero_outputs": 0
+  },
+  "0017-0a688303b1ae62a97607af8021f2130c2caf.json": {
+   "base_sha256": "dfd1d02d57fcf8b682c99d6d136d285fbd9f64df6463cdd2766f84cd3c1e7361",
+   "dependency_edges": {
+    "sequence/completion": 30
+   },
+   "distinct_hashes": 1926,
+   "graph_digest_agentic": "c520d9243a90124860494e3ba20174093a4dd3c562a70007a83e4e9df6fa314a",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "c520d9243a90124860494e3ba20174093a4dd3c562a70007a83e4e9df6fa314a",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "edba511e600454f0e15379c953ce25fa22b4a56faf13446d7184a0b2e1d73806",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 31
+   },
+   "namespace": "weka:c0836843b6d3ff63",
+   "raw_sha256": "f1054b0d0a7dcc141abbb5f3012c812d04585268274d8d2e032f4a8721e931c9",
+   "roots": 1,
+   "rows": 31,
+   "sessions": 1,
+   "span_ms": 9109512.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "981cfee5951607fa0f38baf870de180d95d7478d8d69fa0720f8ff4cb56879e7",
+   "zero_outputs": 0
+  },
+  "0020-0bcd99353218b9a386b1c4aec13d77abecdb.json": {
+   "base_sha256": "e55b8fbd43c274df5909f6000f432003f14fa3a7aea31620c40123d9875b822c",
+   "dependency_edges": {
+    "join/completion": 1,
+    "replay_barrier/completion": 46,
+    "sequence/completion": 31,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 3735,
+   "graph_digest_agentic": "bd229754605ae2a2ec6cfcbff3bdcb6c43de5fc0ab8aad0b9d884545499f2bd8",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "bd229754605ae2a2ec6cfcbff3bdcb6c43de5fc0ab8aad0b9d884545499f2bd8",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "08c81b25d82eb2aae1b8dde14e6d5f6702011324c880750b7309ec825c5fe2be",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 35
+   },
+   "namespace": "weka:42497a6e09900829",
+   "raw_sha256": "bb770e7461d0d728c97b9e55a4db774de1766b530a3e3467df826a2b21539b18",
+   "roots": 1,
+   "rows": 35,
+   "sessions": 4,
+   "span_ms": 7761232.0,
+   "split": "test",
+   "subagent_sessions": 1,
+   "weka_sha256": "cd094b3d287f606ae2350943a3dc894c55cf048ff4f1a33537a0e9553362ed64",
+   "zero_outputs": 0
+  },
+  "0021-0bed163ac9566086e14ffd85c7481096d49d.json": {
+   "base_sha256": "c1128b87a02c97f627f598f368a67fe9a969c955fbf87b6ee885137a660f1116",
+   "dependency_edges": {
+    "replay_barrier/completion": 37,
+    "sequence/completion": 49,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 3343,
+   "graph_digest_agentic": "a8855a241b3ff44034bab195ce566b11ba45066bffb9a9ddf7b79025b293fc7a",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "a8855a241b3ff44034bab195ce566b11ba45066bffb9a9ddf7b79025b293fc7a",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "cfaa401f56acfeecffe149d89f70152cc133da776b2ff2cf1c8d863c5d838951",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 1,
+    "requests": 53
+   },
+   "namespace": "weka:9272f5347504a62b",
+   "raw_sha256": "09e0d19e92e22f71a29d85b2bd28312d3fe8e49dd42b527c921cb9641c383d1d",
+   "roots": 1,
+   "rows": 53,
+   "sessions": 4,
+   "span_ms": 9795492.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "7d9b3b4194d070d2d703070981dec52c36d72e377b2cde7c57bd6c43b3e281f2",
+   "zero_outputs": 1
+  },
+  "0028-0f909e7d63c0d5e1f060d727ada25d910d89.json": {
+   "base_sha256": "37a06e64c912b0cd2f444a80caa84879b3b09acb9babaf53ab2c2e63ea1a362e",
+   "dependency_edges": {
+    "replay_barrier/completion": 46,
+    "sequence/completion": 47,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 2036,
+   "graph_digest_agentic": "c286b02be45a73aa64cc0c87e702eec0c7f8bd0accabf61620b87be544fe4edc",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "c286b02be45a73aa64cc0c87e702eec0c7f8bd0accabf61620b87be544fe4edc",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "0fe61ab1fe67bd01cc3d35c2a4d3598ebcbcd7c8a364761e8ebe54b11a2249d6",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 49
+   },
+   "namespace": "weka:8a366240f169375c",
+   "raw_sha256": "caa2305662ed28a891d8dfbd3a1e496047f44d34c5ab460d04df1c046ae6f19f",
+   "roots": 1,
+   "rows": 49,
+   "sessions": 2,
+   "span_ms": 4459240.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "1f1253fddfa175e72684e7ad89a71008efa79e28475b4142b991816a372e50ab",
+   "zero_outputs": 0
+  },
+  "0032-12bd4c7c82ae413b035253cb800fc5312111.json": {
+   "base_sha256": "9a97dcbcfa2c991b50a4e4a1b64682f70380725bbc2f2d1a307b67460b86ea08",
+   "dependency_edges": {
+    "join/completion": 2,
+    "replay_barrier/completion": 6,
+    "sequence/completion": 36,
+    "spawn/completion": 1,
+    "spawn/dispatch": 2
+   },
+   "distinct_hashes": 3713,
+   "graph_digest_agentic": "22d64240de7c6cd2540432decbdf90d8167cc81095870e5eafa99be2cd90d130",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "22d64240de7c6cd2540432decbdf90d8167cc81095870e5eafa99be2cd90d130",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "b35893af16cde0a82c1672d55421e6802d2aaf778368c171db50ad7aa00a59ec",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 40
+   },
+   "namespace": "weka:20162b5ca262a5c7",
+   "raw_sha256": "6f79aad57c82bd759ee495a83f991248b6f8b734486edc8a0a46255946cde7b9",
+   "roots": 1,
+   "rows": 40,
+   "sessions": 4,
+   "span_ms": 2457796.0,
+   "split": "test",
+   "subagent_sessions": 2,
+   "weka_sha256": "8b14e9776a8f7599539c7d5766f48845025d009e89bb96dd4f234c32b39017d4",
+   "zero_outputs": 0
+  },
+  "0033-12cfecf98c158ab54fb65980602421f00d69.json": {
+   "base_sha256": "84788f3a299216429d17318ad08fd112f8d4209c59c3acc62fc57494591f6c0b",
+   "dependency_edges": {
+    "sequence/completion": 19
+   },
+   "distinct_hashes": 1762,
+   "graph_digest_agentic": "c58a21cef677cc435abd24b9d015d3bc5abbb655e985a0975f55c311a12edcf8",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "c58a21cef677cc435abd24b9d015d3bc5abbb655e985a0975f55c311a12edcf8",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "5ceb61066f8d0e4b89c059fc59f18da58215eb257360723a2e98199adae9e317",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 20
+   },
+   "namespace": "weka:edb046097c76dfae",
+   "raw_sha256": "48e7c8f1bdba324ae6a1cc806a2c1546e2e90ab4fd6f4d75a3912c14d3098e40",
+   "roots": 1,
+   "rows": 20,
+   "sessions": 1,
+   "span_ms": 1378624.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "9237d68db8c8814e902e80c8cbce8d08d2758ec92547cb41b3f2081ec27bd4f0",
+   "zero_outputs": 0
+  },
+  "0037-14129d470e508b236be22188aa78548ef805.json": {
+   "base_sha256": "ba0f96bf9c6228022cd5354f934d07d663a3c1c7836b61f988d1214242a416a5",
+   "dependency_edges": {
+    "sequence/completion": 26
+   },
+   "distinct_hashes": 1499,
+   "graph_digest_agentic": "673ff8733f0f0fd457d0aaa39bbf1a4fbc5bcdfa728b187ff43f6b76dd1e7cd8",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "673ff8733f0f0fd457d0aaa39bbf1a4fbc5bcdfa728b187ff43f6b76dd1e7cd8",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "d319dec45236a47da763f6fb16c8986cc52a3505b2f19e467cf25a9e48ef34da",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 27
+   },
+   "namespace": "weka:e6cbd52220c3886d",
+   "raw_sha256": "a2c265348ad26794301b90644995890749a2e4e084784a29ef151d435e4a03a3",
+   "roots": 1,
+   "rows": 27,
+   "sessions": 1,
+   "span_ms": 2008424.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "dea5409ac6a2f494a45fbb2674026a03245a50e56bbfd6ebb81c7ed1bb1094df",
+   "zero_outputs": 0
+  },
+  "0045-17808bf55e26681520f3f11f47b5e1260108.json": {
+   "base_sha256": "3d50b29f2ea5647c052a8b0f9fa3300379cf2222ab6089c7d6ed36f360e9bde7",
+   "dependency_edges": {
+    "sequence/completion": 26
+   },
+   "distinct_hashes": 1840,
+   "graph_digest_agentic": "c3448cacd476414ccef0d2babb09c04bc9ce3f2022c79528c31cb67d9f45b421",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "c3448cacd476414ccef0d2babb09c04bc9ce3f2022c79528c31cb67d9f45b421",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "797defbd81032881ae691c7483b1f25bb62a9f07034877b5e732b39899f1afb5",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 27
+   },
+   "namespace": "weka:fc6b0c593be314aa",
+   "raw_sha256": "dadc17219ab6a98b5026084497e3714a2542ab592613431bce8615fa70299abd",
+   "roots": 1,
+   "rows": 27,
+   "sessions": 1,
+   "span_ms": 2256720.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "ae757b83006ad526c3d05ae262bc1bf968b3a226b09419bdd488a0aa1d859004",
+   "zero_outputs": 0
+  },
+  "0048-1b5229e3aa8893ca2f4d07d248f9cd9752fb.json": {
+   "base_sha256": "4ebaeab23940830896e5ed32421eb59af9c8198e94f71c8e7426aa17a85276f8",
+   "dependency_edges": {
+    "sequence/completion": 26
+   },
+   "distinct_hashes": 1499,
+   "graph_digest_agentic": "856e3d81c4c39474fcdde8f822e873bb60ddd2020cb0973038d625461838cdb6",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "856e3d81c4c39474fcdde8f822e873bb60ddd2020cb0973038d625461838cdb6",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "f8b6159bc357a98cc94636d08ff94f1e33aa5162e6663342a15dbfbfe7f17bca",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 27
+   },
+   "namespace": "weka:7f4ede3cc2c6b0a4",
+   "raw_sha256": "cb51e8a2cbca911c8a18946f8017ce8f0791ebed5e9b45840db371daf439a292",
+   "roots": 1,
+   "rows": 27,
+   "sessions": 1,
+   "span_ms": 5071616.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "006620c5864f0b0fe9dbe976230dbcff8faacc7685a465143ac3427df97a9d81",
+   "zero_outputs": 0
+  },
+  "0056-203147a7ad6c355f99290d8ac7811e6de5be.json": {
+   "base_sha256": "272e4b37025e65377544eefbde3a76e8c1782370c12554e8a0209412f6e4493b",
+   "dependency_edges": {
+    "sequence/completion": 33
+   },
+   "distinct_hashes": 1306,
+   "graph_digest_agentic": "a1afc65d347f8772bc6a3e696b644173912c62ca15b359b8ab0996efc5ce0cf0",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "a1afc65d347f8772bc6a3e696b644173912c62ca15b359b8ab0996efc5ce0cf0",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "070baa8c9505fd7ab8420cc9c4abd03a87720d4baf722fb64358d015a5c321e2",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 34
+   },
+   "namespace": "weka:65242697fb597d87",
+   "raw_sha256": "d9751bf2316220ea663ea2a244e4d148d086fec7d0620107282765dac392ed67",
+   "roots": 1,
+   "rows": 34,
+   "sessions": 1,
+   "span_ms": 7600000.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "7a12b5611df0ec7871d7e132b68dd758615cf5898beb7e4388afc792f47a5df5",
+   "zero_outputs": 0
+  },
+  "0062-23074f92872cd4f8212d04cd87e71a2ced7b.json": {
+   "base_sha256": "681dd9a48c89687a0b2cceebc8dc4db83af0126785bfc2a7eecb0dbcde32d153",
+   "dependency_edges": {
+    "replay_barrier/completion": 20,
+    "sequence/completion": 16
+   },
+   "distinct_hashes": 2039,
+   "graph_digest_agentic": "5a59629d504987215b36dc51c923eafd09ba7618eab293fb7a7999edf77c2058",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "5a59629d504987215b36dc51c923eafd09ba7618eab293fb7a7999edf77c2058",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "7c82876feaf0f93a959a1f01e574465e6d8f8856034e9c136513fa79c6294d97",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 22
+   },
+   "namespace": "weka:f9423618853c383a",
+   "raw_sha256": "abf41d48e61120f76f552573f2d5acd7e1991fdf40edb38b1e87a87588c5bb60",
+   "roots": 1,
+   "rows": 22,
+   "sessions": 6,
+   "span_ms": 2698404.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "4fb0183770bd0ec0a37e3e0b0794b8e0a9845081586b4cdad602a025047d7af3",
+   "zero_outputs": 0
+  },
+  "0063-23a576b18cd4bacef3d1aa138b060b9407ce.json": {
+   "base_sha256": "f84be4a9730ec0690d59a3280f6c6b663abaf631da6dfff41749b738eb9848f8",
+   "dependency_edges": {
+    "sequence/completion": 66
+   },
+   "distinct_hashes": 2130,
+   "graph_digest_agentic": "6be66d3a9dbd321b427176e213c64119563ef21b52d7fa7e35dd235b0e4f417e",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "6be66d3a9dbd321b427176e213c64119563ef21b52d7fa7e35dd235b0e4f417e",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "9f0567a707b04163781664690de594fa332036eeb58a92e77c3934aed59102fd",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 67
+   },
+   "namespace": "weka:a9c0b3884b8497da",
+   "raw_sha256": "c8dc1e59cc607bbc24e3d5f367fa73eaa86cad277c86dc8f0825e92679f6d339",
+   "roots": 1,
+   "rows": 67,
+   "sessions": 1,
+   "span_ms": 28346552.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "3c20ee617207887e58e050c57075513c9bd932ff42adc742f4d73c5e442a445a",
+   "zero_outputs": 0
+  },
+  "0064-240cd2e1b10e5b738ac6fee166b2aca7eff2.json": {
+   "base_sha256": "2eb11c90f1d9c6c73a582ef2e9ad5d45f1bd6f21a37e85cb593a7a6b42838eda",
+   "dependency_edges": {
+    "replay_barrier/completion": 18,
+    "sequence/completion": 18
+   },
+   "distinct_hashes": 1792,
+   "graph_digest_agentic": "96d3c3e1861cd78068257a99d3fe60b19e29a596765c7d6224e48a38b7bf5398",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "96d3c3e1861cd78068257a99d3fe60b19e29a596765c7d6224e48a38b7bf5398",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "6d7e5e7be0d833910baba225030091d20562b72c051273e913972e8829581213",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 20
+   },
+   "namespace": "weka:d52b62bfb14c4748",
+   "raw_sha256": "3e3daecebc15fa97f82b28e43404339f325b5ede78e432ddd7c3b6b9b188585b",
+   "roots": 1,
+   "rows": 20,
+   "sessions": 2,
+   "span_ms": 4400640.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "85c132b968e38e49e15d587db12747a8391f9d30cc6d2e1620778d92cc8cda2f",
+   "zero_outputs": 0
+  },
+  "0065-24f457bf9e42d6ffb1cc4bbd279c650bb8b6.json": {
+   "base_sha256": "e4c4dcb602f5ce8c5160ab837066829ee0e5beb3033f40856910d35a5195b875",
+   "dependency_edges": {
+    "sequence/completion": 28
+   },
+   "distinct_hashes": 1588,
+   "graph_digest_agentic": "a4c31de5bc16d341361f493211f7848133221b5ce747d9a18c2468f8308ef07b",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "a4c31de5bc16d341361f493211f7848133221b5ce747d9a18c2468f8308ef07b",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "212c85e32879e33684bfb4ff3743903b1b08a41b4848fa77388cf4ac3f596e53",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 29
+   },
+   "namespace": "weka:79274c07083c6b14",
+   "raw_sha256": "bf6c407a119710b8958b48bc40ac682500858066730b7fdbc90dc3dc9e79cf6e",
+   "roots": 1,
+   "rows": 29,
+   "sessions": 1,
+   "span_ms": 4911924.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "fa9fe52b08cb3fe990539f4582d51af01137699f87743540bd614b5470fb9414",
+   "zero_outputs": 0
+  },
+  "0066-259d1cc35e11b72660b8d6a33867cbb93759.json": {
+   "base_sha256": "c3b25b703306cefba9055eba632b27b383a0b680b7bc01c60f5d955bfabe85fd",
+   "dependency_edges": {
+    "replay_barrier/completion": 26,
+    "sequence/completion": 28
+   },
+   "distinct_hashes": 3353,
+   "graph_digest_agentic": "42534a84638789a27c83c18a652e948c581e9e0c4efdeff416c188b4104263b3",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "42534a84638789a27c83c18a652e948c581e9e0c4efdeff416c188b4104263b3",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "285c2e19d66f4209ea101c11d34de6d7e12bb9da53ca517155164815bc73f204",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 34
+   },
+   "namespace": "weka:e880179d9f965726",
+   "raw_sha256": "f391d6be929f54970b246bfdfc1294b8d09a6327c290b39d1a2f1ae6bc465476",
+   "roots": 1,
+   "rows": 34,
+   "sessions": 6,
+   "span_ms": 4096428.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "9eb3edd52a27a7f3a97d86b24fb301ad0cc83c438f0345941f48a783d693c588",
+   "zero_outputs": 0
+  },
+  "0073-2a2da059b7425d9dc1f999fca1177bc1cdb9.json": {
+   "base_sha256": "c19960a64af35b22b3cb1b9ca001164dd875d4a0482fcba927f7b769e701637b",
+   "dependency_edges": {
+    "replay_barrier/completion": 4,
+    "sequence/completion": 22,
+    "spawn/completion": 1,
+    "spawn/dispatch": 5
+   },
+   "distinct_hashes": 3237,
+   "graph_digest_agentic": "249d3260f011de8b8d1ebbaa48ace1327a17a980cac4ea82bf4bbaa2234cf081",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "249d3260f011de8b8d1ebbaa48ace1327a17a980cac4ea82bf4bbaa2234cf081",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "bd5f81456a15b8b1543e4db3ee4b41c9b6970546f7ec024a795727f113b97783",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 30
+   },
+   "namespace": "weka:53f3600e8c7eec16",
+   "raw_sha256": "58b860577f8c390431a8443407567a601dd1cf737c3136c852a0101108566d7f",
+   "roots": 1,
+   "rows": 30,
+   "sessions": 8,
+   "span_ms": 2775428.0,
+   "split": "train",
+   "subagent_sessions": 6,
+   "weka_sha256": "29c753ebaa82ba8263035b63c5789c4cd5e2eb4677e96b947faae0f2800e97b4",
+   "zero_outputs": 0
+  },
+  "0081-3317a925c2a7f40e9eafe5f5532793a23c67.json": {
+   "base_sha256": "af65b5281d19378b4ed3f940430c415a4986b1d2d84c2852f1959084a5a4386b",
+   "dependency_edges": {
+    "join/completion": 1,
+    "replay_barrier/completion": 42,
+    "sequence/completion": 71,
+    "spawn/completion": 1
+   },
+   "distinct_hashes": 3656,
+   "graph_digest_agentic": "bc9a760dc31ead39b0c531de4f2d57f8a7a82d467d37b21263487ea93b690e80",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "bc9a760dc31ead39b0c531de4f2d57f8a7a82d467d37b21263487ea93b690e80",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "a9720f8d465d7c0e341a1a9e0a36f61ef3a0d519faf685f2b221dabb3fe8cf3d",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 76
+   },
+   "namespace": "weka:902ba7745d80f246",
+   "raw_sha256": "0504a238046fa6bce4a38c72ce944f647c037c65976f792618d6827e69b98648",
+   "roots": 1,
+   "rows": 76,
+   "sessions": 5,
+   "span_ms": 11279796.0,
+   "split": "train",
+   "subagent_sessions": 1,
+   "weka_sha256": "5423e47fc1b285b50024e791b54312065b1d1881941b2b271c533a72423cdc66",
+   "zero_outputs": 0
+  },
+  "0083-3531533f1f293048fc9691b112feafc44e62.json": {
+   "base_sha256": "f047e51edd6ee1afd970a627f3259e136260fd365370f60934300c7c8f30ac3f",
+   "dependency_edges": {
+    "replay_barrier/completion": 20,
+    "sequence/completion": 19
+   },
+   "distinct_hashes": 1457,
+   "graph_digest_agentic": "4bf05b8ec6484bbfe5b5833c7c07e119a79a7da52d0e4230c4d3e9b9d6cfb442",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "4bf05b8ec6484bbfe5b5833c7c07e119a79a7da52d0e4230c4d3e9b9d6cfb442",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "6956c6f3ee0c6ac0362e16b0196617ff99334294975cfd59969cb589b752d250",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 22
+   },
+   "namespace": "weka:d3dc426c1a00b900",
+   "raw_sha256": "5acebe3400ad37283d8ef7a0bc55d602e709694336923405eba4e6dc5cb1ebf7",
+   "roots": 1,
+   "rows": 22,
+   "sessions": 3,
+   "span_ms": 4274092.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "7df770c480afb5df73a80d8c85e3fda11ed4ad3ed6bbb62e486450a0f0b30af9",
+   "zero_outputs": 0
+  },
+  "0084-35de830dbe1dbe90e6eaa36bc4814c7410ec.json": {
+   "base_sha256": "3c2b395796c20970f818ee86e7c290ac9ff5359203e18784c2e3972445c4ccfc",
+   "dependency_edges": {
+    "sequence/completion": 59
+   },
+   "distinct_hashes": 1202,
+   "graph_digest_agentic": "8c42ae313d216f961f9b46142dce7b5b12391087ddd5d761c1167a346e350042",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "8c42ae313d216f961f9b46142dce7b5b12391087ddd5d761c1167a346e350042",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "05232e5dd0fd094a1d863a54c8746f000132539188092abb14eb86888e912b97",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 60
+   },
+   "namespace": "weka:55e48e780101cd82",
+   "raw_sha256": "20d18efc6f304183be3c24e7da8761b2126c103216557746f25cc30300f6e7ae",
+   "roots": 1,
+   "rows": 60,
+   "sessions": 1,
+   "span_ms": 1138740.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "f40a636e36d02087e91d41aed7247fa6ff510ac23af449c553ec5c327ff71111",
+   "zero_outputs": 0
+  },
+  "0085-3735de09df4f9ac454aee913e2a00633ad0d.json": {
+   "base_sha256": "66a15448f64833c509545e2723a4e535b181d478bf3814cf691278a20ce0744c",
+   "dependency_edges": {
+    "sequence/completion": 26
+   },
+   "distinct_hashes": 1107,
+   "graph_digest_agentic": "eaf47525dc6da23de1d42f2ec528186a9155425f4f765caa53f578abc8f369d9",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "eaf47525dc6da23de1d42f2ec528186a9155425f4f765caa53f578abc8f369d9",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "bd0b35753fa87600fa2550a20fcccbc058abc0c279fef289789edbce4e18975b",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 27
+   },
+   "namespace": "weka:274cb99b2cd8d2ba",
+   "raw_sha256": "4d7cc9c74dea670f1cf89b0ad625015a103d1dff31b5673f0aa87fd8b0d80fb2",
+   "roots": 1,
+   "rows": 27,
+   "sessions": 1,
+   "span_ms": 6030820.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "f787f269ab19540484ba8cec363d402ba9c6bcf2a1108d5e6108fc962fdc619e",
+   "zero_outputs": 0
+  },
+  "0086-37c8d244d81e01d3b70c9f7fe619d9392a24.json": {
+   "base_sha256": "89be616b3cf4516295b48392a076769fde33c8fd47554fb370e35f212e93d30a",
+   "dependency_edges": {
+    "sequence/completion": 33
+   },
+   "distinct_hashes": 2037,
+   "graph_digest_agentic": "7a9e356f2697266f4e37f18b8a38bb62eccd62a4e63e508383ae2725d8d4ce57",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "7a9e356f2697266f4e37f18b8a38bb62eccd62a4e63e508383ae2725d8d4ce57",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "5a3014c71a7c1b4bc71279930c075e20f7ba7d8092dee3110ebe1c99a050b695",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 34
+   },
+   "namespace": "weka:5f9462b9aea2c930",
+   "raw_sha256": "76a32690f1e14c44ac2a7a82548bb4daaa8fd41550dc3aee3f144ecf4f179d29",
+   "roots": 1,
+   "rows": 34,
+   "sessions": 1,
+   "span_ms": 7447004.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "6f8a1611965fc35f859d3575e6d25e52bfdb05262868300e77874fdc6e5bdedf",
+   "zero_outputs": 0
+  },
+  "0088-3a066e6ad705e8792dec8c84610bbee401cb.json": {
+   "base_sha256": "b7e2fecdc4b74fce7757ac912c58178ec9cf6b88976471e61919bcee81696107",
+   "dependency_edges": {
+    "join/completion": 1,
+    "sequence/completion": 41,
+    "spawn/completion": 1
+   },
+   "distinct_hashes": 2377,
+   "graph_digest_agentic": "b856cbc3691d3b9eeabf8829559e00eb473f3c336f59a75331dec86215500ba9",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "b856cbc3691d3b9eeabf8829559e00eb473f3c336f59a75331dec86215500ba9",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "583d2179ef257d5efb2a801a75cb9549caff04a62193c2d26fddd6d1ad29c562",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 43
+   },
+   "namespace": "weka:04131eecdc46f806",
+   "raw_sha256": "368c1cf8317414e48f8ab0e26918be24ba5643697fac4a5ced217655c4657c74",
+   "roots": 1,
+   "rows": 43,
+   "sessions": 2,
+   "span_ms": 4222772.0,
+   "split": "train",
+   "subagent_sessions": 1,
+   "weka_sha256": "b0756666487dd526fe9d46ec73e3cad55ed807279f1e68619e64e31a14476de7",
+   "zero_outputs": 0
+  },
+  "0091-3c1fbf5cf98484c7f9ef07f2d4b00e65d829.json": {
+   "base_sha256": "055327b24999c5d6462b70d899c33517fd06c759d2be4e0de7f2e96aa0913bac",
+   "dependency_edges": {
+    "replay_barrier/completion": 60,
+    "sequence/completion": 29
+   },
+   "distinct_hashes": 1688,
+   "graph_digest_agentic": "47a8cb5de430096cd2c67e371389df0761e976be01a4160d12e48eecab561e9f",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "47a8cb5de430096cd2c67e371389df0761e976be01a4160d12e48eecab561e9f",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "e81e98ca391c7bc637a5aa3c648965f6a2798e73584280f1396092cbf34f0fc2",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 34
+   },
+   "namespace": "weka:959a69bd7beb105f",
+   "raw_sha256": "e803b8bf6f831f71c5fecb40be6851e435a19c98ba923a0d13536e415976424e",
+   "roots": 1,
+   "rows": 34,
+   "sessions": 5,
+   "span_ms": 4574892.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "5a8408ea77f1c58c60bc72bfad26ee57d0c178c86d62b10967cbf8330ab29014",
+   "zero_outputs": 0
+  },
+  "0094-3d8fcda6a4decdb4d4f56839db6eba041e60.json": {
+   "base_sha256": "5890a1f506b7b178349372662dd020f4cbf37cab0b8ec5a4633eea4e9ddedad3",
+   "dependency_edges": {
+    "sequence/completion": 22
+   },
+   "distinct_hashes": 1642,
+   "graph_digest_agentic": "2ebbac2e77fce8128514a69310eefadb79714b1d158e4af3095e733b18a9f038",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "2ebbac2e77fce8128514a69310eefadb79714b1d158e4af3095e733b18a9f038",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "104d38323f28d7f740f119fbb89b183814eb43d38f2904220055253faedfdd0d",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 23
+   },
+   "namespace": "weka:be20eb8a5ecafb68",
+   "raw_sha256": "104cd6efc0ce82ad0546e788216b72fb50a8c7202341d751ecbd24d4dfb27c0f",
+   "roots": 1,
+   "rows": 23,
+   "sessions": 1,
+   "span_ms": 1133700.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "218e45aebba11a74116bdc1bc8e471a4e1cd5d0225f628aae8382aaa4582afa3",
+   "zero_outputs": 0
+  },
+  "0098-3e8b931fd474375ea08ae58872aea7a8e0f5.json": {
+   "base_sha256": "78a005dceac3c11320f4cf3ed7a3e01a3fa62f05a163c9c46fa2b183e50f9031",
+   "dependency_edges": {
+    "join/completion": 19,
+    "replay_barrier/completion": 41,
+    "sequence/completion": 19,
+    "spawn/completion": 1,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 3459,
+   "graph_digest_agentic": "db3466e7382a4f8fd5c601d625968a2f02d17eb9ae5b5d819fc5c230688391a3",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "db3466e7382a4f8fd5c601d625968a2f02d17eb9ae5b5d819fc5c230688391a3",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "951535accdf8f1c80090f9f0643af8577c1213dbc560dbc8444a0ffe0ca75ef7",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 39
+   },
+   "namespace": "weka:01e91a3cd6f56879",
+   "raw_sha256": "14557099806852d2a0b6de8a50c5a11bc5a641456b1489fb5ee4473e8399e241",
+   "roots": 1,
+   "rows": 39,
+   "sessions": 20,
+   "span_ms": 2375552.0,
+   "split": "train",
+   "subagent_sessions": 19,
+   "weka_sha256": "8005a73b7095b1235bb8de48357c17f09650765daed21f1b1ea3ab3cbb3c267b",
+   "zero_outputs": 0
+  },
+  "0103-457a7bf22f9e6961870d5b356ab2bd780fff.json": {
+   "base_sha256": "7c6ae073ce76ae3bed79eb6472106a2fc2a7f7aa0835530d4ff3c305e9db2e3c",
+   "dependency_edges": {
+    "sequence/completion": 22
+   },
+   "distinct_hashes": 1729,
+   "graph_digest_agentic": "d3d9a20c4ca075cbe497948f989b3b0b523a102cfb58dfe6786174ec66ad9316",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "d3d9a20c4ca075cbe497948f989b3b0b523a102cfb58dfe6786174ec66ad9316",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "6e7e3a446880469d666aaef8033ef958dd7797d102dbcfd0c94e261de1acc6c0",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 23
+   },
+   "namespace": "weka:53642356d9355f6f",
+   "raw_sha256": "f79bf57c09c37acd329bfd1cd19e3d043b106330431a56e41ad3b43e434d90ee",
+   "roots": 1,
+   "rows": 23,
+   "sessions": 1,
+   "span_ms": 5233460.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "20bd7a7a459033b27fddb20096be0885183645e2c034b3123b1d1880a1e6d307",
+   "zero_outputs": 0
+  },
+  "0106-46c7f09048fc482e94f4552b0a99a4ca5e30.json": {
+   "base_sha256": "96a1d504bd7a78e3be3a6bca6583ee0b0a5cad6074d4819eba0187cb0743b958",
+   "dependency_edges": {
+    "sequence/completion": 24
+   },
+   "distinct_hashes": 1642,
+   "graph_digest_agentic": "928015cc3ba1806d867fae23980c798b414e2e741a0413efb5e571e50cbb9152",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "928015cc3ba1806d867fae23980c798b414e2e741a0413efb5e571e50cbb9152",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "cb4224c8fa7d001d3b64fa61f520d47551bd884cd97ff430f3e3e08703001c35",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 25
+   },
+   "namespace": "weka:122b0c23f66e8be3",
+   "raw_sha256": "f3166a57acdb86bdb89e856b63bdaf3a275857dc7765a0ef105080737086063b",
+   "roots": 1,
+   "rows": 25,
+   "sessions": 1,
+   "span_ms": 1236668.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "7fc59f83e2187bc780afe48a2cbe73f1b6d044a3dca0ed3e08be7fe847aba524",
+   "zero_outputs": 0
+  },
+  "0109-47a89e30bcdf1bc8002a026ad7ebfc914766.json": {
+   "base_sha256": "33d827d684cdeff8da0a90c73b25fff3ecd9046407fd231f97363db1e2b421eb",
+   "dependency_edges": {
+    "sequence/completion": 19
+   },
+   "distinct_hashes": 1287,
+   "graph_digest_agentic": "c7c3ab3c5a683d64756edd3d18ca16209568fb1119cd241226935c405a332383",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "c7c3ab3c5a683d64756edd3d18ca16209568fb1119cd241226935c405a332383",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "76f20edd86c469a4e5f49327bd97be741dbe571d3a9a9718aea7db3376723b57",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 20
+   },
+   "namespace": "weka:29103c4822f9853a",
+   "raw_sha256": "5b8d5a1fc4733c9c0485a63175606998a5608b979b163f1f894b7a310512f112",
+   "roots": 1,
+   "rows": 20,
+   "sessions": 1,
+   "span_ms": 1190360.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "a4cff05f4f74f2838dff2d4d6d2f64d6f7b8ee18d33951dc9a15c8f18e317d9d",
+   "zero_outputs": 0
+  },
+  "0127-526f242b0f14fa34da24eb7346123c5025cd.json": {
+   "base_sha256": "362d41226b7850fb662f0956f107652047001c60f2c743b17186c89b637a115e",
+   "dependency_edges": {
+    "replay_barrier/completion": 8,
+    "sequence/completion": 37,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 1569,
+   "graph_digest_agentic": "59248e67588afda8dd017ee035046cd94bb341bc3531ec791bb9701b1303dbd9",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "59248e67588afda8dd017ee035046cd94bb341bc3531ec791bb9701b1303dbd9",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "633cf2b8009f5d78976894b2f6762762b46050de49e4c52df31526efc97e5e21",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 39
+   },
+   "namespace": "weka:e6c0e6a53a4af40e",
+   "raw_sha256": "24831a5e760d69cc62cca1ba8219879bb186eeda1b8a1a816ac3f77042ac591f",
+   "roots": 1,
+   "rows": 39,
+   "sessions": 2,
+   "span_ms": 3067556.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "88e8d03a4389b7c89017ead8df957d7d52a6f8b20f790a16eee6d646878680c5",
+   "zero_outputs": 0
+  },
+  "0128-528995cdde1ebf15ccf0b79aec42dba31ce2.json": {
+   "base_sha256": "7e9d14c6f05a55c23e5242bf7595e6d27d35ade814625ab5e81f559dda7c2ee2",
+   "dependency_edges": {
+    "replay_barrier/completion": 20,
+    "sequence/completion": 22,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 701,
+   "graph_digest_agentic": "320b3f9b235cfb1d1675eec9155d2ebaf7efcde6bc72078fe2d2fb5ea93b8b3b",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "320b3f9b235cfb1d1675eec9155d2ebaf7efcde6bc72078fe2d2fb5ea93b8b3b",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "9d6231bf6ca3833e17bda6a550282c53812da1bef4e5cf2cfeeaf3ad6e9aa29a",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 24
+   },
+   "namespace": "weka:018087e05911b4d3",
+   "raw_sha256": "9737967b587e5246431a99632dbaadfa65218661d3a867d41054cdce618912df",
+   "roots": 1,
+   "rows": 24,
+   "sessions": 2,
+   "span_ms": 6243888.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "095589dd53e1320955ebee2f67fa6db96e60cb3a4a0e286ddd93cac8b1ea4620",
+   "zero_outputs": 0
+  },
+  "0133-557810b129b9cb3e7402235470567c4e4dc0.json": {
+   "base_sha256": "63f3a5f89bf138997aba8bd298e86aa3edfb4911e5ddfc80d71e2667b39655ad",
+   "dependency_edges": {
+    "sequence/completion": 19
+   },
+   "distinct_hashes": 1802,
+   "graph_digest_agentic": "db4fc633fc35ae3a3aa18dda8379b73d722404e210a5184953946b48408196d6",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "db4fc633fc35ae3a3aa18dda8379b73d722404e210a5184953946b48408196d6",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "6d5a04401b461a623650fc428848b43359a358193f9ee1e1df8dbb37fff3a83b",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 20
+   },
+   "namespace": "weka:0abe7b389c1d9230",
+   "raw_sha256": "834cf546b1dc1873c7834efc17f722f756fd544609db9d746541aad8325cfe76",
+   "roots": 1,
+   "rows": 20,
+   "sessions": 1,
+   "span_ms": 1854052.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "3fce6d28e8cda9e31c1777e3682d2b4a14a74f2afaccaa5464e30f5cc0fc4313",
+   "zero_outputs": 0
+  },
+  "0134-557f96e1c557baa7724b7bdfd13c48cce434.json": {
+   "base_sha256": "4b60729abb9dc077355b9b4e902017c9d7a49e6768589d3d6347a1208f47b892",
+   "dependency_edges": {
+    "replay_barrier/completion": 58,
+    "sequence/completion": 27
+   },
+   "distinct_hashes": 1971,
+   "graph_digest_agentic": "4afcaba8b027fab828d024b3549794243e8d082c1c9d3bd463e7e1759611f0d0",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "4afcaba8b027fab828d024b3549794243e8d082c1c9d3bd463e7e1759611f0d0",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "04143c37a46a988fbeb9b18362f40793bdeda404f07e914ebbd795fb3aede31d",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 39
+   },
+   "namespace": "weka:80a0e2386b80790d",
+   "raw_sha256": "537bc7c8ec1be42380dfddf5c761c27c80b68e718860ab0654ea6d632b078da0",
+   "roots": 1,
+   "rows": 39,
+   "sessions": 12,
+   "span_ms": 14935904.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "89a1d9c39b3bac1d6a03f7a328fb0c749fd0b6347d6005d276b3caea27b8a24d",
+   "zero_outputs": 0
+  },
+  "0142-5c5e408b76e5e22747853915f67be3c491a4.json": {
+   "base_sha256": "d9cd76527e23615016d1ca0f69705a3d265156b2aa43e0ed026ff627ecf058b8",
+   "dependency_edges": {
+    "sequence/completion": 23
+   },
+   "distinct_hashes": 1457,
+   "graph_digest_agentic": "cd36f81a6592bc09210b413544550d9accfd54184d477521001ee8eef30f2422",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "cd36f81a6592bc09210b413544550d9accfd54184d477521001ee8eef30f2422",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "069ec66f5701e3a8d218b0a6bd51405445900da020a713d04dc664cbd6eca02f",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 24
+   },
+   "namespace": "weka:b853b54800492c35",
+   "raw_sha256": "4aaddde2e7710b8b5d4ca91a1ebc15561f0cb1b321683a0464ad5ad173e5c9bf",
+   "roots": 1,
+   "rows": 24,
+   "sessions": 1,
+   "span_ms": 854576.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "d224b78d14b2ec885288f20dcad98539b9d124d032dbb18e5b3ad046c19879bd",
+   "zero_outputs": 0
+  },
+  "0156-62378a8a0d0bdde1ebd85f5dd60a43cd8110.json": {
+   "base_sha256": "438c271fe6207e8eca349670b9159935bb1f3a77babacbe2fc54ba2045af5ad1",
+   "dependency_edges": {
+    "sequence/completion": 60
+   },
+   "distinct_hashes": 1711,
+   "graph_digest_agentic": "9ab5a7acfe2c7321598d6340c51e777becc98e715bd464e0edeb847991269245",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "9ab5a7acfe2c7321598d6340c51e777becc98e715bd464e0edeb847991269245",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "5b33e08bbc7c73f75ceaa303a1196287c16a9caeb3a7aad6fec245c0d2913be5",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 61
+   },
+   "namespace": "weka:b4b627b04111ad29",
+   "raw_sha256": "d324aecd80f1ec59b5c6c23ddbd68bd4179a143b1d0c968d8062cc80b399b40f",
+   "roots": 1,
+   "rows": 61,
+   "sessions": 1,
+   "span_ms": 6771908.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "649642f8681f52a2385e45ab4a7810dde4a4693a10947ea2eb0a6731bdf24912",
+   "zero_outputs": 0
+  },
+  "0170-6a66ece7b14e61912eb266be794a6bf62faf.json": {
+   "base_sha256": "ab20b4c1a853b8c301e91fc8665360adba1563c81e16270291cd9a014fd87f9a",
+   "dependency_edges": {
+    "join/completion": 3,
+    "replay_barrier/completion": 17,
+    "sequence/completion": 56,
+    "spawn/completion": 1,
+    "spawn/dispatch": 2
+   },
+   "distinct_hashes": 3484,
+   "graph_digest_agentic": "32e5804863838907d23cf7722b5e03f51601015574d41027e6896a37c66d2da1",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "32e5804863838907d23cf7722b5e03f51601015574d41027e6896a37c66d2da1",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "957b0b9c80931ff21eb1dacd819f88cc4a7be1af4eb049e57027558431c46eaa",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 61
+   },
+   "namespace": "weka:0359f2b92fcde438",
+   "raw_sha256": "cc706710c4be7177e07cd4a4842bd4f6def2e0d7da1955870a9d35f10c389d11",
+   "roots": 1,
+   "rows": 61,
+   "sessions": 5,
+   "span_ms": 8193544.0,
+   "split": "val",
+   "subagent_sessions": 3,
+   "weka_sha256": "4ecac19c3ac45c97f3702b7da18c2ac42588492602470dc37f53bdabfdc35270",
+   "zero_outputs": 0
+  },
+  "0173-6d5c6b957d5f634a7f820ddff7389e161def.json": {
+   "base_sha256": "2ca0e3ffe7be186f2e7bd3c7146aba873162ffb73147c6d8fc0f177336e41ea8",
+   "dependency_edges": {
+    "sequence/completion": 35
+   },
+   "distinct_hashes": 1542,
+   "graph_digest_agentic": "6f7dd200930ac58c0fd554c143bdb9e768a074048721cc5ed807bb4773230790",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "6f7dd200930ac58c0fd554c143bdb9e768a074048721cc5ed807bb4773230790",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "275069ac75cd4cc2ace633bf91c3b53a450b8689f976fc868004019cfbdc30fe",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 36
+   },
+   "namespace": "weka:b839adf6a97da1f7",
+   "raw_sha256": "a11ed8fc17f189f5551b3a433329bf2a3aecd777fe6096edc00616019dc6ab40",
+   "roots": 1,
+   "rows": 36,
+   "sessions": 1,
+   "span_ms": 13190720.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "a779f6d64a7b7353a36f483d1ce9190e659c07b4be8f8cd984985a837b61c055",
+   "zero_outputs": 0
+  },
+  "0185-751fbb2089c7c4303f3ed241f3a7a27a3f2c.json": {
+   "base_sha256": "c637c4d5db9f8d35ffd90f8345cf8299085b1e7bcf67dc11524fa97b6bcdb9ec",
+   "dependency_edges": {
+    "replay_barrier/completion": 36,
+    "sequence/completion": 18
+   },
+   "distinct_hashes": 1622,
+   "graph_digest_agentic": "f81aed8d2ef62de1876f14cd00b0f5911866bd5f1f9d302509f359d46332ba6f",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "f81aed8d2ef62de1876f14cd00b0f5911866bd5f1f9d302509f359d46332ba6f",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "b5f5819d4c82d4e01848341f371f3ff6630b205c586df45d054a2bbbb577620a",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 28
+   },
+   "namespace": "weka:8947186795e3f299",
+   "raw_sha256": "52d32f34156d3d83779b33813b09677691b5593457a26f4ae01eae627a742635",
+   "roots": 1,
+   "rows": 28,
+   "sessions": 10,
+   "span_ms": 8384128.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "f66daf386da0c68a3348fc74806c088a400b3ca175c9a6be65b07af320f79072",
+   "zero_outputs": 0
+  },
+  "0187-768086c44de172b3719b40f29aec56303892.json": {
+   "base_sha256": "0023050c7f828c618da027d196d82fa4bf8f9739576fba273dc69f212a05e2ec",
+   "dependency_edges": {
+    "replay_barrier/completion": 76,
+    "sequence/completion": 20
+   },
+   "distinct_hashes": 1618,
+   "graph_digest_agentic": "5687b0854c195e85ea1af5deef6ea53d395c3fbf14c82ac18014c58d691e09b5",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "5687b0854c195e85ea1af5deef6ea53d395c3fbf14c82ac18014c58d691e09b5",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "eb8d7f00cf09912899f479c86a9e889b14c8fede014683e7fd99074ebb8dfb90",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 25
+   },
+   "namespace": "weka:4c8f469c08dcdb7a",
+   "raw_sha256": "a080f2ca5878a5b79937587388c61f12ad08f8b9408179724aa567215650e254",
+   "roots": 1,
+   "rows": 25,
+   "sessions": 5,
+   "span_ms": 17919524.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "23264bc9c66549f9be8a8201136f644e904346f538d88015f69c305cb3aaf336",
+   "zero_outputs": 0
+  },
+  "0189-77cfef0760bda37fb6f8829cebd9a7871aa5.json": {
+   "base_sha256": "13e525c877fc076ecae55c7f2f2653b8e6f2c5df175e3dfc4d0b900eef3af6f2",
+   "dependency_edges": {
+    "replay_barrier/completion": 33,
+    "sequence/completion": 67,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 3201,
+   "graph_digest_agentic": "6be54760d471d070597eeb04f06d33a79eb3e03469c5998d8354436290418d1f",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "6be54760d471d070597eeb04f06d33a79eb3e03469c5998d8354436290418d1f",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "2c68238036ae125c4e053d9951f7a26b09897363e8eff5b4cbcd028e94d83312",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 70
+   },
+   "namespace": "weka:4bd67edd20a98267",
+   "raw_sha256": "788c17a66969510a2fb1c37dc78d18c6b5b644e827cbba0f2f12af99251bd672",
+   "roots": 1,
+   "rows": 70,
+   "sessions": 3,
+   "span_ms": 10407560.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "1ce6207d29c58d016b8f5ac628519a4b80ae397c52b3ca2543957d46256b8666",
+   "zero_outputs": 0
+  },
+  "0195-79ea3049f1c4977e9457ffc2feeae309e24b.json": {
+   "base_sha256": "af39ff2e483c2ce1214fb3c71bc5a2f0fe2f95dcef25bc2df3975db34e68f8c0",
+   "dependency_edges": {
+    "sequence/completion": 24
+   },
+   "distinct_hashes": 1406,
+   "graph_digest_agentic": "b3c338aba34f1f65d10c665d5164c2112c893a718fd19993a419740da0a95cb6",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "b3c338aba34f1f65d10c665d5164c2112c893a718fd19993a419740da0a95cb6",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "be87e67c39365b0e85a825fd59772543936249e451dd17e7bdb32e77a8d01a10",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 25
+   },
+   "namespace": "weka:24c04e459c253a13",
+   "raw_sha256": "9795f07363546e6ddbe7c56c9081ce300ad0cafd924f0a9c8b7c8858bbce745e",
+   "roots": 1,
+   "rows": 25,
+   "sessions": 1,
+   "span_ms": 8774428.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "86cb991855693c159ecc578ee7a0744b541df2aaef4843dd8cb74a74d1c1e6f6",
+   "zero_outputs": 0
+  },
+  "0196-7b962f1dde638a046d1ce381c550fd26e664.json": {
+   "base_sha256": "94456fcea418e64a7f01d31e065b1d9d2890bc695a40ec0321ecd31ff1189d59",
+   "dependency_edges": {
+    "sequence/completion": 31
+   },
+   "distinct_hashes": 1316,
+   "graph_digest_agentic": "dbb579b029e2f44e2560256ddf224af79178352a32305b70496552a0eca0fc9d",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "dbb579b029e2f44e2560256ddf224af79178352a32305b70496552a0eca0fc9d",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "a73fa3cecdebfa188dbeb977c265f0b945426a1c2314d70921aa60cc08f0d2b4",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 32
+   },
+   "namespace": "weka:72a1c910bba10916",
+   "raw_sha256": "df1bef11078b2c1e0694d3630748aa7a69a87aa44ad6f87b3ffa5ca1b51a3234",
+   "roots": 1,
+   "rows": 32,
+   "sessions": 1,
+   "span_ms": 9824116.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "ae8ca488a34390d9ca5e7579f54e371e3f2f4e6a072284cf3b9a5e86c24f723c",
+   "zero_outputs": 0
+  },
+  "0200-7e370a371b3de565f62dd133bd9e496947ac.json": {
+   "base_sha256": "bf789589734275ce963143e9101c5f3b42a320ab33973686663f0c0180de34ee",
+   "dependency_edges": {
+    "replay_barrier/completion": 17,
+    "sequence/completion": 23,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 1536,
+   "graph_digest_agentic": "d81b6d48b0d4fac35c441c91a66d080f946cc7c843f4317973fe1adaa5476050",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "d81b6d48b0d4fac35c441c91a66d080f946cc7c843f4317973fe1adaa5476050",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "0ddeebbd5ef2d01a7acd808a7b002df7d2e3e2ec6935f9401372c3b8d16d48a6",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 25
+   },
+   "namespace": "weka:445a04790970f5dc",
+   "raw_sha256": "b7de0b39e60ef63eb26ac8d1cd09b664e603640fa1c5d1ef4b2ebab59f752a06",
+   "roots": 1,
+   "rows": 25,
+   "sessions": 2,
+   "span_ms": 2641852.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "c5be1ad2a3eca867eca5441b67cfd7f3d11e0268c1e14672d4daacb522dabe3e",
+   "zero_outputs": 0
+  },
+  "0201-7e6f3a869f85c4774c84d9ee8b6137a758cc.json": {
+   "base_sha256": "4bbf59ddd8624b8f5d88e81fc53ab1a2e266fca00064ef1ffd6fd7ce8a171d50",
+   "dependency_edges": {
+    "sequence/completion": 20
+   },
+   "distinct_hashes": 1463,
+   "graph_digest_agentic": "7673de1604b462e43eaa683fe961b038af6482842d80f82f70edca61a7083ef1",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "7673de1604b462e43eaa683fe961b038af6482842d80f82f70edca61a7083ef1",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "24e87f0f3749c73eaa886a02a3cb12c495dce1b3a18934e734609f7b43873595",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 21
+   },
+   "namespace": "weka:bef3f49b79548ff0",
+   "raw_sha256": "0395dd5870de429a41099fe92de81c65d3d1e895c794c458fe76d3730bdea132",
+   "roots": 1,
+   "rows": 21,
+   "sessions": 1,
+   "span_ms": 2353516.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "241bb6fffa616ed8c0b67bcd96b84757a5ffbd56be7addecdeacc5101b4aa091",
+   "zero_outputs": 0
+  },
+  "0219-8c099fe8073c296bc1f0d744fe98e3cc96b3.json": {
+   "base_sha256": "48f9efd59671dcb56bd65c5d2e8463cba8d46e0bdc963c2355e1144f6ad1335c",
+   "dependency_edges": {
+    "replay_barrier/completion": 39,
+    "sequence/completion": 35
+   },
+   "distinct_hashes": 2966,
+   "graph_digest_agentic": "820af0cd239aa9fd1620dbc6d67b1b5abf32058ed7dbe7cb937253712be6dca9",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "820af0cd239aa9fd1620dbc6d67b1b5abf32058ed7dbe7cb937253712be6dca9",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "3855c03c504e9cdeb814ba671f8f36985d4d50dd3e89395123573fa8abd9bac2",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 40
+   },
+   "namespace": "weka:069e76bc3b4f6f52",
+   "raw_sha256": "99eb5c590cadf7dc5ecd75e7f74f8cea0ddf6da9ccb0a70f2110be5e2f0aa7bb",
+   "roots": 1,
+   "rows": 40,
+   "sessions": 5,
+   "span_ms": 6685960.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "344e564e6192c8118d5f038b8059c69563fb4bc1d57d0c04cebb1a3d1c3ba175",
+   "zero_outputs": 0
+  },
+  "0222-8e9656e01451be8f2bfcad65595a5d48fd7a.json": {
+   "base_sha256": "53c4b95c4da8ddca7a3ae4e95072032c0213b588105da72bcabeacddc603a217",
+   "dependency_edges": {
+    "replay_barrier/completion": 62,
+    "sequence/completion": 31,
+    "spawn/dispatch": 2
+   },
+   "distinct_hashes": 1466,
+   "graph_digest_agentic": "7652f03caf4bf406995df8dfe0c510efd171205c476afba385a92b0c571d4eae",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "7652f03caf4bf406995df8dfe0c510efd171205c476afba385a92b0c571d4eae",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "c78f626517943b632c33148ce81c09d72ccb852f036af2d1ab55b852c892db12",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 34
+   },
+   "namespace": "weka:267d822f41fbeff2",
+   "raw_sha256": "f91a01052b9b32b660283a1a8790c98e1b56ed9a4f984f2c2169e7f2d2869204",
+   "roots": 1,
+   "rows": 34,
+   "sessions": 3,
+   "span_ms": 2825984.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "75b52656ff95052c57d1b81e4d31c1c149732c700f04103b48c8d565dbfda71a",
+   "zero_outputs": 0
+  },
+  "0223-91237fb5e1b97fcdf9c1e3b2dd60bfdde1c0.json": {
+   "base_sha256": "cc7ad08c61a2cd595dbf9a58eec14a0b60f09dd6ec2e958be91cad0c279c090d",
+   "dependency_edges": {
+    "replay_barrier/completion": 5,
+    "sequence/completion": 23,
+    "spawn/completion": 1
+   },
+   "distinct_hashes": 1180,
+   "graph_digest_agentic": "9f2e1dccafb339e4ffcde227bd5d389c91e6ef68039b1109201a69b9f028567f",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "9f2e1dccafb339e4ffcde227bd5d389c91e6ef68039b1109201a69b9f028567f",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "5e662663860f34b8b828ee1a410cd722c2a36b1041570fd919a175b8c74a5098",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 25
+   },
+   "namespace": "weka:2e914aa5b8212846",
+   "raw_sha256": "06ef5e341a7a3e644a4b1af26ffa9fde8bb7a5c27c3e55c601f6ebd425dc54ec",
+   "roots": 1,
+   "rows": 25,
+   "sessions": 2,
+   "span_ms": 4017040.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "f6c7147768368afaaf2b4b807d40ba80248365887d57edba97e2b40bde7ce3d7",
+   "zero_outputs": 0
+  },
+  "0232-979ae6377c88be0e93531cdb9632795b6a7a.json": {
+   "base_sha256": "6f57dbe30adddf526b5ced13ed1ea9a5a541b4dfa09f78c35c5ed957dd550350",
+   "dependency_edges": {
+    "replay_barrier/completion": 12,
+    "sequence/completion": 27,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 810,
+   "graph_digest_agentic": "2ae4e61def54bb5931dae91f3c3afe9ae1f36f8bd0ee5d86c3878fe8a462034b",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "2ae4e61def54bb5931dae91f3c3afe9ae1f36f8bd0ee5d86c3878fe8a462034b",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "d67614f09d0617f8e6a2daa7941ca6a715a03ea5a82a240b0370255317b828ee",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 29
+   },
+   "namespace": "weka:9cbcde29d4e6461b",
+   "raw_sha256": "c9c57dce9224347a3522afb549ce0074e30fa31184f89c68c097d01e891045f1",
+   "roots": 1,
+   "rows": 29,
+   "sessions": 2,
+   "span_ms": 3905800.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "c22e9549b86d2d200ddcc92a03cae00a84aba8f73f56fb3d7997c3d5e22c723c",
+   "zero_outputs": 0
+  },
+  "0246-9ec047754f4ddd94a59fcd0d85213d5f3b1b.json": {
+   "base_sha256": "9fde41b06e98d384e8bb6a77613ac8f31f4716e013e6b621df81f17ecf49e0c9",
+   "dependency_edges": {
+    "sequence/completion": 20
+   },
+   "distinct_hashes": 1434,
+   "graph_digest_agentic": "3b8589e5d19c2386fb8a8a06e3cec707dd17e87b146aa3438d50998e2a809f05",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "3b8589e5d19c2386fb8a8a06e3cec707dd17e87b146aa3438d50998e2a809f05",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "fe9f5ef60641d340fcc438f8bc1c6e14213ebd0bc959c4f8b26458e28d2ca0f2",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 21
+   },
+   "namespace": "weka:88e499f7c26d19e6",
+   "raw_sha256": "f2ab34f3506b50cedda76616050d8289197fbed7e1c40df10912e2388485dca5",
+   "roots": 1,
+   "rows": 21,
+   "sessions": 1,
+   "span_ms": 1776612.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "964cd29f4658eb98d457a8e11d2c6041ccda9eaae774e32053d708d323f89892",
+   "zero_outputs": 0
+  },
+  "0261-a41ce9f7012a1233c0c29ee8f590305932c3.json": {
+   "base_sha256": "4d5993de380961f625281d117ed219cc6d0df712877f1afe589a70ddaa7c8e18",
+   "dependency_edges": {
+    "replay_barrier/completion": 20,
+    "sequence/completion": 35
+   },
+   "distinct_hashes": 1808,
+   "graph_digest_agentic": "aec5b25f888a58f6b3db056abee7e2eed1225318824611ba9c91072e460aa970",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "aec5b25f888a58f6b3db056abee7e2eed1225318824611ba9c91072e460aa970",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "a859e7c44b48a4f3cf0dbc2eea17c44adab4f7f20ad6b5f5e02fa224cf800225",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 37
+   },
+   "namespace": "weka:f11061f4f363b4a3",
+   "raw_sha256": "beb397ac14058188fcc90d3b69f07ee24cc684f32a4de07f7370e4acaee311c5",
+   "roots": 1,
+   "rows": 37,
+   "sessions": 2,
+   "span_ms": 7014312.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "9f2b4c017b175c2f0fbf92fe06469263c34789450f3e9113eeb4e64e00699ee1",
+   "zero_outputs": 0
+  },
+  "0262-a46aa506e8aef39ef68e80643d583a6e25e2.json": {
+   "base_sha256": "c502e1516073bf577b58be77a891557281238ea53194894bbb194172a0e46342",
+   "dependency_edges": {
+    "replay_barrier/completion": 22,
+    "sequence/completion": 23,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 1803,
+   "graph_digest_agentic": "39cc47135581cf7ce7eb935b006ac2a2d04c2ec01b082a6aa5ff7029e22b790b",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "39cc47135581cf7ce7eb935b006ac2a2d04c2ec01b082a6aa5ff7029e22b790b",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "5136f7d74e28f019042e61bf3cb618a73d3eb7de7494ab1b6dcc4266fa9e8a59",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 25
+   },
+   "namespace": "weka:bb6a1ddfc4ef2097",
+   "raw_sha256": "67dad286b338226f34837dc90d8728e40cd19fddc29b1a83a0ad0d0b8a96438b",
+   "roots": 1,
+   "rows": 25,
+   "sessions": 2,
+   "span_ms": 4360692.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "2eddddd200adcad33d246ab28a8e86ab1e2beac8104322cc3396f0a6b027447e",
+   "zero_outputs": 0
+  },
+  "0270-a89db4725a97da42ea24bd5128a093ffb215.json": {
+   "base_sha256": "f65e95bdf757f360f0b9d31b6ad01afded2617f7f5c27b41374265bd6466e50d",
+   "dependency_edges": {
+    "join/completion": 3,
+    "replay_barrier/completion": 15,
+    "sequence/completion": 107,
+    "spawn/completion": 3
+   },
+   "distinct_hashes": 5400,
+   "graph_digest_agentic": "5d2222229e41f200c8e0f25fc53df6cbf81b76df68dc52ccfebc329f6a04cf37",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "5d2222229e41f200c8e0f25fc53df6cbf81b76df68dc52ccfebc329f6a04cf37",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "02be8685f1c0ec3bb18fd439d0b41dcc8dfd6f2f5ec2f94943a327cc49aa3de6",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 112
+   },
+   "namespace": "weka:c01203f04e7d561d",
+   "raw_sha256": "fea065575e026659e579f9ee14f9b6f0408b5be0637dabbe5c004ea190055379",
+   "roots": 1,
+   "rows": 112,
+   "sessions": 5,
+   "span_ms": 12700788.0,
+   "split": "val",
+   "subagent_sessions": 3,
+   "weka_sha256": "e1f10a7a81dfad7c1e1363e584c0029a55c4da1a4b8eb38d3def0f7e322a8de7",
+   "zero_outputs": 0
+  },
+  "0271-a8cb459ec5ff0572db2bbe7e1640f488d6ed.json": {
+   "base_sha256": "3e70d9e7a915d505fd56e3978b4c11eadae0bbcfea9d043c3fc498295b42a9ae",
+   "dependency_edges": {
+    "replay_barrier/completion": 65,
+    "sequence/completion": 67
+   },
+   "distinct_hashes": 1745,
+   "graph_digest_agentic": "f6e3b73de724ce6c379ae1a03c892a3cdd86d9cab5a6663c3303e35767315f80",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "f6e3b73de724ce6c379ae1a03c892a3cdd86d9cab5a6663c3303e35767315f80",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "54e57bfcbd00d251d8eb1fd18803c74ac62fdaaeee2df69b0b7ae6ee6fa74e7f",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 69
+   },
+   "namespace": "weka:b04394f039980173",
+   "raw_sha256": "9e13352271281a5897837279c02675f4fdaf031f44f2255151f17b7c823f3265",
+   "roots": 1,
+   "rows": 69,
+   "sessions": 2,
+   "span_ms": 14600368.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "6895f27319568bd125083f2261ca2742340bf899a387837af2b0a012122e799d",
+   "zero_outputs": 0
+  },
+  "0272-a8fdbf3a66dd9a5c616d189bf04fc7f60b47.json": {
+   "base_sha256": "7d2e4f1af4dac5635a0c90d2a7ba44a6482bf511dc9a2cc6ec0fd669b45d0485",
+   "dependency_edges": {
+    "join/completion": 1,
+    "sequence/completion": 28,
+    "spawn/completion": 1
+   },
+   "distinct_hashes": 5185,
+   "graph_digest_agentic": "311bec898b83c527fad3bb1c8866854407922ec160b568133a45b24c94ebf7b8",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "311bec898b83c527fad3bb1c8866854407922ec160b568133a45b24c94ebf7b8",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "1104617b1b145efe3409cfaaa83bed15ba6bd47814a3ab1625ec62b52a14061b",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 30
+   },
+   "namespace": "weka:af971158701804e6",
+   "raw_sha256": "601142c1c5b635c60605559b07a2faeb2defb322042514adcd69b71259d5f516",
+   "roots": 1,
+   "rows": 30,
+   "sessions": 2,
+   "span_ms": 4679220.0,
+   "split": "train",
+   "subagent_sessions": 1,
+   "weka_sha256": "9f9692d5738d5ea02bb6bd591aae18401ddb2fd58b4e651fec6f2d7109fb11da",
+   "zero_outputs": 0
+  },
+  "0280-af6b2fe9201b7c425aefcc0bda69fd0ebf23.json": {
+   "base_sha256": "82e29ac9e581b16401f0c45e1f51965553cc9cebc58315a80c4e54c32742ddff",
+   "dependency_edges": {
+    "replay_barrier/completion": 31,
+    "sequence/completion": 40
+   },
+   "distinct_hashes": 2119,
+   "graph_digest_agentic": "bb87eb5e70817a7e0353e544063cb10eae76b88f2255c5c4d9de4b4aa8ed54b8",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "bb87eb5e70817a7e0353e544063cb10eae76b88f2255c5c4d9de4b4aa8ed54b8",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "ec58248ce4227f52734e2d915cd5ce4c8312059d97bd20a90dd917cbb9e3840b",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 42
+   },
+   "namespace": "weka:5d49276493788cd0",
+   "raw_sha256": "db696b3ea33d3c6f924260f2ebdaa3dff7b3865cc45cda90cbe042eec762b292",
+   "roots": 1,
+   "rows": 42,
+   "sessions": 2,
+   "span_ms": 10327544.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "fddbdf7cc5b1f5f2f798b0e9d31a1fe2e22ae5d1ba7f679719882cf570f9aea3",
+   "zero_outputs": 0
+  },
+  "0283-b0cc7a9746be5fbe1c8e7e931c664fc3e03c.json": {
+   "base_sha256": "886a36fded2e2a52b00eaa17f2a619e6002a1a3a0047239884f0a816c167b7b9",
+   "dependency_edges": {
+    "replay_barrier/completion": 15,
+    "sequence/completion": 26,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 1214,
+   "graph_digest_agentic": "c3242a579014f52aea7e002de29bc0b820ebaa70ffe5bcf574c8c5e20bd3515d",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "c3242a579014f52aea7e002de29bc0b820ebaa70ffe5bcf574c8c5e20bd3515d",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "d59a5613209469e2b30b8bdcb296f3570bc62f269e175b88692c5ea1c5e967b9",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 28
+   },
+   "namespace": "weka:2e82755aca456bc1",
+   "raw_sha256": "608dc9e34f68a4cf5b4b5f8abf3c6253d03bced47019a38de8f8c7d53912d24f",
+   "roots": 1,
+   "rows": 28,
+   "sessions": 2,
+   "span_ms": 3433812.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "51694df4ca382a68a0a211ead73f5fd7a6ae5f27b60bb746a7c1ebc1548ae5dc",
+   "zero_outputs": 0
+  },
+  "0293-b699b717b623acb2b6c06db1196258fbb4a7.json": {
+   "base_sha256": "70a559c548e35a4e7e81c008ff8e1cb2f41bc7b4698a64d78f5ad20d6be5bde3",
+   "dependency_edges": {
+    "join/completion": 4,
+    "replay_barrier/completion": 14,
+    "sequence/completion": 68,
+    "spawn/completion": 2,
+    "spawn/dispatch": 2
+   },
+   "distinct_hashes": 5958,
+   "graph_digest_agentic": "709d6458917afdc38631b40539261e4adc1e9dc2bee4d85f53e8aefaff58f79b",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "709d6458917afdc38631b40539261e4adc1e9dc2bee4d85f53e8aefaff58f79b",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "dde46deadbaf27b420c5702095cc202e00b2e03cff7eb022b0db2ce90d093da3",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 76
+   },
+   "namespace": "weka:38f566009efabad4",
+   "raw_sha256": "5dae2a8f89b0f8627aaba013f3e33fc1df556d16179cf9e92e182abac518728d",
+   "roots": 1,
+   "rows": 76,
+   "sessions": 8,
+   "span_ms": 7824924.0,
+   "split": "val",
+   "subagent_sessions": 4,
+   "weka_sha256": "ee9b5f75d8adfeed480475228381b386b26c6be59c21e608590ce46b9a78572a",
+   "zero_outputs": 0
+  },
+  "0299-b9bd3fd87da01ccbe4e3e0fe9edb0ffabb9f.json": {
+   "base_sha256": "df38024c597f57c8d53cb8899feb646c08fb2efb36c373ded3ec9dd63b196a6f",
+   "dependency_edges": {
+    "replay_barrier/completion": 20,
+    "sequence/completion": 30
+   },
+   "distinct_hashes": 1633,
+   "graph_digest_agentic": "f86b536319d8e995fc54c9c9d2dbe3e43d7ef80aa76769f36c4630738b081088",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "f86b536319d8e995fc54c9c9d2dbe3e43d7ef80aa76769f36c4630738b081088",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "c09b69e76e7445f3d8bd1de938aec392e3b2859f44a52d7f3c737a23d75d583c",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 32
+   },
+   "namespace": "weka:bb95a8d6d0c5fe4c",
+   "raw_sha256": "179698d84eafa4ca91d5975d25d7f266f4516af916e921f2304bdd96440e416d",
+   "roots": 1,
+   "rows": 32,
+   "sessions": 2,
+   "span_ms": 6369728.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "09d61e152add88503fe4f2c539bac0d99563c347df82c4296e1fd52f2c621705",
+   "zero_outputs": 0
+  },
+  "0302-badfbde3ccac120284b893a0b16105ffd6e7.json": {
+   "base_sha256": "5f80add6db6c5a4107268c4486eb3c148bfb31d38155a09d430a44704d03c0b3",
+   "dependency_edges": {
+    "sequence/completion": 69
+   },
+   "distinct_hashes": 1459,
+   "graph_digest_agentic": "ed3246d08a3edf5a0b396ba5286ec76aa10ff006ddec6b544b342d44204ef3f3",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "ed3246d08a3edf5a0b396ba5286ec76aa10ff006ddec6b544b342d44204ef3f3",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "a399612407f5764302bee11d748bda7d21b2deac32b535ed4a59ea69f588a1ea",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 70
+   },
+   "namespace": "weka:a68413ad2703cfc7",
+   "raw_sha256": "d647f3f4c2dc49936640ca00145788b40d9cca3cd4c83731e16b7d80e4687cce",
+   "roots": 1,
+   "rows": 70,
+   "sessions": 1,
+   "span_ms": 11542864.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "6af09dce68ea8a545d5706f3d91afaf6f38ee2dd1ffaf2a2145b17abda3fd1bf",
+   "zero_outputs": 0
+  },
+  "0303-bb05502f908fdb0da927ead1002023895bdd.json": {
+   "base_sha256": "6208183ea1175a6c1509f959aebdcc7c918608e053998827a5cb0832f1ea68c2",
+   "dependency_edges": {
+    "replay_barrier/completion": 51,
+    "sequence/completion": 26
+   },
+   "distinct_hashes": 2723,
+   "graph_digest_agentic": "b3cbf0e4a503458bc1ff780ac1519ed3c6ed7970066952199fba9c1fa609d21d",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "b3cbf0e4a503458bc1ff780ac1519ed3c6ed7970066952199fba9c1fa609d21d",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "f4f2e5b22a1f8977eb11b49769aead57f720ee45d1a80136fe3f522eaa7020b5",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 42
+   },
+   "namespace": "weka:7c7828df4b45bd55",
+   "raw_sha256": "71e063fa0974168dee3493900be9e0eefe95e9218ce52ba0b7920684c8115e34",
+   "roots": 1,
+   "rows": 42,
+   "sessions": 16,
+   "span_ms": 14948084.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "dedcf62d5392545e64ce6caff732887fbde13175305f36533b7ca78fdc45a1ca",
+   "zero_outputs": 0
+  },
+  "0306-bbdcb12440a7ab3496b9fac8b5f9824b1672.json": {
+   "base_sha256": "ce45a348e9333f4b0ffa8c24482a2481de6d8eb0dce9b927d56a29c6075ecb20",
+   "dependency_edges": {
+    "sequence/completion": 19,
+    "spawn/completion": 1
+   },
+   "distinct_hashes": 1647,
+   "graph_digest_agentic": "6dadc5f28d1f5a8bd51abd241ca935c245aae682d5b51f315f136b6014ec3a36",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "6dadc5f28d1f5a8bd51abd241ca935c245aae682d5b51f315f136b6014ec3a36",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "1f6ad14b2587de1094434b7b70446e18e26d0a97138614f98845fa47167033d4",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 21
+   },
+   "namespace": "weka:ff1da97b94fd5fef",
+   "raw_sha256": "2b46fc38faf30610e44560aeae37d5bb34a4bdf6bcf0bf1badbd05d809fbbfdd",
+   "roots": 1,
+   "rows": 21,
+   "sessions": 2,
+   "span_ms": 276584.0,
+   "split": "val",
+   "subagent_sessions": 1,
+   "weka_sha256": "5c402fe63a0a8eaeb75eb3c9cf6961165acd6854c407b2a3d3e3df6146b8a301",
+   "zero_outputs": 0
+  },
+  "0314-c4b21b8d9ec3f9eb0b1235d8ff1e33ae4fdc.json": {
+   "base_sha256": "410fad7e8ee2e5fa1c71e07e82c240d684c35220f70c0e5c5dd41ddd789f5012",
+   "dependency_edges": {
+    "sequence/completion": 30
+   },
+   "distinct_hashes": 847,
+   "graph_digest_agentic": "e5ecfb9be3df0b2e0e701a32dd6d43d0e52ae0eb2dbead60a5059b8349c57754",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "e5ecfb9be3df0b2e0e701a32dd6d43d0e52ae0eb2dbead60a5059b8349c57754",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "757be3a4ec748dd967d0cceaa22572bf8ce8c038d16650c60ea2e9267718950a",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 31
+   },
+   "namespace": "weka:cdf87e0a5719a62f",
+   "raw_sha256": "0a800bbd93676281c11f56789de9b0848e0d3d8b8600f959639748a1729282fc",
+   "roots": 1,
+   "rows": 31,
+   "sessions": 1,
+   "span_ms": 7592024.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "cd385025e004cbde530cb5b5a23e35f423ef4c4eadc74906e6406876ffa8a197",
+   "zero_outputs": 0
+  },
+  "0315-c7cdef4e9eb74c966d9e8dfe982319c9806d.json": {
+   "base_sha256": "2c793f00c7a99573d16161510b858bcf2b4de8b37633cd3e4921e072f52d594f",
+   "dependency_edges": {
+    "replay_barrier/completion": 25,
+    "sequence/completion": 16,
+    "spawn/dispatch": 4
+   },
+   "distinct_hashes": 1348,
+   "graph_digest_agentic": "2f22f0f2d82667d7d63b36f57a1e502a8fdaef6299dad35d5a12bf22926a609b",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "2f22f0f2d82667d7d63b36f57a1e502a8fdaef6299dad35d5a12bf22926a609b",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "4d0c9b440770d88d12a45b2b1b0786ffd53b8e62cab58a26691016c0fb50a00e",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 26
+   },
+   "namespace": "weka:ee91f9c49c1fc422",
+   "raw_sha256": "b71c14ca43588b95bdeb8088758845668c95235ad83e4e6b2a6b10021fcdac3c",
+   "roots": 1,
+   "rows": 26,
+   "sessions": 10,
+   "span_ms": 4024776.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "34e432a1e05870bc9427144133eac21fa7cc4970eb3c30ca954c28c4ce25a668",
+   "zero_outputs": 0
+  },
+  "0317-c84315dc1c89737d7a6a58a00ddd86965cb7.json": {
+   "base_sha256": "d41eac0cf56e48bac518442152927ce9b35d7a13ec2514a116479b24e6ba5e64",
+   "dependency_edges": {
+    "replay_barrier/completion": 28,
+    "sequence/completion": 14,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 2691,
+   "graph_digest_agentic": "00499135e1f74a001ec88a28ba9d43b69e9142253facef2bbdadc286be91974d",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "00499135e1f74a001ec88a28ba9d43b69e9142253facef2bbdadc286be91974d",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "5c06e507fec98396449019be42e4db4b16d474a06f6ecdcdd5c9f7bd7f2384f9",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 23
+   },
+   "namespace": "weka:d90def11d988f3a8",
+   "raw_sha256": "15fa1a49c56db174dcc2ccbecca39018f68657c3f0eee44f2f722a6e54978b2f",
+   "roots": 1,
+   "rows": 23,
+   "sessions": 9,
+   "span_ms": 4703316.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "8bcb5428449b39aa05b45fe0125ebd01e0171e95a90c89b95aa3c699879702a3",
+   "zero_outputs": 0
+  },
+  "0324-cd4584af6c7bdfd6acfa82ce4d3dfd4dbcb3.json": {
+   "base_sha256": "22a2e1cca9c5a7a2dbea794a90c6d727a295a2621128b8530254685470f0f224",
+   "dependency_edges": {
+    "replay_barrier/completion": 29,
+    "sequence/completion": 29
+   },
+   "distinct_hashes": 1542,
+   "graph_digest_agentic": "ec4b6e620eb1e235807fabf7c2c2fd4c99468140ab010db9470d933e3d6e9381",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "ec4b6e620eb1e235807fabf7c2c2fd4c99468140ab010db9470d933e3d6e9381",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "65a759e1a43846d2eb6160e14e626e23b8ffd403d9770c5e38e444c3ee805862",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 31
+   },
+   "namespace": "weka:0735d2e330ff7dad",
+   "raw_sha256": "98a4dc022d68799d0f936fe3bba72dbc261d4cb239841c253ca3b8f66d0c7677",
+   "roots": 1,
+   "rows": 31,
+   "sessions": 2,
+   "span_ms": 12108360.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "e2c4d3faaec6a6d1cb25b5c1adb4d870a4fce7c30d7a50023d711fd3ba7d736e",
+   "zero_outputs": 0
+  },
+  "0325-cd85ec9e176c8d3d6aad376464fa591be7de.json": {
+   "base_sha256": "d91f14f1bc076b126cb4e14e6380da8a8394a87a3fc77910421f9236797eb77d",
+   "dependency_edges": {
+    "join/completion": 3,
+    "sequence/completion": 107,
+    "spawn/completion": 2,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 5764,
+   "graph_digest_agentic": "12d816ef4f8ddd95cf1be4fef8592fc8e8b2c505b9321cc61abbca1980fdd592",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "12d816ef4f8ddd95cf1be4fef8592fc8e8b2c505b9321cc61abbca1980fdd592",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "8028b91d0b963c301ce6d616e336246a4db27725de4d389f6bd06481a2eb9268",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 111
+   },
+   "namespace": "weka:78c95f99c4fb8cba",
+   "raw_sha256": "008de4bfe3486b2c70a34b2da14d61c63d5857335eb03f1eccc7dc43a7889d21",
+   "roots": 1,
+   "rows": 111,
+   "sessions": 4,
+   "span_ms": 11353936.0,
+   "split": "test",
+   "subagent_sessions": 3,
+   "weka_sha256": "c598b000bbfcf9c4aaf3b9e36240eca56b0b2e979e2fb16b081d3048578c3a44",
+   "zero_outputs": 0
+  },
+  "0336-d699ceca8ee223fa3521c106c46ccfaf3220.json": {
+   "base_sha256": "e4702e5054996d7a93304517e6a8a698a00a4297b02c418e40590570e9dbacc3",
+   "dependency_edges": {
+    "join/completion": 1,
+    "replay_barrier/completion": 12,
+    "sequence/completion": 35,
+    "spawn/completion": 1
+   },
+   "distinct_hashes": 3236,
+   "graph_digest_agentic": "e603778771f151488e4e985af49b0e9d289b503ad53b57a987a85159d08a38ca",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "e603778771f151488e4e985af49b0e9d289b503ad53b57a987a85159d08a38ca",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "469be4a06ba21040d10bb5618a0c2a39c2f8506f8063f54f459510d17be14581",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 39
+   },
+   "namespace": "weka:d635bd1b97db384c",
+   "raw_sha256": "c8be7bf4a9ca752f158759d91ba1da0f80e86a0b355d5bcfa3f2710a4920da42",
+   "roots": 1,
+   "rows": 39,
+   "sessions": 4,
+   "span_ms": 4203364.0,
+   "split": "val",
+   "subagent_sessions": 1,
+   "weka_sha256": "260a6759e143099ea263f60d2343dd59840151c74746758c1e3b5ce311d2b240",
+   "zero_outputs": 0
+  },
+  "0339-d876a71a07454e7499469e864f89cf6a3345.json": {
+   "base_sha256": "07d73afbc8d503de1032066444f7b5743c32f3c6df2b902007b487d1a16420f0",
+   "dependency_edges": {
+    "join/completion": 1,
+    "replay_barrier/completion": 3,
+    "sequence/completion": 27,
+    "spawn/completion": 1
+   },
+   "distinct_hashes": 2320,
+   "graph_digest_agentic": "149a04931516745a06d415a0cc8627078f9a31b5541f6886052220b5d1e0b0fc",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "149a04931516745a06d415a0cc8627078f9a31b5541f6886052220b5d1e0b0fc",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "b5f91c5ff49af9fa8294f6e0477981a66a9266feb6e161d82ae6ffee35dca3be",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 30
+   },
+   "namespace": "weka:92566cee84c961a1",
+   "raw_sha256": "3bae2217a4a9a646081affa3d9b6d72c03d43a4f4f86f0c511b6e466d8a10ca0",
+   "roots": 1,
+   "rows": 30,
+   "sessions": 3,
+   "span_ms": 1999468.0,
+   "split": "val",
+   "subagent_sessions": 1,
+   "weka_sha256": "9ae82acc738be78909f4c3872d5079afcab4d738316951ee2be7d68b0ab9041c",
+   "zero_outputs": 0
+  },
+  "0343-d92c323a6f1e1bf63d1ae4e5f0b2c8708580.json": {
+   "base_sha256": "577cdff8483db561b015a25e15b013ef9215f61e0b3d91fb7891f78aa0d69b66",
+   "dependency_edges": {
+    "sequence/completion": 39
+   },
+   "distinct_hashes": 1665,
+   "graph_digest_agentic": "3892ca0553cb6fbb4f2b98a1f501f1433cf28858628d7b4dca7c55cfff77e92c",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "3892ca0553cb6fbb4f2b98a1f501f1433cf28858628d7b4dca7c55cfff77e92c",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "f1d281fe09ef0b0a7ebbf8fc179a396f5b1669923f95d9133d24fc17b020632b",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 40
+   },
+   "namespace": "weka:855d4c5ee4b0a039",
+   "raw_sha256": "d537e9503d7ff2dc8c4e4bdf5d9d0b592f7a94af90a5e9ea31a7d9c35a2d28a2",
+   "roots": 1,
+   "rows": 40,
+   "sessions": 1,
+   "span_ms": 5125288.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "02be5c078531ab71e3d528c2878a3891a68ff184b3928b340329fd89e5afbc36",
+   "zero_outputs": 0
+  },
+  "0354-df2638f16306b1a10635bdb8e3acf7de0a61.json": {
+   "base_sha256": "7607fe9927b9d0d6eec75ad9d76df37076c0bf620c7fa590dffd93bc3f4f484c",
+   "dependency_edges": {
+    "replay_barrier/completion": 19,
+    "sequence/completion": 19
+   },
+   "distinct_hashes": 1614,
+   "graph_digest_agentic": "a9d7ad83cfd697774a2b65596d5a57870183f78927eb111c3d1908c36d7ae0dc",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "a9d7ad83cfd697774a2b65596d5a57870183f78927eb111c3d1908c36d7ae0dc",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "652066fc973dd20218830e316f37e02d001f0dbb83acd1f241c93498c868e5b5",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 21
+   },
+   "namespace": "weka:9c9b51f4cea6f726",
+   "raw_sha256": "f1ae31fc629be1ff5469748ba8f1841276b8f4586ed602d6d307d91ceb6186a2",
+   "roots": 1,
+   "rows": 21,
+   "sessions": 2,
+   "span_ms": 2557496.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "14786aeba53c4f0acbe1f0043541fc1352e13db0c7c1588006eb6c5bae8eeedb",
+   "zero_outputs": 0
+  },
+  "0358-e3dbfa26bddbcb04c48a73dab3fa353d45f4.json": {
+   "base_sha256": "ed268b437473b0c150f59193ce9d9ae187bf1323be4983f1acfcffbb0cb0c49f",
+   "dependency_edges": {
+    "replay_barrier/completion": 22,
+    "sequence/completion": 15
+   },
+   "distinct_hashes": 1086,
+   "graph_digest_agentic": "dd083ec9a5ec5c11e5ce513663e939941c398f3ed2a3d5e05cc36eedc8b64854",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "dd083ec9a5ec5c11e5ce513663e939941c398f3ed2a3d5e05cc36eedc8b64854",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "5d04a2adc9fc09ab396a960e4d672108c49be44eda864e7c87405d234f07d86e",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 20
+   },
+   "namespace": "weka:6bf382c007e2c2db",
+   "raw_sha256": "e25379cf342de3105c2054c58eac3b7f6883bd36e0be1d926e91244680ebc368",
+   "roots": 1,
+   "rows": 20,
+   "sessions": 5,
+   "span_ms": 8041324.0,
+   "split": "val",
+   "subagent_sessions": 0,
+   "weka_sha256": "272ddef8eb7bda586150956adc3827777da7ab8c16b6ff2176045ee3a030eeb7",
+   "zero_outputs": 0
+  },
+  "0361-e838158b657825a28d77391211d7edc74e5c.json": {
+   "base_sha256": "e922fd07c440a16462bab2f0e1809023cd8916f2c5c31f8f70c7a42bebfdf80e",
+   "dependency_edges": {
+    "replay_barrier/completion": 9,
+    "sequence/completion": 26,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 1244,
+   "graph_digest_agentic": "c9477adcbfb484b05add41e063a3e104e0bb40de69783a58f9bcef6031baac06",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "c9477adcbfb484b05add41e063a3e104e0bb40de69783a58f9bcef6031baac06",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "ea385fe32da692588e3f8eca8ba8b0be78b613d0d63aa92574f60b971aceb615",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 28
+   },
+   "namespace": "weka:0135c454050938f9",
+   "raw_sha256": "b275275ad42cb8f9577fa439864da82b5e876fcabad87f23613762c514148993",
+   "roots": 1,
+   "rows": 28,
+   "sessions": 2,
+   "span_ms": 1462884.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "f6539cef8a3aa1fc7606294bb2331bd93079fe87aa328b0c8b468b984a797f2c",
+   "zero_outputs": 0
+  },
+  "0368-f1b52711b90ba13f25712d3e223db205eab4.json": {
+   "base_sha256": "7622fa326559ea22bf35caf290ee7e5eea2948061ec542b35f215ab1f7421d52",
+   "dependency_edges": {
+    "sequence/completion": 19
+   },
+   "distinct_hashes": 1778,
+   "graph_digest_agentic": "b7d6607090c6ac61dd1d92f8448d0b95b2e8863795cbb8069f5a1c600ebce104",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "b7d6607090c6ac61dd1d92f8448d0b95b2e8863795cbb8069f5a1c600ebce104",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "62baa66508666a386ccb7e95ff6e424f2d4e5d4d440643139def56d7aed3827c",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 20
+   },
+   "namespace": "weka:2411a3f679365d30",
+   "raw_sha256": "931a10d186b6cdaf497a64aeceda2e8d852a3cf51dd4081a1e624bf04ad64524",
+   "roots": 1,
+   "rows": 20,
+   "sessions": 1,
+   "span_ms": 4610948.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "d0877ef9217f0a82df2945749507d43c6323aa6110f1e267e2ed4d0df6cb1cac",
+   "zero_outputs": 0
+  },
+  "0382-fa21035070fee58da42219bb8dd7657395f9.json": {
+   "base_sha256": "9fdabce079aad5277acedd2a5b7c2dfde6b1f2bbe206c68f09c4aac2c90390e2",
+   "dependency_edges": {
+    "replay_barrier/completion": 13,
+    "sequence/completion": 31,
+    "spawn/dispatch": 1
+   },
+   "distinct_hashes": 1195,
+   "graph_digest_agentic": "0c2ed8eed9c655acff253d6acd27538b5c038910be84e189b2449f0039b9e7f5",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "0c2ed8eed9c655acff253d6acd27538b5c038910be84e189b2449f0039b9e7f5",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "b3c821be1d1b4a90fd82b1079c5b0e70a08ddb1fc1f188bfdfa03833f31e3e63",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 33
+   },
+   "namespace": "weka:b7ab98b124874412",
+   "raw_sha256": "75a4d217d84b7173e75ac5e8c2b99761296fc8597a01ad99c0491cf82af28b75",
+   "roots": 1,
+   "rows": 33,
+   "sessions": 2,
+   "span_ms": 3685680.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "3a5f7f0d82db1c4e914d4259e27f0bc25ba9dd54a369c654023cfc19b2f27acb",
+   "zero_outputs": 0
+  },
+  "0386-fd58552cd561b0fd7d5490415dfe966e2e20.json": {
+   "base_sha256": "c8af41174124f50a1bdd5544ac9f35414102b2865612ebbf98bc11d5f415e767",
+   "dependency_edges": {
+    "sequence/completion": 25
+   },
+   "distinct_hashes": 1699,
+   "graph_digest_agentic": "20cab594a8a500e33abee0d0fb88c19abbb5f5f6c1348e5733911f1621d542e1",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "20cab594a8a500e33abee0d0fb88c19abbb5f5f6c1348e5733911f1621d542e1",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "d4dea2267503dade28c4595ee5eff69b7a562729eb27a95926d321695dfcfd97",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 26
+   },
+   "namespace": "weka:795a9e03b5ddd1f3",
+   "raw_sha256": "e9d1acbae364f1c8a8c0850b016ece722094615abc55d9ff7750e3b1c27ac47a",
+   "roots": 1,
+   "rows": 26,
+   "sessions": 1,
+   "span_ms": 6137308.0,
+   "split": "train",
+   "subagent_sessions": 0,
+   "weka_sha256": "3a1842a763ea8a5376da7feeac9522f41161870a6b3ee85219f4fd4d54e09c9e",
+   "zero_outputs": 0
+  },
+  "0387-fdc99869ba95eb9d1af2aeaefe9ac2c86d5e.json": {
+   "base_sha256": "63b6bf99688c74f6ed19f993f1ccf9293bbb3b24e4d9b0e7a0ae9b625beba5bb",
+   "dependency_edges": {
+    "replay_barrier/completion": 19,
+    "sequence/completion": 38
+   },
+   "distinct_hashes": 1459,
+   "graph_digest_agentic": "51781aa59331a96c92ea45d82d7c111e2c2c17516cde3d195dc21a810685964a",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "51781aa59331a96c92ea45d82d7c111e2c2c17516cde3d195dc21a810685964a",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "2ffa7ad3755364625eb5da7097117852ae375c1aa41e8ce7f0648cf70ee66a03",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "not_applicable",
+    "raw_zero_outputs": 0,
+    "requests": 40
+   },
+   "namespace": "weka:afd15e56a8783c83",
+   "raw_sha256": "b8c213830b10230ad3d4ded37e674e4642d007b0ede68ee51e90107ec39c4fd3",
+   "roots": 1,
+   "rows": 40,
+   "sessions": 2,
+   "span_ms": 12223148.0,
+   "split": "test",
+   "subagent_sessions": 0,
+   "weka_sha256": "db03ec104bd0893d6a9dcee66e94e5c01c8b315edc9c94121628d493dcdaeda7",
+   "zero_outputs": 0
+  },
+  "0390-fe1121fb09adada530be4b8c8568a7ee6758.json": {
+   "base_sha256": "554fb1a9a6b5ea62a97ea17cebf44cbb00457cbccafba9e48bd61a8e4ae6b407",
+   "dependency_edges": {
+    "join/completion": 5,
+    "replay_barrier/completion": 13,
+    "sequence/completion": 34,
+    "spawn/completion": 2,
+    "spawn/dispatch": 3
+   },
+   "distinct_hashes": 9088,
+   "graph_digest_agentic": "910f99cead53e024a69aa08f5ac0f037f5b194e95145cc3b206214fd1976cd89",
+   "graph_digest_equal": true,
+   "graph_digest_weka": "910f99cead53e024a69aa08f5ac0f037f5b194e95145cc3b206214fd1976cd89",
+   "header": {
+    "block_size": 64,
+    "hash_id_scope": "local",
+    "schema": "dynamo.agentic_mooncake",
+    "source": {
+     "digest": "7dba4830b1f849d9d0016fb14c0840f5ed4a4554f841488b07716bffc370ac4a",
+     "format": "weka"
+    },
+    "version": 2
+   },
+   "importer": {
+    "nested_timestamp_basis": "absolute",
+    "raw_zero_outputs": 0,
+    "requests": 42
+   },
+   "namespace": "weka:93f1fad4ba3ed513",
+   "raw_sha256": "7effb3d5f405a03c1bcd5910f036b81907f685e754ec3170b101258cf2379b88",
+   "roots": 1,
+   "rows": 42,
+   "sessions": 8,
+   "span_ms": 4326412.0,
+   "split": "test",
+   "subagent_sessions": 5,
+   "weka_sha256": "0605dbab3c0ee4ed0e3809939df60d70d6fb85e86d97893086633e09fbdc0866",
+   "zero_outputs": 0
+  }
+ },
+ "schema": "learned-routing.agentx-lowered-base.v1",
+ "think_cap_s": 300.0,
+ "think_mult": 4.0,
+ "version": "lr-agentx-lowered-v1",
+ "weka_dir": "<campaign-root>/traces/agentx_lowered/weka_cap300_think4"
+}

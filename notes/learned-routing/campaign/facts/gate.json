@@ -1,0 +1,1106 @@
+{
+ "schema": "learned-routing.gate.v1",
+ "stage": "gate judge (end of phase 3)",
+ "written": "2026-10-03 05:24:03 PDT",
+ "decision": "escalate",
+ "rule": "CONTRACT pilot gate as amended by A1 (CRN replicates, paired ratios, segment SE), A9 (CPU-cluster lane) and A10: (1) < 2% of replays error; (2) projected full-run cost feasible (CPU-cluster allowed); (3) some policy differs from default@defaults beyond noise on validation: some val cell |mean_k r - 1| > 3 x pooled sd AND |mean segment delta| > 2 x SE over >= 3 independent segments; LR-09: also per load mode.",
+ "method": "Independent recomputation from raw record files only (runs/gate/scripts/recompute_gate.py, stdlib, no learned_routing import, no summary files read): error scan of every pilot record file + lr-train histories + logs; criterion 3 from the 1,008 val records (14 cells x k3-10 x 9 policies), with CRN pairing checks, the window-goodput identity, and an own per-request re-score of every open-loop val record against the cached E0 table; selection hygiene; cost inputs from fullgen and lr-train histories; own projection (runs/gate/scripts/projection.py).",
+ "criteria": {
+  "1_error_rate": {
+   "pass": true,
+   "records_scanned": 66925,
+   "records_flagged_fresh": 56872,
+   "unique_cache_keys": 55970,
+   "errors": 0,
+   "unique_keys_never_succeeded": 0,
+   "rate": 0.0,
+   "lr_train_candidate_failures": 0,
+   "lr_train_runs": {
+    "m0-s1": {
+     "fevals": 480,
+     "phase": "done"
+    },
+    "m0-s2": {
+     "fevals": 480,
+     "phase": "done"
+    },
+    "m1-s1": {
+     "fevals": 480,
+     "phase": "done"
+    },
+    "m1-s2": {
+     "fevals": 480,
+     "phase": "done"
+    }
+   },
+   "log_files_with_traceback": 0,
+   "a24_native_check_violations": 0,
+   "missing_rows_records": 0,
+   "other_build_or_harness_records": 0,
+   "pilot_claim": "0 / 56,552 fresh (my count 0 / 56,872 includes two derivative files, selected_s1.valonly and warmcheck k3to10_unpaired, whose records are copies flagged cached false)"
+  },
+  "2_cost": {
+   "pass": true,
+   "basis": "16.95 M local-equivalent replay-s for all tiers (PROJECTION); 248 h workstation only, 39.4 h on the 5 measured CPU cluster nodes + workstation; every single run fits one node (3.5 h epyc9654p, 5.5 h epyc7702p) and is resumable across the weekly maintenance window. Agrees with the pilot's 16.8 M / 40 h.",
+   "measured_inputs": {
+    "E_full_replay_s_per_candidate_eval": 700.895219796193,
+    "E_sub_replay_s_per_candidate_eval": 204.19322135318998,
+    "val_pass_replay_s_per_policy_per_replicate": 193.66740879099234,
+    "train_reference_pass_replay_s": 364.7,
+    "test_pass_replay_s_per_policy_per_replicate_estimate": 1385.1,
+    "rate_workstation_fullgen": 18.96137077378403,
+    "rate_workstation_step4_lower_bound": 16.7,
+    "rate_lr_train_epyc9654p_effective": 25.820233243079784,
+    "rate_lr_train_epyc7702p_effective": 16.327792361328115
+   },
+   "fullgen_check": {
+    "fullgen_records": 1088,
+    "fullgen_candidates": 16,
+    "fullgen_replay_s_total": 11214.323516739089,
+    "fullgen_lr_eval_wall_s": 591.43,
+    "max_single_replay_s": 81.26333487500233
+   }
+  },
+  "3_differs_beyond_noise": {
+   "pass": true,
+   "per_mode_pass": {
+    "agentic_lanes": true,
+    "closed_concurrency": true,
+    "open_speedup": true
+   },
+   "policies_passing_per_mode": {
+    "agentic_lanes": [
+     "llm-d-precise-prefix@defaults",
+     "lmetric@defaults",
+     "m0-s1@sel-g25",
+     "m0-s2@sel-g25",
+     "m1-s1@sel-g25",
+     "m1-s2@sel-g30",
+     "ramjet@defaults",
+     "round_robin"
+    ],
+    "closed_concurrency": [
+     "llm-d-precise-prefix@defaults",
+     "lmetric@defaults",
+     "m0-s1@sel-g25",
+     "m0-s2@sel-g25",
+     "m1-s1@sel-g25",
+     "m1-s2@sel-g30",
+     "ramjet@defaults",
+     "round_robin"
+    ],
+    "open_speedup": [
+     "llm-d-precise-prefix@defaults",
+     "lmetric@defaults",
+     "m0-s1@sel-g25",
+     "m0-s2@sel-g25",
+     "m1-s1@sel-g25",
+     "m1-s2@sel-g30",
+     "ramjet@defaults",
+     "round_robin"
+    ]
+   },
+   "val_integrity": {
+    "cell_k_groups": 112,
+    "crn_violations": 0,
+    "records": 1008,
+    "window_identity_ok": 1008
+   },
+   "own_per_request_rescore_open_loop": {
+    "match": 432,
+    "missing_e0_rows": 0,
+    "records": 432
+   },
+   "vs_default": {
+    "llm-d-precise-prefix@defaults": {
+     "mean_clipped_log_ratio": 0.13495097115032578,
+     "mean_ratio": 1.1525198591995935,
+     "cells_better": 14,
+     "pooled_sd": 0.02676730684284515,
+     "max_abs_cell_delta": 0.5863467858032676,
+     "cells_beyond_3sd": 10,
+     "segments": 6,
+     "mean_segment_delta": 0.13475858316745631,
+     "segment_se": 0.033793527542412306,
+     "cell_clause": true,
+     "segment_clause": true,
+     "differs_beyond_noise": true,
+     "segment_clause_survives_leave_one_segment_out": true,
+     "differs_by_mode": {
+      "agentic_lanes": true,
+      "closed_concurrency": true,
+      "open_speedup": true
+     },
+     "by_mode": {
+      "agentic_lanes": {
+       "cells": 4,
+       "pooled_sd": 0.016144930864546773,
+       "cells_beyond_3sd": 3,
+       "segments": 3,
+       "mean_segment_delta": 0.07060751995006036,
+       "segment_se": 0.012103194467819753,
+       "differs": true
+      },
+      "closed_concurrency": {
+       "cells": 4,
+       "pooled_sd": 0.014760086974394206,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.18740024683505904,
+       "segment_se": 0.04859487683362083,
+       "differs": true
+      },
+      "open_speedup": {
+       "cells": 6,
+       "pooled_sd": 0.03678035294876791,
+       "cells_beyond_3sd": 2,
+       "segments": 3,
+       "mean_segment_delta": 0.1889064234177247,
+       "segment_se": 0.07383739406687029,
+       "differs": true
+      }
+     }
+    },
+    "lmetric@defaults": {
+     "mean_clipped_log_ratio": 0.13273283349722234,
+     "mean_ratio": 1.150202661632278,
+     "cells_better": 14,
+     "pooled_sd": 0.026638379492313045,
+     "max_abs_cell_delta": 0.5871612879002956,
+     "cells_beyond_3sd": 9,
+     "segments": 6,
+     "mean_segment_delta": 0.1323513481752935,
+     "segment_se": 0.03591261549740913,
+     "cell_clause": true,
+     "segment_clause": true,
+     "differs_beyond_noise": true,
+     "segment_clause_survives_leave_one_segment_out": true,
+     "differs_by_mode": {
+      "agentic_lanes": true,
+      "closed_concurrency": true,
+      "open_speedup": true
+     },
+     "by_mode": {
+      "agentic_lanes": {
+       "cells": 4,
+       "pooled_sd": 0.01718294737681626,
+       "cells_beyond_3sd": 3,
+       "segments": 3,
+       "mean_segment_delta": 0.06422838750007724,
+       "segment_se": 0.0069283543899063636,
+       "differs": true
+      },
+      "closed_concurrency": {
+       "cells": 4,
+       "pooled_sd": 0.01540670769291962,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.19392007610352766,
+       "segment_se": 0.05444864276234224,
+       "differs": true
+      },
+      "open_speedup": {
+       "cells": 6,
+       "pooled_sd": 0.036064674261925514,
+       "cells_beyond_3sd": 2,
+       "segments": 3,
+       "mean_segment_delta": 0.18656137202723036,
+       "segment_se": 0.07520628434841974,
+       "differs": true
+      }
+     }
+    },
+    "m0-s1@sel-g25": {
+     "mean_clipped_log_ratio": 0.12782796628755966,
+     "mean_ratio": 1.144266389525028,
+     "cells_better": 14,
+     "pooled_sd": 0.02544846716474852,
+     "max_abs_cell_delta": 0.5850942226461795,
+     "cells_beyond_3sd": 9,
+     "segments": 6,
+     "mean_segment_delta": 0.12108441252112616,
+     "segment_se": 0.037332157867670114,
+     "cell_clause": true,
+     "segment_clause": true,
+     "differs_beyond_noise": true,
+     "segment_clause_survives_leave_one_segment_out": true,
+     "differs_by_mode": {
+      "agentic_lanes": true,
+      "closed_concurrency": true,
+      "open_speedup": true
+     },
+     "by_mode": {
+      "agentic_lanes": {
+       "cells": 4,
+       "pooled_sd": 0.014896173635772848,
+       "cells_beyond_3sd": 3,
+       "segments": 3,
+       "mean_segment_delta": 0.046696566363330416,
+       "segment_se": 0.009941692650546839,
+       "differs": true
+      },
+      "closed_concurrency": {
+       "cells": 4,
+       "pooled_sd": 0.015070645846033643,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.17705906767921473,
+       "segment_se": 0.044833003819554136,
+       "differs": true
+      },
+      "open_speedup": {
+       "cells": 6,
+       "pooled_sd": 0.03481058582691791,
+       "cells_beyond_3sd": 2,
+       "segments": 3,
+       "mean_segment_delta": 0.19074631324839456,
+       "segment_se": 0.07281088421170255,
+       "differs": true
+      }
+     }
+    },
+    "m0-s2@sel-g25": {
+     "mean_clipped_log_ratio": 0.1288760070647077,
+     "mean_ratio": 1.1451309715999698,
+     "cells_better": 14,
+     "pooled_sd": 0.02670894763136785,
+     "max_abs_cell_delta": 0.5828533154660647,
+     "cells_beyond_3sd": 9,
+     "segments": 6,
+     "mean_segment_delta": 0.1237078480484363,
+     "segment_se": 0.03510176434860587,
+     "cell_clause": true,
+     "segment_clause": true,
+     "differs_beyond_noise": true,
+     "segment_clause_survives_leave_one_segment_out": true,
+     "differs_by_mode": {
+      "agentic_lanes": true,
+      "closed_concurrency": true,
+      "open_speedup": true
+     },
+     "by_mode": {
+      "agentic_lanes": {
+       "cells": 4,
+       "pooled_sd": 0.01641670922523219,
+       "cells_beyond_3sd": 3,
+       "segments": 3,
+       "mean_segment_delta": 0.05504574596860005,
+       "segment_se": 0.013603182633342979,
+       "differs": true
+      },
+      "closed_concurrency": {
+       "cells": 4,
+       "pooled_sd": 0.016349499704638965,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.17156448725633308,
+       "segment_se": 0.04143726404776308,
+       "differs": true
+      },
+      "open_speedup": {
+       "cells": 6,
+       "pooled_sd": 0.036147596601850886,
+       "cells_beyond_3sd": 2,
+       "segments": 3,
+       "mean_segment_delta": 0.1897171959345062,
+       "segment_se": 0.07279194064797807,
+       "differs": true
+      }
+     }
+    },
+    "m1-s1@sel-g25": {
+     "mean_clipped_log_ratio": 0.16219979843684304,
+     "mean_ratio": 1.187114162852298,
+     "cells_better": 13,
+     "pooled_sd": 0.025867607316178005,
+     "max_abs_cell_delta": 0.5853422698182937,
+     "cells_beyond_3sd": 10,
+     "segments": 6,
+     "mean_segment_delta": 0.14183556660510818,
+     "segment_se": 0.04355031932368331,
+     "cell_clause": true,
+     "segment_clause": true,
+     "differs_beyond_noise": true,
+     "segment_clause_survives_leave_one_segment_out": true,
+     "differs_by_mode": {
+      "agentic_lanes": true,
+      "closed_concurrency": true,
+      "open_speedup": true
+     },
+     "by_mode": {
+      "agentic_lanes": {
+       "cells": 4,
+       "pooled_sd": 0.013446991787636064,
+       "cells_beyond_3sd": 3,
+       "segments": 3,
+       "mean_segment_delta": 0.047692752601009934,
+       "segment_se": 0.007162279347606554,
+       "differs": true
+      },
+      "closed_concurrency": {
+       "cells": 4,
+       "pooled_sd": 0.014304375470878617,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.21576124610277628,
+       "segment_se": 0.045867958105070564,
+       "differs": true
+      },
+      "open_speedup": {
+       "cells": 6,
+       "pooled_sd": 0.03611582416961043,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.2321532347997529,
+       "segment_se": 0.06831402492011326,
+       "differs": true
+      }
+     }
+    },
+    "m1-s2@sel-g30": {
+     "mean_clipped_log_ratio": 0.1647295605713491,
+     "mean_ratio": 1.1905152544661295,
+     "cells_better": 13,
+     "pooled_sd": 0.027015888412970392,
+     "max_abs_cell_delta": 0.5868145024607994,
+     "cells_beyond_3sd": 10,
+     "segments": 6,
+     "mean_segment_delta": 0.14664766518780853,
+     "segment_se": 0.043676045999597395,
+     "cell_clause": true,
+     "segment_clause": true,
+     "differs_beyond_noise": true,
+     "segment_clause_survives_leave_one_segment_out": true,
+     "differs_by_mode": {
+      "agentic_lanes": true,
+      "closed_concurrency": true,
+      "open_speedup": true
+     },
+     "by_mode": {
+      "agentic_lanes": {
+       "cells": 4,
+       "pooled_sd": 0.01962646978597629,
+       "cells_beyond_3sd": 2,
+       "segments": 3,
+       "mean_segment_delta": 0.0526335630880421,
+       "segment_se": 0.014580458678240904,
+       "differs": true
+      },
+      "closed_concurrency": {
+       "cells": 4,
+       "pooled_sd": 0.017459027847705196,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.22460501413022652,
+       "segment_se": 0.04656785988093683,
+       "differs": true
+      },
+      "open_speedup": {
+       "cells": 6,
+       "pooled_sd": 0.035256090007736746,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.2334879608708699,
+       "segment_se": 0.06857114432029957,
+       "differs": true
+      }
+     }
+    },
+    "ramjet@defaults": {
+     "mean_clipped_log_ratio": 0.1346921052498483,
+     "mean_ratio": 1.1524615288188031,
+     "cells_better": 14,
+     "pooled_sd": 0.02634463375766349,
+     "max_abs_cell_delta": 0.5824196465977054,
+     "cells_beyond_3sd": 9,
+     "segments": 6,
+     "mean_segment_delta": 0.12236074487482436,
+     "segment_se": 0.038082333481848994,
+     "cell_clause": true,
+     "segment_clause": true,
+     "differs_beyond_noise": true,
+     "segment_clause_survives_leave_one_segment_out": true,
+     "differs_by_mode": {
+      "agentic_lanes": true,
+      "closed_concurrency": true,
+      "open_speedup": true
+     },
+     "by_mode": {
+      "agentic_lanes": {
+       "cells": 4,
+       "pooled_sd": 0.01582183870333622,
+       "cells_beyond_3sd": 3,
+       "segments": 3,
+       "mean_segment_delta": 0.0425920395772745,
+       "segment_se": 0.007792648217406445,
+       "differs": true
+      },
+      "closed_concurrency": {
+       "cells": 4,
+       "pooled_sd": 0.01708979386107157,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": 0.17957784600007387,
+       "segment_se": 0.04113030832585626,
+       "differs": true
+      },
+      "open_speedup": {
+       "cells": 6,
+       "pooled_sd": 0.03546592179563054,
+       "cells_beyond_3sd": 3,
+       "segments": 3,
+       "mean_segment_delta": 0.20053453656418174,
+       "segment_se": 0.06896419699422904,
+       "differs": true
+      }
+     }
+    },
+    "round_robin": {
+     "mean_clipped_log_ratio": -0.5768945702914029,
+     "mean_ratio": 0.5711357842476529,
+     "cells_better": 0,
+     "pooled_sd": 0.026782662293897388,
+     "max_abs_cell_delta": 0.8852845309620717,
+     "cells_beyond_3sd": 14,
+     "segments": 6,
+     "mean_segment_delta": -0.4732747360257627,
+     "segment_se": 0.06597621467875864,
+     "cell_clause": true,
+     "segment_clause": true,
+     "differs_beyond_noise": true,
+     "segment_clause_survives_leave_one_segment_out": true,
+     "differs_by_mode": {
+      "agentic_lanes": true,
+      "closed_concurrency": true,
+      "open_speedup": true
+     },
+     "by_mode": {
+      "agentic_lanes": {
+       "cells": 4,
+       "pooled_sd": 0.019153152067394794,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": -0.44868178105724704,
+       "segment_se": 0.05843202142290122,
+       "differs": true
+      },
+      "closed_concurrency": {
+       "cells": 4,
+       "pooled_sd": 0.019628029987270885,
+       "cells_beyond_3sd": 4,
+       "segments": 3,
+       "mean_segment_delta": -0.358081166562936,
+       "segment_se": 0.1019871322116404,
+       "differs": true
+      },
+      "open_speedup": {
+       "cells": 6,
+       "pooled_sd": 0.034239214390553024,
+       "cells_beyond_3sd": 6,
+       "segments": 3,
+       "mean_segment_delta": -0.5849199375409954,
+       "segment_se": 0.164767400156158,
+       "differs": true
+      }
+     }
+    }
+   }
+  }
+ },
+ "selection_hygiene": {
+  "lr_train": {
+   "m0-s1": {
+    "cells_outside_split": 0,
+    "history_val_ks": [
+     0,
+     1,
+     2
+    ],
+    "repeats_by_split": {
+     "train": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+     ],
+     "val": [
+      0,
+      1,
+      2
+     ]
+    }
+   },
+   "m0-s2": {
+    "cells_outside_split": 0,
+    "history_val_ks": [
+     0,
+     1,
+     2
+    ],
+    "repeats_by_split": {
+     "train": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+     ],
+     "val": [
+      0,
+      1,
+      2
+     ]
+    }
+   },
+   "m1-s1": {
+    "cells_outside_split": 0,
+    "history_val_ks": [
+     0,
+     1,
+     2
+    ],
+    "repeats_by_split": {
+     "train": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+     ],
+     "val": [
+      0,
+      1,
+      2
+     ]
+    }
+   },
+   "m1-s2": {
+    "cells_outside_split": 0,
+    "history_val_ks": [
+     0,
+     1,
+     2
+    ],
+    "repeats_by_split": {
+     "train": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+     ],
+     "val": [
+      0,
+      1,
+      2
+     ]
+    }
+   }
+  },
+  "pilot_records_touching_test": 0,
+  "screen_repeats_by_split": {
+   "train": [
+    0,
+    1
+   ]
+  },
+  "test_jsonl_sha256": "7b998b8e7bd2c870da8e3701e468c3738655045b1a76a1f19110282ddfb3aa6f",
+  "test_sha_matches_freeze": true,
+  "val_k3_10_unused_by_selection": true
+ },
+ "context_not_gate": {
+  "learned_vs_best_default_arm_heuristic": {
+   "m0-s1@sel-g25 vs llm-d-precise-prefix@defaults": {
+    "mean_clipped_log_ratio": -0.007123004862766125,
+    "mean_ratio": 0.9930964082463161,
+    "cells_better": 3,
+    "pooled_sd": 0.01438464193342189,
+    "max_abs_cell_delta": 0.03667834213420684,
+    "cells_beyond_3sd": 0,
+    "segments": 6,
+    "mean_segment_delta": -0.01211001718773816,
+    "segment_se": 0.00550357210667711,
+    "cell_clause": false,
+    "segment_clause": true,
+    "differs_beyond_noise": false,
+    "segment_clause_survives_leave_one_segment_out": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_mode": {
+     "agentic_lanes": {
+      "cells": 4,
+      "pooled_sd": 0.0137239442593614,
+      "cells_beyond_3sd": 0,
+      "segments": 3,
+      "mean_segment_delta": -0.022028726782031938,
+      "segment_se": 0.006514434782466131,
+      "differs": false
+     },
+     "closed_concurrency": {
+      "cells": 4,
+      "pooled_sd": 0.008009813258350568,
+      "cells_beyond_3sd": 0,
+      "segments": 3,
+      "mean_segment_delta": -0.008409841053212186,
+      "segment_se": 0.0034922630134604123,
+      "differs": false
+     },
+     "open_speedup": {
+      "cells": 6,
+      "pooled_sd": 0.01773337677877418,
+      "cells_beyond_3sd": 0,
+      "segments": 3,
+      "mean_segment_delta": 0.0024365589794653384,
+      "segment_se": 0.0027651511683725754,
+      "differs": false
+     }
+    }
+   },
+   "m0-s1@sel-g25 vs lmetric@defaults": {
+    "mean_clipped_log_ratio": -0.004904867209662676,
+    "mean_ratio": 0.9953027854420906,
+    "cells_better": 4,
+    "pooled_sd": 0.010767561844722408,
+    "max_abs_cell_delta": 0.03471652880507792,
+    "cells_beyond_3sd": 1,
+    "segments": 6,
+    "mean_segment_delta": -0.00975116092552348,
+    "segment_se": 0.005375245525836,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "segment_clause_survives_leave_one_segment_out": false,
+    "differs_by_mode": {
+     "agentic_lanes": true,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_mode": {
+     "agentic_lanes": {
+      "cells": 4,
+      "pooled_sd": 0.010387949978034303,
+      "cells_beyond_3sd": 1,
+      "segments": 3,
+      "mean_segment_delta": -0.016326142976114455,
+      "segment_se": 0.00616506366075533,
+      "differs": true
+     },
+     "closed_concurrency": {
+      "cells": 4,
+      "pooled_sd": 0.008406511141004516,
+      "cells_beyond_3sd": 1,
+      "segments": 3,
+      "mean_segment_delta": -0.01333882159511457,
+      "segment_se": 0.010574158060067385,
+      "differs": false
+     },
+     "open_speedup": {
+      "cells": 6,
+      "pooled_sd": 0.012307515968430308,
+      "cells_beyond_3sd": 0,
+      "segments": 3,
+      "mean_segment_delta": 0.004487462743193918,
+      "segment_se": 0.0054795530203944915,
+      "differs": false
+     }
+    }
+   },
+   "m0-s1@sel-g25 vs ramjet@defaults": {
+    "mean_clipped_log_ratio": -0.006864138962288635,
+    "mean_ratio": 0.9933278272246641,
+    "cells_better": 7,
+    "pooled_sd": 0.009707237012169393,
+    "max_abs_cell_delta": 0.04408489771827151,
+    "cells_beyond_3sd": 1,
+    "segments": 6,
+    "mean_segment_delta": -0.0007633708093518647,
+    "segment_se": 0.005225924024927831,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "segment_clause_survives_leave_one_segment_out": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_mode": {
+     "agentic_lanes": {
+      "cells": 4,
+      "pooled_sd": 0.014872511420300646,
+      "cells_beyond_3sd": 0,
+      "segments": 3,
+      "mean_segment_delta": 0.004042951170267206,
+      "segment_se": 0.003981051258197232,
+      "differs": false
+     },
+     "closed_concurrency": {
+      "cells": 4,
+      "pooled_sd": 0.007229073104121107,
+      "cells_beyond_3sd": 2,
+      "segments": 3,
+      "mean_segment_delta": -0.0021884349503114575,
+      "segment_se": 0.011211111174152221,
+      "differs": false
+     },
+     "open_speedup": {
+      "cells": 6,
+      "pooled_sd": 0.006129463410164028,
+      "cells_beyond_3sd": 2,
+      "segments": 3,
+      "mean_segment_delta": -0.008076422536784176,
+      "segment_se": 0.008858530273024679,
+      "differs": false
+     }
+    }
+   },
+   "m1-s2@sel-g30 vs llm-d-precise-prefix@defaults": {
+    "mean_clipped_log_ratio": 0.02977858942102335,
+    "mean_ratio": 1.031970179217284,
+    "cells_better": 10,
+    "pooled_sd": 0.015100904244396779,
+    "max_abs_cell_delta": 0.19467894130354435,
+    "cells_beyond_3sd": 5,
+    "segments": 6,
+    "mean_segment_delta": 0.009415505656430557,
+    "segment_se": 0.019075033808637645,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "segment_clause_survives_leave_one_segment_out": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_mode": {
+     "agentic_lanes": {
+      "cells": 4,
+      "pooled_sd": 0.015965749644797925,
+      "cells_beyond_3sd": 0,
+      "segments": 3,
+      "mean_segment_delta": -0.016783676642917116,
+      "segment_se": 0.003930858787541833,
+      "differs": false
+     },
+     "closed_concurrency": {
+      "cells": 4,
+      "pooled_sd": 0.008711304313510618,
+      "cells_beyond_3sd": 2,
+      "segments": 3,
+      "mean_segment_delta": 0.032205137406727,
+      "segment_se": 0.027509463580250162,
+      "differs": false
+     },
+     "open_speedup": {
+      "cells": 6,
+      "pooled_sd": 0.01765103579456625,
+      "cells_beyond_3sd": 3,
+      "segments": 3,
+      "mean_segment_delta": 0.03775249535942197,
+      "segment_se": 0.03743900863992847,
+      "differs": false
+     }
+    }
+   },
+   "m1-s2@sel-g30 vs lmetric@defaults": {
+    "mean_clipped_log_ratio": 0.031996727074126784,
+    "mean_ratio": 1.0344864588543101,
+    "cells_better": 6,
+    "pooled_sd": 0.012225405399959463,
+    "max_abs_cell_delta": 0.20481869837480993,
+    "cells_beyond_3sd": 5,
+    "segments": 6,
+    "mean_segment_delta": 0.01194800512919854,
+    "segment_se": 0.020285885728335853,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "segment_clause_survives_leave_one_segment_out": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": false,
+     "open_speedup": false
+    },
+    "by_mode": {
+     "agentic_lanes": {
+      "cells": 4,
+      "pooled_sd": 0.014807449474800203,
+      "cells_beyond_3sd": 0,
+      "segments": 3,
+      "mean_segment_delta": -0.010961480175553298,
+      "segment_se": 0.007912822806731291,
+      "differs": false
+     },
+     "closed_concurrency": {
+      "cells": 4,
+      "pooled_sd": 0.010575850899858954,
+      "cells_beyond_3sd": 2,
+      "segments": 3,
+      "mean_segment_delta": 0.027424998224587365,
+      "segment_se": 0.03497177692979831,
+      "differs": false
+     },
+     "open_speedup": {
+      "cells": 6,
+      "pooled_sd": 0.011313787988466247,
+      "cells_beyond_3sd": 3,
+      "segments": 3,
+      "mean_segment_delta": 0.04009468820664287,
+      "segment_se": 0.04044563500582792,
+      "differs": false
+     }
+    }
+   },
+   "m1-s2@sel-g30 vs ramjet@defaults": {
+    "mean_clipped_log_ratio": 0.03003745532150084,
+    "mean_ratio": 1.0314143642956266,
+    "cells_better": 12,
+    "pooled_sd": 0.011330639919168039,
+    "max_abs_cell_delta": 0.16426918808034685,
+    "cells_beyond_3sd": 3,
+    "segments": 6,
+    "mean_segment_delta": 0.020539903792970507,
+    "segment_se": 0.011095217571870233,
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs_beyond_noise": false,
+    "segment_clause_survives_leave_one_segment_out": false,
+    "differs_by_mode": {
+     "agentic_lanes": false,
+     "closed_concurrency": true,
+     "open_speedup": false
+    },
+    "by_mode": {
+     "agentic_lanes": {
+      "cells": 4,
+      "pooled_sd": 0.017615183412813953,
+      "cells_beyond_3sd": 0,
+      "segments": 3,
+      "mean_segment_delta": 0.00959276319916245,
+      "segment_se": 0.010317978343458599,
+      "differs": false
+     },
+     "closed_concurrency": {
+      "cells": 4,
+      "pooled_sd": 0.008093987584372415,
+      "cells_beyond_3sd": 3,
+      "segments": 3,
+      "mean_segment_delta": 0.03801688985996621,
+      "segment_se": 0.012730743327456362,
+      "differs": true
+     },
+     "open_speedup": {
+      "cells": 6,
+      "pooled_sd": 0.007001646555842149,
+      "cells_beyond_3sd": 3,
+      "segments": 3,
+      "mean_segment_delta": 0.02624490946045821,
+      "segment_se": 0.024824685574847037,
+      "differs": false
+     }
+    }
+   }
+  },
+  "m1_vs_llm_d_precise_prefix_segment_deltas": {
+   "agentx:V1": -0.013606573202609717,
+   "agentx:V2": -0.024599945659157296,
+   "agentx:V3": -0.012144511066984331,
+   "mooncake:w1": 0.10246536321696334,
+   "sessions:s4": 0.0029294334060465665,
+   "sessions:s5": 0.0014492672443247774
+  },
+  "mde_vs_best_heuristic": 0.03815006761727529,
+  "guards_worker_share": {
+   "default@defaults": {
+    "cells_over_cap": [],
+    "max_share": null,
+    "records_over_cap": 0
+   },
+   "llm-d-precise-prefix@defaults": {
+    "cells_over_cap": [
+     "mooncake-w1-base-n8-open-L3"
+    ],
+    "max_share": 0.28674698795180725,
+    "records_over_cap": 1
+   },
+   "lmetric@defaults": {
+    "cells_over_cap": [],
+    "max_share": null,
+    "records_over_cap": 0
+   },
+   "m0-s1@sel-g25": {
+    "cells_over_cap": [],
+    "max_share": null,
+    "records_over_cap": 0
+   },
+   "m0-s2@sel-g25": {
+    "cells_over_cap": [],
+    "max_share": null,
+    "records_over_cap": 0
+   },
+   "m1-s1@sel-g25": {
+    "cells_over_cap": [
+     "mooncake-w1-base-n6-open-L2",
+     "mooncake-w1-base-n8-closed-L2",
+     "mooncake-w1-base-n8-open-L3",
+     "mooncake-w1-islu1.25-n6-closed-L2"
+    ],
+    "max_share": 0.5150214592274678,
+    "records_over_cap": 24
+   },
+   "m1-s2@sel-g30": {
+    "cells_over_cap": [
+     "mooncake-w1-base-n4-open-L2",
+     "mooncake-w1-base-n6-open-L2",
+     "mooncake-w1-base-n8-closed-L2",
+     "mooncake-w1-base-n8-open-L3",
+     "mooncake-w1-islu1.25-n6-closed-L2"
+    ],
+    "max_share": 0.6464592274678111,
+    "records_over_cap": 27
+   },
+   "ramjet@defaults": {
+    "cells_over_cap": [],
+    "max_share": null,
+    "records_over_cap": 0
+   },
+   "round_robin": {
+    "cells_over_cap": [],
+    "max_share": null,
+    "records_over_cap": 0
+   }
+  },
+  "agreement_with_pilot": "every vs-default and vs-heuristic number in facts/pilot.json reproduces to 4 decimals"
+ },
+ "full_plan": {
+  "decision": "escalate to phase 4 (full campaign)",
+  "budget": {
+   "per_policy_cma_es_budget_evals": 400,
+   "generations": 25,
+   "popsize": 16,
+   "uh_reevaluation": "top 2 per generation on fresh replicates (reeval-frac 0.125); identical for every policy, not counted in the 400",
+   "restarts_per_policy": 3,
+   "equal_footing": "every tuned policy, baseline or learned, gets exactly B = 400 per run and 3 restarts, each restart starting from the policy's own defaults (M1 from theta0 = -e0). Do NOT warm-start headline runs from the pilot-tuned specs: that would hand M0/M1 480 extra evaluations (A2.1)."
+  },
+  "objective_cells_repeats": {
+   "objective": "clipped_log_ratio of goodput_rps_window vs default@defaults on the same CRN replicate, eps 1e-3 (pre-registered, LR-01)",
+   "cells": "all 34 train cells every evaluation (cells/train.jsonl; no subset)",
+   "repeats": "K = 2 CRN replicates per evaluation, drawn per generation from the pool k = 0..7 (A1 minimum 2)",
+   "validation": "every 5 generations on all 14 val cells, k = 0..2, best-so-far and CMA mean",
+   "selection": "each policy: argmax val k0-2 over its 3 restarts x checkpoints (LR-10). Val-best baseline: argmax mean clipped log-ratio on fresh val k3-10 among the selected baseline configs. Count every learned variant tried on val (LR-11).",
+   "test": "once, 60 frozen cells x k0-2, per facts/HEADLINE_TEST.json; A5 lag {0, 50, 200} ms on the finalists"
+  },
+  "search_spaces": {
+   "M1": "runs/pilot/spaces/m1_learned_v1.yaml as is (theta[0] pinned -1, temperature 0, bounds +-4 s_j, sigma0 0.004)",
+   "M0": "runs/pilot/spaces/m0_default_tuned.yaml plus cma maxstd 0.3 and prefill_load_scale widened to [0.05, 500]",
+   "other_baselines": "shipped parameters (+ router_config knobs where they apply), sigma0 at about 15-20% decision flips, cma maxstd 0.3"
+  },
+  "tiers": {
+   "A_headline_core": "33 runs: 10 tuned baselines (dynamo-default-cost-fn = M0, two-tier, lmetric, ramjet, dualmap, chwbl, llm-d-precise-prefix, llm-d-optimized-baseline throughput, sticky-session hard, sticky-session bounded) + M1, x 3 restarts; LR-15 drift check (4 x M1 at B/4 on L1/L3/N4/N8-only train subsets, cross-play matrix) early; val re-check on fresh k3-10; test; A5 lag. round_robin and all heuristics at defaults are evaluated (not tuned) on val and test.",
+   "B_ladder": "M2 rank 2 (named-source context), 3 restarts at B = 400, warm-started (theta*_M1, p = 0) from the phase-4 selected M1 and compared with M1 continued for the same added evaluations (LR-15).",
+   "C_conditional": "M2 ranks 3-4 only if rank 2 beats M1 on val by >= MDE 0.038; ablation a (router_queue_threshold, learned + val-best baseline, 3 restarts each); ablation b (simulator-only features, needs Rust + replay plumbing); robustness extras (speedup 0.8/1.2, tau > 0, hash_home)."
+  },
+  "cost_projection": {
+   "status": "PROJECTION from measured pilot inputs (runs/gate/projection.json), not measured",
+   "per_run_replay_s": 324711.47339838964,
+   "per_run_hours": {
+    "epyc9654p": 3.493292668985747,
+    "epyc7702p": 5.524178009097119,
+    "workstation": 4.756915128955752
+   },
+   "tier_replay_s": {
+    "A": 11044281.07669689,
+    "B": 974134.4201951689,
+    "C": 4928846.300975845
+   },
+   "total_replay_s": 16947261.797867905,
+   "expected_local_wall_clock_hours_workstation_only": {
+    "core_tier_A": 161.7950458982448,
+    "A_plus_B": 176.06579128511208,
+    "all": 248.27175090836042,
+    "all_at_step4_rate": 281.8905821335314
+   },
+   "slurm_wall_hours": {
+    "core_A_5_measured_plus_ws": 25.654140200099064,
+    "A_plus_B_5_measured_plus_ws": 27.916902331548112,
+    "all_5_measured_plus_ws": 39.365842570561945,
+    "all_10_validated_plus_ws_hypothesis": 23.394667637289636,
+    "core_A_10_validated_plus_ws_hypothesis": 15.24596056659943
+   },
+   "need_cpu_cluster": true,
+   "why": "workstation-only wall clock (248 h for all tiers, 162 h for the core) is far above the 8 h gate threshold and A9's 1 h lane threshold"
+  },
+  "scheduling": [
+   "One lr-train per CPU cluster node (--mem 400G epyc9654p, 160G epyc7702p-256g, more than half the RAM on the 512 GB / 1 TB nodes); pinned CMA numerics; ingest every return into the cache; record allocations and cancel commands in facts/remote.json.",
+   "Breadth-first over restarts: wave 1 = seed 1 of all 11 tier-A policies + the LR-15 drift check, wave 2 = seed 2, wave 3 = seed 3, then tier B, then tier C. A cut at any time then leaves every policy with the same number of restarts.",
+   "CPU cluster weekly maintenance cutoff: size --time to end 30 min before it, resume after the maintenance window with submit_train.sh --bundle-dir; if CPU cluster is not back, continue on the workstation (4.76 h per run).",
+   "Before the cutoff the 5 measured nodes + workstation hold about 14 run slots (2 epyc9654p x 3 + 3 epyc7702p x 2 + workstation x 2), enough for wave 1. The 5 image-validated but unmeasured nodes (epyc7702p-512g x 3, 7702p-alt-1024 x 2) may start wave 2; record their generation walls."
+  ],
+  "cut_order_if_over": [
+   "1. Ablation b, simulator-only features (-0.97 M replay-s; needs new plumbing; never ships).",
+   "2. M2 ranks 3-4 (-1.95 M) unless rank 2 beats M1 on val by >= MDE 0.038.",
+   "3. Ablation a, queue threshold (-1.95 M).",
+   "4. Robustness extras beyond the mandatory A5 lag check (-0.06 M).",
+   "5. M2 rank 2 if the LR-15 cross-play losses are within the MDE (-0.97 M).",
+   "6. Only then the headline core, uniformly across all 11 policies: drop restart wave 3 (-3.57 M); record an LR-10 deviation.",
+   "7. Last resort: rotating 12-cell subsets per generation (--cells-per-gen 12; subset vs full Spearman 0.947 on 16 pilot candidates) for every policy of a wave, never mixed within a wave.",
+   "Never cut: equal B per run, selection on fresh val replicates, the single frozen-test pass, the A5 lag check."
+  ],
+  "audit_flags_for_stage4": [
+   "M1 worker concentration (LR-13): m1-s2@sel-g30 exceeds min(2/N, 1/N + 0.25) on 5 Mooncake val cells (27 of 112 records, record-level max share 0.646).",
+   "M1's val lead over llm-d-precise-prefix rests on one segment: mooncake:w1 +0.102, while M1 trails on all three AgentX segments (-0.012 to -0.025). Treat it as unconfirmed until tuned baselines and the concentration audit are in.",
+   "Per-mode verdicts rest on exactly 3 segments per mode (2 degrees of freedom).",
+   "agentx-V1-base-n4-lanes-L2 reports 32 incomplete rows for every policy and replicate (completed == num_requests == 4710): policy-independent, so paired ratios are unaffected (zero-output rows, known minor)."
+  ]
+ },
+ "need_cpu_cluster": true,
+ "projected_full_hours_local": 248.27175090836042,
+ "lessons": {
+  "applied": {
+   "LR-01": "clipped log-ratio objective kept",
+   "LR-02": "noise from CRN replicates and segment SE; MDE = 2 x paired segment SE",
+   "LR-03": "popsize 16, UH re-evaluation of the top 2",
+   "LR-05": "pinned anchor, cma maxstd on bounded spaces",
+   "LR-09": "gate criterion 3 checked per load mode",
+   "LR-10": ">= 3 restarts per policy, selection on val, breadth-first restart waves so cuts stay equal",
+   "LR-11": "HEADLINE_TEST.json unchanged; count every learned variant",
+   "LR-13": "worker-share guard recomputed per record; concentration flagged for stage 4",
+   "LR-15": "drift check before M2; M2 warm start compared with M1 continued"
+  },
+  "rejected": {
+   "LR-04": "A2.5: no paper-faithful variants",
+   "LR-08 TTFT part": "A2: no TTFT SLO",
+   "LR-14 action 3 (timing randomization in training)": "A5: training unchanged; staleness is a test-stage check",
+   "LESSONS 'CPU cluster only above 8 h'": "superseded by A9 (about 1 h)"
+  },
+  "deferred": {
+   "LR-07": "multi-start from theta_LMetric needs v2 features"
+  }
+ },
+ "evidence": [
+  "runs/gate/recompute.json",
+  "runs/gate/integrity_scan.json",
+  "runs/gate/projection.json",
+  "runs/gate/scripts/recompute_gate.py",
+  "runs/gate/scripts/integrity_scan.py",
+  "runs/gate/scripts/projection.py",
+  "runs/gate/scripts/write_gate.py"
+ ]
+}

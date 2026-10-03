@@ -1,0 +1,63 @@
+{
+ "best_ever_train": {
+  "generation": 1,
+  "objective": 0.9503982906300743,
+  "per_cell": {
+   "mooncake-w0-base-n8-open-L2": 1.0498066451717485,
+   "sessions-s0-base-n4-open-L2": 0.8509899360884001
+  },
+  "policy_sha": "ae6d07bb376b095235c020af999243b75f3ac6196109636a85edaaab095242b1",
+  "spec": {
+   "name": "default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 3.748410054661592,
+    "overlap_score_credit": 1.972882738724459,
+    "overlap_score_credit_decay": 0.09298442868732157,
+    "prefill_load_scale": 1.4933866258924609,
+    "router_temperature": 0.2669023633992033
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 3.748410054661592,
+   "parameters.overlap_score_credit": 1.972882738724459,
+   "parameters.overlap_score_credit_decay": 0.09298442868732157,
+   "parameters.prefill_load_scale": 1.4933866258924609,
+   "parameters.router_temperature": 0.2669023633992033
+  },
+  "z": [
+   0.49322068468111474,
+   0.023246107171830392,
+   0.5870861288305522,
+   0.468551256832699,
+   0.13345118169960166
+  ]
+ },
+ "fevals": 12,
+ "generation": 2,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "ratio",
+  "popsize": 6,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 1,
+  "space_sha": "7580b9ceed36298803a6e2a71f8ed56afc4c195cfc787b2d1e28387be13a176a",
+  "train_cells": [
+   "mooncake-w0-base-n8-open-L2",
+   "sessions-s0-base-n4-open-L2"
+  ],
+  "val_cells": [
+   "mooncake-w1-base-n4-open-L2"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": null,
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

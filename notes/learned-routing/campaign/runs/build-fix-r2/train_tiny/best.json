@@ -1,0 +1,65 @@
+{
+ "best_ever_train": {
+  "generation": 0,
+  "objective": 0.05820659338151472,
+  "per_cell": {
+   "fx2-agentx-A1_A2-base-n8-lanes-L3": -0.045435709868648186,
+   "fx2-mooncake-w0-base-n8-open-L2": 0.1257953678117881,
+   "fx2-mooncake-w1-base-n8-closed-L2": 0.09426012220140423
+  },
+  "policy_sha": "67659436e03b75f3fbed24bdbfba6cb6f1aaad6fbed6b5104e67e4569ca4b068",
+  "spec": {
+   "name": "default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 0.0015451505035055184,
+    "overlap_score_credit": 0.11583926122774274,
+    "overlap_score_credit_decay": 0.38947580771221996,
+    "prefill_load_scale": 4.264481418781339,
+    "router_temperature": 0.17338958635084034
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 0.0015451505035055184,
+   "parameters.overlap_score_credit": 0.11583926122774274,
+   "parameters.overlap_score_credit_decay": 0.38947580771221996,
+   "parameters.prefill_load_scale": 4.264481418781339,
+   "parameters.router_temperature": 0.17338958635084034
+  },
+  "z": [
+   0.028959815306935685,
+   0.09736895192805499,
+   0.8149331132201348,
+   0.0001931438129381898,
+   0.08669479317542017
+  ]
+ },
+ "fevals": 8,
+ "generation": 2,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "clipped_log_ratio",
+  "popsize": 4,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 11,
+  "space_sha": "7580b9ceed36298803a6e2a71f8ed56afc4c195cfc787b2d1e28387be13a176a",
+  "train_cells": [
+   "fx2-agentx-A1_A2-base-n8-lanes-L3",
+   "fx2-mooncake-w0-base-n8-open-L2",
+   "fx2-mooncake-w1-base-n8-closed-L2"
+  ],
+  "val_cells": [
+   "fx2-sessions-s4-base-n8-closed-L2"
+  ],
+  "val_replicates": 2
+ },
+ "selected_by_val": null,
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

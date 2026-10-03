@@ -1,0 +1,620 @@
+{
+ "base_head": "<commit-02>",
+ "branch": "rupei/learned-routing-public",
+ "build": {
+  "build_id": "4b4525a9914bd4beb598c8aae0519b1a062ed8b8877be2448c80ac15dd4a1313",
+  "correction_fix_r0": {
+   "build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+   "head": "<commit-10>",
+   "post_rebuild_smoke": "runs/build-fix-r0/postbuild: 154 replays 0 errors; theta0-reservoir == default 22/22; default per_request unchanged vs build 4b4525a9 on 14/14",
+   "reason": "build fixer r0 changed learned_choice/features.rs (hash_home key)",
+   "rebuilt": true,
+   "so_sha256": "1d67c131deca024373a2eb4b96f70156e04eb32e1046c2cf7235ac50ddeb288b",
+   "written": "2026-10-02 16:13:14 PDT"
+  },
+  "harness_install": "uv pip install --python WT/.venv/bin/python -e benchmarks/learned_routing (reinstalled after packages.find); lr-eval, lr-train, lr-report on PATH in WT/.venv/bin",
+  "mode": "maturin develop --uv --release --features ais-forward-pass (setup mode, by B1)",
+  "reason": "bindings .so (lib/bindings/python/src/dynamo/_core.abi3.so, mtime 14:36:39) is newer than every tracked lib/**/*.rs and *.toml and both Cargo.lock files; the only builtin sources edited after the B1 build started are learned_choice/tests.rs (cfg(test)) and FEATURES.md (not compiled, no include_str). Rebuilding would change build_id and invalidate the cache for no code change.",
+  "rebuilt": false,
+  "so_sha256": "ecdd220263d980b64bfa56061ba9f99a63b5a6b4b6994440f102329a8ccb2f25",
+  "types_in_bindings_evidence": "learned-choice (v1 one_draw and reservoir, v1 + rank-1 {p,q} context from lr-train M2) and sticky-session (hard, bounded) all resolved and replayed with 0 errors: runs/integrate/smoke/results.jsonl, runs/integrate/smoke/train_m2_tiny/results.jsonl",
+  "wheel_check": "uv build of benchmarks/learned_routing now ships learned_routing.workloads (runs/integrate/pkgcheck/learned_routing-0.1.0-py3-none-any.whl)"
+ },
+ "commit_policy": "git commit -s, DCO sign-off only, no Co-Authored-By trailer; pre-commit hooks ran and passed on every commit; nothing pushed",
+ "commits": [
+  {
+   "scope": "B1 policies: lib/router-plugins/builtin (12 files)",
+   "sha": "<commit-03>",
+   "subject": "feat(router-plugins): add learned-choice and sticky-session policies"
+  },
+  {
+   "scope": "B3 harness: benchmarks/learned_routing package modules, tests, spaces, pyproject (29 files); includes the integrator's NON_CONTENT_KEYS extension and packages.find",
+   "sha": "<commit-04>",
+   "subject": "feat(learned-routing): add the replay evaluation, tuning and report harness"
+  },
+  {
+   "scope": "B2 workloads: learned_routing/workloads (9 files) + pytest testpaths",
+   "sha": "<commit-05>",
+   "subject": "feat(learned-routing): add trace acquisition, transforms and cell splits"
+  },
+  {
+   "scope": ".github/codeowners/areas.yaml + regenerated CODEOWNERS; build_codeowners --strict now 5994/5994 (was 4 catch-all files)",
+   "sha": "<commit-06>",
+   "subject": "chore(codeowners): claim benchmarks/learned_routing for performance"
+  },
+  {
+   "scope": "integration bugs found by the end-to-end smoke (space.py, evaluate.py + 2 tests)",
+   "sha": "<commit-07>",
+   "subject": "fix(learned-routing): hash pinned space keys and relabel cache hits"
+  }
+ ],
+ "gap_fixes": [
+  "pyproject [tool.setuptools.packages.find] include learned_routing* (B2 note: wheel/sdist omitted learned_routing.workloads)",
+  "pytest testpaths add learned_routing/workloads/tests (B2 note)",
+  "cells.NON_CONTENT_KEYS += expected_cost_s, measure_trace, trace_rows, cache_pressure_ref, transform_tag (B2 note): generator metadata no longer invalidates cache keys; replay inputs, sla, measure, load and transform stay in the content hash",
+  "CODEOWNERS claim for benchmarks/learned_routing (B3 note)",
+  "BUG (found by this stage): lr-train crashed with TypeError on every space that pins vector elements, incl. both shipped learned-choice spaces, because Space.sha canonical-JSON-hashed YAML int keys; fixed, regression-tested (commit <commit-07>)",
+  "BUG (found by this stage): a cache hit reported the policy_name of the entry's first evaluation (e.g. lr-train's 'learned-choice-m1' instead of best_policy.yaml's name); name is a label outside the key, now the caller's; regression-tested (commit <commit-07>)"
+ ],
+ "head": "<commit-07>",
+ "lessons": {
+  "applied": {
+   "LR-01": "windowed goodput (goodput_rps_window) is the parity and smoke metric",
+   "LR-02": "noise from CRN replicates (8 per cell) and SE over 7 independent segments, not identical re-runs",
+   "LR-03": "parity separates tie-break discipline: reservoir for bit-exact parity, one_draw judged against tie noise; one_draw is the training default",
+   "LR-05": "the theta[0] = -1 pin in the shipped spaces now works in lr-train (Space.sha fix)",
+   "LR-09": "AgentX smoke cells use lanes < plays",
+   "LR-11": "parity and lr-report cluster by segment",
+   "LR-13": "session_split_frac guard metric used as the session-routing evidence"
+  },
+  "out_of_stage": [
+   "LR-06",
+   "LR-07",
+   "LR-10",
+   "LR-12",
+   "LR-14",
+   "LR-15"
+  ],
+  "rejected": {
+   "LR-04": "Amendment A2.5: baselines run as implemented",
+   "LR-08": "superseded by A2 (no TTFT SLO)"
+  }
+ },
+ "next_stage_notes": [
+  "Calibration: start from candidate cells (cells/*.candidates.jsonl), not the int- smoke cells. Sessions and AgentX need heavier loads or tighter SLAs than B2's provisional loads with I=40 ms, S=3 (default good_frac about 1.0).",
+  "Calibration must fix the closed-loop and lanes window rule; the smoke used completion basis with no warm-up.",
+  "NON_CONTENT_KEYS changed this stage, so cell content SHAs differ from B3's build smoke; no calibrated results existed, nothing of value was invalidated.",
+  "Exact replay parity: learned-choice {feature_set: v1, theta: -e0, tie_break: reservoir}; training uses one_draw (CRN-aligned).",
+  "lr-train works on both shipped learned-choice spaces after commit <commit-07>; record --objective choice at training."
+ ],
+ "parity": {
+  "caveat": "sessions and AgentX cells have default good_frac_window about 1.0 at the provisional SLA, so their goodput parity is weakly informative; the 7 Mooncake cells (default good_frac_window 0.55-0.83) carry the test",
+  "cells": 11,
+  "exact_reservoir": {
+   "identical_goodput_window": 88,
+   "identical_per_request_sha256": 88,
+   "pairs": 88
+  },
+  "file": "runs/integrate/smoke/parity.json",
+  "one_draw_identical_rows_pairs": 0,
+  "one_draw_noise_rule": {
+   "cell_clause_(>3sd)": false,
+   "cells": 11,
+   "degenerate": false,
+   "differs": false,
+   "max_abs_cell_delta": 0.00876937868731864,
+   "mean_segment_delta": 0.0005537855156885604,
+   "pooled_sd": 0.010218495669643472,
+   "replicates_per_cell": 8,
+   "segment_clause_(>2se)": false,
+   "segment_se": 0.0011676883281568893,
+   "segments": 7
+  },
+  "replicates_per_cell": 8,
+  "results": "runs/integrate/smoke/results_parity.jsonl",
+  "script": "runs/integrate/scripts/parity.py",
+  "segment_mean_log_ratio": {
+   "mean": 0.0005102183366372476,
+   "se": 0.0011558909801533492,
+   "segments": 7
+  },
+  "segments": 7,
+  "verdict": "PASS: learned-choice@theta0 with tie_break reservoir is request-for-request identical to dynamo-default-cost-fn on 88/88 (cell, k); with the default one_draw it differs per request on 88/88 (tie relabeling) but goodput_rps_window does not differ beyond noise under the A1 rule (max |cell delta| 0.0088 < 3 x pooled sd 0.0102; segment mean delta 0.00055 < 2 x SE 0.00117). No fix needed: feature 0, tie-breaking and inputs agree."
+ },
+ "replay_plumbing_commit": "none: no change was needed in lib/kv-router, lib/mocker or lib/bindings/python; session_context already reaches policies (proved below)",
+ "schema": "integration/v1",
+ "sessions": {
+  "evidence": {
+   "int-agentx-A2-base-n4-lanes-L2": {
+    "default@defaults": {
+     "later_turns": 453,
+     "later_turns_moved": [
+      8,
+      9,
+      5
+     ],
+     "requests": 486,
+     "requests_routed_differently_from_default": [
+      93,
+      62,
+      35
+     ],
+     "reused_input_token_frac": [
+      0.9496928045972327,
+      0.9503321582132741,
+      0.9571240804515722
+     ],
+     "session_split_frac": [
+      0.42857142857142855,
+      0.6428571428571429,
+      0.2857142857142857
+     ]
+    },
+    "lmetric@defaults": {
+     "later_turns": 453,
+     "later_turns_moved": [
+      2,
+      4,
+      3
+     ],
+     "requests": 486,
+     "requests_routed_differently_from_default": [
+      398,
+      330,
+      370
+     ],
+     "reused_input_token_frac": [
+      0.9570568336967376,
+      0.9531977869704318,
+      0.9548947486397815
+     ],
+     "session_split_frac": [
+      0.07142857142857142,
+      0.21428571428571427,
+      0.14285714285714285
+     ]
+    },
+    "sticky-bounded@1.25": {
+     "later_turns": 453,
+     "later_turns_moved": [
+      3,
+      4,
+      3
+     ],
+     "requests": 486,
+     "requests_routed_differently_from_default": [
+      334,
+      314,
+      198
+     ],
+     "reused_input_token_frac": [
+      0.9560017728689911,
+      0.9549986754427078,
+      0.9551800379027163
+     ],
+     "session_split_frac": [
+      0.21428571428571427,
+      0.2857142857142857,
+      0.21428571428571427
+     ]
+    },
+    "sticky-hard": {
+     "later_turns": 453,
+     "later_turns_moved": [
+      0,
+      0,
+      0
+     ],
+     "requests": 486,
+     "requests_routed_differently_from_default": [
+      422,
+      419,
+      161
+     ],
+     "reused_input_token_frac": [
+      0.959555661972979,
+      0.9603371507753755,
+      0.9602561490025064
+     ],
+     "session_split_frac": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "int-agentx-A3-base-n8-lanes-L2": {
+    "default@defaults": {
+     "later_turns": 376,
+     "later_turns_moved": [
+      10,
+      5,
+      6
+     ],
+     "requests": 415,
+     "requests_routed_differently_from_default": [
+      59,
+      5,
+      6
+     ],
+     "reused_input_token_frac": [
+      0.9376444317503181,
+      0.9449060490397182,
+      0.9449060490397182
+     ],
+     "session_split_frac": [
+      0.45,
+      0.25,
+      0.3
+     ]
+    },
+    "lmetric@defaults": {
+     "later_turns": 376,
+     "later_turns_moved": [
+      11,
+      10,
+      11
+     ],
+     "requests": 415,
+     "requests_routed_differently_from_default": [
+      374,
+      352,
+      399
+     ],
+     "reused_input_token_frac": [
+      0.9319515488276686,
+      0.9248587057184154,
+      0.9296168393356355
+     ],
+     "session_split_frac": [
+      0.4,
+      0.3,
+      0.35
+     ]
+    },
+    "sticky-bounded@1.25": {
+     "later_turns": 376,
+     "later_turns_moved": [
+      2,
+      3,
+      0
+     ],
+     "requests": 415,
+     "requests_routed_differently_from_default": [
+      266,
+      378,
+      341
+     ],
+     "reused_input_token_frac": [
+      0.9421494040973178,
+      0.9411886895334043,
+      0.9449060490397182
+     ],
+     "session_split_frac": [
+      0.1,
+      0.15,
+      0.0
+     ]
+    },
+    "sticky-hard": {
+     "later_turns": 376,
+     "later_turns_moved": [
+      0,
+      0,
+      0
+     ],
+     "requests": 415,
+     "requests_routed_differently_from_default": [
+      270,
+      365,
+      341
+     ],
+     "reused_input_token_frac": [
+      0.9449060490397182,
+      0.9449060490397182,
+      0.9449060490397182
+     ],
+     "session_split_frac": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "int-sessions-s0-base-n4-open-L2": {
+    "default@defaults": {
+     "later_turns": 2928,
+     "later_turns_moved": [
+      1598,
+      1615,
+      1625
+     ],
+     "requests": 3647,
+     "requests_routed_differently_from_default": [
+      0,
+      0,
+      0
+     ],
+     "reused_input_token_frac": [
+      0.7417494456646521,
+      0.742000359946672,
+      0.7389879907112791
+     ],
+     "session_split_frac": [
+      0.8771331058020477,
+      0.8805460750853242,
+      0.8959044368600683
+     ]
+    },
+    "lmetric@defaults": {
+     "later_turns": 2928,
+     "later_turns_moved": [
+      130,
+      127,
+      132
+     ],
+     "requests": 3647,
+     "requests_routed_differently_from_default": [
+      2683,
+      2848,
+      2762
+     ],
+     "reused_input_token_frac": [
+      0.8573692091831832,
+      0.858199532768252,
+      0.8587614689318844
+     ],
+     "session_split_frac": [
+      0.2030716723549488,
+      0.19795221843003413,
+      0.2030716723549488
+     ]
+    },
+    "sticky-bounded@1.25": {
+     "later_turns": 2928,
+     "later_turns_moved": [
+      433,
+      466,
+      497
+     ],
+     "requests": 3647,
+     "requests_routed_differently_from_default": [
+      2645,
+      2613,
+      2713
+     ],
+     "reused_input_token_frac": [
+      0.8111842070776698,
+      0.8077650631566624,
+      0.7988160200731426
+     ],
+     "session_split_frac": [
+      0.4641638225255973,
+      0.5119453924914675,
+      0.5119453924914675
+     ]
+    },
+    "sticky-hard": {
+     "later_turns": 2928,
+     "later_turns_moved": [
+      0,
+      0,
+      0
+     ],
+     "requests": 3647,
+     "requests_routed_differently_from_default": [
+      2636,
+      2652,
+      2797
+     ],
+     "reused_input_token_frac": [
+      0.8594995343408346,
+      0.8592059855986385,
+      0.8588844798333761
+     ],
+     "session_split_frac": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "int-sessions-s0-base-n8-closed-L2": {
+    "default@defaults": {
+     "later_turns": 2928,
+     "later_turns_moved": [
+      1729,
+      1716,
+      1709
+     ],
+     "requests": 3647,
+     "requests_routed_differently_from_default": [
+      0,
+      0,
+      0
+     ],
+     "reused_input_token_frac": [
+      0.722503830985817,
+      0.7229937778150538,
+      0.7208774311689355
+     ],
+     "session_split_frac": [
+      0.9044368600682594,
+      0.9249146757679181,
+      0.9249146757679181
+     ]
+    },
+    "lmetric@defaults": {
+     "later_turns": 2928,
+     "later_turns_moved": [
+      200,
+      201,
+      222
+     ],
+     "requests": 3647,
+     "requests_routed_differently_from_default": [
+      3123,
+      3211,
+      3185
+     ],
+     "reused_input_token_frac": [
+      0.853435656037756,
+      0.8536481294130598,
+      0.8529184511110296
+     ],
+     "session_split_frac": [
+      0.2883959044368601,
+      0.2901023890784983,
+      0.32081911262798635
+     ]
+    },
+    "sticky-bounded@1.25": {
+     "later_turns": 2928,
+     "later_turns_moved": [
+      547,
+      538,
+      552
+     ],
+     "requests": 3647,
+     "requests_routed_differently_from_default": [
+      3243,
+      3185,
+      3152
+     ],
+     "reused_input_token_frac": [
+      0.7952598867391103,
+      0.7977256961735572,
+      0.7959308552927012
+     ],
+     "session_split_frac": [
+      0.5511945392491467,
+      0.552901023890785,
+      0.5511945392491467
+     ]
+    },
+    "sticky-hard": {
+     "later_turns": 2928,
+     "later_turns_moved": [
+      0,
+      0,
+      0
+     ],
+     "requests": 3647,
+     "requests_routed_differently_from_default": [
+      3142,
+      3159,
+      3198
+     ],
+     "reused_input_token_frac": [
+      0.8579842636906415,
+      0.8579423281560421,
+      0.8576599622230726
+     ],
+     "session_split_frac": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   }
+  },
+  "file": "runs/integrate/smoke/sessions.json",
+  "observation_hypothesis": "[hypothesis] the default cost fn moves 55-59% of later session turns on sessions s0 (prefix reuse 0.72-0.74 vs 0.86 under sticky-hard; lmetric moves 4-8%), apparently letting load terms outweigh overlap; at the provisional SLA this costs no goodput, so whether affinity pays off depends on calibration loads",
+  "script": "runs/integrate/scripts/sessions.py",
+  "sessionless_fallback": "on the 3 Mooncake cells (no multi-turn sessions) sticky-hard and sticky-bounded are row-for-row identical to learned-choice@theta0 one_draw on 9/9 (cell, k): the fallback is the default argmin with the shared one_draw chooser",
+  "verdict": "PASS: replay passes session_context to policies. sticky-session hard moved 0 later turns to another worker on every session cell and replicate, while default moved 1598-1729 of 2928 later turns on sessions s0 and 5-10 of 376-453 on AgentX A2/A3; sticky-hard routes differently from default on 2636-3198 of 3647 requests on sessions s0."
+ },
+ "slot_discipline": "every replay of this stage ran through lr-eval/lr-train and the CR/slots pool (20 slots); no out-of-pool replays",
+ "smoke": {
+  "all_requests_completed": true,
+  "cells": [
+   "int-agentx-A2-base-n4-lanes-L2",
+   "int-agentx-A3-base-n8-lanes-L2",
+   "int-mooncake-w0-base-n8-closed-L2",
+   "int-mooncake-w0-base-n8-open-L2",
+   "int-mooncake-w1-base-n4-open-L2",
+   "int-sessions-s0-base-n4-open-L2",
+   "int-sessions-s0-base-n8-closed-L2"
+  ],
+  "cells_file": "runs/integrate/smoke/cells_provisional.jsonl",
+  "cells_generator": "runs/integrate/scripts/make_cells.py",
+  "errors": 0,
+  "native_check_rel_err_max": 0.0,
+  "observations": [
+   "Default good_frac_window under the provisional SLA: Mooncake cells 0.55-0.83; sessions s0 and AgentX A2/A3 about 1.0, so those families need heavier loads or tighter SLAs at calibration (summary.json)",
+   "lmetric@defaults beats default on all 3 Mooncake smoke cells (window goodput 4.04 vs 3.42, 1.56 vs 1.30, 5.66 vs 4.78); round_robin beats default on the two Mooncake open-loop cells (3.68 vs 3.42, 1.46 vs 1.30), consistent with setup audit F6",
+   "AgentX agentic_lanes cells (B3's unexercised path) run end to end with lanes < plays (4/11, 8/11)"
+  ],
+  "policies": [
+   "round_robin",
+   "default@defaults (dynamo-default-cost-fn, seed k+1)",
+   "lmetric@defaults",
+   "sticky-bounded@1.25",
+   "sticky-hard",
+   "learned-choice@theta0 (theta=-e0, rank 0, tau 0, one_draw)",
+   "learned-choice@theta0-reservoir"
+  ],
+  "provisional": {
+   "label": "cell_id prefixed 'int-'; notes field says PROVISIONAL; not calibration and not to be reused as calibrated cells",
+   "loads": "B2 load_provisional per cell (runs/build_workloads/smoke/cells_validation.json)",
+   "sla": {
+    "derivation": "I between setup's batch-32 and batch-64 decode steps at 8K context (27.3, 39.4 ms; facts/setup.json); S = 3 chosen as a moderate slowdown bound",
+    "e2e_slowdown": 3.0,
+    "itl_ms": 40.0,
+    "ttft_ms": null
+   },
+   "windows": "open loop: arrival basis, warmup/window = B2 measure_trace / speedup; closed loop and lanes: completion basis, no warm-up (harness default)"
+  },
+  "repeats": 3,
+  "replays": 147,
+  "report": "runs/integrate/smoke/report/report.md",
+  "results": "runs/integrate/smoke/results.jsonl",
+  "summary": "runs/integrate/smoke/summary.json",
+  "training_smoke": {
+   "m1": {
+    "best_policy_roundtrip": "best_policy.yaml loads in lr-eval; 3/3 cache hits under its own name (runs/integrate/smoke/results_best_roundtrip.jsonl)",
+    "run_dir": "runs/integrate/smoke/train_m1_tiny",
+    "space": "spaces/learned_choice_m1.yaml",
+    "status": "done, 12 fevals, 102 tasks, 0 errors, 14.55 s"
+   },
+   "m2": {
+    "run_dir": "runs/integrate/smoke/train_m2_tiny",
+    "space": "spaces/learned_choice_m2_pooled.yaml",
+    "status": "done, 6 fevals, 37 tasks, 0 errors; rank-1 {p,q} context accepted by the Rust policy"
+   },
+   "note": "tiny smoke on provisional cells; objective values are not results"
+  },
+  "wall_s": 23.45
+ },
+ "stage": "integrate (end of phase 1)",
+ "tests": {
+  "cargo": {
+   "command": "cargo test -p dynamo-custom-policy-builtin",
+   "failed": 0,
+   "ignored": 2,
+   "ignored_note": "pre-existing",
+   "log": "runs/integrate/logs/cargo_test_builtin_final.log",
+   "passed": 127
+  },
+  "clippy_fmt": {
+   "command": "cargo clippy -p dynamo-custom-policy-builtin --no-deps --all-targets -- -D warnings; cargo fmt -p dynamo-custom-policy-builtin --check",
+   "log": "runs/integrate/logs/clippy_fmt_builtin.log",
+   "result": "clean"
+  },
+  "codeowners": "python .github/codeowners/build_codeowners.py --strict: 5994/5994 explicitly owned",
+  "pytest": {
+   "command": "cd benchmarks/learned_routing && PY -m pytest -p no:cacheprovider -v  (testpaths: tests, learned_routing/workloads/tests)",
+   "failed": 0,
+   "log": "runs/integrate/logs/pytest_final.txt",
+   "new_tests": [
+    "test_cell_sha_ignores_generator_metadata",
+    "test_space_sha_reads_pinned_keys_as_element_indices",
+    "test_example_spaces_load now asserts Space.sha",
+    "test_replays_score_cache_and_reproduce now asserts a cache hit carries the caller's policy name"
+   ],
+   "passed": 107
+  }
+ },
+ "worktree": "<worktree>",
+ "written": "2026-10-02 PDT"
+}

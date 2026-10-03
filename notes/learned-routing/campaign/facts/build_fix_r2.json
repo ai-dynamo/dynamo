@@ -1,0 +1,179 @@
+{
+ "base_head": "<commit-13>",
+ "bindings": {
+  "build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+  "rebuilt": false
+ },
+ "branch": "rupei/learned-routing-public",
+ "commits": {
+  "<commit-14>": "fix(learned-routing): score uncontended requests good at unit slowdown"
+ },
+ "e0_method": {
+  "current": "ais-chunked-estimator-v2",
+  "previous": "ais-chunked-estimator-v1",
+  "table": "runs/cache/e0/01277503f73c1abe-ais-chunked-estimator-v2.json"
+ },
+ "e2e_rel_tol": 1e-06,
+ "facts_corrected": [
+  "facts/build_harness.json: corrections_fix_r2 (E0 method/accuracy, E2E tolerance, lrh-4)"
+ ],
+ "findings": {
+  "goodput-normalization-r2/F1": {
+   "evidence": [
+    "runs/build-fix-r2/out/e0_v2_vs_isolated.json",
+    "runs/build-fix-r2/out/idle_regression.json",
+    "runs/build-fix-r2/out/smoke_analysis.json",
+    "runs/build-fix-r2/out/knife_edge_match.json",
+    "runs/build-fix-r2/out/train_recompute.json"
+   ],
+   "root_cause_code": [
+    "aisimulate-core 0.13.0-dev.202609300000000061 src/engine/scheduler/vllm/core.rs ~2820/~3000: decode context_length = sequence.len() (ISL+j+1 at the step producing token j+2)",
+    "WT lib/mocker/src/common/perf_model.rs:297: callback.predict_decode(batch, context_length, 2)",
+    "WT lib/bindings/python/rust/llm/ais_callback.rs:105-117: osl=2 -> one step at isl+1"
+   ],
+   "status": "fixed (E0 decode context ISL+j+2, method v2; a2_good tolerance 1e-6 relative on the E2E clause; HARNESS_VERSION lrh-4; slowdown_atom_frac and slowdown_p95 record fields; unit + replay tests)",
+   "verdict": "valid"
+  }
+ },
+ "harness_version": {
+  "current": "lrh-4",
+  "note": "every lrh-3 cache entry is unreachable; none were calibrated",
+  "previous": "lrh-3"
+ },
+ "head": "<commit-14>",
+ "lessons": {
+  "applied": [
+   "LR-08 (unit S*scale rescore now well-defined, atom reported)",
+   "LR-03 (CRN pairing re-verified 48/48)",
+   "LR-01",
+   "LR-11"
+  ],
+  "rejected": [
+   "LR-08 TTFT part (A2.2)"
+  ]
+ },
+ "next_stage_notes": [
+  "Harness is lrh-4 with E0 method ais-chunked-estimator-v2 and E2E_REL_TOL 1e-6; calibration records both in facts/calibration.json.",
+  "Records carry slowdown_atom_frac (share of completed requests with |e2e - E0| <= 1e-6 E0) and slowdown_p95; calibration records the atom fraction per family (audit request). On the gn2/fx2 AgentX lanes cell it is 0.105-0.121 for default-like policies and 0.386-0.418 for round-robin; Mooncake <= 0.0003; sessions 0.0019-0.0043.",
+  "S x scale = 1 is now well-defined (no slower than idle without reuse), but there the E2E clause passes only uncontended or cache-hit requests, a policy-dependent set on AgentX; weigh this before choosing S at the e2e/E0 atom.",
+  "Any future change to E0 (method, AIS data, aisimulate patch) needs a HARNESS_VERSION bump: the result cache key still has no E0 identity (r2 F4b open)."
+ ],
+ "open_minor_findings_not_addressed": [
+  "goodput-normalization r2 F2, F3, F4, F5, F6, F7"
+ ],
+ "results": {
+  "auditor_cells_smoke": {
+   "agentx_goodput_rps_window_bit_exact_vs_auditor_fixed_tol1e-6": "10/10",
+   "agentx_ratio_vs_default_S1": {
+    "lc-theta0-one_draw k3": {
+     "lrh-3": 0.9959,
+     "lrh-4": 0.9967
+    },
+    "lc-theta0-one_draw k4": {
+     "lrh-3": 1.0078,
+     "lrh-4": 1.0036
+    },
+    "lmetric@defaults k3": {
+     "lrh-3": 0.986,
+     "lrh-4": 0.9576
+    },
+    "lmetric@defaults k4": {
+     "lrh-3": 1.0012,
+     "lrh-4": 0.9815
+    },
+    "round_robin k3": {
+     "lrh-3": 0.5672,
+     "lrh-4": 0.8812
+    },
+    "round_robin k4": {
+     "lrh-3": 0.5615,
+     "lrh-4": 0.942
+    },
+    "sticky-hard k3": {
+     "lrh-3": 1.0048,
+     "lrh-4": 0.9967
+    },
+    "sticky-hard k4": {
+     "lrh-3": 1.0103,
+     "lrh-4": 0.9874
+    }
+   },
+   "changed_records": "10/60 (AgentX, scale 1.0 only); 50 non-AgentX unchanged at every scale",
+   "independent_isolatedE0_tol_equals_harness_all_6_scales": 60,
+   "replays": 60,
+   "rows_identical_to_lrh3": 60
+  },
+  "e0_vs_17233_isolated_replays": {
+   "isolated_good_at_S1": {
+    "n": 17233,
+    "v1_exact": 24,
+    "v1_tol1e-6": 3487,
+    "v2_exact": 3741,
+    "v2_tol1e-6": 17233
+   },
+   "v1_rel_min_max": [
+    -1.6389854976618517e-05,
+    6.310123096718543e-09
+   ],
+   "v2_rel_min_max": [
+    -1.9728721711911162e-08,
+    1.651465178880113e-08
+   ]
+  },
+  "idle_test_workload_good_of_6": {
+   "default@defaults": {
+    "lrh3_semantics": 1,
+    "lrh4": 6,
+    "v1_tol": 3,
+    "v2_exact": 5
+   },
+   "round_robin": {
+    "lrh3_semantics": 1,
+    "lrh4": 6,
+    "v1_tol": 3,
+    "v2_exact": 5
+   }
+  },
+  "lr_train_tiny": {
+   "checks": {
+    "lrh-4": 48,
+    "pairs": 48,
+    "ref_seed_k+1": 48,
+    "same_build_id": 48,
+    "same_cell_sha": 48,
+    "same_harness_version": 48,
+    "same_replicate_protocol": 48,
+    "same_trace_sha256": 48
+   },
+   "gen0_lrh3": [
+    -0.014719917654147784,
+    -0.06630402846029078,
+    -0.12540327624716333,
+    -0.00851918338361852
+   ],
+   "gen0_lrh4": [
+    -0.012827021946874698,
+    0.019566705343899593,
+    -0.01514524877332811,
+    0.05820659338151472
+   ],
+   "gen0_rank_lrh3": [
+    3,
+    0,
+    1,
+    2
+   ],
+   "gen0_rank_lrh4": [
+    3,
+    1,
+    0,
+    2
+   ],
+   "gen0_same_candidates": true,
+   "max_abs_objective_diff_indep_vs_harness": 0.0
+  },
+  "tests": "pytest tests + learned_routing/workloads/tests: 142 passed; pre-commit clean; DCO hook passed"
+ },
+ "schema": "learned-routing.fix.v1",
+ "stage": "build fixer r2"
+}

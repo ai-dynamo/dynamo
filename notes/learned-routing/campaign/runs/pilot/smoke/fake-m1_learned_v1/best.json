@@ -1,0 +1,111 @@
+{
+ "best_ever_train": {
+  "generation": 0,
+  "objective": 0.0,
+  "per_cell": {
+   "agentx-A1-base-n4-lanes-L1": 0.0,
+   "agentx-A1-base-n4-lanes-L3": 0.0,
+   "agentx-A3-base-n8-lanes-L2": 0.0,
+   "mooncake-w0-base-n4-open-L3": 0.0,
+   "mooncake-w0-base-n8-closed-L2": 0.0,
+   "mooncake-w2-base-n4-closed-L3": 0.0,
+   "mooncake-w2-base-n4-open-L2": 0.0,
+   "mooncake-w4-base-n8-open-L1": 0.0,
+   "mooncake-w4-islp1.5-n8-open-L2": 0.0,
+   "sessions-s0-base-n8-closed-L2": 0.0,
+   "sessions-s1-base-n4-open-L3": 0.0,
+   "sessions-s1-base-n8-open-L1": 0.0
+  },
+  "policy_sha": "00508db6abfb799484ea1e72272a0c99c69279ec9adeddd32b58b2b6d577f5e5",
+  "spec": {
+   "name": "m1-learned-v1",
+   "parameters": {
+    "feature_set": "v1",
+    "temperature": 0.0,
+    "theta": [
+     -1.0,
+     1.2994762909305848,
+     -0.3425860386784336,
+     -0.08873412200151876,
+     -2.7468585333434135,
+     3.046321891747823,
+     -1.5651022093879305,
+     0.1814682005204542
+    ],
+    "tie_break": "one_draw"
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "learned-choice"
+  },
+  "values": {
+   "parameters.theta": [
+    -1.0,
+    1.2994762909305848,
+    -0.3425860386784336,
+    -0.08873412200151876,
+    -2.7468585333434135,
+    3.046321891747823,
+    -1.5651022093879305,
+    0.1814682005204542
+   ]
+  },
+  "z": [
+   0.506497381454653,
+   0.4975529568665826,
+   0.49788728280948763,
+   0.4957080335416509,
+   0.5034617294224407,
+   0.4907935164153651,
+   0.5069795461738636
+  ]
+ },
+ "fevals": 48,
+ "generation": 3,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "clipped_log_ratio",
+  "popsize": 16,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 1,
+  "space_sha": "b9f1507701aa0159fc4a037adaee1bca367c4afaa1f82317d97682a9001524a3",
+  "train_cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "agentx-A1-base-n4-lanes-L3",
+   "agentx-A3-base-n8-lanes-L2",
+   "mooncake-w0-base-n4-open-L3",
+   "mooncake-w0-base-n8-closed-L2",
+   "mooncake-w2-base-n4-closed-L3",
+   "mooncake-w2-base-n4-open-L2",
+   "mooncake-w4-base-n8-open-L1",
+   "mooncake-w4-islp1.5-n8-open-L2",
+   "sessions-s0-base-n8-closed-L2",
+   "sessions-s1-base-n4-open-L3",
+   "sessions-s1-base-n8-open-L1"
+  ],
+  "val_cells": [
+   "agentx-V1-base-n4-lanes-L2",
+   "agentx-V2-base-n4-lanes-L3",
+   "agentx-V2-base-n6-lanes-L2",
+   "agentx-V3-base-n8-lanes-L1",
+   "mooncake-w1-base-n4-open-L2",
+   "mooncake-w1-base-n6-open-L2",
+   "mooncake-w1-base-n8-closed-L2",
+   "mooncake-w1-base-n8-open-L3",
+   "mooncake-w1-islu1.25-n6-closed-L2",
+   "sessions-s4-base-n4-open-L2",
+   "sessions-s4-base-n8-closed-L2",
+   "sessions-s5-base-n4-closed-L1",
+   "sessions-s5-base-n8-open-L3",
+   "sessions-s5-think1.5-n6-open-L2"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": null,
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

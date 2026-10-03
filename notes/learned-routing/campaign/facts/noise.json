@@ -1,0 +1,295 @@
+{
+ "schema": "learned-routing.noise.v1",
+ "written_by": "setup fixer, round 0, for audit finding F1 (audits/setup/determinism-cost-context-r0.md)",
+ "finding_verdict": "valid; fixed",
+ "supersedes": [
+  "facts/setup.json determinism.tie_noise_example guidance ('use several seeds to measure tie noise')",
+  "CONTRACT 'Noise, determinism, gates': noise floor from identical re-runs of (policy, cell, repeat)"
+ ],
+ "why": "Replay is deterministic per (policy, workload, policy seed). Identical re-runs of rr, lmetric, two-tier, seeded default (and learned-choice at temperature 0) have zero spread, so a repeat-sd floor is false. The arbitrary order of simultaneous arrivals (Mooncake/toolagent: 3 s bursts, 113 distinct timestamps in the 2000-row slice) moves per-cell goodput by 1.2-3.9% CV for every policy (measured below).",
+ "protocol": {
+  "id": "crn-order-v1",
+  "implementation": "WT/benchmarks/learned_routing/learned_routing/replicates.py and noise.py, commit <commit-02>; tests in WT/benchmarks/learned_routing/tests/test_replicates.py (11 pass)",
+  "repeat_semantics": "lr-eval --repeats K evaluates replicates k = 0..K-1. Replicate k of a cell = materialize_replicate(cell's materialized trace, trace_format, k) (a seeded permutation of arbitrary arrival order, identical for every policy on that trace) + policy seed k+1. Every k, including 0, is permuted; the recorded file order is not used.",
+  "replicate_seed": "int(sha256('crn-order-v1|<source trace sha256>|<k>')[:8]) >> 1; depends on trace content and k only, so cells sharing a trace (other N, other load level) share replicate workloads (CRN across N and levels too)",
+  "per_format": {
+   "mooncake": "sessions (a single-turn row is a one-row session) sharing a first-arrival timestamp are permuted; turns stay in order within a session; arrival times unchanged; rows with wait_for are rejected",
+   "weka": "the trace is re-materialized as a play-per-line JSONL in loader order and the play order is permuted (agentic lanes take plays in source order). Dir vs identity-order JSONL replay identically except label ids (runs/setup-fix-r0/out/weka_identity_check.json)",
+   "synthetic_sessions": "no file; pass arrival_seed = synthetic_arrival_seed(sha256 of canonical synthetic spec, k)"
+  },
+  "policy_seed": "k + 1, injected as parameters.seed into every policy type that accepts seed (dynamo-default-cost-fn, learned-choice, sticky-session if seeded). The seed is NOT part of policy_sha; record it as its own field.",
+  "cache_key": "sha256(canonical policy YAML without seed) + cell_id + harness_version + 'crn-order-v1' + k. The contract's key (policy YAML + cell_id + harness_version) would return replicate 0 for every k of an unseeded policy and silently restore the zero-spread floor.",
+  "lr_eval_record_fields_added": [
+   "repeat (= k)",
+   "replicate_protocol",
+   "replicate_seed",
+   "policy_seed",
+   "trace_sha256 (of the replicate trace)",
+   "replicate_degenerate"
+  ],
+  "degenerate": "If a trace has no permutable units (no arrival ties, fewer than 2 plays), PermutationStats.degenerate is true and its replicates are identical except for policy seed; lr-eval must flag replicate_degenerate and the noise for that cell must come from workload segments, never from these replicates.",
+  "never": "Never estimate noise, thresholds, or gate conditions from identical re-runs (same workload, same seed)."
+ },
+ "rules": {
+  "paired_ratio": "r[c][k] = goodput(policy, c, k) / goodput(default@defaults, c, k), the default run on the same replicate k (same workload, seed k+1). noise.paired_ratios asserts both sides cover the same (cell, k) set.",
+  "pooled_sd": "sqrt(mean over cells of the sample variance over k of r[c][k]) (noise.pooled_sd); requires >= 2 replicates per cell",
+  "differs_beyond_noise": "clause 1: some validation cell has |mean_k r[c][k] - 1| > 3 x pooled_sd; clause 2: cells are averaged within independent workload segments (same trace window / play subset / synthetic spec), then |mean over segments| > 2 x SE over segments, with >= 3 segments; degenerate (pooled_sd == 0) never passes. Implemented by noise.differs_beyond_noise.",
+  "replicates_min": {
+   "validation": 3,
+   "test": 3,
+   "pilot_gate": 3,
+   "cma_es_per_evaluation": 2,
+   "noise_calibration_per_family_and_N": 8
+  },
+  "cma_es": "within a generation every candidate and the default reference use the same (cell, k) set (CRN); rotate k across generations through a fixed pool and normalize each candidate by default on the same k (LR-03)"
+ },
+ "measured_setup_fix_r0": {
+  "source": "runs/setup-fix-r0/crn_noise_summary.json (raw: runs/setup-fix-r0/out/*.jsonl)",
+  "label": "uncalibrated smoke cells (setup's 2000-row Mooncake slice, SLA TTFT 2000 ms / ITL 50 ms; AgentX 2-play sample); calibration must re-measure per family and N",
+  "cells": {
+   "agentx2-n2-lanes1": {
+    "replicates": 4,
+    "distinct_replicate_traces": 2,
+    "replicate_rerun_identical": {
+     "default": true,
+     "lmetric": true
+    },
+    "goodput_cv_by_policy": {
+     "default": 0.0076,
+     "lmetric": 0.00841
+    },
+    "goodput_sd_by_policy": {
+     "default": 0.00018,
+     "lmetric": 0.00019
+    },
+    "good_frac_cv_by_policy": {
+     "default": 0.0076,
+     "lmetric": 0.00778
+    },
+    "duration_cv_by_policy": {
+     "default": 0.0,
+     "lmetric": 0.00062
+    },
+    "paired_ratio_vs_default": {
+     "lmetric": {
+      "mean": 0.97184,
+      "sd": 0.009,
+      "min": 0.96406,
+      "max": 0.98034,
+      "original_order_ratio": 0.97889
+     }
+    }
+   },
+   "mc2000-n4-open": {
+    "replicates": 8,
+    "distinct_replicate_traces": 8,
+    "replicate_rerun_identical": {
+     "default": true,
+     "lmetric": true,
+     "rr": true,
+     "two-tier": true
+    },
+    "goodput_cv_by_policy": {
+     "default": 0.01762,
+     "lmetric": 0.0385,
+     "rr": 0.01169,
+     "two-tier": 0.02702
+    },
+    "goodput_sd_by_policy": {
+     "default": 0.0186,
+     "lmetric": 0.04689,
+     "rr": 0.0137,
+     "two-tier": 0.03325
+    },
+    "good_frac_cv_by_policy": {
+     "default": 0.01657,
+     "lmetric": 0.03994,
+     "rr": 0.01462,
+     "two-tier": 0.02756
+    },
+    "duration_cv_by_policy": {
+     "default": 0.00166,
+     "lmetric": 0.00755,
+     "rr": 0.00679,
+     "two-tier": 0.00518
+    },
+    "paired_ratio_vs_default": {
+     "lmetric": {
+      "mean": 1.15465,
+      "sd": 0.05083,
+      "min": 1.10269,
+      "max": 1.23929,
+      "original_order_ratio": 1.14607
+     },
+     "rr": {
+      "mean": 1.11085,
+      "sd": 0.02181,
+      "min": 1.08797,
+      "max": 1.14641,
+      "original_order_ratio": 1.09664
+     },
+     "two-tier": {
+      "mean": 1.16633,
+      "sd": 0.04092,
+      "min": 1.11815,
+      "max": 1.23942,
+      "original_order_ratio": 1.15392
+     }
+    }
+   },
+   "mc2000-n8-closed32": {
+    "replicates": 8,
+    "distinct_replicate_traces": 8,
+    "replicate_rerun_identical": {
+     "default": true,
+     "lmetric": true,
+     "rr": true,
+     "two-tier": true
+    },
+    "goodput_cv_by_policy": {
+     "default": 0.01261,
+     "lmetric": 0.01693,
+     "rr": 0.02246,
+     "two-tier": 0.01476
+    },
+    "goodput_sd_by_policy": {
+     "default": 0.0555,
+     "lmetric": 0.08472,
+     "rr": 0.08489,
+     "two-tier": 0.07386
+    },
+    "good_frac_cv_by_policy": {
+     "default": 0.00858,
+     "lmetric": 0.00541,
+     "rr": 0.00537,
+     "two-tier": 0.00449
+    },
+    "duration_cv_by_policy": {
+     "default": 0.00691,
+     "lmetric": 0.01646,
+     "rr": 0.01965,
+     "two-tier": 0.01862
+    },
+    "paired_ratio_vs_default": {
+     "lmetric": {
+      "mean": 1.1373,
+      "sd": 0.02529,
+      "min": 1.09878,
+      "max": 1.1659,
+      "original_order_ratio": 1.16418
+     },
+     "rr": {
+      "mean": 0.85914,
+      "sd": 0.02612,
+      "min": 0.81742,
+      "max": 0.90206,
+      "original_order_ratio": 0.83196
+     },
+     "two-tier": {
+      "mean": 1.13689,
+      "sd": 0.0141,
+      "min": 1.11415,
+      "max": 1.15139,
+      "original_order_ratio": 1.15577
+     }
+    }
+   },
+   "mc2000-n8-open": {
+    "replicates": 8,
+    "distinct_replicate_traces": 8,
+    "replicate_rerun_identical": {
+     "default": true,
+     "lmetric": true,
+     "rr": true,
+     "two-tier": true
+    },
+    "goodput_cv_by_policy": {
+     "default": 0.01831,
+     "lmetric": 0.01361,
+     "rr": 0.01269,
+     "two-tier": 0.02475
+    },
+    "goodput_sd_by_policy": {
+     "default": 0.05221,
+     "lmetric": 0.043,
+     "rr": 0.03768,
+     "two-tier": 0.07848
+    },
+    "good_frac_cv_by_policy": {
+     "default": 0.01718,
+     "lmetric": 0.01109,
+     "rr": 0.01161,
+     "two-tier": 0.0188
+    },
+    "duration_cv_by_policy": {
+     "default": 0.00279,
+     "lmetric": 0.01075,
+     "rr": 0.01081,
+     "two-tier": 0.00615
+    },
+    "paired_ratio_vs_default": {
+     "lmetric": {
+      "mean": 1.10799,
+      "sd": 0.02427,
+      "min": 1.07017,
+      "max": 1.13348,
+      "original_order_ratio": 1.09938
+     },
+     "rr": {
+      "mean": 1.04111,
+      "sd": 0.01677,
+      "min": 1.01954,
+      "max": 1.06548,
+      "original_order_ratio": 1.00755
+     },
+     "two-tier": {
+      "mean": 1.11211,
+      "sd": 0.03091,
+      "min": 1.07564,
+      "max": 1.15237,
+      "original_order_ratio": 1.12056
+     }
+    }
+   }
+  },
+  "pooled_paired_ratio_sd_over_mooncake_cells": {
+   "lmetric": 0.03565,
+   "rr": 0.0219,
+   "two-tier": 0.03071
+  },
+  "rule_on_mooncake_cells": {
+   "lmetric": {
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs": false,
+    "segments": 1,
+    "per_cell_threshold_3sd": 0.10694,
+    "max_abs_cell_delta": 0.15465
+   },
+   "rr": {
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs": false,
+    "segments": 1,
+    "per_cell_threshold_3sd": 0.06571,
+    "max_abs_cell_delta": 0.14086
+   },
+   "two-tier": {
+    "cell_clause": true,
+    "segment_clause": false,
+    "differs": false,
+    "segments": 1,
+    "per_cell_threshold_3sd": 0.09212,
+    "max_abs_cell_delta": 0.16633
+   }
+  },
+  "observations": [
+   "Every replicate was itself deterministic: rerunning replicate 0 reproduced the full per-request hash for every policy and cell.",
+   "Original-order goodput at mc2000-n8-open reproduces setup and the auditor exactly (default seed1 2.868672871547336, lmetric 3.153759121853308, rr 2.890342652363542).",
+   "The recorded file order is not a typical draw for round-robin: rr/default original-order ratio is 1.0076 at mc2000-n8-open, below all 8 replicates (1.0195-1.0655), and 0.8320 at mc2000-n8-closed32, below the replicate mean 0.8591 (range 0.8174-0.9021). This is why k = 0 is permuted too. Mechanism not established [hypothesis: file order groups related prefixes within a burst].",
+   "Open loop: the spread is in the good count (good_frac CV ~ goodput CV; makespan CV 0.2-1.1%). Closed loop: mostly in makespan (good_frac CV 0.45-0.86%, duration CV 0.7-2.0%), which LR-01's arrival-window denominator would change.",
+   "One trace segment cannot certify a difference: on the three Mooncake cells (one segment) clause 1 holds for lmetric, rr and two-tier but clause 2 cannot (segments = 1)."
+  ]
+ },
+ "calibration_todo": "Re-measure per family x N (at least one cell per family at each of N in {4, 8} and one of {2, 16, 32}) with K = 8 replicates, on calibrated loads and SLAs; record pooled paired-ratio sd per (family, N, load mode) here or in facts/noise_calibration.json; size validation segments and K from it (LR-02 power check n ~ 8/(delta/s)^2)."
+}

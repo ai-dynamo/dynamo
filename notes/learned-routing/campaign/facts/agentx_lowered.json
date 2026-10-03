@@ -1,0 +1,4834 @@
+{
+ "schema": "learned-routing.agentx-lowered.v1",
+ "stage": "sidecar A3 (AgentX lowering with recycling)",
+ "written": "2026-10-02T17:30:52-07:00",
+ "status": "ok",
+ "method": {
+  "summary": "AISim's own Weka lowering, not a reimplementation: an 81-line Rust CLI (WT benchmarks/learned_routing/tools/agentx_lower) calls the public aisimulate_core::replay::loadgen::WekaImporter (=0.13.0-dev.202609300000000061, the crate the bindings link; helper Cargo.lock pins the same serde_json 1.0.150, blake3 1.8.7) to emit each capped play's header and rows once (base rows). Python (learned_routing.workloads.agentx_lowered) only recycles: draws copies per split, prefixes ids, remaps hash ids to disjoint per-copy ranges, sets ordinals, and in open mode rebases not_before_ms to Poisson play arrivals.",
+  "input_plays": "82 selected plays (traces/agentx/plays) after B2's AgentX transforms: the plain cap (think_cap_s=300, max_model_len=131072) in traces/agentx_lowered/weka_cap300/<play>.json, plus think_mult 0.5/2/4 and osl_mult 1.5/2.5 on top of it in weka_cap300_<think|osl><m>/ (fix_r0); each byte-identical to the play lines inside B2's AgentX cell traces that use the same transform (transforms.by_tag.*.b2_cell_trace_check)",
+  "b2_cell_trace_check": {
+   "byte_identical": 82,
+   "plays_checked": 82
+  },
+  "base_manifest": "<campaign-root>/traces/agentx_lowered/base_cap300/MANIFEST.json",
+  "base_manifest_sha256": "9868b9f6d71bbe4c70045185e20cf671d5941abc1dddfd598123a88490f46586",
+  "helper_binary_sha256": "f6d1d98cbd135a2a14cf4d97bf164523ae9ecbdf68f96ef6b57f8daf0936c683",
+  "hash_namespace_semantics": [
+   "native: ns = 'weka:' + blake3(relative source name)[:16]; source name = path relative to the corpus root, or '<file>#<line:06>' inside .jsonl; ids are '{ns}:request:<source id>', '{ns}:session:<stream>', '{ns}:play:<trace id>'",
+   "native: full 64-token block with source hash h -> u64_le(blake3('weka-full-block\\0source:{name}:{h}\\0{nonce}')[:8]): the (relative path, source hash) pair is the identity, nonce resolves u64 collisions within one play",
+   "native: missing source hash -> 'private:missing:{request_id}:{i}'; partial tail block -> 'weka-partial-tail\\0{request_id}:{blocks}:{input_length}' (request-private)",
+   "native: header hash_id_scope='local' but replay interns u64 ids GLOBALLY in node order (WorkloadDriver: dense u32 by first appearance), so isolation between plays comes only from the per-play namespace",
+   "recycled: copy i maps the k-th distinct id of its play (first appearance in row order) to hash_base_i + k; ranges [hash_base_i, hash_base_i + distinct_i) are consecutive from 1 and disjoint, so equal source hashes stay equal within a copy and never collide across copies or plays; engine re-chunking 64 -> 16 tokens runs on synthesized tokens exactly as for native Weka"
+  ],
+  "recycling_semantics": [
+   "copy i draws pool[index_draw(seed, 'agentx-lowered-draw|' + split, i, len(pool))] (blake2b counter draw, with replacement) from the split's sorted pool only",
+   "ids: 'lrx:{i:06d}:' + native id for request_id, session_id, play_id and every dependency target; subagent session structure and within-play sort order unchanged",
+   "source_play_ordinal = i (contiguous); replay sorts plays by ordinal and deals lanes ordinal % agentic_lanes, so lane j runs copies j, j+L, j+2L, ... back to back",
+   "dependency edges (relation, trigger, delay_ms), lengths, models, recorded_api_time_ms copied verbatim",
+   "closed: not_before_ms unchanged (lanes rebase each play to its activation: start + max(nb - root_nb, 0))",
+   "open: not_before_ms = a_i + max(nb - root_nb, 0) on every row (the lane rebase at a_i; descendants keep offsets, which replay uses as floors under dependency times); a_0 = 0, a_i = a_{i-1} - ln(1 - u_i)/rate, u_i = unit_draw(seed, 'agentx-lowered-arrival', i), rounded to whole ns; independent of split and rate",
+   "header: schema dynamo.agentic_mooncake v2, block_size 64 and hash_id_scope local copied from the base rows; source = {format: weka, digest: lr-agentx-lowered-v1:<spec key>} (provenance only; replay ignores it)"
+  ],
+  "base_manifests": {
+   "cap300": {
+    "path": "<campaign-root>/traces/agentx_lowered/base_cap300/MANIFEST.json",
+    "sha256": "9868b9f6d71bbe4c70045185e20cf671d5941abc1dddfd598123a88490f46586"
+   },
+   "cap300_osl1.5": {
+    "path": "<campaign-root>/traces/agentx_lowered/base_cap300_osl1.5/MANIFEST.json",
+    "sha256": "92c6314c42bf22c22e9de59a18808162fc736ffdc244431a315b9e22d7079b82"
+   },
+   "cap300_osl2.5": {
+    "path": "<campaign-root>/traces/agentx_lowered/base_cap300_osl2.5/MANIFEST.json",
+    "sha256": "c7a7a70ab8e98547b9c0bcc64aeb554e9c6d70610b9404ce5263a784f8f679ba"
+   },
+   "cap300_think0.5": {
+    "path": "<campaign-root>/traces/agentx_lowered/base_cap300_think0.5/MANIFEST.json",
+    "sha256": "da6d56a89a83094e0f9c07be1cf1e9fd293a47df4ec68a703cb472bb80b72598"
+   },
+   "cap300_think2": {
+    "path": "<campaign-root>/traces/agentx_lowered/base_cap300_think2/MANIFEST.json",
+    "sha256": "9a45b84dfa253d039f2f70575b0fe046685882e8ff60d33ed491d6b425af200f"
+   },
+   "cap300_think4": {
+    "path": "<campaign-root>/traces/agentx_lowered/base_cap300_think4/MANIFEST.json",
+    "sha256": "3561c1ec50d23ad1d52c1ee83966b9f87a63809d55d56d5f9976cbcc42869141"
+   }
+  }
+ },
+ "parity_evidence": {
+  "graph_digests": {
+   "what": "for every play, the canonical graph digest (blake3 over all compiled nodes: ids, lengths, hash ids, not_before_ms, dependencies) of native load_weka_agentic_graph equals that of AgenticTrace::from_agentic_mooncake(base file) Repeated for each of the six play transforms (fix_r0): 82/82 equal for each.",
+   "plays": 82,
+   "equal": 82,
+   "per_transform": {
+    "cap300": {
+     "plays": 82,
+     "equal": 82
+    },
+    "cap300_osl1.5": {
+     "plays": 82,
+     "equal": 82
+    },
+    "cap300_osl2.5": {
+     "plays": 82,
+     "equal": 82
+    },
+    "cap300_think0.5": {
+     "plays": 82,
+     "equal": 82
+    },
+    "cap300_think2": {
+     "plays": 82,
+     "equal": 82
+    },
+    "cap300_think4": {
+     "plays": 82,
+     "equal": 82
+    }
+   }
+  },
+  "replay": {
+   "file": "<campaign-root>/runs/agentx_lowered/parity/parity.json",
+   "plays": [
+    "0098-3e8b931fd474375ea08ae58872aea7a8e0f5.json",
+    "0073-2a2da059b7425d9dc1f999fca1177bc1cdb9.json",
+    "0390-fe1121fb09adada530be4b8c8568a7ee6758.json",
+    "0013-07dd40536557a1d6440a923557c3129dc929.json",
+    "0021-0bed163ac9566086e14ffd85c7481096d49d.json",
+    "0315-c7cdef4e9eb74c966d9e8dfe982319c9806d.json"
+   ],
+   "workers": [
+    2,
+    4
+   ],
+   "policies": [
+    "dynamo-default-cost-fn seed 1 (YAML)",
+    "round_robin"
+   ],
+   "fields_compared": [
+    "admission_count",
+    "admission_history",
+    "agentic",
+    "arrival_time_ms",
+    "decode_admit_ms",
+    "decode_reused_input_tokens",
+    "decode_route_overlap_tokens",
+    "decode_worker_idx",
+    "destination_activated_ms",
+    "destination_reserved_ms",
+    "dispatched_at_ms",
+    "e2e_latency_ms",
+    "first_admit_ms",
+    "first_token_ms",
+    "input_length",
+    "itl_ms",
+    "last_token_ms",
+    "output_length",
+    "play_id",
+    "prefill_admit_ms",
+    "prefill_route_overlap_tokens",
+    "prefill_worker_idx",
+    "pressure_record_ordinals",
+    "readmission_count",
+    "request_id",
+    "requested_output_length",
+    "reused_input_tokens",
+    "routing_history",
+    "session_id",
+    "source_held_ms",
+    "source_released_ms",
+    "terminal_status",
+    "terminal_time_ms",
+    "ttft_ms",
+    "ttst_ms",
+    "turn_index",
+    "uuid"
+   ],
+   "exact_cases": 84,
+   "exact_identical": 84,
+   "all_exact_identical": true,
+   "tiers": {
+    "single": "each play alone: native capped Weka file vs base agentic file (ids identical) and vs a relabeled copy (lrx prefix and new hash range, ids mapped back); timestamp mode",
+    "corpus": "the 6 plays as one native directory vs its AISim lowering vs relabeled copies ordered like the native ids; timestamp mode and agentic_lanes 2 and 3",
+    "recycle": "12 seeded draws with replacement from the 6 plays (5 distinct): native directory with one file per copy (distinct names = native copy isolation) vs this module's recycling with disjoint hash ranges and native-ordered labels; timestamp mode and agentic_lanes 3 and 5 (lanes run 2-4 copies each)"
+   },
+   "per_tier": {
+    "single": {
+     "cases": 48,
+     "identical": 48,
+     "rows_per_case": [
+      26,
+      30,
+      39,
+      42,
+      53,
+      119
+     ]
+    },
+    "corpus": {
+     "cases": 24,
+     "identical": 24,
+     "rows_per_case": [
+      309
+     ]
+    },
+    "recycle": {
+     "cases": 12,
+     "identical": 12,
+     "rows_per_case": [
+      712
+     ]
+    }
+   },
+   "coverage": "explicit subagents (0098: 1 subagent lowered to 19 streams; 0073: 6; 0390: 5; 0013: 3), joins, replay barriers, spawn/dispatch (concurrent, non-blocking children: 0073 has 5, 0315 has 4 detected streams without a subagent marker), spawn/completion, and the only authored zero-output request (0021). No selected play has an async_launched (background) subagent, so that importer branch is not exercised by data.",
+   "per_transform": {
+    "cap300_osl1.5": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_osl1.5/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.05683554699858462,
+      0.1804466282923427
+     ]
+    },
+    "cap300_osl2.5": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_osl2.5/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.15608933593375007,
+      0.13520381570782436
+     ]
+    },
+    "cap300_think0.5": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_think0.5/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.06773670816993871,
+      0.028210181806327395
+     ]
+    },
+    "cap300_think2": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_think2/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.02605272933188063,
+      0.0536228344463634
+     ]
+    },
+    "cap300_think4": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_think4/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.001254915203145357,
+      0.006454516375253627
+     ]
+    }
+   },
+   "wording_correction_fix_r0": "audit parity-fidelity r0 m1: the single tier ran in timestamp mode only (agentic_lanes null in all 48 single cases); only the corpus (lanes 2, 3) and recycle (lanes 3, 5) tiers also ran lanes. The STATE.md line of 16:47 overstated this. The builder's exact cases replayed relabeled files with base headers and native-ordered labels, never an unmodified generator file; the auditor closed that gap with unmodified generator output (64/64 single copies, 24/24 two-play cases, 36/36 untouched 12-copy prefixes; audits/agentx-lowering/parity-fidelity-r0.md rows 6-8)."
+  },
+  "node_order_sensitivity": {
+   "what": "the same 12-copy recycled corpus with this module's default labels (copy index order) instead of native-ordered labels",
+   "cases": 12,
+   "identical": 0,
+   "mean_e2e_rel_diff_range": [
+    -0.07440062017876858,
+    0.047116820326871034
+   ],
+   "explanation": "replay sorts nodes by request_id; node order breaks ties between simultaneously ready requests (ReadySession session_index) and fixes the dense u32 hash interning. Native order follows blake3 of file names; the generator uses copy index. Neither is privileged; the effect is the same kind as a crn-order-v1 replicate. In this worst case all lanes start at t = 0; open-mode Poisson arrivals rarely tie."
+  },
+  "open_mode_semantics_check": "validate runs check every root becomes ready exactly at its copy's arrival and no request is ready before it (runs[*].open_mode_arrivals)"
+ },
+ "generator_usage": {
+  "module": "learned_routing.workloads.agentx_lowered (WT benchmarks/learned_routing)",
+  "env": "LR_ROOT=<campaign-root> PYTHONDONTWRITEBYTECODE=1, PY=WT/.venv/bin/python",
+  "build_base_once": "cd WT/benchmarks/learned_routing/tools/agentx_lower && cargo build --release --offline; PY -m learned_routing.workloads.agentx_lowered build-base --all-cell-transforms (or one transform: build-base [--think-cap-s S] [--think-mult M] [--osl-mult M])",
+  "open": "PY -m learned_routing.workloads.agentx_lowered --split {train|val|test} --mode open --num-copies C --seed K --play-rate-per-s R_TOTAL [--out PATH]   (R_TOTAL = per-worker play rate x N; C >= R_TOTAL x (warm-up + window + margin))",
+  "closed": "PY -m learned_routing.workloads.agentx_lowered --split S --mode closed --num-copies C --seed K [--out PATH]; replay with agentic_lanes = lanes per worker x N and C >= 8 x lanes",
+  "output": "PATH (default traces/agentx_lowered/gen/<sha256>.jsonl) plus PATH.meta.json (spec, draws, per-copy label/hash range/start, sha256)",
+  "replay_call": "run_trace_replay(path, trace_format='agentic_mooncake', execution_model='Qwen/Qwen3-32B', arrival_speedup_ratio=1.0 (a speedup also divides think/tool delays), agentic_lanes=L for closed mode, trace_block_size ignored (header 64))",
+  "python_api": "agentx_lowered.GenSpec(...); write_generated(spec, root, out) -> meta; generate(spec, root) -> (header, rows, meta) without writing",
+  "crn_replicates": "harness replicates.py (crn-order-v1) does not handle agentic_mooncake. Suggested replicate k for a lowered cell: the same GenSpec with seed = k (new draws and arrivals, shared by every policy). Files at the same seed share draws across N and modes (same copy count -> identical draws) and normalized arrivals across rates.",
+  "harness_gap": "learned_routing.cells.Cell.load_kwargs accepts agentic_lanes only for trace_format weka, and replicates.materialize_replicate rejects agentic_mooncake; calibration must extend both (not edited here by rule).",
+  "parity_and_validation": "PY -m learned_routing.workloads.agentx_lowered parity; PY -m learned_routing.workloads.agentx_lowered validate --runs-json RUNS --out-dir DIR [--keep-per-request]",
+  "tests": "PY -m pytest -p no:cacheprovider learned_routing/workloads/tests/test_workloads_agentx_lowered.py learned_routing/workloads/tests/test_workloads_agentx_lowered_transforms.py",
+  "transform_cells": "add --think-mult M or --osl-mult M (GenSpec think_mult/osl_mult) to the open/closed command; PlayTransform.from_cell(cell['transform']) gives the values; meta.json records spec.think_mult/osl_mult and transform {think_cap_s, think_mult, osl_mult, max_model_len, tag}",
+  "parity_per_transform": "PY -m learned_routing.workloads.agentx_lowered parity --think-mult M | --osl-mult M [--out-dir DIR]"
+ },
+ "per_split_play_pools": {
+  "train": {
+   "plays": 33,
+   "rows": 1212,
+   "rows_per_play_mean": 36.72727272727273,
+   "recorded_span_s_mean_after_cap": 1611.9781818181818,
+   "recorded_span_s_max_after_cap": 3737.021,
+   "plays_with_subagent_sessions": 6,
+   "zero_output_rows": 0,
+   "subsets": [
+    "A1",
+    "A2",
+    "A3"
+   ],
+   "names": [
+    "0001-006c98de37d819e95b0840e25426bb7ca99d.json",
+    "0009-05f72f78a037cfa5cd4e4541960a574701d9.json",
+    "0010-063179eb93f4337a662e859c5a2c5638e03f.json",
+    "0012-077ea9e6554f45bbad9c24a8462bae9a8512.json",
+    "0017-0a688303b1ae62a97607af8021f2130c2caf.json",
+    "0065-24f457bf9e42d6ffb1cc4bbd279c650bb8b6.json",
+    "0073-2a2da059b7425d9dc1f999fca1177bc1cdb9.json",
+    "0081-3317a925c2a7f40e9eafe5f5532793a23c67.json",
+    "0083-3531533f1f293048fc9691b112feafc44e62.json",
+    "0084-35de830dbe1dbe90e6eaa36bc4814c7410ec.json",
+    "0086-37c8d244d81e01d3b70c9f7fe619d9392a24.json",
+    "0088-3a066e6ad705e8792dec8c84610bbee401cb.json",
+    "0091-3c1fbf5cf98484c7f9ef07f2d4b00e65d829.json",
+    "0098-3e8b931fd474375ea08ae58872aea7a8e0f5.json",
+    "0103-457a7bf22f9e6961870d5b356ab2bd780fff.json",
+    "0106-46c7f09048fc482e94f4552b0a99a4ca5e30.json",
+    "0109-47a89e30bcdf1bc8002a026ad7ebfc914766.json",
+    "0128-528995cdde1ebf15ccf0b79aec42dba31ce2.json",
+    "0185-751fbb2089c7c4303f3ed241f3a7a27a3f2c.json",
+    "0189-77cfef0760bda37fb6f8829cebd9a7871aa5.json",
+    "0196-7b962f1dde638a046d1ce381c550fd26e664.json",
+    "0200-7e370a371b3de565f62dd133bd9e496947ac.json",
+    "0201-7e6f3a869f85c4774c84d9ee8b6137a758cc.json",
+    "0219-8c099fe8073c296bc1f0d744fe98e3cc96b3.json",
+    "0262-a46aa506e8aef39ef68e80643d583a6e25e2.json",
+    "0271-a8cb459ec5ff0572db2bbe7e1640f488d6ed.json",
+    "0272-a8fdbf3a66dd9a5c616d189bf04fc7f60b47.json",
+    "0303-bb05502f908fdb0da927ead1002023895bdd.json",
+    "0314-c4b21b8d9ec3f9eb0b1235d8ff1e33ae4fdc.json",
+    "0315-c7cdef4e9eb74c966d9e8dfe982319c9806d.json",
+    "0324-cd4584af6c7bdfd6acfa82ce4d3dfd4dbcb3.json",
+    "0382-fa21035070fee58da42219bb8dd7657395f9.json",
+    "0386-fd58552cd561b0fd7d5490415dfe966e2e20.json"
+   ]
+  },
+  "test": {
+   "plays": 28,
+   "rows": 1035,
+   "rows_per_play_mean": 36.964285714285715,
+   "recorded_span_s_mean_after_cap": 1305.8570357142858,
+   "recorded_span_s_max_after_cap": 3733.976,
+   "plays_with_subagent_sessions": 6,
+   "zero_output_rows": 0,
+   "subsets": [
+    "T1",
+    "T2",
+    "T3",
+    "T4"
+   ],
+   "names": [
+    "0007-04dba6fe621301a1d01fd63b8d02c9645c48.json",
+    "0013-07dd40536557a1d6440a923557c3129dc929.json",
+    "0020-0bcd99353218b9a386b1c4aec13d77abecdb.json",
+    "0028-0f909e7d63c0d5e1f060d727ada25d910d89.json",
+    "0032-12bd4c7c82ae413b035253cb800fc5312111.json",
+    "0033-12cfecf98c158ab54fb65980602421f00d69.json",
+    "0045-17808bf55e26681520f3f11f47b5e1260108.json",
+    "0056-203147a7ad6c355f99290d8ac7811e6de5be.json",
+    "0062-23074f92872cd4f8212d04cd87e71a2ced7b.json",
+    "0064-240cd2e1b10e5b738ac6fee166b2aca7eff2.json",
+    "0066-259d1cc35e11b72660b8d6a33867cbb93759.json",
+    "0085-3735de09df4f9ac454aee913e2a00633ad0d.json",
+    "0133-557810b129b9cb3e7402235470567c4e4dc0.json",
+    "0134-557f96e1c557baa7724b7bdfd13c48cce434.json",
+    "0142-5c5e408b76e5e22747853915f67be3c491a4.json",
+    "0156-62378a8a0d0bdde1ebd85f5dd60a43cd8110.json",
+    "0173-6d5c6b957d5f634a7f820ddff7389e161def.json",
+    "0195-79ea3049f1c4977e9457ffc2feeae309e24b.json",
+    "0222-8e9656e01451be8f2bfcad65595a5d48fd7a.json",
+    "0223-91237fb5e1b97fcdf9c1e3b2dd60bfdde1c0.json",
+    "0232-979ae6377c88be0e93531cdb9632795b6a7a.json",
+    "0283-b0cc7a9746be5fbe1c8e7e931c664fc3e03c.json",
+    "0325-cd85ec9e176c8d3d6aad376464fa591be7de.json",
+    "0354-df2638f16306b1a10635bdb8e3acf7de0a61.json",
+    "0361-e838158b657825a28d77391211d7edc74e5c.json",
+    "0368-f1b52711b90ba13f25712d3e223db205eab4.json",
+    "0387-fdc99869ba95eb9d1af2aeaefe9ac2c86d5e.json",
+    "0390-fe1121fb09adada530be4b8c8568a7ee6758.json"
+   ]
+  },
+  "val": {
+   "plays": 21,
+   "rows": 885,
+   "rows_per_play_mean": 42.142857142857146,
+   "recorded_span_s_mean_after_cap": 1874.315761904762,
+   "recorded_span_s_max_after_cap": 7086.638,
+   "plays_with_subagent_sessions": 6,
+   "zero_output_rows": 1,
+   "subsets": [
+    "V1",
+    "V2",
+    "V3"
+   ],
+   "names": [
+    "0021-0bed163ac9566086e14ffd85c7481096d49d.json",
+    "0037-14129d470e508b236be22188aa78548ef805.json",
+    "0048-1b5229e3aa8893ca2f4d07d248f9cd9752fb.json",
+    "0063-23a576b18cd4bacef3d1aa138b060b9407ce.json",
+    "0094-3d8fcda6a4decdb4d4f56839db6eba041e60.json",
+    "0127-526f242b0f14fa34da24eb7346123c5025cd.json",
+    "0170-6a66ece7b14e61912eb266be794a6bf62faf.json",
+    "0187-768086c44de172b3719b40f29aec56303892.json",
+    "0246-9ec047754f4ddd94a59fcd0d85213d5f3b1b.json",
+    "0261-a41ce9f7012a1233c0c29ee8f590305932c3.json",
+    "0270-a89db4725a97da42ea24bd5128a093ffb215.json",
+    "0280-af6b2fe9201b7c425aefcc0bda69fd0ebf23.json",
+    "0293-b699b717b623acb2b6c06db1196258fbb4a7.json",
+    "0299-b9bd3fd87da01ccbe4e3e0fe9edb0ffabb9f.json",
+    "0302-badfbde3ccac120284b893a0b16105ffd6e7.json",
+    "0306-bbdcb12440a7ab3496b9fac8b5f9824b1672.json",
+    "0317-c84315dc1c89737d7a6a58a00ddd86965cb7.json",
+    "0336-d699ceca8ee223fa3521c106c46ccfaf3220.json",
+    "0339-d876a71a07454e7499469e864f89cf6a3345.json",
+    "0343-d92c323a6f1e1bf63d1ae4e5f0b2c8708580.json",
+    "0358-e3dbfa26bddbcb04c48a73dab3fa353d45f4.json"
+   ]
+  }
+ },
+ "suggested_loads": {
+  "status": "suggestion only; calibration finalizes loads and the AgentX SLA with the A2 band rule (default good_frac about 0.95/0.85/0.65 at L1/L2/L3)",
+  "how_measured": "default = dynamo-default-cost-fn seed 1; train pool; A2 good fraction in the steady window (open: arrival basis; closed: completion basis) on a grid of provisional SLAs; E0 = ais-chunked-estimator-v1. Points and interpolations: validation.band_tables; every run: validation.runs[*].good_frac",
+  "provisional_sla": {
+   "itl_ms": 40,
+   "e2e_slowdown": 3,
+   "why": "the integration stage's provisional SLA; at L1/L2 loads (closed lanes <= 5, open <= 0.002 plays/s per worker) adding E2E slowdown 3 to I = 40 ms changes good_frac by <= 0.004, at closed L3 by up to 0.041, so ITL sets the band"
+  },
+  "closed_mode": {
+   "agentic_lanes": "lanes_per_worker x N (needs an integer)",
+   "L1_lanes_per_worker": 4,
+   "L2_lanes_per_worker": 5,
+   "L3_lanes_per_worker": 6,
+   "default_good_frac_at_I40_S3": {
+    "N8": [
+     0.951,
+     0.844,
+     0.673
+    ],
+    "N16": [
+     0.951,
+     0.849,
+     0.706
+    ],
+    "N32": [
+     0.924,
+     0.844,
+     0.637
+    ]
+   },
+   "round_robin_at_L1": {
+    "N8": 0.763,
+    "N32": 0.767
+   },
+   "alternative_at_I30_S3_interpolated": {
+    "L1": 3.3,
+    "L2": 4.2,
+    "L3": 5.3,
+    "note": "linear interpolation between measured lanes 3..6 (hypothesis until measured)"
+   },
+   "copies": ">= 8 x lanes (window 2,460-10,620 s simulated in these runs); each extra copy per lane lengthens the window by about one play sojourn (1,770-2,660 s measured)",
+   "warmup": "p90 over lanes of the end of each lane's first copy: 3,300-4,920 s simulated in the 15 closed runs",
+   "window_end": "first lane out of copies (7,380-14,880 s at 8 copies per lane)",
+   "steady_state": "stationary in all 16 closed runs (lanes 2-6, N 8/16/32, default and round robin, train and val); in-flight plays = lanes by construction; per-worker active requests 0.5-3.4; telemetry active KV usage 0.12-0.72"
+  },
+  "open_mode": {
+   "play_rate_per_s": "per_worker_rate x N (generator --play-rate-per-s takes the total)",
+   "L1_plays_per_s_per_worker": 0.0015,
+   "L2_plays_per_s_per_worker": 0.002,
+   "L3_plays_per_s_per_worker": null,
+   "default_good_frac_at_I40_S3": {
+    "N8": {
+     "0.0015": 0.985,
+     "0.002": 0.95,
+     "0.0025": 0.564,
+     "0.003": 0.004
+    },
+    "N16": {
+     "0.0015": 0.991,
+     "0.002": 0.962,
+     "0.0025": 0.854
+    },
+    "N32": {
+     "0.0015": 0.994,
+     "0.002": 0.95,
+     "0.0025": 0.733
+    }
+   },
+   "default_good_frac_at_I25_S3": {
+    "N8": {
+     "0.0015": 0.95,
+     "0.002": 0.788
+    },
+    "N16": {
+     "0.0015": 0.971,
+     "0.002": 0.874
+    },
+    "N32": {
+     "0.0015": 0.979,
+     "0.002": 0.861
+    }
+   },
+   "round_robin_at_0.002": {
+    "N8": 0.381,
+    "N32": 0.598
+   },
+   "cliff": "between 0.002 and 0.0025 plays/s per worker the open system loses its steady state at every N: play stretch (sojourn / recorded span) and in-flight plays keep growing (N32 at 0.0025: in-flight drift 1.40, stretch 1.28 -> 1.79 by third; N8 at 0.003: stretch 4.2, good_frac 0.004). The A2 L3 target (0.65) therefore has no stationary open-loop load at I40_S3 or I30_S3; use closed lanes for L3, or accept a drifting window.",
+   "why_I_matters": "with a tighter ITL (I = 25 ms, about 1.35x the light-load ITL p50 of 18.3-18.7 ms) the stable rates 0.0015/0.002 sit near 0.95/0.85, which keeps open-loop L1/L2 off the cliff",
+   "copies": "rate x N x (warm-up + window + margin); 16,000 s of arrivals was used",
+   "warmup": "Little's-law plateau of in-flight plays: 1,500-2,880 s simulated at stable loads (later and non-stationary near the cliff)",
+   "window_end": "last play arrival",
+   "steady_state": "stationary at 0.0015 and 0.002 for N 8/16/32 (train); N16 test pool at 0.002 flagged (in-flight drift 0.81 against tolerance 0.16, flat stretch 1.18-1.21); N8 at 0.001 flagged from small counts (13 plays in flight, flat stretch)"
+  },
+  "lr12_note": "closed-mode bands are nearly N-invariant at matched lanes per worker (N8/16/32 within 0.03 except L3 0.64-0.71); open mode is N-dependent past 0.002 (N32 tolerates more than N8). Calibrate per N as LR-12 says, and expect knee-matched open loads to differ by N.",
+  "transform_cells": "not covered by the closed/open suggestions above (measured on cap300 only). Provisional paired runs (transforms.validation): think 0.5 is stationary at 3 lanes/worker (N4) and drifts at 4-5; think 2 and 4 are light at 4-5 lanes/worker; osl 1.5/2.5 stay stationary at 5 lanes/worker with default good 0.825/0.862 (I40 S3). Calibration sets each transform cell's load with the A2 band rule."
+ },
+ "validation": {
+  "out_dir": "<campaign-root>/runs/agentx_lowered/validate",
+  "policy": "dynamo-default-cost-fn seed 1 unless named rr (round_robin)",
+  "steady_state_rules": {
+   "window_end": "open: last play arrival; closed: first lane out of copies",
+   "warmup_open": "first 60 s bin whose 5-bin trailing mean of in-flight plays reaches 90% of the median bin over the second half of [0, window end)",
+   "warmup_closed": "p90 over lanes of the end of each lane's first copy (all lanes start in phase at t = 0)",
+   "stationary": "|last third / first third - 1| <= max(0.15, 2 / sqrt(level x third/sojourn)) on in-flight plays (open) or requests (closed)"
+  },
+  "runs": {
+   "n16-closed-l3-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-closed-l3-train-def.json",
+    "trace_sha256": "7b0087ac64d168590f54f1ae3eb1c33636ae8094dcf100a8b353ef830d867bbc",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 3.0,
+    "agentic_lanes": 48,
+    "copies": 384,
+    "rows": 14139,
+    "completed": 14139,
+    "replay_wall_s": 60.503966308999225,
+    "replay_ms_per_row": 4.27922528531008,
+    "sim_makespan_s": 21648.40249054079,
+    "warmup_end_s": 3780.0,
+    "window_end_s": 9248.041262853842,
+    "prefix_cache_reused_ratio": 0.7276341990801765,
+    "window_s": [
+     3780.0,
+     9240.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.9182200493337624,
+    "drift_tolerance": 0.4436631479235388,
+    "in_flight_plays_per_worker": 3.0,
+    "in_flight_plays_by_third": [
+     48.0,
+     48.0,
+     48.0
+    ],
+    "littles_law_plays": 48.88516046791634,
+    "play_sojourn_mean_s": 1934.1520011219075,
+    "in_flight_requests_per_worker": 1.2700864887835017,
+    "in_flight_requests_by_third": [
+     19.332292224683403,
+     23.966230433316248,
+     17.751298320283507
+    ],
+    "worker_active_requests_mean": 1.266691962988263,
+    "worker_active_requests_min_max": [
+     1.0961579153188945,
+     1.6616923340248984
+    ],
+    "worker_busy_frac_mean": 0.9148223941606058,
+    "worker_busy_frac_min_max": [
+     0.8777643713738102,
+     0.9615879164437837
+    ],
+    "telemetry_active_kv_usage_mean": 0.2782697193995105,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.22860323687339537,
+     0.3704347658914801
+    ],
+    "scored_requests": 5083,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     19.99465779679841,
+     23.453378351577648,
+     47.62674081906949
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.7713286651549475,
+     1.149951708090168,
+     2.4345612192702615
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.9425536100727917,
+     "I25_S2.0": 0.9453078890419044,
+     "I25_S3.0": 0.9453078890419044,
+     "I25_Snone": 0.9453078890419044,
+     "I30_S1.5": 0.959866220735786,
+     "I30_S2.0": 0.9704898681880779,
+     "I30_S3.0": 0.9706866024001574,
+     "I30_Snone": 0.9706866024001574,
+     "I40_S1.5": 0.963997639189455,
+     "I40_S2.0": 0.9781625024591777,
+     "I40_S3.0": 0.984064528821562,
+     "I40_Snone": 0.984064528821562,
+     "I50_S1.5": 0.964784576037773,
+     "I50_S2.0": 0.9801298445799724,
+     "I50_S3.0": 0.989769820971867,
+     "I50_Snone": 0.9905567578201849,
+     "I60_S1.5": 0.964784576037773,
+     "I60_S2.0": 0.9805233130041314,
+     "I60_S3.0": 0.9911469604564234,
+     "I60_Snone": 0.9927208341530592
+    }
+   },
+   "n16-closed-l4-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-closed-l4-train-def.json",
+    "trace_sha256": "ca0a6eb28b979557cce87cd100e5c63cf781b10541bc8ace6dcc4b4691f13d3c",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 4.0,
+    "agentic_lanes": 64,
+    "copies": 512,
+    "rows": 18468,
+    "completed": 18468,
+    "replay_wall_s": 70.62019911000243,
+    "replay_ms_per_row": 3.8239224122808335,
+    "sim_makespan_s": 20792.419283206655,
+    "warmup_end_s": 3900.0,
+    "window_end_s": 9684.21240513889,
+    "prefix_cache_reused_ratio": 0.6253719738729976,
+    "window_s": [
+     3900.0,
+     9660.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.8721192168474515,
+    "drift_tolerance": 0.3663070145681063,
+    "in_flight_plays_per_worker": 4.0,
+    "in_flight_plays_by_third": [
+     64.0,
+     64.0,
+     64.0
+    ],
+    "littles_law_plays": 65.81948700596445,
+    "play_sojourn_mean_s": 1995.3697113387116,
+    "in_flight_requests_per_worker": 1.8631573676273907,
+    "in_flight_requests_by_third": [
+     33.439358187317694,
+     26.829088584592135,
+     29.163106874204924
+    ],
+    "worker_active_requests_mean": 1.8474730358252092,
+    "worker_active_requests_min_max": [
+     1.4408055970872073,
+     2.336455869268395
+    ],
+    "worker_busy_frac_mean": 0.9778897270123798,
+    "worker_busy_frac_min_max": [
+     0.9623199156069732,
+     0.9878216989216787
+    ],
+    "telemetry_active_kv_usage_mean": 0.38366237806817577,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.31508276785240946,
+     0.4786704902896322
+    ],
+    "scored_requests": 7007,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     21.80094037411346,
+     29.572798822962383,
+     95.23374276254886
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.000000731690411,
+     1.4900095728418206,
+     3.8955025177478912
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.8073355216212359,
+     "I25_S2.0": 0.8131868131868132,
+     "I25_S3.0": 0.8133295276152419,
+     "I25_Snone": 0.8134722420436706,
+     "I30_S1.5": 0.8792635935493078,
+     "I30_S2.0": 0.9033823319537605,
+     "I30_S3.0": 0.903667760810618,
+     "I30_Snone": 0.9039531896674754,
+     "I40_S1.5": 0.8949621806764664,
+     "I40_S2.0": 0.9356357927786499,
+     "I40_S3.0": 0.9509062366205223,
+     "I40_Snone": 0.9513343799058085,
+     "I50_S1.5": 0.8978164692450407,
+     "I50_S2.0": 0.9443413729128015,
+     "I50_S3.0": 0.9663193948908234,
+     "I50_Snone": 0.968031968031968,
+     "I60_S1.5": 0.8993863279577565,
+     "I60_S2.0": 0.948051948051948,
+     "I60_S3.0": 0.9727415441701156,
+     "I60_Snone": 0.9773084058798345
+    }
+   },
+   "n16-closed-l4-val-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-closed-l4-val-def.json",
+    "trace_sha256": "031192af6a2a48cbb9f04f495d56276f73a474f8554693e4a34552bdcfb7a07e",
+    "split": "val",
+    "mode": "closed",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 4.0,
+    "agentic_lanes": 64,
+    "copies": 512,
+    "rows": 21617,
+    "completed": 21617,
+    "replay_wall_s": 88.00069248699947,
+    "replay_ms_per_row": 4.0709021828653125,
+    "sim_makespan_s": 30880.70571933807,
+    "warmup_end_s": 4920.0,
+    "window_end_s": 7387.623653415019,
+    "prefix_cache_reused_ratio": 0.6673348306436792,
+    "window_s": [
+     4920.0,
+     7380.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.0696201810301906,
+    "drift_tolerance": 0.38793605490676464,
+    "in_flight_plays_per_worker": 4.0,
+    "in_flight_plays_by_third": [
+     64.0,
+     64.0,
+     64.0
+    ],
+    "littles_law_plays": 55.59069917410452,
+    "play_sojourn_mean_s": 1981.9292749028568,
+    "in_flight_requests_per_worker": 1.6611915708772012,
+    "in_flight_requests_by_third": [
+     24.46276268758658,
+     28.95740359966351,
+     26.165864654394948
+    ],
+    "worker_active_requests_mean": 1.651712870773967,
+    "worker_active_requests_min_max": [
+     1.4617693212438996,
+     1.7594646569234955
+    ],
+    "worker_busy_frac_mean": 0.9839902000419469,
+    "worker_busy_frac_min_max": [
+     0.9772842547524334,
+     0.9909436145166103
+    ],
+    "telemetry_active_kv_usage_mean": 0.35696309267206544,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.3131818258223933,
+     0.4013929708824735
+    ],
+    "scored_requests": 3123,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     21.87643300574847,
+     31.228201120407245,
+     98.37302166463589
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.0000003561252246,
+     1.4789527559587325,
+     3.139165505580849
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.8075568363752802,
+     "I25_S2.0": 0.8094780659622158,
+     "I25_S3.0": 0.8094780659622158,
+     "I25_Snone": 0.8094780659622158,
+     "I30_S1.5": 0.8735190521934038,
+     "I30_S2.0": 0.8888888888888888,
+     "I30_S3.0": 0.8888888888888888,
+     "I30_Snone": 0.8888888888888888,
+     "I40_S1.5": 0.8952929875120077,
+     "I40_S2.0": 0.9276336855587576,
+     "I40_S3.0": 0.9372398334934358,
+     "I40_Snone": 0.9372398334934358,
+     "I50_S1.5": 0.8978546269612552,
+     "I50_S2.0": 0.9388408581492155,
+     "I50_S3.0": 0.9599743836055076,
+     "I50_Snone": 0.9606147934678194,
+     "I60_S1.5": 0.8994556516170349,
+     "I60_S2.0": 0.9452449567723343,
+     "I60_S3.0": 0.9711815561959655,
+     "I60_Snone": 0.9731027857829011
+    }
+   },
+   "n16-closed-l5-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-closed-l5-train-def.json",
+    "trace_sha256": "0352abf267215fa0283f872ee395e146fe317f65b00f4b8021ecfcc408fa1a5d",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 5.0,
+    "agentic_lanes": 80,
+    "copies": 640,
+    "rows": 23040,
+    "completed": 23040,
+    "replay_wall_s": 84.20370274800007,
+    "replay_ms_per_row": 3.654674598437503,
+    "sim_makespan_s": 23422.060299327688,
+    "warmup_end_s": 3780.0,
+    "window_end_s": 10797.079373009909,
+    "prefix_cache_reused_ratio": 0.5545094854846999,
+    "window_s": [
+     3780.0,
+     10740.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.8703335517666706,
+    "drift_tolerance": 0.29570089242277664,
+    "in_flight_plays_per_worker": 5.0,
+    "in_flight_plays_by_third": [
+     80.0,
+     80.0,
+     80.0
+    ],
+    "littles_law_plays": 80.02582610293226,
+    "play_sojourn_mean_s": 2109.771779077305,
+    "in_flight_requests_per_worker": 2.600053187426156,
+    "in_flight_requests_by_third": [
+     45.94909098666917,
+     38.97391978393043,
+     39.99103555887769
+    ],
+    "worker_active_requests_mean": 2.560363420642894,
+    "worker_active_requests_min_max": [
+     2.2434034079835845,
+     2.9020050382119633
+    ],
+    "worker_busy_frac_mean": 0.9965741807774953,
+    "worker_busy_frac_min_max": [
+     0.9934323523536307,
+     0.9989691391360644
+    ],
+    "telemetry_active_kv_usage_mean": 0.5382480977858497,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.4793403707678049,
+     0.6242452383520375
+    ],
+    "scored_requests": 9527,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     24.776817028375504,
+     47.40683160622557,
+     138.84271629769103
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.111347303598391,
+     2.127313144332975,
+     5.961790410874709
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.5202057310800882,
+     "I25_S2.0": 0.5267135509604283,
+     "I25_S3.0": 0.5269234806339876,
+     "I25_Snone": 0.527133410307547,
+     "I30_S1.5": 0.7002204261572373,
+     "I30_S2.0": 0.7227878660648682,
+     "I30_S3.0": 0.7244673034533431,
+     "I30_Snone": 0.72551695182114,
+     "I40_S1.5": 0.7510234071586018,
+     "I40_S2.0": 0.8289073160491235,
+     "I40_S3.0": 0.8494804240579406,
+     "I40_Snone": 0.8505300724257374,
+     "I50_S1.5": 0.7629893985514853,
+     "I50_S2.0": 0.8615513802876037,
+     "I50_S3.0": 0.9066862601028656,
+     "I50_Snone": 0.9113047129211714,
+     "I60_S1.5": 0.7661383436548757,
+     "I60_S2.0": 0.8719428991287919,
+     "I60_S3.0": 0.9289388055001574,
+     "I60_Snone": 0.9410097617298205
+    }
+   },
+   "n16-closed-l6-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-closed-l6-train-def.json",
+    "trace_sha256": "456016e4d039f24e72e0c861649f56d987e3d91697c977589aa9571cd43fb419",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 6.0,
+    "agentic_lanes": 96,
+    "copies": 768,
+    "rows": 27413,
+    "completed": 27413,
+    "replay_wall_s": 95.87289335400055,
+    "replay_ms_per_row": 3.497351379053754,
+    "sim_makespan_s": 25349.585551049604,
+    "warmup_end_s": 4200.0,
+    "window_end_s": 11766.50415710202,
+    "prefix_cache_reused_ratio": 0.4614894581810364,
+    "window_s": [
+     4200.0,
+     11760.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.8963698420709135,
+    "drift_tolerance": 0.2715772469842754,
+    "in_flight_plays_per_worker": 6.0,
+    "in_flight_plays_by_third": [
+     96.0,
+     96.0,
+     96.0
+    ],
+    "littles_law_plays": 96.69503446921333,
+    "play_sojourn_mean_s": 2396.7687232368944,
+    "in_flight_requests_per_worker": 3.2238797443932623,
+    "in_flight_requests_by_third": [
+     53.24803484527412,
+     53.76826030075762,
+     47.72993258484486
+    ],
+    "worker_active_requests_mean": 3.0859959878700596,
+    "worker_active_requests_min_max": [
+     2.9346088693683012,
+     3.377782133809014
+    ],
+    "worker_busy_frac_mean": 0.9989601739866409,
+    "worker_busy_frac_min_max": [
+     0.9978569386140314,
+     0.9997358923296217
+    ],
+    "telemetry_active_kv_usage_mean": 0.6553301073782638,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.6159082322073363,
+     0.6948708692333778
+    ],
+    "scored_requests": 10743,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     27.68370914118474,
+     63.163003938039715,
+     169.86622152071772
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.3065310044532374,
+     2.6987139595934404,
+     6.5919601366400995
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.241738806664805,
+     "I25_S2.0": 0.2516987806013218,
+     "I25_S3.0": 0.2534673741040678,
+     "I25_Snone": 0.25560830308107607,
+     "I30_S1.5": 0.5058177417853486,
+     "I30_S2.0": 0.5380247603090385,
+     "I30_S3.0": 0.5467746439542027,
+     "I30_Snone": 0.5523596760681374,
+     "I40_S1.5": 0.5706971981755562,
+     "I40_S2.0": 0.6746718793633063,
+     "I40_S3.0": 0.7056688075956437,
+     "I40_Snone": 0.7120915945266685,
+     "I50_S1.5": 0.5874522945173601,
+     "I50_S2.0": 0.7332216326910547,
+     "I50_S3.0": 0.8057339663036396,
+     "I50_Snone": 0.8172763660057712,
+     "I60_S1.5": 0.5953644233454343,
+     "I60_S2.0": 0.7563995159638834,
+     "I60_S3.0": 0.861398119705855,
+     "I60_Snone": 0.8855068416643396
+    }
+   },
+   "n16-open-r0.0015-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-open-r0.0015-train-def.json",
+    "trace_sha256": "9f6777a5f04200e3b624fa7abf1862d9037008394ac08bc1b280435ae68f1c25",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 0.0015,
+    "agentic_lanes": null,
+    "copies": 384,
+    "rows": 14139,
+    "completed": 14139,
+    "replay_wall_s": 64.79215477199978,
+    "replay_ms_per_row": 4.582513245066821,
+    "sim_makespan_s": 20130.141638734,
+    "warmup_end_s": 1740.0,
+    "window_end_s": 16690.695483798998,
+    "prefix_cache_reused_ratio": 0.7616875341196957,
+    "window_s": [
+     1740.0,
+     16680.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.9015524313538172,
+    "drift_tolerance": 0.18954447310686354,
+    "in_flight_plays_per_worker": 2.5716439878386574,
+    "in_flight_plays_by_third": [
+     40.9943551405802,
+     45.48599572690343,
+     36.958560548771935
+    ],
+    "littles_law_plays": 41.391494793970345,
+    "play_sojourn_mean_s": 1840.443250660467,
+    "in_flight_requests_per_worker": 0.9740516573992279,
+    "in_flight_requests_by_third": [
+     15.876720231078183,
+     18.28477508797373,
+     12.592984236111022
+    ],
+    "worker_active_requests_mean": 0.9726256404735184,
+    "worker_active_requests_min_max": [
+     0.8870557747369516,
+     1.070430856270496
+    ],
+    "worker_busy_frac_mean": 0.7877845364310889,
+    "worker_busy_frac_min_max": [
+     0.7443960953164065,
+     0.8332020368652262
+    ],
+    "telemetry_active_kv_usage_mean": 0.21586374656235077,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.198583657643882,
+     0.23553824054102218
+    ],
+    "scored_requests": 12304,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     19.223680961578513,
+     22.46446006130715,
+     36.89745581439866
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.6999736857634874,
+     1.0581708694583918,
+     1.90374244986255
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.9691970091027308,
+     "I25_S2.0": 0.9712288686605982,
+     "I25_S3.0": 0.9712288686605982,
+     "I25_Snone": 0.9712288686605982,
+     "I30_S1.5": 0.97870611183355,
+     "I30_S2.0": 0.9852080624187256,
+     "I30_S3.0": 0.9852080624187256,
+     "I30_Snone": 0.9852080624187256,
+     "I40_S1.5": 0.9808192457737321,
+     "I40_S2.0": 0.9890279583875162,
+     "I40_S3.0": 0.9910598179453837,
+     "I40_Snone": 0.9910598179453837,
+     "I50_S1.5": 0.9812256176853056,
+     "I50_S2.0": 0.9900845253576073,
+     "I50_S3.0": 0.9939856957087126,
+     "I50_Snone": 0.9942295188556567,
+     "I60_S1.5": 0.981388166449935,
+     "I60_S2.0": 0.9905721716514955,
+     "I60_S3.0": 0.9948797139141743,
+     "I60_Snone": 0.9957737321196359
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 384,
+     "roots_ready_at_arrival": 384
+    }
+   },
+   "n16-open-r0.002-test-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-open-r0.002-test-def.json",
+    "trace_sha256": "f402f84f8399f061fad0fd9045630862a5db14b7347d23dc4fe40aa651e02617",
+    "split": "test",
+    "mode": "open",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 0.002,
+    "agentic_lanes": null,
+    "copies": 512,
+    "rows": 19424,
+    "completed": 19424,
+    "replay_wall_s": 80.46625194800072,
+    "replay_ms_per_row": 4.142620054983563,
+    "sim_makespan_s": 20435.966466104866,
+    "warmup_end_s": 1500.0,
+    "window_end_s": 17405.943286015,
+    "prefix_cache_reused_ratio": 0.6841513080795714,
+    "window_s": [
+     1500.0,
+     17400.0
+    ],
+    "stationary": false,
+    "drift_last_over_first_third": 0.806316515740861,
+    "drift_tolerance": 0.16033494593520436,
+    "in_flight_plays_per_worker": 2.9005769410497546,
+    "in_flight_plays_by_third": [
+     52.935954903678656,
+     43.65094555524013,
+     42.683134715349524
+    ],
+    "littles_law_plays": 45.13727732418573,
+    "play_sojourn_mean_s": 1580.798919503421,
+    "in_flight_requests_per_worker": 1.2274428017699466,
+    "in_flight_requests_by_third": [
+     22.435676356027887,
+     18.633970618433413,
+     17.86773646912336
+    ],
+    "worker_active_requests_mean": 1.2214720787581175,
+    "worker_active_requests_min_max": [
+     1.162494640992657,
+     1.2905514349357803
+    ],
+    "worker_busy_frac_mean": 0.8849161696864913,
+    "worker_busy_frac_min_max": [
+     0.8684524815425964,
+     0.9011370155723187
+    ],
+    "telemetry_active_kv_usage_mean": 0.2579135904471067,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.24769274780717768,
+     0.26798044289559575
+    ],
+    "scored_requests": 17581,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     20.30318488616769,
+     25.076785232000052,
+     66.92558457143416
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.770022604040961,
+     1.2400756173826921,
+     2.413539244565739
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.8942608497810136,
+     "I25_S2.0": 0.8983561799670099,
+     "I25_S3.0": 0.8983561799670099,
+     "I25_Snone": 0.8984699391388431,
+     "I30_S1.5": 0.9296399522211478,
+     "I30_S2.0": 0.9426084978101359,
+     "I30_S3.0": 0.9426084978101359,
+     "I30_Snone": 0.9427222569819692,
+     "I40_S1.5": 0.9420397019509698,
+     "I40_S2.0": 0.9655309709345316,
+     "I40_S3.0": 0.9712758091121096,
+     "I40_Snone": 0.9713895682839429,
+     "I50_S1.5": 0.9461919117228826,
+     "I50_S2.0": 0.9734941129628576,
+     "I50_S3.0": 0.9821398100221831,
+     "I50_Snone": 0.9824810875376827,
+     "I60_S1.5": 0.947613901370798,
+     "I60_S2.0": 0.9763380922586884,
+     "I60_S3.0": 0.9870883339969285,
+     "I60_Snone": 0.9878277686138445
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 512,
+     "roots_ready_at_arrival": 512
+    }
+   },
+   "n16-open-r0.002-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-open-r0.002-train-def.json",
+    "trace_sha256": "9d89a98968a9a2af34a5c3bc6f872f4c3aea191942e241ddca3782a9bd01ad70",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 0.002,
+    "agentic_lanes": null,
+    "copies": 512,
+    "rows": 18468,
+    "completed": 18468,
+    "replay_wall_s": 80.11643288499909,
+    "replay_ms_per_row": 4.338121771983923,
+    "sim_makespan_s": 20955.89021343894,
+    "warmup_end_s": 1560.0,
+    "window_end_s": 17405.943286015,
+    "prefix_cache_reused_ratio": 0.645549229003394,
+    "window_s": [
+     1560.0,
+     17400.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.9038423132720046,
+    "drift_tolerance": 0.16143572827603977,
+    "in_flight_plays_per_worker": 3.479752298562615,
+    "in_flight_plays_by_third": [
+     58.91063729005359,
+     54.87154635638187,
+     53.24592668457006
+    ],
+    "littles_law_plays": 54.65436040340786,
+    "play_sojourn_mean_s": 1915.3209486503993,
+    "in_flight_requests_per_worker": 1.3897697772904072,
+    "in_flight_requests_by_third": [
+     27.1317314425758,
+     23.199592085022594,
+     16.377625782341145
+    ],
+    "worker_active_requests_mean": 1.382913610346709,
+    "worker_active_requests_min_max": [
+     1.2649808013901145,
+     1.5461846903899312
+    ],
+    "worker_busy_frac_mean": 0.8940081375853902,
+    "worker_busy_frac_min_max": [
+     0.8718873674511982,
+     0.9113311357090703
+    ],
+    "telemetry_active_kv_usage_mean": 0.2978905965100831,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.2712684885755182,
+     0.3345539568403111
+    ],
+    "scored_requests": 16516,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     20.725379651887252,
+     26.208329906211695,
+     79.9560048312368
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.9024637375191273,
+     1.3201376940575775,
+     3.220373385304709
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.8704892225720513,
+     "I25_S2.0": 0.8739404214095423,
+     "I25_S3.0": 0.8740009687575684,
+     "I25_Snone": 0.8741220634536208,
+     "I30_S1.5": 0.9153548074594333,
+     "I30_S2.0": 0.9302494550738678,
+     "I30_S3.0": 0.9303705497699201,
+     "I30_Snone": 0.9304916444659724,
+     "I40_S1.5": 0.926071688060063,
+     "I40_S2.0": 0.9527125211915718,
+     "I40_S3.0": 0.9619157180915476,
+     "I40_Snone": 0.9620368127875999,
+     "I50_S1.5": 0.9290990554613708,
+     "I50_S2.0": 0.9614918866553644,
+     "I50_S3.0": 0.9757205134415112,
+     "I50_Snone": 0.9768103657059821,
+     "I60_S1.5": 0.9302494550738678,
+     "I60_S2.0": 0.9639137805764108,
+     "I60_S3.0": 0.9809881327197869,
+     "I60_Snone": 0.9838944054250424
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 512,
+     "roots_ready_at_arrival": 512
+    }
+   },
+   "n16-open-r0.0025-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n16-open-r0.0025-train-def.json",
+    "trace_sha256": "c8680dce14cd6ea81268cf963af69795b45b942fb08c5a218e763009881773b2",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 16,
+    "policy": "default-seed1",
+    "per_worker_load": 0.0025,
+    "agentic_lanes": null,
+    "copies": 640,
+    "rows": 23040,
+    "completed": 23040,
+    "replay_wall_s": 91.52818483699957,
+    "replay_ms_per_row": 3.9725774668836618,
+    "sim_makespan_s": 20461.88013184926,
+    "warmup_end_s": 2160.0,
+    "window_end_s": 17181.436207479,
+    "prefix_cache_reused_ratio": 0.5306319790626194,
+    "window_s": [
+     2160.0,
+     17160.0
+    ],
+    "stationary": false,
+    "drift_last_over_first_third": 0.8438084409130756,
+    "drift_tolerance": 0.15,
+    "in_flight_plays_per_worker": 4.787553612245386,
+    "in_flight_plays_by_third": [
+     83.10474064425122,
+     76.65137973645493,
+     70.12448163551113
+    ],
+    "littles_law_plays": 77.45054649214164,
+    "play_sojourn_mean_s": 2119.9967105513224,
+    "in_flight_requests_per_worker": 2.2736287608252224,
+    "in_flight_requests_by_third": [
+     48.856805698547625,
+     34.060853935639734,
+     26.337491591230226
+    ],
+    "worker_active_requests_mean": 2.2275232126808384,
+    "worker_active_requests_min_max": [
+     2.0843800207100407,
+     2.3980534909536564
+    ],
+    "worker_busy_frac_mean": 0.9802183324386451,
+    "worker_busy_frac_min_max": [
+     0.9739549542024061,
+     0.9855148275387975
+    ],
+    "telemetry_active_kv_usage_mean": 0.474689862429094,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.44342829878598317,
+     0.49615575465196415
+    ],
+    "scored_requests": 19520,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     24.243817074137898,
+     47.06534591831821,
+     127.93484987578694
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.0786165376149155,
+     2.0683435189237858,
+     4.946610008274401
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.5565573770491803,
+     "I25_S2.0": 0.5642930327868853,
+     "I25_S3.0": 0.5651639344262295,
+     "I25_Snone": 0.5656762295081967,
+     "I30_S1.5": 0.7257684426229508,
+     "I30_S2.0": 0.7524077868852459,
+     "I30_S3.0": 0.7552766393442623,
+     "I30_Snone": 0.7567622950819672,
+     "I40_S1.5": 0.7677766393442623,
+     "I40_S2.0": 0.8345799180327869,
+     "I40_S3.0": 0.8538422131147541,
+     "I40_Snone": 0.8555840163934426,
+     "I50_S1.5": 0.7787909836065574,
+     "I50_S2.0": 0.8676741803278688,
+     "I50_S3.0": 0.9088627049180328,
+     "I50_Snone": 0.9146004098360656,
+     "I60_S1.5": 0.7836065573770492,
+     "I60_S2.0": 0.8796618852459016,
+     "I60_S3.0": 0.9329918032786885,
+     "I60_Snone": 0.9453381147540983
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 640,
+     "roots_ready_at_arrival": 640
+    }
+   },
+   "n32-closed-l3-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-closed-l3-train-def.json",
+    "trace_sha256": "456016e4d039f24e72e0c861649f56d987e3d91697c977589aa9571cd43fb419",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 32,
+    "policy": "default-seed1",
+    "per_worker_load": 3.0,
+    "agentic_lanes": 96,
+    "copies": 768,
+    "rows": 27413,
+    "completed": 27413,
+    "replay_wall_s": 125.90487458400094,
+    "replay_ms_per_row": 4.592889307408928,
+    "sim_makespan_s": 21524.40695465011,
+    "warmup_end_s": 3300.0,
+    "window_end_s": 9072.413853131893,
+    "prefix_cache_reused_ratio": 0.6981100830540503,
+    "window_s": [
+     3300.0,
+     9060.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.9468767991708885,
+    "drift_tolerance": 0.34540835849841595,
+    "in_flight_plays_per_worker": 3.0,
+    "in_flight_plays_by_third": [
+     96.0,
+     96.0,
+     96.0
+    ],
+    "littles_law_plays": 93.28554875046862,
+    "play_sojourn_mean_s": 1912.1877608636983,
+    "in_flight_requests_per_worker": 1.0434547798824565,
+    "in_flight_requests_by_third": [
+     32.60757918143132,
+     36.68871948325951,
+     30.87536020402499
+    ],
+    "worker_active_requests_mean": 1.0418660414167085,
+    "worker_active_requests_min_max": [
+     0.9350997728622815,
+     1.2359273192689153
+    ],
+    "worker_busy_frac_mean": 0.8745521715130062,
+    "worker_busy_frac_min_max": [
+     0.8326411289590164,
+     0.9101482806447847
+    ],
+    "telemetry_active_kv_usage_mean": 0.23118610210520155,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.18806934651610738,
+     0.27702877325982084
+    ],
+    "scored_requests": 10301,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     19.22060233333355,
+     22.13573421533496,
+     36.33082681245287
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.7813385705896071,
+     1.0604451969727786,
+     1.9653874404582163
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.9722357052713329,
+     "I25_S2.0": 0.9736918745752839,
+     "I25_S3.0": 0.9736918745752839,
+     "I25_Snone": 0.9736918745752839,
+     "I30_S1.5": 0.9793223958838948,
+     "I30_S2.0": 0.9849529171925056,
+     "I30_S3.0": 0.9849529171925056,
+     "I30_Snone": 0.9849529171925056,
+     "I40_S1.5": 0.981069799048636,
+     "I40_S2.0": 0.9894185030579555,
+     "I40_S3.0": 0.9922337637122609,
+     "I40_Snone": 0.9922337637122609,
+     "I50_S1.5": 0.9813610329094262,
+     "I50_S2.0": 0.9900980487331327,
+     "I50_S3.0": 0.9943694786913891,
+     "I50_Snone": 0.9946607125521794,
+     "I60_S1.5": 0.9815551888166197,
+     "I60_S2.0": 0.9905834385011164,
+     "I60_S3.0": 0.9952431802737598,
+     "I60_Snone": 0.9961168818561305
+    }
+   },
+   "n32-closed-l4-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-closed-l4-train-def.json",
+    "trace_sha256": "7fff35a72c1d8245b21a9ece174170fcc156f82438a2c1f70410d99691e64b4a",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 32,
+    "policy": "default-seed1",
+    "per_worker_load": 4.0,
+    "agentic_lanes": 128,
+    "copies": 1024,
+    "rows": 37055,
+    "completed": 37055,
+    "replay_wall_s": 154.10545533500044,
+    "replay_ms_per_row": 4.158830261368248,
+    "sim_makespan_s": 23971.833621876376,
+    "warmup_end_s": 3660.0,
+    "window_end_s": 8769.977505569963,
+    "prefix_cache_reused_ratio": 0.5667723406687002,
+    "window_s": [
+     3660.0,
+     8760.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.9057440820702758,
+    "drift_tolerance": 0.2818493822910249,
+    "in_flight_plays_per_worker": 4.0,
+    "in_flight_plays_by_third": [
+     128.0,
+     128.0,
+     128.0
+    ],
+    "littles_law_plays": 133.52893999717324,
+    "play_sojourn_mean_s": 2026.7785535285225,
+    "in_flight_requests_per_worker": 1.5735329383541288,
+    "in_flight_requests_by_third": [
+     53.06471079856233,
+     50.01318944853567,
+     48.06304777256849
+    ],
+    "worker_active_requests_mean": 1.5607951193365748,
+    "worker_active_requests_min_max": [
+     1.4170901358580348,
+     1.8626487200306001
+    ],
+    "worker_busy_frac_mean": 0.9804519246837314,
+    "worker_busy_frac_min_max": [
+     0.970970464396842,
+     0.9888227847650894
+    ],
+    "telemetry_active_kv_usage_mean": 0.33799776484309463,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.30728784330357284,
+     0.43626302347265583
+    ],
+    "scored_requests": 11855,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     21.53305192999728,
+     34.10035920060908,
+     121.07645829408997
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.0000018332247758,
+     1.6533245056696029,
+     4.741141534932146
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.8055672711935892,
+     "I25_S2.0": 0.8088570223534374,
+     "I25_S3.0": 0.8088570223534374,
+     "I25_Snone": 0.8088570223534374,
+     "I30_S1.5": 0.8549135385913117,
+     "I30_S2.0": 0.8739772247996626,
+     "I30_S3.0": 0.8740615773935049,
+     "I30_Snone": 0.8740615773935049,
+     "I40_S1.5": 0.8700970054829186,
+     "I40_S2.0": 0.9115984816533108,
+     "I40_S3.0": 0.9242513707296499,
+     "I40_Snone": 0.9243357233234922,
+     "I50_S1.5": 0.8738928722058203,
+     "I50_S2.0": 0.9234921973850696,
+     "I50_S3.0": 0.9471952762547449,
+     "I50_Snone": 0.9499789118515395,
+     "I60_S1.5": 0.875411218894981,
+     "I60_S2.0": 0.928469000421763,
+     "I60_S3.0": 0.958245466048081,
+     "I60_Snone": 0.9654997891185154
+    }
+   },
+   "n32-closed-l4-train-rr": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-closed-l4-train-rr.json",
+    "trace_sha256": "7fff35a72c1d8245b21a9ece174170fcc156f82438a2c1f70410d99691e64b4a",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 32,
+    "policy": "round_robin",
+    "per_worker_load": 4.0,
+    "agentic_lanes": 128,
+    "copies": 1024,
+    "rows": 37055,
+    "completed": 37055,
+    "replay_wall_s": 125.34715972399863,
+    "replay_ms_per_row": 3.3827326871946735,
+    "sim_makespan_s": 28713.378376663513,
+    "warmup_end_s": 4860.0,
+    "window_end_s": 12628.68454976393,
+    "prefix_cache_reused_ratio": 0.05899546929388141,
+    "window_s": [
+     4860.0,
+     12600.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.9411121852696144,
+    "drift_tolerance": 0.24121848319880862,
+    "in_flight_plays_per_worker": 4.0,
+    "in_flight_plays_by_third": [
+     128.0,
+     128.0,
+     128.0
+    ],
+    "littles_law_plays": 125.42608347435339,
+    "play_sojourn_mean_s": 2588.794362910654,
+    "in_flight_requests_per_worker": 2.1482699248621735,
+    "in_flight_requests_by_third": [
+     70.57848052497025,
+     69.23316422193477,
+     66.42226803986367
+    ],
+    "worker_active_requests_mean": 1.801906290534153,
+    "worker_active_requests_min_max": [
+     1.4267960733372305,
+     2.6316745204454146
+    ],
+    "worker_busy_frac_mean": 0.884550473359971,
+    "worker_busy_frac_min_max": [
+     0.8266601557912573,
+     0.9560812039444743
+    ],
+    "telemetry_active_kv_usage_mean": 0.41641332910661,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.3184461028049251,
+     0.590379755782926
+    ],
+    "scored_requests": 13722,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     25.1377272972589,
+     50.34729884915957,
+     116.46083980904174
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.2424386938691752,
+     2.7405864885465503,
+     12.364701534346489
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.46873633581110624,
+     "I25_S2.0": 0.48513336248360295,
+     "I25_S3.0": 0.48841276781810233,
+     "I25_Snone": 0.4932225623087014,
+     "I30_S1.5": 0.5806004955545839,
+     "I30_S2.0": 0.619588981198076,
+     "I30_S3.0": 0.6345284943885731,
+     "I30_Snone": 0.6687071855414662,
+     "I40_S1.5": 0.6269494242821746,
+     "I40_S2.0": 0.7369916921731526,
+     "I40_S3.0": 0.7669435942282467,
+     "I40_Snone": 0.8061507068940388,
+     "I50_S1.5": 0.6359131321964728,
+     "I50_S2.0": 0.7888791721323423,
+     "I50_S3.0": 0.8476898411310304,
+     "I50_Snone": 0.8971724238449206,
+     "I60_S1.5": 0.6391925375309722,
+     "I60_S2.0": 0.8037458096487392,
+     "I60_S3.0": 0.8768401107710246,
+     "I60_Snone": 0.9387115580819123
+    }
+   },
+   "n32-closed-l5-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-closed-l5-train-def.json",
+    "trace_sha256": "109321f5216224c6330086529af203accd7a9cc42c9a93a73cebcce774a1e164",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 32,
+    "policy": "default-seed1",
+    "per_worker_load": 5.0,
+    "agentic_lanes": 160,
+    "copies": 1280,
+    "rows": 46606,
+    "completed": 46606,
+    "replay_wall_s": 178.08770096900116,
+    "replay_ms_per_row": 3.8211324930052175,
+    "sim_makespan_s": 23572.63666879447,
+    "warmup_end_s": 3840.0,
+    "window_end_s": 9367.00661574706,
+    "prefix_cache_reused_ratio": 0.48521644335067576,
+    "window_s": [
+     3840.0,
+     9360.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.8261162487597066,
+    "drift_tolerance": 0.2371977140679211,
+    "in_flight_plays_per_worker": 5.0,
+    "in_flight_plays_by_third": [
+     160.0,
+     160.0,
+     160.0
+    ],
+    "littles_law_plays": 169.17284071626136,
+    "play_sojourn_mean_s": 2244.793463350391,
+    "in_flight_requests_per_worker": 2.2217184131483503,
+    "in_flight_requests_by_third": [
+     75.7055079236141,
+     75.18663593209307,
+     62.54155021630433
+    ],
+    "worker_active_requests_mean": 2.196850498582457,
+    "worker_active_requests_min_max": [
+     1.9907917210977744,
+     2.5715772593570994
+    ],
+    "worker_busy_frac_mean": 0.9963147953974427,
+    "worker_busy_frac_min_max": [
+     0.9946978331072615,
+     0.9980917196775606
+    ],
+    "telemetry_active_kv_usage_mean": 0.4616979622374375,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.41599813529592095,
+     0.513994500390689
+    ],
+    "scored_requests": 14530,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     23.9404497140112,
+     48.80674494230242,
+     158.96648541918003
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.0971905903846344,
+     2.1801643281464638,
+     6.778121494985595
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.5898141775636614,
+     "I25_S2.0": 0.594769442532691,
+     "I25_S3.0": 0.5949070887818307,
+     "I25_Snone": 0.5949759119064005,
+     "I30_S1.5": 0.7161046111493462,
+     "I30_S2.0": 0.7348245010323469,
+     "I30_S3.0": 0.7354439091534756,
+     "I30_Snone": 0.7356503785271852,
+     "I40_S1.5": 0.755677907777013,
+     "I40_S2.0": 0.8247075017205782,
+     "I40_S3.0": 0.8439091534755678,
+     "I40_Snone": 0.844253269098417,
+     "I50_S1.5": 0.765244322092223,
+     "I50_S2.0": 0.856159669649002,
+     "I50_S3.0": 0.9,
+     "I50_Snone": 0.9048864418444598,
+     "I60_S1.5": 0.7692360633172746,
+     "I60_S2.0": 0.8668960770818995,
+     "I60_S3.0": 0.9225051617343427,
+     "I60_Snone": 0.9359256710254645
+    }
+   },
+   "n32-closed-l6-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-closed-l6-train-def.json",
+    "trace_sha256": "fc1c7f2f2c8056e755728527faf7050d72403944dd815cd619f15221a5e12a72",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 32,
+    "policy": "default-seed1",
+    "per_worker_load": 6.0,
+    "agentic_lanes": 192,
+    "copies": 1536,
+    "rows": 55726,
+    "completed": 55726,
+    "replay_wall_s": 223.8595863010014,
+    "replay_ms_per_row": 4.017147943527283,
+    "sim_makespan_s": 27456.298122867778,
+    "warmup_end_s": 4500.0,
+    "window_end_s": 9486.02729011871,
+    "prefix_cache_reused_ratio": 0.3976826433963575,
+    "window_s": [
+     4500.0,
+     9480.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.0950808455827012,
+    "drift_tolerance": 0.19536224520318538,
+    "in_flight_plays_per_worker": 6.0,
+    "in_flight_plays_by_third": [
+     192.0,
+     192.0,
+     192.0
+    ],
+    "littles_law_plays": 197.06528160839082,
+    "play_sojourn_mean_s": 2472.002776850847,
+    "in_flight_requests_per_worker": 3.2751314654416612,
+    "in_flight_requests_by_third": [
+     99.84086946894344,
+     105.06066540079374,
+     109.33382376176269
+    ],
+    "worker_active_requests_mean": 3.15992400817216,
+    "worker_active_requests_min_max": [
+     2.8292991885433767,
+     3.5776019763651243
+    ],
+    "worker_busy_frac_mean": 0.9998697536594539,
+    "worker_busy_frac_min_max": [
+     0.9994454869999951,
+     1.0
+    ],
+    "telemetry_active_kv_usage_mean": 0.6785016796763473,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.6365115873556251,
+     0.7410101626886063
+    ],
+    "scored_requests": 13798,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     30.705151444305884,
+     73.72039022300591,
+     280.6427023838461
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.3938685507814634,
+     2.9747839705813193,
+     13.87732880322772
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.19488331642266996,
+     "I25_S2.0": 0.20307290911726336,
+     "I25_S3.0": 0.20473981736483549,
+     "I25_Snone": 0.2056819828960719,
+     "I30_S1.5": 0.4573126540078272,
+     "I30_S2.0": 0.48202638063487463,
+     "I30_S3.0": 0.48796927090882736,
+     "I30_Snone": 0.49094071604580375,
+     "I40_S1.5": 0.5180460936367589,
+     "I40_S2.0": 0.6145093491810407,
+     "I40_S3.0": 0.636541527757646,
+     "I40_Snone": 0.6398028699811567,
+     "I50_S1.5": 0.5347876503841137,
+     "I50_S2.0": 0.6822727931584287,
+     "I50_S3.0": 0.7505435570372517,
+     "I50_Snone": 0.7597477895347152,
+     "I60_S1.5": 0.5419626032758371,
+     "I60_S2.0": 0.7069140455138426,
+     "I60_S3.0": 0.8162052471372663,
+     "I60_Snone": 0.8401217567763444
+    }
+   },
+   "n32-open-r0.0015-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-open-r0.0015-train-def.json",
+    "trace_sha256": "2753d770deb65966382c65f5396ea79586ec5bc79f4405cb6ed2c91413a217a7",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 32,
+    "policy": "default-seed1",
+    "per_worker_load": 0.0015,
+    "agentic_lanes": null,
+    "copies": 768,
+    "rows": 27413,
+    "completed": 27413,
+    "replay_wall_s": 135.19235992700123,
+    "replay_ms_per_row": 4.931687882646965,
+    "sim_makespan_s": 20503.605927617948,
+    "warmup_end_s": 2880.0,
+    "window_end_s": 16886.921308835,
+    "prefix_cache_reused_ratio": 0.7595752748303451,
+    "window_s": [
+     2880.0,
+     16860.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.0452438641284005,
+    "drift_tolerance": 0.15,
+    "in_flight_plays_per_worker": 2.5673710300967425,
+    "in_flight_plays_by_third": [
+     83.02266170511182,
+     76.67714212947912,
+     86.77892773087605
+    ],
+    "littles_law_plays": 83.36912332463504,
+    "play_sojourn_mean_s": 1855.892267640761,
+    "in_flight_requests_per_worker": 0.8708547675288808,
+    "in_flight_requests_by_third": [
+     32.10191334005796,
+     22.42178321223958,
+     29.132650371233147
+    ],
+    "worker_active_requests_mean": 0.8696986881161737,
+    "worker_active_requests_min_max": [
+     0.7684871736502351,
+     0.9813868214578313
+    ],
+    "worker_busy_frac_mean": 0.7543508504008674,
+    "worker_busy_frac_min_max": [
+     0.704651812064963,
+     0.801388468975053
+    ],
+    "telemetry_active_kv_usage_mean": 0.1985899954813099,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.1703827166701668,
+     0.23187023486949834
+    ],
+    "scored_requests": 22298,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     19.034082899028185,
+     21.73805114760454,
+     30.265688597820752
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.700679532387519,
+     1.0075919320249145,
+     1.6977626890916524
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.9776661583998565,
+     "I25_S2.0": 0.9790564176159297,
+     "I25_S3.0": 0.9790564176159297,
+     "I25_Snone": 0.9790564176159297,
+     "I30_S1.5": 0.9850659251950847,
+     "I30_S2.0": 0.9897748677011391,
+     "I30_S3.0": 0.9897748677011391,
+     "I30_Snone": 0.9897748677011391,
+     "I40_S1.5": 0.9863216431966992,
+     "I40_S2.0": 0.9924208449188268,
+     "I40_S3.0": 0.994394116064221,
+     "I40_Snone": 0.994394116064221,
+     "I50_S1.5": 0.9866804197685891,
+     "I50_S2.0": 0.993228092205579,
+     "I50_S3.0": 0.9965467754955601,
+     "I50_Snone": 0.9966813167100188,
+     "I60_S1.5": 0.9868149609830478,
+     "I60_S2.0": 0.9935420217059826,
+     "I60_S3.0": 0.9971297874248811,
+     "I60_Snone": 0.9973540227823123
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 768,
+     "roots_ready_at_arrival": 768
+    }
+   },
+   "n32-open-r0.002-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-open-r0.002-train-def.json",
+    "trace_sha256": "85363e4b79f7c38c2c748317202cc0aa25c2ee9d357c74aa5b87264a0f987027",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 32,
+    "policy": "default-seed1",
+    "per_worker_load": 0.002,
+    "agentic_lanes": null,
+    "copies": 1024,
+    "rows": 37055,
+    "completed": 37055,
+    "replay_wall_s": 167.87029872499988,
+    "replay_ms_per_row": 4.530300869653215,
+    "sim_makespan_s": 20739.27291839884,
+    "warmup_end_s": 2760.0,
+    "window_end_s": 16828.295951089,
+    "prefix_cache_reused_ratio": 0.5773552495523415,
+    "window_s": [
+     2760.0,
+     16800.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.072849551704172,
+    "drift_tolerance": 0.15,
+    "in_flight_plays_per_worker": 3.674902538181134,
+    "in_flight_plays_by_third": [
+     115.68940798871387,
+     112.98390617906226,
+     124.11732949761274
+    ],
+    "littles_law_plays": 119.17593063208966,
+    "play_sojourn_mean_s": 1987.20910460159,
+    "in_flight_requests_per_worker": 1.4998087656963026,
+    "in_flight_requests_by_third": [
+     49.450777714336986,
+     38.91931981266999,
+     55.61154397983808
+    ],
+    "worker_active_requests_mean": 1.4918140248448,
+    "worker_active_requests_min_max": [
+     1.342436854372092,
+     1.815689364304625
+    ],
+    "worker_busy_frac_mean": 0.9486359798255484,
+    "worker_busy_frac_min_max": [
+     0.9356142903691639,
+     0.961500252994665
+    ],
+    "telemetry_active_kv_usage_mean": 0.31557840262173814,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.28002406918804096,
+     0.37090462448305844
+    ],
+    "scored_requests": 30097,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     20.84739941446088,
+     27.723452154414815,
+     91.94663312139035
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.0000007034985186,
+     1.4266049520733135,
+     4.057937091699775
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.8573611987905772,
+     "I25_S2.0": 0.8609495963052796,
+     "I25_S3.0": 0.8609828222081936,
+     "I25_Snone": 0.8610824999169352,
+     "I30_S1.5": 0.896933249161046,
+     "I30_S2.0": 0.9142771704821079,
+     "I30_S3.0": 0.9143436222879356,
+     "I30_Snone": 0.9144432999966774,
+     "I40_S1.5": 0.9066019869089943,
+     "I40_S2.0": 0.9384656278034356,
+     "I40_S3.0": 0.9496627570854238,
+     "I40_Snone": 0.9497624347941656,
+     "I50_S1.5": 0.9084958633750873,
+     "I50_S2.0": 0.94657274811443,
+     "I50_S3.0": 0.9663089344452935,
+     "I50_Snone": 0.9678373259793335,
+     "I60_S1.5": 0.9097916735887298,
+     "I60_S2.0": 0.9497624347941656,
+     "I60_S3.0": 0.9729873409309898,
+     "I60_Snone": 0.9772734824068844
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 1024,
+     "roots_ready_at_arrival": 1024
+    }
+   },
+   "n32-open-r0.002-train-rr": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-open-r0.002-train-rr.json",
+    "trace_sha256": "85363e4b79f7c38c2c748317202cc0aa25c2ee9d357c74aa5b87264a0f987027",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 32,
+    "policy": "round_robin",
+    "per_worker_load": 0.002,
+    "agentic_lanes": null,
+    "copies": 1024,
+    "rows": 37055,
+    "completed": 37055,
+    "replay_wall_s": 129.06687437499932,
+    "replay_ms_per_row": 3.4831162967210716,
+    "sim_makespan_s": 22967.16221462164,
+    "warmup_end_s": 6540.0,
+    "window_end_s": 16828.295951089,
+    "prefix_cache_reused_ratio": 0.042604896222825525,
+    "window_s": [
+     6540.0,
+     16800.0
+    ],
+    "stationary": false,
+    "drift_last_over_first_third": 1.2221261953597315,
+    "drift_tolerance": 0.15,
+    "in_flight_plays_per_worker": 6.1281029523444985,
+    "in_flight_plays_by_third": [
+     176.99084648460322,
+     195.0018871127422,
+     216.30514982772647
+    ],
+    "littles_law_plays": 217.9862375356503,
+    "play_sojourn_mean_s": 3618.9948173394373,
+    "in_flight_requests_per_worker": 4.211530920764484,
+    "in_flight_requests_by_third": [
+     108.78137209957515,
+     126.22742785641981,
+     169.29816843739545
+    ],
+    "worker_active_requests_mean": 2.420458884068905,
+    "worker_active_requests_min_max": [
+     1.8065766167531858,
+     2.8819515387164913
+    ],
+    "worker_busy_frac_mean": 0.9443366103701751,
+    "worker_busy_frac_min_max": [
+     0.8950998521376248,
+     0.9717995576375692
+    ],
+    "telemetry_active_kv_usage_mean": 0.5347570997463086,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.40162368050575825,
+     0.6262422211495445
+    ],
+    "scored_requests": 20601,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     27.40557453117578,
+     65.54390891229963,
+     163.2531576217321
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.5995732850043285,
+     7.6802032909764595,
+     68.2730032005836
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.3121207708363672,
+     "I25_S2.0": 0.32629484005630793,
+     "I25_S3.0": 0.3312945973496432,
+     "I25_Snone": 0.3402747439444687,
+     "I30_S1.5": 0.4089121887287025,
+     "I30_S2.0": 0.45191980971797485,
+     "I30_S3.0": 0.4782292121741663,
+     "I30_Snone": 0.5629823794961409,
+     "I40_S1.5": 0.4438134071161594,
+     "I40_S2.0": 0.54667249162662,
+     "I40_S3.0": 0.5977865152177079,
+     "I40_Snone": 0.7010339303917286,
+     "I50_S1.5": 0.45177418571913985,
+     "I50_S2.0": 0.5896315712829474,
+     "I50_S3.0": 0.6808892772195525,
+     "I50_Snone": 0.8116596281733897,
+     "I60_S1.5": 0.454735207028785,
+     "I60_S2.0": 0.6046308431629532,
+     "I60_S3.0": 0.7197223435755545,
+     "I60_Snone": 0.8775787583127033
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 1024,
+     "roots_ready_at_arrival": 1024
+    }
+   },
+   "n32-open-r0.0025-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n32-open-r0.0025-train-def.json",
+    "trace_sha256": "bebf6c7127ccb4d1e44cb8bf5f413df82595d3b577527d150c810a287619d672",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 32,
+    "policy": "default-seed1",
+    "per_worker_load": 0.0025,
+    "agentic_lanes": null,
+    "copies": 1280,
+    "rows": 46606,
+    "completed": 46606,
+    "replay_wall_s": 195.6457672869983,
+    "replay_ms_per_row": 4.197866525490244,
+    "sim_makespan_s": 21062.158281700064,
+    "warmup_end_s": 3300.0,
+    "window_end_s": 16862.103495838,
+    "prefix_cache_reused_ratio": 0.40722328218439474,
+    "window_s": [
+     3300.0,
+     16860.0
+    ],
+    "stationary": false,
+    "drift_last_over_first_third": 1.397255360562278,
+    "drift_tolerance": 0.15,
+    "in_flight_plays_per_worker": 5.389387947852052,
+    "in_flight_plays_by_third": [
+     148.04566779976764,
+     162.01934307131532,
+     206.85760294124756
+    ],
+    "littles_law_plays": 183.62908114184842,
+    "play_sojourn_mean_s": 2455.6314992933576,
+    "in_flight_requests_per_worker": 2.8897151504808187,
+    "in_flight_requests_by_third": [
+     65.5135558389714,
+     78.02040356703954,
+     133.33385543192713
+    ],
+    "worker_active_requests_mean": 2.6572071672959146,
+    "worker_active_requests_min_max": [
+     2.3539490906495995,
+     2.920542887928179
+    ],
+    "worker_busy_frac_mean": 0.9967116177091457,
+    "worker_busy_frac_min_max": [
+     0.9955487544019688,
+     0.9980066317592968
+    ],
+    "telemetry_active_kv_usage_mean": 0.5573745692039339,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.5168010465775815,
+     0.6093281364135154
+    ],
+    "scored_requests": 35383,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     25.910189319594004,
+     64.22180952145415,
+     188.47989074837852
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.2081383090616584,
+     3.1421376711199804,
+     11.456168155735448
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.424921572506571,
+     "I25_S2.0": 0.43145013141904304,
+     "I25_S3.0": 0.43294802588813835,
+     "I25_Snone": 0.4348981149139417,
+     "I30_S1.5": 0.5748240680552807,
+     "I30_S2.0": 0.6061668032671057,
+     "I30_S3.0": 0.6252720232880197,
+     "I30_Snone": 0.642172794844982,
+     "I40_S1.5": 0.6118192352259559,
+     "I40_S2.0": 0.6917446231240991,
+     "I40_S3.0": 0.7328095413051465,
+     "I40_Snone": 0.7518017126868836,
+     "I50_S1.5": 0.6205522426023796,
+     "I50_S2.0": 0.7263092445524687,
+     "I50_S3.0": 0.8036345137495408,
+     "I50_Snone": 0.8303139925953141,
+     "I60_S1.5": 0.6244241584941921,
+     "I60_S2.0": 0.7384902354237911,
+     "I60_S3.0": 0.8417036429923975,
+     "I60_Snone": 0.8837859989260379
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 1280,
+     "roots_ready_at_arrival": 1280
+    }
+   },
+   "n8-closed-l2-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-closed-l2-train-def.json",
+    "trace_sha256": "ef4ade52acd7ca72a2ce993805b33c7d5f22cbbc81af45cfc6fde5fc13834952",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 2.0,
+    "agentic_lanes": 16,
+    "copies": 128,
+    "rows": 4648,
+    "completed": 4648,
+    "replay_wall_s": 20.492814806999377,
+    "replay_ms_per_row": 4.408953271729642,
+    "sim_makespan_s": 17996.1877149801,
+    "warmup_end_s": 3720.0,
+    "window_end_s": 8707.811646347003,
+    "prefix_cache_reused_ratio": 0.8806426038373638,
+    "window_s": [
+     3720.0,
+     8700.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.0784417324296829,
+    "drift_tolerance": 0.9613663291299157,
+    "in_flight_plays_per_worker": 2.0,
+    "in_flight_plays_by_third": [
+     16.0,
+     16.0,
+     16.0
+    ],
+    "littles_law_plays": 14.540748594142826,
+    "play_sojourn_mean_s": 1810.3231999707818,
+    "in_flight_requests_per_worker": 0.5409936775556219,
+    "in_flight_requests_by_third": [
+     3.471187814649134,
+     5.738588017488352,
+     3.7434738004190167
+    ],
+    "worker_active_requests_mean": 0.5407702590793758,
+    "worker_active_requests_min_max": [
+     0.4230572048490023,
+     0.6726202685881301
+    ],
+    "worker_busy_frac_mean": 0.5011066205321141,
+    "worker_busy_frac_min_max": [
+     0.40912422917390184,
+     0.6016325218236738
+    ],
+    "telemetry_active_kv_usage_mean": 0.1205119475942257,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.0882878383065209,
+     0.15313685426113083
+    ],
+    "scored_requests": 1575,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     18.59116822891461,
+     20.871985161837877,
+     23.708659290347406
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.5426745215255004,
+     1.0000012780159142,
+     1.116486865844035
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.9961904761904762,
+     "I25_S2.0": 0.9961904761904762,
+     "I25_S3.0": 0.9961904761904762,
+     "I25_Snone": 0.9961904761904762,
+     "I30_S1.5": 0.9987301587301587,
+     "I30_S2.0": 0.9987301587301587,
+     "I30_S3.0": 0.9987301587301587,
+     "I30_Snone": 0.9987301587301587,
+     "I40_S1.5": 0.9987301587301587,
+     "I40_S2.0": 0.9987301587301587,
+     "I40_S3.0": 0.9987301587301587,
+     "I40_Snone": 0.9987301587301587,
+     "I50_S1.5": 0.9987301587301587,
+     "I50_S2.0": 0.9993650793650793,
+     "I50_S3.0": 0.9993650793650793,
+     "I50_Snone": 0.9993650793650793,
+     "I60_S1.5": 0.9987301587301587,
+     "I60_S2.0": 0.9993650793650793,
+     "I60_S3.0": 0.9993650793650793,
+     "I60_Snone": 0.9993650793650793
+    }
+   },
+   "n8-closed-l3-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-closed-l3-train-def.json",
+    "trace_sha256": "4f54e698eeb3a5a706e92ac142b6e63ae87d767277a4157fa90e9059ef4570bb",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 3.0,
+    "agentic_lanes": 24,
+    "copies": 192,
+    "rows": 7121,
+    "completed": 7121,
+    "replay_wall_s": 27.53802881199954,
+    "replay_ms_per_row": 3.8671575357392975,
+    "sim_makespan_s": 18757.6865147872,
+    "warmup_end_s": 3780.0,
+    "window_end_s": 9401.70982305894,
+    "prefix_cache_reused_ratio": 0.7577463020649177,
+    "window_s": [
+     3780.0,
+     9360.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.8000581495478863,
+    "drift_tolerance": 0.5867105240546536,
+    "in_flight_plays_per_worker": 3.0,
+    "in_flight_plays_by_third": [
+     24.0,
+     24.0,
+     24.0
+    ],
+    "littles_law_plays": 23.163829280105,
+    "play_sojourn_mean_s": 1770.6050326436423,
+    "in_flight_requests_per_worker": 1.382709662110452,
+    "in_flight_requests_by_third": [
+     10.5372206829964,
+     14.217421926638634,
+     8.430389281015815
+    ],
+    "worker_active_requests_mean": 1.3694871999310663,
+    "worker_active_requests_min_max": [
+     1.0832408847951194,
+     1.7043095545229203
+    ],
+    "worker_busy_frac_mean": 0.8569852082994631,
+    "worker_busy_frac_min_max": [
+     0.8304404140802777,
+     0.8771296689522904
+    ],
+    "telemetry_active_kv_usage_mean": 0.28681034271450223,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.23360376090417664,
+     0.3383876041109095
+    ],
+    "scored_requests": 2663,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     20.239247999972953,
+     24.332716352207946,
+     51.22597743662714
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.7571081708240072,
+     1.1693672359922398,
+     2.271299538310026
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.9196395043184379,
+     "I25_S2.0": 0.9226436349981224,
+     "I25_S3.0": 0.923019151333083,
+     "I25_Snone": 0.923019151333083,
+     "I30_S1.5": 0.9560645888096132,
+     "I30_S2.0": 0.9662035298535486,
+     "I30_S3.0": 0.9665790461885092,
+     "I30_Snone": 0.9669545625234698,
+     "I40_S1.5": 0.9647014645137063,
+     "I40_S2.0": 0.9785955689072474,
+     "I40_S3.0": 0.9823507322568532,
+     "I40_Snone": 0.9827262485918138,
+     "I50_S1.5": 0.9669545625234698,
+     "I50_S2.0": 0.9834772812617348,
+     "I50_S3.0": 0.9883589936162223,
+     "I50_Snone": 0.989485542621104,
+     "I60_S1.5": 0.9677055951933909,
+     "I60_S2.0": 0.9849793466015772,
+     "I60_S3.0": 0.9902365752910252,
+     "I60_Snone": 0.9917386406308675
+    }
+   },
+   "n8-closed-l4-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-closed-l4-train-def.json",
+    "trace_sha256": "a655f1f601ad16dc2ce9d189c3a2a827519b7d8d0f8e62a52bee30f30226426a",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 4.0,
+    "agentic_lanes": 32,
+    "copies": 256,
+    "rows": 9484,
+    "completed": 9484,
+    "replay_wall_s": 34.98329101700074,
+    "replay_ms_per_row": 3.688664173028336,
+    "sim_makespan_s": 22245.00693529871,
+    "warmup_end_s": 3360.0,
+    "window_end_s": 11371.179635955054,
+    "prefix_cache_reused_ratio": 0.6742610875098928,
+    "window_s": [
+     3360.0,
+     11340.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.9048644508541703,
+    "drift_tolerance": 0.43915348812677507,
+    "in_flight_plays_per_worker": 4.0,
+    "in_flight_plays_by_third": [
+     32.0,
+     32.0,
+     32.0
+    ],
+    "littles_law_plays": 31.878639545697762,
+    "play_sojourn_mean_s": 1927.2086634444554,
+    "in_flight_requests_per_worker": 1.878384231174719,
+    "in_flight_requests_by_third": [
+     16.638684722656354,
+     13.386130682282415,
+     15.055754314502115
+    ],
+    "worker_active_requests_mean": 1.867115974703789,
+    "worker_active_requests_min_max": [
+     1.5746294314994826,
+     2.024953395719808
+    ],
+    "worker_busy_frac_mean": 0.9495544243409683,
+    "worker_busy_frac_min_max": [
+     0.9438524762179225,
+     0.9589932705608825
+    ],
+    "telemetry_active_kv_usage_mean": 0.39175167481870665,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.3353147088683379,
+     0.4237541449446125
+    ],
+    "scored_requests": 4825,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     22.29039097189631,
+     29.459607095396333,
+     76.31375884113157
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.95692416354094,
+     1.445712806668014,
+     3.0481979450552616
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.7716062176165803,
+     "I25_S2.0": 0.7761658031088083,
+     "I25_S3.0": 0.776580310880829,
+     "I25_Snone": 0.7769948186528497,
+     "I30_S1.5": 0.8820725388601036,
+     "I30_S2.0": 0.9027979274611398,
+     "I30_S3.0": 0.9038341968911917,
+     "I30_Snone": 0.9042487046632124,
+     "I40_S1.5": 0.9038341968911917,
+     "I40_S2.0": 0.9413471502590673,
+     "I40_S3.0": 0.9510880829015544,
+     "I40_Snone": 0.9515025906735751,
+     "I50_S1.5": 0.9088082901554404,
+     "I50_S2.0": 0.9544041450777202,
+     "I50_S3.0": 0.9699481865284975,
+     "I50_Snone": 0.9720207253886011,
+     "I60_S1.5": 0.9106735751295337,
+     "I60_S2.0": 0.9595854922279793,
+     "I60_S3.0": 0.979481865284974,
+     "I60_Snone": 0.9823834196891191
+    }
+   },
+   "n8-closed-l4-train-rr": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-closed-l4-train-rr.json",
+    "trace_sha256": "a655f1f601ad16dc2ce9d189c3a2a827519b7d8d0f8e62a52bee30f30226426a",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 8,
+    "policy": "round_robin",
+    "per_worker_load": 4.0,
+    "agentic_lanes": 32,
+    "copies": 256,
+    "rows": 9484,
+    "completed": 9484,
+    "replay_wall_s": 28.954817496000032,
+    "replay_ms_per_row": 3.0530174500210916,
+    "sim_makespan_s": 27467.5692256661,
+    "warmup_end_s": 4260.0,
+    "window_end_s": 14920.802398607755,
+    "prefix_cache_reused_ratio": 0.20664310758118976,
+    "window_s": [
+     4260.0,
+     14880.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.080648276093501,
+    "drift_tolerance": 0.3772753605421071,
+    "in_flight_plays_per_worker": 4.0,
+    "in_flight_plays_by_third": [
+     32.0,
+     32.0,
+     32.0
+    ],
+    "littles_law_plays": 33.61029285467692,
+    "play_sojourn_mean_s": 2663.7411202736484,
+    "in_flight_requests_per_worker": 2.6432720982055034,
+    "in_flight_requests_by_third": [
+     22.110090693938613,
+     17.43520827031775,
+     23.89323139267572
+    ],
+    "worker_active_requests_mean": 2.000292666335943,
+    "worker_active_requests_min_max": [
+     1.4915901354794445,
+     3.067731437093855
+    ],
+    "worker_busy_frac_mean": 0.8664719958870609,
+    "worker_busy_frac_min_max": [
+     0.8058458342275195,
+     0.9401293484161858
+    ],
+    "telemetry_active_kv_usage_mean": 0.4271778391080976,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.33152367457171855,
+     0.608123816361268
+    ],
+    "scored_requests": 4665,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     25.0011280769339,
+     51.74989997207904,
+     146.55469310668346
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.2028881872796717,
+     3.4848831547434598,
+     29.27620642702531
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.48038585209003215,
+     "I25_S2.0": 0.49239013933547693,
+     "I25_S3.0": 0.49560557341907824,
+     "I25_Snone": 0.49989281886388,
+     "I30_S1.5": 0.5901393354769561,
+     "I30_S2.0": 0.632583065380493,
+     "I30_S3.0": 0.6535905680600215,
+     "I30_Snone": 0.7065380493033226,
+     "I40_S1.5": 0.6304394426580922,
+     "I40_S2.0": 0.7217577706323687,
+     "I40_S3.0": 0.7627009646302251,
+     "I40_Snone": 0.8242229367631297,
+     "I50_S1.5": 0.637513397642015,
+     "I50_S2.0": 0.7564844587352626,
+     "I50_S3.0": 0.8195069667738478,
+     "I50_Snone": 0.8932475884244373,
+     "I60_S1.5": 0.6394426580921758,
+     "I60_S2.0": 0.7672025723472669,
+     "I60_S3.0": 0.8445873526259379,
+     "I60_Snone": 0.9320471596998928
+    }
+   },
+   "n8-closed-l5-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-closed-l5-train-def.json",
+    "trace_sha256": "12ffbada118f38642a305d920f11c7e8c980d23853d052497c358f655756a154",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 5.0,
+    "agentic_lanes": 40,
+    "copies": 320,
+    "rows": 11772,
+    "completed": 11772,
+    "replay_wall_s": 39.61245491599766,
+    "replay_ms_per_row": 3.3649723849811126,
+    "sim_makespan_s": 20364.540716841006,
+    "warmup_end_s": 3600.0,
+    "window_end_s": 10791.235268509874,
+    "prefix_cache_reused_ratio": 0.5962673682594519,
+    "window_s": [
+     3600.0,
+     10740.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.0294298079089674,
+    "drift_tolerance": 0.39038220062338974,
+    "in_flight_plays_per_worker": 5.0,
+    "in_flight_plays_by_third": [
+     40.0,
+     40.0,
+     40.0
+    ],
+    "littles_law_plays": 39.44461448264052,
+    "play_sojourn_mean_s": 2133.5950561064647,
+    "in_flight_requests_per_worker": 2.9412031866019923,
+    "in_flight_requests_by_third": [
+     22.374565703407594,
+     25.152389406199564,
+     23.03304487410545
+    ],
+    "worker_active_requests_mean": 2.855639935315179,
+    "worker_active_requests_min_max": [
+     2.721767704867247,
+     3.000383620335076
+    ],
+    "worker_busy_frac_mean": 0.9969838351894708,
+    "worker_busy_frac_min_max": [
+     0.9955989555228298,
+     0.998317443068225
+    ],
+    "telemetry_active_kv_usage_mean": 0.6038898011624731,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.5666301509736058,
+     0.6484632447051873
+    ],
+    "scored_requests": 4788,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     25.620860228773985,
+     47.77052014611468,
+     142.13187517219902
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.1346325954114762,
+     2.0946409662072076,
+     6.19484995930789
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.41353383458646614,
+     "I25_S2.0": 0.4220969089390142,
+     "I25_S3.0": 0.4237677527151211,
+     "I25_Snone": 0.42543859649122806,
+     "I30_S1.5": 0.6675020885547202,
+     "I30_S2.0": 0.7038429406850459,
+     "I30_S3.0": 0.7111528822055138,
+     "I30_Snone": 0.7151211361737677,
+     "I40_S1.5": 0.7305764411027569,
+     "I40_S2.0": 0.818295739348371,
+     "I40_S3.0": 0.8437761069340016,
+     "I40_Snone": 0.8481620718462823,
+     "I50_S1.5": 0.7462406015037594,
+     "I50_S2.0": 0.8594402673350042,
+     "I50_S3.0": 0.9030910609857978,
+     "I50_Snone": 0.9104010025062657,
+     "I60_S1.5": 0.75,
+     "I60_S2.0": 0.8723893065998329,
+     "I60_S3.0": 0.9296157059314955,
+     "I60_Snone": 0.9421470342522974
+    }
+   },
+   "n8-closed-l6-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-closed-l6-train-def.json",
+    "trace_sha256": "7b0087ac64d168590f54f1ae3eb1c33636ae8094dcf100a8b353ef830d867bbc",
+    "split": "train",
+    "mode": "closed",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 6.0,
+    "agentic_lanes": 48,
+    "copies": 384,
+    "rows": 14139,
+    "completed": 14139,
+    "replay_wall_s": 48.8960816430008,
+    "replay_ms_per_row": 3.4582418589009687,
+    "sim_makespan_s": 25635.14899212499,
+    "warmup_end_s": 4380.0,
+    "window_end_s": 12692.645192541926,
+    "prefix_cache_reused_ratio": 0.5042431663739445,
+    "window_s": [
+     4380.0,
+     12660.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.0625754042611455,
+    "drift_tolerance": 0.34752890841014544,
+    "in_flight_plays_per_worker": 6.0,
+    "in_flight_plays_by_third": [
+     48.0,
+     48.0,
+     48.0
+    ],
+    "littles_law_plays": 48.36094242692781,
+    "play_sojourn_mean_s": 2617.180413692564,
+    "in_flight_requests_per_worker": 3.9256602574447537,
+    "in_flight_requests_by_third": [
+     28.911062373450537,
+     34.58460001613515,
+     30.7201837890884
+    ],
+    "worker_active_requests_mean": 3.4190074239743167,
+    "worker_active_requests_min_max": [
+     3.206792704826101,
+     3.715185984990672
+    ],
+    "worker_busy_frac_mean": 0.9992378687903385,
+    "worker_busy_frac_min_max": [
+     0.9981510472141265,
+     0.999999255301208
+    ],
+    "telemetry_active_kv_usage_mean": 0.7182795982396333,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.7013405969972656,
+     0.7385649538587542
+    ],
+    "scored_requests": 5688,
+    "score_basis": "completion",
+    "mean_itl_ms_p50_p90_p99": [
+     27.93885010643001,
+     62.528166115381524,
+     168.96107404390003
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.4641986526585669,
+     3.339420647232294,
+     12.801552946662511
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.17563291139240506,
+     "I25_S2.0": 0.18829113924050633,
+     "I25_S3.0": 0.1939170182841069,
+     "I25_Snone": 0.19743319268635726,
+     "I30_S1.5": 0.4258087201125176,
+     "I30_S2.0": 0.4785513361462729,
+     "I30_S3.0": 0.5184599156118144,
+     "I30_Snone": 0.5536216596343179,
+     "I40_S1.5": 0.4848804500703235,
+     "I40_S2.0": 0.6063642756680732,
+     "I40_S3.0": 0.6729957805907173,
+     "I40_Snone": 0.7137834036568214,
+     "I50_S1.5": 0.5052742616033755,
+     "I50_S2.0": 0.6605133614627285,
+     "I50_S3.0": 0.7795358649789029,
+     "I50_Snone": 0.8306962025316456,
+     "I60_S1.5": 0.510548523206751,
+     "I60_S2.0": 0.6761603375527426,
+     "I60_S3.0": 0.8183895921237694,
+     "I60_Snone": 0.8885372714486639
+    }
+   },
+   "n8-open-r0.001-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-open-r0.001-train-def.json",
+    "trace_sha256": "ced06a2f1d8eb988cdb851beda4913ca430e1428fce579cb7b53c0eaecb4db43",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 0.001,
+    "agentic_lanes": null,
+    "copies": 128,
+    "rows": 4648,
+    "completed": 4648,
+    "replay_wall_s": 21.136751434998587,
+    "replay_ms_per_row": 4.547493854345651,
+    "sim_makespan_s": 19790.843044348872,
+    "warmup_end_s": 1800.0,
+    "window_end_s": 16345.939094951,
+    "prefix_cache_reused_ratio": 0.8795806766612592,
+    "window_s": [
+     1800.0,
+     16320.0
+    ],
+    "stationary": false,
+    "drift_last_over_first_third": 0.6085061736396381,
+    "drift_tolerance": 0.3283661424366452,
+    "in_flight_plays_per_worker": 1.6631934858536066,
+    "in_flight_plays_by_third": [
+     15.998258955833283,
+     14.216588709074015,
+     9.735039342110182
+    ],
+    "littles_law_plays": 13.509731005293505,
+    "play_sojourn_mean_s": 1735.9406566093955,
+    "in_flight_requests_per_worker": 0.5941520296492657,
+    "in_flight_requests_by_third": [
+     4.03494258206634,
+     5.157324229939005,
+     5.0585143235878
+    ],
+    "worker_active_requests_mean": 0.5937018339204171,
+    "worker_active_requests_min_max": [
+     0.5108838218887868,
+     0.6650464008776112
+    ],
+    "worker_busy_frac_mean": 0.5426577887499541,
+    "worker_busy_frac_min_max": [
+     0.4889289343917327,
+     0.6044009330707248
+    ],
+    "telemetry_active_kv_usage_mean": 0.1344263859065563,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.11604958852938303,
+     0.16341186537289537
+    ],
+    "scored_requests": 4011,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     18.70085571374306,
+     21.12581795172205,
+     25.116808637424516
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.5818564579806925,
+     1.0000018105236181,
+     1.3095414175553028
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.9880329094988781,
+     "I25_S2.0": 0.9892794814260782,
+     "I25_S3.0": 0.9892794814260782,
+     "I25_Snone": 0.9892794814260782,
+     "I30_S1.5": 0.9930191972076788,
+     "I30_S2.0": 0.9960109698329593,
+     "I30_S3.0": 0.9960109698329593,
+     "I30_Snone": 0.9960109698329593,
+     "I40_S1.5": 0.994016454749439,
+     "I40_S2.0": 0.9977561705310396,
+     "I40_S3.0": 0.9987534280727998,
+     "I40_Snone": 0.9987534280727998,
+     "I50_S1.5": 0.994016454749439,
+     "I50_S2.0": 0.9980054849164797,
+     "I50_S3.0": 0.9992520568436799,
+     "I50_Snone": 0.9992520568436799,
+     "I60_S1.5": 0.994016454749439,
+     "I60_S2.0": 0.9980054849164797,
+     "I60_S3.0": 0.9992520568436799,
+     "I60_Snone": 0.9992520568436799
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 128,
+     "roots_ready_at_arrival": 128
+    }
+   },
+   "n8-open-r0.0015-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-open-r0.0015-train-def.json",
+    "trace_sha256": "13a82e178240d22ece945a18b3f06646ee19587262a1790cd644948ff867d474",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 0.0015,
+    "agentic_lanes": null,
+    "copies": 192,
+    "rows": 7121,
+    "completed": 7121,
+    "replay_wall_s": 30.10292201699849,
+    "replay_ms_per_row": 4.2273447573372405,
+    "sim_makespan_s": 18965.59408653995,
+    "warmup_end_s": 2640.0,
+    "window_end_s": 15483.730005029,
+    "prefix_cache_reused_ratio": 0.7679325594468058,
+    "window_s": [
+     2640.0,
+     15480.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 0.991175392567539,
+    "drift_tolerance": 0.2770542363733435,
+    "in_flight_plays_per_worker": 2.7645374530889373,
+    "in_flight_plays_by_third": [
+     24.965814656845104,
+     16.600552066718926,
+     24.745501143266864
+    ],
+    "littles_law_plays": 22.0691399022752,
+    "play_sojourn_mean_s": 1816.4599765718817,
+    "in_flight_requests_per_worker": 1.1093521171007672,
+    "in_flight_requests_by_third": [
+     8.119089123018373,
+     9.066595229992163,
+     9.4309338251773
+    ],
+    "worker_active_requests_mean": 1.1071245116562496,
+    "worker_active_requests_min_max": [
+     1.0197381518098838,
+     1.2242867574382064
+    ],
+    "worker_busy_frac_mean": 0.8231818292659938,
+    "worker_busy_frac_min_max": [
+     0.796758846284649,
+     0.8533209940356237
+    ],
+    "telemetry_active_kv_usage_mean": 0.24143800217604458,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.22455496865990435,
+     0.26931462522933436
+    ],
+    "scored_requests": 5773,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     19.73395735977483,
+     23.225385528001144,
+     53.566180157397525
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.7065038634173768,
+     1.1147132101012127,
+     2.0793744663831424
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.948380391477568,
+     "I25_S2.0": 0.9501125931058375,
+     "I25_S3.0": 0.9502858132686645,
+     "I25_Snone": 0.9502858132686645,
+     "I30_S1.5": 0.9681274900398407,
+     "I30_S2.0": 0.9750562965529188,
+     "I30_S3.0": 0.9752295167157458,
+     "I30_Snone": 0.9752295167157458,
+     "I40_S1.5": 0.9712454529707258,
+     "I40_S2.0": 0.9819851030659968,
+     "I40_S3.0": 0.9847566256712281,
+     "I40_Snone": 0.9847566256712281,
+     "I50_S1.5": 0.9724579941105145,
+     "I50_S2.0": 0.9847566256712281,
+     "I50_S3.0": 0.988740689416248,
+     "I50_Snone": 0.9892603499047289,
+     "I60_S1.5": 0.9731508747618223,
+     "I60_S2.0": 0.9861423869738437,
+     "I60_S3.0": 0.9911657716958254,
+     "I60_Snone": 0.9922050926727871
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 192,
+     "roots_ready_at_arrival": 192
+    }
+   },
+   "n8-open-r0.002-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-open-r0.002-train-def.json",
+    "trace_sha256": "406a828fb83a3687793df342d1e4775f1a7b89248eb3f2efc420f5d167ac1f68",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 0.002,
+    "agentic_lanes": null,
+    "copies": 256,
+    "rows": 9484,
+    "completed": 9484,
+    "replay_wall_s": 35.54994539300242,
+    "replay_ms_per_row": 3.7484126310630974,
+    "sim_makespan_s": 18892.327065588946,
+    "warmup_end_s": 2700.0,
+    "window_end_s": 15355.46995984,
+    "prefix_cache_reused_ratio": 0.6725273357561109,
+    "window_s": [
+     2700.0,
+     15300.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.1061644456629371,
+    "drift_tolerance": 0.24181530405089696,
+    "in_flight_plays_per_worker": 3.9493770939518034,
+    "in_flight_plays_by_third": [
+     30.780746655977516,
+     29.95573603706509,
+     34.048567561800674
+    ],
+    "littles_law_plays": 31.099705721299966,
+    "play_sojourn_mean_s": 1939.882634100889,
+    "in_flight_requests_per_worker": 1.8228202513019272,
+    "in_flight_requests_by_third": [
+     12.908139997341403,
+     14.136683270776578,
+     16.702862763128277
+    ],
+    "worker_active_requests_mean": 1.8081697365368437,
+    "worker_active_requests_min_max": [
+     1.546863840796412,
+     2.1822647247547904
+    ],
+    "worker_busy_frac_mean": 0.9513267393533601,
+    "worker_busy_frac_min_max": [
+     0.9257907427948527,
+     0.9802644624998963
+    ],
+    "telemetry_active_kv_usage_mean": 0.3885905230193652,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.33332752705599017,
+     0.4911150072073573
+    ],
+    "scored_requests": 7527,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     22.028690850228475,
+     30.119000455912694,
+     81.12686875188346
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     0.945457683115556,
+     1.4360351106993994,
+     3.0817134855030965
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.7819848545237146,
+     "I25_S2.0": 0.7882290421150525,
+     "I25_S3.0": 0.7884947522253222,
+     "I25_Snone": 0.7887604623355918,
+     "I30_S1.5": 0.8771090740002657,
+     "I30_S2.0": 0.8977016075461671,
+     "I30_S3.0": 0.8979673176564368,
+     "I30_Snone": 0.898631592932111,
+     "I40_S1.5": 0.9015544041450777,
+     "I40_S2.0": 0.9402152251893184,
+     "I40_S3.0": 0.9496479341038927,
+     "I40_Snone": 0.9505779194898366,
+     "I50_S1.5": 0.9077985917364155,
+     "I50_S2.0": 0.9537664408130729,
+     "I50_S3.0": 0.9681147867676365,
+     "I50_Snone": 0.9695761923741198,
+     "I60_S1.5": 0.9103228377839777,
+     "I60_S2.0": 0.9582835126876578,
+     "I60_S3.0": 0.9763518001859971,
+     "I60_Snone": 0.9798060316195031
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 256,
+     "roots_ready_at_arrival": 256
+    }
+   },
+   "n8-open-r0.002-train-rr": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-open-r0.002-train-rr.json",
+    "trace_sha256": "406a828fb83a3687793df342d1e4775f1a7b89248eb3f2efc420f5d167ac1f68",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 8,
+    "policy": "round_robin",
+    "per_worker_load": 0.002,
+    "agentic_lanes": null,
+    "copies": 256,
+    "rows": 9484,
+    "completed": 9484,
+    "replay_wall_s": 27.72450965099779,
+    "replay_ms_per_row": 2.923292877583065,
+    "sim_makespan_s": 21156.332127184134,
+    "warmup_end_s": 10920.0,
+    "window_end_s": 15355.46995984,
+    "prefix_cache_reused_ratio": 0.13177647349276694,
+    "window_s": [
+     10920.0,
+     15300.0
+    ],
+    "stationary": true,
+    "drift_last_over_first_third": 1.0861974396641254,
+    "drift_tolerance": 0.22849151553036237,
+    "in_flight_plays_per_worker": 9.577007947873119,
+    "in_flight_plays_by_third": [
+     72.99262317443761,
+     77.45998646709744,
+     79.28440040644244
+    ],
+    "littles_law_plays": 81.97011020759166,
+    "play_sojourn_mean_s": 4851.744360935831,
+    "in_flight_requests_per_worker": 8.304199797703891,
+    "in_flight_requests_by_third": [
+     62.36794357031848,
+     70.27550474067453,
+     66.6483968958096
+    ],
+    "worker_active_requests_mean": 3.1537523714850355,
+    "worker_active_requests_min_max": [
+     2.2938603644523665,
+     3.9717305892646304
+    ],
+    "worker_busy_frac_mean": 0.9678696657168249,
+    "worker_busy_frac_min_max": [
+     0.9211905109812575,
+     1.0
+    ],
+    "telemetry_active_kv_usage_mean": 0.6451126689271379,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.484214222377794,
+     0.8117856294739503
+    ],
+    "scored_requests": 2429,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     28.80102352572339,
+     73.28043456242627,
+     192.3136810626693
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     3.0867541501216222,
+     22.98151979648352,
+     182.73863994517546
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.19349526554137506,
+     "I25_S2.0": 0.2017291066282421,
+     "I25_S3.0": 0.20584602717167558,
+     "I25_Snone": 0.22066694112803623,
+     "I30_S1.5": 0.2515438452037876,
+     "I30_S2.0": 0.2815973651708522,
+     "I30_S3.0": 0.30547550432276654,
+     "I30_Snone": 0.515850144092219,
+     "I40_S1.5": 0.2750102923013586,
+     "I40_S2.0": 0.33635240839851793,
+     "I40_S3.0": 0.3808151502675998,
+     "I40_Snone": 0.6401811445039111,
+     "I50_S1.5": 0.27748044462741867,
+     "I50_S2.0": 0.35981885549608894,
+     "I50_S3.0": 0.4392754219843557,
+     "I50_Snone": 0.7612186084808563,
+     "I60_S1.5": 0.2799505969534788,
+     "I60_S2.0": 0.3659942363112392,
+     "I60_S3.0": 0.46438863729930013,
+     "I60_Snone": 0.8398517908604364
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 256,
+     "roots_ready_at_arrival": 256
+    }
+   },
+   "n8-open-r0.0025-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-open-r0.0025-train-def.json",
+    "trace_sha256": "281773460c35e506d9c11c51a00ce55dd252be3f2280c055643abc4236b4bd1e",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 0.0025,
+    "agentic_lanes": null,
+    "copies": 320,
+    "rows": 11772,
+    "completed": 11772,
+    "replay_wall_s": 42.002592847002234,
+    "replay_ms_per_row": 3.5680082268945155,
+    "sim_makespan_s": 19981.442240857305,
+    "warmup_end_s": 8220.0,
+    "window_end_s": 16600.340982491998,
+    "prefix_cache_reused_ratio": 0.4761730648135044,
+    "window_s": [
+     8220.0,
+     16560.0
+    ],
+    "stationary": false,
+    "drift_last_over_first_third": 0.9341327592824983,
+    "drift_tolerance": 0.2778205858534319,
+    "in_flight_plays_per_worker": 6.3828907533695265,
+    "in_flight_plays_by_third": [
+     49.98608277092773,
+     56.604646768072264,
+     46.69363742453007
+    ],
+    "littles_law_plays": 50.25119901435714,
+    "play_sojourn_mean_s": 2739.1830050963304,
+    "in_flight_requests_per_worker": 4.208335477684609,
+    "in_flight_requests_by_third": [
+     32.43165877291383,
+     41.27970484510444,
+     27.424389888435005
+    ],
+    "worker_active_requests_mean": 3.3805224200874577,
+    "worker_active_requests_min_max": [
+     3.1428307896864305,
+     3.677035981549347
+    ],
+    "worker_busy_frac_mean": 0.9977668836770689,
+    "worker_busy_frac_min_max": [
+     0.99490862918609,
+     0.9993100208014837
+    ],
+    "telemetry_active_kv_usage_mean": 0.7079307793758631,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.6879615111918311,
+     0.7225494163329147
+    ],
+    "scored_requests": 5694,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     28.568680157750656,
+     76.22570387311804,
+     190.30123310928278
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     1.827510946770469,
+     4.774072971052923,
+     20.572195524421865
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.1793115560238848,
+     "I25_S2.0": 0.18756585879873552,
+     "I25_S3.0": 0.19406392694063926,
+     "I25_Snone": 0.19950825430277486,
+     "I30_S1.5": 0.34562697576396206,
+     "I30_S2.0": 0.40270460133473834,
+     "I30_S3.0": 0.45345978222690553,
+     "I30_Snone": 0.5191429574991219,
+     "I40_S1.5": 0.3805760449596066,
+     "I40_S2.0": 0.4817351598173516,
+     "I40_S3.0": 0.5639269406392694,
+     "I40_Snone": 0.6420793818054092,
+     "I50_S1.5": 0.39128907622058307,
+     "I50_S2.0": 0.5144011239901651,
+     "I50_S3.0": 0.6429574991218827,
+     "I50_Snone": 0.741657885493502,
+     "I60_S1.5": 0.3955040393396558,
+     "I60_S2.0": 0.5275728837372673,
+     "I60_S3.0": 0.6903758342114507,
+     "I60_Snone": 0.821390937829294
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 320,
+     "roots_ready_at_arrival": 320
+    }
+   },
+   "n8-open-r0.003-train-def": {
+    "file": "<campaign-root>/runs/agentx_lowered/validate/n8-open-r0.003-train-def.json",
+    "trace_sha256": "9f6777a5f04200e3b624fa7abf1862d9037008394ac08bc1b280435ae68f1c25",
+    "split": "train",
+    "mode": "open",
+    "num_workers": 8,
+    "policy": "default-seed1",
+    "per_worker_load": 0.003,
+    "agentic_lanes": null,
+    "copies": 384,
+    "rows": 14139,
+    "completed": 14139,
+    "replay_wall_s": 49.49692388599942,
+    "replay_ms_per_row": 3.5007372435108155,
+    "sim_makespan_s": 24528.850182508613,
+    "warmup_end_s": 9780.0,
+    "window_end_s": 16690.695483798998,
+    "prefix_cache_reused_ratio": 0.18790280890502167,
+    "window_s": [
+     9780.0,
+     16680.0
+    ],
+    "stationary": false,
+    "drift_last_over_first_third": 1.1739803081226396,
+    "drift_tolerance": 0.1755008668009772,
+    "in_flight_plays_per_worker": 16.23347411140116,
+    "in_flight_plays_by_third": [
+     121.79622129287019,
+     124.47556638680267,
+     142.98636540157693
+    ],
+    "littles_law_plays": 143.1024483689692,
+    "play_sojourn_mean_s": 6856.992317679773,
+    "in_flight_requests_per_worker": 15.194323493265404,
+    "in_flight_requests_by_third": [
+     115.6145070915457,
+     114.6126616480938,
+     134.10628722302232
+    ],
+    "worker_active_requests_mean": 3.9445039912348427,
+    "worker_active_requests_min_max": [
+     3.68264145477658,
+     4.189922307117833
+    ],
+    "worker_busy_frac_mean": 1.0,
+    "worker_busy_frac_min_max": [
+     1.0,
+     1.0
+    ],
+    "telemetry_active_kv_usage_mean": 0.7935102132308707,
+    "telemetry_active_kv_usage_min_max_worker": [
+     0.7761958653817341,
+     0.807900214129801
+    ],
+    "scored_requests": 4332,
+    "score_basis": "arrival",
+    "mean_itl_ms_p50_p90_p99": [
+     44.47699000747408,
+     99.65701680943431,
+     292.38622289876537
+    ],
+    "e2e_over_e0_p50_p90_p99": [
+     11.982446159264017,
+     31.194485671234247,
+     543.333463923322
+    ],
+    "good_frac": {
+     "I25_S1.5": 0.0,
+     "I25_S2.0": 0.0,
+     "I25_S3.0": 0.00023084025854108956,
+     "I25_Snone": 0.02123730378578024,
+     "I30_S1.5": 0.0,
+     "I30_S2.0": 0.0,
+     "I30_S3.0": 0.0018467220683287165,
+     "I30_Snone": 0.3573407202216066,
+     "I40_S1.5": 0.0,
+     "I40_S2.0": 0.0,
+     "I40_S3.0": 0.0039242843951985225,
+     "I40_Snone": 0.4452908587257618,
+     "I50_S1.5": 0.0,
+     "I50_S2.0": 0.0,
+     "I50_S3.0": 0.006001846722068329,
+     "I50_Snone": 0.5630193905817175,
+     "I60_S1.5": 0.0,
+     "I60_S2.0": 0.0,
+     "I60_S3.0": 0.006463527239150508,
+     "I60_Snone": 0.6765927977839336
+    },
+    "open_mode_arrivals": {
+     "max_abs_root_error_ms": 0.0,
+     "requests_before_copy_arrival": 0,
+     "roots_checked": 384,
+     "roots_ready_at_arrival": 384
+    }
+   }
+  },
+  "round_robin_contrast": [
+   {
+    "run": "n32-closed-l4-train-rr",
+    "default_good_frac": 0.9242513707296499,
+    "round_robin_good_frac": 0.7669435942282467,
+    "default_reuse": 0.5667723406687002,
+    "round_robin_reuse": 0.05899546929388141
+   },
+   {
+    "run": "n32-open-r0.002-train-rr",
+    "default_good_frac": 0.9496627570854238,
+    "round_robin_good_frac": 0.5977865152177079,
+    "default_reuse": 0.5773552495523415,
+    "round_robin_reuse": 0.042604896222825525
+   },
+   {
+    "run": "n8-closed-l4-train-rr",
+    "default_good_frac": 0.9510880829015544,
+    "round_robin_good_frac": 0.7627009646302251,
+    "default_reuse": 0.6742610875098928,
+    "round_robin_reuse": 0.20664310758118976
+   },
+   {
+    "run": "n8-open-r0.002-train-rr",
+    "default_good_frac": 0.9496479341038927,
+    "round_robin_good_frac": 0.3808151502675998,
+    "default_reuse": 0.6725273357561109,
+    "round_robin_reuse": 0.13177647349276694
+   }
+  ],
+  "band_tables": {
+   "I40_S3.0": {
+    "closed_n8": {
+     "points": [
+      [
+       2.0,
+       0.9987301587301587
+      ],
+      [
+       3.0,
+       0.9823507322568532
+      ],
+      [
+       4.0,
+       0.9510880829015544
+      ],
+      [
+       5.0,
+       0.8437761069340016
+      ],
+      [
+       6.0,
+       0.6729957805907173
+      ]
+     ],
+     "L1_load_for_0.95": 4.010139435899339,
+     "L2_load_for_0.85": 4.942001878076681,
+     "L3_load_for_0.65": null
+    },
+    "closed_n16": {
+     "points": [
+      [
+       3.0,
+       0.984064528821562
+      ],
+      [
+       4.0,
+       0.9509062366205223
+      ],
+      [
+       5.0,
+       0.8494804240579406
+      ],
+      [
+       6.0,
+       0.7056688075956437
+      ]
+     ],
+     "L1_load_for_0.95": 4.008934970276558,
+     "L2_load_for_0.85": 4.99487728095115,
+     "L3_load_for_0.65": null
+    },
+    "closed_n32": {
+     "points": [
+      [
+       3.0,
+       0.9922337637122609
+      ],
+      [
+       4.0,
+       0.9242513707296499
+      ],
+      [
+       5.0,
+       0.8439091534755678
+      ],
+      [
+       6.0,
+       0.636541527757646
+      ]
+     ],
+     "L1_load_for_0.95": 3.6212456175684165,
+     "L2_load_for_0.85": 4.9241887175559285,
+     "L3_load_for_0.65": 5.935098488996246
+    },
+    "open_n8": {
+     "points": [
+      [
+       0.001,
+       0.9987534280727998
+      ],
+      [
+       0.0015,
+       0.9847566256712281
+      ],
+      [
+       0.002,
+       0.9496479341038927
+      ],
+      [
+       0.0025,
+       0.5639269406392694
+      ],
+      [
+       0.003,
+       0.0039242843951985225
+      ]
+     ],
+     "L1_load_for_0.95": 0.0019949860578621676,
+     "L2_load_for_0.85": 0.002129171001568822,
+     "L3_load_for_0.65": 0.0023884257522677143
+    },
+    "open_n16": {
+     "points": [
+      [
+       0.0015,
+       0.9910598179453837
+      ],
+      [
+       0.002,
+       0.9619157180915476
+      ],
+      [
+       0.0025,
+       0.8538422131147541
+      ]
+     ],
+     "L1_load_for_0.95": 0.002055127841435819,
+     "L2_load_for_0.85": null,
+     "L3_load_for_0.65": null
+    },
+    "open_n32": {
+     "points": [
+      [
+       0.0015,
+       0.994394116064221
+      ],
+      [
+       0.002,
+       0.9496627570854238
+      ],
+      [
+       0.0025,
+       0.7328095413051465
+      ]
+     ],
+     "L1_load_for_0.95": 0.0019962303524610554,
+     "L2_load_for_0.85": 0.002229793126947228,
+     "L3_load_for_0.65": null
+    }
+   },
+   "I30_S3.0": {
+    "closed_n8": {
+     "points": [
+      [
+       2.0,
+       0.9987301587301587
+      ],
+      [
+       3.0,
+       0.9665790461885092
+      ],
+      [
+       4.0,
+       0.9038341968911917
+      ],
+      [
+       5.0,
+       0.7111528822055138
+      ],
+      [
+       6.0,
+       0.5184599156118144
+      ]
+     ],
+     "L1_load_for_0.95": 3.2642295961210963,
+     "L2_load_for_0.85": 4.279395005058024,
+     "L3_load_for_0.65": 5.317359181741475
+    },
+    "closed_n16": {
+     "points": [
+      [
+       3.0,
+       0.9706866024001574
+      ],
+      [
+       4.0,
+       0.903667760810618
+      ],
+      [
+       5.0,
+       0.7244673034533431
+      ],
+      [
+       6.0,
+       0.5467746439542027
+      ]
+     ],
+     "L1_load_for_0.95": 3.3086684566536326,
+     "L2_load_for_0.85": 4.299484508031247,
+     "L3_load_for_0.65": 5.419079233004013
+    },
+    "closed_n32": {
+     "points": [
+      [
+       3.0,
+       0.9849529171925056
+      ],
+      [
+       4.0,
+       0.8740615773935049
+      ],
+      [
+       5.0,
+       0.7354439091534756
+      ],
+      [
+       6.0,
+       0.48796927090882736
+      ]
+     ],
+     "L1_load_for_0.95": 3.315199701400132,
+     "L2_load_for_0.85": 4.173582326834701,
+     "L3_load_for_0.65": 5.345263295501851
+    },
+    "open_n8": {
+     "points": [
+      [
+       0.001,
+       0.9960109698329593
+      ],
+      [
+       0.0015,
+       0.9752295167157458
+      ],
+      [
+       0.002,
+       0.8979673176564368
+      ],
+      [
+       0.0025,
+       0.45345978222690553
+      ],
+      [
+       0.003,
+       0.0018467220683287165
+      ]
+     ],
+     "L1_load_for_0.95": 0.001663272059447718,
+     "L2_load_for_0.85": 0.0020539555731154094,
+     "L3_load_for_0.65": 0.0022789236378375722
+    },
+    "open_n16": {
+     "points": [
+      [
+       0.0015,
+       0.9852080624187256
+      ],
+      [
+       0.002,
+       0.9303705497699201
+      ],
+      [
+       0.0025,
+       0.7552766393442623
+      ]
+     ],
+     "L1_load_for_0.95": 0.0018210216940747089,
+     "L2_load_for_0.85": 0.0022295069816378457,
+     "L3_load_for_0.65": null
+    },
+    "open_n32": {
+     "points": [
+      [
+       0.0015,
+       0.9897748677011391
+      ],
+      [
+       0.002,
+       0.9143436222879356
+      ],
+      [
+       0.0025,
+       0.6252720232880197
+      ]
+     ],
+     "L1_load_for_0.95": 0.0017636498143657653,
+     "L2_load_for_0.85": 0.0021112935731329914,
+     "L3_load_for_0.65": 0.002457228629866216
+    }
+   }
+  }
+ },
+ "costs": {
+  "base_build_s": "about 7 s for all 82 plays (lowering, two digests per play)",
+  "generate": {
+   "closed_1536": {
+    "rows": 55726,
+    "generate_s": 3.6,
+    "serialize_s": 2.17,
+    "bytes": 474190433
+   },
+   "open_1280": {
+    "rows": 46606,
+    "generate_s": 3.57,
+    "serialize_s": 1.72,
+    "bytes": 394219513
+   }
+  },
+  "generate_note": "seconds for generate() and serialization in one process; files are about 8.5 KB per row (64-token hash ids); 56K rows = 474 MB",
+  "replay_ms_per_row": {
+   "n16-closed-l3-train-def": 4.28,
+   "n16-closed-l4-train-def": 3.82,
+   "n16-closed-l4-val-def": 4.07,
+   "n16-closed-l5-train-def": 3.65,
+   "n16-closed-l6-train-def": 3.5,
+   "n16-open-r0.0015-train-def": 4.58,
+   "n16-open-r0.002-test-def": 4.14,
+   "n16-open-r0.002-train-def": 4.34,
+   "n16-open-r0.0025-train-def": 3.97,
+   "n32-closed-l3-train-def": 4.59,
+   "n32-closed-l4-train-def": 4.16,
+   "n32-closed-l4-train-rr": 3.38,
+   "n32-closed-l5-train-def": 3.82,
+   "n32-closed-l6-train-def": 4.02,
+   "n32-open-r0.0015-train-def": 4.93,
+   "n32-open-r0.002-train-def": 4.53,
+   "n32-open-r0.002-train-rr": 3.48,
+   "n32-open-r0.0025-train-def": 4.2,
+   "n8-closed-l2-train-def": 4.41,
+   "n8-closed-l3-train-def": 3.87,
+   "n8-closed-l4-train-def": 3.69,
+   "n8-closed-l4-train-rr": 3.05,
+   "n8-closed-l5-train-def": 3.36,
+   "n8-closed-l6-train-def": 3.46,
+   "n8-open-r0.001-train-def": 4.55,
+   "n8-open-r0.0015-train-def": 4.23,
+   "n8-open-r0.002-train-def": 3.75,
+   "n8-open-r0.002-train-rr": 2.92,
+   "n8-open-r0.0025-train-def": 3.57,
+   "n8-open-r0.003-train-def": 3.5
+  },
+  "replay_wall_s": {
+   "n16-closed-l3-train-def": 60.5,
+   "n16-closed-l4-train-def": 70.6,
+   "n16-closed-l4-val-def": 88.0,
+   "n16-closed-l5-train-def": 84.2,
+   "n16-closed-l6-train-def": 95.9,
+   "n16-open-r0.0015-train-def": 64.8,
+   "n16-open-r0.002-test-def": 80.5,
+   "n16-open-r0.002-train-def": 80.1,
+   "n16-open-r0.0025-train-def": 91.5,
+   "n32-closed-l3-train-def": 125.9,
+   "n32-closed-l4-train-def": 154.1,
+   "n32-closed-l4-train-rr": 125.3,
+   "n32-closed-l5-train-def": 178.1,
+   "n32-closed-l6-train-def": 223.9,
+   "n32-open-r0.0015-train-def": 135.2,
+   "n32-open-r0.002-train-def": 167.9,
+   "n32-open-r0.002-train-rr": 129.1,
+   "n32-open-r0.0025-train-def": 195.6,
+   "n8-closed-l2-train-def": 20.5,
+   "n8-closed-l3-train-def": 27.5,
+   "n8-closed-l4-train-def": 35.0,
+   "n8-closed-l4-train-rr": 29.0,
+   "n8-closed-l5-train-def": 39.6,
+   "n8-closed-l6-train-def": 48.9,
+   "n8-open-r0.001-train-def": 21.1,
+   "n8-open-r0.0015-train-def": 30.1,
+   "n8-open-r0.002-train-def": 35.5,
+   "n8-open-r0.002-train-rr": 27.7,
+   "n8-open-r0.0025-train-def": 42.0,
+   "n8-open-r0.003-train-def": 49.5
+  },
+  "parity_wall_s_total": 354.37921448999987,
+  "transform_base_build_s": "41.4 s wall for all six transforms (82 plays each, lowering plus two digests per play; runs/agentx_lowered/fix_r0/build_base.log)",
+  "transform_parity_wall_s": {
+   "cap300_osl1.5": 509.3,
+   "cap300_osl2.5": 716.1,
+   "cap300_think0.5": 346.0,
+   "cap300_think2": 364.2,
+   "cap300_think4": 376.0
+  }
+ },
+ "caveats": [
+  "Node order is a free choice the lowering cannot pin: replay sorts nodes by request_id, which breaks ties between simultaneously ready requests and fixes the dense u32 hash interning. Native corpora order plays by blake3 of file names; the generator orders copies by index. Exact parity needs the native order (parity uses label_ranks); in the generator's own order the 12-copy recycled corpus differed in 12/12 replays, mean e2e -7.4% to +4.7% (worst case: synchronized start). This is the same class of variation as a crn-order-v1 replicate, not a lowering error.",
+  "Lowered plays are B2's transformed plays (think_cap_s = 300 s, plus think_mult or osl_mult for the 5 transform cells), byte-identical to the AgentX cell traces that use the same transform, not the raw plays. Each transform has its own weka_<tag>/base_<tag>; a transform cell generated from base_cap300 would replay untransformed traffic, which GenSpec prevents (the base MANIFEST must match the spec's transform).",
+  "No selected play has an async_launched (background) subagent, so that importer branch is not exercised by data; dispatch-triggered spawns (concurrent children) and the only zero-output request are covered by parity.",
+  "Open mode makes play roots exogenous (Poisson). Descendants keep the native semantics: ready at max(recorded offset from the play start, dependency completion + delay_ms), so a descendant never starts before its recorded offset (causal release per LR-09, with recorded floors).",
+  "The suggested loads use a provisional SLA (I = 40 ms, S = 3) and the train pool; val (N16 lanes 4: 0.937 vs train 0.951) and test (N16 open 0.002: 0.971 vs train 0.962) pools respond slightly differently. The full SLA grid is in every run record.",
+  "Steady-state rules (warm-up, window end, stationarity tolerance) are heuristics for calibration to adopt or replace; stationarity flags at N = 8 and low load are limited by Poisson noise.",
+  "Harness integration is not done here (by rule): learned_routing.cells.Cell.load_kwargs accepts agentic_lanes only for trace_format weka, replicates.materialize_replicate rejects agentic_mooncake, and cells.expected_cost_s estimates non-Mooncake files as 5 s + size / 5 MB (474 MB -> about 100 s vs 224 s measured; the pool timeout max(120 s, 20 x cost) still covers it).",
+  "Files are about 8.5 KB per row (one 64-token hash id per block); N = 32 traces are 220-475 MB. Generation takes about 6 s per 56K rows, so calibration can regenerate instead of keeping files.",
+  "Replay costs 2.9-4.9 ms per row in one fresh process at N 8-32 (startup included): AgentX N = 32 lanes cells take 2-4 minutes per replay at 8 copies per lane, N = 8 cells 20-50 s; size CMA-ES budgets accordingly.",
+  "The base manifest sha changed after the validation traces were generated (the helper was rebuilt after cargo fmt; all 82 base files stayed byte-identical, runs/agentx_lowered/base_shas_before_fmt.json): validation trace headers embed manifest sha 0a032304..., the current one is 9868b9f6....",
+  "Header source is {format: weka, digest: lr-agentx-lowered-v1:<spec key>}; replay only checks it is non-empty.",
+  "per_request arrival_time_ms of a non-root request is its release (ready) time, not a trace timestamp.",
+  "Node-order sensitivity grows with output length: the 12-copy synchronized recycled corpus in copy-index order moved mean e2e by -5.7..+18.0% (osl 1.5) and -15.6..+13.5% (osl 2.5), vs -7.4..+4.7% (cap300), -6.8..+2.8% (think 0.5), -2.6..+5.4% (think 2) and -0.1..+0.7% (think 4). This is a synchronized-start N = 2 worst case and the same class as a crn-order-v1 replicate; measure lowered-cell noise with seed = k replicates (A1) per transform.",
+  "think_mult dilates every recorded gap of the play (think, tool and api time, subagent durations) about its first request; in closed mode it therefore changes the offered load per lane, so transform cells cannot reuse the base cells' lanes (transforms.validation.observations)."
+ ],
+ "scratch": {
+  "note": "bulky outputs of this sidecar; nothing else depends on gen/ (calibration regenerates); not added to CLEANUP.md because this stage may only create new files",
+  "paths": {
+   "<campaign-root>/traces/agentx_lowered/gen": "4.0 GiB (validation and pilot traces + .meta.json)",
+   "<campaign-root>/runs/agentx_lowered/parity": "40 MiB (native corpus copies, lowered and relabeled corpora)",
+   "<campaign-root>/runs/agentx_lowered/validate": "56 MiB (reports, per_request gz, private E0 cache)",
+   "<campaign-root>/runs/agentx_lowered/sweep": "7.3 MiB (N = 8 pilot)",
+   "<campaign-root>/runs/agentx_lowered/probe": "2.3 MiB (cost probe)",
+   "<worktree>/benchmarks/learned_routing/tools/agentx_lower/target": "378 MiB (gitignored cargo build of the helper)",
+   "<campaign-root>/traces/agentx_lowered/base_cap300_{think0.5,think2,think4,osl1.5,osl2.5}": "5 x 66 MiB (needed by calibration for the 5 transform cells)",
+   "<campaign-root>/traces/agentx_lowered/weka_cap300_{think0.5,think2,think4,osl1.5,osl2.5}": "5 x 14 MiB (transformed Weka plays; inputs of base_*)",
+   "<campaign-root>/traces/agentx_lowered/gen (fix_r0 additions)": "11 validation traces, 573 MiB (listed in runs/agentx_lowered/fix_r0/validate_runs*.json)",
+   "<campaign-root>/runs/agentx_lowered/fix_r0": "283 MiB (parity corpora per transform, validation reports and per_request gz, scripts)"
+  }
+ },
+ "worktree_files": [
+  "benchmarks/learned_routing/learned_routing/workloads/agentx_lowered.py",
+  "benchmarks/learned_routing/learned_routing/workloads/tests/test_workloads_agentx_lowered.py",
+  "benchmarks/learned_routing/learned_routing/workloads/tests/test_workloads_agentx_lowered_transforms.py",
+  "benchmarks/learned_routing/tools/agentx_lower/Cargo.lock",
+  "benchmarks/learned_routing/tools/agentx_lower/Cargo.toml",
+  "benchmarks/learned_routing/tools/agentx_lower/src/main.rs"
+ ],
+ "commit": "<commit-13>",
+ "lessons": {
+  "applied": [
+   "LR-01 (warm-up before a measurement window; windowed scoring)",
+   "LR-09 (lanes as the primary AgentX mode; causal release kept)",
+   "LR-12 (bands reported per N; closed nearly N-invariant, open N-dependent)"
+  ],
+  "not_in_scope": [
+   "LR-02..08, LR-10, LR-11, LR-13..15 (training, baselines, noise and reporting)"
+  ]
+ },
+ "evidence_files": {
+  "base_manifest": "<campaign-root>/traces/agentx_lowered/base_cap300/MANIFEST.json",
+  "parity": "<campaign-root>/runs/agentx_lowered/parity/parity.json",
+  "validation_reports": "<campaign-root>/runs/agentx_lowered/validate/<run>.json (+ .per_request.jsonl.gz; pre-reanalysis copies in validate/orig)",
+  "generation_cost": "<campaign-root>/runs/agentx_lowered/gen_cost.json",
+  "facts_builder": "<campaign-root>/runs/agentx_lowered/scripts/build_facts.py",
+  "fix_r0_dir": "<campaign-root>/runs/agentx_lowered/fix_r0",
+  "transform_relation": "<campaign-root>/runs/agentx_lowered/fix_r0/transform_relation.json",
+  "transform_parity": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_<tag>/parity.json",
+  "transform_validation": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/<run>.json",
+  "identity_bytes_check": "<campaign-root>/runs/agentx_lowered/fix_r0/identity_bytes_check.json",
+  "facts_before_fix_r0": "<campaign-root>/runs/agentx_lowered/fix_r0/agentx_lowered.facts.before_fix_r0.json",
+  "fix_r0_record": "<campaign-root>/audits/agentx-lowering/fix-r0.md"
+ },
+ "deviations": [
+  "Replays ran outside lr-eval, which cannot run agentic_mooncake cells yet (cells/replicates gaps above); every replay held one CR/slots slot through learned_routing.slots.SlotPool, with at most 5 of this stage's replays at once (4 validate processes + 1 parity process, each sequential).",
+  "Recorded here instead of facts/DEVIATIONS.md and CR/CLEANUP.md, because this sidecar may only create new files and append one STATE.md line.",
+  "New paths outside the listed module/tests/data: the Rust helper crate WT benchmarks/learned_routing/tools/agentx_lower (the task's preferred route; committed with the module) and CR/runs/agentx_lowered (run evidence, per the contract's runs layout).",
+  "E0 for band scoring used a private cache (runs/agentx_lowered/{validate,sweep,probe}/e0) seeded read-only from runs/cache/e0, so the shared harness cache was never written.",
+  "fix_r0 evidence (parity per transform, paired validation, scripts) is under CR/runs/agentx_lowered/fix_r0, following the contract's runs layout; every replay held one CR/slots slot (at most 8 at once: 5 parity + 3 validate processes, each sequential)."
+ ],
+ "transforms": {
+  "what": "B2's AgentX cells use six per-play Weka transforms (transform.transform_weka): the plain cap (think_cap_s 300) and think_mult 0.5/2/4 or osl_mult 1.5/2.5 on top of it. Each is lowered by AISim into its own weka_<tag>/base_<tag> directories with its own 82-play graph-digest proof and a byte check against every B2 cell trace that uses it. A transformed AgentX cell MUST be generated from its own transform's base (GenSpec think_mult/osl_mult); the generator refuses a base built for another transform and fails loudly when a transform has no base.",
+  "added_in": "fix_r0 (audit parity-fidelity r0 F1), WT commit <commit-13>",
+  "cell_to_spec": "t = PlayTransform.from_cell(cell['transform']) (rejects window/isl_*/prefix_root_mult/max_model_len != 131072); GenSpec(split=cell['split'], mode=..., num_copies=..., seed=k, play_rate_per_s=..., think_cap_s=t.think_cap_s, think_mult=t.think_mult, osl_mult=t.osl_mult). CLI: --think-mult M / --osl-mult M",
+  "draws_independent_of_transform": "draws, labels, ordinals, hash ranges and open-mode arrivals depend only on split, num_copies, seed (and rate), so a transformed spec replays the same plays in the same order as its identity twin (tested: test_think_mult_dilates_every_copy_and_nothing_else)",
+  "identity_unchanged": {
+   "cap300_base": "base_cap300 and weka_cap300 rebuilt by the new code: all 165 files byte-identical, MANIFEST sha still 9868b9f6... (runs/agentx_lowered/fix_r0/cap300_shas_{before,after}.txt)",
+   "generated_traces": "identity GenSpecs give byte-identical traces before (<commit-12>) and after (<commit-13>) the fix: 3/3 (train closed 96, test open 80, val closed 50 copies; runs/agentx_lowered/fix_r0/identity_bytes_check.json)",
+   "how": "identity multipliers are omitted from GenSpec.key_dict() (the trace digest key) and from the base MANIFEST"
+  },
+  "by_tag": {
+   "cap300": {
+    "think_cap_s": 300.0,
+    "think_mult": 1.0,
+    "osl_mult": 1.0,
+    "cells": [
+     "agentx-T1-base-n4-lanes-L2",
+     "agentx-T2-base-n8-lanes-L1",
+     "agentx-T3-base-n4-lanes-L3",
+     "agentx-T4-base-n8-lanes-L2",
+     "agentx-T3-base-n2-lanes-L2",
+     "agentx-T4-base-n2-lanes-L3",
+     "agentx-T3-base-n6-lanes-L2",
+     "agentx-T1-base-n6-lanes-L3",
+     "agentx-A1-base-n4-lanes-L1",
+     "agentx-A1-base-n4-lanes-L3",
+     "agentx-A2-base-n4-lanes-L2",
+     "agentx-A3-base-n8-lanes-L2",
+     "agentx-A1_A2-base-n8-lanes-L3",
+     "agentx-V1-base-n4-lanes-L2",
+     "agentx-V2-base-n6-lanes-L2",
+     "agentx-V3-base-n8-lanes-L1",
+     "agentx-V2-base-n4-lanes-L3"
+    ],
+    "splits": [
+     "test",
+     "train",
+     "val"
+    ],
+    "holdout_axes": [
+     "None",
+     "agentx_plays",
+     "worker_count"
+    ],
+    "weka_dir": "<campaign-root>/traces/agentx_lowered/weka_cap300",
+    "base_dir": "<campaign-root>/traces/agentx_lowered/base_cap300",
+    "base_manifest_sha256": "9868b9f6d71bbe4c70045185e20cf671d5941abc1dddfd598123a88490f46586",
+    "graph_digests": {
+     "plays": 82,
+     "equal": 82
+    },
+    "b2_cell_trace_check": {
+     "byte_identical": 82,
+     "plays_checked": 82
+    },
+    "rows": 3132,
+    "validation_runs": [
+     "n4-closed-lanes20-test-cap300-def",
+     "n4-closed-lanes20-train-cap300-def",
+     "n8-closed-lanes32-train-cap300-def",
+     "n8-closed-lanes40-test-cap300-def"
+    ]
+   },
+   "cap300_osl1.5": {
+    "think_cap_s": 300.0,
+    "think_mult": 1.0,
+    "osl_mult": 1.5,
+    "cells": [
+     "agentx-A3-osl1.5-n4-lanes-L2"
+    ],
+    "splits": [
+     "train"
+    ],
+    "holdout_axes": [
+     "None"
+    ],
+    "weka_dir": "<campaign-root>/traces/agentx_lowered/weka_cap300_osl1.5",
+    "base_dir": "<campaign-root>/traces/agentx_lowered/base_cap300_osl1.5",
+    "base_manifest_sha256": "92c6314c42bf22c22e9de59a18808162fc736ffdc244431a315b9e22d7079b82",
+    "graph_digests": {
+     "plays": 82,
+     "equal": 82
+    },
+    "b2_cell_trace_check": {
+     "byte_identical": 11,
+     "plays_checked": 11
+    },
+    "rows": 3132,
+    "relation_to_cap300": {
+     "plays": 82,
+     "rows": 3132,
+     "structure_mismatch_rows": 0,
+     "timing_values": 10594,
+     "timing_mismatch_values": 0,
+     "max_rel_timing_err": 0.0,
+     "osl_mismatch_rows": 0,
+     "outputs_changed": 3131,
+     "outputs_clamped": 2,
+     "span_ratio_min_max": [
+      1.0,
+      1.0
+     ]
+    },
+    "replay_parity": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_osl1.5/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "all_exact_identical": true,
+     "non_vacuous": "rows == completed on both sides in every exact case",
+     "fields_compared": 37,
+     "per_tier": {
+      "single": {
+       "cases": 48,
+       "identical": 48,
+       "rows_per_case": [
+        26,
+        30,
+        39,
+        42,
+        53,
+        119
+       ],
+       "agentic_lanes": [
+        null
+       ]
+      },
+      "corpus": {
+       "cases": 24,
+       "identical": 24,
+       "rows_per_case": [
+        309
+       ],
+       "agentic_lanes": [
+        null,
+        2,
+        3
+       ]
+      },
+      "recycle": {
+       "cases": 12,
+       "identical": 12,
+       "rows_per_case": [
+        712
+       ],
+       "agentic_lanes": [
+        null,
+        3,
+        5
+       ]
+      }
+     },
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.05683554699858462,
+      0.1804466282923427
+     ],
+     "wall_s": 509.27077483700486
+    },
+    "validation_runs": [
+     "n4-closed-lanes20-train-cap300_osl1.5-def"
+    ]
+   },
+   "cap300_osl2.5": {
+    "think_cap_s": 300.0,
+    "think_mult": 1.0,
+    "osl_mult": 2.5,
+    "cells": [
+     "agentx-T2-osl2.5-n8-lanes-L2"
+    ],
+    "splits": [
+     "test"
+    ],
+    "holdout_axes": [
+     "transform_extrapolation"
+    ],
+    "weka_dir": "<campaign-root>/traces/agentx_lowered/weka_cap300_osl2.5",
+    "base_dir": "<campaign-root>/traces/agentx_lowered/base_cap300_osl2.5",
+    "base_manifest_sha256": "c7a7a70ab8e98547b9c0bcc64aeb554e9c6d70610b9404ce5263a784f8f679ba",
+    "graph_digests": {
+     "plays": 82,
+     "equal": 82
+    },
+    "b2_cell_trace_check": {
+     "byte_identical": 7,
+     "plays_checked": 7
+    },
+    "rows": 3132,
+    "relation_to_cap300": {
+     "plays": 82,
+     "rows": 3132,
+     "structure_mismatch_rows": 0,
+     "timing_values": 10594,
+     "timing_mismatch_values": 0,
+     "max_rel_timing_err": 0.0,
+     "osl_mismatch_rows": 0,
+     "outputs_changed": 3131,
+     "outputs_clamped": 9,
+     "span_ratio_min_max": [
+      1.0,
+      1.0
+     ]
+    },
+    "replay_parity": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_osl2.5/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "all_exact_identical": true,
+     "non_vacuous": "rows == completed on both sides in every exact case",
+     "fields_compared": 37,
+     "per_tier": {
+      "single": {
+       "cases": 48,
+       "identical": 48,
+       "rows_per_case": [
+        26,
+        30,
+        39,
+        42,
+        53,
+        119
+       ],
+       "agentic_lanes": [
+        null
+       ]
+      },
+      "corpus": {
+       "cases": 24,
+       "identical": 24,
+       "rows_per_case": [
+        309
+       ],
+       "agentic_lanes": [
+        null,
+        2,
+        3
+       ]
+      },
+      "recycle": {
+       "cases": 12,
+       "identical": 12,
+       "rows_per_case": [
+        712
+       ],
+       "agentic_lanes": [
+        null,
+        3,
+        5
+       ]
+      }
+     },
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.15608933593375007,
+      0.13520381570782436
+     ],
+     "wall_s": 716.0792463030375
+    },
+    "validation_runs": [
+     "n8-closed-lanes40-test-cap300_osl2.5-def"
+    ]
+   },
+   "cap300_think0.5": {
+    "think_cap_s": 300.0,
+    "think_mult": 0.5,
+    "osl_mult": 1.0,
+    "cells": [
+     "agentx-A2-think0.5-n4-lanes-L2"
+    ],
+    "splits": [
+     "train"
+    ],
+    "holdout_axes": [
+     "None"
+    ],
+    "weka_dir": "<campaign-root>/traces/agentx_lowered/weka_cap300_think0.5",
+    "base_dir": "<campaign-root>/traces/agentx_lowered/base_cap300_think0.5",
+    "base_manifest_sha256": "da6d56a89a83094e0f9c07be1cf1e9fd293a47df4ec68a703cb472bb80b72598",
+    "graph_digests": {
+     "plays": 82,
+     "equal": 82
+    },
+    "b2_cell_trace_check": {
+     "byte_identical": 11,
+     "plays_checked": 11
+    },
+    "rows": 3132,
+    "relation_to_cap300": {
+     "plays": 82,
+     "rows": 3132,
+     "structure_mismatch_rows": 0,
+     "timing_values": 10594,
+     "timing_mismatch_values": 0,
+     "max_rel_timing_err": 0.0,
+     "osl_mismatch_rows": 0,
+     "outputs_changed": 0,
+     "outputs_clamped": 0,
+     "span_ratio_min_max": [
+      0.5,
+      0.5
+     ]
+    },
+    "replay_parity": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_think0.5/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "all_exact_identical": true,
+     "non_vacuous": "rows == completed on both sides in every exact case",
+     "fields_compared": 37,
+     "per_tier": {
+      "single": {
+       "cases": 48,
+       "identical": 48,
+       "rows_per_case": [
+        26,
+        30,
+        39,
+        42,
+        53,
+        119
+       ],
+       "agentic_lanes": [
+        null
+       ]
+      },
+      "corpus": {
+       "cases": 24,
+       "identical": 24,
+       "rows_per_case": [
+        309
+       ],
+       "agentic_lanes": [
+        null,
+        2,
+        3
+       ]
+      },
+      "recycle": {
+       "cases": 12,
+       "identical": 12,
+       "rows_per_case": [
+        712
+       ],
+       "agentic_lanes": [
+        null,
+        3,
+        5
+       ]
+      }
+     },
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.06773670816993871,
+      0.028210181806327395
+     ],
+     "wall_s": 346.0424895500182
+    },
+    "validation_runs": [
+     "n4-closed-lanes12-train-cap300_think0.5-def",
+     "n4-closed-lanes16-train-cap300_think0.5-def",
+     "n4-closed-lanes20-train-cap300_think0.5-def"
+    ]
+   },
+   "cap300_think2": {
+    "think_cap_s": 300.0,
+    "think_mult": 2.0,
+    "osl_mult": 1.0,
+    "cells": [
+     "agentx-A3-think2.0-n8-lanes-L1"
+    ],
+    "splits": [
+     "train"
+    ],
+    "holdout_axes": [
+     "None"
+    ],
+    "weka_dir": "<campaign-root>/traces/agentx_lowered/weka_cap300_think2",
+    "base_dir": "<campaign-root>/traces/agentx_lowered/base_cap300_think2",
+    "base_manifest_sha256": "9a45b84dfa253d039f2f70575b0fe046685882e8ff60d33ed491d6b425af200f",
+    "graph_digests": {
+     "plays": 82,
+     "equal": 82
+    },
+    "b2_cell_trace_check": {
+     "byte_identical": 11,
+     "plays_checked": 11
+    },
+    "rows": 3132,
+    "relation_to_cap300": {
+     "plays": 82,
+     "rows": 3132,
+     "structure_mismatch_rows": 0,
+     "timing_values": 10594,
+     "timing_mismatch_values": 0,
+     "max_rel_timing_err": 0.0,
+     "osl_mismatch_rows": 0,
+     "outputs_changed": 0,
+     "outputs_clamped": 0,
+     "span_ratio_min_max": [
+      2.0,
+      2.0
+     ]
+    },
+    "replay_parity": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_think2/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "all_exact_identical": true,
+     "non_vacuous": "rows == completed on both sides in every exact case",
+     "fields_compared": 37,
+     "per_tier": {
+      "single": {
+       "cases": 48,
+       "identical": 48,
+       "rows_per_case": [
+        26,
+        30,
+        39,
+        42,
+        53,
+        119
+       ],
+       "agentic_lanes": [
+        null
+       ]
+      },
+      "corpus": {
+       "cases": 24,
+       "identical": 24,
+       "rows_per_case": [
+        309
+       ],
+       "agentic_lanes": [
+        null,
+        2,
+        3
+       ]
+      },
+      "recycle": {
+       "cases": 12,
+       "identical": 12,
+       "rows_per_case": [
+        712
+       ],
+       "agentic_lanes": [
+        null,
+        3,
+        5
+       ]
+      }
+     },
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.02605272933188063,
+      0.0536228344463634
+     ],
+     "wall_s": 364.2317833020097
+    },
+    "validation_runs": [
+     "n8-closed-lanes32-train-cap300_think2-def"
+    ]
+   },
+   "cap300_think4": {
+    "think_cap_s": 300.0,
+    "think_mult": 4.0,
+    "osl_mult": 1.0,
+    "cells": [
+     "agentx-T1-think4.0-n4-lanes-L2"
+    ],
+    "splits": [
+     "test"
+    ],
+    "holdout_axes": [
+     "transform_extrapolation"
+    ],
+    "weka_dir": "<campaign-root>/traces/agentx_lowered/weka_cap300_think4",
+    "base_dir": "<campaign-root>/traces/agentx_lowered/base_cap300_think4",
+    "base_manifest_sha256": "3561c1ec50d23ad1d52c1ee83966b9f87a63809d55d56d5f9976cbcc42869141",
+    "graph_digests": {
+     "plays": 82,
+     "equal": 82
+    },
+    "b2_cell_trace_check": {
+     "byte_identical": 7,
+     "plays_checked": 7
+    },
+    "rows": 3132,
+    "relation_to_cap300": {
+     "plays": 82,
+     "rows": 3132,
+     "structure_mismatch_rows": 0,
+     "timing_values": 10594,
+     "timing_mismatch_values": 0,
+     "max_rel_timing_err": 0.0,
+     "osl_mismatch_rows": 0,
+     "outputs_changed": 0,
+     "outputs_clamped": 0,
+     "span_ratio_min_max": [
+      4.0,
+      4.0
+     ]
+    },
+    "replay_parity": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/parity_cap300_think4/parity.json",
+     "exact_cases": 84,
+     "exact_identical": 84,
+     "all_exact_identical": true,
+     "non_vacuous": "rows == completed on both sides in every exact case",
+     "fields_compared": 37,
+     "per_tier": {
+      "single": {
+       "cases": 48,
+       "identical": 48,
+       "rows_per_case": [
+        26,
+        30,
+        39,
+        42,
+        53,
+        119
+       ],
+       "agentic_lanes": [
+        null
+       ]
+      },
+      "corpus": {
+       "cases": 24,
+       "identical": 24,
+       "rows_per_case": [
+        309
+       ],
+       "agentic_lanes": [
+        null,
+        2,
+        3
+       ]
+      },
+      "recycle": {
+       "cases": 12,
+       "identical": 12,
+       "rows_per_case": [
+        712
+       ],
+       "agentic_lanes": [
+        null,
+        3,
+        5
+       ]
+      }
+     },
+     "copy_order_identical": [
+      0,
+      12
+     ],
+     "copy_order_mean_e2e_rel_diff_range": [
+      -0.001254915203145357,
+      0.006454516375253627
+     ],
+     "wall_s": 375.98939854502896
+    },
+    "validation_runs": [
+     "n4-closed-lanes20-test-cap300_think4-def"
+    ]
+   }
+  },
+  "validation": {
+   "what": "closed mode, the cell's split and N, provisional lanes per worker for the cell's level (L1 4, L2 5 from suggested_loads), 8 copies per lane, seed 0, seeded default; each transform run is paired with an identity run with the same split, N, lanes, copies and seed (same plays in the same order). Provisional SLA grid as in suggested_loads; calibration sets loads and SLA.",
+   "out_dir": "<campaign-root>/runs/agentx_lowered/fix_r0/validate",
+   "runs": {
+    "n4-closed-lanes20-train-cap300_think0.5-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n4-closed-lanes20-train-cap300_think0.5-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/22ddad9e959733b17ea4b1cd32487672987077b03fc88da373b9e28983bde148.jsonl",
+     "trace_sha256": "22ddad9e959733b17ea4b1cd32487672987077b03fc88da373b9e28983bde148",
+     "split": "train",
+     "transform": "cap300_think0.5",
+     "num_workers": 4,
+     "agentic_lanes": 20,
+     "lanes_per_worker": 5,
+     "copies": 160,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 5806,
+     "completed_requests": 5806,
+     "trajectories_completed": [
+      160,
+      160
+     ],
+     "warmup_end_s": 2700.0,
+     "window_s": [
+      2700.0,
+      11400.0
+     ],
+     "stationary": false,
+     "drift_last_over_first_third": 1.4880636075775409,
+     "drift_tolerance": 0.4061861534110015,
+     "worker_busy_frac_mean": 0.9986853581704861,
+     "prefix_cache_reused_ratio": 0.5307031974732562,
+     "scored_requests": 2906,
+     "good_frac_I40_S3": 0.5750172057811425,
+     "good_frac_I30_S3": 0.43702684101858225,
+     "mean_itl_ms_p50_p90": [
+      29.054108161588772,
+      69.45677518143509
+     ],
+     "e2e_over_e0_p50_p90": [
+      1.789091937536368,
+      4.41331265621284
+     ],
+     "wall_s": 18.76290231600069
+    },
+    "n4-closed-lanes20-train-cap300-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n4-closed-lanes20-train-cap300-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/318f1d31398a48be60ffa570026f9725d066ab57ae66db6a32f65824a70160ec.jsonl",
+     "trace_sha256": "318f1d31398a48be60ffa570026f9725d066ab57ae66db6a32f65824a70160ec",
+     "split": "train",
+     "transform": "cap300",
+     "num_workers": 4,
+     "agentic_lanes": 20,
+     "lanes_per_worker": 5,
+     "copies": 160,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 5806,
+     "completed_requests": 5806,
+     "trajectories_completed": [
+      160,
+      160
+     ],
+     "warmup_end_s": 3900.0,
+     "window_s": [
+      3900.0,
+      11160.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 1.3594183913831486,
+     "drift_tolerance": 0.5680444643917948,
+     "worker_busy_frac_mean": 0.9642987140796015,
+     "prefix_cache_reused_ratio": 0.6496440067888433,
+     "scored_requests": 2430,
+     "good_frac_I40_S3": 0.8423868312757201,
+     "good_frac_I30_S3": 0.7325102880658436,
+     "mean_itl_ms_p50_p90": [
+      25.043444509484114,
+      46.75953279916637
+     ],
+     "e2e_over_e0_p50_p90": [
+      1.0744830311068179,
+      2.2466598039330816
+     ],
+     "wall_s": 19.2892861170003
+    },
+    "n4-closed-lanes20-train-cap300_osl1.5-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n4-closed-lanes20-train-cap300_osl1.5-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/4c1b53b7ba5066e9eee74c908d24c0c080ad0d98e789278ce8555dbab87f61b3.jsonl",
+     "trace_sha256": "4c1b53b7ba5066e9eee74c908d24c0c080ad0d98e789278ce8555dbab87f61b3",
+     "split": "train",
+     "transform": "cap300_osl1.5",
+     "num_workers": 4,
+     "agentic_lanes": 20,
+     "lanes_per_worker": 5,
+     "copies": 160,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 5806,
+     "completed_requests": 5806,
+     "trajectories_completed": [
+      160,
+      160
+     ],
+     "warmup_end_s": 4380.0,
+     "window_s": [
+      4380.0,
+      14100.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 1.3307851114477667,
+     "drift_tolerance": 0.5046238505537549,
+     "worker_busy_frac_mean": 0.9918428872256954,
+     "prefix_cache_reused_ratio": 0.5995084695778542,
+     "scored_requests": 2510,
+     "good_frac_I40_S3": 0.8247011952191236,
+     "good_frac_I30_S3": 0.6553784860557769,
+     "mean_itl_ms_p50_p90": [
+      26.404214375104196,
+      42.68712627737884
+     ],
+     "e2e_over_e0_p50_p90": [
+      1.2225126675135352,
+      2.658571820489249
+     ],
+     "wall_s": 28.478143717999046
+    },
+    "n8-closed-lanes32-train-cap300_think2-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n8-closed-lanes32-train-cap300_think2-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/02e07e12a1a2202f6feb24542751a149528a842245cdd8dbdbc9e4c63daaefed.jsonl",
+     "trace_sha256": "02e07e12a1a2202f6feb24542751a149528a842245cdd8dbdbc9e4c63daaefed",
+     "split": "train",
+     "transform": "cap300_think2",
+     "num_workers": 8,
+     "agentic_lanes": 32,
+     "lanes_per_worker": 4,
+     "copies": 256,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 9484,
+     "completed_requests": 9484,
+     "trajectories_completed": [
+      256,
+      256
+     ],
+     "warmup_end_s": 6120.0,
+     "window_s": [
+      6120.0,
+      18300.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 0.7196674446937207,
+     "drift_tolerance": 0.6580717550339886,
+     "worker_busy_frac_mean": 0.6964228579123232,
+     "prefix_cache_reused_ratio": 0.7261065441088627,
+     "scored_requests": 4465,
+     "good_frac_I40_S3": 0.9926091825307951,
+     "good_frac_I30_S3": 0.9840985442329228,
+     "mean_itl_ms_p50_p90": [
+      19.451016020213636,
+      22.408054761148783
+     ],
+     "e2e_over_e0_p50_p90": [
+      0.7480185831818229,
+      1.0756233374548223
+     ],
+     "wall_s": 39.54973496399907
+    },
+    "n8-closed-lanes32-train-cap300-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n8-closed-lanes32-train-cap300-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/eddc62e2e977eef265cb51aff3967258050e4153a2f2d65fb0c5ef226daf910e.jsonl",
+     "trace_sha256": "eddc62e2e977eef265cb51aff3967258050e4153a2f2d65fb0c5ef226daf910e",
+     "split": "train",
+     "transform": "cap300",
+     "num_workers": 8,
+     "agentic_lanes": 32,
+     "lanes_per_worker": 4,
+     "copies": 256,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 9484,
+     "completed_requests": 9484,
+     "trajectories_completed": [
+      256,
+      256
+     ],
+     "warmup_end_s": 3360.0,
+     "window_s": [
+      3360.0,
+      11340.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 0.9048644508541703,
+     "drift_tolerance": 0.43915348812677507,
+     "worker_busy_frac_mean": 0.9495544243409683,
+     "prefix_cache_reused_ratio": 0.6742610875098928,
+     "scored_requests": 4825,
+     "good_frac_I40_S3": 0.9510880829015544,
+     "good_frac_I30_S3": 0.9038341968911917,
+     "mean_itl_ms_p50_p90": [
+      22.29039097189631,
+      29.459607095396333
+     ],
+     "e2e_over_e0_p50_p90": [
+      0.95692416354094,
+      1.445712806668014
+     ],
+     "wall_s": 32.50944720500047
+    },
+    "n4-closed-lanes20-test-cap300_think4-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n4-closed-lanes20-test-cap300_think4-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/4ab66b5fdec6196c40a3ec24364ef38e0ef3327b414f39fde4811c821f94e766.jsonl",
+     "trace_sha256": "4ab66b5fdec6196c40a3ec24364ef38e0ef3327b414f39fde4811c821f94e766",
+     "split": "test",
+     "transform": "cap300_think4",
+     "num_workers": 4,
+     "agentic_lanes": 20,
+     "lanes_per_worker": 5,
+     "copies": 160,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 5888,
+     "completed_requests": 5888,
+     "trajectories_completed": [
+      160,
+      160
+     ],
+     "warmup_end_s": 11520.0,
+     "window_s": [
+      11520.0,
+      26100.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 1.238364283659459,
+     "drift_tolerance": 1.3164390865079754,
+     "worker_busy_frac_mean": 0.5014284051490999,
+     "prefix_cache_reused_ratio": 0.7139846688506051,
+     "scored_requests": 1907,
+     "good_frac_I40_S3": 0.989512323020451,
+     "good_frac_I30_S3": 0.9826953329837441,
+     "mean_itl_ms_p50_p90": [
+      18.83388994513761,
+      22.07666131377769
+     ],
+     "e2e_over_e0_p50_p90": [
+      0.7137176584207475,
+      1.044306984157118
+     ],
+     "wall_s": 23.96422925099978
+    },
+    "n4-closed-lanes20-test-cap300-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n4-closed-lanes20-test-cap300-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/2f404c930f3e3c411cc67b42db72fb5254821d35dc63f8de4072d7ac671b787c.jsonl",
+     "trace_sha256": "2f404c930f3e3c411cc67b42db72fb5254821d35dc63f8de4072d7ac671b787c",
+     "split": "test",
+     "transform": "cap300",
+     "num_workers": 4,
+     "agentic_lanes": 20,
+     "lanes_per_worker": 5,
+     "copies": 160,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 5888,
+     "completed_requests": 5888,
+     "trajectories_completed": [
+      160,
+      160
+     ],
+     "warmup_end_s": 3960.0,
+     "window_s": [
+      3960.0,
+      9900.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 0.8857413602470204,
+     "drift_tolerance": 0.6180511495447959,
+     "worker_busy_frac_mean": 0.9864181518651298,
+     "prefix_cache_reused_ratio": 0.6682700691217316,
+     "scored_requests": 2244,
+     "good_frac_I40_S3": 0.857397504456328,
+     "good_frac_I30_S3": 0.7286096256684492,
+     "mean_itl_ms_p50_p90": [
+      25.059041300708945,
+      44.97212922172947
+     ],
+     "e2e_over_e0_p50_p90": [
+      1.087674320873169,
+      1.946155199022958
+     ],
+     "wall_s": 18.016116009999678
+    },
+    "n8-closed-lanes40-test-cap300_osl2.5-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n8-closed-lanes40-test-cap300_osl2.5-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/5fd5c714c267695e9ad7cc40d2d389830195d28a0784fac4cac977694615c0e2.jsonl",
+     "trace_sha256": "5fd5c714c267695e9ad7cc40d2d389830195d28a0784fac4cac977694615c0e2",
+     "split": "test",
+     "transform": "cap300_osl2.5",
+     "num_workers": 8,
+     "agentic_lanes": 40,
+     "lanes_per_worker": 5,
+     "copies": 320,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 11671,
+     "completed_requests": 11671,
+     "trajectories_completed": [
+      320,
+      320
+     ],
+     "warmup_end_s": 5640.0,
+     "window_s": [
+      5640.0,
+      15420.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 0.8330721038074375,
+     "drift_tolerance": 0.3546936564487677,
+     "worker_busy_frac_mean": 0.999777134884525,
+     "prefix_cache_reused_ratio": 0.5777023205950197,
+     "scored_requests": 4260,
+     "good_frac_I40_S3": 0.861737089201878,
+     "good_frac_I30_S3": 0.6143192488262911,
+     "mean_itl_ms_p50_p90": [
+      27.585560573308292,
+      39.859936488085346
+     ],
+     "e2e_over_e0_p50_p90": [
+      1.430258745085483,
+      2.502449834824051
+     ],
+     "wall_s": 78.23001563799698
+    },
+    "n8-closed-lanes40-test-cap300-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n8-closed-lanes40-test-cap300-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/842e7d4ba1280a9ed8348b82611d8447b7f22cee9ecec9c4c9040ddabe42d7da.jsonl",
+     "trace_sha256": "842e7d4ba1280a9ed8348b82611d8447b7f22cee9ecec9c4c9040ddabe42d7da",
+     "split": "test",
+     "transform": "cap300",
+     "num_workers": 8,
+     "agentic_lanes": 40,
+     "lanes_per_worker": 5,
+     "copies": 320,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 11671,
+     "completed_requests": 11671,
+     "trajectories_completed": [
+      320,
+      320
+     ],
+     "warmup_end_s": 3960.0,
+     "window_s": [
+      3960.0,
+      8400.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 0.6814237578418938,
+     "drift_tolerance": 0.4651274454770766,
+     "worker_busy_frac_mean": 0.986341155921617,
+     "prefix_cache_reused_ratio": 0.6387248091013811,
+     "scored_requests": 3296,
+     "good_frac_I40_S3": 0.8847087378640777,
+     "good_frac_I30_S3": 0.7545509708737864,
+     "mean_itl_ms_p50_p90": [
+      24.28580634135077,
+      41.91961421811232
+     ],
+     "e2e_over_e0_p50_p90": [
+      1.059273105818082,
+      1.8255484286914019
+     ],
+     "wall_s": 37.09210247300143
+    },
+    "n4-closed-lanes12-train-cap300_think0.5-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n4-closed-lanes12-train-cap300_think0.5-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/d49afd76c144e01d40d6d64b0ab393adfd1292618e76e70a794b148dffcf9186.jsonl",
+     "trace_sha256": "d49afd76c144e01d40d6d64b0ab393adfd1292618e76e70a794b148dffcf9186",
+     "split": "train",
+     "transform": "cap300_think0.5",
+     "num_workers": 4,
+     "agentic_lanes": 12,
+     "lanes_per_worker": 3,
+     "copies": 96,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 3550,
+     "completed_requests": 3550,
+     "trajectories_completed": [
+      96,
+      96
+     ],
+     "warmup_end_s": 2280.0,
+     "window_s": [
+      2280.0,
+      7380.0
+     ],
+     "stationary": true,
+     "drift_last_over_first_third": 1.2707596037011355,
+     "drift_tolerance": 0.6803771288188596,
+     "worker_busy_frac_mean": 0.8973773824777814,
+     "prefix_cache_reused_ratio": 0.8118788015781687,
+     "scored_requests": 1890,
+     "good_frac_I40_S3": 0.9724867724867725,
+     "good_frac_I30_S3": 0.9375661375661376,
+     "mean_itl_ms_p50_p90": [
+      21.300516549511308,
+      26.225413394397943
+     ],
+     "e2e_over_e0_p50_p90": [
+      0.7164199557264554,
+      1.2337597780577396
+     ],
+     "wall_s": 11.855767596000078
+    },
+    "n4-closed-lanes16-train-cap300_think0.5-def": {
+     "file": "<campaign-root>/runs/agentx_lowered/fix_r0/validate/n4-closed-lanes16-train-cap300_think0.5-def.json",
+     "trace": "<campaign-root>/traces/agentx_lowered/gen/e478a126d5fc1b1821ec39e46050b0ed913726ad8cc8174c7e052d6480cb3618.jsonl",
+     "trace_sha256": "e478a126d5fc1b1821ec39e46050b0ed913726ad8cc8174c7e052d6480cb3618",
+     "split": "train",
+     "transform": "cap300_think0.5",
+     "num_workers": 4,
+     "agentic_lanes": 16,
+     "lanes_per_worker": 4,
+     "copies": 128,
+     "seed": 0,
+     "policy": "dynamo-default-cost-fn seed 1",
+     "requests": 4648,
+     "completed_requests": 4648,
+     "trajectories_completed": [
+      128,
+      128
+     ],
+     "warmup_end_s": 2460.0,
+     "window_s": [
+      2460.0,
+      8520.0
+     ],
+     "stationary": false,
+     "drift_last_over_first_third": 1.6905633110021157,
+     "drift_tolerance": 0.5023840380254675,
+     "worker_busy_frac_mean": 0.9856844359939289,
+     "prefix_cache_reused_ratio": 0.6816718189167608,
+     "scored_requests": 2440,
+     "good_frac_I40_S3": 0.8463114754098361,
+     "good_frac_I30_S3": 0.7233606557377049,
+     "mean_itl_ms_p50_p90": [
+      25.419332730838637,
+      47.436172293304686
+     ],
+     "e2e_over_e0_p50_p90": [
+      1.0715959119887633,
+      2.055604411077546
+     ],
+     "wall_s": 14.335065139999642
+    }
+   },
+   "pairs": [
+    {
+     "cell": "agentx-A2-think0.5-n4-lanes-L2",
+     "transform": "n4-closed-lanes20-train-cap300_think0.5-def",
+     "identity": "n4-closed-lanes20-train-cap300-def"
+    },
+    {
+     "cell": "agentx-A3-osl1.5-n4-lanes-L2",
+     "transform": "n4-closed-lanes20-train-cap300_osl1.5-def",
+     "identity": "n4-closed-lanes20-train-cap300-def"
+    },
+    {
+     "cell": "agentx-A3-think2.0-n8-lanes-L1",
+     "transform": "n8-closed-lanes32-train-cap300_think2-def",
+     "identity": "n8-closed-lanes32-train-cap300-def"
+    },
+    {
+     "cell": "agentx-T1-think4.0-n4-lanes-L2",
+     "transform": "n4-closed-lanes20-test-cap300_think4-def",
+     "identity": "n4-closed-lanes20-test-cap300-def"
+    },
+    {
+     "cell": "agentx-T2-osl2.5-n8-lanes-L2",
+     "transform": "n8-closed-lanes40-test-cap300_osl2.5-def",
+     "identity": "n8-closed-lanes40-test-cap300-def"
+    }
+   ],
+   "observations": [
+    "all 11 runs completed every request and every trajectory",
+    "think_mult changes the offered load per lane (it dilates think and tool gaps, and api time): at the identity-level lanes, think 2 (N8, 4 lanes/worker) and think 4 (N4, 5 lanes/worker) are light (busy 0.70 / 0.50, default good 0.993 / 0.990 at I40 S3), and think 0.5 at 5 lanes/worker is past the stationary limit (in-flight drift 1.49 > tolerance 0.41, good 0.575); think 0.5 is stationary at 3 lanes/worker (good 0.972) and drifts at 4 (1.69 > 0.50, good 0.846)",
+    "osl_mult at the identity-level lanes stays stationary: osl 1.5 N4 5 lanes/worker good 0.825 vs identity 0.842; osl 2.5 N8 5 lanes/worker good 0.862 vs identity 0.885 (I40 S3)",
+    "so the transform cells need their own load calibration (A2 band rule per cell); the base cells' suggested lanes do not carry over to think_mult cells"
+   ]
+  }
+ },
+ "commits": [
+  "<commit-11> (sidecar)",
+  "<commit-13> (fix_r0: think_mult/osl_mult transforms)"
+ ],
+ "fix_rounds": [
+  {
+   "round": "fix_r0",
+   "audit": "audits/agentx-lowering/parity-fidelity-r0.md",
+   "findings": {
+    "F1 (major)": "VALID, FIXED at the root: think_mult/osl_mult threaded through capped_play_bytes, build-base, GenSpec, generate, parity and the CLI; one base per transform with its own 82/82 digest proof and B2 byte check; 84/84 replay parity per transform; transform recorded in spec, key and meta",
+    "m1 (minor)": "VALID, wording corrected here and in the module docstring (single tier timestamp mode only)",
+    "m2 (minor, outside lens)": "not changed: open-loop arrival-basis membership is a calibration/harness scoring choice; the per-copy arrival a_i is in every open trace's meta (copies[].start_ms) for policy-independent membership"
+   },
+   "commit": "<commit-13>"
+  }
+ ]
+}

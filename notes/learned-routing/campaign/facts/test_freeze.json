@@ -1,0 +1,469 @@
+{
+ "bindings_build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+ "cell_content_sha256": {
+  "agentx-T1-base-n16-lanes-L3": "4cf8f75d15f04005d1ce72c84b4959db5bca5f9e9d7507a87fdddf24428329a9",
+  "agentx-T1-base-n4-lanes-L2": "b5ac41505f604badd96f008973de18feb3ddf00e878766496e8c970f2f84df4e",
+  "agentx-T1-base-n6-lanes-L3": "f05dc0affebab6a32206c437bbb4d2b0d4f62fe89e3bf83b55e51ed1ff7db186",
+  "agentx-T1-think4.0-n4-lanes-L2": "0c9d0472d2babe8ce6c90a235ad1ea98d7a7c66e27eceec7899ecb9a02016807",
+  "agentx-T2-base-n8-lanes-L1": "7a8fd886dd83f9f16f4a50ca3cf7f6f70ea208699080257e86d7a03d42db8b90",
+  "agentx-T2-osl2.5-n8-lanes-L2": "b2aa4dcc37b119bff2d1a686894a82473cc48d3c39fbb8e2f9576fc154e9067a",
+  "agentx-T3-base-n16-lanes-L2": "3628189d20259a6fa2638641caaba9657a21289d4838aa9974bd3822d6f73991",
+  "agentx-T3-base-n2-lanes-L2": "e6f9c81bbfc9663b8b1e33f26f49de3479499b656ccf4b4f338d03a388e2615d",
+  "agentx-T3-base-n32-lanes-L2": "e6ba026ccbd5b20427abef7cee14164b60d5e6eb5d4bf917e9198de4a6741fd6",
+  "agentx-T3-base-n4-lanes-L3": "2caa16d9997ea3d7fdcbe126e6847af127924ceec1bbed286ec3b1e24d62736b",
+  "agentx-T3-base-n6-lanes-L2": "aabd3e7a3d93af45f400878051007b58b184190f863303d38b88d4c5a4f97ef4",
+  "agentx-T4-base-n2-lanes-L3": "9a6799ba1d3136756f8fcbc3e481e3c7f3c8896ddf3b097ea7fed2be90c599c3",
+  "agentx-T4-base-n32-lanes-L3": "22f7144457cd7048515d1e2fed1c6cd2414e74cf6057dfeae71d1f1071f552ed",
+  "agentx-T4-base-n8-lanes-L2": "e3020468329d05c99429307ce9b9e579cc7aea62a665231a876d11f4275e5eb1",
+  "conv-w3-base-n4-open-L2": "47203272f86747b8c6a6d7ca9df4d644e7e1181cff1701dbb1d079ded3d623d2",
+  "conv-w3-base-n8-closed-L2": "845684dce7af18ec2915d35cee912bcd0140816fb7f36de2410baca7c6293243",
+  "conv-w5-base-n8-open-L2": "35366547974a57e17c6e2d9fee4418ed452efa154a512d2cb82ac8cf4c8b9481",
+  "fast25_synthetic-x0-base-n4-open-L2": "9f6714ec165f81c615d83ab28eb27cdbc87c6728de4d55b3185d5c68a53ed723",
+  "fast25_synthetic-x0-base-n8-closed-L2": "304893388972228be2c9ef4471719c5aaba3803ab4e3e69dbc6eaede3ef6d33c",
+  "fast25_synthetic-x1-base-n8-open-L2": "ce4d22f191836ab854c99db6aac4fabbe6b45196feba7ea90e30a6ad73f3cf67",
+  "mooncake-w3-base-n16-open-L2": "400650acf8a494c98babf12c1720c4ef51fd1d719bb2c7c8b4ebd8468ae04996",
+  "mooncake-w3-base-n2-open-L1": "510a73b78e5712fbfce5318b247fb39f59ef066755c92ef56f2dac12b0a2eb16",
+  "mooncake-w3-base-n2-open-L2": "aa0e14094fa3ea5a9a650a4b567d27460860463dbd4546d01ad3f0de04d997f7",
+  "mooncake-w3-base-n32-open-L1": "6f0fa9737ab515184ca1e07f6d6676c0a6b1586817dfd788f49534d3a31fd605",
+  "mooncake-w3-base-n32-open-L2": "a8da0644e147104745953de3b4b61a198e17950d75c5480c153be044c52c9a41",
+  "mooncake-w3-base-n4-open-L2": "6d9e8bf61c19e92a1a4c4a7a1a3822ce65f4950761692e6711e15eb7124b400f",
+  "mooncake-w3-base-n6-open-L2": "e1010d5c723c02a3a7479f27ffe39106b0fdc093612c1fe1c3d9cde815c17381",
+  "mooncake-w3-base-n8-closed-L2": "366d7e50b691ccadc7f5315985b42b173da5f57550847c02427aa6dd13368f97",
+  "mooncake-w3-base-n8-open-L1": "cefc640d843adb22a0abc60e737a7a4dd1e58a75718c8794f0a237ea44f5dfc2",
+  "mooncake-w3-islu2.5-n8-open-L2": "bc2d37fd370309fb4bd7b879bfc50a3f44b9989c15175c45d49a30783c253326",
+  "mooncake-w3-osl4.0-n4-open-L2": "28a9247008c9294ed4aeee09d48f3971effcff87aae0dc4d0f58f8644690c5bf",
+  "mooncake-w5-base-n16-closed-L2": "f7df23a3daf287e10123b5fe5eb2e37b79e94ac3ec5943e2b953348b724e1758",
+  "mooncake-w5-base-n16-open-L3": "f9dea473b56e98e739c0330705a6f310ee66f568a278f1abed152b93cc294e16",
+  "mooncake-w5-base-n2-closed-L2": "e6bca3e189e77c5a727185c39725a9754f914575c940797aaed46270cebbd262",
+  "mooncake-w5-base-n2-open-L3": "c868b6b0e2595c872054a3d69c35f7fb660a1f1d7a293b4f4367027bc7237f7a",
+  "mooncake-w5-base-n32-closed-L2": "91f8ae036ac53e9cc065a63e7e46f04c4237e24db225d1ce7ae0126a6a566b03",
+  "mooncake-w5-base-n32-open-L3": "acb44e5630d0ea234c286ee796f1dd3573c8399466ed7ac856950ebf8760260f",
+  "mooncake-w5-base-n4-closed-L3": "86b0fa5d42aab486b7233815d49072036db3355f3c6544f3e6fc97d549a66aa5",
+  "mooncake-w5-base-n4-open-L3": "bfe0ff9affa43736556487c72939f8aaa54dd68196b663dbb204f15fdf48f26e",
+  "mooncake-w5-base-n6-closed-L2": "90f664140b2a10fa55f8bbb5b02718257a85572ad2ac8a02eb750df63f3c0e74",
+  "mooncake-w5-base-n6-open-L3": "be03e7a8356929d209d7eb277a803668f41eb95f5222b85fefef2cab19f91c7f",
+  "mooncake-w5-base-n8-open-L2": "753926e2685583b9fa5517df018a280bd7a5d5773aa6356faba67029fab99257",
+  "mooncake-w5-islp2.5-n4-open-L2": "9b0ba41ba7f54b40522563eb07650ead53a4924a1ff4191ca60757d6e2201a95",
+  "mooncake-w5-osl0.25-n8-closed-L2": "0e18a809698c85e2c2276466631435a205d9bf2596a2644f2fb3454bc4faeeca",
+  "mooncake-w5-root4-n8-open-L2": "499ba752f88a6d4b6983360d4adeac92197fd1d9ed0245cfc8096c3ac6bab0ee",
+  "sessions-s6-base-n16-open-L2": "5d0263e7307953043e569e2a19e8387ae28a67303a652ae830981fb3386f37b6",
+  "sessions-s6-base-n2-open-L2": "e8d11d70aa0e4de62cc00d68de7e465ec902b6c4d5851be02b8e40006b3e182f",
+  "sessions-s6-base-n32-open-L2": "b7a150cf5c0c628d79fe9f0213c24f249ee65fba0019e155f919179722e789c3",
+  "sessions-s6-base-n4-open-L2": "83d0e9249c1343b51c07efc47d571e5c306a9ecab2c5f36153b2876f756bf4f8",
+  "sessions-s6-base-n6-open-L2": "d12fb7cfadf9c4d2679ab53ad43e86f7e5282730f615127404458d825bb17292",
+  "sessions-s6-think4.0-n4-open-L2": "c22cca3a956e546d2cefab4d93755c79a56c6bee1a263557c74f7bea662fb582",
+  "sessions-s7-base-n8-closed-L2": "a1428b2d91b4aa36fc7a8494ab9aceccca9b9bfbc8cc75064ecdd5baae687f46",
+  "sessions-s7-think0.25-n8-open-L2": "caf6bd97ec61e64cc207d17f57c80b0b2881d4f94ef988c5590088ba076a3d0f",
+  "sessions-s8-base-n8-open-L3": "e27e92c1a702a0d8d4e5a573c45b8d909e9241e59d175459d21daa7b53f99036",
+  "sessions-s8-islu2.5-n8-closed-L2": "9565993042935f10f1d1e9a50d3bfb18b582447863037118d4a0fd733b5fd1a3",
+  "sessions-s9-base-n16-closed-L2": "77a1bc5c0f251585952aed8f22a4c086cd8bb50bfa34851d2ea0a8eef58f79c7",
+  "sessions-s9-base-n2-closed-L2": "282fd17aea87f96fc2587d6d086fb9aa77aa4f2b95b28a89384d2571f4d50212",
+  "sessions-s9-base-n32-closed-L2": "3163b77124dea26375971c6c7e6d1e3e1c0b359bf0dc0eccace50bf97cbaeaa5",
+  "sessions-s9-base-n4-open-L1": "816f460d48c739dd86ba0f1fc8955c7bde39c30878b64fe2d4b0124626beb922",
+  "sessions-s9-base-n6-closed-L2": "a69b89e6dd54c94bf38606c1969ddb6f9100be7d76fb037bdd09575c8318f673"
+ },
+ "engine_json_sha256": "7b5ff164ea9b214dde07e9b9a486862f981fadaa82419f694d44e19e94cef31b",
+ "harness_version": "lrh-4",
+ "rule": "Nobody evaluates test cells until the test stage. The test stage verifies every SHA-256 below before its single pass.",
+ "schema": "learned-routing.test-freeze.v1",
+ "split_manifest_sha256": "0e84edf1c1e754c17f9630cbb1b0f7dc29d756ff372410f3f5c4b1d3dba6c1ad",
+ "stage": "calibration fixer r0 (re-freeze; no test cell had been evaluated)",
+ "supersedes": {
+  "kept_at": "cells/superseded/calibration-r0/test_freeze.json",
+  "reason": "audit calibration/independent-rerun r0 F1: open-loop session warm-up shorter than the session-population relaxation; sessions family re-calibrated",
+  "test_jsonl_sha256": "b8648ac5ad0d6c0f87034376aacc685a89c00da3d8d3a595e5cadceae1245600",
+  "written": "2026-10-02 21:16:53 PDT"
+ },
+ "test_jsonl": {
+  "cells": 60,
+  "path": "cells/test.jsonl",
+  "sha256": "7b998b8e7bd2c870da8e3701e468c3738655045b1a76a1f19110282ddfb3aa6f"
+ },
+ "trace_sources": {
+  "traces/agentx_lowered/base_cap300/MANIFEST.json": "9868b9f6d71bbe4c70045185e20cf671d5941abc1dddfd598123a88490f46586",
+  "traces/agentx_lowered/base_cap300_osl2.5/MANIFEST.json": "c7a7a70ab8e98547b9c0bcc64aeb554e9c6d70610b9404ce5263a784f8f679ba",
+  "traces/agentx_lowered/base_cap300_think4/MANIFEST.json": "3561c1ec50d23ad1d52c1ee83966b9f87a63809d55d56d5f9976cbcc42869141",
+  "traces/synthetic_sessions/long/sessions_seed6_d48000.jsonl": "10d59f9079509ccb979747706dc6e092a637c557d7900361dc2715db46e869bf",
+  "traces/synthetic_sessions/long/sessions_seed7_d48000.jsonl": "fd5fbe7b021de42e9a0e7d99ae2ebd2ac15dccdb34338224c79f2bc21d41a198",
+  "traces/synthetic_sessions/long/sessions_seed8_d48000.jsonl": "9fdf5cdc06bc3b23cd23bd505b926911f78e1f83dd19864d9ff5a98b985e48da",
+  "traces/synthetic_sessions/long/sessions_seed9_d48000.jsonl": "62a36b124080e8623784eadb9727ba675cbda18e21cd9a243a0a4284b4fe7025"
+ },
+ "traces": {
+  "CR/traces/agentx_lowered/gen/0689ffcb164ebfa4cb912c55147ba3e13b7263ba48c6b3bac41b7aa436c47b48.jsonl": {
+   "bytes": 558556873,
+   "cells": [
+    "agentx-T4-base-n32-lanes-L3"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/0689ffcb164ebfa4cb912c55147ba3e13b7263ba48c6b3bac41b7aa436c47b48.jsonl.meta.json",
+   "meta_sha256": "79d36724aa68924352851d55c3aa95fbf73c0009b63b47aa20fabbf917ef35d2",
+   "sha256": "0689ffcb164ebfa4cb912c55147ba3e13b7263ba48c6b3bac41b7aa436c47b48"
+  },
+  "CR/traces/agentx_lowered/gen/1d35bb7d5c38315887754ce6d27db824d86b03ce6a8dbd80192121df878cbbf9.jsonl": {
+   "bytes": 43803571,
+   "cells": [
+    "agentx-T2-osl2.5-n8-lanes-L2"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/1d35bb7d5c38315887754ce6d27db824d86b03ce6a8dbd80192121df878cbbf9.jsonl.meta.json",
+   "meta_sha256": "48199e87a9896de4f98b958e5dc48a88f751e034db4d3f33782cc9fb5f5f9ea3",
+   "sha256": "1d35bb7d5c38315887754ce6d27db824d86b03ce6a8dbd80192121df878cbbf9"
+  },
+  "CR/traces/agentx_lowered/gen/619499802e44f268d122d188e14074d5a7b8fd2cba9cfb2e6e5b0ab42b620a20.jsonl": {
+   "bytes": 154119579,
+   "cells": [
+    "agentx-T3-base-n16-lanes-L2"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/619499802e44f268d122d188e14074d5a7b8fd2cba9cfb2e6e5b0ab42b620a20.jsonl.meta.json",
+   "meta_sha256": "fb40ec82f727a8ff1d149816d2547f2edfc33cb39536307ad5281d242a284b32",
+   "sha256": "619499802e44f268d122d188e14074d5a7b8fd2cba9cfb2e6e5b0ab42b620a20"
+  },
+  "CR/traces/agentx_lowered/gen/700c91563448086fac7d6d128c4478031b0b5a50263b4f67c0cbb5bff60a3a31.jsonl": {
+   "bytes": 319286444,
+   "cells": [
+    "agentx-T3-base-n32-lanes-L2"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/700c91563448086fac7d6d128c4478031b0b5a50263b4f67c0cbb5bff60a3a31.jsonl.meta.json",
+   "meta_sha256": "12c07ff1e859d703e71d02a3645e6052d0a8df1241405f4a6ee3610badc37173",
+   "sha256": "700c91563448086fac7d6d128c4478031b0b5a50263b4f67c0cbb5bff60a3a31"
+  },
+  "CR/traces/agentx_lowered/gen/81b3a1db2638801597ed24e3e374fd8def318a3bce58ab4221c8454f4971cc2c.jsonl": {
+   "bytes": 16165240,
+   "cells": [
+    "agentx-T3-base-n2-lanes-L2"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/81b3a1db2638801597ed24e3e374fd8def318a3bce58ab4221c8454f4971cc2c.jsonl.meta.json",
+   "meta_sha256": "ddc09025fdb471d9f58bf70edf63becf701ebbf3f25ff7d154b734d770cd4e6e",
+   "sha256": "81b3a1db2638801597ed24e3e374fd8def318a3bce58ab4221c8454f4971cc2c"
+  },
+  "CR/traces/agentx_lowered/gen/9b6445eae7c244510329283a9f127cce032835946e828104ff2eaa7bfbab0aef.jsonl": {
+   "bytes": 114274475,
+   "cells": [
+    "agentx-T1-think4.0-n4-lanes-L2"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/9b6445eae7c244510329283a9f127cce032835946e828104ff2eaa7bfbab0aef.jsonl.meta.json",
+   "meta_sha256": "9cb30aa2090dcb9f3cac2f96e66839fbff457d0e7f23f98bd227b49c2c098f03",
+   "sha256": "9b6445eae7c244510329283a9f127cce032835946e828104ff2eaa7bfbab0aef"
+  },
+  "CR/traces/agentx_lowered/gen/9cabd075b871eb8aed3a0eaf28a2e876c43daffa3e98264db421566e88e575bc.jsonl": {
+   "bytes": 23851354,
+   "cells": [
+    "agentx-T4-base-n2-lanes-L3"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/9cabd075b871eb8aed3a0eaf28a2e876c43daffa3e98264db421566e88e575bc.jsonl.meta.json",
+   "meta_sha256": "4871c40112e02d0047bffa6e4ed372cc3eb295f46f548680fde3a5f41cb59a30",
+   "sha256": "9cabd075b871eb8aed3a0eaf28a2e876c43daffa3e98264db421566e88e575bc"
+  },
+  "CR/traces/agentx_lowered/gen/9e4cb32409020048e8103b7f1cd0fe4ec0a9593c3f4c587d5097ce907e40a7a5.jsonl": {
+   "bytes": 49368498,
+   "cells": [
+    "agentx-T3-base-n4-lanes-L3",
+    "agentx-T3-base-n6-lanes-L2"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/9e4cb32409020048e8103b7f1cd0fe4ec0a9593c3f4c587d5097ce907e40a7a5.jsonl.meta.json",
+   "meta_sha256": "c0aa061e234280261354ca60371e8fd277bb966f0b573f2e86e19b1231debf16",
+   "sha256": "9e4cb32409020048e8103b7f1cd0fe4ec0a9593c3f4c587d5097ce907e40a7a5"
+  },
+  "CR/traces/agentx_lowered/gen/ae98cfbaf6545a9e5f319f6db7423b9a271e30e6b42f31657a134df9b84aaa44.jsonl": {
+   "bytes": 80605503,
+   "cells": [
+    "agentx-T1-base-n6-lanes-L3"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/ae98cfbaf6545a9e5f319f6db7423b9a271e30e6b42f31657a134df9b84aaa44.jsonl.meta.json",
+   "meta_sha256": "8df765b93675ea75e2775afc63c11765c6c81eba6d7d2a77d0a260dbc414fcb1",
+   "sha256": "ae98cfbaf6545a9e5f319f6db7423b9a271e30e6b42f31657a134df9b84aaa44"
+  },
+  "CR/traces/agentx_lowered/gen/cd321b13fe849fde2ba413032f8c6bbdd4ec20053f4e6e5dbbade5ff66a027ed.jsonl": {
+   "bytes": 41946096,
+   "cells": [
+    "agentx-T1-base-n4-lanes-L2"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/cd321b13fe849fde2ba413032f8c6bbdd4ec20053f4e6e5dbbade5ff66a027ed.jsonl.meta.json",
+   "meta_sha256": "8413a28f4cade961da02dd7bf92ac6f1595669da9842e02eb05aa02690a1ffd6",
+   "sha256": "cd321b13fe849fde2ba413032f8c6bbdd4ec20053f4e6e5dbbade5ff66a027ed"
+  },
+  "CR/traces/agentx_lowered/gen/d5a6a783bab1b8ee90e3ae752e380445e264f6a7abb6f6fd23b2cdd845bc6bf1.jsonl": {
+   "bytes": 310972494,
+   "cells": [
+    "agentx-T1-base-n16-lanes-L3"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/d5a6a783bab1b8ee90e3ae752e380445e264f6a7abb6f6fd23b2cdd845bc6bf1.jsonl.meta.json",
+   "meta_sha256": "579bb10852d11db135306d9d84176802702a1d1838ba8ad658ff2f654595fe08",
+   "sha256": "d5a6a783bab1b8ee90e3ae752e380445e264f6a7abb6f6fd23b2cdd845bc6bf1"
+  },
+  "CR/traces/agentx_lowered/gen/e3f3eafde0d60b7a073ec3d09bac1c50b90a81a4d93e916ee1d0928cc5d088f5.jsonl": {
+   "bytes": 60821584,
+   "cells": [
+    "agentx-T2-base-n8-lanes-L1"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/e3f3eafde0d60b7a073ec3d09bac1c50b90a81a4d93e916ee1d0928cc5d088f5.jsonl.meta.json",
+   "meta_sha256": "8fea4a6ec074c6129706e8398ce2595d3aaa2e5e1e2c358d875471432e318d77",
+   "sha256": "e3f3eafde0d60b7a073ec3d09bac1c50b90a81a4d93e916ee1d0928cc5d088f5"
+  },
+  "CR/traces/agentx_lowered/gen/ebbe79d15dd91c5e1eebd6493e1bb30c02d8c1d098867254e823f6c3deadcb56.jsonl": {
+   "bytes": 68450827,
+   "cells": [
+    "agentx-T4-base-n8-lanes-L2"
+   ],
+   "meta": "CR/traces/agentx_lowered/gen/ebbe79d15dd91c5e1eebd6493e1bb30c02d8c1d098867254e823f6c3deadcb56.jsonl.meta.json",
+   "meta_sha256": "c765b107137a2ac03b830a349c8df61c63290118adc384bf93d4e72106db6e5f",
+   "sha256": "ebbe79d15dd91c5e1eebd6493e1bb30c02d8c1d098867254e823f6c3deadcb56"
+  },
+  "CR/traces/derived/0b34c9d120ee08566bfcf3f8275e8216a5dc3b9958b13c9c1cbf95789fda75b3.jsonl": {
+   "bytes": 10333372,
+   "cells": [
+    "sessions-s7-base-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/0b34c9d120ee08566bfcf3f8275e8216a5dc3b9958b13c9c1cbf95789fda75b3.meta.json",
+   "meta_sha256": "f3cd6a5927a2827fcc0cd887887daef78dfef3d6f3dfe714d1f06e2b703d61e4",
+   "sha256": "0b34c9d120ee08566bfcf3f8275e8216a5dc3b9958b13c9c1cbf95789fda75b3"
+  },
+  "CR/traces/derived/0f96af8afd717ad2941384a1b5fa386e4514727cc59e56ee6145ba60c4bdcb00.jsonl": {
+   "bytes": 70780160,
+   "cells": [
+    "sessions-s6-base-n32-open-L2"
+   ],
+   "meta": "CR/traces/derived/0f96af8afd717ad2941384a1b5fa386e4514727cc59e56ee6145ba60c4bdcb00.meta.json",
+   "meta_sha256": "4a4bcacb05627b4521c80233322b770f891fcb51f3fe87edb1dd274fae76ab17",
+   "sha256": "0f96af8afd717ad2941384a1b5fa386e4514727cc59e56ee6145ba60c4bdcb00"
+  },
+  "CR/traces/derived/1b21ccb0dc6e8a1adf7070938e498989e3ff3ee24c62e437c0a9fc9d3d008b9a.jsonl": {
+   "bytes": 21014043,
+   "cells": [
+    "sessions-s8-base-n8-open-L3"
+   ],
+   "meta": "CR/traces/derived/1b21ccb0dc6e8a1adf7070938e498989e3ff3ee24c62e437c0a9fc9d3d008b9a.meta.json",
+   "meta_sha256": "9a4545c26a254c9571ccd4d8242c372266bde03bf3aa537605e54f13868caf53",
+   "sha256": "1b21ccb0dc6e8a1adf7070938e498989e3ff3ee24c62e437c0a9fc9d3d008b9a"
+  },
+  "CR/traces/derived/1d56d2cf3ffa6f0e1f6d1c3f4ecc5cc013f41868395c279cd1d69b0fc1ee1bbd.jsonl": {
+   "bytes": 34165674,
+   "cells": [
+    "sessions-s6-base-n16-open-L2"
+   ],
+   "meta": "CR/traces/derived/1d56d2cf3ffa6f0e1f6d1c3f4ecc5cc013f41868395c279cd1d69b0fc1ee1bbd.meta.json",
+   "meta_sha256": "078c25b54e5ead08162b3137eb8f3bef667a50d9f6aad574b73da2587a6da447",
+   "sha256": "1d56d2cf3ffa6f0e1f6d1c3f4ecc5cc013f41868395c279cd1d69b0fc1ee1bbd"
+  },
+  "CR/traces/derived/22a0b543d2684110dfb3d2fe9b17cf3c16f87ef5e044ad5c53a2929ca93af64c.jsonl": {
+   "bytes": 7588992,
+   "cells": [
+    "sessions-s9-base-n6-closed-L2"
+   ],
+   "meta": "CR/traces/derived/22a0b543d2684110dfb3d2fe9b17cf3c16f87ef5e044ad5c53a2929ca93af64c.meta.json",
+   "meta_sha256": "37532e099e198348fd8bad7cf8f172c95cf0b28fa70998b35d4f657296798f87",
+   "sha256": "22a0b543d2684110dfb3d2fe9b17cf3c16f87ef5e044ad5c53a2929ca93af64c"
+  },
+  "CR/traces/derived/29b3fa2913d496df184f383375494bdefc8fef178457d93a0d99af3f537265c0.jsonl": {
+   "bytes": 661561,
+   "cells": [
+    "mooncake-w5-base-n8-open-L2",
+    "mooncake-w5-base-n4-open-L3",
+    "mooncake-w5-base-n4-closed-L3",
+    "mooncake-w5-base-n2-closed-L2",
+    "mooncake-w5-base-n2-open-L3",
+    "mooncake-w5-base-n6-closed-L2",
+    "mooncake-w5-base-n6-open-L3",
+    "mooncake-w5-base-n16-closed-L2",
+    "mooncake-w5-base-n16-open-L3",
+    "mooncake-w5-base-n32-closed-L2",
+    "mooncake-w5-base-n32-open-L3"
+   ],
+   "meta": "CR/traces/derived/29b3fa2913d496df184f383375494bdefc8fef178457d93a0d99af3f537265c0.meta.json",
+   "meta_sha256": "609daa5acbf6604bd89c8cab0536f703dc83711a047b09f3a1e4f386db248c02",
+   "sha256": "29b3fa2913d496df184f383375494bdefc8fef178457d93a0d99af3f537265c0"
+  },
+  "CR/traces/derived/317308c18a8f68b2c229568fb9db2bb4dc748604b709fc85587c57ab237fcdb8.jsonl": {
+   "bytes": 401781,
+   "cells": [
+    "fast25_synthetic-x0-base-n4-open-L2",
+    "fast25_synthetic-x0-base-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/317308c18a8f68b2c229568fb9db2bb4dc748604b709fc85587c57ab237fcdb8.meta.json",
+   "meta_sha256": "07b3f407ffef38feff6e4f349f95477a1ff68d7f1dcda7638f3e2008a78c7c16",
+   "sha256": "317308c18a8f68b2c229568fb9db2bb4dc748604b709fc85587c57ab237fcdb8"
+  },
+  "CR/traces/derived/33cecaa4c604148a04464d89ab77c9d3c3b501c0b3eb91d7c3fd5e4560c085bd.jsonl": {
+   "bytes": 4928485,
+   "cells": [
+    "sessions-s6-base-n2-open-L2"
+   ],
+   "meta": "CR/traces/derived/33cecaa4c604148a04464d89ab77c9d3c3b501c0b3eb91d7c3fd5e4560c085bd.meta.json",
+   "meta_sha256": "17c46bcd989d559a6ad92878a727c4538e2c700be24b708185ece631a1e265dc",
+   "sha256": "33cecaa4c604148a04464d89ab77c9d3c3b501c0b3eb91d7c3fd5e4560c085bd"
+  },
+  "CR/traces/derived/3ca84db3ef900b2beecfc8fce3d370d7123186465c1d2bcf079e076ff21c66be.jsonl": {
+   "bytes": 17284948,
+   "cells": [
+    "sessions-s7-think0.25-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/3ca84db3ef900b2beecfc8fce3d370d7123186465c1d2bcf079e076ff21c66be.meta.json",
+   "meta_sha256": "34a5cbe61f8f7cc571b713d0d764556b0cc91f495ce9fc05f2530a8e0ec42b88",
+   "sha256": "3ca84db3ef900b2beecfc8fce3d370d7123186465c1d2bcf079e076ff21c66be"
+  },
+  "CR/traces/derived/3cbc77c2399217cc7f26f2362db8eb4438db27392e982d4813b17434162ec5bf.jsonl": {
+   "bytes": 405485,
+   "cells": [
+    "conv-w3-base-n4-open-L2",
+    "conv-w3-base-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/3cbc77c2399217cc7f26f2362db8eb4438db27392e982d4813b17434162ec5bf.meta.json",
+   "meta_sha256": "27a3254771d5423da76fec2f8bce349f786d04af728bc7b8d86c671ec2ba1882",
+   "sha256": "3cbc77c2399217cc7f26f2362db8eb4438db27392e982d4813b17434162ec5bf"
+  },
+  "CR/traces/derived/3f558fe7ca529fb3c52e0a0f37057e5f7114edeefda38ff53b9f51cc6fee1239.jsonl": {
+   "bytes": 39415933,
+   "cells": [
+    "sessions-s9-base-n32-closed-L2"
+   ],
+   "meta": "CR/traces/derived/3f558fe7ca529fb3c52e0a0f37057e5f7114edeefda38ff53b9f51cc6fee1239.meta.json",
+   "meta_sha256": "08e8815395e9b7563428a1411c51caa4ebcfeed4b77b580c37e99bf9b81701a3",
+   "sha256": "3f558fe7ca529fb3c52e0a0f37057e5f7114edeefda38ff53b9f51cc6fee1239"
+  },
+  "CR/traces/derived/42741ec4315d7d136859bf7b02cf1298e16becb6b471fdac4e4db102b3c4d044.jsonl": {
+   "bytes": 11293911,
+   "cells": [
+    "sessions-s6-think4.0-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/42741ec4315d7d136859bf7b02cf1298e16becb6b471fdac4e4db102b3c4d044.meta.json",
+   "meta_sha256": "d1309e9498f8c10fa2bbd16e24660360ffe477778ffd8eeded5bbc9956dc31f4",
+   "sha256": "42741ec4315d7d136859bf7b02cf1298e16becb6b471fdac4e4db102b3c4d044"
+  },
+  "CR/traces/derived/501e13967759ca21e75a5dd916632cad165e6166a487161a273be9d9e51309c3.jsonl": {
+   "bytes": 2801835,
+   "cells": [
+    "sessions-s9-base-n2-closed-L2"
+   ],
+   "meta": "CR/traces/derived/501e13967759ca21e75a5dd916632cad165e6166a487161a273be9d9e51309c3.meta.json",
+   "meta_sha256": "c9e5bc26ba6591afa0cb3d8147d9c3d74d499a4593d8d10fdf6ed42b0f4e7dfa",
+   "sha256": "501e13967759ca21e75a5dd916632cad165e6166a487161a273be9d9e51309c3"
+  },
+  "CR/traces/derived/5da45c9e1434414b03aa83a4935c14dcd71d8ce3f9ac4e9c3455ff1b4003387e.jsonl": {
+   "bytes": 19942192,
+   "cells": [
+    "sessions-s9-base-n16-closed-L2"
+   ],
+   "meta": "CR/traces/derived/5da45c9e1434414b03aa83a4935c14dcd71d8ce3f9ac4e9c3455ff1b4003387e.meta.json",
+   "meta_sha256": "c47da23d206b1dea1f679d621e1b79f8bfc2343cfcd919b894741db22d530620",
+   "sha256": "5da45c9e1434414b03aa83a4935c14dcd71d8ce3f9ac4e9c3455ff1b4003387e"
+  },
+  "CR/traces/derived/5e5d359060624d0cf91c9536bd8c39f446efde5e44564cd390195a7871315de7.jsonl": {
+   "bytes": 538180,
+   "cells": [
+    "fast25_synthetic-x1-base-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/5e5d359060624d0cf91c9536bd8c39f446efde5e44564cd390195a7871315de7.meta.json",
+   "meta_sha256": "00280a6d00f65fbf9eb5040239d7a23f2f33aa1197f110f681f6f171fa7aaa3c",
+   "sha256": "5e5d359060624d0cf91c9536bd8c39f446efde5e44564cd390195a7871315de7"
+  },
+  "CR/traces/derived/64f3020ffc5d23b822f614169aa6d4ec0f629081f622a97c20139c7ae5247d0e.jsonl": {
+   "bytes": 792221,
+   "cells": [
+    "mooncake-w3-islu2.5-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/64f3020ffc5d23b822f614169aa6d4ec0f629081f622a97c20139c7ae5247d0e.meta.json",
+   "meta_sha256": "4a8cff16eae2bc0fc3af93227e96ab56a4ca5d5ccc660ac02f838e5f1410edea",
+   "sha256": "64f3020ffc5d23b822f614169aa6d4ec0f629081f622a97c20139c7ae5247d0e"
+  },
+  "CR/traces/derived/6f26fcbf5baa8d69744b2203adb99346bba1be8dd70fdf22738786b5a82a8de1.jsonl": {
+   "bytes": 13450757,
+   "cells": [
+    "sessions-s6-base-n6-open-L2"
+   ],
+   "meta": "CR/traces/derived/6f26fcbf5baa8d69744b2203adb99346bba1be8dd70fdf22738786b5a82a8de1.meta.json",
+   "meta_sha256": "3dfc53495ee71792732c0fb2f92d12a9153cc92f52f8ec108efbe4aded1d23a6",
+   "sha256": "6f26fcbf5baa8d69744b2203adb99346bba1be8dd70fdf22738786b5a82a8de1"
+  },
+  "CR/traces/derived/78d443899faaeb8953eb69bb79c0179a713770f827d0ec763b87537852bcb767.jsonl": {
+   "bytes": 438019,
+   "cells": [
+    "conv-w5-base-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/78d443899faaeb8953eb69bb79c0179a713770f827d0ec763b87537852bcb767.meta.json",
+   "meta_sha256": "52a69bd3c6dbc5de83184dc44856cc573d27eb7f2d5acbad37e30314465df9da",
+   "sha256": "78d443899faaeb8953eb69bb79c0179a713770f827d0ec763b87537852bcb767"
+  },
+  "CR/traces/derived/7c860ea09311436a9efbf00c2bbfddf35052c5e482320ea58efe0ba77425e5d3.jsonl": {
+   "bytes": 609384,
+   "cells": [
+    "mooncake-w3-base-n4-open-L2",
+    "mooncake-w3-base-n8-closed-L2",
+    "mooncake-w3-base-n8-open-L1",
+    "mooncake-w3-base-n2-open-L2",
+    "mooncake-w3-base-n2-open-L1",
+    "mooncake-w3-base-n6-open-L2",
+    "mooncake-w3-base-n16-open-L2",
+    "mooncake-w3-base-n32-open-L2",
+    "mooncake-w3-base-n32-open-L1"
+   ],
+   "meta": "CR/traces/derived/7c860ea09311436a9efbf00c2bbfddf35052c5e482320ea58efe0ba77425e5d3.meta.json",
+   "meta_sha256": "311dca398fe72dea86d7bda62b28af3ec2b73dd4046934437d049e7f240ae7de",
+   "sha256": "7c860ea09311436a9efbf00c2bbfddf35052c5e482320ea58efe0ba77425e5d3"
+  },
+  "CR/traces/derived/8d4a496dcbb08cb992ed12e1bfe51e44786f2fe008e25e37bef36694bebc2c10.jsonl": {
+   "bytes": 8483077,
+   "cells": [
+    "sessions-s9-base-n4-open-L1"
+   ],
+   "meta": "CR/traces/derived/8d4a496dcbb08cb992ed12e1bfe51e44786f2fe008e25e37bef36694bebc2c10.meta.json",
+   "meta_sha256": "a6d6d014e2fce28afd86b3034f6c679f0c39ab58235d948ad418d36707e3b01a",
+   "sha256": "8d4a496dcbb08cb992ed12e1bfe51e44786f2fe008e25e37bef36694bebc2c10"
+  },
+  "CR/traces/derived/97c869a8a4c168293298c5b4faab1749fe0dff2dc77916bc3d6811f97932df42.jsonl": {
+   "bytes": 11021835,
+   "cells": [
+    "sessions-s8-islu2.5-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/97c869a8a4c168293298c5b4faab1749fe0dff2dc77916bc3d6811f97932df42.meta.json",
+   "meta_sha256": "043e9a69549be05f31fc64af14181014dc4ee67fef020f1379500d1195b12bac",
+   "sha256": "97c869a8a4c168293298c5b4faab1749fe0dff2dc77916bc3d6811f97932df42"
+  },
+  "CR/traces/derived/ac40502257fefcf93d63f71cffc981f24f77f87e0b4af33047e617673a4247c5.jsonl": {
+   "bytes": 919446,
+   "cells": [
+    "mooncake-w5-islp2.5-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/ac40502257fefcf93d63f71cffc981f24f77f87e0b4af33047e617673a4247c5.meta.json",
+   "meta_sha256": "bbbdee5900e655e67321ee206c996320efd95c3de0d10c3db9df7bc268b4c185",
+   "sha256": "ac40502257fefcf93d63f71cffc981f24f77f87e0b4af33047e617673a4247c5"
+  },
+  "CR/traces/derived/b23ac44fb6b665e001dac5cde320d6b2c036604bcc22d813bd7f20c962edb00f.jsonl": {
+   "bytes": 9434741,
+   "cells": [
+    "sessions-s6-base-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/b23ac44fb6b665e001dac5cde320d6b2c036604bcc22d813bd7f20c962edb00f.meta.json",
+   "meta_sha256": "169f55ccebef7c4228eac22b379bca6ab2534fbbb147e78a5da0f1f4e04ac618",
+   "sha256": "b23ac44fb6b665e001dac5cde320d6b2c036604bcc22d813bd7f20c962edb00f"
+  },
+  "CR/traces/derived/c8c59b4d76d6af07965eb340032d014ca5d9adf6a5cde2bc7a01127d988f2319.jsonl": {
+   "bytes": 612396,
+   "cells": [
+    "mooncake-w3-osl4.0-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/c8c59b4d76d6af07965eb340032d014ca5d9adf6a5cde2bc7a01127d988f2319.meta.json",
+   "meta_sha256": "1b3c9ff1208011b8e62cdb1d010018a5f39870a4a80f1180155f013b5d0177ee",
+   "sha256": "c8c59b4d76d6af07965eb340032d014ca5d9adf6a5cde2bc7a01127d988f2319"
+  },
+  "CR/traces/derived/e157962e9fa4cdc33fc7494e1803c6bd814fc8b245a1e4efe8683bb000c35506.jsonl": {
+   "bytes": 659453,
+   "cells": [
+    "mooncake-w5-osl0.25-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/e157962e9fa4cdc33fc7494e1803c6bd814fc8b245a1e4efe8683bb000c35506.meta.json",
+   "meta_sha256": "f55885f88db9a831e0cd59dd3a5a4923d903565d1497b52061b74eff66946928",
+   "sha256": "e157962e9fa4cdc33fc7494e1803c6bd814fc8b245a1e4efe8683bb000c35506"
+  },
+  "CR/traces/derived/edbe432653d8e282a25bca414ef02bb734d5cd42a515b44febe3014de5f909f5.jsonl": {
+   "bytes": 664846,
+   "cells": [
+    "mooncake-w5-root4-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/edbe432653d8e282a25bca414ef02bb734d5cd42a515b44febe3014de5f909f5.meta.json",
+   "meta_sha256": "ca8ef172d9eab202c0dfc8901f169b0ac6cac32bc07aea5c3150e38e9ffb3567",
+   "sha256": "edbe432653d8e282a25bca414ef02bb734d5cd42a515b44febe3014de5f909f5"
+  }
+ },
+ "traces_manifest_sha256": "b2616d0deee3a8b30095bfbf4912e3cb17a505e71b1eba3fc4e161a73958e628",
+ "verify": "python3: hashlib.sha256(open(path,'rb').read()).hexdigest() for cells/test.jsonl and each traces[*] path (relative to CR, 'CR/' prefix stripped)",
+ "worktree_head": "<commit-17>",
+ "written": "2026-10-03 01:53:07 PDT"
+}

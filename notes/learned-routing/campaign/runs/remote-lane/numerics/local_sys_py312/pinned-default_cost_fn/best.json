@@ -1,0 +1,61 @@
+{
+ "best_ever_train": {
+  "generation": 56,
+  "objective": 1.9990009359160061,
+  "per_cell": {
+   "mooncake-w0-base-n8-open-L2": 1.9990009359160061,
+   "sessions-s0-base-n4-open-L2": 1.9990009359160061
+  },
+  "policy_sha": "77dda0b9a2a1eb6c986aad5ba9668b2ac5f02f0f2d1c51c34905f7c24f72b920",
+  "spec": {
+   "name": "default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 0.5998847190957123,
+    "overlap_score_credit": 1.699930661753674,
+    "overlap_score_credit_decay": 0.2999587290604112,
+    "prefill_load_scale": 2.500055310408412,
+    "router_temperature": 0.10009334896026843
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 0.5998847190957123,
+   "parameters.overlap_score_credit": 1.699930661753674,
+   "parameters.overlap_score_credit_decay": 0.2999587290604112,
+   "parameters.prefill_load_scale": 2.500055310408412,
+   "parameters.router_temperature": 0.10009334896026843
+  },
+  "z": [
+   0.4249826654384185,
+   0.0749896822651028,
+   0.698974808483908,
+   0.07498558988696404,
+   0.050046674480134216
+  ]
+ },
+ "fevals": 720,
+ "generation": 60,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "ratio",
+  "popsize": 12,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 1,
+  "space_sha": "7580b9ceed36298803a6e2a71f8ed56afc4c195cfc787b2d1e28387be13a176a",
+  "train_cells": [
+   "mooncake-w0-base-n8-open-L2",
+   "sessions-s0-base-n4-open-L2"
+  ],
+  "val_cells": [],
+  "val_replicates": 3
+ },
+ "selected_by_val": null,
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

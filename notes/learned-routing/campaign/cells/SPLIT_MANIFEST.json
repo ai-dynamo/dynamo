@@ -1,0 +1,1382 @@
+{
+ "agentx_play_allocation": "seeded (agentx-split-v1) round-robin deal, subagent plays first",
+ "agentx_play_subsets": {
+  "A1": {
+   "plays": [
+    "0017-0a688303b1ae62a97607af8021f2130c2caf.json",
+    "0083-3531533f1f293048fc9691b112feafc44e62.json",
+    "0091-3c1fbf5cf98484c7f9ef07f2d4b00e65d829.json",
+    "0098-3e8b931fd474375ea08ae58872aea7a8e0f5.json",
+    "0196-7b962f1dde638a046d1ce381c550fd26e664.json",
+    "0200-7e370a371b3de565f62dd133bd9e496947ac.json",
+    "0201-7e6f3a869f85c4774c84d9ee8b6137a758cc.json",
+    "0262-a46aa506e8aef39ef68e80643d583a6e25e2.json",
+    "0272-a8fdbf3a66dd9a5c616d189bf04fc7f60b47.json",
+    "0315-c7cdef4e9eb74c966d9e8dfe982319c9806d.json",
+    "0386-fd58552cd561b0fd7d5490415dfe966e2e20.json"
+   ],
+   "requests": 311,
+   "split": "train",
+   "subagent_plays": 2
+  },
+  "A2": {
+   "plays": [
+    "0009-05f72f78a037cfa5cd4e4541960a574701d9.json",
+    "0010-063179eb93f4337a662e859c5a2c5638e03f.json",
+    "0084-35de830dbe1dbe90e6eaa36bc4814c7410ec.json",
+    "0086-37c8d244d81e01d3b70c9f7fe619d9392a24.json",
+    "0088-3a066e6ad705e8792dec8c84610bbee401cb.json",
+    "0106-46c7f09048fc482e94f4552b0a99a4ca5e30.json",
+    "0128-528995cdde1ebf15ccf0b79aec42dba31ce2.json",
+    "0271-a8cb459ec5ff0572db2bbe7e1640f488d6ed.json",
+    "0303-bb05502f908fdb0da927ead1002023895bdd.json",
+    "0314-c4b21b8d9ec3f9eb0b1235d8ff1e33ae4fdc.json",
+    "0382-fa21035070fee58da42219bb8dd7657395f9.json"
+   ],
+   "requests": 486,
+   "split": "train",
+   "subagent_plays": 2
+  },
+  "A3": {
+   "plays": [
+    "0001-006c98de37d819e95b0840e25426bb7ca99d.json",
+    "0012-077ea9e6554f45bbad9c24a8462bae9a8512.json",
+    "0065-24f457bf9e42d6ffb1cc4bbd279c650bb8b6.json",
+    "0073-2a2da059b7425d9dc1f999fca1177bc1cdb9.json",
+    "0081-3317a925c2a7f40e9eafe5f5532793a23c67.json",
+    "0103-457a7bf22f9e6961870d5b356ab2bd780fff.json",
+    "0109-47a89e30bcdf1bc8002a026ad7ebfc914766.json",
+    "0185-751fbb2089c7c4303f3ed241f3a7a27a3f2c.json",
+    "0189-77cfef0760bda37fb6f8829cebd9a7871aa5.json",
+    "0219-8c099fe8073c296bc1f0d744fe98e3cc96b3.json",
+    "0324-cd4584af6c7bdfd6acfa82ce4d3dfd4dbcb3.json"
+   ],
+   "requests": 415,
+   "split": "train",
+   "subagent_plays": 2
+  },
+  "T1": {
+   "plays": [
+    "0007-04dba6fe621301a1d01fd63b8d02c9645c48.json",
+    "0013-07dd40536557a1d6440a923557c3129dc929.json",
+    "0173-6d5c6b957d5f634a7f820ddff7389e161def.json",
+    "0222-8e9656e01451be8f2bfcad65595a5d48fd7a.json",
+    "0223-91237fb5e1b97fcdf9c1e3b2dd60bfdde1c0.json",
+    "0232-979ae6377c88be0e93531cdb9632795b6a7a.json",
+    "0361-e838158b657825a28d77391211d7edc74e5c.json"
+   ],
+   "requests": 296,
+   "split": "test",
+   "subagent_plays": 2
+  },
+  "T2": {
+   "plays": [
+    "0020-0bcd99353218b9a386b1c4aec13d77abecdb.json",
+    "0064-240cd2e1b10e5b738ac6fee166b2aca7eff2.json",
+    "0085-3735de09df4f9ac454aee913e2a00633ad0d.json",
+    "0133-557810b129b9cb3e7402235470567c4e4dc0.json",
+    "0325-cd85ec9e176c8d3d6aad376464fa591be7de.json",
+    "0354-df2638f16306b1a10635bdb8e3acf7de0a61.json",
+    "0387-fdc99869ba95eb9d1af2aeaefe9ac2c86d5e.json"
+   ],
+   "requests": 274,
+   "split": "test",
+   "subagent_plays": 2
+  },
+  "T3": {
+   "plays": [
+    "0028-0f909e7d63c0d5e1f060d727ada25d910d89.json",
+    "0033-12cfecf98c158ab54fb65980602421f00d69.json",
+    "0056-203147a7ad6c355f99290d8ac7811e6de5be.json",
+    "0066-259d1cc35e11b72660b8d6a33867cbb93759.json",
+    "0156-62378a8a0d0bdde1ebd85f5dd60a43cd8110.json",
+    "0195-79ea3049f1c4977e9457ffc2feeae309e24b.json",
+    "0390-fe1121fb09adada530be4b8c8568a7ee6758.json"
+   ],
+   "requests": 265,
+   "split": "test",
+   "subagent_plays": 1
+  },
+  "T4": {
+   "plays": [
+    "0032-12bd4c7c82ae413b035253cb800fc5312111.json",
+    "0045-17808bf55e26681520f3f11f47b5e1260108.json",
+    "0062-23074f92872cd4f8212d04cd87e71a2ced7b.json",
+    "0134-557f96e1c557baa7724b7bdfd13c48cce434.json",
+    "0142-5c5e408b76e5e22747853915f67be3c491a4.json",
+    "0283-b0cc7a9746be5fbe1c8e7e931c664fc3e03c.json",
+    "0368-f1b52711b90ba13f25712d3e223db205eab4.json"
+   ],
+   "requests": 200,
+   "split": "test",
+   "subagent_plays": 1
+  },
+  "V1": {
+   "plays": [
+    "0021-0bed163ac9566086e14ffd85c7481096d49d.json",
+    "0037-14129d470e508b236be22188aa78548ef805.json",
+    "0306-bbdcb12440a7ab3496b9fac8b5f9824b1672.json",
+    "0317-c84315dc1c89737d7a6a58a00ddd86965cb7.json",
+    "0336-d699ceca8ee223fa3521c106c46ccfaf3220.json",
+    "0343-d92c323a6f1e1bf63d1ae4e5f0b2c8708580.json",
+    "0358-e3dbfa26bddbcb04c48a73dab3fa353d45f4.json"
+   ],
+   "requests": 223,
+   "split": "val",
+   "subagent_plays": 2
+  },
+  "V2": {
+   "plays": [
+    "0048-1b5229e3aa8893ca2f4d07d248f9cd9752fb.json",
+    "0063-23a576b18cd4bacef3d1aa138b060b9407ce.json",
+    "0170-6a66ece7b14e61912eb266be794a6bf62faf.json",
+    "0187-768086c44de172b3719b40f29aec56303892.json",
+    "0261-a41ce9f7012a1233c0c29ee8f590305932c3.json",
+    "0280-af6b2fe9201b7c425aefcc0bda69fd0ebf23.json",
+    "0293-b699b717b623acb2b6c06db1196258fbb4a7.json"
+   ],
+   "requests": 335,
+   "split": "val",
+   "subagent_plays": 2
+  },
+  "V3": {
+   "plays": [
+    "0094-3d8fcda6a4decdb4d4f56839db6eba041e60.json",
+    "0127-526f242b0f14fa34da24eb7346123c5025cd.json",
+    "0246-9ec047754f4ddd94a59fcd0d85213d5f3b1b.json",
+    "0270-a89db4725a97da42ea24bd5128a093ffb215.json",
+    "0299-b9bd3fd87da01ccbe4e3e0fe9edb0ffabb9f.json",
+    "0302-badfbde3ccac120284b893a0b16105ffd6e7.json",
+    "0339-d876a71a07454e7499469e864f89cf6a3345.json"
+   ],
+   "requests": 327,
+   "split": "val",
+   "subagent_plays": 2
+  }
+ },
+ "agentx_think_cap_s": 300.0,
+ "calibration": {
+  "added_test_cells": [
+   "agentx-T3-base-n16-lanes-L2",
+   "agentx-T1-base-n16-lanes-L3",
+   "agentx-T3-base-n32-lanes-L2",
+   "agentx-T4-base-n32-lanes-L3"
+  ],
+  "candidates_unchanged": {
+   "test": "cells/test.candidates.jsonl",
+   "train": "cells/train.candidates.jsonl",
+   "val": "cells/val.candidates.jsonl"
+  },
+  "cells_version": "lr-cells-v5",
+  "counts": {
+   "test": 60,
+   "train": 34,
+   "val": 14
+  },
+  "files": {
+   "test": {
+    "path": "cells/test.jsonl",
+    "sha256": "7b998b8e7bd2c870da8e3701e468c3738655045b1a76a1f19110282ddfb3aa6f"
+   },
+   "train": {
+    "path": "cells/train.jsonl",
+    "sha256": "55b54ec690356414f5d460a377573de1d0eaf00a594d3beb70e7bc77e560c383"
+   },
+   "val": {
+    "path": "cells/val.jsonl",
+    "sha256": "e61ac577d17f27144a48449b7464ea558fda8262261bf2fa2b03090275699f45"
+   }
+  },
+  "fix": "audits/calibration/fix-r0.md",
+  "harness_version": "lrh-4",
+  "pre_calibration_split_manifest": "cells/superseded/pre-calibration/SPLIT_MANIFEST.json",
+  "previous_split_manifest": "cells/superseded/calibration-r0/SPLIT_MANIFEST.json",
+  "rules": "facts/calibration.json",
+  "stage": "calibration fixer r0 (audit calibration/independent-rerun r0 F1: lifetime-derived open-loop session warm-up; sessions family re-calibrated; non-session cells byte-identical to lr-cells-v4)",
+  "supersedes": {
+   "cells_version": "lr-cells-v4",
+   "files": {
+    "test": {
+     "path": "cells/test.jsonl",
+     "sha256": "b8648ac5ad0d6c0f87034376aacc685a89c00da3d8d3a595e5cadceae1245600"
+    },
+    "train": {
+     "path": "cells/train.jsonl",
+     "sha256": "6572232d5a6c6ac7c5463ce77a12ea9610976fd19bd7b3ed22e92ab697022874"
+    },
+    "val": {
+     "path": "cells/val.jsonl",
+     "sha256": "60635df604d2f3328b085251bb3c8cf834a4ad6dbe86160757ae56a2153b9c83"
+    }
+   },
+   "kept_at": "cells/superseded/calibration-r0/"
+  },
+  "traces_manifest_sha256": "b2616d0deee3a8b30095bfbf4912e3cb17a505e71b1eba3fc4e161a73958e628",
+  "worktree_head": "<commit-17>",
+  "written": "2026-10-03 01:53:05 PDT"
+ },
+ "cell_fields_added": {
+  "cache_pressure_ref": "LR-12 numerator table: distinct block tokens per trace-time window",
+  "derived_meta": "the derived trace's meta JSON (spec, source SHA, realized stats)",
+  "expected_cost_s": "replay cost estimate from the build smoke",
+  "holdout_axes": "every axis a test cell is held out on; holdout_axis is the primary one",
+  "measure": "harness measurement rule: basis; on completion-basis cells (closed loop, lanes) end full_occupancy (window ends when fewer than load.value sessions or lanes stay occupied); warmup_trace_ms (identity warm-up) on closed-loop cells. Calibration adds open-loop warmup_ms and window_ms and lanes warmup_ms, in replay time",
+  "measure_trace": "warm-up and window in trace time (open loop) or play counts (lanes)",
+  "segment": "unit of independence (LR-02, LR-11)",
+  "selection_exposed": "true for test cells at N = 6, a worker count validation also uses (LR-10)",
+  "trace_rows": "requests in the derived trace",
+  "trace_sha256": "SHA-256 of the derived trace file (checked by the harness)",
+  "transform_tag": "short name of the transform"
+ },
+ "cells_version": "lr-cells-v3",
+ "cost_model": {
+  "evidence": [
+   "runs/build_workloads/smoke/cost.json",
+   "runs/build_workloads/smoke/cells_validation.json"
+  ],
+  "formula": "expected_cost_s = max(0.3 + trace_rows * ms_per_request / 1000, 1.5 * measured wall of the per-cell replay check at a provisional load); one replay, in-process, before load calibration",
+  "ms_per_request_in_process": {
+   "agentx": 6.0,
+   "fast25_conversation": 0.6,
+   "fast25_synthetic": 0.6,
+   "mooncake": 0.6,
+   "synthetic_sessions": 0.7
+  }
+ },
+ "counts": {
+  "test": {
+   "by_family": {
+    "agentx": 10,
+    "fast25_conversation": 3,
+    "fast25_synthetic": 3,
+    "mooncake": 25,
+    "synthetic_sessions": 15
+   },
+   "by_holdout_axis": {
+    "agentx_plays": 4,
+    "family": 6,
+    "time_window": 6,
+    "transform_extrapolation": 10,
+    "worker_count": 26,
+    "workload_draw": 4
+   },
+   "by_level": {
+    "L1": 5,
+    "L2": 41,
+    "L3": 10
+   },
+   "by_load_mode": {
+    "agentic_lanes": 10,
+    "closed_concurrency": 15,
+    "open_speedup": 31
+   },
+   "by_num_workers": {
+    "16": 5,
+    "2": 8,
+    "32": 6,
+    "4": 13,
+    "6": 7,
+    "8": 17
+   },
+   "cells": 56,
+   "expected_cost_s_max": 4.01,
+   "expected_cost_s_total": 145.3
+  },
+  "train": {
+   "by_family": {
+    "agentx": 8,
+    "mooncake": 18,
+    "synthetic_sessions": 8
+   },
+   "by_holdout_axis": {
+    "none": 34
+   },
+   "by_level": {
+    "L1": 6,
+    "L2": 20,
+    "L3": 8
+   },
+   "by_load_mode": {
+    "agentic_lanes": 8,
+    "closed_concurrency": 8,
+    "open_speedup": 18
+   },
+   "by_num_workers": {
+    "4": 18,
+    "8": 16
+   },
+   "cells": 34,
+   "expected_cost_s_max": 5.42,
+   "expected_cost_s_total": 101.0
+  },
+  "val": {
+   "by_family": {
+    "agentx": 4,
+    "mooncake": 5,
+    "synthetic_sessions": 5
+   },
+   "by_holdout_axis": {
+    "none": 14
+   },
+   "by_level": {
+    "L1": 2,
+    "L2": 9,
+    "L3": 3
+   },
+   "by_load_mode": {
+    "agentic_lanes": 4,
+    "closed_concurrency": 4,
+    "open_speedup": 6
+   },
+   "by_num_workers": {
+    "4": 5,
+    "6": 4,
+    "8": 5
+   },
+   "cells": 14,
+   "expected_cost_s_max": 4.2,
+   "expected_cost_s_total": 38.9
+  }
+ },
+ "derived_traces": [
+  {
+   "cells": [
+    "mooncake-w4-islp1.5-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/00df09ec8329813e67472db3e287a6c46ae0a90b8b876d5e9a9b91b680f4e2d6.meta.json",
+   "path": "CR/traces/derived/00df09ec8329813e67472db3e287a6c46ae0a90b8b876d5e9a9b91b680f4e2d6.jsonl",
+   "rows": 4155,
+   "sha256": "00df09ec8329813e67472db3e287a6c46ae0a90b8b876d5e9a9b91b680f4e2d6",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-T1-base-n4-lanes-L2",
+    "agentx-T1-base-n6-lanes-L3"
+   ],
+   "meta": "CR/traces/derived/03cafc794829bb5299a1c8c4639ceaf17514a936a0823f93bdafe23ee63cc278.meta.json",
+   "path": "CR/traces/derived/03cafc794829bb5299a1c8c4639ceaf17514a936a0823f93bdafe23ee63cc278.jsonl",
+   "rows": 296,
+   "sha256": "03cafc794829bb5299a1c8c4639ceaf17514a936a0823f93bdafe23ee63cc278",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "sessions-s6-think4.0-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/050c9f7b1c06cb8fbbb7c8724a1082a95fad062cbde371657f0d050f8b946ca1.meta.json",
+   "path": "CR/traces/derived/050c9f7b1c06cb8fbbb7c8724a1082a95fad062cbde371657f0d050f8b946ca1.jsonl",
+   "rows": 3385,
+   "sha256": "050c9f7b1c06cb8fbbb7c8724a1082a95fad062cbde371657f0d050f8b946ca1",
+   "source": "CR/traces/synthetic_sessions/sessions_seed6.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-A2-think0.5-n4-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/066c1dcc1abeb41c3de30ee69d23f905f853a81d718546dab54387cfbcca8641.meta.json",
+   "path": "CR/traces/derived/066c1dcc1abeb41c3de30ee69d23f905f853a81d718546dab54387cfbcca8641.jsonl",
+   "rows": 486,
+   "sha256": "066c1dcc1abeb41c3de30ee69d23f905f853a81d718546dab54387cfbcca8641",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "agentx-A3-base-n8-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/086627f00d6d648601435cce80069aaa158a6b8ffc75e4396c5ea0f3d5bc5b11.meta.json",
+   "path": "CR/traces/derived/086627f00d6d648601435cce80069aaa158a6b8ffc75e4396c5ea0f3d5bc5b11.jsonl",
+   "rows": 415,
+   "sha256": "086627f00d6d648601435cce80069aaa158a6b8ffc75e4396c5ea0f3d5bc5b11",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "mooncake-w2-root2-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/0c8b294c84ccca9b0b12cd34901b7f6432ec76d1fd8ffe17f3c2a43c73623da6.meta.json",
+   "path": "CR/traces/derived/0c8b294c84ccca9b0b12cd34901b7f6432ec76d1fd8ffe17f3c2a43c73623da6.jsonl",
+   "rows": 4002,
+   "sha256": "0c8b294c84ccca9b0b12cd34901b7f6432ec76d1fd8ffe17f3c2a43c73623da6",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s2-think2.0-n4-closed-L2"
+   ],
+   "meta": "CR/traces/derived/1079cc0eab29f758dafba8a29664159562d09589f66575028102744684e7dcbf.meta.json",
+   "path": "CR/traces/derived/1079cc0eab29f758dafba8a29664159562d09589f66575028102744684e7dcbf.jsonl",
+   "rows": 3708,
+   "sha256": "1079cc0eab29f758dafba8a29664159562d09589f66575028102744684e7dcbf",
+   "source": "CR/traces/synthetic_sessions/sessions_seed2.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-T2-base-n8-lanes-L1"
+   ],
+   "meta": "CR/traces/derived/14e8b47e0593aa798d822390adbe7fefeac4e6ba700a9dc539434ec87b18548d.meta.json",
+   "path": "CR/traces/derived/14e8b47e0593aa798d822390adbe7fefeac4e6ba700a9dc539434ec87b18548d.jsonl",
+   "rows": 274,
+   "sha256": "14e8b47e0593aa798d822390adbe7fefeac4e6ba700a9dc539434ec87b18548d",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "sessions-s9-base-n16-closed-L2",
+    "sessions-s9-base-n2-closed-L2",
+    "sessions-s9-base-n32-closed-L2",
+    "sessions-s9-base-n4-open-L1",
+    "sessions-s9-base-n6-closed-L2"
+   ],
+   "meta": "CR/traces/derived/18812c0f25f6771df8f4f897d8ce807b85c8f4f4ec5a3428eafe68a124aee5ac.meta.json",
+   "path": "CR/traces/derived/18812c0f25f6771df8f4f897d8ce807b85c8f4f4ec5a3428eafe68a124aee5ac.jsonl",
+   "rows": 3459,
+   "sha256": "18812c0f25f6771df8f4f897d8ce807b85c8f4f4ec5a3428eafe68a124aee5ac",
+   "source": "CR/traces/synthetic_sessions/sessions_seed9.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-T1-think4.0-n4-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/215086a75d49b12887e428eceab549d2f9718acd526528b701da2a15f4f1ed72.meta.json",
+   "path": "CR/traces/derived/215086a75d49b12887e428eceab549d2f9718acd526528b701da2a15f4f1ed72.jsonl",
+   "rows": 296,
+   "sha256": "215086a75d49b12887e428eceab549d2f9718acd526528b701da2a15f4f1ed72",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "mooncake-w5-base-n16-closed-L2",
+    "mooncake-w5-base-n16-open-L3",
+    "mooncake-w5-base-n2-closed-L2",
+    "mooncake-w5-base-n2-open-L3",
+    "mooncake-w5-base-n32-closed-L2",
+    "mooncake-w5-base-n32-open-L3",
+    "mooncake-w5-base-n4-closed-L3",
+    "mooncake-w5-base-n4-open-L3",
+    "mooncake-w5-base-n6-closed-L2",
+    "mooncake-w5-base-n6-open-L3",
+    "mooncake-w5-base-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/29b3fa2913d496df184f383375494bdefc8fef178457d93a0d99af3f537265c0.meta.json",
+   "path": "CR/traces/derived/29b3fa2913d496df184f383375494bdefc8fef178457d93a0d99af3f537265c0.jsonl",
+   "rows": 4195,
+   "sha256": "29b3fa2913d496df184f383375494bdefc8fef178457d93a0d99af3f537265c0",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "fast25_synthetic-x0-base-n4-open-L2",
+    "fast25_synthetic-x0-base-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/317308c18a8f68b2c229568fb9db2bb4dc748604b709fc85587c57ab237fcdb8.meta.json",
+   "path": "CR/traces/derived/317308c18a8f68b2c229568fb9db2bb4dc748604b709fc85587c57ab237fcdb8.jsonl",
+   "rows": 1919,
+   "sha256": "317308c18a8f68b2c229568fb9db2bb4dc748604b709fc85587c57ab237fcdb8",
+   "source": "CR/traces/fast25/synthetic_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w1-islu1.25-n6-closed-L2"
+   ],
+   "meta": "CR/traces/derived/36d01924957d45f43e1030deacc2ab312cecaacdda89698822de6269c4f89930.meta.json",
+   "path": "CR/traces/derived/36d01924957d45f43e1030deacc2ab312cecaacdda89698822de6269c4f89930.jsonl",
+   "rows": 3728,
+   "sha256": "36d01924957d45f43e1030deacc2ab312cecaacdda89698822de6269c4f89930",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "conv-w3-base-n4-open-L2",
+    "conv-w3-base-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/3cbc77c2399217cc7f26f2362db8eb4438db27392e982d4813b17434162ec5bf.meta.json",
+   "path": "CR/traces/derived/3cbc77c2399217cc7f26f2362db8eb4438db27392e982d4813b17434162ec5bf.jsonl",
+   "rows": 2083,
+   "sha256": "3cbc77c2399217cc7f26f2362db8eb4438db27392e982d4813b17434162ec5bf",
+   "source": "CR/traces/fast25/conversation_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w1-base-n4-open-L2",
+    "mooncake-w1-base-n6-open-L2",
+    "mooncake-w1-base-n8-closed-L2",
+    "mooncake-w1-base-n8-open-L3"
+   ],
+   "meta": "CR/traces/derived/3de5f643c43096125c96e881ef2dca777ea68b6233d70e83457088656e24f62e.meta.json",
+   "path": "CR/traces/derived/3de5f643c43096125c96e881ef2dca777ea68b6233d70e83457088656e24f62e.jsonl",
+   "rows": 3735,
+   "sha256": "3de5f643c43096125c96e881ef2dca777ea68b6233d70e83457088656e24f62e",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-V2-base-n4-lanes-L3",
+    "agentx-V2-base-n6-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/45650d39f9dbd06f47037e0d50e2eec511176e5432923d0f75657c84fce38903.meta.json",
+   "path": "CR/traces/derived/45650d39f9dbd06f47037e0d50e2eec511176e5432923d0f75657c84fce38903.jsonl",
+   "rows": 335,
+   "sha256": "45650d39f9dbd06f47037e0d50e2eec511176e5432923d0f75657c84fce38903",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "agentx-A1_A2-base-n8-lanes-L3"
+   ],
+   "meta": "CR/traces/derived/45ad8d576bc30e7629eb81eced960e7f5a5ce74d243d961914e54204a17f9885.meta.json",
+   "path": "CR/traces/derived/45ad8d576bc30e7629eb81eced960e7f5a5ce74d243d961914e54204a17f9885.jsonl",
+   "rows": 797,
+   "sha256": "45ad8d576bc30e7629eb81eced960e7f5a5ce74d243d961914e54204a17f9885",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "agentx-A3-osl1.5-n4-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/4c25181b3eff59dc64fbf9a6f055c5330151d8dea521e68648a8a9378a79c0e2.meta.json",
+   "path": "CR/traces/derived/4c25181b3eff59dc64fbf9a6f055c5330151d8dea521e68648a8a9378a79c0e2.jsonl",
+   "rows": 415,
+   "sha256": "4c25181b3eff59dc64fbf9a6f055c5330151d8dea521e68648a8a9378a79c0e2",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "agentx-A2-base-n4-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/59ee3018f1a327095cd39cdf6d837c268820fd2e0ec3c783945b224043dfa4ef.meta.json",
+   "path": "CR/traces/derived/59ee3018f1a327095cd39cdf6d837c268820fd2e0ec3c783945b224043dfa4ef.jsonl",
+   "rows": 486,
+   "sha256": "59ee3018f1a327095cd39cdf6d837c268820fd2e0ec3c783945b224043dfa4ef",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "fast25_synthetic-x1-base-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/5e5d359060624d0cf91c9536bd8c39f446efde5e44564cd390195a7871315de7.meta.json",
+   "path": "CR/traces/derived/5e5d359060624d0cf91c9536bd8c39f446efde5e44564cd390195a7871315de7.jsonl",
+   "rows": 2053,
+   "sha256": "5e5d359060624d0cf91c9536bd8c39f446efde5e44564cd390195a7871315de7",
+   "source": "CR/traces/fast25/synthetic_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w3-islu2.5-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/64f3020ffc5d23b822f614169aa6d4ec0f629081f622a97c20139c7ae5247d0e.meta.json",
+   "path": "CR/traces/derived/64f3020ffc5d23b822f614169aa6d4ec0f629081f622a97c20139c7ae5247d0e.jsonl",
+   "rows": 4048,
+   "sha256": "64f3020ffc5d23b822f614169aa6d4ec0f629081f622a97c20139c7ae5247d0e",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s1-base-n4-open-L3",
+    "sessions-s1-base-n8-open-L1"
+   ],
+   "meta": "CR/traces/derived/6a136cf2f4dd1ef33493960adec59c5b48940ec2101959751778ff41cd928c37.meta.json",
+   "path": "CR/traces/derived/6a136cf2f4dd1ef33493960adec59c5b48940ec2101959751778ff41cd928c37.jsonl",
+   "rows": 3333,
+   "sha256": "6a136cf2f4dd1ef33493960adec59c5b48940ec2101959751778ff41cd928c37",
+   "source": "CR/traces/synthetic_sessions/sessions_seed1.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w4-base-n4-closed-L2",
+    "mooncake-w4-base-n8-open-L1"
+   ],
+   "meta": "CR/traces/derived/6df4e709c5806353d5d95c71d2b29aa175be37992f92178161cf2216be117ee2.meta.json",
+   "path": "CR/traces/derived/6df4e709c5806353d5d95c71d2b29aa175be37992f92178161cf2216be117ee2.jsonl",
+   "rows": 4159,
+   "sha256": "6df4e709c5806353d5d95c71d2b29aa175be37992f92178161cf2216be117ee2",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s7-base-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/6e441377a3e550986563981a772e5b2f2c86ef4708da6201c055346db9a41b05.meta.json",
+   "path": "CR/traces/derived/6e441377a3e550986563981a772e5b2f2c86ef4708da6201c055346db9a41b05.jsonl",
+   "rows": 3562,
+   "sha256": "6e441377a3e550986563981a772e5b2f2c86ef4708da6201c055346db9a41b05",
+   "source": "CR/traces/synthetic_sessions/sessions_seed7.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s5-think1.5-n6-open-L2"
+   ],
+   "meta": "CR/traces/derived/6f2667aff253087caaf08d18531e50b62f4ede62a627fdb0d5979ddde7d5704a.meta.json",
+   "path": "CR/traces/derived/6f2667aff253087caaf08d18531e50b62f4ede62a627fdb0d5979ddde7d5704a.jsonl",
+   "rows": 3872,
+   "sha256": "6f2667aff253087caaf08d18531e50b62f4ede62a627fdb0d5979ddde7d5704a",
+   "source": "CR/traces/synthetic_sessions/sessions_seed5.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w0-base-n4-open-L1",
+    "mooncake-w0-base-n4-open-L3",
+    "mooncake-w0-base-n8-closed-L2",
+    "mooncake-w0-base-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/73b15ca5a70477dd4c3e152f7e83ccb3ac60b3e1dc0b86f23f74f32889d3a7ec.meta.json",
+   "path": "CR/traces/derived/73b15ca5a70477dd4c3e152f7e83ccb3ac60b3e1dc0b86f23f74f32889d3a7ec.jsonl",
+   "rows": 3422,
+   "sha256": "73b15ca5a70477dd4c3e152f7e83ccb3ac60b3e1dc0b86f23f74f32889d3a7ec",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s3-islu1.5-n8-open-L3"
+   ],
+   "meta": "CR/traces/derived/76dcc8bf7424d6c891e16716a7aef228e6a5b5f140c9dcdb884d5ea6f1834d5e.meta.json",
+   "path": "CR/traces/derived/76dcc8bf7424d6c891e16716a7aef228e6a5b5f140c9dcdb884d5ea6f1834d5e.jsonl",
+   "rows": 3670,
+   "sha256": "76dcc8bf7424d6c891e16716a7aef228e6a5b5f140c9dcdb884d5ea6f1834d5e",
+   "source": "CR/traces/synthetic_sessions/sessions_seed3.jsonl"
+  },
+  {
+   "cells": [
+    "conv-w5-base-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/78d443899faaeb8953eb69bb79c0179a713770f827d0ec763b87537852bcb767.meta.json",
+   "path": "CR/traces/derived/78d443899faaeb8953eb69bb79c0179a713770f827d0ec763b87537852bcb767.jsonl",
+   "rows": 2182,
+   "sha256": "78d443899faaeb8953eb69bb79c0179a713770f827d0ec763b87537852bcb767",
+   "source": "CR/traces/fast25/conversation_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w3-base-n16-open-L2",
+    "mooncake-w3-base-n2-open-L1",
+    "mooncake-w3-base-n2-open-L2",
+    "mooncake-w3-base-n32-open-L1",
+    "mooncake-w3-base-n32-open-L2",
+    "mooncake-w3-base-n4-open-L2",
+    "mooncake-w3-base-n6-open-L2",
+    "mooncake-w3-base-n8-closed-L2",
+    "mooncake-w3-base-n8-open-L1"
+   ],
+   "meta": "CR/traces/derived/7c860ea09311436a9efbf00c2bbfddf35052c5e482320ea58efe0ba77425e5d3.meta.json",
+   "path": "CR/traces/derived/7c860ea09311436a9efbf00c2bbfddf35052c5e482320ea58efe0ba77425e5d3.jsonl",
+   "rows": 4075,
+   "sha256": "7c860ea09311436a9efbf00c2bbfddf35052c5e482320ea58efe0ba77425e5d3",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s2-think0.5-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/7d07ba7761ea5ba83da979a7f8b0255d2909966c06e2afa7cda2497fb87c247e.meta.json",
+   "path": "CR/traces/derived/7d07ba7761ea5ba83da979a7f8b0255d2909966c06e2afa7cda2497fb87c247e.jsonl",
+   "rows": 3708,
+   "sha256": "7d07ba7761ea5ba83da979a7f8b0255d2909966c06e2afa7cda2497fb87c247e",
+   "source": "CR/traces/synthetic_sessions/sessions_seed2.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s0-base-n4-open-L2",
+    "sessions-s0-base-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/7d3e21342e9816e7ceab03c9ae0574742187c587efad78c15dcb51239edb5f82.meta.json",
+   "path": "CR/traces/derived/7d3e21342e9816e7ceab03c9ae0574742187c587efad78c15dcb51239edb5f82.jsonl",
+   "rows": 3647,
+   "sha256": "7d3e21342e9816e7ceab03c9ae0574742187c587efad78c15dcb51239edb5f82",
+   "source": "CR/traces/synthetic_sessions/sessions_seed0.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w0-osl0.5-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/80404a1312cd2dd096a6d990eabefd389c9ea4aac813e246b8fa63a1d3245ee3.meta.json",
+   "path": "CR/traces/derived/80404a1312cd2dd096a6d990eabefd389c9ea4aac813e246b8fa63a1d3245ee3.jsonl",
+   "rows": 3422,
+   "sha256": "80404a1312cd2dd096a6d990eabefd389c9ea4aac813e246b8fa63a1d3245ee3",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-V3-base-n8-lanes-L1"
+   ],
+   "meta": "CR/traces/derived/85aab9f7897375e633a51aa321974bb5d5f12f75fcd77afee2f4bd7da28fb687.meta.json",
+   "path": "CR/traces/derived/85aab9f7897375e633a51aa321974bb5d5f12f75fcd77afee2f4bd7da28fb687.jsonl",
+   "rows": 327,
+   "sha256": "85aab9f7897375e633a51aa321974bb5d5f12f75fcd77afee2f4bd7da28fb687",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "sessions-s8-islu2.5-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/86296c73980f75b444f11858b8a48dc4a87f003a252584c59cf7f5408130ff52.meta.json",
+   "path": "CR/traces/derived/86296c73980f75b444f11858b8a48dc4a87f003a252584c59cf7f5408130ff52.jsonl",
+   "rows": 3794,
+   "sha256": "86296c73980f75b444f11858b8a48dc4a87f003a252584c59cf7f5408130ff52",
+   "source": "CR/traces/synthetic_sessions/sessions_seed8.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s8-base-n8-open-L3"
+   ],
+   "meta": "CR/traces/derived/89d6ab739726af03f25c6a8bbcdf29f379e5287486929908227b03789baac742.meta.json",
+   "path": "CR/traces/derived/89d6ab739726af03f25c6a8bbcdf29f379e5287486929908227b03789baac742.jsonl",
+   "rows": 3794,
+   "sha256": "89d6ab739726af03f25c6a8bbcdf29f379e5287486929908227b03789baac742",
+   "source": "CR/traces/synthetic_sessions/sessions_seed8.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-T3-base-n2-lanes-L2",
+    "agentx-T3-base-n4-lanes-L3",
+    "agentx-T3-base-n6-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/8af4d7ccff49bdc56a6d9718ed89cec82f22360bd6cf31fa903a39448b3d8f12.meta.json",
+   "path": "CR/traces/derived/8af4d7ccff49bdc56a6d9718ed89cec82f22360bd6cf31fa903a39448b3d8f12.jsonl",
+   "rows": 265,
+   "sha256": "8af4d7ccff49bdc56a6d9718ed89cec82f22360bd6cf31fa903a39448b3d8f12",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "agentx-T2-osl2.5-n8-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/8b6eb6c33cf8422050996e5e8bb6e27f15f3b54991585f293d28a7d0efcacb22.meta.json",
+   "path": "CR/traces/derived/8b6eb6c33cf8422050996e5e8bb6e27f15f3b54991585f293d28a7d0efcacb22.jsonl",
+   "rows": 274,
+   "sha256": "8b6eb6c33cf8422050996e5e8bb6e27f15f3b54991585f293d28a7d0efcacb22",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "mooncake-w2-base-n4-closed-L3",
+    "mooncake-w2-base-n4-open-L2",
+    "mooncake-w2-base-n8-closed-L1",
+    "mooncake-w2-base-n8-open-L3"
+   ],
+   "meta": "CR/traces/derived/935fe780c246accec501f327a527ae126a0e1a2f7a18c140e87c39b107b96b3d.meta.json",
+   "path": "CR/traces/derived/935fe780c246accec501f327a527ae126a0e1a2f7a18c140e87c39b107b96b3d.jsonl",
+   "rows": 4002,
+   "sha256": "935fe780c246accec501f327a527ae126a0e1a2f7a18c140e87c39b107b96b3d",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s5-base-n4-closed-L1",
+    "sessions-s5-base-n8-open-L3"
+   ],
+   "meta": "CR/traces/derived/962d74d47d32fc287f9958a281109562b4a46921ae09eb406bb466419be089f4.meta.json",
+   "path": "CR/traces/derived/962d74d47d32fc287f9958a281109562b4a46921ae09eb406bb466419be089f4.jsonl",
+   "rows": 3872,
+   "sha256": "962d74d47d32fc287f9958a281109562b4a46921ae09eb406bb466419be089f4",
+   "source": "CR/traces/synthetic_sessions/sessions_seed5.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w2-islu1.5-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/aacf1870298637b31011f616f07f4719f09498343af4759ae2586e29ce1772f3.meta.json",
+   "path": "CR/traces/derived/aacf1870298637b31011f616f07f4719f09498343af4759ae2586e29ce1772f3.jsonl",
+   "rows": 3991,
+   "sha256": "aacf1870298637b31011f616f07f4719f09498343af4759ae2586e29ce1772f3",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w5-islp2.5-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/ac40502257fefcf93d63f71cffc981f24f77f87e0b4af33047e617673a4247c5.meta.json",
+   "path": "CR/traces/derived/ac40502257fefcf93d63f71cffc981f24f77f87e0b4af33047e617673a4247c5.jsonl",
+   "rows": 4169,
+   "sha256": "ac40502257fefcf93d63f71cffc981f24f77f87e0b4af33047e617673a4247c5",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-A1-base-n4-lanes-L1",
+    "agentx-A1-base-n4-lanes-L3"
+   ],
+   "meta": "CR/traces/derived/b24f40b27ecbb15bc4627e76b11492f85d723baa2fe1c03d5829a02ec0556902.meta.json",
+   "path": "CR/traces/derived/b24f40b27ecbb15bc4627e76b11492f85d723baa2fe1c03d5829a02ec0556902.jsonl",
+   "rows": 311,
+   "sha256": "b24f40b27ecbb15bc4627e76b11492f85d723baa2fe1c03d5829a02ec0556902",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "sessions-s6-base-n16-open-L2",
+    "sessions-s6-base-n2-open-L2",
+    "sessions-s6-base-n32-open-L2",
+    "sessions-s6-base-n4-open-L2",
+    "sessions-s6-base-n6-open-L2"
+   ],
+   "meta": "CR/traces/derived/bbb39b4a657f4f12138f6014b7bc04f49dbadf8ba024ce476469b99b72adc4cc.meta.json",
+   "path": "CR/traces/derived/bbb39b4a657f4f12138f6014b7bc04f49dbadf8ba024ce476469b99b72adc4cc.jsonl",
+   "rows": 3385,
+   "sha256": "bbb39b4a657f4f12138f6014b7bc04f49dbadf8ba024ce476469b99b72adc4cc",
+   "source": "CR/traces/synthetic_sessions/sessions_seed6.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w3-osl4.0-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/c8c59b4d76d6af07965eb340032d014ca5d9adf6a5cde2bc7a01127d988f2319.meta.json",
+   "path": "CR/traces/derived/c8c59b4d76d6af07965eb340032d014ca5d9adf6a5cde2bc7a01127d988f2319.jsonl",
+   "rows": 4075,
+   "sha256": "c8c59b4d76d6af07965eb340032d014ca5d9adf6a5cde2bc7a01127d988f2319",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w4-osl2.0-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/ccd73fda3b67c5c80d53d2b9a120cc80b679b974ce04b4880685c277891015ab.meta.json",
+   "path": "CR/traces/derived/ccd73fda3b67c5c80d53d2b9a120cc80b679b974ce04b4880685c277891015ab.jsonl",
+   "rows": 4159,
+   "sha256": "ccd73fda3b67c5c80d53d2b9a120cc80b679b974ce04b4880685c277891015ab",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-T4-base-n2-lanes-L3",
+    "agentx-T4-base-n8-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/d2e6f49c80156dc0119bbf8226ecc65d595c0ecbe114df9674a35f7fc9c9e35d.meta.json",
+   "path": "CR/traces/derived/d2e6f49c80156dc0119bbf8226ecc65d595c0ecbe114df9674a35f7fc9c9e35d.jsonl",
+   "rows": 200,
+   "sha256": "d2e6f49c80156dc0119bbf8226ecc65d595c0ecbe114df9674a35f7fc9c9e35d",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "mooncake-w5-osl0.25-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/e157962e9fa4cdc33fc7494e1803c6bd814fc8b245a1e4efe8683bb000c35506.meta.json",
+   "path": "CR/traces/derived/e157962e9fa4cdc33fc7494e1803c6bd814fc8b245a1e4efe8683bb000c35506.jsonl",
+   "rows": 4195,
+   "sha256": "e157962e9fa4cdc33fc7494e1803c6bd814fc8b245a1e4efe8683bb000c35506",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w0-islu1.5-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/e70bfe84c4b390b71ee8f6a9447a7e72bed3434efdc08ca3d6c83baebc61b995.meta.json",
+   "path": "CR/traces/derived/e70bfe84c4b390b71ee8f6a9447a7e72bed3434efdc08ca3d6c83baebc61b995.jsonl",
+   "rows": 3412,
+   "sha256": "e70bfe84c4b390b71ee8f6a9447a7e72bed3434efdc08ca3d6c83baebc61b995",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w0-islp1.5-n4-closed-L2"
+   ],
+   "meta": "CR/traces/derived/e8f460f86ee95abc1588e6d2cedc5605b7939e39d5b636433a3df97b2e197204.meta.json",
+   "path": "CR/traces/derived/e8f460f86ee95abc1588e6d2cedc5605b7939e39d5b636433a3df97b2e197204.jsonl",
+   "rows": 3408,
+   "sha256": "e8f460f86ee95abc1588e6d2cedc5605b7939e39d5b636433a3df97b2e197204",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w5-root4-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/edbe432653d8e282a25bca414ef02bb734d5cd42a515b44febe3014de5f909f5.meta.json",
+   "path": "CR/traces/derived/edbe432653d8e282a25bca414ef02bb734d5cd42a515b44febe3014de5f909f5.jsonl",
+   "rows": 4195,
+   "sha256": "edbe432653d8e282a25bca414ef02bb734d5cd42a515b44febe3014de5f909f5",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s4-base-n4-open-L2",
+    "sessions-s4-base-n8-closed-L2"
+   ],
+   "meta": "CR/traces/derived/edf87e19d91efaaa7f2f82902b572df2a7566988d2547d6856bc586718f13603.meta.json",
+   "path": "CR/traces/derived/edf87e19d91efaaa7f2f82902b572df2a7566988d2547d6856bc586718f13603.jsonl",
+   "rows": 3740,
+   "sha256": "edf87e19d91efaaa7f2f82902b572df2a7566988d2547d6856bc586718f13603",
+   "source": "CR/traces/synthetic_sessions/sessions_seed4.jsonl"
+  },
+  {
+   "cells": [
+    "agentx-A3-think2.0-n8-lanes-L1"
+   ],
+   "meta": "CR/traces/derived/ee56caaafba51ec7716136feda1aad27a00b3f7256e38883ff6d8d9e8246e396.meta.json",
+   "path": "CR/traces/derived/ee56caaafba51ec7716136feda1aad27a00b3f7256e38883ff6d8d9e8246e396.jsonl",
+   "rows": 415,
+   "sha256": "ee56caaafba51ec7716136feda1aad27a00b3f7256e38883ff6d8d9e8246e396",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "agentx-V1-base-n4-lanes-L2"
+   ],
+   "meta": "CR/traces/derived/f07059cab5aa12f175e2d23a02bfc1787e9fd0f18e763ebabfdd310262e311f0.meta.json",
+   "path": "CR/traces/derived/f07059cab5aa12f175e2d23a02bfc1787e9fd0f18e763ebabfdd310262e311f0.jsonl",
+   "rows": 223,
+   "sha256": "f07059cab5aa12f175e2d23a02bfc1787e9fd0f18e763ebabfdd310262e311f0",
+   "source": "CR/traces/agentx/plays"
+  },
+  {
+   "cells": [
+    "sessions-s7-think0.25-n8-open-L2"
+   ],
+   "meta": "CR/traces/derived/f3e8c0b438f3e2ac3afe80fa65a737a67f79cdca3ec07c750a250a5b4e8f0f64.meta.json",
+   "path": "CR/traces/derived/f3e8c0b438f3e2ac3afe80fa65a737a67f79cdca3ec07c750a250a5b4e8f0f64.jsonl",
+   "rows": 3562,
+   "sha256": "f3e8c0b438f3e2ac3afe80fa65a737a67f79cdca3ec07c750a250a5b4e8f0f64",
+   "source": "CR/traces/synthetic_sessions/sessions_seed7.jsonl"
+  },
+  {
+   "cells": [
+    "mooncake-w4-root2-n8-open-L3"
+   ],
+   "meta": "CR/traces/derived/f457852866ca8cfff5e3fcfedbed0109a3f8b4783590e6f895c2e92f3401431e.meta.json",
+   "path": "CR/traces/derived/f457852866ca8cfff5e3fcfedbed0109a3f8b4783590e6f895c2e92f3401431e.jsonl",
+   "rows": 4159,
+   "sha256": "f457852866ca8cfff5e3fcfedbed0109a3f8b4783590e6f895c2e92f3401431e",
+   "source": "CR/traces/mooncake/mooncake_trace.jsonl"
+  },
+  {
+   "cells": [
+    "sessions-s3-root2-n4-open-L2"
+   ],
+   "meta": "CR/traces/derived/f652bde79c17d9e50cbc3452f4b856394c880536b5c1883d58ed397bec237480.meta.json",
+   "path": "CR/traces/derived/f652bde79c17d9e50cbc3452f4b856394c880536b5c1883d58ed397bec237480.jsonl",
+   "rows": 3670,
+   "sha256": "f652bde79c17d9e50cbc3452f4b856394c880536b5c1883d58ed397bec237480",
+   "source": "CR/traces/synthetic_sessions/sessions_seed3.jsonl"
+  }
+ ],
+ "families": {
+  "agentx": "train/val/test by disjoint play subsets; agentic_lanes only",
+  "fast25_conversation": "test only (held-out family); segments shared with the aligned Mooncake windows",
+  "fast25_synthetic": "test only (held-out family); two disjoint windows",
+  "mooncake": "train/val/test by disjoint, self-contained time windows (no row in two slices)",
+  "synthetic_sessions": "train/val/test by generator seed",
+  "toolagent": "excluded: relabeled copy of mooncake_trace (audit setup/determinism-cost-context r1 F1)"
+ },
+ "files": {
+  "test": {
+   "cells": 56,
+   "path": "cells/test.candidates.jsonl",
+   "sha256": "4ba73c06aa7518049bd7bda0c6be9eac909f0d836acb2715912dab64bc9f1e78"
+  },
+  "train": {
+   "cells": 34,
+   "path": "cells/train.candidates.jsonl",
+   "sha256": "c7eb4cb7de2149a0fa3333b211307d195d2bb2c3a7dc7de698ca287cd1a6b598"
+  },
+  "val": {
+   "cells": 14,
+   "path": "cells/val.candidates.jsonl",
+   "sha256": "e0eaf74cd9c042e26934e1e39604e67f4be229e5104b2769bb7bc0896bc8e155"
+  }
+ },
+ "holdout_axes": {
+  "agentx_plays": "AgentX play subsets T1-T4, disjoint from train and val plays",
+  "family": "FAST25 conversation (correlated with Mooncake w3/w5) and FAST25 synthetic (two disjoint windows), never trained on",
+  "time_window": "held-out Mooncake windows w3, w5 at N in {4, 8}; every slice is disjoint from every other",
+  "transform_extrapolation": "transform values outside TRAIN_RANGES, on held-out segments",
+  "worker_count": "N in {2, 6, 16, 32}, on held-out segments; N = 6 also appears in validation (selection_exposed)",
+  "workload_draw": "synthetic-session generator seeds 6-9, disjoint from train and val seeds"
+ },
+ "load_modes": {
+  "agentic_lanes": "AgentX only; trace_timestamps mode is a synchronized start of every play (audit r1 F3) and is not used",
+  "closed_concurrency": "replay_concurrency",
+  "open_speedup": "Mooncake-format traces: arrival_speedup_ratio (for session traces it divides inter-turn delays too)"
+ },
+ "max_model_len": 131072,
+ "replay_check": {
+  "cells_checked": 104,
+  "errors": [],
+  "incomplete": [],
+  "missing": [],
+  "over_expected_cost": [],
+  "source": "<campaign-root>/runs/build-fix-r0/workloads/cells_validation.json",
+  "stale": [],
+  "wall_s_by_family": {
+   "agentx": {
+    "max": 3.6166,
+    "mean": 1.898,
+    "min": 1.1142,
+    "n": 22
+   },
+   "fast25_conversation": {
+    "max": 1.2821,
+    "mean": 1.117,
+    "min": 1.003,
+    "n": 3
+   },
+   "fast25_synthetic": {
+    "max": 0.989,
+    "mean": 0.959,
+    "min": 0.9019,
+    "n": 3
+   },
+   "mooncake": {
+    "max": 2.0124,
+    "mean": 1.424,
+    "min": 1.0075,
+    "n": 48
+   },
+   "synthetic_sessions": {
+    "max": 2.8025,
+    "mean": 1.786,
+    "min": 1.321,
+    "n": 28
+   }
+  }
+ },
+ "schema": "learned-routing.split-manifest.v1",
+ "segments": {
+  "conv:w3": {
+   "family": "fast25_conversation",
+   "measure": [
+    2004299.4333333333,
+    2357999.3333333335
+   ],
+   "segment": "mooncake:w3",
+   "slice": [
+    1768499.5,
+    2357999.3333333335
+   ],
+   "split": "test"
+  },
+  "conv:w5": {
+   "family": "fast25_conversation",
+   "measure": [
+    3183299.1,
+    3536999.0
+   ],
+   "segment": "mooncake:w5",
+   "slice": [
+    2947499.166666667,
+    3536999.0
+   ],
+   "split": "test"
+  },
+  "fast25_synthetic:x0": {
+   "family": "fast25_synthetic",
+   "measure": [
+    180000,
+    510000
+   ],
+   "slice": [
+    0,
+    510000
+   ],
+   "split": "test"
+  },
+  "fast25_synthetic:x1": {
+   "family": "fast25_synthetic",
+   "measure": [
+    690000,
+    1020000
+   ],
+   "slice": [
+    510000,
+    1020000
+   ],
+   "split": "test"
+  },
+  "mooncake:w0": {
+   "family": "mooncake",
+   "measure": [
+    240000,
+    600000
+   ],
+   "slice": [
+    0,
+    600000
+   ],
+   "split": "train"
+  },
+  "mooncake:w1": {
+   "family": "mooncake",
+   "measure": [
+    840000,
+    1200000
+   ],
+   "slice": [
+    600000,
+    1200000
+   ],
+   "split": "val"
+  },
+  "mooncake:w2": {
+   "family": "mooncake",
+   "measure": [
+    1440000,
+    1800000
+   ],
+   "slice": [
+    1200000,
+    1800000
+   ],
+   "split": "train"
+  },
+  "mooncake:w3": {
+   "family": "mooncake",
+   "measure": [
+    2040000,
+    2400000
+   ],
+   "slice": [
+    1800000,
+    2400000
+   ],
+   "split": "test"
+  },
+  "mooncake:w4": {
+   "family": "mooncake",
+   "measure": [
+    2640000,
+    3000000
+   ],
+   "slice": [
+    2400000,
+    3000000
+   ],
+   "split": "train"
+  },
+  "mooncake:w5": {
+   "family": "mooncake",
+   "measure": [
+    3240000,
+    3600000
+   ],
+   "slice": [
+    3000000,
+    3600000
+   ],
+   "split": "test"
+  },
+  "sessions:s0": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed0.jsonl",
+   "split": "train"
+  },
+  "sessions:s1": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed1.jsonl",
+   "split": "train"
+  },
+  "sessions:s2": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed2.jsonl",
+   "split": "train"
+  },
+  "sessions:s3": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed3.jsonl",
+   "split": "train"
+  },
+  "sessions:s4": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed4.jsonl",
+   "split": "val"
+  },
+  "sessions:s5": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed5.jsonl",
+   "split": "val"
+  },
+  "sessions:s6": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed6.jsonl",
+   "split": "test"
+  },
+  "sessions:s7": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed7.jsonl",
+   "split": "test"
+  },
+  "sessions:s8": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed8.jsonl",
+   "split": "test"
+  },
+  "sessions:s9": {
+   "family": "synthetic_sessions",
+   "measure": [
+    180000,
+    720000
+   ],
+   "path": "traces/synthetic_sessions/sessions_seed9.jsonl",
+   "split": "test"
+  }
+ },
+ "segments_by_split": {
+  "test": [
+   "agentx:T1",
+   "agentx:T2",
+   "agentx:T3",
+   "agentx:T4",
+   "fast25_synthetic:x0",
+   "fast25_synthetic:x1",
+   "mooncake:w3",
+   "mooncake:w5",
+   "sessions:s6",
+   "sessions:s7",
+   "sessions:s8",
+   "sessions:s9"
+  ],
+  "train": [
+   "agentx:A1",
+   "agentx:A2",
+   "agentx:A3",
+   "mooncake:w0",
+   "mooncake:w2",
+   "mooncake:w4",
+   "sessions:s0",
+   "sessions:s1",
+   "sessions:s2",
+   "sessions:s3"
+  ],
+  "val": [
+   "agentx:V1",
+   "agentx:V2",
+   "agentx:V3",
+   "mooncake:w1",
+   "sessions:s4",
+   "sessions:s5"
+  ]
+ },
+ "status": "calibrated; test.jsonl frozen (facts/test_freeze.json)",
+ "traces_manifest_sha256": "9372f0a2b8aa84518ec768b1b7ef5b3965dab8f2639d81ec9c028fd75eed237d",
+ "train_ranges": {
+  "isl_prefix_mult": [
+   1.0,
+   1.5
+  ],
+  "isl_unique_mult": [
+   1.0,
+   1.5
+  ],
+  "osl_mult": [
+   0.5,
+   2.0
+  ],
+  "prefix_root_mult": [
+   1,
+   2
+  ],
+  "think_mult": [
+   0.5,
+   2.0
+  ]
+ },
+ "transform_tags": {
+  "base": {},
+  "islp1.5": {
+   "isl_prefix_mult": 1.5
+  },
+  "islp2.5": {
+   "isl_prefix_mult": 2.5
+  },
+  "islu1.25": {
+   "isl_unique_mult": 1.25
+  },
+  "islu1.5": {
+   "isl_unique_mult": 1.5
+  },
+  "islu2.5": {
+   "isl_unique_mult": 2.5
+  },
+  "osl0.25": {
+   "osl_mult": 0.25
+  },
+  "osl0.5": {
+   "osl_mult": 0.5
+  },
+  "osl1.5": {
+   "osl_mult": 1.5
+  },
+  "osl2.0": {
+   "osl_mult": 2.0
+  },
+  "osl2.5": {
+   "osl_mult": 2.5
+  },
+  "osl4.0": {
+   "osl_mult": 4.0
+  },
+  "root2": {
+   "prefix_root_mult": 2
+  },
+  "root4": {
+   "prefix_root_mult": 4
+  },
+  "think0.25": {
+   "think_mult": 0.25
+  },
+  "think0.5": {
+   "think_mult": 0.5
+  },
+  "think1.5": {
+   "think_mult": 1.5
+  },
+  "think2.0": {
+   "think_mult": 2.0
+  },
+  "think4.0": {
+   "think_mult": 4.0
+  }
+ },
+ "worker_counts": {
+  "test": [
+   2,
+   4,
+   6,
+   8,
+   16,
+   32
+  ],
+  "train": [
+   4,
+   8
+  ],
+  "val": [
+   4,
+   6,
+   8
+  ]
+ }
+}

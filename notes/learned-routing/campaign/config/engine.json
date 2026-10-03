@@ -1,0 +1,99 @@
+{
+  "ais_perf_config": {
+    "backend": "vllm",
+    "backend_version": "0.24.0",
+    "model": "Qwen/Qwen3-32B",
+    "system": "h100_sxm",
+    "tp": 2,
+    "worker_type": "aggregated"
+  },
+  "ais_perf_config_canonical_local": {
+    "attention_backend": null,
+    "attention_dp": 1,
+    "backend": "vllm",
+    "backend_version": "0.24.0",
+    "comm_quant_mode": null,
+    "database_mode": "SILICON",
+    "dcp": null,
+    "decoder_replay": false,
+    "enable_eplb": false,
+    "enable_shared_layer": null,
+    "estimation_mode": "auto",
+    "estimator_config": {},
+    "fallback_policy": "deny",
+    "fmha_quant_mode": null,
+    "fpm_fmha_quant_mode": null,
+    "gemm_quant_mode": null,
+    "kv_block_size": null,
+    "kvcache_quant_mode": null,
+    "model": "Qwen/Qwen3-32B",
+    "moe_backend": null,
+    "moe_ep_size": null,
+    "moe_kernel_source": null,
+    "moe_quant_mode": null,
+    "moe_tp_size": null,
+    "nextn": 0,
+    "pp": 1,
+    "speculation": null,
+    "strict_provenance": false,
+    "system": "h100_sxm",
+    "systems_paths": [
+      "<worktree>/.venv/lib/python3.12/site-packages/aisimulate_core/systems"
+    ],
+    "tp": 2,
+    "transfer_policy": null,
+    "wideep_num_slots": null,
+    "worker_type": "aggregated"
+  },
+  "backend": "vllm",
+  "backend_version": "0.24.0",
+  "decisions": {
+    "block_size": "16 = vLLM default KV block size on H100 (FlashAttention).",
+    "max_model_len": "131072 per operator (YaRN).",
+    "max_num_seqs": "1024 and max_num_batched_tokens 8192: vLLM V1 OpenAI-server defaults for >=70 GiB GPUs (hypothesis from vLLM source knowledge; capacity is unchanged between 256 and 1024 per the estimator)."
+  },
+  "hardware": "h100_sxm",
+  "kv_capacity": {
+    "block_size": 16,
+    "num_gpu_blocks": 18863,
+    "source": "dynamo._internal.ais.estimate_canonical_num_gpu_blocks(block_size=16, max_num_batched_tokens=8192, max_num_seqs=1024); pinned so every replay uses identical capacity",
+    "tokens_per_worker": 301808
+  },
+  "max_model_len": 131072,
+  "mock_engine_args": {
+    "ais_perf_config": {
+      "backend": "vllm",
+      "backend_version": "0.24.0",
+      "model": "Qwen/Qwen3-32B",
+      "system": "h100_sxm",
+      "tp": 2,
+      "worker_type": "aggregated"
+    },
+    "block_size": 16,
+    "decode_speedup_ratio": 1.0,
+    "dp_size": 1,
+    "enable_chunked_prefill": true,
+    "enable_prefix_caching": true,
+    "engine_type": "vllm",
+    "max_model_len": 131072,
+    "max_num_batched_tokens": 8192,
+    "max_num_seqs": 1024,
+    "num_gpu_blocks": 18863,
+    "speedup_ratio": 1.0,
+    "worker_type": "aggregated"
+  },
+  "mode": "aggregated",
+  "model": "Qwen/Qwen3-32B",
+  "replay_call": {
+    "engine_args": "MockEngineArgs.from_json(json.dumps(engine['mock_engine_args']))",
+    "note": "Top-level run_trace_replay(ais_perf_config=...) is the router's AIS prefill-load estimator; it must stay None (no AIS coupling in routing). Engine timing comes only from mock_engine_args.ais_perf_config.",
+    "router_prefill_load_model": "none",
+    "top_level_ais_perf_config": null
+  },
+  "schema": "learned-routing.engine.v1",
+  "tp": 2,
+  "versions": {
+    "ai-dynamo-runtime": "1.6.0",
+    "aisimulate": "0.13.0.dev202609300000000061"
+  }
+}
