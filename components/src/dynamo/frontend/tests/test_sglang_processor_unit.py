@@ -5357,3 +5357,45 @@ class TestThinkingControlParity:  # FRONTEND.10
             reasoning_parser_name=None,
         )
         assert result.request.get("chat_template_kwargs", {}) == case.expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "modalities, rejects",
+    [(None, False), (frozenset({"text"}), True), (frozenset({"text", "image"}), False)],
+)
+async def test_input_modalities_guard_before_dispatch(tokenizer, modalities, rejects):
+    engine = FakeRoutedEngine(
+        items=[
+            {
+                "token_ids": tokenizer.encode("ok", add_special_tokens=False),
+                "finish_reason": "stop",
+            }
+        ]
+    )
+    processor = SglangProcessor(
+        tokenizer, engine, None, None, None, input_modalities=modalities
+    )
+    request = {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.invalid/image.png"},
+                    },
+                ],
+            }
+        ],
+    }
+    expected = (
+        pytest.raises(InvalidArgument, match="does not accept image")
+        if rejects
+        else nullcontext()
+    )
+    with expected:
+        assert [item async for item in processor.generator(request)]
+    assert len(engine.requests) == (0 if rejects else 1)

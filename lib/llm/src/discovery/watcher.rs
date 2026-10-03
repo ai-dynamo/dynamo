@@ -1921,6 +1921,7 @@ mod tests {
             "explicit-default",
             "overridden-policy",
             "needs",
+            "input-modalities",
         ] {
             let endpoint = drt
                 .namespace(difference)
@@ -1949,6 +1950,13 @@ mod tests {
                     });
                 }
                 "needs" => newcomer.needs = vec![vec![WorkerType::Encode]],
+                "input-modalities" => {
+                    newcomer.runtime_config.runtime_data.insert(
+                        crate::local_model::runtime_config::INPUT_MODALITIES_RUNTIME_KEY
+                            .to_string(),
+                        serde_json::json!(["text"]),
+                    );
+                }
                 _ => unreachable!(),
             }
             let manager = Arc::new(ModelManager::new());

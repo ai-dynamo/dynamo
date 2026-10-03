@@ -49,7 +49,9 @@ from .utils import (
     nvext_extra_field_requested,
     random_uuid,
     read_jinja_chat_template,
+    reject_undeclared_input_modalities,
     resolve_chat_template,
+    runtime_input_modalities,
     worker_warmup,
 )
 
@@ -517,6 +519,7 @@ class SglangProcessor:
         preprocess_workers: int = 0,
         stream_interval: int = 1,
         default_thinking_mode: str | None = None,
+        input_modalities: frozenset[str] | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -541,6 +544,7 @@ class SglangProcessor:
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
         self.default_thinking_mode = default_thinking_mode
+        self.input_modalities = input_modalities
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -564,6 +568,9 @@ class SglangProcessor:
             logger.info("[perf] sglang generator enter: active_requests=%d", active)
 
         try:
+            reject_undeclared_input_modalities(
+                request.get("messages") or [], self.input_modalities
+            )
             if self.preprocess_pool is None:
                 async for item in self._generator_inner(request, context=context):
                     yield item
@@ -1122,6 +1129,7 @@ class SglangEngineFactory:
             preprocess_workers=preprocess_workers,
             stream_interval=self.stream_interval,
             default_thinking_mode=default_thinking_mode,
+            input_modalities=runtime_input_modalities(mdc.runtime_config()),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

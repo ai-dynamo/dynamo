@@ -3470,6 +3470,14 @@ impl OpenAIPreprocessor {
                     continue;
                 };
 
+                let modality = type_str.trim_end_matches("_url");
+                if self.runtime_config.rejects_input_modality(modality) {
+                    return Err(invalid_argument_error(format!(
+                        "Model does not accept {modality} input; \
+                         received unsupported content type '{type_str}'."
+                    )));
+                }
+
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
                     total_image_count += 1;
@@ -12762,6 +12770,48 @@ mod tests {
             .expect_err("URL-passthrough must stop at the policy rejection");
 
         assert!(MediaFetcher::is_policy_rejection(&error));
+    }
+
+    /// A worker that declares its input modalities gets media outside them
+    /// rejected, rather than dropped by a text-only chat template.
+    #[tokio::test]
+    async fn undeclared_input_modality_is_rejected() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config
+            .set_engine_specific(
+                crate::local_model::runtime_config::INPUT_MODALITIES_RUNTIME_KEY,
+                ["text"],
+            )
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}
+                ]
+            }]
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequest::builder();
+
+        let error = preprocessor
+            .gather_multi_modal_data(&request, &mut builder, None, &[])
+            .await
+            .expect_err("a text-only worker must reject image content");
+
+        let dynamo_err = error
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+        assert!(error.to_string().contains("'image_url'"), "{error}");
     }
 
     /// Object-store and file URLs are backend-owned passthrough schemes, so a

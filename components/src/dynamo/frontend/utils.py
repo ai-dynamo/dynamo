@@ -205,6 +205,58 @@ def extract_mm_urls(
     return mm_data or None, mm_uuids if has_user_uuid else None
 
 
+# Mirrors INPUT_MODALITIES_RUNTIME_KEY in lib/llm/src/local_model/runtime_config.rs.
+INPUT_MODALITIES_RUNTIME_KEY = "input_modalities"
+
+
+def runtime_input_modalities(
+    runtime_config: dict[str, Any] | None,
+) -> frozenset[str] | None:
+    """Read worker-declared input modalities; ``None`` when undeclared."""
+    if not isinstance(runtime_config, dict):
+        return None
+    runtime_data = runtime_config.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+    declared = runtime_data.get(INPUT_MODALITIES_RUNTIME_KEY)
+    if not isinstance(declared, list) or not all(
+        isinstance(value, str) for value in declared
+    ):
+        return None
+    return frozenset(declared)
+
+
+def reject_undeclared_input_modalities(
+    messages: list[dict[str, Any]],
+    input_modalities: frozenset[str] | None,
+) -> None:
+    """Reject media the worker did not declare, matching the Rust preprocessor.
+
+    Without this, a text-only chat template drops the media and the request
+    succeeds as though the model had seen it.
+    """
+    if input_modalities is None:
+        return
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") not in ("user", "tool"):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type not in _MEDIA_CONTENT_TYPES:
+                continue
+            modality = part_type.removesuffix("_url")
+            if modality not in input_modalities:
+                raise InvalidArgument(
+                    f"Model does not accept {modality} input; "
+                    f"received unsupported content type '{part_type}'."
+                )
+
+
 def make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]:
     """Build an OpenAI-style error dict, guarding against None/missing message."""
     backend_msg = engine_response.get("message") or "unknown backend error"

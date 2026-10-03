@@ -53,7 +53,9 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     random_uuid,
+    reject_undeclared_input_modalities,
     resolve_chat_template,
+    runtime_input_modalities,
 )
 
 logger = logging.getLogger(__name__)
@@ -419,6 +421,7 @@ class VllmProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        input_modalities: frozenset[str] | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -431,6 +434,7 @@ class VllmProcessor:
         self.enable_auto_tool_choice = enable_auto_tool_choice
         self.default_chat_template_kwargs = default_chat_template_kwargs
         self.default_thinking_mode = default_thinking_mode
+        self.input_modalities = input_modalities
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
@@ -653,6 +657,7 @@ class VllmProcessor:
             )
 
         messages = request.get("messages") or []
+        reject_undeclared_input_modalities(messages, self.input_modalities)
         _normalize_vllm_image_parts(messages)
         # Preserve user cache UUIDs alongside URL-backed media. UUID-only image
         # slots are resolved by the worker-side vLLM processor cache.
@@ -1315,6 +1320,7 @@ class EngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            input_modalities=runtime_input_modalities(mdc.runtime_config()),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
