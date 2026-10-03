@@ -20,7 +20,8 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
 use crate::picker::{
-    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
+    ResponseUsage,
 };
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc, ProcessingRequest, ProcessingResponse,
@@ -331,13 +332,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         // Inject routing extensions into the request body JSON.
         // `nvext.token_data` lets the backend skip redundant tokenization.
         // `cache_salt` is written only under the `NativeVllm` forwarding
-        // policy (see `CacheSaltForwarding`); `Preserve` leaves the body
-        // untouched. Only the injection path allocates a new body — otherwise
-        // the unchanged body is a cheap `Bytes` clone (no copy).
-        let cache_salt = match result.cache_salt_forwarding {
-            CacheSaltForwarding::NativeVllm => result.cache_namespace.as_deref(),
-            CacheSaltForwarding::Preserve => None,
-        };
+        // policy; `Preserve` and `NativeSglang` leave the body untouched.
+        // Only the injection path allocates a new body — otherwise the
+        // unchanged body is a cheap `Bytes` clone (no copy).
+        let cache_salt = cache_salt_to_inject(&result);
         let forwarded_body: Bytes = if result.token_ids.is_some() || cache_salt.is_some() {
             match inject_body_extensions(&raw_body, result.token_ids.as_deref(), cache_salt) {
                 Ok(modified) => {
@@ -847,6 +845,13 @@ fn validate_protocol_config(
         "ProtocolConfiguration mismatch — failing stream"
     );
     Err(Status::failed_precondition(detail))
+}
+
+fn cache_salt_to_inject(result: &PickResult) -> Option<&str> {
+    match result.cache_salt_forwarding {
+        CacheSaltForwarding::NativeVllm => result.cache_namespace.as_deref(),
+        CacheSaltForwarding::Preserve | CacheSaltForwarding::NativeSglang => None,
+    }
 }
 
 /// Inject routing helpers into the request body JSON:
@@ -1627,6 +1632,33 @@ mod tests {
             dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
         ));
         assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
+    }
+
+    #[test]
+    fn cache_salt_to_inject_only_for_native_vllm() {
+        let result = |forwarding| PickResult {
+            cache_namespace: Some("tenant-a".to_string()),
+            cache_salt_forwarding: forwarding,
+            ..Default::default()
+        };
+        assert_eq!(
+            cache_salt_to_inject(&result(CacheSaltForwarding::NativeVllm)),
+            Some("tenant-a")
+        );
+        assert_eq!(
+            cache_salt_to_inject(&result(CacheSaltForwarding::Preserve)),
+            None
+        );
+        assert_eq!(
+            cache_salt_to_inject(&result(CacheSaltForwarding::NativeSglang)),
+            None
+        );
+
+        let result = PickResult {
+            cache_salt_forwarding: CacheSaltForwarding::NativeVllm,
+            ..Default::default()
+        };
+        assert_eq!(cache_salt_to_inject(&result), None);
     }
 
     /// Cache salt is injected as a top-level field and tagged with the Dynamo
