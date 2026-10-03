@@ -74,4 +74,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Skip plot generation.",
     )
+    parser.add_argument(
+        "--uuid-and-strip",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Send image UUIDs and strip repeated image content after its first "
+            "use in each session. Requires a chat endpoint and image_uuids in "
+            "the input JSONL."
+        ),
+    )
     return parser.parse_args(argv)

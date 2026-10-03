@@ -52,7 +52,7 @@ spec:
           done
           echo "Model '${MODEL_NAME}' is ready."
 
-          INPUT_FILE="${DATASET_DIR}/30u_8t_5w_8000word_base64.jsonl"
+          INPUT_FILE="${DATASET_DIR}/30u_8t_5w_8000word_sharedtext_base64_uuid.jsonl"
           if [[ ! -f "${INPUT_FILE}" ]]; then
             echo "Dataset not found: ${INPUT_FILE}" >&2
             exit 1
@@ -70,6 +70,8 @@ spec:
             --model "${MODEL_NAME}" \
             --input-file "${INPUT_FILE}" \
             --custom-dataset-type single_turn \
+            --endpoint-type chat \
+            --uuid-and-strip \
             --url "http://${FRONTEND}:8000" \
             --streaming \
             --ui-type none \
