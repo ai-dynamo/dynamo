@@ -1,0 +1,296 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Dynamo media protocol",
+    "version": "1"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "MediaDelivery": {
+        "type": "string",
+        "description": "Delivery mode of generated media: a URL to the file, or the bytes as\nbase64 text.\n\nThe set has two values. A request with an unknown value fails to parse.",
+        "enum": [
+          "url",
+          "b64_json"
+        ]
+      },
+      "NvCreateVideoRequest": {
+        "type": "object",
+        "description": "Request for video generation (/v1/videos endpoint)",
+        "required": [
+          "prompt",
+          "model"
+        ],
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "The text prompt for video generation"
+          },
+          "model": {
+            "type": "string",
+            "description": "The model to use for video generation"
+          },
+          "input_reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional image reference that guides generation (for I2V)"
+          },
+          "seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Clip duration in seconds"
+          },
+          "size": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Video size in WxH format (default: \"832x480\")"
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional user identifier"
+          },
+          "response_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MediaDelivery",
+                "description": "Delivery mode of the generated video. If absent, the worker applies its\nown default."
+              }
+            ]
+          },
+          "output_format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Output container format: \"mp4\", \"webm\", \"gif\", etc.\nThis field is used as model hint and the model may not\nreturn the requested format, should check with output_format\nfield in the response data."
+          },
+          "stream": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to stream the video generation (default: false)"
+          },
+          "nvext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VideoNvExt",
+                "description": "NVIDIA extensions"
+              }
+            ]
+          },
+          "extra_args": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Worker-boundary passthrough. The frontend nests unknown top-level request fields (an OpenAI client's extra_body) under the \"media_passthrough\" key.",
+            "additionalProperties": true
+          }
+        }
+      },
+      "NvVideosResponse": {
+        "type": "object",
+        "description": "Response structure for video generation",
+        "required": [
+          "id",
+          "model",
+          "created"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the response"
+          },
+          "object": {
+            "type": "string",
+            "description": "Object type (always \"video\")",
+            "default": "video"
+          },
+          "model": {
+            "type": "string",
+            "description": "Model used for generation"
+          },
+          "status": {
+            "type": "string",
+            "description": "Status of the generation (\"completed\", \"failed\", etc.)",
+            "default": "completed"
+          },
+          "progress": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Progress percentage (0-100)",
+            "default": 100
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp of creation"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VideoData"
+            },
+            "description": "Generated video data",
+            "default": []
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Error message if generation failed"
+          },
+          "inference_time_s": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Inference time in seconds"
+          }
+        }
+      },
+      "VideoData": {
+        "type": "object",
+        "description": "Video data in response",
+        "required": [
+          "output_format"
+        ],
+        "properties": {
+          "output_format": {
+            "type": "string",
+            "description": "Actual container format of this video: \"mp4\", \"webm\", \"gif\""
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "URL of the generated video (if response_format is \"url\")"
+          },
+          "b64_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64-encoded video (if response_format is \"b64_json\")"
+          },
+          "fps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Actual video frame rate when reported by the model"
+          },
+          "audio_sample_rate": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Muxed audio sample rate when the generated video contains audio"
+          }
+        }
+      },
+      "VideoNvExt": {
+        "type": "object",
+        "description": "NVIDIA extensions to the OpenAI Videos API",
+        "properties": {
+          "annotations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Annotations\nUser requests triggers which result in the request issue back out-of-band information in the SSE\nstream using the `event:` field."
+          },
+          "fps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Frames per second (default: 24)"
+          },
+          "num_frames": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Number of frames to generate (overrides fps * seconds if set)"
+          },
+          "negative_prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A text description of the undesired video content."
+          },
+          "num_inference_steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The number of denoising steps. More steps usually lead to higher quality at the expense of slower inference."
+          },
+          "guidance_scale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "The CFG scale. Higher values usually lead to more coherent output."
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The seed for the random number generator."
+          },
+          "boundary_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "MoE expert switching boundary as a fraction of the denoising schedule (vLLM-Omni I2V)."
+          },
+          "guidance_scale_2": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "CFG scale for the low-noise expert (vLLM-Omni I2V dual-guidance)."
+          }
+        }
+      }
+    }
+  }
+}

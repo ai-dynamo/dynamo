@@ -24,6 +24,8 @@ pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod generate;
 pub mod images;
+#[cfg(test)]
+mod media_schemas;
 pub mod models;
 pub mod pooling;
 pub mod rerank;
