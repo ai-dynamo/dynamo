@@ -341,8 +341,7 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA
-  # variants)
+  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA variants)
   # ============================================================================
   # Built HERE — not reused from post-merge — for two reasons:
   #   1. OSRB from the get-go: GitLab's nvbug:attach-compliance resolves
@@ -538,10 +537,20 @@ jobs:
     secrets: inherit
 
   deepseek-v4-pro-agg-perf:
-    name: DeepSeek V4 Pro aggregated perf
+    name: Recipe tests
     needs: [compute-release-mode, resolve-source-sha, vllm-build, vllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/deepseek-v4-pro-nightly.yml
+    uses: ./.github/workflows/deepseek-v4-pro-agg-nightly.yml
+    with:
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+    secrets: inherit
+
+  deepseek-v4-pro-disagg-perf:
+    name: Recipe tests
+    needs: [compute-release-mode, resolve-source-sha, vllm-build, vllm-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/deepseek-v4-pro-disagg-nightly.yml
     with:
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
@@ -600,6 +609,16 @@ jobs:
           # endpoint; empty vars -> no cache (workers download from HuggingFace).
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
+
+  kimi-k25-agg-perf:
+    name: Recipe tests
+    needs: [compute-release-mode, resolve-source-sha, trtllm-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: $/.github/workflows/kimi-k25-agg-nightly.yml
+    with:
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
+    secrets: inherit
 
   deploy-test-vllm:
     name: vLLM Nightly Deploy Test
@@ -976,7 +995,7 @@ jobs:
       dd_flaky_retry_enabled: ${{ 'false' }}
       test_suite_name: trtllm
       framework: trtllm
-      test_type: Sidecar E2E Test
+      test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
       amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
@@ -1008,9 +1027,7 @@ jobs:
       enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: vllm and gpu_0
-      # not sidecar: sidecar-marked tests need the dynamo-vllm-sidecar binary
-      # installed (see pr.yaml's sidecar-vllm-test), which this plain
-      # vllm-runtime image doesn't have.
+      # Plain runtime images do not include sidecar binaries.
       # TODO: this ad-hoc exclusion is duplicated across pr.yaml, post-merge-ci.yml,
       # and nightly-ci.yml's gpu_test_markers; consolidate into shared-test.yml
       # once there's a second marker that needs the same treatment.
@@ -1691,7 +1708,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, deploy-cleanup, deepseek-v4-pro-agg-perf, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, deploy-cleanup, deepseek-v4-pro-agg-perf, deepseek-v4-pro-disagg-perf, rust-tests, kimi-k25-agg-perf]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
