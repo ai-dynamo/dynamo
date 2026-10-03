@@ -50,6 +50,18 @@ pub(super) struct RequestState {
     blocks: RequestBlockChain,
     started_at: Instant,
     expected_output_tokens: Option<u32>,
+    prefill_completed: bool,
+}
+
+/// What marking a request's prefill complete changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrefillCompletion {
+    /// The request is unknown or its prefill was already complete.
+    Unchanged,
+    /// The request left the prefill phase without holding prompt load.
+    PhaseChanged,
+    /// The request left the prefill phase and released its prompt load.
+    LoadReleased,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -112,6 +124,8 @@ pub(super) struct SequenceMutationOutcome {
 pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
+    /// Requests not yet marked prefill-complete, whether or not they hold prompt load.
+    prefill_requests: usize,
     blocks: BlockTracker,
     last_expiry_check_time: Instant,
     expiry_duration: Option<Duration>,
@@ -135,6 +149,7 @@ impl ActiveSequences {
         Self {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
+            prefill_requests: 0,
             blocks: BlockTracker::default(),
             last_expiry_check_time: Instant::now(),
             expiry_duration,
@@ -145,10 +160,20 @@ impl ActiveSequences {
     fn assert_consistent(&self) {
         self.prefill.assert_consistent();
         let active_prefills: HashSet<RequestId> = self.prefill.prefills.keys().cloned().collect();
-        let active_requests: HashSet<RequestId> = self.requests.keys().cloned().collect();
+        let prefill_phase: HashSet<RequestId> = self
+            .requests
+            .iter()
+            .filter(|(_, state)| !state.prefill_completed)
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
         assert!(
-            active_prefills.is_subset(&active_requests),
-            "prefill tracker cannot reference missing request state",
+            active_prefills.is_subset(&prefill_phase),
+            "prefill tracker can only reference requests still in prefill",
+        );
+        assert_eq!(
+            self.prefill_requests,
+            prefill_phase.len(),
+            "prefill request count must match per-request prefill state",
         );
         self.blocks
             .assert_consistent(self.requests.values().map(|state| &state.blocks));
@@ -224,8 +249,10 @@ impl ActiveSequences {
                 blocks,
                 started_at,
                 expected_output_tokens,
+                prefill_completed: false,
             },
         );
+        self.prefill_requests += 1;
 
         self.validate_state();
         outcome
@@ -236,10 +263,21 @@ impl ActiveSequences {
         &mut self,
         request_id: &RequestId,
         decay_now: Instant,
-    ) -> bool {
-        let changed = self.prefill.remove(request_id, decay_now).is_some();
+    ) -> PrefillCompletion {
+        let Some(request_state) = self.requests.get_mut(request_id) else {
+            return PrefillCompletion::Unchanged;
+        };
+        if std::mem::replace(&mut request_state.prefill_completed, true) {
+            return PrefillCompletion::Unchanged;
+        }
+        self.prefill_requests -= 1;
+        let completion = if self.prefill.remove(request_id, decay_now).is_some() {
+            PrefillCompletion::LoadReleased
+        } else {
+            PrefillCompletion::PhaseChanged
+        };
         self.validate_state();
-        changed
+        completion
     }
 
     /// Free all blocks associated with a request.
@@ -254,6 +292,9 @@ impl ActiveSequences {
         let _ = self.prefill.remove(request_id, decay_now);
 
         let request_state = self.requests.remove(request_id)?;
+        if !request_state.prefill_completed {
+            self.prefill_requests -= 1;
+        }
 
         let blocks = request_state.blocks;
         let _ = request_state.expected_output_tokens;
@@ -341,6 +382,7 @@ impl ActiveSequences {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
             active_requests: self.requests.len(),
+            prefill_requests: self.prefill_requests,
             prefill: self.prefill.snapshot(),
         }
     }
@@ -634,6 +676,80 @@ mod tests {
 
         seq_manager.free(&"r2".to_string(), decay_now);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
+    }
+
+    #[test]
+    fn prefill_phase_counts_requests_until_marked_even_without_prompt_load() {
+        let mut seq_manager = ActiveSequences::new(4);
+        let decay_now = Instant::now();
+
+        seq_manager.add_request_with_prefill_tracking(
+            "loaded".to_string(),
+            Some(vec![1, 2]),
+            None,
+            true,
+            tracking_hint(8),
+            decay_now,
+        );
+        seq_manager.add_request_with_prefill_tracking(
+            "cached".to_string(),
+            Some(vec![1]),
+            None,
+            true,
+            tracking_hint(0),
+            decay_now,
+        );
+        let load = seq_manager.worker_load_snapshot();
+        assert_eq!((load.active_requests, load.prefill_requests), (2, 2));
+
+        assert_eq!(
+            seq_manager.mark_prefill_completed(&"cached".to_string(), decay_now),
+            PrefillCompletion::PhaseChanged
+        );
+        assert_eq!(
+            seq_manager.mark_prefill_completed(&"cached".to_string(), decay_now),
+            PrefillCompletion::Unchanged
+        );
+        assert_eq!(seq_manager.worker_load_snapshot().prefill_requests, 1);
+
+        assert_eq!(
+            seq_manager.mark_prefill_completed(&"loaded".to_string(), decay_now),
+            PrefillCompletion::LoadReleased
+        );
+        assert_eq!(seq_manager.worker_load_snapshot().prefill_requests, 0);
+        assert_eq!(
+            seq_manager.mark_prefill_completed(&"missing".to_string(), decay_now),
+            PrefillCompletion::Unchanged
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_and_expiry_remove_prefill_phase_requests_from_the_count() {
+        let mut seq_manager = ActiveSequences::new_with_expiry(4, Some(Duration::from_secs(60)));
+
+        for request_id in ["freed", "expired", "decoding"] {
+            seq_manager.add_request_with_prefill_tracking(
+                request_id.to_string(),
+                Some(vec![1]),
+                None,
+                false,
+                None,
+                Instant::now(),
+            );
+        }
+        seq_manager.mark_prefill_completed(&"decoding".to_string(), Instant::now());
+        seq_manager.free(&"freed".to_string(), Instant::now());
+        let load = seq_manager.worker_load_snapshot();
+        assert_eq!((load.active_requests, load.prefill_requests), (2, 1));
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let expired = seq_manager.force_expiry();
+        assert_eq!(
+            expired.expired_request_ids,
+            HashSet::from(["expired".to_string(), "decoding".to_string()])
+        );
+        let load = seq_manager.worker_load_snapshot();
+        assert_eq!((load.active_requests, load.prefill_requests), (0, 0));
     }
 
     #[test]

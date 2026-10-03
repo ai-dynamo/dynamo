@@ -28,7 +28,8 @@ use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::{RequestBooking, RequestIndex};
 use super::sharded_lock::ShardedRwLock;
 use super::single::{
-    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PromptMembershipDelta, RequestId,
+    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PrefillCompletion,
+    PromptMembershipDelta, RequestId,
 };
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
@@ -102,6 +103,19 @@ pub struct SchedulerLoadSnapshot {
     pub active_prefill_tokens: u64,
 }
 
+/// Per-worker load after any local mutation, for host metrics. Unlike
+/// [`SchedulerLoadSnapshot`], it includes replica-local output blocks and request
+/// counts, which are never published as shared scheduler load.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LocalWorkerLoad {
+    pub active_blocks: usize,
+    pub active_tokens: usize,
+    /// Requests booked on the worker, in either phase.
+    pub active_requests: usize,
+    /// The booked requests not yet marked prefill-complete; the rest are decoding.
+    pub prefill_requests: usize,
+}
+
 /// Abstraction over event publishing and metrics observation.
 ///
 /// Implementations provide the runtime-specific transport (e.g., NATS EventPublisher,
@@ -126,13 +140,7 @@ pub trait SequencePublisher: Send + Sync {
     }
 
     /// Record per-worker load in Prometheus gauges.
-    fn observe_load(
-        &self,
-        worker: &WorkerWithDpRank,
-        worker_type: &str,
-        blocks: usize,
-        tokens: usize,
-    );
+    fn observe_load(&self, worker: &WorkerWithDpRank, worker_type: &str, load: LocalWorkerLoad);
 
     /// Observe that a worker/dp_rank is currently registered in the router.
     fn observe_worker_registered(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
@@ -251,7 +259,7 @@ impl SequencePublisher for NoopSequencePublisher {
 
     fn publish_scheduler_load(&self, _snapshot: SchedulerLoadSnapshot) {}
 
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: LocalWorkerLoad) {}
 }
 
 /// Abstraction over event subscription for replica sync.
@@ -543,8 +551,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let active_blocks = load.active_blocks;
         let active_tokens = load.active_tokens(decay_now);
 
-        self.publisher
-            .observe_load(&worker, self.worker_type, active_blocks, active_tokens);
+        self.publisher.observe_load(
+            &worker,
+            self.worker_type,
+            LocalWorkerLoad {
+                active_blocks,
+                active_tokens,
+                active_requests: load.active_requests,
+                prefill_requests: load.prefill_requests,
+            },
+        );
 
         SchedulerLoadSnapshot {
             worker,
@@ -1062,12 +1078,44 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let Some(worker) = self.request_index.worker_for(request_id) else {
             return Ok(LifecycleMutationOutcome::NoChange);
         };
-        self.mutate_request_worker_load_state_local(
-            worker,
-            request_id,
-            decay_now,
-            |seqs, rid, decay_now| seqs.mark_prefill_completed(rid, decay_now),
-        )
+        let (completion, load) = {
+            let table = self.workers.read();
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                return Err(self.stale_request_not_found(
+                    request_id,
+                    worker,
+                    "mark_prefill_completed",
+                ));
+            };
+            let mut seq = table.slots[idx].sequences.write();
+            let completion = seq.mark_prefill_completed(request_id, decay_now);
+            if completion == PrefillCompletion::Unchanged {
+                return Ok(LifecycleMutationOutcome::NoChange);
+            }
+            let load = seq.worker_load_snapshot();
+            self.prompt_registry.replace_worker_load_state(worker, load);
+            (completion, load)
+        };
+        Ok(self.settle_prefill_completion(worker, completion, load, decay_now))
+    }
+
+    /// Publish load released by a prefill completion. A completion that released no
+    /// prompt load changes no scheduler state, so it only refreshes the load gauges
+    /// and reports `NoChange`; callers then republish the ordered completion event.
+    fn settle_prefill_completion(
+        &self,
+        worker: WorkerWithDpRank,
+        completion: PrefillCompletion,
+        load: WorkerLoadSnapshot,
+        decay_now: Instant,
+    ) -> LifecycleMutationOutcome {
+        if completion == PrefillCompletion::PhaseChanged {
+            let _ = self.observe_worker_load_snapshot(worker, load, decay_now);
+            return LifecycleMutationOutcome::NoChange;
+        }
+        self.publish_worker_load_snapshot(worker, load, decay_now);
+        LifecycleMutationOutcome::Applied
     }
 
     pub(crate) fn mark_prefill_completed_if_booking(
@@ -1078,7 +1126,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         decay_now: Instant,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
         let expected = RequestBooking { worker, attempt_id };
-        let (load, lora_name) = {
+        let (completion, load, lora_name) = {
             let table = self.workers.read();
             let Some(&idx) = table.index.get(&worker) else {
                 drop(table);
@@ -1090,7 +1138,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if self.request_index.booking_for(request_id) != Some(expected) {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
-            if !seq.mark_prefill_completed(request_id, decay_now) {
+            let completion = seq.mark_prefill_completed(request_id, decay_now);
+            if completion == PrefillCompletion::Unchanged {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
             let load = seq.worker_load_snapshot();
@@ -1099,18 +1148,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 .replica_sync
                 .then(|| self.request_index.lora_for(request_id))
                 .flatten();
-            (load, lora_name)
+            (completion, load, lora_name)
         };
 
-        self.publish_worker_load_snapshot(worker, load, decay_now);
-        self.enqueue_publish_event(|| ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker,
-            data: ActiveSequenceEventData::MarkPrefillCompleted,
-            router_id: self.router_id,
-            lora_name,
-        });
-        Ok(LifecycleMutationOutcome::Applied)
+        let outcome = self.settle_prefill_completion(worker, completion, load, decay_now);
+        if outcome.is_applied() {
+            self.enqueue_publish_event(|| ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker,
+                data: ActiveSequenceEventData::MarkPrefillCompleted,
+                router_id: self.router_id,
+                lora_name,
+            });
+        }
+        Ok(outcome)
     }
 
     /// Publish the router's ordered completion fallback independently of the local mutation.
@@ -1549,33 +1600,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         Ok(LifecycleMutationOutcome::Applied)
     }
-
-    fn mutate_request_worker_load_state_local(
-        &self,
-        worker: WorkerWithDpRank,
-        request_id: &RequestId,
-        decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> bool,
-    ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        let load = {
-            let table = self.workers.read();
-            let Some(&idx) = table.index.get(&worker) else {
-                drop(table);
-                return Err(self.stale_request_not_found(request_id, worker, "load_only_mutate"));
-            };
-            let mut seq = table.slots[idx].sequences.write();
-            if !mutate_fn(&mut seq, request_id, decay_now) {
-                return Ok(LifecycleMutationOutcome::NoChange);
-            }
-            let load = seq.worker_load_snapshot();
-            self.prompt_registry.replace_worker_load_state(worker, load);
-            load
-        };
-
-        self.publish_worker_load_snapshot(worker, load, decay_now);
-
-        Ok(LifecycleMutationOutcome::Applied)
-    }
 }
 
 #[cfg(test)]
@@ -1809,7 +1833,7 @@ mod tests {
         events: Mutex<Vec<ActiveSequenceEventData>>,
         single_loads: Mutex<Vec<SchedulerLoadSnapshot>>,
         load_batches: Mutex<Vec<Vec<SchedulerLoadSnapshot>>>,
-        observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
+        observations: Mutex<Vec<(WorkerWithDpRank, LocalWorkerLoad)>>,
         registered: Mutex<Vec<WorkerWithDpRank>>,
         removed: Mutex<Vec<WorkerWithDpRank>>,
     }
@@ -1851,14 +1875,13 @@ mod tests {
             &self,
             worker: &WorkerWithDpRank,
             _worker_type: &str,
-            blocks: usize,
-            tokens: usize,
+            load: LocalWorkerLoad,
         ) {
             self.state
                 .observations
                 .lock()
                 .unwrap()
-                .push((*worker, blocks, tokens));
+                .push((*worker, load));
         }
 
         fn observe_worker_registered(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
@@ -1899,14 +1922,7 @@ mod tests {
             }
         }
 
-        fn observe_load(
-            &self,
-            _worker: &WorkerWithDpRank,
-            _worker_type: &str,
-            _blocks: usize,
-            _tokens: usize,
-        ) {
-        }
+        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: LocalWorkerLoad) {}
     }
 
     fn make_recording_sequences(
@@ -2411,7 +2427,7 @@ mod tests {
         let observations = state.observations.lock().unwrap();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].0, worker);
-        assert_eq!(observations[0].1, 4);
+        assert_eq!(observations[0].1.active_blocks, 4);
         assert_eq!(sequences.active_blocks().get(&worker), Some(&4));
         assert!(state.load_batches.lock().unwrap().is_empty());
         drop(observations);
@@ -2424,7 +2440,7 @@ mod tests {
         let observations = state.observations.lock().unwrap();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].0, worker);
-        assert_eq!(observations[0].1, 5);
+        assert_eq!(observations[0].1.active_blocks, 5);
         assert_eq!(sequences.active_blocks().get(&worker), Some(&5));
         assert!(state.load_batches.lock().unwrap().is_empty());
     }
@@ -3227,6 +3243,123 @@ mod tests {
 
         assert!(publisher.load_batches().is_empty());
         assert_eq!(sequences.remote_state_update_count(), wake_count_before + 1);
+    }
+
+    fn unloaded_sequence_request(request_id: &str, worker: WorkerWithDpRank) -> SequenceRequest {
+        SequenceRequest {
+            track_prefill_tokens: false,
+            prefill_load_hint: None,
+            ..local_sequence_request(request_id, worker)
+        }
+    }
+
+    fn last_observed_load(
+        state: &RecordingPublisherState,
+        worker: WorkerWithDpRank,
+    ) -> Option<LocalWorkerLoad> {
+        state
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(observed, _)| *observed == worker)
+            .map(|(_, load)| *load)
+    }
+
+    #[test]
+    fn observed_load_counts_requests_per_dp_rank_and_phase() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 2))]));
+        let rank_0 = WorkerWithDpRank::new(1, 0);
+        let rank_1 = WorkerWithDpRank::new(1, 1);
+        let now = Instant::now();
+
+        for (request_id, worker) in [("decoding", rank_0), ("queued", rank_0), ("other", rank_1)] {
+            sequences
+                .add_request(local_sequence_request(request_id, worker), now)
+                .unwrap();
+        }
+        sequences
+            .mark_prefill_completed(&"decoding".to_string(), now)
+            .unwrap();
+
+        let rank_0_load = last_observed_load(&state, rank_0).unwrap();
+        assert_eq!(
+            (rank_0_load.active_requests, rank_0_load.prefill_requests),
+            (2, 1)
+        );
+        let rank_1_load = last_observed_load(&state, rank_1).unwrap();
+        assert_eq!(
+            (rank_1_load.active_requests, rank_1_load.prefill_requests),
+            (1, 1)
+        );
+
+        sequences.free(&"other".to_string(), now).unwrap();
+        assert_eq!(
+            last_observed_load(&state, rank_1),
+            Some(LocalWorkerLoad::default())
+        );
+    }
+
+    #[test]
+    fn phase_only_prefill_completion_observes_without_publishing_load() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let now = Instant::now();
+        sequences
+            .add_request(unloaded_sequence_request("local", worker), now)
+            .unwrap();
+        let attempt_id = sequences
+            .add_request_admitted(unloaded_sequence_request("booked", worker), now)
+            .unwrap();
+        state.clear();
+
+        assert_eq!(
+            sequences
+                .mark_prefill_completed(&"local".to_string(), now)
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert_eq!(
+            sequences
+                .mark_prefill_completed_if_booking(&"booked".to_string(), worker, attempt_id, now)
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+
+        assert!(state.events.lock().unwrap().is_empty());
+        assert!(state.single_loads.lock().unwrap().is_empty());
+        let prefill_counts: Vec<_> = state
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, load)| (load.active_requests, load.prefill_requests))
+            .collect();
+        assert_eq!(prefill_counts, vec![(2, 1), (2, 0)]);
+    }
+
+    #[test]
+    fn replica_phase_only_mark_observes_without_waking_scheduler() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let mut add = replica_add("req-1", worker, vec![1, 2, 3]);
+        add.data = ActiveSequenceEventData::AddRequest {
+            token_sequence: Some(vec![1, 2, 3]),
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+        };
+        sequences.apply_replica_batch(vec![add]);
+        state.clear();
+        let wake_count_before = sequences.remote_state_update_count();
+
+        sequences.apply_replica_batch(vec![replica_mark("req-1", worker)]);
+
+        assert!(state.load_batches().is_empty());
+        assert_eq!(sequences.remote_state_update_count(), wake_count_before);
+        let load = last_observed_load(&state, worker).unwrap();
+        assert_eq!((load.active_requests, load.prefill_requests), (1, 0));
     }
 
     #[test]

@@ -23,7 +23,7 @@ use dynamo_kv_router::scheduling::{
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
     WorkerAvailabilityProvider,
 };
-use dynamo_kv_router::sequences::ReplicaWorkerPolicy;
+use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use dynamo_kv_router::services::selection::{
     CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
@@ -200,13 +200,13 @@ impl dynamo_kv_router::services::selection::SchedulerLoadSink for SenderLoadSink
         self.sender.publish_batch(snapshots);
     }
 
-    fn observe_local_load(&self, worker: &WorkerWithDpRank, blocks: usize, tokens: usize) {
+    fn observe_local_load(&self, worker: &WorkerWithDpRank, load: LocalWorkerLoad) {
         WORKER_LOAD_METRICS.observe(
             worker.worker_id,
             worker.dp_rank,
             self.worker_type,
-            blocks,
-            tokens,
+            load.active_blocks,
+            load.active_tokens,
         );
     }
 }
@@ -717,7 +717,14 @@ mod tests {
             ),
             worker_type: "decode",
         };
-        sink.observe_local_load(&WorkerWithDpRank::new(3, 1), 5, 7);
+        sink.observe_local_load(
+            &WorkerWithDpRank::new(3, 1),
+            LocalWorkerLoad {
+                active_blocks: 5,
+                active_tokens: 7,
+                ..Default::default()
+            },
+        );
         let labels = ["3", "1", "decode"];
         assert_eq!(
             WORKER_LOAD_METRICS
