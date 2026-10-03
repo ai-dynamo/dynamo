@@ -39,8 +39,8 @@ ENV PATH=/usr/local/bin/etcd:${PATH}
 
 {% if device != "cuda" %}
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
-ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
+ENV TORCH_LIB_DIR=/opt/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 # vLLM 0.27.1's XPU image installs the oneAPI runtime and SYCL headers in
@@ -48,6 +48,7 @@ ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 # removed /opt/intel/oneapi tree: Triton gives that variable priority over its
 # wheel-metadata fallback and would search a nonexistent compiler include path.
 {% elif device == "cpu" %}
+ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 {% endif %}
