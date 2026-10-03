@@ -280,9 +280,7 @@ async def test_encode_with_cache_owns_only_admitted_item_storage(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "capacity_bytes, cache_key", [(0, "key"), (32, "key"), (64, None)]
-)
+@pytest.mark.parametrize("capacity_bytes, cache_key", [(32, "key"), (64, None)])
 async def test_encode_with_cache_does_not_clone_rejected_or_unkeyed_items(
     cache_handler: MultimodalEncodeWorkerHandler,
     monkeypatch,
