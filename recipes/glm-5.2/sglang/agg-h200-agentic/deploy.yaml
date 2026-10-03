@@ -10,8 +10,8 @@ metadata:
     app.kubernetes.io/part-of: dynamo
 data:
   agg.yaml: |-
-    model-path: zai-org/GLM-5.2-FP8
-    served-model-name: zai-org/GLM-5.2
+    model-path: zai-org/GLM-5.3
+    served-model-name: zai-org/GLM-5.3
     trust-remote-code: true
     quantization: fp8
     kv-cache-dtype: fp8_e4m3
@@ -24,7 +24,6 @@ data:
     tensor-parallel-size: 8
     ep-size: 8
     attention-backend: dsa
-    dsa-prefill-backend: flashmla_kv
     enable-prefill-cp: true
     cp-strategy: interleave
     moe-a2a-backend: none
@@ -65,8 +64,8 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
-              imagePullPolicy: Always
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0@sha256:5d481e748e2383f0e7c8494990fff5b31d28e4c28a8388a23276334a9240dc17
+              imagePullPolicy: IfNotPresent
               resources: {}
       replicas: 1
 
@@ -89,6 +88,8 @@ spec:
               args:
                 - --config
                 - /etc/sglang/agg.yaml
+                - --dsa-prefill-backend
+                - flashmla_kv
                 - --dyn-tool-call-parser
                 - glm47
                 - --dyn-reasoning-parser
@@ -108,22 +109,23 @@ spec:
                   value: /model-cache
                 - name: DYN_SGL_ALLOW_TOP_LOGPROBS
                   value: "1"
-                - name: PYTHONUNBUFFERED
-                  value: "1"
+                # Forward-pass metrics are disabled: the SGLang 0.5.18 metrics reporter in
+                # sglang-runtime:1.5.0 crashes the scheduler on the first EAGLE decode batch.
                 - name: DYN_FORWARDPASS_METRIC_PORT
                   value: ""
-                # Synthetic MTP acceptance length for performance benchmarking.
+                # Synthetic MTP acceptance length for performance benchmarking only.
+                # Uncomment for throughput runs; keep commented for accuracy evaluation.
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "2.69"
                 # - name: SGLANG_SIMULATE_ACC_METHOD
                 #   value: match-expected
-                # - name: SGLANG_SIMULATE_ACC_TOKEN_ID
-                #   value: "32"
+                # - name: SGLANG_SIMULATE_ACC_TOKEN_MODE
+                #   value: real-draft-token
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
-              imagePullPolicy: Always
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0@sha256:5d481e748e2383f0e7c8494990fff5b31d28e4c28a8388a23276334a9240dc17
+              imagePullPolicy: IfNotPresent
               resources:
                 requests:
                   nvidia.com/gpu: "8"
@@ -133,6 +135,7 @@ spec:
                   memory: 1Ti
               securityContext:
                 runAsUser: 0
+                runAsGroup: 0
                 capabilities:
                   add:
                     - IPC_LOCK
@@ -145,20 +148,37 @@ spec:
                   port: 9090
                 periodSeconds: 60
                 timeoutSeconds: 20
+              # Replaces the operator default liveness (5 s / 4 s / 1 failure) and readiness
+              # (10 s / 4 s / 3 failures) probes: serve-time kernel compiles and long EAGLE
+              # batches can stall /live beyond the default budget and restart a healthy worker.
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
               volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
                 - mountPath: /etc/sglang
                   name: sglang-config
                   readOnly: true
-                - mountPath: /model-cache
-                  name: model-cache
               workingDir: /workspace/
           volumes:
-            - name: sglang-config
-              configMap:
-                name: glm52-agg-h200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+            - name: sglang-config
+              configMap:
+                name: glm52-agg-h200-agentic-sglang-config
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal

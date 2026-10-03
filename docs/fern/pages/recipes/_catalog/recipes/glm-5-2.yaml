@@ -44,7 +44,7 @@ targets:
     asset: recipes/glm-5.2/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 176.42 output tok/s/GPU, 57.49 user tok/s P50, TTFT P50 355.6 ms at concurrency 64 (15% agentic trace subset)
+    summary: 190.05 output tok/s/GPU, 61.92 user tok/s P50, TTFT P50 228.7 ms at concurrency 64 (15% agentic trace subset)
 - id: sglang-disagg-b200
   recommended: false
   hardware:
@@ -60,7 +60,7 @@ targets:
   - eagle-mtp-spec-dec
   - kv-aware-routing
   - hicache-cpu-offload
-  - nixl-ucx
+  - mooncake
   workload:
     type: agentic-trace-replay
     traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 128
@@ -71,7 +71,7 @@ targets:
     asset: recipes/glm-5.2/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 320.91 output tok/s/GPU, 65.11 user tok/s P50, TTFT P50 1938.1 ms at concurrency 128 (3P1D, 15% agentic trace subset)
+    summary: 323.82 output tok/s/GPU, 63.13 user tok/s P50, TTFT P50 1280.1 ms at concurrency 128 (3P1D, 15% agentic trace subset)
 - id: sglang-agg-h200
   recommended: false
   hardware:
@@ -95,7 +95,7 @@ targets:
     asset: recipes/glm-5.2/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 54.55 output tok/s/GPU, 52.37 user tok/s P50, TTFT P50 1790 ms at concurrency 32 (3 workers, 15% agentic trace subset)
+    summary: 60.87 output tok/s/GPU, 57.33 user tok/s P50, TTFT P50 1158 ms at concurrency 32 (3 workers, 15% agentic trace subset)
 - id: sglang-disagg-h200
   recommended: false
   hardware:
@@ -110,7 +110,7 @@ targets:
   - fp8-kv-cache
   - eagle-mtp-spec-dec
   - kv-aware-routing
-  - nixl-ucx
+  - mooncake
   workload:
     type: agentic-trace-replay
     traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 24
@@ -121,7 +121,7 @@ targets:
     asset: recipes/glm-5.2/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 68.86 output tok/s/GPU, 53.88 user tok/s P50, TTFT P50 1874 ms at concurrency 24 (1P1D, 15% agentic trace subset)
+    summary: 84.33 output tok/s/GPU, 61.46 user tok/s P50, TTFT P50 1310 ms at concurrency 24 (1P1D, 15% agentic trace subset)
 related_benchmarks: []
 maintainer: milesial
 gaps:

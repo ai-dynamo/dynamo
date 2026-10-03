@@ -10,10 +10,8 @@ metadata:
     app.kubernetes.io/part-of: dynamo
 data:
   prefill.yaml: |-
-    model-path: nvidia/GLM-5.2-NVFP4
-    served-model-name: zai-org/GLM-5.2
-    # Decode connects to the pod IP advertised by Dynamo, so the SGLang
-    # bootstrap server must not use its loopback-only default.
+    model-path: RadixArk/GLM-5.3-NVFP4
+    served-model-name: zai-org/GLM-5.3
     host: 0.0.0.0
     trust-remote-code: true
     tensor-parallel-size: 4
@@ -23,19 +21,16 @@ data:
     quantization: modelopt_fp4
     kv-cache-dtype: fp8_e4m3
     context-length: 500000
-    mem-fraction-static: 0.93
+    mem-fraction-static: 0.86
     attention-backend: dsa
-    dsa-prefill-backend: trtllm
-    dsa-decode-backend: trtllm
     moe-runner-backend: flashinfer_trtllm_routed
     chunked-prefill-size: 16384
     max-prefill-tokens: 32768
     max-running-requests: 32
     watchdog-timeout: 3600
-    cuda-graph-backend-prefill: disabled
     cuda-graph-backend-decode: disabled
     disaggregation-mode: prefill
-    disaggregation-transfer-backend: nixl
+    disaggregation-transfer-backend: mooncake
     disaggregation-bootstrap-port: 12345
     speculative-algorithm: EAGLE
     speculative-num-steps: 3
@@ -55,8 +50,8 @@ data:
     enable-metrics: true
 
   decode.yaml: |-
-    model-path: nvidia/GLM-5.2-NVFP4
-    served-model-name: zai-org/GLM-5.2
+    model-path: RadixArk/GLM-5.3-NVFP4
+    served-model-name: zai-org/GLM-5.3
     trust-remote-code: true
     tensor-parallel-size: 8
     data-parallel-size: 8
@@ -68,7 +63,7 @@ data:
     kv-cache-dtype: fp8_e4m3
     context-length: 500000
     disaggregation-mode: decode
-    disaggregation-transfer-backend: nixl
+    disaggregation-transfer-backend: mooncake
     disaggregation-bootstrap-port: 12345
     speculative-algorithm: EAGLE
     speculative-num-steps: 3
@@ -78,7 +73,7 @@ data:
     max-running-requests: 256
     watchdog-timeout: 3600
     cuda-graph-max-bs: 256
-    mem-fraction-static: 0.87
+    mem-fraction-static: 0.84
     enable-metrics: true
     speculative-moe-runner-backend: flashinfer_cutlass
     speculative-moe-a2a-backend: none
@@ -115,8 +110,8 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
-              imagePullPolicy: Always
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0@sha256:5d481e748e2383f0e7c8494990fff5b31d28e4c28a8388a23276334a9240dc17
+              imagePullPolicy: IfNotPresent
               resources: {}
       replicas: 1
 
@@ -144,13 +139,11 @@ spec:
                   set -euo pipefail
                   ulimit -l unlimited || true
                   ulimit -n 1048576 || true
-                  UCX_NET_DEVICES="$(nvidia-smi topo -m | awk 'BEGIN{split("PIX PXB NODE PHB SYS", pri)} $1 ~ /^NIC[0-9]+:/ {gsub(":", "", $1); nic[$1]=$2; next} /CPU Affinity/ && /NIC/ {for (i=1; i<=NF; i++) if ($i ~ /^NIC[0-9]+$/) {idx=i+1; cols[++n]=idx; col[idx]=$i}; next} $1 ~ /^GPU[0-9]+$/ {g++; for (c=1; c<=n; c++) {idx=cols[c]; rel[g,c]=$idx}; next} END{for (r=1; r<=g; r++) for (p=1; p<=5; p++) {found=0; for (c=1; c<=n; c++) {dev=nic[col[cols[c]]]; if (rel[r,c] != pri[p] || dev == "" || dev ~ /bond/) continue; if (system("[ -d /sys/class/infiniband/" dev " ]") == 0) {found=1; if (!seen[dev]++) out=out (out ? "," : "") dev ":1"}} if (found) break} if (!out) exit 1; print out}')"
-                  : "${UCX_NET_DEVICES:?no GPU-local InfiniBand devices found from nvidia-smi topo -m}"
-                  export UCX_NET_DEVICES
-                  export SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS="{\"ucx_devices\":\"${UCX_NET_DEVICES}\",\"ucx_error_handling_mode\":\"peer\"}"
-                  echo "dynamic UCX_NET_DEVICES=${UCX_NET_DEVICES}"
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/prefill.yaml \
+                    --dsa-prefill-backend trtllm \
+                    --dsa-decode-backend trtllm \
+                    --cuda-graph-backend-prefill disabled \
                     --dyn-tool-call-parser glm47 \
                     --dyn-reasoning-parser glm45 \
                     --reasoning-parser glm45
@@ -163,15 +156,15 @@ spec:
                   value: /model-cache
                 - name: DYN_SGL_ALLOW_TOP_LOGPROBS
                   value: "1"
-                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
-                  value: UCX
-                - name: UCX_TLS
-                  value: cuda_ipc,cuda_copy,rc
+                # Forward-pass metrics are disabled: the SGLang 0.5.18 metrics reporter in
+                # sglang-runtime:1.5.0 crashes the scheduler on the first EAGLE decode batch.
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
-              imagePullPolicy: Always
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0@sha256:5d481e748e2383f0e7c8494990fff5b31d28e4c28a8388a23276334a9240dc17
+              imagePullPolicy: IfNotPresent
               resources:
                 requests:
                   nvidia.com/gpu: "4"
@@ -183,6 +176,7 @@ spec:
                   memory: 1Ti
               securityContext:
                 runAsUser: 0
+                runAsGroup: 0
                 capabilities:
                   add:
                     - IPC_LOCK
@@ -195,20 +189,37 @@ spec:
                   port: 9090
                 periodSeconds: 60
                 timeoutSeconds: 20
+              # Replaces the operator default liveness (5 s / 4 s / 1 failure) and readiness
+              # (10 s / 4 s / 3 failures) probes: serve-time kernel compiles and long EAGLE
+              # batches can stall /live beyond the default budget and restart a healthy worker.
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
               volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
                 - mountPath: /etc/sglang
                   name: sglang-config
                   readOnly: true
-                - mountPath: /model-cache
-                  name: model-cache
               workingDir: /workspace/
           volumes:
-            - name: sglang-config
-              configMap:
-                name: glm52-disagg-b200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+            - name: sglang-config
+              configMap:
+                name: glm52-disagg-b200-agentic-sglang-config
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
@@ -240,11 +251,6 @@ spec:
                   set -euo pipefail
                   ulimit -l unlimited || true
                   ulimit -n 1048576 || true
-                  UCX_NET_DEVICES="$(nvidia-smi topo -m | awk 'BEGIN{split("PIX PXB NODE PHB SYS", pri)} $1 ~ /^NIC[0-9]+:/ {gsub(":", "", $1); nic[$1]=$2; next} /CPU Affinity/ && /NIC/ {for (i=1; i<=NF; i++) if ($i ~ /^NIC[0-9]+$/) {idx=i+1; cols[++n]=idx; col[idx]=$i}; next} $1 ~ /^GPU[0-9]+$/ {g++; for (c=1; c<=n; c++) {idx=cols[c]; rel[g,c]=$idx}; next} END{for (r=1; r<=g; r++) for (p=1; p<=5; p++) {found=0; for (c=1; c<=n; c++) {dev=nic[col[cols[c]]]; if (rel[r,c] != pri[p] || dev == "" || dev ~ /bond/) continue; if (system("[ -d /sys/class/infiniband/" dev " ]") == 0) {found=1; if (!seen[dev]++) out=out (out ? "," : "") dev ":1"}} if (found) break} if (!out) exit 1; print out}')"
-                  : "${UCX_NET_DEVICES:?no GPU-local InfiniBand devices found from nvidia-smi topo -m}"
-                  export UCX_NET_DEVICES
-                  export SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS="{\"ucx_devices\":\"${UCX_NET_DEVICES}\",\"ucx_error_handling_mode\":\"peer\"}"
-                  echo "dynamic UCX_NET_DEVICES=${UCX_NET_DEVICES}"
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/decode.yaml \
                     --dyn-tool-call-parser glm47 \
@@ -259,24 +265,25 @@ spec:
                   value: /model-cache
                 - name: DYN_SGL_ALLOW_TOP_LOGPROBS
                   value: "1"
-                # Synthetic MTP acceptance length for performance benchmarking.
+                # Forward-pass metrics are disabled: the SGLang 0.5.18 metrics reporter in
+                # sglang-runtime:1.5.0 crashes the scheduler on the first EAGLE decode batch.
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                # Synthetic MTP acceptance length for performance benchmarking only.
+                # Uncomment for throughput runs; keep commented for accuracy evaluation.
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "2.69"
                 # - name: SGLANG_SIMULATE_ACC_METHOD
                 #   value: match-expected
-                # - name: SGLANG_SIMULATE_ACC_TOKEN_ID
-                #   value: "32"
+                # - name: SGLANG_SIMULATE_ACC_TOKEN_MODE
+                #   value: real-draft-token
                 - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
                   value: "3600"
-                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
-                  value: UCX
-                - name: UCX_TLS
-                  value: cuda_ipc,cuda_copy,rc
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
-              imagePullPolicy: Always
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0@sha256:5d481e748e2383f0e7c8494990fff5b31d28e4c28a8388a23276334a9240dc17
+              imagePullPolicy: IfNotPresent
               resources:
                 requests:
                   nvidia.com/gpu: "8"
@@ -288,6 +295,7 @@ spec:
                   memory: 200Gi
               securityContext:
                 runAsUser: 0
+                runAsGroup: 0
                 capabilities:
                   add:
                     - IPC_LOCK
@@ -300,20 +308,37 @@ spec:
                   port: 9090
                 periodSeconds: 60
                 timeoutSeconds: 20
+              # Replaces the operator default liveness (5 s / 4 s / 1 failure) and readiness
+              # (10 s / 4 s / 3 failures) probes: serve-time kernel compiles and long EAGLE
+              # batches can stall /live beyond the default budget and restart a healthy worker.
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 60
+                failureThreshold: 10
               volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
                 - mountPath: /etc/sglang
                   name: sglang-config
                   readOnly: true
-                - mountPath: /model-cache
-                  name: model-cache
               workingDir: /workspace/
           volumes:
-            - name: sglang-config
-              configMap:
-                name: glm52-disagg-b200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
+            - name: sglang-config
+              configMap:
+                name: glm52-disagg-b200-agentic-sglang-config
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
