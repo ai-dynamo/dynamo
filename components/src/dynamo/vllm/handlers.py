@@ -49,6 +49,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.agent_context import session_id_from_request
+from dynamo.common.backend.health_check import is_probe
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -4295,6 +4296,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        local_probe = is_probe(request)
         prepared_input = await self._multimodal_request_processor.prepare_input(
             request,
             request_id,
@@ -4330,15 +4332,21 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             enable_rl=self.config.enable_rl,
         )
 
-        # One protocol instance per request; carries per-request state
-        # (e.g. Mooncake's transfer_id) into the response loop below.
-        kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
-            self.engine_client.vllm_config
-        )
-        _update_kv_transfer_params(
-            sampling_params,
-            kv_protocol.prefill_request_kv_transfer_params(),
-        )
+        kv_protocol: KvConnectorProtocol | None = None
+        if local_probe:
+            # A health probe has no decode worker, so it must not ask for a
+            # KV handoff. Drop a client-supplied value too.
+            if sampling_params.extra_args is not None:
+                sampling_params.extra_args = dict(sampling_params.extra_args)
+                sampling_params.extra_args.pop(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY, None)
+        else:
+            # One protocol instance per request; carries per-request state
+            # (e.g. Mooncake's transfer_id) into the response loop below.
+            kv_protocol = make_kv_connector_protocol(self.engine_client.vllm_config)
+            _update_kv_transfer_params(
+                sampling_params,
+                kv_protocol.prefill_request_kv_transfer_params(),
+            )
 
         # Extract LoRA request if present
         model_name = request.get("model")
@@ -4394,22 +4402,23 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
 
-                # For prefill worker, only one res will be generated,
-                # so we can always build embedding params here without conditionals
-                embedding_params = (
-                    self._multimodal_request_processor.build_prefill_handoff(
-                        multi_modal_data=multi_modal_data,
-                        prompt_token_ids=list(res.prompt_token_ids or []),
-                        mm_processor_kwargs=mm_processor_kwargs,
+                disaggregated_params = None
+                if kv_protocol is not None:
+                    embedding_params = (
+                        self._multimodal_request_processor.build_prefill_handoff(
+                            multi_modal_data=multi_modal_data,
+                            prompt_token_ids=list(res.prompt_token_ids or []),
+                            mm_processor_kwargs=mm_processor_kwargs,
+                        )
                     )
-                )
+                    disaggregated_params = self._build_disaggregated_params(
+                        kv_protocol.decode_request_kv_transfer_params(res),
+                        embedding_params,
+                    )
 
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
-                    "disaggregated_params": self._build_disaggregated_params(
-                        kv_protocol.decode_request_kv_transfer_params(res),
-                        embedding_params,
-                    ),
+                    "disaggregated_params": disaggregated_params,
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
                     ),
