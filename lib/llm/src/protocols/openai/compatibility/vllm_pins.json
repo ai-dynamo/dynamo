@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "target": "vllm",
+  "repository": "https://github.com/vllm-project/vllm",
+  "versions": [
+    {
+      "version": "0.29.0",
+      "commit": "98dff2a81d747d1dba01a47f939f48c3526d4206",
+      "platforms": ["cpu", "xpu"]
+    },
+    {
+      "version": "0.30.0",
+      "commit": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+      "platforms": ["cuda13.0"]
+    }
+  ]
+}
