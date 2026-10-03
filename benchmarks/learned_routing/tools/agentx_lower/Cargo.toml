@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+# Standalone helper; kept out of the top-level workspace like lib/bindings/python.
+
+[package]
+name = "agentx-lower"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Emit AISimulate's own Weka -> Agentic Mooncake v2 lowering and graph digests"
+
+[dependencies]
+# Pinned to the exact crate the Python bindings link (lib/bindings/python/Cargo.toml).
+aisimulate-core = "=0.13.0-dev.202609300000000061"
+anyhow = "1"
+serde_json = "1"

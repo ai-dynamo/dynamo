@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example lr-train space: dynamo-default-cost-fn catalog parameters (PLAN baseline "default,
+# tuned"). The ranges are build-stage placeholders; the tuning stage owns the final ranges.
+# init = the shipped defaults, so generation 0 is centred on default@defaults.
+base:
+  name: default-tuned
+  type: dynamo-default-cost-fn
+  parameters: {}
+  router_config: {}
+params:
+  - path: parameters.overlap_score_credit
+    kind: float
+    bounds: [0.0, 4.0]
+    init: 1.0
+  - path: parameters.overlap_score_credit_decay
+    kind: float
+    bounds: [0.0, 4.0]
+    init: 0.0
+  - path: parameters.prefill_load_scale
+    kind: float
+    bounds: [0.1, 10.0]
+    scale: log
+    init: 1.0
+  - path: parameters.decode_active_request_weight
+    kind: float
+    bounds: [0.0, 8.0]
+    init: 0.0
+  - path: parameters.router_temperature
+    kind: float
+    bounds: [0.0, 2.0]
+    init: 0.0
+cma:
+  sigma0: 0.2

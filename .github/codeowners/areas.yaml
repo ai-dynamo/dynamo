@@ -470,6 +470,7 @@ areas:
   - benchmarks/burstgpt_loadgen/
   - benchmarks/frontend/
   - benchmarks/incluster/
+  - benchmarks/learned_routing/
   - benchmarks/mocker/README.md
   - benchmarks/mocker/bench_ais_concurrency.py
   - benchmarks/nat_trace/

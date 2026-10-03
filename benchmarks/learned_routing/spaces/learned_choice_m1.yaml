@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example lr-train space: learned-choice M1 (conditional logit over feature_set v1, no context).
+# Build-stage placeholder ranges; the training stage owns the final space.
+# - theta[0] (default_logit_scaled) is pinned at -1: it fixes the scale of the utility at
+#   temperature 0 (LR-05) and makes the start theta0 = -e0, which reproduces default routing.
+# - temperature stays 0 (LR-15); tie_break one_draw keeps CRN draw alignment (LR-03).
+# - Feature order (B1 FEATURES.md): 0 default_logit_scaled, 1 overlap_frac, 2 new_prefill_tokens_k,
+#   3 active_prefill_tokens_k, 4 kv_load_frac, 5 active_requests_s, 6 session_affinity,
+#   7 isl_x_prefill_load.
+base:
+  name: learned-choice-m1
+  type: learned-choice
+  parameters:
+    feature_set: v1
+    temperature: 0.0
+    tie_break: one_draw
+params:
+  - path: parameters.theta
+    kind: vector
+    dim: 8
+    bounds: [-8.0, 8.0]
+    init: [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    fixed: {0: -1.0}
+    std: 0.05          # internal units (bounds width 16 -> about 0.8 per coordinate)
+cma:
+  sigma0: 0.05

@@ -422,6 +422,7 @@
 /benchmarks/pyproject.toml                                                                              @ai-dynamo/dynamo-performance-codeowners
 /examples/backends/mocker/                                                                              @ai-dynamo/dynamo-performance-codeowners
 /lib/mocker/src/scheduler/                                                                              @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/learned_routing/                                                                            @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/mocker/README.md                                                                            @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/burstgpt_loadgen/                                                                           @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3-235b-a22b-fp8/                                                                           @ai-dynamo/dynamo-performance-codeowners

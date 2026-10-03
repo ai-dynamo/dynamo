@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example lr-train space: learned-choice M2 with the contract's pooled low-rank context
+# u_i = theta.x_i + sum_k (p_k.x_i)(q_k.mean_S x), rank 1. The p/q pair has a scale gauge
+# (p -> c p, q -> q / c); prefer the named-sources form (context {sources, p}) per LR-05 when
+# the training stage adopts it. Warm-start theta from M1's selected value (LR-15).
+base:
+  name: learned-choice-m2-pooled
+  type: learned-choice
+  parameters:
+    feature_set: v1
+    temperature: 0.0
+    tie_break: one_draw
+params:
+  - path: parameters.theta
+    kind: vector
+    dim: 8
+    bounds: [-8.0, 8.0]
+    init: [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    fixed: {0: -1.0}
+    std: 0.05
+  - path: parameters.context
+    kind: lowrank
+    dim: 8
+    rank: 1
+    bounds: [-4.0, 4.0]
+    init: 0.0
+    std: 0.03
+cma:
+  sigma0: 0.05

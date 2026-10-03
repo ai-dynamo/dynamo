@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "learned-routing"
+version = "0.1.0"
+description = "Learned-routing campaign harness for Dynamo offline replay"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+# lr-eval needs only pyyaml (plus the dynamo bindings and aisimulate, installed separately);
+# lr-train needs cma and numpy; lr-report needs numpy and matplotlib.
+dependencies = ["pyyaml>=6", "cma>=4", "numpy>=1.26", "matplotlib>=3.8"]
+
+[project.scripts]
+lr-eval = "learned_routing.eval_cli:main_exit"
+lr-train = "learned_routing.train_cli:main_exit"
+lr-report = "learned_routing.report_cli:main_exit"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["learned_routing*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "learned_routing/workloads/tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+    "replay: runs real offline replays through the slot pool (seconds each)",
+]
