@@ -15,6 +15,7 @@ import logging
 import os
 from typing import Any, Dict, Generator, Optional, Tuple
 
+import pynvml
 import pytest
 import requests
 
@@ -72,6 +73,32 @@ SYSTEM_HEALTH_TOOL = {
 }
 
 
+# vLLM needs --gpu-memory-utilization below 1.0, so the startup guard can never
+# be asked to hold back more than this share of a card.
+MAX_GPU_MEMORY_UTILIZATION = 0.95
+
+
+def _pin_gpu_and_get_total_memory_gib(env: Dict[str, str]) -> float:
+    """Pin the worker to its scheduled GPU by UUID and return that GPU's capacity."""
+    # The scheduler assigns NVML indices. Pin this single-GPU worker by UUID
+    # so CUDA cannot interpret the same number as a different physical card.
+    visible = env.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip()
+    if not visible.isdigit():
+        raise ValueError(
+            f"Cannot size the startup VRAM guard for CUDA_VISIBLE_DEVICES={visible!r}; "
+            "expected a numeric GPU index"
+        )
+
+    pynvml.nvmlInit()
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(int(visible))
+        total_gib = pynvml.nvmlDeviceGetMemoryInfo(handle).total / (1024**3)
+        env["CUDA_VISIBLE_DEVICES"] = pynvml.nvmlDeviceGetUUID(handle)
+        return total_gib
+    finally:
+        pynvml.nvmlShutdown()
+
+
 class WorkerProcess(ManagedProcess):
     """Vllm Worker process for GPT-OSS model."""
 
@@ -87,6 +114,10 @@ class WorkerProcess(ManagedProcess):
         self.frontend_port = int(frontend_port)
         self.system_port = int(system_port)
 
+        vram_mark = request.node.get_closest_marker("profiled_vram_gib")
+        self.required_vram_gib = float(vram_mark.args[0]) if vram_mark else None
+
+        env = os.environ.copy()
         command = [
             "python3",
             "-m",
@@ -117,11 +148,10 @@ class WorkerProcess(ManagedProcess):
                     "--kv-cache-memory-bytes",
                     kv_bytes,
                     "--gpu-memory-utilization",
-                    "0.01",
+                    self._gpu_memory_utilization(env),
                 ]
             )
 
-        env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
@@ -142,6 +172,37 @@ class WorkerProcess(ManagedProcess):
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
+
+    def _gpu_memory_utilization(self, env: Dict[str, str]) -> str:
+        """Express this test's declared VRAM budget as a utilization fraction.
+
+        Passing --kv-cache-memory-bytes makes vLLM size the KV cache from that
+        byte count and skip memory profiling, so --gpu-memory-utilization no
+        longer decides how much is allocated. Its one remaining job is the
+        startup guard in vLLM's worker, which refuses to start when free VRAM is
+        below `total * utilization`. The fraction therefore has to describe the
+        budget the test was scheduled against: a token 0.01 lets the guard pass
+        on a card with a few hundred MiB free, and the worker then dies part-way
+        through loading weights it was never going to fit, holding on to GiBs
+        that co-scheduled tests on the same card still need.
+        """
+        if self.required_vram_gib is None:
+            raise ValueError(
+                "profiled_vram_gib is required to size the startup VRAM guard"
+            )
+        total_gib = _pin_gpu_and_get_total_memory_gib(env)
+        guardable_gib = total_gib * MAX_GPU_MEMORY_UTILIZATION
+        if self.required_vram_gib > guardable_gib:
+            # Clamping here would hand vLLM a guard weaker than the budget, the
+            # very thing this method exists to prevent. The scheduler never
+            # assigns a card this small, but a direct pytest run has no such
+            # admission filter, so refuse the card instead of the budget.
+            pytest.skip(
+                f"needs {self.required_vram_gib} GiB, above the "
+                f"{guardable_gib:.1f} GiB this {total_gib:.1f} GiB GPU can guard"
+            )
+        fraction = max(self.required_vram_gib / total_gib, 0.01)
+        return str(fraction)
 
 
 def _send_chat_request(
