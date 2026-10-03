@@ -133,6 +133,43 @@ pub trait MultimodalCacheIndex: Send + Sync {
 
 pub type MultimodalCacheKeyExtractor<T> = Arc<dyn Fn(&T) -> Vec<String> + Send + Sync>;
 
+type MultimodalCacheKeyAlternatives<T> = Arc<dyn Fn(&T) -> Vec<Vec<String>> + Send + Sync>;
+
+fn cache_key_alternative_hits(
+    indexer: &dyn MultimodalCacheIndex,
+    mut groups: Vec<Vec<String>>,
+) -> (usize, Vec<(u64, usize)>) {
+    for group in &mut groups {
+        group.sort();
+        group.dedup();
+    }
+    groups.retain(|group| !group.is_empty());
+    groups.sort();
+    groups.dedup();
+    let count = groups.len();
+    if count == 0 {
+        return (0, Vec::new());
+    }
+    if groups.iter().all(|group| group.len() == 1) {
+        // Preserve the single-query path when there are no alternatives.
+        let keys = groups.into_iter().flatten().collect::<Vec<_>>();
+        return (count, indexer.workers_with_cache_key_hits(&keys));
+    }
+    let mut hits = HashMap::<u64, usize>::new();
+    for group in groups {
+        let workers = indexer
+            .workers_with_cache_key_hits(&group)
+            .into_iter()
+            .filter(|(_, hits)| *hits > 0)
+            .map(|(worker, _)| worker)
+            .collect::<std::collections::HashSet<_>>();
+        for worker in workers {
+            *hits.entry(worker).or_default() += 1;
+        }
+    }
+    (count, hits.into_iter().collect())
+}
+
 #[derive(Clone)]
 pub struct PushRouter<T, U>
 where
@@ -183,6 +220,7 @@ where
 
     /// Optional typed request extractor for multimodal embedding cache keys.
     multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+    multimodal_cache_key_alternatives: Option<MultimodalCacheKeyAlternatives<T>>,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
@@ -621,6 +659,7 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            multimodal_cache_key_alternatives: None,
             _phantom: PhantomData,
         })
     }
@@ -690,10 +729,24 @@ where
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
+            multimodal_cache_key_alternatives: None,
             _phantom: PhantomData,
         };
 
         Ok(router)
+    }
+
+    /// Query alternate cache-key representations for each distinct multimodal item.
+    ///
+    /// Each nonempty group represents one item; any key in the group is sufficient
+    /// for a worker to have that item cached. Matching multiple alternatives counts
+    /// only once. Keys remain opaque, and this overrides the flat key extractor.
+    pub fn with_multimodal_cache_key_alternatives<F>(mut self, extractor: F) -> Self
+    where
+        F: Fn(&T) -> Vec<Vec<String>> + Send + Sync + 'static,
+    {
+        self.multimodal_cache_key_alternatives = Some(Arc::new(extractor));
+        self
     }
 
     /// Like the other constructors but with a caller-supplied [`StreamingDispatch`]
@@ -733,6 +786,7 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            multimodal_cache_key_alternatives: None,
             _phantom: PhantomData,
         })
     }
@@ -1356,32 +1410,32 @@ where
             .filter(|value| *value >= 1)
             .unwrap_or(8);
 
-        let (request_cache_keys, cache_matched_candidates) =
-            if let (Some(indexer), Some(extractor)) = (
-                self.multimodal_cache_indexer.as_ref(),
-                self.multimodal_cache_key_extractor.as_ref(),
-            ) {
-                let request_cache_keys = extractor(request);
-                let matched = if request_cache_keys.is_empty() {
-                    Vec::new()
+        let (request_cache_keys, required_cache_hits, mut cache_matched_candidates) =
+            if let Some(indexer) = self.multimodal_cache_indexer.as_ref() {
+                if let Some(extractor) = self.multimodal_cache_key_alternatives.as_ref() {
+                    let (count, matched) =
+                        cache_key_alternative_hits(indexer.as_ref(), extractor(request));
+                    (count, count, matched)
+                } else if let Some(extractor) = self.multimodal_cache_key_extractor.as_ref() {
+                    let keys = extractor(request);
+                    let count = keys.iter().collect::<std::collections::HashSet<_>>().len();
+                    let matched = if keys.is_empty() {
+                        Vec::new()
+                    } else {
+                        indexer.workers_with_cache_key_hits(&keys)
+                    };
+                    (keys.len(), count, matched)
                 } else {
-                    let mut matched = indexer.workers_with_cache_key_hits(&request_cache_keys);
-                    matched.retain(|(id, _)| instance_ids.contains(id));
-                    matched
-                };
-                (request_cache_keys, matched)
+                    (0, 0, Vec::new())
+                }
             } else {
-                (Vec::new(), Vec::new())
+                (0, 0, Vec::new())
             };
-
+        cache_matched_candidates.retain(|(id, _)| instance_ids.contains(id));
         let embedding_cache_hit = !cache_matched_candidates.is_empty();
         let cache_hits = cache_matched_candidates
             .into_iter()
             .collect::<HashMap<_, _>>();
-        let request_cache_key_count = request_cache_keys
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len();
         let candidates = instance_ids
             .iter()
             .map(|worker_id| RouteCandidate {
@@ -1394,11 +1448,11 @@ where
         DeviceAwareCandidates {
             candidates,
             context: RouteContext {
-                required_cache_hits: request_cache_key_count,
+                required_cache_hits,
                 non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
             },
             embedding_cache_hit,
-            request_cache_keys: request_cache_keys.len(),
+            request_cache_keys,
         }
     }
 
@@ -2297,6 +2351,82 @@ mod tests {
         }
 
         fn remove_worker(&self, _worker_id: u64) {}
+    }
+
+    struct KeyedMultimodalCacheIndex {
+        keys: HashMap<String, Vec<u64>>,
+        queries: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl MultimodalCacheIndex for KeyedMultimodalCacheIndex {
+        fn workers_with_cache_key_hits(&self, cache_keys: &[String]) -> Vec<(u64, usize)> {
+            self.queries.lock().unwrap().push(cache_keys.to_vec());
+            let mut hits = HashMap::new();
+            for key in cache_keys {
+                for worker in self.keys.get(key).into_iter().flatten() {
+                    *hits.entry(*worker).or_default() += 1;
+                }
+            }
+            hits.into_iter().collect()
+        }
+
+        fn remove_worker(&self, _worker_id: u64) {}
+    }
+
+    #[test]
+    fn cache_key_alternatives_count_each_item_once_per_worker() {
+        let indexer = KeyedMultimodalCacheIndex {
+            keys: HashMap::from([
+                ("raw:a".into(), vec![1, 3]),
+                ("raw:b".into(), vec![1]),
+                ("session:a".into(), vec![2, 3]),
+                ("session:b".into(), vec![2]),
+                ("another-session:a".into(), vec![4]),
+                ("a".into(), vec![5]),
+            ]),
+            queries: Default::default(),
+        };
+        let groups = vec![
+            vec!["raw:a".into(), "session:a".into(), "raw:a".into()],
+            vec!["session:a".into(), "raw:a".into()],
+            vec!["raw:b".into(), "session:b".into()],
+            vec![],
+        ];
+        let (required_hits, hits) = cache_key_alternative_hits(&indexer, groups);
+        assert_eq!(required_hits, 2);
+        assert_eq!(
+            hits.into_iter().collect::<HashMap<_, _>>(),
+            HashMap::from([(1, 2), (2, 2), (3, 1)])
+        );
+        assert_eq!(indexer.queries.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn cache_key_alternatives_keep_single_key_queries_batched() {
+        let indexer = KeyedMultimodalCacheIndex {
+            keys: HashMap::from([("opaque:key".into(), vec![1]), ("other".into(), vec![1])]),
+            queries: Default::default(),
+        };
+        let (required_hits, hits) = cache_key_alternative_hits(
+            &indexer,
+            vec![
+                vec!["opaque:key".into()],
+                vec![],
+                vec!["other".into()],
+                vec!["opaque:key".into()],
+            ],
+        );
+        assert_eq!((required_hits, hits), (2, vec![(1, 2)]));
+        assert_eq!(
+            *indexer.queries.lock().unwrap(),
+            vec![vec!["opaque:key", "other"]]
+        );
+
+        assert_eq!(
+            cache_key_alternative_hits(&indexer, vec![vec![]]),
+            (0, vec![])
+        );
+        assert_eq!(indexer.queries.lock().unwrap().len(), 1);
     }
 
     #[test]
