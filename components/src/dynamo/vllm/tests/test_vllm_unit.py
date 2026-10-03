@@ -597,6 +597,15 @@ def test_should_register_model_fetch_weights_for_default_load_format():
 def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     from dynamo.vllm import main as vllm_main
 
+    # Isolate NIXL env so allow_nixl_telemetry_capture() cannot leak into later tests.
+    for var in (
+        "NIXL_TELEMETRY_ENABLE",
+        "NIXL_TELEMETRY_EXPORTER",
+        "NIXL_TELEMETRY_DIR",
+        "NIXL_TELEMETRY_PROMETHEUS_PORT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
     class FakeModelConfig:
         def get_diff_sampling_param(self):
             return {"temperature": 0.7}

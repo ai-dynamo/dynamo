@@ -51,6 +51,7 @@ from dynamo.llm import (
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -635,6 +636,8 @@ def setup_vllm_engine(
 
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    # Before EngineCore spawns: a false NIXL_TELEMETRY_ENABLE vetoes capture.
+    allow_nixl_telemetry_capture()
 
     engine_args = config.engine_args
 
