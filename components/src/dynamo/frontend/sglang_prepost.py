@@ -328,6 +328,19 @@ def create_parsers(
     return tool_call_parser, reasoning_parser
 
 
+def _continuation_template_kwargs(request: dict[str, Any]) -> dict[str, bool]:
+    nested_kwargs = (
+        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
+    )
+    continuation = {}
+    for flag in ("add_generation_prompt", "continue_final_message"):
+        if request.get(flag) is not None:
+            continuation[flag] = request[flag]
+        elif flag in nested_kwargs:
+            continuation[flag] = nested_kwargs[flag]
+    return continuation
+
+
 def _is_named_tool_choice(tool_choice: Any) -> bool:
     return (
         isinstance(tool_choice, dict)
@@ -831,6 +844,14 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
     ):
+        continuation = _continuation_template_kwargs(request)
+        if continuation.get("continue_final_message") or (
+            continuation.get("add_generation_prompt") is False
+        ):
+            raise PreprocessError(
+                "add_generation_prompt=false and continue_final_message are not "
+                "supported with the DeepSeek-V4 encoder"
+            )
         prompt_token_ids = _render_deepseek_v4_prompt_token_ids(
             request,
             messages=messages,
@@ -853,6 +874,14 @@ def preprocess_chat_request(
         )
         if chat_template_kwargs:
             template_kwargs.update(chat_template_kwargs)
+        # Top-level flags win over nested copies, as on the vLLM path.
+        template_kwargs.update(_continuation_template_kwargs(request))
+        if template_kwargs.get("continue_final_message") and (
+            template_kwargs.get("add_generation_prompt") is not False
+        ):
+            raise PreprocessError(
+                "continue_final_message requires add_generation_prompt=false"
+            )
 
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
