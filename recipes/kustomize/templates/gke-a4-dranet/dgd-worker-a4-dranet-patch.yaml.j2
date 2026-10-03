@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{% set dgd = base.dynamographdeployment | only %}
+apiVersion: {{ dgd.apiVersion }}
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ dgd.metadata.name }}
+spec:
+  services:
+  {% for name, service in dgd.spec.services.items() if service.componentType == "worker" %}
+  {% set gpu_count = service.resources.limits.gpu | int %}
+  {% set claim_name = dgd.metadata.name ~ '-' ~ (name | lower | replace('_', '-')) ~ '-a4-devices' %}
+    {{ name }}:
+      resources:
+        limits:
+          gpu: null
+        requests:
+          gpu: null
+      extraPodSpec:
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-b200
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        resourceClaims:
+          - name: devices
+            resourceClaimTemplateName: {{ claim_name }}
+        mainContainer:
+          env:
+            # Require reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
+            - name: UCX_TLS
+              value: rc_x,rc,cuda_copy
+            - name: UCX_IB_GPU_DIRECT_RDMA
+              value: "yes"
+            - name: UCX_MAX_RNDV_RAILS
+              value: "{{ gpu_count }}"
+            - name: UCX_RNDV_SCHEME
+              value: get_zcopy
+          resources:
+            claims:
+              - name: devices
+          securityContext:
+            $patch: replace
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+  {% endfor %}
