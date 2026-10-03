@@ -25,6 +25,12 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5);
 const WARNING_INTERVAL: Duration = Duration::from_secs(1);
 const RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Clone, Copy)]
+struct SessionTiming {
+    backoff: Duration,
+    idle_timeout: Duration,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct HubFeedConfig {
     #[serde(default = "default_event_plane")]
@@ -156,8 +162,10 @@ async fn run_feed_client<T: CarrierFeedTransport>(
                 &hub_url,
                 &replica,
                 &cancel,
-                backoff,
-                idle_timeout,
+                SessionTiming {
+                    backoff,
+                    idle_timeout,
+                },
                 transport.as_ref(),
                 &mut last_warning,
             ) => result,
@@ -184,8 +192,7 @@ async fn run_session<T: CarrierFeedTransport>(
     hub_url: &str,
     replica: &CarrierFeedReplica,
     cancel: &CancellationToken,
-    backoff: Duration,
-    idle_timeout: Duration,
+    timing: SessionTiming,
     transport: &T,
     last_warning: &mut Option<Instant>,
 ) -> Result<()> {
@@ -211,7 +218,7 @@ async fn run_session<T: CarrierFeedTransport>(
     loop {
         let receive = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            result = tokio::time::timeout(idle_timeout, frames.next()) => result,
+            result = tokio::time::timeout(timing.idle_timeout, frames.next()) => result,
         };
         let payload = match receive {
             Ok(Some(result)) => result.context("receive carrier feed frame")?,
@@ -241,7 +248,7 @@ async fn run_session<T: CarrierFeedTransport>(
                 }
             }
             FeedApply::NeedsSnapshot => {
-                let wait = backoff.saturating_sub(last_snapshot.elapsed());
+                let wait = timing.backoff.saturating_sub(last_snapshot.elapsed());
                 if !wait.is_zero() {
                     tokio::select! {
                         _ = cancel.cancelled() => return Ok(()),
@@ -529,8 +536,10 @@ mod tests {
                 &session_hub_url,
                 &session_replica,
                 &session_cancel,
-                INITIAL_BACKOFF,
-                RECEIVE_IDLE_TIMEOUT,
+                SessionTiming {
+                    backoff: INITIAL_BACKOFF,
+                    idle_timeout: RECEIVE_IDLE_TIMEOUT,
+                },
                 &transport,
                 &mut last_warning,
             )
@@ -598,8 +607,10 @@ mod tests {
                 &session_hub_url,
                 &session_replica,
                 &session_cancel,
-                INITIAL_BACKOFF,
-                RECEIVE_IDLE_TIMEOUT,
+                SessionTiming {
+                    backoff: INITIAL_BACKOFF,
+                    idle_timeout: RECEIVE_IDLE_TIMEOUT,
+                },
                 &transport,
                 &mut last_warning,
             )
@@ -657,8 +668,10 @@ mod tests {
                 &hub_url,
                 &replica,
                 &CancellationToken::new(),
-                INITIAL_BACKOFF,
-                RECEIVE_IDLE_TIMEOUT,
+                SessionTiming {
+                    backoff: INITIAL_BACKOFF,
+                    idle_timeout: RECEIVE_IDLE_TIMEOUT,
+                },
                 &transport,
                 &mut last_warning,
             )
@@ -686,8 +699,10 @@ mod tests {
                 &hub_url,
                 &session_replica,
                 &session_cancel,
-                INITIAL_BACKOFF,
-                RECEIVE_IDLE_TIMEOUT,
+                SessionTiming {
+                    backoff: INITIAL_BACKOFF,
+                    idle_timeout: RECEIVE_IDLE_TIMEOUT,
+                },
                 &transport,
                 &mut last_warning,
             )
