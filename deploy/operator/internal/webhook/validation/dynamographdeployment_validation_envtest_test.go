@@ -67,6 +67,7 @@ type dgdAdmissionTestCase struct {
 	wantWarnings       []string
 	notWantErr         string
 	wantPodAnnotations map[string]string
+	wantOriginVersion  string
 	wantProvider       string
 	wantRoleReplicas   map[string]int32
 	wantReplicas       map[string]*int32
@@ -2348,17 +2349,61 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.priorityClassName: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
-			name: "origin version accepts semver",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.2.3"}
-			}),
-		},
-		{
-			name: "origin version rejects non-semver",
+			name: "create overwrites a user-supplied origin version",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
+			wantOriginVersion: "1.1.0",
+		},
+		{
+			name:               "origin version cannot be materialized on update",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate:    betaDGDForAdmission(nil),
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.2.3",
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+				}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "1.2.3": field is immutable`},
+		},
+		{
+			name: "origin version cannot change on update",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.2.3",
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+				}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "1.2.3": field is immutable`},
+		},
+		{
+			name: "origin version cannot be removed on update",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			wantWebhookErrs: []string{
+				"metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: null: field is immutable",
+			},
 		},
 		{
 			name: "vLLM backend annotation accepts mp",
@@ -2436,13 +2481,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components = nil
 				dgd.Annotations = map[string]string{
-					consts.KubeAnnotationDynamoOperatorOriginVersion:    "not-semver",
 					consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
 					consts.KubeAnnotationDynamoKubeDiscoveryMode:        "invalid",
 				}
 			}),
 			wantWebhookErrs: []string{
-				`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`,
 				`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "invalid": must be "mp" or "ray"`,
 				`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Unsupported value: "invalid": supported values: "pod", "container"`,
 				"spec.components: Required value: must have at least one component",
@@ -3041,6 +3084,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment:      betaTerminatingDGDForAdmission(nil),
 			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
+				dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.1.0"
 			}),
 			// Removal reports a null bad value, since there is no new value to name.
 			wantWebhookErrs: []string{
@@ -3142,7 +3186,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil || tt.wantReplicas != nil {
+			if tt.wantPodAnnotations != nil || tt.wantOriginVersion != "" || tt.wantProvider != "" || tt.wantRoleReplicas != nil || tt.wantReplicas != nil {
 				t.Log("Convert the admitted DGD for result assertions")
 				actualDGD := admittedBetaDGD(t, actual)
 
@@ -3157,6 +3201,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					}
 				}
 
+				if tt.wantOriginVersion != "" {
+					t.Log("Verify creation stamped the authoritative operator origin version")
+					if got := actualDGD.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; got != tt.wantOriginVersion {
+						t.Fatalf("operator origin version = %q, want %q", got, tt.wantOriginVersion)
+					}
+				}
 				if tt.wantProvider != "" {
 					t.Log("Verify creation-time routing intent determined the admitted workload provider")
 					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
