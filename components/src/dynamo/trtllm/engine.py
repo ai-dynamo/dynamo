@@ -186,19 +186,19 @@ class TensorRTLLMEngine:
             return {}
         return get_capacity()
 
-    def abort(self, request_id: str) -> None:
+    def abort(self, request_id: int) -> None:
         """Abort an in-flight request or an unclaimed KV session."""
         if not self._llm:
             return
+        executor = getattr(self._llm, "_executor", None)
+        abort_fn = getattr(executor, "abort_request", None)
+        if not callable(abort_fn):
+            abort_fn = getattr(self._llm, "abort", None)
+        if not callable(abort_fn):
+            logger.debug("TensorRT-LLM engine object does not support abort()")
+            return
         try:
-            # Attempt to abort via the LLM object if available
-            if hasattr(self._llm, "abort"):
-                self._llm.abort(request_id)
-            # Fallback: attempt to access the underlying executor if it provides abort_request
-            elif hasattr(self._llm, "_executor") and hasattr(self._llm._executor, "abort_request"):
-                self._llm._executor.abort_request(request_id)
-            else:
-                logger.debug("TensorRT-LLM engine object does not support abort()")
+            abort_fn(request_id)
         except Exception as e:
             logger.error("TensorRT-LLM abort failed for request %s: %s", request_id, e)
             raise

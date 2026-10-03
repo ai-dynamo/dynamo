@@ -1298,6 +1298,7 @@ class HandlerBase(BaseGenerativeHandler):
                 if (
                     self.disaggregation_mode == DisaggregationMode.DECODE
                     and disaggregated_params is not None
+                    and disaggregated_params.disagg_request_id is not None
                 ):
                     logging.debug(
                         "DECODE: Request rejected before dispatch; aborting abandoned "
