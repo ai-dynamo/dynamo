@@ -4,8 +4,10 @@
 """Unit tests for MM kwargs transfer (NIXL sender/receiver + SHM sender/receiver)."""
 
 import asyncio
+import errno
 import pickle
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -33,6 +35,181 @@ def _make_feature(data=None, mm_hash="hash_default"):
     feat.mm_hash = mm_hash
     feat.modality = "image"
     return feat
+
+
+class TestMmKwargsPreparationOwnership:
+    @staticmethod
+    def _shm_boundary(monkeypatch):
+        handles = []
+
+        def allocate(*, name, create, size):
+            assert create
+            handle = SimpleNamespace(
+                name=name, buf=bytearray(size), close=MagicMock(), unlink=MagicMock()
+            )
+            handles.append(handle)
+            return handle
+
+        monkeypatch.setattr(mm_kwargs_transfer.shm, "SharedMemory", allocate)
+        return handles, allocate
+
+    @staticmethod
+    def _nixl_boundary():
+        sender = MmKwargsNixlSender()
+        operations = []
+
+        async def create_readable(descriptor):
+            operation = MagicMock()
+            operation.metadata.return_value.model_dump.return_value = {
+                "operation": len(operations)
+            }
+            operation.wait_for_completion = AsyncMock()
+            operations.append(operation)
+            return operation
+
+        sender._connector.create_readable = AsyncMock(side_effect=create_readable)
+        return sender, operations, create_readable
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure_site", ["pickle", "allocation", "item_metadata", "batch_metadata"]
+    )
+    async def test_shm_failure_releases_every_created_segment(
+        self, monkeypatch, failure_site
+    ):
+        handles, allocate = self._shm_boundary(monkeypatch)
+        sender = MmKwargsShmSender()
+        failure = OSError(errno.ENOSPC, "controlled preparation failure")
+        features = [_make_feature(data={"image": i}) for i in range(2)]
+
+        def fail(*args, **kwargs):
+            raise failure
+
+        if failure_site == "pickle":
+            dumps = pickle.dumps
+
+            def fail_later_pickle(value):
+                return fail() if handles else dumps(value)
+
+            monkeypatch.setattr(mm_kwargs_transfer.pickle, "dumps", fail_later_pickle)
+        elif failure_site == "allocation":
+
+            def fail_later_allocation(**kwargs):
+                return fail() if handles else allocate(**kwargs)
+
+            monkeypatch.setattr(
+                mm_kwargs_transfer.shm, "SharedMemory", fail_later_allocation
+            )
+        elif failure_site == "item_metadata":
+            monkeypatch.setattr(mm_kwargs_transfer, "MmKwargsShmItem", fail)
+        else:
+            monkeypatch.setattr(sender, "_assemble_extra_args", fail)
+
+        with pytest.raises(OSError) as caught:
+            await sender.prepare(features)
+
+        assert caught.value is failure
+        assert len(handles) == (2 if failure_site == "batch_metadata" else 1)
+        for handle in handles:
+            handle.close.assert_called_once_with()
+            handle.unlink.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_shm_success_leaves_cleanup_with_caller(self, monkeypatch):
+        handles, _ = self._shm_boundary(monkeypatch)
+        sender = MmKwargsShmSender()
+        data = {"image": b"pixels"}
+        metadata, cleanup = await sender.prepare([_make_feature(data=data)])
+
+        assert cleanup == handles
+        assert metadata["mm_kwargs_shm"]["items"][0]["name"] == handles[0].name
+        assert pickle.loads(handles[0].buf) == data
+        handles[0].close.assert_not_called()
+        handles[0].unlink.assert_not_called()
+        await sender.cleanup(cleanup)
+        handles[0].close.assert_called_once_with()
+        handles[0].unlink.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure_site", ["registration", "item_metadata", "batch_metadata"]
+    )
+    async def test_nixl_failure_releases_without_waiting_for_unpublished_reads(
+        self, monkeypatch, failure_site
+    ):
+        sender, operations, create_readable = self._nixl_boundary()
+        failure = RuntimeError("controlled preparation failure")
+
+        def fail(*args, **kwargs):
+            raise failure
+
+        if failure_site == "registration":
+
+            async def fail_later_registration(descriptor):
+                if operations:
+                    raise failure
+                return await create_readable(descriptor)
+
+            sender._connector.create_readable.side_effect = fail_later_registration
+        elif failure_site == "item_metadata":
+            monkeypatch.setattr(mm_kwargs_transfer, "TensorTransferSpec", fail)
+        else:
+
+            def fail_batch_metadata(*args):
+                # A failed deregistration must not replace the preparation error
+                # or prevent cleanup of later registrations.
+                operations[0].__exit__.side_effect = RuntimeError("release failed")
+                raise failure
+
+            monkeypatch.setattr(sender, "_assemble_extra_args", fail_batch_metadata)
+
+        with pytest.raises(RuntimeError) as caught:
+            await sender.prepare([_make_feature(data={"image": i}) for i in range(2)])
+
+        assert caught.value is failure
+        assert len(operations) == (2 if failure_site == "batch_metadata" else 1)
+        for operation in operations:
+            operation.wait_for_completion.assert_not_awaited()
+            operation.__exit__.assert_called_once_with(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_nixl_cancelled_preparation_releases_prior_registration(self):
+        sender, operations, create_readable = self._nixl_boundary()
+        second_registration = asyncio.Event()
+
+        async def wait_at_later_registration(descriptor):
+            if operations:
+                second_registration.set()
+                await asyncio.Event().wait()
+            return await create_readable(descriptor)
+
+        sender._connector.create_readable.side_effect = wait_at_later_registration
+        task = asyncio.create_task(
+            sender.prepare([_make_feature(data={"image": i}) for i in range(2)])
+        )
+        try:
+            await asyncio.wait_for(second_registration.wait(), timeout=1)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert len(operations) == 1
+        operations[0].wait_for_completion.assert_not_awaited()
+        operations[0].__exit__.assert_called_once_with(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_nixl_success_preserves_completion_wait_and_caller_cleanup(self):
+        sender, operations, _ = self._nixl_boundary()
+        metadata, cleanup = await sender.prepare([_make_feature(data={"image": 0})])
+
+        assert metadata["mm_kwargs_nixl"]["tensor_specs"]
+        assert cleanup == operations
+        operations[0].__exit__.assert_not_called()
+        operations[0].wait_for_completion.assert_not_awaited()
+        await sender.cleanup(cleanup)
+        operations[0].wait_for_completion.assert_awaited_once()
+        operations[0].__exit__.assert_called_once_with(None, None, None)
 
 
 class TestMmKwargsTransferMetadata:
