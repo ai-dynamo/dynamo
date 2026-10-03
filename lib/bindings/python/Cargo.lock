@@ -2347,9 +2347,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "9.2.0"
+version = "9.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d4ac14f31d8af179e8c312d54529bbfa732c954fc79ded7e29feabf3824379d"
+checksum = "aedc2cc2376c35d3bc998f6ec326271703cd19a61ef18ad7e1d21dbde3eeb638"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2358,6 +2358,7 @@ dependencies = [
  "futures",
  "num-traits",
  "openai-harmony",
+ "percent-encoding",
  "regex",
  "rustpython-ruff_python_ast",
  "rustpython-ruff_python_parser",
