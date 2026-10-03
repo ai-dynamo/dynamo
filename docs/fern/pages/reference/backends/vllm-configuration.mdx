@@ -187,6 +187,12 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_GMS_SHADOW_MODE`
 </ParamField>
 
+<ParamField path="--model-express-url" type="string" default="null">
+  ModelExpress server URL used when prefetching the model with a non-ModelExpress load format. With `--load-format=mx`, the vLLM ModelExpress plugin reads its own configuration instead.
+
+  Environment variable: `MODEL_EXPRESS_URL`
+</ParamField>
+
 ## Benchmarking
 
 These flags control the self-benchmark sweep that runs on startup before the worker begins accepting production requests.
@@ -260,12 +266,6 @@ The sweep does not walk a fixed grid of sample counts. Each axis is derived from
 ## Deprecated
 
 These flags are retained for backward compatibility and will be removed in a future release. Each is mapped to its replacement at startup with a deprecation warning.
-
-<ParamField path="--model-express-url" type="string" default="null" deprecated={true}>
-  **Deprecated** — accepted for compatibility with older ModelExpress manifests only. The vLLM ModelExpress plugin reads its own configuration.
-
-  Environment variable: `MODEL_EXPRESS_URL`
-</ParamField>
 
 The five `--benchmark-*-granularity` flags below are the previous names for the benchmark sampling limits. They are read only when `--benchmark-mode` is set and `--benchmark-points-file` is not; otherwise they are ignored entirely, and none of the translation, range checking, or deprecation warnings described here takes place. Under those conditions each is translated to its replacement at startup, with a deprecation warning, and is accepted in the range 1 to 1024; a value outside it raises a `ValueError`. Because the four uniform-sampling limits need both endpoints of their axis, a legacy value of `1` maps to `2` for those flags.
 
