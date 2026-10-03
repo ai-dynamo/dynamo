@@ -390,6 +390,18 @@ Every result and skipped-point entry in the artifact carries a `kv_seed_regime` 
   Optional gzip roll threshold in records.
 </ParamField>
 
+<ParamField path="DYN_REQUEST_TRACE_FILE_MAX_BYTES" type="integer">
+  Soft limit on total compressed bytes for one request-trace gzip output prefix. Unset or `0` disables
+  the limit. Cleanup preserves the active segment. Requires the `file` sink with `jsonl_gz` format.
+  See [Local File Retention](request-traces.mdx#local-file-retention).
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS" type="integer">
+  Expire request-trace gzip segments by last modification time, in seconds. Unset or `0` disables
+  the limit. Cleanup runs on new segments and every 60 seconds, including without incoming traffic.
+  Requires the `file` sink with `jsonl_gz` format. See [Local File Retention](request-traces.mdx#local-file-retention).
+</ParamField>
+
 <ParamField path="DYN_REQUEST_TRACE_S3_BUCKET" type="string">
   Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`. When it is unset, the `s3` sink fails to initialize: Dynamo logs a warning carrying the underlying error, starts no sink from that `DYN_REQUEST_TRACE_SINKS` list, and keeps serving. Startup does not fail. See [Sink Behavior](request-traces.mdx#sink-behavior).
 </ParamField>

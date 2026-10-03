@@ -25,6 +25,8 @@ one or more sinks. For the capture and replay workflow, see
 | `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | `1000` | Integer milliseconds | Periodic file flush interval. |
 | `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | `268435456` | Positive integer bytes | Gzip roll threshold in uncompressed bytes. |
 | `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | unset | Positive integer records | Optional gzip roll threshold in records. |
+| `DYN_REQUEST_TRACE_FILE_MAX_BYTES` | unset | Nonnegative integer bytes | Soft limit on total compressed bytes for one gzip output prefix. Unset or `0` disables the limit. |
+| `DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS` | unset | Nonnegative integer seconds | Expire gzip segments by their last modification time. Unset or `0` disables the limit. |
 | `DYN_REQUEST_TRACE_S3_BUCKET` | unset | Bucket name | Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`. |
 | `DYN_REQUEST_TRACE_S3_REGION` | unset | Region name | Region override for the `s3` sink. When unset, the client uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`. |
 | `DYN_REQUEST_TRACE_S3_PREFIX` | unset | Object key prefix | Key prefix for the `s3` sink. When unset, records land at the bucket root. |
@@ -82,6 +84,47 @@ The `s3` sink is compiled in only when `dynamo-llm` is built with the `request-t
 feature. Shipped Dynamo Python wheels enable it; local source builds pass
 `--features request-trace-s3` to `maturin develop`.
 </Note>
+
+## Local File Retention
+
+The `file` sink with `jsonl_gz` format can retain a rolling window by compressed size, age, or both.
+For example, these settings retain up to 10 GiB of compressed segments and expire segments whose
+last write was at least seven days ago:
+
+```bash
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_FILE_PATH=/tmp/frontend-a-request-trace
+export DYN_REQUEST_TRACE_FILE_MAX_BYTES=10737418240
+export DYN_REQUEST_TRACE_FILE_MAX_AGE_SECS=604800
+```
+
+Both limits are disabled by default. A nonnegative integer is required; invalid values log a warning
+and leave that limit disabled. Retention with plain `jsonl` format or without a `file` sink fails
+trace-sink initialization, with the best-effort startup behavior described in [Sink Behavior](#sink-behavior).
+
+Cleanup runs when a new segment is written and every 60 seconds, including when there is no traffic.
+It removes expired segments first, then removes the oldest closed segments until the byte limit is
+met. Only regular files matching the exact output prefix and segment filename pattern are eligible;
+unrelated files, directories, and symlinks are preserved. Existing segments from earlier runs are
+included.
+
+The byte limit counts compressed file lengths, including the active segment. The active segment is
+never deleted, so usage can exceed the limit by the active segment and writes between cleanup passes.
+`DYN_REQUEST_TRACE_FILE_ROLL_BYTES` still controls rotation in **uncompressed** bytes. Age applies to
+whole segments by last modification time, not to individual request timestamps. An idle active
+segment is closed before expiration. Cleanup failures log a warning and are retried on later passes.
+
+Give each frontend process a separate output prefix when retention is enabled. A prefix lock prevents
+another gzip writer from using that prefix while retention owns it. The lock file remains after exit
+and does not count toward the byte limit; do not remove it while a writer is running. Use a filesystem
+that supports file locking, and do not share the prefix with older Dynamo processes that do not take
+this lock. Without retention, an unsupported shared-lock operation logs a warning and recording
+continues without the lock. Lock contention, permission errors, and other I/O errors still fail
+initialization; exclusive locking for retention never falls back.
+
+Retention preserves record timestamps. Replay normalizes the selected requests to their earliest
+arrival time. A truncated window does not restore earlier KV cache state and can omit agent-session
+dependencies; retain a warmup interval or complete sessions when those are required.
 
 ## Record Types
 

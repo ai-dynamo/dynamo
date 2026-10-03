@@ -213,6 +213,8 @@ impl JsonlGzipRequestTraceSink {
                 roll_uncompressed_bytes: policy.file_roll_bytes,
                 roll_lines: policy.file_roll_lines,
                 max_segments: None,
+                max_bytes: policy.file_max_bytes,
+                max_age: policy.file_max_age_secs.map(Duration::from_secs),
             },
         )
         .await
@@ -252,6 +254,7 @@ impl RequestTraceSink for JsonlGzipRequestTraceSink {
 
 async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>> {
     let policy = config::policy();
+    validate_file_retention(policy)?;
     let mut sinks: Vec<Arc<dyn RequestTraceSink>> = Vec::new();
     for sink_kind in &policy.sinks {
         match sink_kind {
@@ -286,6 +289,16 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>
         }
     }
     Ok(sinks)
+}
+
+fn validate_file_retention(policy: &RequestTracePolicy) -> anyhow::Result<()> {
+    if (policy.file_max_bytes.is_some() || policy.file_max_age_secs.is_some())
+        && (!policy.sinks.contains(&RequestTraceSinkKind::File)
+            || policy.file_format != RequestTraceFileFormat::JsonlGz)
+    {
+        anyhow::bail!("request trace file retention requires the file sink with jsonl_gz format");
+    }
+    Ok(())
 }
 
 /// The sink workers, retained so that teardown can wait for them.
@@ -586,6 +599,48 @@ mod tests {
     use crate::request_trace::RequestTraceMetrics;
     use crate::request_trace::RequestTraceSchema;
 
+    #[test]
+    fn retention_requires_rotating_file_sink() {
+        let mut policy = config::load_from_env();
+        policy.file_max_bytes = Some(100);
+        policy.file_max_age_secs = None;
+        policy.sinks = vec![RequestTraceSinkKind::File];
+        policy.file_format = RequestTraceFileFormat::Jsonl;
+        assert!(validate_file_retention(&policy).is_err());
+        policy.file_format = RequestTraceFileFormat::JsonlGz;
+        assert!(validate_file_retention(&policy).is_ok());
+        policy.sinks = vec![RequestTraceSinkKind::S3];
+        assert!(validate_file_retention(&policy).is_err());
+        policy.file_max_bytes = None;
+        assert!(validate_file_retention(&policy).is_ok());
+    }
+
+    #[tokio::test]
+    async fn file_policy_retains_latest_segment_without_changing_replay_times() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("retained");
+        let mut policy = config::load_from_env();
+        policy.file_path = Some(path.display().to_string());
+        policy.file_roll_lines = Some(1);
+        policy.file_roll_bytes = 1024 * 1024;
+        policy.file_buffer_bytes = 1;
+        policy.file_max_bytes = Some(1);
+        let sink = JsonlGzipRequestTraceSink::from_policy(&policy)
+            .await
+            .unwrap();
+        sink.emit(&sample_record()).await;
+        sink.emit(&sample_record()).await;
+        sink.shutdown().await;
+        assert!(!segment_path(&path, 0).exists());
+        let bytes = std::fs::read(segment_path(&path, 1)).unwrap();
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut MultiGzDecoder::new(bytes.as_slice()), &mut contents)
+            .unwrap();
+        let row: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(row["event"]["request"]["request_received_ms"], 1_000);
+        assert_eq!(row["event"]["event_time_unix_ms"], 1_100);
+    }
+
     fn sample_record() -> RequestTraceRecord {
         RequestTraceRecord {
             schema: RequestTraceSchema::V1,
@@ -851,6 +906,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: Some(1),
                 max_segments: None,
+                ..Default::default()
             },
         )
         .await
@@ -889,6 +945,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: None,
+                ..Default::default()
             },
         )
         .await
@@ -961,6 +1018,7 @@ mod tests {
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
                 max_segments: None,
+                ..Default::default()
             },
         )
         .await
