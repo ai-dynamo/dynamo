@@ -25,6 +25,23 @@ Check Prometheus metrics (port {{ .Values.agent.prometheusPort }} on each pod):
 
 RBAC scope: {{ if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}namespace-scoped (Role + RoleBinding in {{ .Release.Namespace }}){{ else }}cluster-wide (ClusterRole + ClusterRoleBinding){{ end }}.
 
+READINESS — pod readiness now means the agent is ENFORCING power caps: its last
+reconcile cycle completed every enforcement action it was required to take, with
+no reported failure, and completed recently. Each pod serves this on port 8081:
+
+  kubectl exec -n {{ .Release.Namespace }} <pod> -- curl -s localhost:8081/readyz
+  # "ok last_good_cycle_age_s=3.2"  (HTTP 200)
+  # "not-ready last_good_cycle_age_s=none"  (HTTP 503 — no cycle has succeeded)
+
+An agent that is not enforcing goes NotReady, which consumes the DaemonSet
+rollout budget under `daemonset.updateStrategy.rollingUpdate.maxUnavailable`
+and can stall a `helm upgrade` that previously completed. This is intended — an
+upgrade rolling over a node whose agent is not enforcing should not be reported
+as progress. The update strategy itself is unchanged.
+
+Chart >=1.4.0 REQUIRES agent image >=v1.3.0: an older image serves no /readyz,
+so every pod is permanently NotReady and the rollout stalls at the first node.
+
 {{- end }}
 
 {{- if .Values.dev.enabled }}
