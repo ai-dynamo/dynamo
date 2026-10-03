@@ -43,7 +43,7 @@ from tests.utils.payload_builder import (
     guided_decoding_chat_payload_default,
     image_token_metrics_payload,
     kv_events_metrics_payload,
-    lora_chat_payload,
+    lora_lifecycle_chat_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -1270,21 +1270,23 @@ def test_sglang_lora_aggregated(
     dynamo_dynamic_ports,
 ):
     """
-    Test LoRA inference with aggregated SGLang deployment.
+    Test the LoRA lifecycle with aggregated SGLang deployment.
 
     This test:
     1. Uses MinIO fixture to provide S3-compatible storage with uploaded LoRA
     2. Starts SGLang with LoRA support enabled
-    3. Loads the LoRA adapter via system API
-    4. Runs inference with the LoRA model
+    3. Loads the LoRA adapter via system API and runs inference with it
+    4. Unloads the adapter and checks the worker and frontend no longer serve
+       it while the base model still does
+    5. Reloads the adapter and runs inference with it again
     """
     minio_config: MinioLoraConfig = minio_lora_service
 
-    lora_payload = lora_chat_payload(
+    lora_payload = lora_lifecycle_chat_payload(
         lora_name=minio_config.lora_name,
         s3_uri=minio_config.get_s3_uri(),
+        base_model="Qwen/Qwen3-0.6B",
         system_port=DefaultPort.SYSTEM1.value,
-        repeat_count=2,
     )
 
     config = SGLangConfig(
