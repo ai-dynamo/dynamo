@@ -176,8 +176,8 @@ vllm_omni_configs = {
         directory=vllm_dir,
         script_name="agg_omni_audio.sh",
         marks=[
+            # Restore XPU with a two-card case after startup is fixed; see #15417.
             pytest.mark.gpu_1,
-            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
         ],
