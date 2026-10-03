@@ -6,13 +6,42 @@
 # This script verifies that the Kubernetes cluster has the necessary prerequisites
 # before deploying Dynamo platform.
 #
+# Usage: ./pre-deployment-check.sh [--device gpu|xpu|cpu]
+#   --device gpu  (default) Check for NVIDIA GPU nodes and GPU Operator
+#   --device xpu            Check for Intel GPU resources and device plugin
+#   --device cpu            Skip accelerator-specific checks
+#
 # Checks performed:
 # 1. kubectl connectivity - Verifies kubectl is installed and can connect to cluster
 # 2. Default StorageClass - Ensures a default StorageClass is configured
-# 3. Cluster GPU Resources - Validates GPU nodes are available
-# 4. GPU Operator - Confirms GPU operator is installed and running
+# 3. Cluster GPU Resources - Validates GPU nodes are available; skipped for CPU
+# 4. GPU Operator / Device Plugin - Confirms the operator is running; skipped for CPU
 
 set -e
+
+# Parse arguments
+DEVICE_TYPE="gpu"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --device requires a value: gpu, xpu, or cpu" >&2
+                exit 1
+            fi
+            DEVICE_TYPE="$2"
+            if [[ "$DEVICE_TYPE" != "gpu" && "$DEVICE_TYPE" != "xpu" && "$DEVICE_TYPE" != "cpu" ]]; then
+                echo "Error: --device must be 'gpu', 'xpu', or 'cpu'" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--device gpu|xpu|cpu]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Colors for output
 RED='\033[0;31m'
@@ -122,7 +151,7 @@ check_default_storage_class() {
     fi
 }
 
-check_cluster_resources() {
+check_gpu_resources() {
     print_section "Checking cluster GPU resources"
 
     # Primary detection: GPU Feature Discovery label
@@ -173,6 +202,113 @@ check_cluster_resources() {
     print_status $BLUE "Please ensure your cluster has GPU-enabled nodes configured."
 
     return 1
+}
+
+check_intel_gpu_resources() {
+    print_section "Checking cluster Intel GPU resources"
+
+    # Check for gpu.intel.com DeviceClass
+    if kubectl get deviceclass gpu.intel.com &> /dev/null; then
+        print_status $GREEN "✅ DeviceClass gpu.intel.com found"
+    else
+        print_status $RED "❌ DeviceClass gpu.intel.com not found"
+        print_status $YELLOW "Dynamo requires the Intel resource drivers for Kubernetes with DeviceClass gpu.intel.com."
+        print_status $BLUE "Install the Intel resource drivers:"
+        print_status $BLUE "https://github.com/intel/intel-resource-drivers-for-kubernetes"
+        return 1
+    fi
+
+    # Check for ResourceSlices describing Intel GPU devices
+    local resource_slices
+    resource_slices=$(kubectl get resourceslice -o json 2>/dev/null | \
+        python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+count = 0
+for item in data.get('items', []):
+    driver = item.get('spec', {}).get('driver', '')
+    if 'intel' in driver.lower():
+        count += 1
+        print(item['metadata']['name'])
+" 2>/dev/null || true)
+
+    local slice_count
+    slice_count=$(echo "$resource_slices" | grep -c . || true)
+
+    if [[ $slice_count -gt 0 ]]; then
+        print_status $GREEN "✅ Found ${slice_count} Intel GPU ResourceSlice(s)"
+        ALLOCATABLE_GPU_DETECTED=true
+        return 0
+    fi
+
+    # Fallback: check allocatable gpu.intel.com/gpu on nodes
+    local allocatable_xpu_nodes
+    allocatable_xpu_nodes=$(kubectl get nodes \
+        -o json 2>/dev/null | \
+        python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for item in data.get('items', []):
+    name = item['metadata']['name']
+    alloc = item.get('status', {}).get('allocatable', {})
+    gpu = alloc.get('gpu.intel.com/gpu', '0')
+    if gpu.isdigit() and int(gpu) > 0:
+        print(f'{name} {gpu}')
+" 2>/dev/null || true)
+
+    local allocatable_count
+    allocatable_count=$(echo "$allocatable_xpu_nodes" | grep -c . || true)
+
+    if [[ $allocatable_count -gt 0 ]]; then
+        ALLOCATABLE_GPU_DETECTED=true
+        print_status $GREEN "✅ Found ${allocatable_count} Intel GPU node(s) via allocatable resources"
+        echo "$allocatable_xpu_nodes" | while read -r node gpu_count; do
+            print_status $GREEN "  - ${node}: ${gpu_count} Intel GPU(s)"
+        done
+        return 0
+    fi
+
+    print_status $RED "❌ No Intel GPU resources found in the cluster"
+    print_status $YELLOW "Ensure your cluster has Intel GPU nodes and the Intel resource drivers are installed."
+    return 1
+}
+
+check_intel_gpu_operator() {
+    print_section "Checking Intel GPU resource driver"
+
+    # Check for Intel GPU resource driver DaemonSet pods
+    local intel_driver_pods
+    intel_driver_pods=$(kubectl get pods -n intel-gpu-resource-driver \
+        -l app=intel-gpu-resource-driver-kubelet-plugin \
+        --no-headers 2>/dev/null || true)
+
+    if [[ -z "$intel_driver_pods" ]]; then
+        print_status $RED "❌ Intel GPU resource driver pods not found"
+        print_status $YELLOW "Dynamo requires the Intel resource drivers for Kubernetes on Intel GPU nodes."
+        print_status $BLUE "Install: https://github.com/intel/intel-resource-drivers-for-kubernetes"
+        return 1
+    fi
+
+    # Count running pods
+    local running_pods
+    running_pods=$(echo "$intel_driver_pods" | awk '$4 == "Running"' | wc -l | tr -d ' ')
+
+    local total_pods
+    total_pods=$(echo "$intel_driver_pods" | wc -l | tr -d ' ')
+
+    if [[ $running_pods -eq 0 ]]; then
+        print_status $RED "❌ Intel GPU resource driver pods are not running"
+        echo "$intel_driver_pods"
+        return 1
+    elif [[ $running_pods -lt $total_pods ]]; then
+        print_status $YELLOW "⚠️ Intel GPU resource driver partially running: $running_pods/$total_pods pods running"
+        echo "$intel_driver_pods"
+        print_status $GREEN "✅ Intel GPU resource driver is available (with warnings)"
+        return 0
+    else
+        print_status $GREEN "✅ Intel GPU resource driver is running ($running_pods/$total_pods pods)"
+        return 0
+    fi
 }
 
 check_gpu_operator() {
@@ -312,18 +448,34 @@ main() {
         overall_exit_code=1
     fi
 
-    if check_cluster_resources; then
-        record_check_result "Cluster GPU Resources" "PASS"
-    else
-        record_check_result "Cluster GPU Resources" "FAIL"
-        overall_exit_code=1
-    fi
+    if [[ "$DEVICE_TYPE" == "gpu" ]]; then
+        if check_gpu_resources; then
+            record_check_result "Cluster GPU Resources" "PASS"
+        else
+            record_check_result "Cluster GPU Resources" "FAIL"
+            overall_exit_code=1
+        fi
 
-    if check_gpu_operator; then
-        record_check_result "GPU Operator" "PASS"
-    else
-        record_check_result "GPU Operator" "FAIL"
-        overall_exit_code=1
+        if check_gpu_operator; then
+            record_check_result "GPU Operator" "PASS"
+        else
+            record_check_result "GPU Operator" "FAIL"
+            overall_exit_code=1
+        fi
+    elif [[ "$DEVICE_TYPE" == "xpu" ]]; then
+        if check_intel_gpu_resources; then
+            record_check_result "Cluster Intel GPU Resources" "PASS"
+        else
+            record_check_result "Cluster Intel GPU Resources" "FAIL"
+            overall_exit_code=1
+        fi
+
+        if check_intel_gpu_operator; then
+            record_check_result "Intel GPU Resource Driver" "PASS"
+        else
+            record_check_result "Intel GPU Resource Driver" "FAIL"
+            overall_exit_code=1
+        fi
     fi
 
     # Display summary
