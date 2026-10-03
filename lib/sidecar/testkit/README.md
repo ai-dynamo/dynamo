@@ -200,12 +200,17 @@ establish complete parity with the legacy Python backend.
 `tests/serve/test_sidecar.py` starts the frontend, production sidecar executable
 and real engines through the existing launch scripts. vLLM payloads validate
 HTTP streaming, logprobs, structured output, distinct prefill/decode workers and
-KV-aware routing. Post-validation checks scheduler cleanup after client
-disconnection, recovery on the same deployment, and completed KV transfers.
+KV-aware routing, including exact token/usage accounting. Post-validation checks
+scheduler cleanup after client disconnection, recovery on the same deployment,
+and completed KV transfers.
 GPU assertions share each deployment's existing startup and teardown.
 
-The CPU suites retain direct adapter cancellation and consumer-drop checks;
-the GPU suite exercises cancellation through the frontend connection.
+GPU post-validation also uses the existing Dynamo client to check native logprob
+metadata, explicit cancellation, consumer drop, and handoff responses on the same
+vLLM deployment. Cancellation must release scheduler work and allow subsequent
+generation. Exact cancelled-terminal delivery remains a CPU adapter assertion
+because the network transport can close first; GPU checks validate it when
+delivered.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and
