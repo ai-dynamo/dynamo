@@ -110,6 +110,7 @@ link no catalog and reject a configured policy type at startup.
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -226,6 +227,23 @@ startup, so an out-of-range value or an unknown key fails the process immediatel
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+`dynamo-sticky-min-load` accepts two parameters:
+
+```yaml
+    - name: dynamo-sticky-min-load
+      type: dynamo-sticky-min-load
+      parameters:
+        max_idle_secs: 14400
+        eviction_interval_secs: 60
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `max_idle_secs` | `14400` | Seconds a session binding may go unused before it is dropped. Must be greater than `0`. |
+| `eviction_interval_secs` | `60` | Minimum seconds between sweeps for idle bindings. |
+
+Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently.
 
 #### Override the Selection
 
