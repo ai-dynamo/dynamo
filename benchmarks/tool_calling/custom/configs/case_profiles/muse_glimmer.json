@@ -1,0 +1,2757 @@
+{
+  "schema_version": 1,
+  "profile": "muse_glimmer",
+  "description": "Muse Glimmer recipient-routed reasoning and ATEM tool-calling qualification matrix.",
+  "default_modes": [
+    "nonstream",
+    "stream"
+  ],
+  "logical_cases": 61,
+  "expected_records": 122,
+  "defaults": {
+    "forbidden_output_fragments": [
+      "<|message|>",
+      "<|start|>",
+      "<|eom|>",
+      "<|eot|>",
+      "to=self",
+      "<atem:function_calls>",
+      "</atem:function_calls>",
+      "<atem:invoke",
+      "</atem:invoke>",
+      "<atem:parameter",
+      "</atem:parameter>",
+      "<|patch|>",
+      "<|video|>"
+    ]
+  },
+  "request_presets": {
+    "template_default": {}
+  },
+  "tools": {
+    "add_numbers": {
+      "type": "function",
+      "function": {
+        "name": "add_numbers",
+        "description": "Add two integers.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "a": {
+              "type": "integer"
+            },
+            "b": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "a",
+            "b"
+          ]
+        }
+      }
+    },
+    "add_numbers_2": {
+      "type": "function",
+      "function": {
+        "name": "add_numbers_2",
+        "description": "Add two integers (second registry entry).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "a": {
+              "type": "integer"
+            },
+            "b": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "a",
+            "b"
+          ]
+        }
+      }
+    },
+    "multiply_numbers": {
+      "type": "function",
+      "function": {
+        "name": "multiply_numbers",
+        "description": "Multiply two integers.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "a": {
+              "type": "integer"
+            },
+            "b": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "a",
+            "b"
+          ]
+        }
+      }
+    },
+    "get_weather": {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ]
+            }
+          },
+          "required": [
+            "city",
+            "unit"
+          ]
+        }
+      }
+    },
+    "get_weather_2": {
+      "type": "function",
+      "function": {
+        "name": "get_weather_2",
+        "description": "Get the current weather for a city (second registry entry).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ]
+            }
+          },
+          "required": [
+            "city",
+            "unit"
+          ]
+        }
+      }
+    },
+    "set_threshold": {
+      "type": "function",
+      "function": {
+        "name": "set_threshold",
+        "description": "Set a floating point threshold.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "value"
+          ]
+        }
+      }
+    },
+    "set_mode": {
+      "type": "function",
+      "function": {
+        "name": "set_mode",
+        "description": "Enable or disable a mode.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "enabled"
+          ]
+        }
+      }
+    },
+    "set_coordinate": {
+      "type": "function",
+      "function": {
+        "name": "set_coordinate",
+        "description": "Set an x/y coordinate.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        }
+      }
+    },
+    "record_scalars": {
+      "type": "function",
+      "function": {
+        "name": "record_scalars",
+        "description": "Record a mixed-type scalar tuple.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer"
+            },
+            "ratio": {
+              "type": "number"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "count",
+            "ratio",
+            "enabled",
+            "label"
+          ]
+        }
+      }
+    },
+    "store_text": {
+      "type": "function",
+      "function": {
+        "name": "store_text",
+        "description": "Store a text value verbatim.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    },
+    "submit_json": {
+      "type": "function",
+      "function": {
+        "name": "submit_json",
+        "description": "Submit a JSON document encoded as a string.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        }
+      }
+    },
+    "copy_file": {
+      "type": "function",
+      "function": {
+        "name": "copy_file",
+        "description": "Copy a file from source to destination.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string"
+            },
+            "destination": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "destination"
+          ]
+        }
+      }
+    },
+    "sum_values": {
+      "type": "function",
+      "function": {
+        "name": "sum_values",
+        "description": "Sum a list of integers.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            }
+          },
+          "required": [
+            "values"
+          ]
+        }
+      }
+    },
+    "search_docs": {
+      "type": "function",
+      "function": {
+        "name": "search_docs",
+        "description": "Search documents with a query, result limit, and tag filter.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "query",
+            "limit",
+            "tags"
+          ]
+        }
+      }
+    },
+    "register_address": {
+      "type": "function",
+      "function": {
+        "name": "register_address",
+        "description": "Register a user with a nested address object.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "user": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "address": {
+                  "type": "object",
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    },
+                    "zip": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "zip"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "address"
+              ]
+            }
+          },
+          "required": [
+            "user"
+          ]
+        }
+      }
+    },
+    "ping": {
+      "type": "function",
+      "function": {
+        "name": "ping",
+        "description": "Health check that takes no arguments.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    "translate_text": {
+      "type": "function",
+      "function": {
+        "name": "translate_text",
+        "description": "Translate text into a target language.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "target_language": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "target_language"
+          ]
+        }
+      }
+    },
+    "lookup_inventory": {
+      "type": "function",
+      "function": {
+        "name": "lookup_inventory",
+        "description": "Look up inventory for a SKU in a warehouse.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sku": {
+              "type": "string"
+            },
+            "warehouse": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sku",
+            "warehouse"
+          ]
+        }
+      }
+    },
+    "lookup_inventory_2": {
+      "type": "function",
+      "function": {
+        "name": "lookup_inventory_2",
+        "description": "Look up inventory for a SKU in a warehouse (second registry entry).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sku": {
+              "type": "string"
+            },
+            "warehouse": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sku",
+            "warehouse"
+          ]
+        }
+      }
+    },
+    "send_email": {
+      "type": "function",
+      "function": {
+        "name": "send_email",
+        "description": "Send an email.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "to": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "to",
+            "subject",
+            "body"
+          ]
+        }
+      }
+    },
+    "create_task": {
+      "type": "function",
+      "function": {
+        "name": "create_task",
+        "description": "Create a task. The due_date field is optional.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ]
+            },
+            "due_date": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "priority"
+          ]
+        }
+      }
+    },
+    "strict_profile": {
+      "type": "function",
+      "function": {
+        "name": "strict_profile",
+        "description": "Set a profile. No properties beyond those declared are permitted.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "handle": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "handle",
+            "tier"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "get_time": {
+      "type": "function",
+      "function": {
+        "name": "get_time",
+        "description": "Get the current time in a timezone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timezone": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "timezone"
+          ]
+        }
+      }
+    },
+    "read_file": {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a file by path.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      }
+    },
+    "fetch_url": {
+      "type": "function",
+      "function": {
+        "name": "fetch_url",
+        "description": "Fetch a URL.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ]
+        }
+      }
+    },
+    "book_trip": {
+      "type": "function",
+      "function": {
+        "name": "book_trip",
+        "description": "Book a trip between two cities.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "origin": {
+              "type": "string"
+            },
+            "destination": {
+              "type": "string"
+            },
+            "passengers": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "origin",
+            "destination",
+            "passengers"
+          ]
+        }
+      }
+    },
+    "append_note": {
+      "type": "function",
+      "function": {
+        "name": "append_note",
+        "description": "Append a note that may span multiple lines.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "note"
+          ]
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "case_id": "muse_core_required_single_default",
+      "description": "tool_choice=required, single call, thinking=default",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Use add_numbers exactly once with a=17 and b=19. Do not calculate the answer yourself."
+        }
+      ],
+      "tools": [
+        "add_numbers"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [
+        "add_numbers"
+      ],
+      "expected_tool_calls": [
+        {
+          "name": "add_numbers",
+          "arguments": {
+            "a": 17,
+            "b": 19
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_core_auto_call_default",
+      "description": "tool_choice=auto with an obvious call, thinking=default",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the weather in Paris right now? Report it in celsius. Use the tool."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "auto",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [
+        "get_weather"
+      ],
+      "expected_tool_calls": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris",
+            "unit": "celsius"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_core_auto_no_call_default",
+      "description": "tool_choice=auto where no call applies, thinking=default",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reply with exactly the word BLUE. Do not call any function."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "auto",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "BLUE",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_core_none_default",
+      "description": "tool_choice=none must suppress calls, thinking=default",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the weather in Paris? Answer in one short sentence without calling anything."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "none",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_integer_scalars",
+      "description": "integers must not come back as strings",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call add_numbers with a=17 and b=19."
+        }
+      ],
+      "tools": [
+        "add_numbers"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "add_numbers",
+          "arguments": {
+            "a": 17,
+            "b": 19
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_float_scalar",
+      "description": "a float must stay a float",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call set_threshold with value 0.75."
+        }
+      ],
+      "tools": [
+        "set_threshold"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "set_threshold",
+          "arguments": {
+            "value": 0.75
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_negative_floats",
+      "description": "negative floats keep their sign and type",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call set_coordinate with x=-12.5 and y=3.25."
+        }
+      ],
+      "tools": [
+        "set_coordinate"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "set_coordinate",
+          "arguments": {
+            "x": -12.5,
+            "y": 3.25
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_boolean_true",
+      "description": "boolean true must not become the string 'true'",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call set_mode with enabled set to true."
+        }
+      ],
+      "tools": [
+        "set_mode"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "set_mode",
+          "arguments": {
+            "enabled": true
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_boolean_false",
+      "description": "boolean false must not become the string 'false' or be dropped",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call set_mode with enabled set to false."
+        }
+      ],
+      "tools": [
+        "set_mode"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "set_mode",
+          "arguments": {
+            "enabled": false
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_mixed_scalars",
+      "description": "int, float, bool and string in one call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call record_scalars with count=3, ratio=0.5, enabled=true, label=alpha."
+        }
+      ],
+      "tools": [
+        "record_scalars"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "record_scalars",
+          "arguments": {
+            "count": 3,
+            "ratio": 0.5,
+            "enabled": true,
+            "label": "alpha"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_numeric_string_stays_string",
+      "description": "a numeric-looking value declared as string must stay a string",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call store_text with text set to the four characters 1234. It is a string, not a number."
+        }
+      ],
+      "tools": [
+        "store_text"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "store_text",
+          "arguments": {
+            "text": "1234"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_array_of_integers",
+      "description": "an integer array must decode as a list of ints",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call sum_values with values [1, 2, 3]."
+        }
+      ],
+      "tools": [
+        "sum_values"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "sum_values",
+          "arguments": {
+            "values": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_array_of_strings",
+      "description": "a string array plus sibling scalars",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call search_docs with query=kv cache, limit=5, and tags [\"gpu\", \"memory\"]."
+        }
+      ],
+      "tools": [
+        "search_docs"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "search_docs",
+          "arguments": {
+            "query": "kv cache",
+            "limit": 5,
+            "tags": [
+              "gpu",
+              "memory"
+            ]
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_nested_object",
+      "description": "a two-level nested object must survive the parameter block",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call register_address for a user named Ada whose address has city=Paris and zip=75001."
+        }
+      ],
+      "tools": [
+        "register_address"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "register_address",
+          "arguments": {
+            "user": {
+              "name": "Ada",
+              "address": {
+                "city": "Paris",
+                "zip": "75001"
+              }
+            }
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_unicode_string",
+      "description": "non-ASCII argument text round-trips without escaping damage",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call translate_text with text set to 你好世界 and target_language set to English."
+        }
+      ],
+      "tools": [
+        "translate_text"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "translate_text",
+          "arguments": {
+            "text": "你好世界",
+            "target_language": "English"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_windows_path_backslashes",
+      "description": "backslashes must not be consumed as escapes",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call copy_file with source C:\\data\\input.txt and destination D:\\backup\\input.txt."
+        }
+      ],
+      "tools": [
+        "copy_file"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "copy_file",
+          "arguments": {
+            "source": "C:\\data\\input.txt",
+            "destination": "D:\\backup\\input.txt"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_type_embedded_json_string",
+      "description": "a JSON document carried inside a string argument stays a string",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call submit_json with payload set to exactly {\"a\":1,\"b\":2}"
+        }
+      ],
+      "tools": [
+        "submit_json"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "submit_json",
+          "arguments": {
+            "payload": "{\"a\":1,\"b\":2}"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_schema_empty_object",
+      "description": "a no-argument tool must produce {} and not an empty string",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call ping once."
+        }
+      ],
+      "tools": [
+        "ping"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "ping",
+          "arguments": {}
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_schema_enum_required",
+      "description": "enum-valued argument",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call get_weather for Tokyo using fahrenheit."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Tokyo",
+            "unit": "fahrenheit"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_schema_optional_omitted",
+      "description": "an unmentioned optional property must be absent, not null",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call create_task with title=Ship release and priority=high. Do not set a due date."
+        }
+      ],
+      "tools": [
+        "create_task"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "create_task",
+          "arguments": {
+            "title": "Ship release",
+            "priority": "high"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_schema_additional_properties_false",
+      "description": "no invented properties when additionalProperties is false",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call strict_profile with handle=ada and tier=2."
+        }
+      ],
+      "tools": [
+        "strict_profile"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "strict_profile",
+          "arguments": {
+            "handle": "ada",
+            "tier": 2
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_schema_all_required_fields",
+      "description": "every required field present on a three-field tool",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call send_email to ada@example.com with subject Status and body All green."
+        }
+      ],
+      "tools": [
+        "send_email"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "send_email",
+          "arguments": {
+            "to": "ada@example.com",
+            "subject": "Status",
+            "body": "All green"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": true
+    },
+    {
+      "case_id": "muse_schema_multiline_value",
+      "description": "a parameter value spanning lines must not truncate at the newline",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call append_note with note set to exactly these two lines:\nfirst line\nsecond line"
+        }
+      ],
+      "tools": [
+        "append_note"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "append_note",
+          "arguments": {
+            "note": "first line\nsecond line"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_schema_angle_brackets_in_value",
+      "description": "angle brackets inside a value must not be mistaken for markup",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call store_text with text set to exactly a < b > c"
+        }
+      ],
+      "tools": [
+        "store_text"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "store_text",
+          "arguments": {
+            "text": "a < b > c"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_schema_quotes_in_value",
+      "description": "embedded double quotes survive the parameter block",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call store_text with text set to exactly she said \"hi\""
+        }
+      ],
+      "tools": [
+        "store_text"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "store_text",
+          "arguments": {
+            "text": "she said \"hi\""
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_parallel_two_different_tools",
+      "description": "two distinct tools in one turn",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call get_weather for Paris in celsius and add_numbers with a=2 and b=3. Use both tools."
+        }
+      ],
+      "tools": [
+        "get_weather",
+        "add_numbers"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 2,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris",
+            "unit": "celsius"
+          }
+        },
+        {
+          "name": "add_numbers",
+          "arguments": {
+            "a": 2,
+            "b": 3
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_parallel_same_tool_twice",
+      "description": "the same tool called twice with different arguments",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call get_weather twice: once for Paris in celsius and once for Tokyo in celsius."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 2,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris",
+            "unit": "celsius"
+          }
+        },
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Tokyo",
+            "unit": "celsius"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_parallel_three_calls",
+      "description": "three calls in a single turn",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call add_numbers with a=1 b=2, then add_numbers with a=3 b=4, then add_numbers with a=5 b=6."
+        }
+      ],
+      "tools": [
+        "add_numbers"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 3,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "add_numbers",
+          "arguments": {
+            "a": 1,
+            "b": 2
+          }
+        },
+        {
+          "name": "add_numbers",
+          "arguments": {
+            "a": 3,
+            "b": 4
+          }
+        },
+        {
+          "name": "add_numbers",
+          "arguments": {
+            "a": 5,
+            "b": 6
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_parallel_distinct_registry_tools",
+      "description": "parallel calls across near-identical tool names",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call add_numbers with a=1 b=2 and add_numbers_2 with a=3 b=4."
+        }
+      ],
+      "tools": [
+        "add_numbers",
+        "add_numbers_2"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 2,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "add_numbers",
+          "arguments": {
+            "a": 1,
+            "b": 2
+          }
+        },
+        {
+          "name": "add_numbers_2",
+          "arguments": {
+            "a": 3,
+            "b": 4
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_lifecycle_single_result",
+      "description": "one tool result then a fixed final answer",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call get_weather for Paris in celsius. After the tool result, return exactly PARIS_SUNNY."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris",
+            "unit": "celsius"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false,
+      "scripted_followup": {
+        "tool_results": [
+          "{\"condition\":\"sunny\",\"temperature_c\":21}"
+        ],
+        "reverse_results": false,
+        "tool_choice": "none",
+        "expected_finish_reasons": [
+          "stop"
+        ],
+        "expect_no_tool_calls": true,
+        "exact_tool_calls": 0,
+        "min_tool_calls": 0,
+        "expected_content": "PARIS_SUNNY",
+        "expect_reasoning": true
+      }
+    },
+    {
+      "case_id": "muse_lifecycle_parallel_results_in_order",
+      "description": "two results delivered in call order",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call get_weather for Paris and for Tokyo, both in celsius. After both results, reply with exactly DONE."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 2,
+      "expected_tool_names": [
+        "get_weather"
+      ],
+      "expected_tool_calls": [],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false,
+      "scripted_followup": {
+        "tool_results": [
+          "{\"condition\":\"sunny\",\"temperature_c\":21}",
+          "{\"condition\":\"rain\",\"temperature_c\":14}"
+        ],
+        "reverse_results": false,
+        "tool_choice": "none",
+        "expected_finish_reasons": [
+          "stop"
+        ],
+        "expect_no_tool_calls": true,
+        "exact_tool_calls": 0,
+        "min_tool_calls": 0,
+        "expected_content": "DONE",
+        "expect_reasoning": true
+      }
+    },
+    {
+      "case_id": "muse_lifecycle_parallel_results_out_of_order",
+      "description": "the same two results appended in reverse order",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call get_weather for Paris and for Tokyo, both in celsius. After both results, reply with exactly DONE."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 2,
+      "expected_tool_names": [
+        "get_weather"
+      ],
+      "expected_tool_calls": [],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false,
+      "scripted_followup": {
+        "tool_results": [
+          "{\"condition\":\"sunny\",\"temperature_c\":21}",
+          "{\"condition\":\"rain\",\"temperature_c\":14}"
+        ],
+        "reverse_results": true,
+        "tool_choice": "none",
+        "expected_finish_reasons": [
+          "stop"
+        ],
+        "expect_no_tool_calls": true,
+        "exact_tool_calls": 0,
+        "min_tool_calls": 0,
+        "expected_content": "DONE",
+        "expect_reasoning": true
+      }
+    },
+    {
+      "case_id": "muse_lifecycle_error_result",
+      "description": "an error payload must still reach a clean final answer",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call lookup_inventory for sku=ABC in warehouse=east. If the tool reports an error, reply with exactly LOOKUP_FAILED."
+        }
+      ],
+      "tools": [
+        "lookup_inventory"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "lookup_inventory",
+          "arguments": {
+            "sku": "ABC",
+            "warehouse": "east"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false,
+      "scripted_followup": {
+        "tool_results": [
+          "{\"error\":\"warehouse unavailable\"}"
+        ],
+        "reverse_results": false,
+        "tool_choice": "none",
+        "expected_finish_reasons": [
+          "stop"
+        ],
+        "expect_no_tool_calls": true,
+        "exact_tool_calls": 0,
+        "min_tool_calls": 0,
+        "expected_content": "LOOKUP_FAILED",
+        "expect_reasoning": true
+      }
+    },
+    {
+      "case_id": "muse_lifecycle_unicode_result",
+      "description": "non-ASCII tool output consumed on the second turn",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call translate_text with text 你好 and target_language English. After the tool result, reply with exactly the translation the tool returned."
+        }
+      ],
+      "tools": [
+        "translate_text"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "translate_text",
+          "arguments": {
+            "text": "你好",
+            "target_language": "English"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false,
+      "scripted_followup": {
+        "tool_results": [
+          "{\"translation\":\"Hello\"}"
+        ],
+        "reverse_results": false,
+        "tool_choice": "none",
+        "expected_finish_reasons": [
+          "stop"
+        ],
+        "expect_no_tool_calls": true,
+        "exact_tool_calls": 0,
+        "min_tool_calls": 0,
+        "expected_content": "Hello",
+        "expect_reasoning": true
+      }
+    },
+    {
+      "case_id": "muse_reasoning_multiply_17_19",
+      "description": "reasoning: multiply_17_19",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Compute 17 times 19. Return only the integer."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "323",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_compare_fractions",
+      "description": "reasoning: compare_fractions",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Which is larger, 5/8 or 7/12? Reply with exactly the larger fraction in the form a/b."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "5/8",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_sequence_next",
+      "description": "reasoning: sequence_next",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Continue the sequence 2, 6, 12, 20, 30. Return only the next integer."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "42",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_minutes_to_seconds",
+      "description": "reasoning: minutes_to_seconds",
+      "messages": [
+        {
+          "role": "user",
+          "content": "How many seconds are in 7 minutes and 15 seconds? Return only the integer."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "435",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_sort_integers",
+      "description": "reasoning: sort_integers",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Sort 8, 3, 11, 5 ascending. Return only the integers separated by single spaces."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "3 5 8 11",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_parity_expression",
+      "description": "reasoning: parity_expression",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Is 3^7 + 2 even or odd? Reply with exactly one word, even or odd."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "odd",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_set_intersection",
+      "description": "reasoning: set_intersection",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Given A={1,2,3,4} and B={3,4,5}, list the intersection ascending, comma separated with no spaces."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "3,4",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_chinese_arithmetic",
+      "description": "reasoning: chinese_arithmetic",
+      "messages": [
+        {
+          "role": "user",
+          "content": "用中文思考：23 乘以 4 等于多少？只返回这个整数。"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "92",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_unicode_symbol_math",
+      "description": "reasoning: unicode_symbol_math",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Evaluate ⌈7.2⌉ + ⌊3.9⌋. Return only the integer."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "11",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_spanish_logic",
+      "description": "reasoning: spanish_logic",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Si todos los gatos son mamíferos y Feli es un gato, ¿es Feli un mamífero? Responde exactamente sí o no."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": null,
+      "content_pattern": "(?i)sí[.!]?",
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_structured_json",
+      "description": "reasoning then a strict JSON body",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Return only this JSON object with no prose: {\"answer\": 42, \"unit\": \"cm\"}"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false,
+      "expected_json": {
+        "answer": 42,
+        "unit": "cm"
+      }
+    },
+    {
+      "case_id": "muse_reasoning_system_instruction",
+      "description": "a system message must not break the reasoning split",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are terse. Answer with only the integer, no words."
+        },
+        {
+          "role": "user",
+          "content": "What is 12 times 12?"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "144",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_long_context_retrieval",
+      "description": "retrieve one fact from a long preamble",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Here are records. record 1 value 3. record 2 value 6. record 3 value 9. record 4 value 12. record 5 value 15. record 6 value 18. record 7 value 21. record 8 value 24. record 9 value 27. record 10 value 30. record 11 value 33. record 12 value 36. record 13 value 39. record 14 value 42. record 15 value 45. record 16 value 48. record 17 value 51. record 18 value 54. record 19 value 57. record 20 value 60. record 21 value 63. record 22 value 66. record 23 value 69. record 24 value 72. record 25 value 75. record 26 value 78. record 27 value 81. record 28 value 84. record 29 value 87. record 30 value 90. record 31 value 93. record 32 value 96. record 33 value 99. record 34 value 102. record 35 value 105. record 36 value 108. record 37 value 111. record 38 value 114. record 39 value 117. record 40 value 120. record 41 value 123. record 42 value 126. record 43 value 129. record 44 value 132. record 45 value 135. record 46 value 138. record 47 value 141. record 48 value 144. record 49 value 147. record 50 value 150. record 51 value 153. record 52 value 156. record 53 value 159. record 54 value 162. record 55 value 165. record 56 value 168. record 57 value 171. record 58 value 174. record 59 value 177. record 60 value 180. What is the value of record 47? Return only the integer."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "141",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_truncate_at_16_tokens",
+      "description": "a hard max_tokens cut mid-reasoning must still yield a clean length finish",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Explain in detail how a KV cache works in transformer inference."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 16,
+      "expected_finish_reasons": [
+        "length"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_truncate_at_32_tokens",
+      "description": "a slightly later cut, still inside the reasoning block",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Explain in detail how paged attention allocates blocks."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 32,
+      "expected_finish_reasons": [
+        "length"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_simple_ack",
+      "description": "trivial instruction still reasons and answers cleanly",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Remember the codeword ORCHID. Reply with exactly ACK."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "ACK",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_tool_required",
+      "description": "reasoning must populate alongside a forced call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Use get_weather exactly once for Paris in celsius."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Paris",
+            "unit": "celsius"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_tool_auto",
+      "description": "reasoning plus an auto-selected call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "I need today's weather for Berlin in celsius."
+        }
+      ],
+      "tools": [
+        "get_weather"
+      ],
+      "tool_choice": "auto",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "get_weather",
+          "arguments": {
+            "city": "Berlin",
+            "unit": "celsius"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_tool_named",
+      "description": "a named tool_choice with reasoning enabled",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Look up inventory using sku=XY9 and warehouse=west."
+        }
+      ],
+      "tools": [
+        "lookup_inventory",
+        "get_weather"
+      ],
+      "tool_choice": {
+        "type": "function",
+        "function": {
+          "name": "lookup_inventory"
+        }
+      },
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "lookup_inventory",
+          "arguments": {
+            "sku": "XY9",
+            "warehouse": "west"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_tool_none_arithmetic",
+      "description": "tool_choice=none with reasoning on and tools declared",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Tools are available but do not use them. Compute 9 times 6 and return only the integer."
+        }
+      ],
+      "tools": [
+        "multiply_numbers"
+      ],
+      "tool_choice": "none",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "54",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_named_tool_time",
+      "description": "a second named tool_choice shape with a distractor tool declared",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Get the time in Asia/Tokyo."
+        }
+      ],
+      "tools": [
+        "get_time",
+        "get_weather"
+      ],
+      "tool_choice": {
+        "type": "function",
+        "function": {
+          "name": "get_time"
+        }
+      },
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "get_time",
+          "arguments": {
+            "timezone": "Asia/Tokyo"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_marker_no_leak_on_plain_answer",
+      "description": "tool markup must not appear when answering without a call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reply with exactly the word GREEN. Do not call any function."
+        }
+      ],
+      "tools": [
+        "get_weather",
+        "add_numbers"
+      ],
+      "tool_choice": "none",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "GREEN",
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_marker_no_leak_with_unicode_arg",
+      "description": "unicode arguments must not drag markup into content",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call translate_text with text 안녕하세요 and target_language English."
+        }
+      ],
+      "tools": [
+        "translate_text"
+      ],
+      "tool_choice": "required",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [],
+      "expected_tool_calls": [
+        {
+          "name": "translate_text",
+          "arguments": {
+            "text": "안녕하세요",
+            "target_language": "English"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_marker_reasoning_stays_out_of_content",
+      "description": "reasoning text must not bleed into the visible answer",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Think about the capital of France, then reply with exactly Paris and nothing else."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "Paris",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_rt_ingress_with_reasoning",
+      "description": "assistant history message CARRIES reasoning_content; prompt must render and answer cleanly",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the capital of France? Answer in one word."
+        },
+        {
+          "role": "assistant",
+          "content": "Paris",
+          "reasoning_content": "The user asks for the capital of France. That is Paris. This sentence exists to make the rendered prompt measurably longer when the field is forwarded to the chat template."
+        },
+        {
+          "role": "user",
+          "content": "Repeat your previous answer exactly, one word only."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "Paris",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_rt_ingress_without_reasoning",
+      "description": "identical history minus reasoning_content; usage.prompt_tokens baseline for the delta check",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the capital of France? Answer in one word."
+        },
+        {
+          "role": "assistant",
+          "content": "Paris"
+        },
+        {
+          "role": "user",
+          "content": "Repeat your previous answer exactly, one word only."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "Paris",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    },
+    {
+      "case_id": "muse_reasoning_recipient_routed_always_on",
+      "description": "reasoning is routed by recipient and always on, so it populates with no request control",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Think step by step about why 2+2=4, then return only the integer 4."
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "stop"
+      ],
+      "expect_no_tool_calls": true,
+      "min_tool_calls": 0,
+      "exact_tool_calls": 0,
+      "expected_tool_names": [],
+      "expected_tool_calls": [],
+      "expected_content": "4",
+      "content_pattern": null,
+      "expect_reasoning": true,
+      "normalize_argument_strings": false
+    }
+  ]
+}
