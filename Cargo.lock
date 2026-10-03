@@ -3249,7 +3249,6 @@ version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "blake3",
  "clap",
  "dynamo-backend-common",
  "dynamo-kv-router",
