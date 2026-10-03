@@ -1,121 +1,132 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Generated from lib/llm/src/protocols/openai/media_schemas/image.json by
+# scripts/generate_media_protocols.py. Do not edit.
 
+from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
-from pydantic import BaseModel
-
-# For omni models, we need to support raw_request parsing and json output format. We need to have these protocols defined here for serialization and deserialization.
-# TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
-
-
-class ImageNvExt(BaseModel):
-    """NVIDIA extensions for image generation requests.
-
-    Matches Rust NvExt in lib/llm/src/protocols/openai/images/nvext.rs.
-    """
-
-    annotations: Optional[list[str]] = None
-    """Annotations for SSE stream events."""
-
-    negative_prompt: Optional[str] = None
-    """Optional negative prompt."""
-
-    num_inference_steps: Optional[int] = None
-    """Number of denoising steps."""
-
-    guidance_scale: Optional[float] = None
-    """CFG guidance scale."""
-
-    seed: Optional[int] = None
-    """Random seed for reproducibility."""
-
-
-class NvCreateImageRequest(BaseModel):
-    """Request for image generation (/v1/images/generations endpoint).
-
-    Matches the flattened Rust NvCreateImageRequest in lib/llm/src/protocols/openai/images.rs
-    """
-
-    extra_args: Optional[Dict[str, Any]] = None
-    """Worker-boundary passthrough. The frontend nests unknown top-level
-    request fields (an OpenAI client's extra_body) under the
-    "media_passthrough" key."""
-
-    prompt: str
-    """The text prompt for image generation."""
-
-    model: Optional[str] = None
-    """The model to use for image generation."""
-
-    n: Optional[int] = None
-    """Number of images to generate (1-10)."""
-
-    quality: Optional[str] = None
-    """Image quality: standard, hd, high, medium, low, auto."""
-
-    response_format: Optional[str] = None
-    """Response format: url or b64_json."""
-
-    size: Optional[str] = None
-    """Image size in WxH format (e.g. 1024x1024)."""
-
-    style: Optional[str] = None
-    """Image style: vivid or natural."""
-
-    user: Optional[str] = None
-    """Optional user identifier."""
-
-    moderation: Optional[str] = None
-    """Content moderation level: auto or low."""
-
-    input_reference: Optional[str] = None
-    """Optional image reference that guides generation (for I2I)."""
-
-    nvext: Optional[ImageNvExt] = None
-    """NVIDIA extensions."""
+from pydantic import BaseModel, conint
 
 
 class ImageData(BaseModel):
-    """Individual image data in a response.
-
-    Matches the flattened Rust Image enum in lib/protocols/src/types/mod.rs.
+    """
+    One generated image. The worker sets one of `url` and `b64_json`.
     """
 
-    url: Optional[str] = None
-    """URL of the generated image (if response_format is url)."""
+    url: str | None = None
+    """
+    URL of the generated image (if response_format is "url")
+    """
+    b64_json: str | None = None
+    """
+    Base64-encoded image (if response_format is "b64_json")
+    """
+    revised_prompt: str | None = None
+    """
+    The prompt the model used, when it rewrote the original prompt
+    """
 
-    b64_json: Optional[str] = None
-    """Base64-encoded image (if response_format is b64_json)."""
 
-    revised_prompt: Optional[str] = None
-    """Revised prompt, when the model rewrites the original prompt."""
+class ImageNvExt(BaseModel):
+    """
+    NVIDIA extensions to the OpenAI Images API
+    """
+
+    annotations: list[str] | None = None
+    """
+    Annotations
+    User requests triggers which result in the request issue back out-of-band information in the SSE
+    stream using the `event:` field.
+    """
+    negative_prompt: str | None = None
+    """
+    A text description of the undesired image(s).
+    """
+    num_inference_steps: conint(ge=0) | None = None
+    """
+    The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference.
+    """
+    guidance_scale: float | None = None
+    """
+    The CFG scale. Higher values usually lead to more coherent images.
+    """
+    seed: int | None = None
+    """
+    The seed for the random number generator.
+    i64 to match PyTorch's torch.manual_seed() accepted range.
+    """
+
+
+class NvCreateImageRequest(BaseModel):
+    """
+    Request for image generation (/v1/images/generations and /v1/images/edits).
+
+    The OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`.
+    `model` and `size` are free text, because the OpenAI type accepts any
+    string there.
+    """
+
+    prompt: str
+    model: str | None = None
+    n: conint(ge=0) | None = None
+    """
+    Number of images to generate
+    """
+    quality: str | None = None
+    response_format: str | None = None
+    output_format: str | None = None
+    output_compression: conint(ge=0) | None = None
+    """
+    Compression level (0-100%) of jpeg and webp output
+    """
+    stream: bool | None = None
+    partial_images: conint(ge=0) | None = None
+    """
+    Number of partial images to stream before the final image
+    """
+    size: str | None = None
+    """
+    Image size in WxH format, or "auto"
+    """
+    moderation: str | None = None
+    background: str | None = None
+    style: str | None = None
+    user: str | None = None
+    input_reference: str | None = None
+    """
+    Optional image reference that guides generation (for I2I/TI2I).
+    """
+    nvext: ImageNvExt | None = None
+    extra_args: dict[str, Any] | None = None
+    """
+    Worker-boundary passthrough. The frontend nests unknown top-level request fields (an OpenAI client's extra_body) under the "media_passthrough" key.
+    """
 
 
 class NvImagesResponse(BaseModel):
-    """Response structure for image generation.
+    """
+    Response for image generation.
 
-    Matches the flattened Rust NvImagesResponse in lib/llm/src/protocols/openai/images.rs
+    Keeps the wire format of the OpenAI `ImagesResponse`, which writes every
+    absent optional field as null.
     """
 
-    created: int
-    """Unix timestamp of creation."""
-
-    data: list[ImageData] = []
-    """List of generated images."""
-
-    background: Optional[str] = None
-    """Background of the generation: transparent or opaque."""
-
-    output_format: Optional[str] = None
-    """Output format of the generated images: png, webp, or jpeg."""
-
-    size: Optional[str] = None
-    """Size of the generated images in WxH format."""
-
-    quality: Optional[str] = None
-    """Quality of the generated images: low, medium, or high."""
-
-    usage: Optional[Dict[str, Any]] = None
-    """Token usage of the generation, when the model reports it."""
+    created: conint(ge=0)
+    """
+    Unix timestamp of creation
+    """
+    data: list[ImageData]
+    background: str | None = None
+    output_format: str | None = None
+    size: str | None = None
+    """
+    Image size in WxH format
+    """
+    quality: str | None = None
+    usage: dict[str, Any] | None = None
+    """
+    Token usage of the generation, when the model reports it
+    """

@@ -247,14 +247,6 @@ class TestImageData:
 class TestNvImagesResponse:
     """Tests for NvImagesResponse protocol type."""
 
-    def test_default_values(self):
-        """Test default values for completed response."""
-        response = NvImagesResponse(
-            created=1234567890,
-        )
-        assert response.created == 1234567890
-        assert response.data == []
-
     def test_with_image_data(self):
         """Test response with image data."""
         image = ImageData(url="/tmp/output.png")

@@ -4,7 +4,6 @@
 """Unit tests for dynamo.common.protocols.audio_protocol module."""
 
 import pytest
-from pydantic import ValidationError
 
 from dynamo.common.protocols.audio_protocol import (
     AudioData,
@@ -39,12 +38,6 @@ def test_audio_request_wire_shape_adds_no_defaults():
         "task_type": "CustomVoice",
         "language": "English",
     }
-
-
-@pytest.mark.parametrize("speed", [0.1, 5.0])
-def test_audio_request_rejects_speed_outside_supported_range(speed):
-    with pytest.raises(ValidationError):
-        NvCreateAudioSpeechRequest(input="hi", speed=speed)
 
 
 def test_audio_response_wire_shape():
