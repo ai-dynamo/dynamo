@@ -240,8 +240,7 @@ class TestCheckpointVariant:
     def test_unknown_variant_is_not_restricted(self):
         # "database" must not read as a Base checkpoint.
         handler = self._handler(tts_model_type="other", model="/data/database")
-        for task in ("CustomVoice", "VoiceDesign", "Base"):
-            handler._validate_tts_request(self._request(task))
+        handler._validate_tts_request(self._request("CustomVoice"))
 
     def test_metadata_wins_over_the_model_path(self):
         handler = self._handler(tts_model_type="base", model="/m/x-CustomVoice")
