@@ -1,0 +1,9 @@
+dependencies:
+- name: batch-gateway
+  repository: oci://ghcr.io/llm-d/charts
+  version: 0.6.0
+- name: llm-d-async
+  repository: oci://ghcr.io/llm-d/charts
+  version: v0.10.0
+digest: sha256:83ad8d15e9e4544fd6568d355f3069e97de33519d10b0a38ab315db4055c610a
+generated: "2026-09-30T16:10:56.176253-04:00"
