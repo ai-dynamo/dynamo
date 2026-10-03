@@ -307,6 +307,15 @@ class AudioGenerationHandler:
 
     # -- Qwen3-TTS-specific helpers -------------------------------------------
 
+    @staticmethod
+    def _tts_task_type(req: NvCreateAudioSpeechRequest) -> str:
+        """Task the engine will run; reference inputs imply Base, as in vLLM-Omni."""
+        if req.task_type is not None:
+            return req.task_type
+        if req.ref_audio is not None or req.ref_text is not None:
+            return "Base"
+        return "CustomVoice"
+
     async def _engine_inputs_tts(
         self, req: NvCreateAudioSpeechRequest, *, stream_audio: bool
     ) -> EngineInputs:
@@ -316,7 +325,7 @@ class AudioGenerationHandler:
         if req.voice is not None:
             req.voice = req.voice.lower()
 
-        task_type = req.task_type or "CustomVoice"
+        task_type = self._tts_task_type(req)
 
         tts_params: Dict[str, Any] = {
             "text": [req.input],
@@ -363,7 +372,7 @@ class AudioGenerationHandler:
 
     def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
         """Validate Qwen3-TTS-specific request parameters."""
-        task_type = req.task_type or "CustomVoice"
+        task_type = self._tts_task_type(req)
 
         _ALLOWED_TASK_TYPES = {"CustomVoice", "VoiceDesign", "Base"}
         if task_type not in _ALLOWED_TASK_TYPES:

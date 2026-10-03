@@ -160,8 +160,6 @@ class TestValidateTtsRequest:
 
 
 class TestCheckpointVariant:
-    """A Qwen3-TTS checkpoint serves one task; any other is refused up front."""
-
     @staticmethod
     def _handler(tts_model_type=None, model=None):
         handler = _make_audio_handler()
@@ -179,7 +177,6 @@ class TestCheckpointVariant:
             req.ref_audio = "data:audio/wav;base64,AAAA"
         return req
 
-    @pytest.mark.parametrize("task", ["CustomVoice", "VoiceDesign", "Base"])
     @pytest.mark.parametrize(
         "configured, variant",
         [
@@ -188,14 +185,30 @@ class TestCheckpointVariant:
             ("base", "Base"),
         ],
     )
-    def test_only_the_checkpoint_task_is_accepted(self, configured, variant, task):
+    def test_the_checkpoint_task_is_accepted(self, configured, variant):
         handler = self._handler(tts_model_type=configured)
-        req = self._request(task)
-        if task == variant:
+        handler._validate_tts_request(self._request(variant))
+
+    def test_another_task_is_refused(self):
+        handler = self._handler(tts_model_type="custom_voice")
+        with pytest.raises(ValueError, match="does not support"):
+            handler._validate_tts_request(self._request("Base"))
+
+    def test_reference_inputs_imply_base_without_task_type(self):
+        handler = self._handler(tts_model_type="base")
+        req = NvCreateAudioSpeechRequest(
+            input="hello", ref_audio="data:audio/wav;base64,AAAA"
+        )
+        handler._validate_tts_request(req)
+        assert handler._tts_task_type(req) == "Base"
+
+    def test_reference_inputs_without_task_type_are_refused_by_other_checkpoints(
+        self,
+    ):
+        handler = self._handler(tts_model_type="custom_voice")
+        req = NvCreateAudioSpeechRequest(input="hello", ref_text="hi")
+        with pytest.raises(ValueError, match="does not support"):
             handler._validate_tts_request(req)
-        else:
-            with pytest.raises(ValueError, match="does not support"):
-                handler._validate_tts_request(req)
 
     @pytest.mark.parametrize(
         "model, task",
