@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
+        ConnectionHandle, StreamErrorSignal, create_http_connection_monitor,
         monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal,
     },
@@ -1201,7 +1201,7 @@ async fn handler_completions(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context.clone(),
         Some(state.metrics_clone()),
         cancellation_labels,
@@ -2443,6 +2443,7 @@ async fn pooling(
     Ok(response)
 }
 
+/// Handle chat completion requests, applying the route template and monitoring client disconnects.
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -2554,7 +2555,7 @@ async fn handler_chat_completions(
     }
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context.clone(),
         Some(state.metrics_clone()),
         cancellation_labels,
@@ -4089,7 +4090,7 @@ async fn handler_responses(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context.clone(),
         Some(state.metrics_clone()),
         cancellation_labels,
@@ -5242,6 +5243,7 @@ pub fn images_router(
     (vec![doc, edits_doc], router)
 }
 
+/// Generate video responses as JSON or SSE, monitoring disconnects for streaming requests.
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -5301,7 +5303,7 @@ async fn videos(
         // [gluo TODO] revisit the cancellation handling here,
         // should be unified with chat_completions.
         let ctx = stream.context();
-        let (mut connection_handle, stream_handle) = create_connection_monitor(
+        let (mut connection_handle, stream_handle) = create_http_connection_monitor(
             ctx.clone(),
             Some(state.metrics_clone()),
             CancellationLabels {
@@ -5426,7 +5428,7 @@ async fn video_stream(
     // video_stream returns the streaming body directly (graceful handler exit).
     // The stream_handle is armed below and lives inside the monitored stream so that
     // a client disconnect (body drop) signals the engine context to cancel.
-    let (mut connection_handle, mut stream_handle) = create_connection_monitor(
+    let (mut connection_handle, mut stream_handle) = create_http_connection_monitor(
         ctx.clone(),
         Some(state.metrics_clone()),
         CancellationLabels {
@@ -5576,6 +5578,7 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
         .collect()
 }
 
+/// Handle speech generation requests and monitor disconnects while audio is produced.
 async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -5633,7 +5636,7 @@ async fn handler_audio_speech(
     request.model = Some(model.clone());
 
     let context = request.context();
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context,
         Some(state.metrics_clone()),
         CancellationLabels {
