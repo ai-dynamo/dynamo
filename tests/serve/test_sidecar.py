@@ -110,7 +110,7 @@ sidecar_configs = {
             pytest.mark.gpu_1,
             # Let the 600s health check report failure before pytest times out.
             pytest.mark.timeout(780),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         # Flush Python output promptly into CI logs.
@@ -127,7 +127,7 @@ sidecar_configs = {
             pytest.mark.sglang,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         env={"PYTHONUNBUFFERED": "1"},
@@ -143,7 +143,7 @@ sidecar_configs = {
             pytest.mark.trtllm,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.skipif(
                 not _trtllm_serves_openengine(),
                 reason=TRTLLM_OPENENGINE_SKIP_REASON,
@@ -160,7 +160,6 @@ sidecar_configs = {
             chat_payload_default(),
         ],
     ),
-    # Prefill/decode handoff is a critical native-sidecar path.
     "trtllm_disaggregated": EngineConfig(
         name="trtllm_disaggregated",
         directory=trtllm_sidecar_dir,
@@ -184,7 +183,7 @@ sidecar_configs = {
             # Leaving that at its 600s default would let the health check fail
             # at the single-engine budget and then idle until the kill timer.
             pytest.mark.timeout(1200),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.skipif(
                 not _trtllm_serves_openengine(),
                 reason=TRTLLM_OPENENGINE_SKIP_REASON,
@@ -213,9 +212,7 @@ sidecar_configs = {
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
             pytest.mark.post_merge,
-            pytest.mark.nightly,
             pytest.mark.timeout(1200),
             pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
         ],
@@ -233,9 +230,7 @@ sidecar_configs = {
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
             pytest.mark.post_merge,
-            pytest.mark.nightly,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
         ],
@@ -331,7 +326,7 @@ def test_serve_deployment(
 @pytest.mark.router
 @pytest.mark.sidecar
 @pytest.mark.e2e
-@pytest.mark.pre_merge  # Guard native KV-event discovery on every sidecar change.
+@pytest.mark.post_merge
 @pytest.mark.timeout(1200)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(

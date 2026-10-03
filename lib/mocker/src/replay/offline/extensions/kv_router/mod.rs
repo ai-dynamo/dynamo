@@ -201,6 +201,9 @@ pub(crate) struct OfflineRouterSnapshot {
 struct SyncReplayIndexer {
     block_size: u32,
     tree: RadixTree,
+    /// Disaggregated decode placement never observes KV events, so its tree
+    /// stays empty and hashing a prompt to query it would be wasted work.
+    has_indexed_events: bool,
 }
 
 impl SyncReplayIndexer {
@@ -208,10 +211,14 @@ impl SyncReplayIndexer {
         Self {
             block_size,
             tree: RadixTree::new(),
+            has_indexed_events: false,
         }
     }
 
     fn find_matches_for_request(&self, tokens: &[u32], lora_name: Option<&str>) -> OverlapScores {
+        if !self.has_indexed_events {
+            return OverlapScores::default();
+        }
         let sequence = compute_block_hash_for_seq(
             tokens,
             self.block_size,
@@ -232,6 +239,7 @@ impl SyncReplayIndexer {
         if !event.storage_tier.is_gpu() {
             return Ok(());
         }
+        self.has_indexed_events = true;
         self.tree.apply_event(event).map_err(Into::into)
     }
 
@@ -271,8 +279,10 @@ impl PendingRequest {
         self.uuid.to_string()
     }
 
+    /// Build the selector input, moving `token_seq` into it; callers that
+    /// still need the sequence take it back from the returned request.
     fn scheduling_request(
-        &self,
+        &mut self,
         block_size: usize,
         worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     ) -> SchedulingRequest {
@@ -292,7 +302,7 @@ impl PendingRequest {
             mode: ScheduleMode::Tracked {
                 request_id: self.request_id(),
             },
-            token_seq: self.token_seq.clone(),
+            token_seq: self.token_seq.take(),
             isl_tokens: self.isl_tokens,
             overlap: OverlapSignals {
                 tier_overlap_blocks: TierOverlapBlocks::default(),
@@ -924,13 +934,14 @@ impl OfflineReplayRouter {
 
     fn admit_request(
         &mut self,
-        request: PendingRequest,
+        mut request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
+        let mut scheduling_request =
+            request.scheduling_request(self.block_size as usize, worker_loads);
         let eligibility = scheduling_request.eligibility();
         let best_available_overlap_blocks = request
             .overlaps
@@ -976,7 +987,7 @@ impl OfflineReplayRouter {
             .add_request(
                 SequenceRequest {
                     request_id,
-                    token_sequence: request.token_seq,
+                    token_sequence: scheduling_request.token_seq.take(),
                     track_prefill_tokens: request.track_prefill_tokens,
                     expected_output_tokens: request.expected_output_tokens,
                     prefill_load_hint,
@@ -998,10 +1009,15 @@ impl OfflineReplayRouter {
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         let mut admissions = Vec::new();
         loop {
-            let active_tokens = self.slots.active_tokens(decay_now);
+            // Most completions find an empty queue, which never consults the
+            // predicate, so only snapshot active tokens once one is needed.
+            let mut active_tokens = None;
+            let slots = &self.slots;
             let workers = &self.workers_with_configs;
             let Some(popped) = self.pending.pop_next(|_, class, _| {
-                !Self::all_workers_busy_with(&active_tokens, workers, class)
+                let active_tokens =
+                    active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
+                !Self::all_workers_busy_with(active_tokens, workers, class)
             }) else {
                 break;
             };
@@ -1105,7 +1121,7 @@ mod tests {
     use dynamo_kv_router::protocols::{
         BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        WorkerId,
+        WorkerId, compute_block_hash_for_seq,
     };
     use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
@@ -1265,7 +1281,7 @@ mod tests {
     fn session_identity_reaches_scheduling_request() {
         let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let request = request(1, 7);
-        let pending = router
+        let mut pending = router
             .build_pending_request(
                 &request,
                 request.max_output_tokens,
@@ -1435,6 +1451,38 @@ mod tests {
         let effects = router
             .on_request_arrival(&target, Some(hashes), 0.0)
             .unwrap();
+        assert_eq!(
+            effects.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(1),
+                worker_idx: 1,
+                overlap_blocks: 1,
+                best_available_overlap_blocks: 1,
+                isl_blocks: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn prompt_token_lookup_scores_indexed_prefix() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(router_config()), None, 2)
+            .expect("router construction");
+        let target = request(1, 7);
+        let local_hashes = compute_block_hash_for_seq(
+            &target.tokens,
+            router.block_size,
+            BlockHashOptions::default(),
+        );
+        router
+            .on_kv_events(vec![store_event(
+                1,
+                1,
+                local_hashes[0].0,
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        let effects = router.on_request_arrival(&target, None, 0.0).unwrap();
         assert_eq!(
             effects.admissions,
             vec![WorkerAdmission {

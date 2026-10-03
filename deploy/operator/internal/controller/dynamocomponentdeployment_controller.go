@@ -144,8 +144,8 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	if compatibilityErr := stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
 		dynamoComponentDeployment.Spec.Experimental,
 	)...); compatibilityErr != nil {
-		if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
-			return ctrl.Result{}, fmt.Errorf("clear GPU shape for invalid checkpoint configuration: %w", clearErr)
+		if clearErr := r.clearDCDComponentProjections(ctx, req); clearErr != nil {
+			return ctrl.Result{}, fmt.Errorf("clear component projections for invalid checkpoint configuration: %w", clearErr)
 		}
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
@@ -281,8 +281,8 @@ func (r *DynamoComponentDeploymentReconciler) recordReconcileError(
 ) {
 	logs := log.FromContext(ctx)
 	logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
-	if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
-		logs.Error(clearErr, "Failed to clear DynamoComponentDeployment GPU shape after reconcile error")
+	if clearErr := r.clearDCDComponentProjections(ctx, req); clearErr != nil {
+		logs.Error(clearErr, "Failed to clear DynamoComponentDeployment projections after reconcile error")
 	}
 
 	ownershipConflictCondition, ownershipConflictTransition := applyOwnershipConflict(dcd.Status.Conditions, dcd.Generation, reconcileErr)
@@ -351,6 +351,10 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		ReadyReplicas:     &deployment.Status.ReadyReplicas,
 		AvailableReplicas: &deployment.Status.AvailableReplicas,
 	}
+	applyComponentRuntimeStatus(serviceReplicaStatus, dynamo.ResolveComponentRuntimeStatus(
+		&deployment.Spec.Template.Spec,
+		deployment.Spec.Template.Annotations,
+	))
 	gpuShape, err := dynamo.ResolveGPUShape(
 		ctx,
 		r.Client,
@@ -460,6 +464,10 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
 	lwsReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment)
+	applyComponentRuntimeStatus(&lwsReplicaStatus, dynamo.ResolveComponentRuntimeStatus(
+		&lwsObj.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec,
+		lwsObj.Spec.LeaderWorkerTemplate.LeaderTemplate.Annotations,
+	))
 	groupSize := dynamoComponentDeployment.GetNumberOfNodes()
 	gpuShape, err := dynamo.ResolveGPUShape(
 		ctx,
@@ -541,18 +549,25 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 	return nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) clearDCDGPUShape(ctx context.Context, req ctrl.Request) error {
+func (r *DynamoComponentDeploymentReconciler) clearDCDComponentProjections(ctx context.Context, req ctrl.Request) error {
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
 	if err := r.Get(ctx, req.NamespacedName, dcd); err != nil {
 		return err
 	}
 	if dcd.Status.Component == nil ||
-		(dcd.Status.Component.GPUsPerEngine == nil && dcd.Status.Component.GPUsPerReplica == nil) {
+		(dcd.Status.Component.GPUsPerEngine == nil &&
+			dcd.Status.Component.GPUsPerReplica == nil &&
+			dcd.Status.Component.ServedModelName == "" &&
+			dcd.Status.Component.RuntimeComponentName == "" &&
+			dcd.Status.Component.GPUPowerLimitWatts == nil) {
 		return nil
 	}
 	original := dcd.DeepCopy()
 	dcd.Status.Component.GPUsPerEngine = nil
 	dcd.Status.Component.GPUsPerReplica = nil
+	dcd.Status.Component.ServedModelName = ""
+	dcd.Status.Component.RuntimeComponentName = ""
+	dcd.Status.Component.GPUPowerLimitWatts = nil
 	return r.Status().Patch(ctx, dcd, client.MergeFrom(original))
 }
 
