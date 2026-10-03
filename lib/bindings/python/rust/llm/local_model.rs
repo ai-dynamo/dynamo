@@ -10,6 +10,7 @@ use dynamo_kv_router::protocols::{
 use dynamo_runtime::protocols::EndpointId;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use llm_rs::local_model::runtime_config::PrefillCancelUntil;
 use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
 use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
 use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
@@ -103,6 +104,36 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_total_kv_blocks(&mut self, total_kv_blocks: u64) {
         self.inner.total_kv_blocks = Some(total_kv_blocks);
+    }
+
+    /// Declare how long this worker's prefill request stays cancellable after
+    /// the client disconnects: "anytime", "pre_handoff", or "never".
+    ///
+    /// Leaving this unset marks the worker as not supporting prefill
+    /// cancellation, which is the behaviour of every worker that predates it.
+    #[setter]
+    fn set_prefill_cancel_until(&mut self, value: Option<&str>) -> PyResult<()> {
+        self.inner.prefill_cancel_until = match value {
+            None => None,
+            Some("anytime") => Some(PrefillCancelUntil::Anytime),
+            Some("pre_handoff") => Some(PrefillCancelUntil::PreHandoff),
+            Some("never") => Some(PrefillCancelUntil::Never),
+            Some(other) => {
+                return Err(PyErr::new::<PyException, _>(format!(
+                    "invalid prefill_cancel_until {other:?};                      expected one of: anytime, pre_handoff, never"
+                )));
+            }
+        };
+        Ok(())
+    }
+
+    #[getter]
+    fn get_prefill_cancel_until(&self) -> Option<&'static str> {
+        self.inner.prefill_cancel_until.map(|value| match value {
+            PrefillCancelUntil::Anytime => "anytime",
+            PrefillCancelUntil::PreHandoff => "pre_handoff",
+            PrefillCancelUntil::Never => "never",
+        })
     }
 
     #[setter]

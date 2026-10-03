@@ -499,6 +499,30 @@ class TestDeferredAbortGuard:
         await handler._handle_cancellation(generation_result, context)
         generation_result.abort.assert_called_once()
 
+    def test_prefill_abort_before_handoff_reaches_engine(self):
+        """Before any result is claimed, abort reaches the engine and blocks handoff."""
+        from dynamo.trtllm.request_handlers.handler_base import _PrefillAbortGuard
+
+        generation_result = MagicMock()
+        guard = _PrefillAbortGuard(generation_result)
+
+        guard.abort()
+
+        generation_result.abort.assert_called_once()
+        assert not guard.claim_handoff()
+
+    def test_prefill_abort_after_handoff_is_skipped(self):
+        """Once a result is claimed for handoff, decode owns the KV: no abort."""
+        from dynamo.trtllm.request_handlers.handler_base import _PrefillAbortGuard
+
+        generation_result = MagicMock()
+        guard = _PrefillAbortGuard(generation_result)
+
+        assert guard.claim_handoff()
+        guard.abort()
+
+        generation_result.abort.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_cancellation_monitor_cleans_up_waiters_on_normal_completion(
         self, monkeypatch
