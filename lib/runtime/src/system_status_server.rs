@@ -4,11 +4,13 @@
 // TODO: (DEP-635) this file should be renamed to system_http_server.rs
 //  it is being used not just for status, health, but others like loras management.
 
+#[cfg(test)]
+mod probe_tests;
+
 use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
 use crate::config::environment_names::runtime::system as env_system;
-use crate::logging::make_system_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
 use crate::utils::ip_resolver::{
@@ -28,10 +30,20 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
+
+/// Selects probe semantics for the runtime-owned HTTP server.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SystemProbePolicy {
+    /// Preserve the configured worker health handler for both probes.
+    #[default]
+    Worker,
+    /// Static liveness and readiness based on runtime dependencies, not the engine.
+    RuntimeOnly,
+}
 
 /// System status server information containing socket address and handle
 #[derive(Debug)]
@@ -175,48 +187,56 @@ pub struct LoraResponse {
     pub count: Option<usize>,
 }
 
-/// Start system status server with metrics support
+/// Start the complete system HTTP server after runtime initialization.
 pub async fn spawn_system_status_server(
     host: &str,
     port: u16,
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
     discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
-) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    policy: SystemProbePolicy,
+) -> anyhow::Result<(SocketAddr, JoinHandle<()>)> {
     // Create system status server state with the provided distributed runtime
     let server_state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
-    let health_path = server_state
-        .drt()
-        .system_health()
-        .lock()
-        .health_path()
-        .to_string();
-    let live_path = server_state
-        .drt()
-        .system_health()
-        .lock()
-        .live_path()
-        .to_string();
-
+    let system_health = server_state.drt().system_health();
+    let (health_path, live_path) = {
+        let health = system_health.lock();
+        (
+            health.health_path().to_string(),
+            health.live_path().to_string(),
+        )
+    };
+    let mut app = match policy {
+        SystemProbePolicy::Worker => Router::new()
+            .route(
+                &health_path,
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || health_handler(state)
+                }),
+            )
+            .route(
+                &live_path,
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || health_handler(state)
+                }),
+            ),
+        SystemProbePolicy::RuntimeOnly => Router::new()
+            .route(&live_path, get(|| async { StatusCode::OK }))
+            .route(
+                &health_path,
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || runtime_health_handler(state)
+                }),
+            ),
+    };
     // Check if LoRA feature is enabled
     let lora_enabled =
         crate::config::env_is_truthy(crate::config::environment_names::llm::DYN_LORA_ENABLED);
 
-    let mut app = Router::new()
-        .route(
-            &health_path,
-            get({
-                let state = Arc::clone(&server_state);
-                move || health_handler(state)
-            }),
-        )
-        .route(
-            &live_path,
-            get({
-                let state = Arc::clone(&server_state);
-                move || health_handler(state)
-            }),
-        )
+    app = app
         .route(
             "/metrics",
             get({
@@ -279,7 +299,7 @@ pub async fn spawn_system_status_server(
             tracing::info!("[fallback handler] called");
             (StatusCode::NOT_FOUND, "Route not found").into_response()
         })
-        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
+        .layer(TraceLayer::new_for_http().make_span_with(crate::logging::make_system_request_span));
 
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {address}");
@@ -341,6 +361,20 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     tracing::trace!("Response {}", response.to_string());
 
     (status_code, response.to_string())
+}
+
+/// Sidecar readiness is independent of engine health and model registration.
+async fn runtime_health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    let ready = matches!(
+        tokio::time::timeout(Duration::from_secs(1), state.drt().check_dependencies()).await,
+        Ok(Ok(()))
+    );
+    let (code, status) = if ready {
+        (StatusCode::OK, "ready")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "notready")
+    };
+    (code, Json(json!({ "status": status })))
 }
 
 /// Metrics handler with DistributedRuntime uptime

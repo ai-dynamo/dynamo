@@ -282,7 +282,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_input_sequence_tokens" type="histogram">
-  Input sequence length in tokens.
+  Input sequence length per routing attempt, excluding query-only lookups. Labeled by `phase` and `model`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_output_sequence_tokens" type="histogram">
@@ -300,6 +300,32 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
   Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
 </ParamField>
+
+### KV-cache reuse telemetry
+
+The cache reuse funnel shows how much of the incoming prompt could be reused, and how much the worker reports reusing. Each step counts tokens, not requests.
+
+All metric names below start with `dynamo_component_router_`.
+
+| Step | Meaning | Metric suffix |
+| --- | --- | --- |
+| **F0 — Incoming tokens** | Tokens received by the router. | `input_sequence_tokens_sum` |
+| **F2 — Best available match** | Prefix the router estimates is cached on the best-matching eligible worker. | `kv_best_eligible_cached_prefix_tokens_total` |
+| **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `kv_selected_cached_prefix_tokens_total` |
+| **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `kv_worker_reused_tokens_total` |
+
+These counters need no enable flag.
+
+Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
+
+vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of each aggregated or prefill attempt, as `engine_data.kv_cache_hit` with `prompt_tokens` and `reused_tokens`. `reused_tokens` is the engine's per-request cached-token count, so it includes hits on host and storage tiers and KV connectors, the same tiers F2 and F3 count.
+
+- Disaggregated decode attempts do not report, because each engine counts the KV transferred from the prefill worker as cached; read worker reuse from the `prefill` phase. The exception is a decode attempt that prefills locally under conditional disaggregation, which reports under `phase="decode"`.
+- Attempts take their `phase` from the frontend's request tracker. A standalone router (`python -m dynamo.router`) does not set one, so all of its attempts are labeled `aggregated`.
+- The router counts a report only when its `prompt_tokens` equals the routed prompt length. Engines count multimodal prompts after placeholder expansion, so a multimodal report counts only when the router also routed on expanded tokens; TensorRT-LLM does not report multimodal requests. F2 and F3 count expanded routing tokens while F0 counts the unexpanded prompt, so multimodal ratios to F0 can exceed 100%.
+- With `n > 1`, vLLM and SGLang do not report. Later samples reuse the prompt blocks earlier samples just cached, vLLM keeps the first buffered sample's count when it merges outputs, and SGLang caches the prompt before running the samples.
+- Engines recompute the last prompt token, so a full-prefix hit reports at least one token less than F3, and up to one block less for vLLM.
+- Preemption, partial-block reuse in TensorRT-LLM, and KV loads that fail under a recompute policy can also make F4 differ from F3 when the router's estimate is accurate.
 
 ### Per-request routing overhead
 

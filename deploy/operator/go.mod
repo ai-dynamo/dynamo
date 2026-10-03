@@ -3,9 +3,11 @@ module github.com/ai-dynamo/dynamo/deploy/operator
 go 1.26.6
 
 require (
+	capnproto.org/go/capnp/v3 v3.1.0-alpha.2
 	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.13
+	github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20260428070018-96d409e6f37f
 	github.com/ai-dynamo/snapshot/api v0.1.0
 	github.com/bsm/gomega v1.27.10
 	github.com/evanphx/json-patch/v5 v5.9.11
@@ -26,7 +28,9 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/crypto v0.55.0
 	golang.org/x/sync v0.22.0
+	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
+	gotest.tools/v3 v3.5.2
 	helm.sh/helm/v3 v3.20.2
 	istio.io/api v1.23.1
 	istio.io/client-go v1.23.1
@@ -35,7 +39,7 @@ require (
 	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.3
 	k8s.io/klog/v2 v2.140.0
-	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2
+	k8s.io/utils v0.0.0-20260319190234-28399d86e0b5
 	sigs.k8s.io/controller-runtime v0.24.1
 	sigs.k8s.io/gateway-api-inference-extension v1.2.0
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730
@@ -56,6 +60,7 @@ require (
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/colega/zeropool v0.0.0-20230505084239-6fb4a4f75381 // indirect
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
@@ -119,7 +124,6 @@ require (
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-	google.golang.org/grpc v1.83.2 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

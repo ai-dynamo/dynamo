@@ -77,3 +77,109 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
 ```
 
 See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options.
+## Role-Specific Pod Templates
+
+**Available since Dynamo 1.6.0.** By default, a multinode component uses one component-level
+`podTemplate` for its leader and worker roles, and Dynamo generates the backend-specific launch
+details. Use `roles[].podTemplate` when the roles need different images, resources, placement, or
+commands.
+
+Role Pod templates are complete inputs rather than patches. Omit the component-level `podTemplate`
+and provide one template for both `leader` and `worker`. `multinode.nodeCount` remains the source of
+truth for cardinality: admission defaults the leader to one Pod and the worker role to
+`nodeCount - 1` Pods.
+
+The following vLLM component runs one leader and one worker on different node pools. Each Pod uses
+one GPU, and the two Pods form one TP-2 engine:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: role-specific-multinode
+spec:
+  backendFramework: vllm
+  components:
+  - name: decode
+    type: decode
+    replicas: 1
+    multinode:
+      nodeCount: 2
+    roles:
+    - name: leader
+      podTemplate:
+        spec:
+          nodeSelector:
+            example.com/engine-role: leader
+          containers:
+          - name: main
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+            command: [python3, -m, dynamo.vllm]
+            args:
+            - --model
+            - Qwen/Qwen3-8B
+            - --tensor-parallel-size
+            - "2"
+            - --distributed-executor-backend
+            - mp
+            - --nnodes
+            - "2"
+            - --node-rank
+            - $(DYNAMO_RANK)
+            - --master-addr
+            - $(DYNAMO_LEADER_ADDRESS)
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+    - name: worker
+      podTemplate:
+        spec:
+          nodeSelector:
+            example.com/engine-role: worker
+          containers:
+          - name: main
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+            command: [python3, -m, dynamo.vllm]
+            args:
+            - --model
+            - Qwen/Qwen3-8B
+            - --tensor-parallel-size
+            - "2"
+            - --distributed-executor-backend
+            - mp
+            - --nnodes
+            - "2"
+            - --node-rank
+            - $(DYNAMO_RANK)
+            - --master-addr
+            - $(DYNAMO_LEADER_ADDRESS)
+            - --headless
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+```
+
+Complete role templates transfer ownership of the role-dependent backend command to the manifest.
+Dynamo preserves the authored vLLM, SGLang, or TensorRT-LLM topology arguments instead of generating
+Leader and Worker launch commands. It still owns Services, labels, volumes, portable topology
+variables, provider resources, rollout, readiness, status, and scaling. For vLLM multiprocessing,
+Dynamo also adds `--master-port=29500` and keeps the worker wait-for-leader wiring on that port.
+For TensorRT-LLM, the authored worker command must start `sshd` on port `2222`; Dynamo retains the
+worker readiness probe on that port and mounts the MPI SSH key.
+
+The two template-source modes are exclusive:
+
+```text
+Valid:   component.podTemplate
+Valid:   leader.podTemplate + worker.podTemplate
+Invalid: component.podTemplate + any role.podTemplate
+Invalid: a podTemplate on only one required role
+```
+
+> [!IMPORTANT]
+> A DGD that includes a Planner and uses role Pod templates requires Planner runtime 1.6.0 or later.
+> Set the Planner's `runtimeVersionOverride` when its image tag does not identify that version.
+> Role Pod templates cannot currently be combined with GPU Memory Service (GMS) or failover.
+
+See the [`roles` API reference](../../reference/kubernetes-api/dynamo-component-deployment.mdx#shared-component-spec)
+for validation and lifecycle details.

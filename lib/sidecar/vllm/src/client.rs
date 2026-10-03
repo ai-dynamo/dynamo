@@ -30,9 +30,8 @@ pub(crate) struct VllmClient {
 }
 
 impl VllmClient {
-    /// `bootstrap`: see `GrpcChannelPool::connect`. True from the
-    /// `bootstrap_discover` call site (before the tracing subscriber is
-    /// installed), false from `LLMEngine::start` (after it).
+    /// `bootstrap`: see `GrpcChannelPool::connect`. True for pre-logging
+    /// synchronous constructors; false for deferred discovery and engine start.
     pub(crate) async fn connect(
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,

@@ -45,12 +45,22 @@ pub struct AnthropicStreamConverter {
     saw_backend_usage: bool,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
+    // Text that arrived after a tool call. Tool blocks stream only once their
+    // call is complete, so this text waits and streams in arrival order.
+    pending_text: Vec<PendingText>,
     tool_blocks_flushed: bool,
     tool_flush_requested: bool,
     // Block index counter
     next_block_index: u32,
     // Stop reason
     stop_reason: Option<AnthropicStopReason>,
+}
+
+/// Text that arrived after `after_calls` tool calls had started.
+struct PendingText {
+    after_calls: usize,
+    /// Each fragment with the cumulative usage when its chunk was processed.
+    fragments: Vec<(String, AnthropicUsage)>,
 }
 
 struct ToolCallState {
@@ -98,6 +108,7 @@ impl AnthropicStreamConverter {
             },
             saw_backend_usage: false,
             tool_call_states: Vec::new(),
+            pending_text: Vec::new(),
             tool_blocks_flushed: false,
             tool_flush_requested: false,
             next_block_index: 0,
@@ -168,6 +179,18 @@ impl AnthropicStreamConverter {
                     .argument_fragments
                     .push((arguments.clone(), usage_snapshot.clone()));
             }
+        }
+    }
+
+    fn buffer_text(&mut self, text: &str, usage_snapshot: &AnthropicUsage) {
+        let after_calls = self.tool_call_states.len();
+        let fragment = (text.to_owned(), usage_snapshot.clone());
+        match self.pending_text.last_mut() {
+            Some(pending) if pending.after_calls == after_calls => pending.fragments.push(fragment),
+            _ => self.pending_text.push(PendingText {
+                after_calls,
+                fragments: vec![fragment],
+            }),
         }
     }
 
@@ -245,6 +268,12 @@ impl AnthropicStreamConverter {
             if !arguments_are_valid && repaired_input.is_none() {
                 continue;
             }
+            drain_pending_text(
+                &mut self.pending_text,
+                Some(call_index),
+                &mut block_index,
+                &mut events,
+            );
             let emitted_id = new_tool_use_id();
             tracing::debug!(
                 backend_id = %tool_call.backend_id,
@@ -312,6 +341,9 @@ impl AnthropicStreamConverter {
             self.stop_reason = Some(AnthropicStopReason::EndTurn);
         }
 
+        if is_final {
+            drain_pending_text(&mut self.pending_text, None, &mut block_index, &mut events);
+        }
         self.next_block_index = block_index;
         events
     }
@@ -550,30 +582,35 @@ impl AnthropicStreamConverter {
                     events.push(make_sse_event("content_block_stop", &block_stop));
                 }
 
-                // Emit content_block_start on first text
-                if !self.text_block_started {
-                    self.text_block_started = true;
-                    self.text_block_index = self.next_block_index;
-                    self.next_block_index += 1;
+                if self.text_block_closed || !self.tool_call_states.is_empty() {
+                    // Text after a tool call streams after that call's block.
+                    self.buffer_text(text, &usage_snapshot);
+                } else {
+                    // Emit content_block_start on first text
+                    if !self.text_block_started {
+                        self.text_block_started = true;
+                        self.text_block_index = self.next_block_index;
+                        self.next_block_index += 1;
 
-                    let block_start = AnthropicStreamEvent::ContentBlockStart {
+                        let block_start = AnthropicStreamEvent::ContentBlockStart {
+                            index: self.text_block_index,
+                            content_block: AnthropicResponseContentBlock::Text {
+                                text: String::new(),
+                                citations: None,
+                            },
+                        };
+                        events.push(make_sse_event("content_block_start", &block_start));
+                    }
+
+                    // Emit text delta
+                    let block_delta = AnthropicStreamEvent::ContentBlockDelta {
                         index: self.text_block_index,
-                        content_block: AnthropicResponseContentBlock::Text {
-                            text: String::new(),
-                            citations: None,
+                        delta: AnthropicDelta::TextDelta {
+                            text: text.to_string(),
                         },
                     };
-                    events.push(make_sse_event("content_block_start", &block_start));
+                    events.push(self.serialize_event("content_block_delta", &block_delta));
                 }
-
-                // Emit text delta
-                let block_delta = AnthropicStreamEvent::ContentBlockDelta {
-                    index: self.text_block_index,
-                    delta: AnthropicDelta::TextDelta {
-                        text: text.to_string(),
-                    },
-                };
-                events.push(self.serialize_event("content_block_delta", &block_delta));
             }
 
             // Handle tool call deltas
@@ -699,6 +736,55 @@ impl AnthropicStreamConverter {
     ) {
         let error_event = AnthropicStreamEvent::Error { error };
         events.push(make_sse_event("error", &error_event));
+    }
+}
+
+/// Moves held text into `events` as text blocks: the text that arrived before
+/// tool call `before_call`, or all of it when `None`.
+#[allow(clippy::type_complexity)]
+fn drain_pending_text(
+    pending_text: &mut Vec<PendingText>,
+    before_call: Option<usize>,
+    block_index: &mut u32,
+    events: &mut Vec<(&'static str, AnthropicStreamEvent, Option<AnthropicUsage>)>,
+) {
+    let count = match before_call {
+        Some(call_index) => pending_text
+            .iter()
+            .take_while(|text| text.after_calls <= call_index)
+            .count(),
+        None => pending_text.len(),
+    };
+    for text in pending_text.drain(..count) {
+        events.push((
+            "content_block_start",
+            AnthropicStreamEvent::ContentBlockStart {
+                index: *block_index,
+                content_block: AnthropicResponseContentBlock::Text {
+                    text: String::new(),
+                    citations: None,
+                },
+            },
+            None,
+        ));
+        for (fragment, usage) in text.fragments {
+            events.push((
+                "content_block_delta",
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index: *block_index,
+                    delta: AnthropicDelta::TextDelta { text: fragment },
+                },
+                Some(usage),
+            ));
+        }
+        events.push((
+            "content_block_stop",
+            AnthropicStreamEvent::ContentBlockStop {
+                index: *block_index,
+            },
+            None,
+        ));
+        *block_index += 1;
     }
 }
 
@@ -854,29 +940,33 @@ impl AnthropicStreamConverter {
                     events.push(make_tagged_event("content_block_stop", &ev));
                 }
 
-                if !self.text_block_started {
-                    self.text_block_started = true;
-                    self.text_block_index = self.next_block_index;
-                    self.next_block_index += 1;
+                self.usage.output_tokens += 1;
+                if self.text_block_closed || !self.tool_call_states.is_empty() {
+                    self.buffer_text(text, &usage_snapshot);
+                } else {
+                    if !self.text_block_started {
+                        self.text_block_started = true;
+                        self.text_block_index = self.next_block_index;
+                        self.next_block_index += 1;
 
-                    let ev = AnthropicStreamEvent::ContentBlockStart {
+                        let ev = AnthropicStreamEvent::ContentBlockStart {
+                            index: self.text_block_index,
+                            content_block: AnthropicResponseContentBlock::Text {
+                                text: String::new(),
+                                citations: None,
+                            },
+                        };
+                        events.push(make_tagged_event("content_block_start", &ev));
+                    }
+
+                    let ev = AnthropicStreamEvent::ContentBlockDelta {
                         index: self.text_block_index,
-                        content_block: AnthropicResponseContentBlock::Text {
-                            text: String::new(),
-                            citations: None,
+                        delta: AnthropicDelta::TextDelta {
+                            text: text.to_string(),
                         },
                     };
-                    events.push(make_tagged_event("content_block_start", &ev));
+                    events.push(make_tagged_event("content_block_delta", &ev));
                 }
-
-                self.usage.output_tokens += 1;
-                let ev = AnthropicStreamEvent::ContentBlockDelta {
-                    index: self.text_block_index,
-                    delta: AnthropicDelta::TextDelta {
-                        text: text.to_string(),
-                    },
-                };
-                events.push(make_tagged_event("content_block_delta", &ev));
             }
 
             if let Some(tool_calls) = &delta.tool_calls {
@@ -2171,6 +2261,92 @@ mod tests {
             nvext: None,
             llm_metrics: None,
         }
+    }
+
+    /// Asserts the Anthropic block protocol: blocks start one at a time at
+    /// consecutive indices, and deltas and stops target the open block.
+    /// Returns each block's type in order.
+    fn block_types(values: &[serde_json::Value]) -> Vec<String> {
+        let mut open = None;
+        let mut types = Vec::new();
+        for value in values {
+            let index = value["index"].as_u64();
+            match value["type"].as_str().unwrap() {
+                "content_block_start" => {
+                    assert_eq!(open, None, "block started while another is open: {value}");
+                    assert_eq!(index, Some(types.len() as u64), "non-consecutive: {value}");
+                    open = index;
+                    types.push(value["content_block"]["type"].as_str().unwrap().to_owned());
+                }
+                "content_block_delta" => {
+                    assert_eq!(index, open, "delta outside its block: {value}")
+                }
+                "content_block_stop" => {
+                    assert_eq!(index, open, "stop outside its block: {value}");
+                    open = None;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(open, None, "a block was left open");
+        types
+    }
+
+    /// Text after a tool call keeps its place among the tool blocks, in a text
+    /// block of its own. The first case is Qwen3.8 output from SGLang, which
+    /// writes text between parallel calls.
+    #[rstest::rstest]
+    #[case::between_calls(
+        vec![
+            reasoning_chunk("Run both."),
+            text_chunk("\n\n"),
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("\n"),
+            tool_call_chunk(1, Some("call-b"), Some("shell"), Some(r#"{"command":"hostname"}"#)),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["thinking", "text", "tool_use", "text", "tool_use"],
+        "\n\n\n"
+    )]
+    #[case::after_last_call(
+        vec![
+            text_chunk("Checking."),
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("\n"),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["text", "tool_use", "text"],
+        "Checking.\n"
+    )]
+    #[case::no_text_before_calls(
+        vec![
+            tool_call_chunk(0, Some("call-a"), Some("Bash"), Some(r#"{"command":"hostname"}"#)),
+            text_chunk("Now the sandbox."),
+            tool_call_chunk(1, Some("call-b"), Some("shell"), Some(r#"{"command":"hostname"}"#)),
+            finish_chunk(FinishReason::ToolCalls),
+        ],
+        &["tool_use", "text", "tool_use"],
+        "Now the sandbox."
+    )]
+    #[tokio::test]
+    async fn test_text_after_tool_call_keeps_its_place(
+        #[case] chunks: Vec<NvCreateChatCompletionStreamResponse>,
+        #[case] expected: &[&str],
+        #[case] text: &str,
+    ) {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::new();
+        for chunk in &chunks {
+            conv.append_chunk_events(chunk, &mut events);
+        }
+        conv.append_end_events(&mut events);
+        let values = sse_values(events).await;
+        assert_eq!(block_types(&values), expected);
+        let streamed: String = values
+            .iter()
+            .filter_map(|value| value["delta"]["text"].as_str())
+            .collect();
+        assert_eq!(streamed, text);
     }
 
     /// Full reasoning flow: thinking → text → tool_use.

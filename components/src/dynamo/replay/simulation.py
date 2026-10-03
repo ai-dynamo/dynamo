@@ -18,6 +18,7 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
+from aisimulate.runner import EngineReplayRunnerFactory
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -47,13 +48,6 @@ _ROUTER_HOOK = HookCapability(
     api_version=1,
 )
 _REPLAY_SPEC_API_VERSION = 1
-_SUPPORTED_BACKEND_TOPOLOGIES = (
-    ("vllm", "agg"),
-    ("vllm", "disagg"),
-    ("sglang", "agg"),
-    ("sglang", "disagg"),
-    ("trtllm", "agg"),
-)
 
 
 @dataclass(frozen=True)
@@ -66,13 +60,21 @@ class DynamoReplayRunnerFactory:
     def capabilities(self) -> RunnerCapabilities:
         """Advertise the backend/topology and Dynamo hook support."""
 
+        engine_capabilities = EngineReplayRunnerFactory().capabilities()
         return RunnerCapabilities(
             # Runner-owned constant: do not inherit the consumer package's default,
             # otherwise an old Dynamo wheel can self-certify against a newer spec.
             replay_spec_api_version=_REPLAY_SPEC_API_VERSION,
-            supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
+            supported_backend_topologies=tuple(
+                (backend, topology)
+                for backend, topology in engine_capabilities.supported_backend_topologies
+                if backend in ("vllm", "sglang", "trtllm")
+                and topology in ("agg", "disagg")
+            ),
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
-            supports_disaggregated_attention_dp=False,
+            supports_disaggregated_attention_dp=(
+                engine_capabilities.supports_disaggregated_attention_dp
+            ),
             supported_execution_modes=("offline",),
             supported_trace_formats=(
                 "mooncake",
@@ -82,10 +84,15 @@ class DynamoReplayRunnerFactory:
                 "dynamo",
                 "weka",
             ),
-            supports_agentic_lanes=True,
+            supports_agentic_lanes=engine_capabilities.supports_agentic_lanes,
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
-            supported_agentic_topologies=("agg",),
+            supported_agentic_topologies=tuple(
+                topology
+                for topology in engine_capabilities.supported_agentic_topologies
+                if topology in ("agg", "disagg")
+            ),
+            supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             agentic_qualification="functional_only",
         )
 
