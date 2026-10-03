@@ -182,6 +182,19 @@ class TestImageDiffusionWorkerHandler:
         assert response["data"][0]["url"].startswith("file:///tmp/images/users/")
 
     @pytest.mark.asyncio
+    async def test_generate_defaults_to_url_format(self, handler, mock_context):
+        """A request without response_format gets a URL."""
+        test_image = Image.new("RGB", (256, 256), color="green")
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image.convert("RGB")])
+        )
+
+        request = {"prompt": "A green square", "model": "test-model"}
+        results = [result async for result in handler.generate(request, mock_context)]
+
+        assert results[0]["data"][0]["url"].startswith("file:///tmp/images/users/")
+
+    @pytest.mark.asyncio
     async def test_generate_success_b64_format(self, handler, mock_context):
         """Test successful image generation with base64 response format."""
         # Create a simple test image
