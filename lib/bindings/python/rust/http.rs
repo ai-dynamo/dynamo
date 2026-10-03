@@ -209,6 +209,15 @@ where
             Err(e) => {
                 if let Some(py_err) = e.downcast_ref::<PyErr>() {
                     Python::with_gil(|py| {
+                        // Preserve explicitly public validation metadata before the
+                        // legacy HTTP adapter reduces the error to code/message.
+                        // Keep that adapter for other errors: its status mapping is
+                        // not identical to the semantic error class catalog.
+                        if let Some(error) = crate::errors::http_like_error_to_dynamo(py, py_err)
+                            .filter(|error| error.public_parameter().is_some())
+                        {
+                            return Err(error.into());
+                        }
                         // With the Stable ABI, we can't subclass Python's built-in exceptions in PyO3, so instead we
                         // implement the exception in Python and assume that it's an HttpError if the code and message
                         // are present.

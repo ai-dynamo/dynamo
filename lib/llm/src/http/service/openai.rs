@@ -143,6 +143,76 @@ pub(super) fn get_body_limit() -> usize {
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
+/// Marks only errors adapted by a chat/completion route, including custom paths.
+/// The shared JSON middleware must not infer endpoint ownership from body shape.
+#[derive(Clone, Copy)]
+struct CompletionErrorEnvelope;
+
+/// Public chat/completion error envelope. Internal errors and other APIs retain
+/// their own representations; this conversion runs at the HTTP route boundary.
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub(crate) struct CompletionErrorResponse {
+    error: CompletionErrorInfo,
+}
+
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub(crate) struct CompletionErrorInfo {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: String,
+    param: Option<String>,
+    code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<Box<serde_json::Value>>,
+}
+
+fn completion_error_response((status, Json(mut error)): ErrorResponse) -> Response {
+    // Classify by the existing semantic label, not status alone: an operator may
+    // configure overload to use a status that also represents validation errors.
+    let error_type = match error.error_type.as_str() {
+        "Bad Request" => "BadRequestError".to_owned(),
+        "Not Found" => "NotFoundError".to_owned(),
+        "Internal Server Error" => "InternalServerError".to_owned(),
+        "Unprocessable Entity" => "UnprocessableEntityError".to_owned(),
+        "Not Implemented" => "NotImplementedError".to_owned(),
+        _ => error.error_type,
+    };
+    let param = error.details.as_ref().and_then(|details| {
+        // Serialized public-message metadata comes from the semantic error
+        // boundary, never from diagnostic text. Keep it out of error.details:
+        // message and param each have their own native OpenAI envelope field.
+        if details["type"] == "message" && status == StatusCode::BAD_REQUEST {
+            return details["parameter"]
+                .as_str()
+                .and_then(dynamo_runtime::error::PublicParameter::new)
+                .map(|parameter| parameter.as_str().to_owned());
+        }
+        None
+    });
+    if error
+        .details
+        .as_ref()
+        .is_some_and(|details| details["type"] == "message")
+    {
+        error.details = None;
+    }
+    let mut response = (
+        status,
+        Json(CompletionErrorResponse {
+            error: CompletionErrorInfo {
+                message: error.message,
+                error_type,
+                param,
+                code: error.code,
+                details: error.details,
+            },
+        }),
+    )
+        .into_response();
+    response.extensions_mut().insert(CompletionErrorEnvelope);
+    response
+}
+
 /// Preserve an emitted failure when the response body is dropped before EOF.
 struct StreamingLifecycleTerminal {
     terminal: LifecycleTerminal,
@@ -804,10 +874,11 @@ impl ErrorMessage {
                 details: error
                     .public_details()
                     .filter(|details| {
-                        !matches!(
-                            details,
-                            dynamo_runtime::error::PublicDetails::Message { .. }
-                        )
+                        error.public_parameter().is_some()
+                            || !matches!(
+                                details,
+                                dynamo_runtime::error::PublicDetails::Message { .. }
+                            )
                     })
                     .and_then(|details| serde_json::to_value(details).ok())
                     .map(Box::new),
@@ -1001,10 +1072,19 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
+        if parts.extensions.get::<CompletionErrorEnvelope>().is_some()
+            && let Ok(mut envelope) = serde_json::from_slice::<CompletionErrorResponse>(&body_bytes)
+        {
+            // Preserve the existing 422-to-400 policy without undoing the
+            // endpoint's envelope or dropping its structured details.
+            envelope.error.code = StatusCode::BAD_REQUEST.as_u16();
+            envelope.error.error_type = "BadRequestError".to_owned();
+            return (StatusCode::BAD_REQUEST, Json(envelope)).into_response();
+        }
         let (error_message, already_recorded) = unprocessable_error_message(&body_bytes);
         if !already_recorded {
             record_local_failure(ErrorClass::InvalidRequest);
@@ -1154,6 +1234,16 @@ pub(super) fn warn_nvext_disabled(endpoint: &str, discarded: bool) {
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 async fn handler_completions(
+    state: State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    handler_completions_inner(state, headers, body)
+        .await
+        .unwrap_or_else(completion_error_response)
+}
+
+async fn handler_completions_inner(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
     body: Body,
@@ -2441,6 +2531,16 @@ async fn pooling(
 }
 
 async fn handler_chat_completions(
+    state: State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    handler_chat_completions_inner(state, headers, body)
+        .await
+        .unwrap_or_else(completion_error_response)
+}
+
+async fn handler_chat_completions_inner(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
     body: Body,
@@ -2924,7 +3024,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                // New writers also retain the legacy JSON diagnostic for old
+                // readers. Do not let that fallback erase explicitly public
+                // validation metadata from the current semantic representation.
+                semantic: if overloaded
+                    || semantic.is_some_and(|error| error.public_parameter().is_some())
+                {
+                    semantic.cloned()
+                } else {
+                    None
+                },
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -5934,6 +6043,110 @@ mod tests {
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
 
+    #[tokio::test]
+    async fn completion_422_rewrite_requires_route_marker() {
+        // Both routes emit identical JSON. Only the route-owned response may
+        // use the nested rewrite; an unrelated endpoint keeps its old policy.
+        for marked in [false, true] {
+            let app = axum::Router::new()
+                .route(
+                    "/custom-path",
+                    axum::routing::get(move || async move {
+                        let mut response = completion_error_response((
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(ErrorMessage {
+                                message: "safe validation message".into(),
+                                error_type: "Unprocessable Entity".into(),
+                                code: 422,
+                                details: Some(Box::new(serde_json::json!({
+                                    "validation_marker": "retained"
+                                }))),
+                                metric_error_type: None,
+                            }),
+                        ));
+                        if !marked {
+                            response
+                                .extensions_mut()
+                                .remove::<CompletionErrorEnvelope>();
+                        }
+                        response
+                    }),
+                )
+                .layer(middleware::from_fn(smart_json_error_middleware));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move { axum::serve(listener, app).await });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap()
+                .get(format!("http://{addr}/custom-path"))
+                .send()
+                .await;
+            let response = match response {
+                Ok(response) => {
+                    let status = response.status();
+                    response
+                        .json::<serde_json::Value>()
+                        .await
+                        .map(|body| (status, body))
+                }
+                Err(error) => Err(error),
+            };
+            task.abort();
+            let _ = task.await;
+            let (status, body) = response.unwrap();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            if marked {
+                assert_eq!(body.as_object().unwrap().len(), 1);
+                assert_eq!(body["error"]["code"], 400);
+                assert_eq!(body["error"]["type"], "BadRequestError");
+                assert_eq!(body["error"]["message"], "safe validation message");
+                assert!(body["error"]["param"].is_null());
+                assert_eq!(body["error"]["details"]["validation_marker"], "retained");
+            } else {
+                assert!(body.get("error").is_none());
+                assert_eq!(body["code"], 400);
+                // The existing fallback treats unknown JSON as raw text.
+                let original: serde_json::Value =
+                    serde_json::from_str(body["message"].as_str().unwrap()).unwrap();
+                assert_eq!(original["error"]["code"], 422);
+                assert_eq!(original["error"]["message"], "safe validation message");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_error_envelope_preserves_semantic_overload_labels() {
+        for (label, expected) in [
+            ("Bad Request", "BadRequestError"),
+            ("Overloaded", "Overloaded"),
+        ] {
+            let response = completion_error_response((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorMessage {
+                    message: "safe message".into(),
+                    error_type: label.into(),
+                    code: 400,
+                    details: None,
+                    metric_error_type: None,
+                }),
+            ));
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body.as_object().unwrap().len(), 1);
+            assert_eq!(body["error"]["type"], expected);
+            assert_eq!(body["error"]["message"], "safe message");
+            assert_eq!(body["error"]["code"], 400);
+            assert!(body["error"].get("param").unwrap().is_null());
+            assert!(body["error"].get("details").is_none());
+        }
+    }
+
     #[test]
     fn wire_normalized_invalid_request_is_found_through_error_context() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
@@ -7644,6 +7857,97 @@ mod tests {
         let body = serde_json::to_string(&response.1.0).expect("error response serializes");
         assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
         assert!(!body.contains("/srv/frontend.rs"));
+    }
+
+    #[tokio::test]
+    async fn completion_error_projects_only_validated_public_parameter() {
+        use dynamo_runtime::error::{DynamoError, PublicParameter};
+        for (class, status, parameter) in [
+            (
+                ErrorClass::InvalidRequest,
+                StatusCode::BAD_REQUEST,
+                serde_json::json!("reasoning_effort"),
+            ),
+            (
+                ErrorClass::Internal,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::Value::Null,
+            ),
+        ] {
+            let error = DynamoError::builder()
+                .class(class)
+                .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL=/srv/backend.rs")
+                .public_message_with_parameter(
+                    "Invalid request",
+                    PublicParameter::new("reasoning_effort").unwrap(),
+                )
+                .build();
+            // Exercise serialization too: worker errors are not local anyhow annotations.
+            let error: DynamoError =
+                serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
+            let response = completion_error_response(ErrorMessage::from_anyhow(
+                error.into(),
+                BACKUP_ERROR_MESSAGE,
+            ));
+            assert_eq!(response.status(), status);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["param"], parameter);
+            assert!(body["error"].get("details").is_none());
+            assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_preflight_preserves_parameter_beside_legacy_diagnostic() {
+        use dynamo_runtime::error::{DynamoError, PublicParameter};
+        for public in [false, true] {
+            let builder = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .diagnostic(
+                    serde_json::json!({
+                        "code": 400,
+                        "message": "PRIVATE_DIAGNOSTIC_SENTINEL"
+                    })
+                    .to_string(),
+                );
+            let error = if public {
+                builder
+                    .public_message_with_parameter(
+                        "Invalid request",
+                        PublicParameter::new("reasoning_effort").unwrap(),
+                    )
+                    .build()
+            } else {
+                builder.build()
+            };
+            let event = Annotated::<serde_json::Value> {
+                data: None,
+                id: None,
+                event: Some("error".to_owned()),
+                comment: None,
+                error: Some(error),
+            };
+            let event = serde_json::from_value(serde_json::to_value(event).unwrap()).unwrap();
+            let info = extract_backend_error_if_present::<serde_json::Value>(&event).unwrap();
+            let response = completion_error_response(backend_error_response(info, false));
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["error"]["param"],
+                if public {
+                    serde_json::json!("reasoning_effort")
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+        }
     }
 
     #[test]

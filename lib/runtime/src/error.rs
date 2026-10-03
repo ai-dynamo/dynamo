@@ -546,6 +546,15 @@ impl std::error::Error for InvalidErrorReason {}
 pub enum PublicDetails {
     Message {
         message: String,
+        /// Reviewed top-level request field, not a value or diagnostic fragment.
+        /// Optional within the existing message variant so older readers ignore
+        /// it instead of rejecting an unknown PublicDetails variant.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_public_parameter"
+        )]
+        parameter: Option<PublicParameter>,
     },
     SizeLimit {
         limit: u64,
@@ -565,10 +574,54 @@ impl PublicDetails {
     /// Returns the client-safe rejection message when one was explicitly captured.
     pub fn message(&self) -> Option<&str> {
         match self {
-            Self::Message { message } => Some(message),
+            Self::Message { message, .. } => Some(message),
             Self::SizeLimit { .. } | Self::ContextLength { .. } | Self::RateLimit { .. } => None,
         }
     }
+}
+
+/// Bounded top-level field identity for a client-safe validation error.
+///
+/// Syntax validation is not a privacy policy: producers must choose the field
+/// from a reviewed schema, never copy a request value or parse exception text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct PublicParameter(String);
+
+impl PublicParameter {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        let mut bytes = value.bytes();
+        (!value.is_empty()
+            && value.len() <= 128
+            && bytes
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+            && bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_'))
+        .then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicParameter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?)
+            .ok_or_else(|| serde::de::Error::custom("invalid public request parameter"))
+    }
+}
+
+fn deserialize_public_parameter<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<PublicParameter>, D::Error> {
+    // Bad optional metadata must not destroy an otherwise readable error.
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(value)) => PublicParameter::new(value),
+        _ => None,
+    })
 }
 
 fn bounded_message(mut message: String) -> String {
@@ -884,6 +937,17 @@ impl DynamoError {
         self.public_details().and_then(PublicDetails::message)
     }
 
+    /// Public field context is meaningful only for a validated request error.
+    pub fn public_parameter(&self) -> Option<&PublicParameter> {
+        if self.class() != ErrorClass::InvalidRequest {
+            return None;
+        }
+        match self.public_details()? {
+            PublicDetails::Message { parameter, .. } => parameter.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Returns the legacy error message view.
     pub fn message(&self) -> &str {
         self.diagnostic
@@ -1011,7 +1075,23 @@ impl DynamoErrorBuilder {
     /// Set a bounded client-safe rejection message.
     pub fn public_message(mut self, message: impl Into<String>) -> Self {
         let message = bounded_message(message.into());
-        self.public = Some(PublicDetails::Message { message });
+        self.public = Some(PublicDetails::Message {
+            message,
+            parameter: None,
+        });
+        self
+    }
+
+    /// Explicit public validation text plus an independently reviewed field name.
+    pub fn public_message_with_parameter(
+        mut self,
+        message: impl Into<String>,
+        parameter: PublicParameter,
+    ) -> Self {
+        self.public = Some(PublicDetails::Message {
+            message: bounded_message(message.into()),
+            parameter: Some(parameter),
+        });
         self
     }
 
@@ -1102,6 +1182,86 @@ pub fn match_error_chain(
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn public_parameter_roundtrip_preserves_legacy_message_variant() {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldPublicDetails {
+            Message { message: String },
+        }
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("private diagnostic")
+            .public_message_with_parameter(
+                "Invalid request",
+                PublicParameter::new("reasoning_effort").unwrap(),
+            )
+            .build();
+        let wire = serde_json::to_value(&error).unwrap();
+        let OldPublicDetails::Message { message } =
+            serde_json::from_value(wire["public"].clone()).unwrap();
+        assert_eq!(message, "Invalid request");
+        let restored: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            restored.public_parameter().unwrap().as_str(),
+            "reasoning_effort"
+        );
+        assert_eq!(restored.class(), ErrorClass::InvalidRequest);
+        assert_eq!(
+            restored.diagnostic().unwrap().as_str(),
+            "private diagnostic"
+        );
+    }
+
+    #[test]
+    fn malformed_optional_parameter_does_not_destroy_error() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .public_message("Invalid request")
+            .build();
+        let original = serde_json::to_value(error).unwrap();
+        assert!(original["public"].get("parameter").is_none());
+        for parameter in [
+            serde_json::Value::Null,
+            serde_json::json!(17),
+            serde_json::json!({"private":"value"}),
+            serde_json::json!("path/to/private"),
+            serde_json::json!(""),
+            serde_json::json!("x".repeat(129)),
+        ] {
+            let mut wire = original.clone();
+            wire["public"]["parameter"] = parameter;
+            let restored: DynamoError = serde_json::from_value(wire).unwrap();
+            assert_eq!(restored.class(), ErrorClass::InvalidRequest);
+            assert_eq!(restored.public_message(), Some("Invalid request"));
+            assert!(restored.public_parameter().is_none());
+        }
+    }
+
+    #[test]
+    fn public_parameter_requires_valid_request_identity() {
+        for class in [
+            ErrorClass::Internal,
+            ErrorClass::Unavailable,
+            ErrorClass::NotFound,
+        ] {
+            let error = DynamoError::builder()
+                .class(class)
+                .public_message_with_parameter(
+                    "Safe message",
+                    PublicParameter::new("model").unwrap(),
+                )
+                .build();
+            assert!(error.public_parameter().is_none());
+        }
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::new("runtime.internal").unwrap())
+            .public_message_with_parameter("Safe message", PublicParameter::new("model").unwrap())
+            .build();
+        assert!(error.public_details().is_none());
+    }
 
     // Compile-time assertions that DynamoError is std::error::Error + Send + Sync + 'static.
     // These fail at compile time if a future change breaks these guarantees.
