@@ -3,6 +3,7 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::MediaDelivery;
 
@@ -12,7 +13,7 @@ mod nvext;
 pub use nvext::NvExt;
 
 /// Request for video generation (/v1/videos endpoint)
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
     pub prompt: String,
@@ -69,6 +70,7 @@ pub struct NvCreateVideoRequest {
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
+    #[schema(ignore)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -81,7 +83,7 @@ impl NvCreateVideoRequest {
 }
 
 /// Video data in response
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct VideoData {
     /// Actual container format of this video: "mp4", "webm", "gif"
     pub output_format: String,
@@ -104,13 +106,14 @@ pub struct VideoData {
 }
 
 /// Response structure for video generation
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvVideosResponse {
     /// Unique identifier for the response
     pub id: String,
 
     /// Object type (always "video")
     #[serde(default = "default_object_type")]
+    #[schema(default = default_object_type)]
     pub object: String,
 
     /// Model used for generation
@@ -118,10 +121,12 @@ pub struct NvVideosResponse {
 
     /// Status of the generation ("completed", "failed", etc.)
     #[serde(default = "default_status")]
+    #[schema(default = default_status)]
     pub status: String,
 
     /// Progress percentage (0-100)
     #[serde(default = "default_progress")]
+    #[schema(default = default_progress)]
     pub progress: i32,
 
     /// Unix timestamp of creation
@@ -129,6 +134,7 @@ pub struct NvVideosResponse {
 
     /// Generated video data
     #[serde(default)]
+    #[schema(default = json!([]))]
     pub data: Vec<VideoData>,
 
     /// Error message if generation failed

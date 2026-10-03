@@ -170,7 +170,7 @@ axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { workspace = true }
 tower = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras", "rc_schema"] }
+utoipa = { version = "5.3", features = ["axum_extras", "rc_schema", "preserve_order"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 
