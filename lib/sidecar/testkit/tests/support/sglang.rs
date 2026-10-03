@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_backend_common::BackendError;
+use dynamo_backend_common::{BackendError, DisaggregationMode};
 use dynamo_mocker::common::protocols::EngineType;
-use dynamo_sglang_mocker::{MockerServerConfig, SglangMockerService};
+use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use dynamo_sglang_sidecar::SglangSidecarEngine;
 use dynamo_sglang_sidecar::proto::{
     self as pb,
@@ -15,7 +15,9 @@ use futures::stream::BoxStream;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-use super::{FixtureConfig, SidecarFixture, fast_engine_args};
+use super::{
+    FixtureConfig, GenerateOpening, SidecarFixture, fast_engine_args, wait_scheduler_idle,
+};
 
 pub struct Fixture {
     config: FixtureConfig,
@@ -26,14 +28,23 @@ pub struct Fixture {
 impl SidecarFixture for Fixture {
     type Engine = SglangSidecarEngine;
     type Protocol = Adapter;
+    const GENERATE_OPENING: GenerateOpening = GenerateOpening::OnStreamPoll;
 
     async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
+        let mut args = fast_engine_args(EngineType::Sglang);
+        args.speedup_ratio = config.speedup_ratio;
         let service = SglangMockerService::new(
             MockerServerConfig {
                 model: config.model.clone(),
+                mode: match config.disaggregation_mode {
+                    DisaggregationMode::Aggregated => ServerMode::Aggregated,
+                    DisaggregationMode::Prefill => ServerMode::Prefill,
+                    DisaggregationMode::Decode => ServerMode::Decode,
+                    DisaggregationMode::Encode => panic!("Mocker does not support encode mode"),
+                },
                 ..Default::default()
             },
-            fast_engine_args(EngineType::Sglang),
+            args,
         )
         .unwrap();
         let controlled = ControlledService {
@@ -63,6 +74,8 @@ impl SidecarFixture for Fixture {
             "dynamo-sglang-sidecar".into(),
             "--grpc-endpoint".into(),
             self.server.endpoint(),
+            "--disaggregation-mode".into(),
+            self.config.disaggregation_mode.to_string(),
             "--grpc-connections".into(),
             self.config.connections.to_string(),
             "--grpc-connect-attempt-timeout-secs".into(),
@@ -88,6 +101,13 @@ impl SidecarFixture for Fixture {
 
     fn active_request_count(&self) -> usize {
         self.service.active_request_count()
+    }
+
+    async fn scheduler_idle(&self) {
+        wait_scheduler_idle(self.service.metrics_receiver(), || {
+            self.active_request_count()
+        })
+        .await;
     }
 
     async fn shutdown(&mut self) {

@@ -46,6 +46,7 @@ from dynamo.common.multimodal.image_loader import (
 from dynamo.common.multimodal.media_source import decode_data_uri, describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -714,7 +715,7 @@ class MultimodalRequestProcessor:
                     processed_inputs["multi_modal_uuids"] = {"image": list(mm_hashes)}
 
         # Get token_ids from request (already tokenized by Rust frontend)
-        token_ids = request.get("token_ids")
+        token_ids = token_ids_to_list(request.get("token_ids"))
         if not token_ids:
             logging.warning("No token_ids in request")
             return None
