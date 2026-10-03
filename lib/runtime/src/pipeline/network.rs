@@ -1306,6 +1306,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
     quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     velo_response_service: tokio::sync::OnceCell<Arc<velo_response::VeloResponseService>>,
+    velo_response_owner: OnceLock<std::sync::Weak<velo_response::RuntimeService>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
 }
@@ -1353,6 +1354,7 @@ where
             endpoint_health_check_notifier: OnceLock::new(),
             quic_response_client_pool: OnceLock::new(),
             velo_response_service: tokio::sync::OnceCell::new(),
+            velo_response_owner: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
         })
@@ -1396,6 +1398,29 @@ where
         }
         let pool = quic_response::process_client_pool_from_env()?;
         Ok(self.quic_response_client_pool.get_or_init(|| pool).clone())
+    }
+
+    async fn velo_response_service(
+        &self,
+    ) -> Result<&Arc<velo_response::VeloResponseService>, PipelineError> {
+        let owner = self
+            .velo_response_owner
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                PipelineError::Generic(
+                    "Velo ingress must be bound to a live runtime endpoint".into(),
+                )
+            })?;
+        if owner.is_closed() {
+            return Err(PipelineError::Generic(
+                "Velo response runtime is shut down".into(),
+            ));
+        }
+        self.velo_response_service
+            .get_or_try_init(|| owner.service())
+            .await
+            .map_err(|error| PipelineError::Generic(error.to_string()))
     }
 
     pub fn add_metrics(
@@ -1464,6 +1489,11 @@ where
     }
 
     fn bind_lifecycle_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        // Endpoint tasks retain this ingress. Keep a weak back-reference so
+        // those tasks cannot keep their own Tokio runtime alive.
+        let _ = self.velo_response_owner.set(Arc::downgrade(
+            &endpoint.drt().runtime().velo_response_service(),
+        ));
         // Keep an explicitly constructed ingress role; otherwise observe model
         // registration even when it happens after the endpoint starts serving.
         let _ = self
