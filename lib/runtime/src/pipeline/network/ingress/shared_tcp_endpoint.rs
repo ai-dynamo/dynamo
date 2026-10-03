@@ -111,7 +111,15 @@ pub struct SharedTcpServer {
     tls_acceptor: Option<TlsAcceptor>,
 }
 
+#[cfg(test)]
+type HandlerLookupGate = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 struct EndpointHandler {
+    #[cfg(test)]
+    after_lookup: Mutex<Option<HandlerLookupGate>>,
     service_handler: Arc<dyn PushWorkHandler>,
     instance_id: u64,
     namespace: String,
@@ -455,6 +463,8 @@ impl SharedTcpServer {
         let fqn_endpoint = format!("{namespace}.{component_name}.{endpoint_name}");
 
         let handler = Arc::new(EndpointHandler {
+            #[cfg(test)]
+            after_lookup: Mutex::new(None),
             service_handler,
             instance_id,
             namespace,
@@ -617,8 +627,11 @@ impl SharedTcpServer {
                 "Received TCP request"
             );
 
-            // Look up handler (lock-free read with DashMap)
-            let handler = handlers.get(endpoint_path).map(|h| h.clone());
+            // Reserve inflight ownership before removal can observe a drained handler.
+            let handler = handlers.get(endpoint_path).map(|h| {
+                h.inflight.fetch_add(1, Ordering::SeqCst);
+                h.clone()
+            });
 
             let handler = match handler {
                 Some(h) => h,
@@ -637,7 +650,14 @@ impl SharedTcpServer {
                 }
             };
 
-            handler.inflight.fetch_add(1, Ordering::SeqCst);
+            #[cfg(test)]
+            {
+                let gate = handler.after_lookup.lock().take();
+                if let Some((reached, resume)) = gate {
+                    let _ = reached.send(());
+                    let _ = resume.await;
+                }
+            }
 
             // Build work item
             // NOTE: payload is Bytes (Arc-counted), so cloning is extremely cheap
@@ -880,6 +900,166 @@ mod tests {
             "/health".to_string(),
             "/live".to_string(),
         )))
+    }
+
+    struct DrainBoundaryHandler {
+        started: Notify,
+        finish: Notify,
+        completed: Notify,
+        calls: AtomicU64,
+    }
+
+    #[async_trait]
+    impl PushWorkHandler for DrainBoundaryHandler {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            self.finish.notified().await;
+            self.completed.notify_one();
+            Ok(())
+        }
+
+        fn add_metrics(
+            &self,
+            _endpoint: &crate::component::Endpoint,
+            _metrics_labels: Option<&[(&str, &str)]>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn removal_waits_for_looked_up_request(queued: bool) {
+        use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
+        use futures::FutureExt;
+
+        let cancel = CancellationToken::new();
+        let server = SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), cancel.clone()).unwrap();
+        let handler = Arc::new(DrainBoundaryHandler {
+            started: Notify::new(),
+            finish: Notify::new(),
+            completed: Notify::new(),
+            calls: AtomicU64::new(0),
+        });
+        let path = "drain-boundary";
+        server
+            .register_endpoint(
+                path.to_string(),
+                handler.clone(),
+                1,
+                "test".to_string(),
+                "component".to_string(),
+                path.to_string(),
+                ready_system_health(),
+            )
+            .await
+            .unwrap();
+        let endpoint = server.handlers.get(path).unwrap().clone();
+        let (looked_up_tx, looked_up_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        *endpoint.after_lookup.lock() = Some((looked_up_tx, resume_rx));
+        let held_permits = if queued {
+            Some(
+                server
+                    .engine_sem
+                    .clone()
+                    .acquire_many_owned(server.engine_sem.available_permits() as u32)
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel();
+        let read_task = tokio::spawn(SharedTcpServer::read_loop(
+            Box::new(reader),
+            server.handlers.clone(),
+            response_tx,
+            server.work_tx.clone(),
+            server.engine_sem.clone(),
+            server.queue_capacity,
+        ));
+        let request = TcpRequestMessage::new(path.to_string(), Bytes::from_static(b"work"))
+            .encode()
+            .unwrap();
+        writer.write_all(&request).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), looked_up_rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let removal = server.remove_handler(path, path);
+        tokio::pin!(removal);
+        let drained_before_dispatch = removal.as_mut().now_or_never().is_some();
+        let removed_from_map = !server.handlers.contains_key(path);
+        resume_tx.send(()).unwrap();
+        let accepted_ack = tokio::time::timeout(Duration::from_secs(5), response_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(held_permits);
+        tokio::time::timeout(Duration::from_secs(5), handler.started.notified())
+            .await
+            .unwrap();
+        let drained_while_running =
+            drained_before_dispatch || removal.as_mut().now_or_never().is_some();
+
+        writer.write_all(&request).await.unwrap();
+        let rejected_ack = tokio::time::timeout(Duration::from_secs(5), response_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        handler.finish.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), handler.completed.notified())
+            .await
+            .unwrap();
+        if !drained_while_running {
+            tokio::time::timeout(Duration::from_secs(5), removal)
+                .await
+                .unwrap();
+        }
+        writer.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), read_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        cancel.cancel();
+
+        assert!(removed_from_map);
+        assert!(!drained_before_dispatch, "drain missed an accepted request");
+        assert!(
+            !drained_while_running,
+            "drain returned before handler completion"
+        );
+        assert!(
+            TcpResponseMessage::decode(&accepted_ack)
+                .unwrap()
+                .data
+                .is_empty()
+        );
+        assert!(
+            TcpResponseMessage::decode(&rejected_ack)
+                .unwrap()
+                .data
+                .starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes())
+        );
+        assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(endpoint.inflight.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn removal_waits_for_looked_up_direct_request() {
+        removal_waits_for_looked_up_request(false).await;
+    }
+
+    #[tokio::test]
+    async fn removal_waits_for_looked_up_queued_request() {
+        removal_waits_for_looked_up_request(true).await;
     }
 
     #[tokio::test]
