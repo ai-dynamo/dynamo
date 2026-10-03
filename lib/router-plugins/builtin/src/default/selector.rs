@@ -71,7 +71,7 @@ impl std::fmt::Debug for DefaultWorkerSelector {
             .finish_non_exhaustive()
     }
 }
-impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
+impl<C: WorkerConfigLike + Sync> WorkerSelector<C> for DefaultWorkerSelector {
     fn required_worker_inputs(&self) -> WorkerInputs {
         <WorkerSelectionPolicy as WorkerSelector<C>>::required_worker_inputs(&self.policy.lock())
     }

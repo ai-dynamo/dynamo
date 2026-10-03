@@ -4,6 +4,7 @@
 //! Request metadata available to worker-selection components.
 
 use super::SessionContext;
+use super::inputs::{WorkerMetadata, WorkerTable};
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
 use crate::scheduling::SchedulingRequest;
 
@@ -15,9 +16,19 @@ pub struct WorkerSelectionContext<'a> {
     pub(crate) track_prefill_tokens: bool,
     pub(crate) pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) router_temperature_override: Option<f64>,
+    pub(crate) workers: Option<&'a (dyn WorkerTable + Sync)>,
 }
 
-impl WorkerSelectionContext<'_> {
+impl<'a> WorkerSelectionContext<'a> {
+    /// Facts this worker advertised at registration, or None for a worker the host does not know.
+    /// Each call is one lookup in the host's worker table, so policies that never call it pay
+    /// nothing.
+    pub fn worker(&self, worker: WorkerWithDpRank) -> Option<WorkerMetadata<'a>> {
+        self.workers?
+            .get(worker.worker_id)
+            .map(|config| WorkerMetadata { config })
+    }
+
     /// The exact worker/rank imposed by the host for this selection, if any.
     /// Includes explicit pins and eligible exclusive-affinity targets. This is
     /// read-only routing metadata, not permission to change eligibility.
