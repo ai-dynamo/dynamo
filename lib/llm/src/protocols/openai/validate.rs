@@ -12,6 +12,12 @@ use dynamo_runtime::config::{
 use serde_json::Value;
 
 use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
+use super::compatibility::{VLLM_VERSIONS, known_native_field};
+use super::compatibility::{
+    profile::Endpoint,
+    rejection::{CompatibilityRejection, RejectionKind},
+    telemetry::{self, Event},
+};
 use super::tools::{ToolChoiceError, validate_openai_tool_choice};
 
 //
@@ -116,6 +122,28 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "logprob_token_ids",
 ];
 
+/// Preserve reviewed root fields when a typed request crosses into a Python
+/// processor. The catch-all also contains rejected or migration-ignored keys;
+/// serializing the entire map would incorrectly grant those keys passthrough.
+/// Admission and target capability checks still run at their normal boundaries.
+pub(super) fn serialize_passthrough_fields<S>(
+    fields: &std::collections::HashMap<String, Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+
+    let mut map = serializer.serialize_map(None)?;
+    for name in PASSTHROUGH_EXTRA_FIELDS {
+        if let Some(value) = fields.get(*name).filter(|value| !value.is_null()) {
+            map.serialize_entry(name, value)?;
+        }
+    }
+    map.end()
+}
+
 /// Treat null passthrough fields as omitted while preserving unknown fields for validation.
 pub(super) fn deserialize_extra_fields<'de, D>(
     deserializer: D,
@@ -138,28 +166,90 @@ static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
 /// Validates that no unsupported fields are present in the request.
 ///
 /// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
-/// Other fields may be ignored and dropped when
-/// `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy.
+/// Known native-server fields must never be silently dropped. Only otherwise
+/// unknown fields may be ignored when `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS`
+/// is truthy. Membership in the native vocabulary does not grant support.
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
-    validate_no_unsupported_fields_with_ignore(
+    validate_no_unsupported_fields_observed(
         unsupported_fields,
         *IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+        None,
     )
 }
 
+pub(crate) fn validate_no_unsupported_fields_for_endpoint(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+    endpoint: Endpoint,
+) -> Result<(), anyhow::Error> {
+    validate_no_unsupported_fields_observed(
+        unsupported_fields,
+        *IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+        Some(endpoint),
+    )
+}
+
+#[cfg(test)]
 fn validate_no_unsupported_fields_with_ignore(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
     ignore_unsupported_fields: bool,
 ) -> Result<(), anyhow::Error> {
-    let unknown: Vec<_> = unsupported_fields
+    validate_no_unsupported_fields_observed(unsupported_fields, ignore_unsupported_fields, None)
+}
+
+fn validate_no_unsupported_fields_observed(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+    ignore_unsupported_fields: bool,
+    endpoint: Option<Endpoint>,
+) -> Result<(), anyhow::Error> {
+    let mut unknown: Vec<_> = unsupported_fields
         .keys()
         .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
-        .map(|s| format!("`{}`", s))
+        .map(String::as_str)
         .collect();
+    unknown.sort_unstable();
+    let known: Vec<_> = unknown
+        .iter()
+        .copied()
+        .filter_map(known_native_field)
+        .collect();
+    if !known.is_empty() {
+        for field in &known {
+            telemetry::record_validation(endpoint, field, Event::RejectKnownField);
+        }
+        return Err(CompatibilityRejection::request_field(
+            known[0],
+            RejectionKind::UnsupportedField,
+            &[
+                "Remove the unsupported fields",
+                "Use a server path that supports them",
+            ],
+        )
+        .attach(crate::protocols::common::invalid_argument_error(format!(
+            "Unsupported native-server parameter(s): {} (vLLM {} inventory). \
+             These fields have no handler on this request path and cannot be ignored. \
+             Remove them or use a server path that supports them.",
+            known
+                .iter()
+                .map(|field| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            VLLM_VERSIONS,
+        ))));
+    }
     if !unknown.is_empty() && !ignore_unsupported_fields {
-        anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
+        for field in &unknown {
+            telemetry::record_validation(endpoint, field, Event::RejectUnknownField);
+        }
+        anyhow::bail!(
+            "Unsupported parameter(s): {}",
+            unknown
+                .iter()
+                .map(|field| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     if let Some(value) = unsupported_fields.get("cache_salt")
         && !value.is_string()
@@ -183,17 +273,71 @@ fn validate_no_unsupported_fields_with_ignore(
         anyhow::bail!("`detokenize` must be a boolean");
     }
     if let Some(value) = unsupported_fields.get("allowed_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
-            .map_err(|_| anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs"))?;
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone()).map_err(|_| {
+            invalid_sampling_field(
+                "allowed_token_ids",
+                "`allowed_token_ids` must be an array of token IDs",
+            )
+        })?;
     }
     if let Some(value) = unsupported_fields.get("bad_words_token_ids") {
         serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
-            |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
+            |_| {
+                invalid_sampling_field(
+                    "bad_words_token_ids",
+                    "`bad_words_token_ids` must be an array of token ID arrays",
+                )
+            },
         )?;
     }
     if let Some(value) = unsupported_fields.get("logprob_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
-            .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone()).map_err(|_| {
+            invalid_sampling_field(
+                "logprob_token_ids",
+                "`logprob_token_ids` must be an array of token IDs",
+            )
+        })?;
+    }
+    // Count ignores only after this validation boundary succeeds. These are
+    // field decisions, not evidence that downstream generation succeeded.
+    for field in &unknown {
+        telemetry::record_validation(endpoint, field, Event::IgnoreUnknownField);
+    }
+    Ok(())
+}
+
+fn invalid_sampling_field(field: &'static str, message: &'static str) -> anyhow::Error {
+    CompatibilityRejection::request_field(
+        field,
+        RejectionKind::InvalidValue,
+        &["Use unsigned 32-bit token IDs in the field's declared array shape"],
+    )
+    .attach(crate::protocols::common::invalid_argument_error(message))
+}
+
+/// Native vLLM requires output logprobs when a nonempty explicit token selection
+/// is supplied. Empty lists are normalized to no selection by the worker.
+/// Call after validating passthrough types; the endpoint determines whether its
+/// boolean (chat) or optional count (completions, including zero) enables logprobs.
+pub fn validate_logprob_token_selection(
+    extra: &std::collections::HashMap<String, serde_json::Value>,
+    logprobs_enabled: bool,
+) -> Result<(), anyhow::Error> {
+    if extra
+        .get("logprob_token_ids")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|ids| !ids.is_empty())
+        && !logprobs_enabled
+    {
+        return Err(CompatibilityRejection::request_field(
+            "logprob_token_ids",
+            RejectionKind::UnsafeCombination,
+            &["Enable output logprobs", "Omit logprob_token_ids"],
+        )
+        .attach(crate::protocols::common::invalid_argument_error(
+            "`logprob_token_ids` requires `logprobs` to enable output log probabilities: \
+             true for chat completions, or a count (including zero) for completions",
+        )));
     }
     Ok(())
 }
@@ -1039,6 +1183,15 @@ pub fn validate_chat_only_generation_flags(
     if extra_fields.contains_key("add_generation_prompt")
         || extra_fields.contains_key("continue_final_message")
     {
+        for field in ["add_generation_prompt", "continue_final_message"] {
+            if extra_fields.contains_key(field) {
+                telemetry::record_validation(
+                    Some(Endpoint::Completion),
+                    field,
+                    Event::RejectWrongEndpoint,
+                );
+            }
+        }
         anyhow::bail!(
             "`add_generation_prompt` and `continue_final_message` are only supported on /v1/chat/completions"
         );
@@ -1191,11 +1344,59 @@ mod tests {
     fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
         let err = validate_no_unsupported_fields_with_ignore(&unknown_fields(), false).unwrap_err();
         assert!(err.to_string().contains("Unsupported parameter(s)"));
+        assert!(
+            err.downcast_ref::<super::super::compatibility::rejection::CompatibilityFailure>()
+                .is_none()
+        );
     }
 
     #[test]
     fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
         validate_no_unsupported_fields_with_ignore(&unknown_fields(), true).unwrap();
+    }
+
+    #[test]
+    fn native_semantic_fields_cannot_be_dropped_even_for_falsy_values() {
+        for ignore in [false, true] {
+            for field in ["watermarking", "vllm_xargs", "priority", "session_id"] {
+                for value in [json!(null), json!(0), json!(false), json!([]), json!({})] {
+                    let fields = HashMap::from([(field.to_string(), value)]);
+                    let err = validate_no_unsupported_fields_with_ignore(&fields, ignore)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(err.contains("Unsupported native-server parameter"), "{err}");
+                    assert!(err.contains(field), "{err}");
+                    assert!(err.contains("cannot be ignored"), "{err}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_field_errors_are_stable_and_do_not_include_values() {
+        let entries = [
+            ("watermarking".to_string(), json!("private-payload")),
+            ("priority".to_string(), json!("another-private-payload")),
+            ("private-unknown-key".to_string(), json!("private-value")),
+        ];
+        for ignore in [false, true] {
+            for ordered in [entries.to_vec(), entries.iter().rev().cloned().collect()] {
+                let fields = HashMap::from_iter(ordered);
+                let err = validate_no_unsupported_fields_with_ignore(&fields, ignore).unwrap_err();
+                let message = err.to_string();
+                assert!(message.contains("`priority`, `watermarking`"), "{message}");
+                assert!(!message.contains("private-"), "{message}");
+                let failure = err
+                    .downcast_ref::<super::super::compatibility::rejection::CompatibilityFailure>()
+                    .unwrap();
+                let details = serde_json::to_value(failure.details).unwrap();
+                assert_eq!(details["field"], "priority");
+                assert_eq!(details["kind"], "unsupported_field");
+                assert_eq!(details["stage"], "request_validation");
+                assert!(details["profile"].is_null());
+                assert!(!details.to_string().contains("private-"));
+            }
+        }
     }
 
     #[test]

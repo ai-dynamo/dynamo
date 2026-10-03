@@ -49,6 +49,16 @@ impl HarnessService {
         Self::start_with_engine(engine).await
     }
 
+    /// Enable the completions route for pre-dispatch validation tests. No
+    /// completion engine is registered; successful generation remains chat-only.
+    #[allow(dead_code)] // Shared harness: not every integration binary uses this route.
+    pub async fn start_with_completion_validation(
+        scripts: impl IntoIterator<Item = Script>,
+    ) -> Self {
+        let engine = Arc::new(ScriptedChatEngine::new(scripts.into_iter().map(Ok)));
+        Self::start_with_routes(engine, true).await
+    }
+
     pub async fn start_with_gated_tail(script: Script, split_at: usize) -> (Self, ScriptGate) {
         let (engine, gate) = ScriptedChatEngine::with_gated_tail(script, split_at);
         (Self::start_with_engine(Arc::new(engine)).await, gate)
@@ -68,6 +78,10 @@ impl HarnessService {
     }
 
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+        Self::start_with_routes(engine, false).await
+    }
+
+    async fn start_with_routes(engine: Arc<ScriptedChatEngine>, completions: bool) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -77,7 +91,7 @@ impl HarnessService {
             .port(port)
             .host("127.0.0.1")
             .enable_chat_endpoints(true)
-            .enable_cmpl_endpoints(false)
+            .enable_cmpl_endpoints(completions)
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
             .build()

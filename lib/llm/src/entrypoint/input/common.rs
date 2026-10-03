@@ -158,6 +158,7 @@ fn preprocessed_backend_engine(
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
     load_context: Arc<RoutingLoadContext>,
+    legacy_vllm_target: Option<crate::protocols::common::legacy_vllm::LegacyVllmRelease>,
 ) -> anyhow::Result<Arc<RoutingHost>> {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
     // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
@@ -168,7 +169,7 @@ fn preprocessed_backend_engine(
         affinity.is_some(),
     )?;
 
-    let routing_host = match router_mode {
+    let mut routing_host = match router_mode {
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
@@ -193,6 +194,9 @@ fn preprocessed_backend_engine(
         }
     };
 
+    Arc::get_mut(&mut routing_host)
+        .expect("new routing host has one owner")
+        .set_legacy_vllm_target(legacy_vllm_target);
     Ok(routing_host)
 }
 
@@ -219,6 +223,7 @@ pub async fn build_preprocessed_routing(
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
         SessionAffinityMode::Hard,
+        None,
     )
     .await
 }
@@ -235,6 +240,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: SessionAffinityMode,
+    legacy_vllm_target: Option<crate::protocols::common::legacy_vllm::LegacyVllmRelease>,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -303,6 +309,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         &endpoint_id,
         affinity,
         load_context,
+        legacy_vllm_target,
     )?;
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
         prefill_router
@@ -322,6 +329,10 @@ pub async fn prepare_engine(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
+    anyhow::ensure!(
+        engine_config.local_model().legacy_vllm_targets().is_empty(),
+        "legacy vLLM targets are currently supported only by the HTTP frontend"
+    );
     match engine_config {
         EngineConfig::Dynamic {
             model: local_model,

@@ -86,10 +86,13 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     pub skip_special_tokens: Option<bool>,
 
-    /// Number of log probabilities to return per prompt token.
+    /// Number of log probabilities per prompt token; -1 requests the full
+    /// vocabulary. Full-vocabulary support requires an advertised worker
+    /// contract and a sufficient engine limit; it is unavailable with streaming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    pub prompt_logprobs: Option<u32>,
+    #[schema(minimum = -1, maximum = 4294967294.0)]
+    pub prompt_logprobs: Option<i64>,
 }
 
 pub(crate) fn extract_guided_decoding_options(
@@ -137,7 +140,7 @@ pub trait CommonExtProvider {
     fn get_skip_special_tokens(&self) -> Option<bool>;
 
     /// Number of prompt logprobs to request from the engine.
-    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+    fn get_prompt_logprobs_count(&self) -> Option<i64> {
         None
     }
 

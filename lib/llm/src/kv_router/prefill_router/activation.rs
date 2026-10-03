@@ -289,6 +289,14 @@ impl PrefillRouter {
         let endpoint = target.endpoint();
         let endpoint_id = endpoint.id();
         let client = target.client(context.parent_token.clone()).await?;
+        // Resolve from this committed prefill card, never the decode declaration.
+        // The unrestricted legacy endpoint API has no selected card authority.
+        let legacy_vllm_target = match &target {
+            WorkerSetTarget::Committed(target) => context
+                .model_manager
+                .legacy_vllm_target(&endpoint_id, target.card.as_ref()),
+            WorkerSetTarget::Legacy(_) => None,
+        };
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
@@ -356,7 +364,7 @@ impl PrefillRouter {
             "Activating prefill router"
         );
 
-        let router = if prefill_router_mode.is_kv_routing() {
+        let mut router = if prefill_router_mode.is_kv_routing() {
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = context
                 .model_manager
@@ -421,6 +429,9 @@ impl PrefillRouter {
             )?)
         };
 
+        Arc::get_mut(&mut router)
+            .expect("new prefill routing host has one owner")
+            .set_legacy_vllm_target(legacy_vllm_target);
         Ok(PrefillBinding {
             target_id,
             endpoint_id,

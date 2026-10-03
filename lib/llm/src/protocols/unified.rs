@@ -391,7 +391,7 @@ impl CommonExtProvider for UnifiedRequest {
         self.inner.common.skip_special_tokens
     }
 
-    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+    fn get_prompt_logprobs_count(&self) -> Option<i64> {
         self.inner.common.prompt_logprobs
     }
 }
@@ -443,7 +443,7 @@ impl OpenAIOutputOptionsProvider for UnifiedRequest {
         OpenAIOutputOptionsProvider::get_logprobs(&self.inner)
     }
 
-    fn get_prompt_logprobs(&self) -> Option<u32> {
+    fn get_prompt_logprobs(&self) -> Option<i64> {
         OpenAIOutputOptionsProvider::get_prompt_logprobs(&self.inner)
     }
 
@@ -562,6 +562,9 @@ mod tests {
     #[test]
     fn test_chat_completions_roundtrip() {
         let req = NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
+            add_generation_prompt: None,
+            continue_final_message: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],

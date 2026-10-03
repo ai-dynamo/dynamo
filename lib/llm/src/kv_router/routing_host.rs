@@ -293,6 +293,8 @@ struct DeviceAwareTelemetry {
 /// owns optional KV candidate state. `RoutingHost` owns the common request
 /// lifecycle regardless of which policy selected the worker.
 pub struct RoutingHost {
+    /// Operator-declared fallback for this exact committed hop, not worker data.
+    legacy_vllm_target: Option<crate::protocols::common::legacy_vllm::LegacyVllmRelease>,
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     policy: RoutingPolicy,
     request_metrics: Arc<RouterRequestMetrics>,
@@ -437,6 +439,7 @@ impl RoutingHost {
             RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
 
         RoutingHost {
+            legacy_vllm_target: None,
             inner,
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
@@ -514,6 +517,7 @@ impl RoutingHost {
         let request_metrics =
             RouterRequestMetrics::from_component(inner.client.endpoint.component());
         Ok(Self {
+            legacy_vllm_target: None,
             inner,
             policy,
             request_metrics,
@@ -670,6 +674,60 @@ impl RoutingHost {
         let start = config.data_parallel_start_rank();
         let end = start.saturating_add(config.data_parallel_size());
         (start..end).contains(&dp_rank)
+    }
+
+    pub(crate) fn set_legacy_vllm_target(
+        &mut self,
+        target: Option<crate::protocols::common::legacy_vllm::LegacyVllmRelease>,
+    ) {
+        self.legacy_vllm_target = target;
+    }
+
+    fn validate_dispatch_protocol(
+        &self,
+        request: &PreprocessedRequest,
+        worker_id: u64,
+    ) -> Result<(), Error> {
+        use crate::protocols::common::backend_extensions::{
+            requires_worker_validation, validate_worker_extensions_for_target,
+        };
+        use crate::protocols::common::prompt_logprobs::{
+            FULL_VOCAB_COUNT, validate_full_vocab_count,
+        };
+        if !requires_worker_validation(request.extra_args.as_ref())
+            && request.output_options.prompt_logprobs != Some(FULL_VOCAB_COUNT)
+        {
+            return Ok(());
+        }
+        let configs = match &self.policy {
+            RoutingPolicy::Kv(router) => Some(&router.workers_with_configs),
+            _ => self
+                .routing_context
+                .as_ref()
+                .and_then(|context| context.monitor())
+                .and_then(|monitor| monitor.runtime_configs()),
+        };
+        // Closed/missing watches must not authorize extension dispatch from a
+        // stale representative card. Default requests never reach this branch.
+        let snapshot = configs
+            .filter(|watch| watch.has_changed().is_ok())
+            .map(|watch| watch.borrow());
+        let runtime = snapshot
+            .as_ref()
+            .and_then(|configs| configs.get(&worker_id));
+        validate_full_vocab_count(request.output_options.prompt_logprobs, runtime)
+            .and_then(|_| {
+                validate_worker_extensions_for_target(
+                    request.extra_args.as_ref(),
+                    runtime,
+                    self.legacy_vllm_target,
+                )
+            })
+            .map_err(|error| {
+                invalid_argument(format!(
+                    "Protocol compatibility rejected at routing for the selected worker: {error}"
+                ))
+            })
     }
 
     /// Take a session-affinity slot under the same cleanup policy as every other

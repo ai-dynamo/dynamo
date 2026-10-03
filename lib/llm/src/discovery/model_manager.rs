@@ -158,6 +158,9 @@ pub(crate) struct RemovedDiscoveryGroup {
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
+    /// Set once before discovery starts; never changes card/checksum identity.
+    legacy_vllm_targets:
+        std::sync::OnceLock<crate::protocols::common::legacy_vllm::LegacyVllmTargets>,
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
@@ -216,6 +219,7 @@ impl Default for ModelManager {
 impl ModelManager {
     pub fn new() -> Self {
         Self {
+            legacy_vllm_targets: std::sync::OnceLock::new(),
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
@@ -231,6 +235,32 @@ impl ModelManager {
             alias_to_primary: DashMap::new(),
             reservation_lock: parking_lot::Mutex::new(()),
         }
+    }
+
+    pub(crate) fn configure_legacy_vllm_targets(
+        &self,
+        targets: crate::protocols::common::legacy_vllm::LegacyVllmTargets,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.cards.is_empty() && self.models.is_empty(),
+            "legacy compatibility targets must be configured before discovery"
+        );
+        self.legacy_vllm_targets.set(targets).map_err(|_| {
+            anyhow::anyhow!("legacy compatibility targets are immutable after startup")
+        })
+    }
+
+    pub(crate) fn legacy_vllm_target(
+        &self,
+        endpoint: &EndpointId,
+        card: &ModelDeploymentCard,
+    ) -> Option<crate::protocols::common::legacy_vllm::LegacyVllmRelease> {
+        self.legacy_vllm_targets.get()?.resolve(
+            endpoint,
+            &card.display_name,
+            card.worker_type,
+            card.model_input,
+        )
     }
 
     fn publish_catalog_locked(&self) {
@@ -2831,6 +2861,53 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    #[test]
+    fn legacy_target_configuration_is_immutable_and_does_not_change_card_identity() {
+        use crate::model_type::ModelInput;
+        use crate::protocols::common::legacy_vllm::{LegacyVllmRelease, LegacyVllmTargets};
+
+        let manager = ModelManager::new();
+        let endpoint = EndpointId::from("ns.worker.generate");
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "model-a".into();
+        card.worker_type = Some(WorkerType::Decode);
+        card.model_input = ModelInput::Tokens;
+        let before = serde_json::to_value(&card).unwrap();
+        let checksum = card.mdcsum().to_owned();
+        assert_eq!(manager.legacy_vllm_target(&endpoint, &card), None);
+        manager
+            .configure_legacy_vllm_targets(
+                LegacyVllmTargets::from_json(
+                    r#"[{
+            "namespace":"ns", "component":"worker", "endpoint":"generate",
+            "model":"model-a", "worker_type":"decode", "dynamo_release":"1.5.0"
+        }]"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            manager.legacy_vllm_target(&endpoint, &card),
+            Some(LegacyVllmRelease::Dynamo15)
+        );
+        assert_eq!(serde_json::to_value(&card).unwrap(), before);
+        assert_eq!(card.mdcsum(), checksum);
+        assert!(
+            manager
+                .configure_legacy_vllm_targets(LegacyVllmTargets::default())
+                .is_err()
+        );
+        assert_eq!(
+            manager.legacy_vllm_target(&EndpointId::from("other.worker.generate"), &card),
+            None
+        );
+        card.worker_type = Some(WorkerType::Prefill);
+        assert_eq!(manager.legacy_vllm_target(&endpoint, &card), None);
+        card.worker_type = Some(WorkerType::Decode);
+        card.display_name = "model-b".into();
+        assert_eq!(manager.legacy_vllm_target(&endpoint, &card), None);
     }
 
     fn insert_runtime_configs(

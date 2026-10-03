@@ -24,13 +24,17 @@ use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
-use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
+use dynamo_llm::entrypoint::{
+    ChatEngineFactory, ChatEngineFactoryCallback, ChatProcessorIdentity, HttpFrontend,
+    PrefillRoutedEngine,
+};
 use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_llm::protocols::common::legacy_vllm::LegacyVllmTargets;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
@@ -445,12 +449,14 @@ impl From<RouterConfig> for RsRouterConfig {
 struct PyEngineFactory {
     callback: Arc<PyObject>,
     locals: Arc<TaskLocals>,
+    identity: ChatProcessorIdentity,
 }
 
 impl std::fmt::Debug for PyEngineFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PyEngineFactory")
             .field("callback", &"<PyObject>")
+            .field("identity", &self.identity)
             .finish()
     }
 }
@@ -458,6 +464,7 @@ impl std::fmt::Debug for PyEngineFactory {
 #[pyclass]
 #[derive(Clone, Debug)]
 pub(crate) struct EntrypointArgs {
+    legacy_vllm_targets: LegacyVllmTargets,
     engine_type: EngineType,
     model_path: Option<PathBuf>,
     model_name: Option<String>,
@@ -490,7 +497,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, legacy_vllm_targets=None, chat_engine_factory_identity=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -525,7 +532,32 @@ impl EntrypointArgs {
         reasoning_field_name: Option<String>,
         tokenizer_backend: Option<String>,
         tokenizer_fallback: Option<bool>,
+        legacy_vllm_targets: Option<String>,
+        chat_engine_factory_identity: Option<String>,
     ) -> PyResult<Self> {
+        if chat_engine_factory_identity.is_some() && chat_engine_factory.is_none() {
+            return Err(PyValueError::new_err(
+                "chat_engine_factory_identity requires chat_engine_factory",
+            ));
+        }
+        if chat_engine_factory.is_some() && !matches!(engine_type, EngineType::Dynamic) {
+            return Err(PyValueError::new_err(
+                "chat_engine_factory requires a dynamic frontend",
+            ));
+        }
+        let identity = chat_engine_factory_identity
+            .as_deref()
+            .unwrap_or("custom")
+            .parse::<ChatProcessorIdentity>()
+            .map_err(PyValueError::new_err)?;
+        let legacy_vllm_targets =
+            LegacyVllmTargets::from_json(legacy_vllm_targets.as_deref().unwrap_or("[]"))
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        if !legacy_vllm_targets.is_empty() && !matches!(engine_type, EngineType::Dynamic) {
+            return Err(PyValueError::new_err(
+                "legacy vLLM targets require a dynamic HTTP frontend",
+            ));
+        }
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
@@ -544,6 +576,11 @@ impl EntrypointArgs {
         // Capture TaskLocals at registration time for the chat engine factory callback
         let chat_engine_factory = chat_engine_factory
             .map(|callback| {
+                if !callback.bind(py).is_callable() {
+                    return Err(PyValueError::new_err(
+                        "chat_engine_factory must be callable",
+                    ));
+                }
                 let locals = pyo3_async_runtimes::tokio::get_current_locals(py).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "Failed to get TaskLocals for chat_engine_factory: {}",
@@ -553,6 +590,7 @@ impl EntrypointArgs {
                 Ok::<_, PyErr>(PyEngineFactory {
                     callback: Arc::new(callback),
                     locals: Arc::new(locals),
+                    identity,
                 })
             })
             .transpose()?;
@@ -585,6 +623,7 @@ impl EntrypointArgs {
         runtime_config.validate_config()?;
 
         Ok(EntrypointArgs {
+            legacy_vllm_targets,
             engine_type,
             model_path,
             model_name,
@@ -618,6 +657,14 @@ impl EntrypointArgs {
             chat_engine_factory,
             ais_perf_config,
         })
+    }
+
+    /// Registration metadata only; does not imply a verified compatibility profile.
+    #[getter]
+    fn chat_engine_factory_identity(&self) -> Option<&'static str> {
+        self.chat_engine_factory
+            .as_ref()
+            .map(|factory| factory.identity.as_str())
     }
 }
 
@@ -686,7 +733,8 @@ pub fn make_engine<'p>(
             builder.model_path(local_path);
         }
 
-        let local_model = builder.build().await.map_err(to_pyerr)?;
+        let mut local_model = builder.build().await.map_err(to_pyerr)?;
+        local_model.set_legacy_vllm_targets(args.legacy_vllm_targets.clone());
         let inner = select_engine(distributed_runtime, args, local_model)
             .await
             .map_err(to_pyerr)?;
@@ -695,11 +743,12 @@ pub fn make_engine<'p>(
 }
 
 /// Convert a PyEngineFactory to a Rust ChatEngineFactoryCallback
-fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryCallback {
+fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactory {
     let callback = factory.callback;
     let locals = factory.locals;
+    let identity = factory.identity;
 
-    Arc::new(
+    let callback: ChatEngineFactoryCallback = Arc::new(
         move |instance_id: RsModelCardInstanceId,
               card: RsModelDeploymentCard,
               routed_engine: PrefillRoutedEngine|
@@ -752,7 +801,8 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                 Ok(engine)
             })
         },
-    )
+    );
+    ChatEngineFactory::new(callback, identity)
 }
 
 async fn select_engine(

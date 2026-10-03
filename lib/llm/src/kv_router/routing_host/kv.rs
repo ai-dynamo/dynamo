@@ -539,6 +539,12 @@ impl RoutingHost {
         mut guard: RequestGuard,
         budget: &CleanupBudget,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        if let Err(error) =
+            self.validate_dispatch_protocol(request.content(), selection.worker.worker_id)
+        {
+            guard.abort_with_error(Some(error.as_ref())).await;
+            return Err(error);
+        }
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
         let route_trace_context = get_route_trace_context(&request);

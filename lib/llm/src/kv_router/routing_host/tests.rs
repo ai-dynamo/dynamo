@@ -58,6 +58,163 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_dispatch_checks_live_worker_protocol_capability() {
+    use crate::protocols::common::backend_extensions::VLLM_PROTOCOL_EXTENSIONS_CAPABILITY;
+    use crate::protocols::common::prompt_logprobs::{
+        FULL_VOCAB_COUNT, VLLM_PROMPT_LOGPROBS_CAPABILITY,
+    };
+
+    // Exercise each builtin dispatch arm, including exact targets and occupancy.
+    for full_vocab in [false, true] {
+        for mode in [
+            RouterMode::Direct,
+            RouterMode::RoundRobin,
+            RouterMode::LeastLoaded,
+        ] {
+            let (host, dispatch, worker_id, runtime) =
+                builtin_host_with_recorded_dispatch("protocol-dispatch", mode).await;
+            let mut input = request();
+            if mode == RouterMode::Direct {
+                input.routing_mut().backend_instance_id = Some(worker_id);
+            }
+            input.extra_args = Some(serde_json::json!({
+                "backend_extensions":{"schema_version":1,"vllm":{"allowed_token_ids":[0]}},
+                "sampling_options":{"allowed_token_ids":[0]},
+            }));
+            if full_vocab {
+                input.extra_args = None;
+                input.output_options.prompt_logprobs = Some(FULL_VOCAB_COUNT);
+            }
+            let error = host
+                .generate(Context::new(input.clone()))
+                .await
+                .unwrap_err();
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[ErrorType::InvalidArgument],
+                &[]
+            ));
+            assert!(error.to_string().contains("routing"));
+            assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+            assert_eq!(host.inner.occupancy_for_test(worker_id), 0);
+
+            let model_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut card =
+                crate::model_card::ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            card.runtime_config
+                .set_engine_specific(
+                    VLLM_PROMPT_LOGPROBS_CAPABILITY,
+                    serde_json::json!({
+                        "schema_version":1,"wire_count":"u32_max","max_logprobs":-1,"vocab_size":32,
+                    }),
+                )
+                .unwrap();
+            card.runtime_config
+                .set_engine_specific(
+                    VLLM_PROTOCOL_EXTENSIONS_CAPABILITY,
+                    serde_json::json!({
+                        "schema_version":1,"target":"vllm","engine_version":"0.30.0",
+                        "sampling_fields":["allowed_token_ids"],
+                    }),
+                )
+                .unwrap();
+            crate::local_model::register_model_card(&host.inner.client.endpoint, &card)
+                .await
+                .unwrap();
+            let mut configs = host
+                .routing_context
+                .as_ref()
+                .unwrap()
+                .monitor()
+                .unwrap()
+                .runtime_configs()
+                .unwrap()
+                .clone();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                configs.wait_for(|configs| {
+                    configs.get(&worker_id).is_some_and(|config| {
+                        config
+                            .runtime_data
+                            .contains_key(VLLM_PROTOCOL_EXTENSIONS_CAPABILITY)
+                    })
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let mut response = host.generate(Context::new(input.clone())).await.unwrap();
+            while response.next().await.is_some() {}
+            assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+            assert_eq!(host.inner.occupancy_for_test(worker_id), 0);
+
+            // Model cards are immutable (except taints). Remove the old registration
+            // before replacing it; its previous success must not authorize a new card.
+            crate::local_model::LocalModel::detach_from_endpoint(&host.inner.client.endpoint, None)
+                .await
+                .unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                configs.wait_for(|configs| !configs.contains_key(&worker_id)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            card.runtime_config
+                .runtime_data
+                .get_mut(VLLM_PROTOCOL_EXTENSIONS_CAPABILITY)
+                .unwrap()["sampling_fields"] = serde_json::json!([]);
+            card.runtime_config
+                .runtime_data
+                .get_mut(VLLM_PROMPT_LOGPROBS_CAPABILITY)
+                .unwrap()["max_logprobs"] = serde_json::json!(20);
+            crate::local_model::register_model_card(&host.inner.client.endpoint, &card)
+                .await
+                .unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                configs.wait_for(|configs| {
+                    configs.get(&worker_id).is_some_and(|config| {
+                        config.runtime_data[VLLM_PROTOCOL_EXTENSIONS_CAPABILITY]["sampling_fields"]
+                            == serde_json::json!([])
+                    })
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let error = host
+                .generate(Context::new(input.clone()))
+                .await
+                .unwrap_err();
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[ErrorType::InvalidArgument],
+                &[]
+            ));
+            assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+            assert_eq!(host.inner.occupancy_for_test(worker_id), 0);
+
+            // Capability loss is feature-scoped, not an unconditional worker outage.
+            input.extra_args = None;
+            input.output_options.prompt_logprobs = None;
+            let mut response = host.generate(Context::new(input)).await.unwrap();
+            while response.next().await.is_some() {}
+            assert_eq!(
+                dispatch.worker_ids.lock().unwrap().as_slice(),
+                &[worker_id, worker_id]
+            );
+            assert_eq!(host.inner.occupancy_for_test(worker_id), 0);
+            drop(configs);
+            drop(host);
+            runtime.shutdown();
+        }
+    }
+}
+
 async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
     RoutingLoadContext::start(
         client.clone(),
@@ -1650,6 +1807,21 @@ async fn router_with_recorded_dispatch_and_affinity(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    let (host, dispatch, worker_id, runtime, _configs) =
+        router_with_recorded_dispatch_and_live_configs(namespace, session_affinity_ttl).await;
+    (host, dispatch, worker_id, runtime)
+}
+
+async fn router_with_recorded_dispatch_and_live_configs(
+    namespace: &str,
+    session_affinity_ttl: Option<Duration>,
+) -> (
+    RoutingHost,
+    Arc<PendingThenCompletedDispatch>,
+    u64,
+    Runtime,
+    watch::Sender<HashMap<u64, ModelRuntimeConfig>>,
+) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1664,7 +1836,7 @@ async fn router_with_recorded_dispatch_and_affinity(
     endpoint.register_endpoint_instance().await.unwrap();
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let workers = HashMap::from([(worker_id, ModelRuntimeConfig::default())]);
-    let (_workers_tx, workers) = watch::channel(workers);
+    let (workers_tx, workers) = watch::channel(workers);
     let config = KvRouterConfig {
         skip_initial_worker_wait: true,
         use_kv_events: false,
@@ -1697,7 +1869,151 @@ async fn router_with_recorded_dispatch_and_affinity(
     .await
     .unwrap();
     let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
-    (router, dispatch, worker_id, runtime)
+    (router, dispatch, worker_id, runtime, workers_tx)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_rechecks_protocol_after_admission_and_releases_booking() {
+    use crate::protocols::common::backend_extensions::VLLM_PROTOCOL_EXTENSIONS_CAPABILITY;
+    use crate::protocols::common::prompt_logprobs::{
+        FULL_VOCAB_COUNT, VLLM_PROMPT_LOGPROBS_CAPABILITY,
+    };
+
+    for full_vocab in [false, true] {
+        for phase in [
+            RequestPhase::Aggregated,
+            RequestPhase::Prefill,
+            RequestPhase::Decode,
+        ] {
+            for close_watch in [false, true] {
+                let (router, dispatch, worker_id, runtime, configs) =
+                    router_with_recorded_dispatch_and_live_configs("kv-protocol-dispatch", None)
+                        .await;
+                let mut capable = ModelRuntimeConfig::default();
+                capable.set_engine_specific(VLLM_PROMPT_LOGPROBS_CAPABILITY,serde_json::json!({
+                "schema_version":1,"wire_count":"u32_max","max_logprobs":-1,"vocab_size":32,
+            })).unwrap();
+                capable
+                    .set_engine_specific(
+                        VLLM_PROTOCOL_EXTENSIONS_CAPABILITY,
+                        serde_json::json!({
+                            "schema_version":1,"target":"vllm","engine_version":"0.30.0",
+                            "sampling_fields":["allowed_token_ids"],
+                        }),
+                    )
+                    .unwrap();
+                configs.send_replace(HashMap::from([(worker_id, capable.clone())]));
+                let mut input = request();
+                input.extra_args = Some(serde_json::json!({
+                    "backend_extensions":{"schema_version":1,"vllm":{"allowed_token_ids":[0]}},
+                    "sampling_options":{"allowed_token_ids":[0]},
+                }));
+                if full_vocab {
+                    input.extra_args = None;
+                    input.output_options.prompt_logprobs = Some(FULL_VOCAB_COUNT);
+                }
+
+                // A positive control proves the live-watch path permits the feature.
+                let mut response = router.generate(Context::new(input.clone())).await.unwrap();
+                while response.next().await.is_some() {}
+                assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+
+                let tracker = Arc::new(RequestTracker::new());
+                drop(tracker.set_phase(phase).await);
+                input.tracker = Some(tracker);
+                let input = Context::new(input);
+                let budget = CleanupBudget::default();
+                let (mut selection, _) = router
+                    .select_with_affinity(&input, phase, false, &budget)
+                    .await
+                    .unwrap();
+                let guard = router
+                    .track_selection(&input, &mut selection, phase, false, &budget)
+                    .await
+                    .unwrap();
+                assert!(
+                    potential_loads(&router)
+                        .await
+                        .iter()
+                        .any(|load| load.active_requests == 1)
+                );
+
+                if close_watch {
+                    // Stale last-known data is not authority once discovery has stopped.
+                    drop(configs);
+                } else {
+                    // Another worker remains capable; it must not authorize this target.
+                    configs.send_replace(HashMap::from([
+                        (worker_id, ModelRuntimeConfig::default()),
+                        (worker_id.wrapping_add(1), capable),
+                    ]));
+                }
+                let error = router
+                    .dispatch_selection(input, selection, guard, &budget)
+                    .await
+                    .unwrap_err();
+                assert!(match_error_chain(
+                    error.as_ref(),
+                    &[ErrorType::InvalidArgument],
+                    &[]
+                ));
+                assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+                assert!(
+                    potential_loads(&router)
+                        .await
+                        .iter()
+                        .all(|load| load.active_requests == 0)
+                );
+                drop(router);
+                runtime.shutdown();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_legacy_declaration_does_not_override_live_capability_or_closed_watch() {
+    use crate::protocols::common::{
+        backend_extensions::VLLM_PROTOCOL_EXTENSIONS_CAPABILITY, legacy_vllm::LegacyVllmRelease,
+    };
+
+    for close_watch in [false, true] {
+        let (mut router, dispatch, worker_id, runtime, configs) =
+            router_with_recorded_dispatch_and_live_configs("kv-legacy-dispatch", None).await;
+        router.set_legacy_vllm_target(Some(LegacyVllmRelease::Dynamo15));
+        let mut input = request();
+        input.extra_args = Some(serde_json::json!({"sampling_options":{"allowed_token_ids":[0]}}));
+        let mut response = router.generate(Context::new(input.clone())).await.unwrap();
+        while response.next().await.is_some() {}
+        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+
+        if close_watch {
+            drop(configs);
+        } else {
+            let mut restricted = ModelRuntimeConfig::default();
+            restricted.set_engine_specific(VLLM_PROTOCOL_EXTENSIONS_CAPABILITY, serde_json::json!({
+                "schema_version":1, "target":"vllm", "engine_version":"0.30.0", "sampling_fields":[]
+            })).unwrap();
+            configs.send_replace(HashMap::from([(worker_id, restricted)]));
+        }
+        let error = router.generate(Context::new(input)).await.unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+        assert!(
+            potential_loads(&router)
+                .await
+                .iter()
+                .all(|load| load.active_requests == 0)
+        );
+        drop(router);
+        runtime.shutdown();
+    }
 }
 
 /// Select and admit a request in the given phase, then stop its context, leaving

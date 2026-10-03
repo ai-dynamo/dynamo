@@ -8,7 +8,7 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
+    entrypoint::{ChatEngineFactory, EngineConfig, RouterConfig, input::common},
     http::service::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
@@ -165,6 +165,11 @@ async fn run_with_router_plugins(
     plugins: RouterPluginBuilder,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
+    anyhow::ensure!(
+        local_model.legacy_vllm_targets().is_empty()
+            || matches!(&engine_config, EngineConfig::Dynamic { .. }),
+        "legacy vLLM targets require a dynamic HTTP frontend"
+    );
     let mut http_service_builder = match (
         local_model.tls_cert_path(),
         local_model.tls_key_path(),
@@ -239,6 +244,10 @@ async fn run_with_router_plugins(
                 http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
 
+            http_service
+                .state()
+                .manager_clone()
+                .configure_legacy_vllm_targets(model.legacy_vllm_targets().clone())?;
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
             let migration_max_seq_len = model.migration_max_seq_len();
@@ -349,7 +358,7 @@ async fn run_watcher(
     namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
-    chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    chat_engine_factory: Option<ChatEngineFactory>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,

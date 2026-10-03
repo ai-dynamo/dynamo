@@ -57,6 +57,19 @@ impl ModelDeploymentCard {
         }
     }
 
+    fn model_input(&self) -> &str {
+        self.inner.model_input.as_str()
+    }
+
+    fn worker_type(&self) -> Option<&'static str> {
+        self.inner.worker_type.map(|role| match role {
+            llm_rs::worker_type::WorkerType::Aggregated => "aggregated",
+            llm_rs::worker_type::WorkerType::Decode => "decode",
+            llm_rs::worker_type::WorkerType::Prefill => "prefill",
+            llm_rs::worker_type::WorkerType::Encode => "encode",
+        })
+    }
+
     fn runtime_config(&self, py: Python<'_>) -> PyResult<PyObject> {
         let rc = pythonize::pythonize(py, &self.inner.runtime_config).map_err(to_pyerr)?;
         Ok(rc.unbind())

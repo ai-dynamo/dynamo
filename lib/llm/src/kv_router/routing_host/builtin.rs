@@ -285,6 +285,10 @@ impl RoutingHost {
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
+        let prepare = |request: &mut PreprocessedRequest, target: AffinityTarget| {
+            self.validate_dispatch_protocol(request, target.worker_id)?;
+            prepare(request, target)
+        };
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(request.content(), phase)?;

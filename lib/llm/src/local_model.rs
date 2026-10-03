@@ -374,6 +374,7 @@ impl LocalModelBuilder {
                 tls_key_path: self.tls_key_path.take(),
                 tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
+                legacy_vllm_targets: Default::default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
                 namespace_prefix: self.namespace_prefix.clone(),
@@ -431,6 +432,7 @@ impl LocalModelBuilder {
             tls_key_path: self.tls_key_path.take(),
             tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
+            legacy_vllm_targets: Default::default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
             namespace_prefix: self.namespace_prefix.clone(),
@@ -443,6 +445,8 @@ impl LocalModelBuilder {
 
 #[derive(Debug, Clone)]
 pub struct LocalModel {
+    // Frontend-owned startup policy. Never projected into the deployment card.
+    legacy_vllm_targets: crate::protocols::common::legacy_vllm::LegacyVllmTargets,
     full_path: PathBuf,
     card: ModelDeploymentCard,
     endpoint_id: EndpointId,
@@ -622,6 +626,17 @@ impl LocalModel {
 
     pub fn runtime_config(&self) -> &ModelRuntimeConfig {
         &self.runtime_config
+    }
+
+    pub fn legacy_vllm_targets(&self) -> &crate::protocols::common::legacy_vllm::LegacyVllmTargets {
+        &self.legacy_vllm_targets
+    }
+
+    pub fn set_legacy_vllm_targets(
+        &mut self,
+        targets: crate::protocols::common::legacy_vllm::LegacyVllmTargets,
+    ) {
+        self.legacy_vllm_targets = targets;
     }
 
     pub fn migration_limit(&self) -> u32 {

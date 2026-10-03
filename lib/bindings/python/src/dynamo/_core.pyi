@@ -883,6 +883,14 @@ class ModelDeploymentCard:
         """Return the runtime configuration as a dict."""
         ...
 
+    def model_input(self) -> str:
+        """Advertised RPC input kind: text, tokens, or tensor."""
+        ...
+
+    def worker_type(self) -> Optional[str]:
+        """Advertised worker role; missing legacy role remains None."""
+        ...
+
 class ModelRuntimeConfig:
     """
     A model runtime configuration is a collection of runtime information
@@ -3244,6 +3252,8 @@ class EntrypointArgs:
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
+        legacy_vllm_targets: Optional[str] = None,
+        chat_engine_factory_identity: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3280,7 +3290,14 @@ class EntrypointArgs:
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
+            legacy_vllm_targets: JSON array of exact legacy vLLM WorkerSet declarations; dynamic HTTP frontend only
+            chat_engine_factory_identity: Registration identity ("vllm", "sglang", or "custom"); requires a callable factory, defaults to custom, and grants no capabilities
         """
+        ...
+
+    @property
+    def chat_engine_factory_identity(self) -> Optional[str]:
+        """Read-only registered identity; None when no factory is installed."""
         ...
 
 class PlannerDecision:

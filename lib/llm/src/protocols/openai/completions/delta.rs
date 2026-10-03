@@ -11,7 +11,10 @@ use crate::{
             extensions::{NvExtProvider, NvExtResponseInput},
             timing::RequestTracker,
         },
-        openai::delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
+        openai::{
+            compatibility::{profile::Endpoint, telemetry},
+            delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
+        },
     },
     types::TokenIdType,
 };
@@ -36,7 +39,15 @@ impl NvCreateCompletionRequest {
         let mut generator = DeltaGenerator::new(self.inner.model.clone(), options, request_id);
         generator.capture_prompt_logprobs = self.common.prompt_logprobs.is_some();
         // Native vLLM returns the sampled token plus the requested top-k.
-        generator.top_logprobs_limit = self.inner.logprobs.map(|count| count as usize + 1);
+        // Explicit token selection replaces top-k, so preserve all returned IDs.
+        if !self
+            .unsupported_fields
+            .get("logprob_token_ids")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|ids| !ids.is_empty())
+        {
+            generator.top_logprobs_limit = self.inner.logprobs.map(|count| count as usize + 1);
+        }
         generator
     }
 }
@@ -302,7 +313,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let prompt_logprobs_payload = if self.capture_prompt_logprobs
             || self.state.options().response_fields.prompt_logprobs
         {
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+            telemetry::decode_prompt_logprobs(Endpoint::Completion, delta.engine_data.as_ref())?
         } else {
             None
         };
@@ -632,6 +643,50 @@ mod tests {
             })
         );
         assert_eq!(logprobs.text_offset, vec![0]);
+    }
+
+    #[test]
+    fn test_completion_maps_preserve_count_selection_and_duplicate_decoding() {
+        for selected_ids in [false, true] {
+            let mut request = create_test_request();
+            request.inner.logprobs = Some(0);
+            if selected_ids {
+                request
+                    .unsupported_fields
+                    .insert("logprob_token_ids".into(), serde_json::json!([2, 3]));
+            }
+            let generator = request.response_generator("maps".into());
+            let entries = [
+                (1, "é", -0.5),
+                (2, "other", f64::NEG_INFINITY),
+                (3, "é", -2.0),
+            ]
+            .into_iter()
+            .map(
+                |(token_id, token, logprob)| common::llm_backend::TopLogprob {
+                    token_id,
+                    token: Some(token.into()),
+                    logprob,
+                    rank: 1,
+                    bytes: None,
+                },
+            )
+            .collect();
+            let result = generator
+                .create_logprobs(
+                    vec![Some("é".into())],
+                    vec![1],
+                    Some(vec![-0.5]),
+                    Some(vec![entries]),
+                )
+                .unwrap();
+            let expected = if selected_ids {
+                serde_json::json!({"é": -2.0, "other": -9999.0})
+            } else {
+                serde_json::json!({"é": -0.5})
+            };
+            assert_eq!(result.top_logprobs, vec![expected]);
+        }
     }
 
     #[tokio::test]

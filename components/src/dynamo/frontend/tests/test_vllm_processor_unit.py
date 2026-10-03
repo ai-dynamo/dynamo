@@ -1287,12 +1287,46 @@ async def test_generator_admits_logprobs_including_zero_top_logprobs(
     preprocess_chat_request.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("allowed_token_ids", [31415]),
+        ("bad_words_token_ids", [[31415]]),
+        ("logprob_token_ids", [31415]),
+    ],
+)
+async def test_generator_extension_rejection_is_explicitly_public(
+    vllm_processor_module, monkeypatch, field, value
+):
+    """Only the reviewed, payload-free contract error is made client-visible."""
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+
+    async def reject_at_lowering(request, context=None):
+        yield vllm_processor_module.lower_sampling_extensions(request, {})
+
+    monkeypatch.setattr(processor, "_generator_inner", reject_at_lowering)
+    with pytest.raises(InvalidArgument, match=field) as raised:
+        await anext(processor.generator({field: value}))
+    assert "31415" not in str(raised.value)
+    assert "Remove the field or use a compatible worker" in str(raised.value)
+    assert isinstance(
+        raised.value.__cause__, vllm_processor_module.ProtocolExtensionError
+    )
+
+
 @pytest.mark.parametrize("count", ["omitted", None, 0, 1])
-def test_generated_logprob_request_selection(vllm_processor_module, count):
-    request = {"logprobs": True}
+@pytest.mark.parametrize("selection", [None, [], [0]])
+def test_generated_logprob_request_selection(vllm_processor_module, count, selection):
+    request = {"logprobs": True, "logprob_token_ids": selection}
     if count != "omitted":
         request["top_logprobs"] = count
-    assert vllm_processor_module.wants_sample_logprobs(request) is (count is not None)
+    assert vllm_processor_module.wants_sample_logprobs(request) is (
+        count is not None or bool(selection)
+    )
     request["logprobs"] = False
     assert not vllm_processor_module.wants_sample_logprobs(request)
 
@@ -1341,9 +1375,10 @@ def test_worker_logprobs_reject_malformed_without_silent_truncation(
 
 
 @pytest.mark.parametrize("count", [None, 0, 1])
+@pytest.mark.parametrize("selection", [None, [0]])
 @pytest.mark.parametrize("return_ids", [False, True])
 def test_chat_logprob_projection_bytes_count_and_selection(
-    vllm_processor_module, count, return_ids
+    vllm_processor_module, count, selection, return_ids
 ):
     output = SimpleNamespace(
         token_ids=[5],
@@ -1356,12 +1391,18 @@ def test_chat_logprob_projection_bytes_count_and_selection(
     )
     request = {
         "top_logprobs": count,
+        "logprob_token_ids": selection,
         "return_tokens_as_token_ids": return_ids,
     }
     result = vllm_processor_module.chat_logprob_content(output, request, object())[0]
     assert result["token"] == ("token_id:5" if return_ids else "é")
     assert result["bytes"] == [195, 169]
-    assert len(result["top_logprobs"]) == (count or 0)
+    assert len(result["top_logprobs"]) == (2 if selection else (count or 0))
+    if selection:
+        assert result["top_logprobs"][1]["logprob"] == -9999.0
+        assert result["top_logprobs"][1]["bytes"] == list(
+            ("token_id:0" if return_ids else "!").encode()
+        )
 
 
 @pytest.mark.parametrize("selected", [None, False, "-0.1", -0.2])
@@ -1429,6 +1470,7 @@ async def test_include_reasoning_false_keeps_response_parser_active(
                     max_tokens=1,
                     logprobs=None,
                     top_logprobs=None,
+                    logprob_token_ids=None,
                     cache_salt=None,
                     mm_processor_kwargs=None,
                     include_reasoning=False,

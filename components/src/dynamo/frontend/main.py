@@ -437,6 +437,7 @@ async def async_main():
         "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
         "tokenizer_fallback": config.tokenizer_fallback,
+        "legacy_vllm_targets": config.legacy_vllm_targets,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
@@ -466,11 +467,13 @@ async def async_main():
             config, vllm_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+        kwargs["chat_engine_factory_identity"] = "vllm"
     elif config.chat_processor == "sglang":
         chat_engine_factory = setup_sglang_engine_factory(
             config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+        kwargs["chat_engine_factory_identity"] = "sglang"
 
     if config.router_prefill_load_model == "ais":
         kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
