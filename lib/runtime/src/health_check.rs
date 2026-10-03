@@ -3,15 +3,16 @@
 
 use crate::DistributedRuntime;
 use crate::config::HealthStatus;
-use crate::engine::AsyncEngine;
+use crate::engine::{AsyncEngine, AsyncEngineContextProvider};
 use crate::pipeline::SingleIn;
 use crate::protocols::maybe_error::MaybeError;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Configuration for health check behavior
@@ -223,10 +224,13 @@ impl HealthCheckManager {
         let endpoint_subject_owned = endpoint_subject.to_string();
         let payload = payload.clone();
         let timeout = self.config.request_timeout;
+        // Runtime shutdown cancels any drain that is still waiting on its stream.
+        let drain_cancel = self.drt.child_token();
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
-            let result = tokio::time::timeout(timeout, async {
+            let deadline = tokio::time::Instant::now() + timeout;
+            let result = tokio::time::timeout_at(deadline, async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
@@ -251,9 +255,22 @@ impl HealthCheckManager {
                             false
                         };
 
+                        // Drain separately so a slow tail does not delay the health verdict.
+                        let drain_subject = endpoint_subject_owned.clone();
                         tokio::spawn(async move {
-                            // We need to consume the rest of the stream to avoid warnings on the frontend.
-                            response_stream.for_each(|_| async {}).await;
+                            match drain_response_stream(response_stream, deadline, drain_cancel)
+                                .await
+                            {
+                                DrainOutcome::Completed => {}
+                                DrainOutcome::TimedOut => warn!(
+                                    "Health check response stream from {} did not close within the {:?} health check budget; abandoning the remainder",
+                                    drain_subject, timeout
+                                ),
+                                DrainOutcome::Cancelled => debug!(
+                                    "Runtime shutdown released the health check response drain for {}",
+                                    drain_subject
+                                ),
+                            }
                         });
 
                         // Update health status based on response
@@ -293,6 +310,41 @@ impl HealthCheckManager {
 
         Ok(())
     }
+}
+
+const STOP_GRACE: Duration = Duration::from_millis(100);
+
+/// Drain a canary response until completion, its shared deadline, or runtime shutdown.
+async fn drain_response_stream<S>(
+    mut stream: S,
+    deadline: tokio::time::Instant,
+    cancel: CancellationToken,
+) -> DrainOutcome
+where
+    S: Stream + AsyncEngineContextProvider + Unpin,
+{
+    let context = stream.context();
+
+    let outcome = tokio::select! {
+        _ = (&mut stream).for_each(|_| async {}) => DrainOutcome::Completed,
+        _ = tokio::time::sleep_until(deadline) => DrainOutcome::TimedOut,
+        _ = cancel.cancelled() => DrainOutcome::Cancelled,
+    };
+
+    if outcome != DrainOutcome::Completed {
+        context.stop_generating();
+        // Keep polling briefly so the producer can observe the stop signal.
+        let _ = tokio::time::timeout(STOP_GRACE, (&mut stream).for_each(|_| async {})).await;
+    }
+
+    outcome
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainOutcome {
+    Completed,
+    TimedOut,
+    Cancelled,
 }
 
 /// Start health check manager for the distributed runtime
@@ -348,6 +400,279 @@ pub async fn get_health_check_status(
         "endpoints_checked": endpoint_subjects.len(),
         "endpoint_statuses": endpoint_statuses,
     }))
+}
+
+#[cfg(test)]
+mod bounded_drain_tests {
+    use super::*;
+    use crate::engine::AsyncEngineContext;
+    use crate::pipeline::{Context, ManyOut, ResponseStream};
+    use crate::protocols::annotated::Annotated;
+    use futures::stream::{self, Stream, StreamExt};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context as TaskContext, Poll};
+
+    type TestResponse = Annotated<serde_json::Value>;
+
+    struct DropProbe(Arc<AtomicUsize>);
+
+    impl DropProbe {
+        fn new(live: &Arc<AtomicUsize>) -> Self {
+            live.fetch_add(1, Ordering::SeqCst);
+            Self(live.clone())
+        }
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct ProbedStream<S> {
+        inner: S,
+        _probe: DropProbe,
+    }
+
+    impl<S: Stream + Unpin> Stream for ProbedStream<S> {
+        type Item = S::Item;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<S::Item>> {
+            Pin::new(&mut self.get_mut().inner).poll_next(cx)
+        }
+    }
+
+    fn probed_response_stream<S>(inner: S, live: &Arc<AtomicUsize>) -> ManyOut<TestResponse>
+    where
+        S: Stream<Item = TestResponse> + Unpin + Send + 'static,
+    {
+        let probed = ProbedStream {
+            inner,
+            _probe: DropProbe::new(live),
+        };
+        ResponseStream::new(Box::pin(probed), Context::new(()).context())
+    }
+
+    fn healthy_item() -> TestResponse {
+        Annotated::from_data(serde_json::json!({"token": "ok"}))
+    }
+
+    fn one_item_then_pending(live: &Arc<AtomicUsize>) -> ManyOut<TestResponse> {
+        probed_response_stream(
+            stream::iter([healthy_item()]).chain(stream::pending()),
+            live,
+        )
+    }
+
+    #[tokio::test]
+    async fn bounded_drain_releases_a_stream_that_never_closes() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let response_stream = one_item_then_pending(&live);
+        let context: Arc<dyn AsyncEngineContext> = response_stream.context();
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_response_stream(
+                response_stream,
+                tokio::time::Instant::now() + Duration::from_millis(100),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("drain must return once its deadline passes");
+
+        assert_eq!(outcome, DrainOutcome::TimedOut);
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "the response stream must be dropped when the drain gives up"
+        );
+        assert!(
+            context.is_stopped(),
+            "the engine must be told to stop producing before the stream is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_drain_releases_the_stream_before_the_budget_elapses() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let response_stream = one_item_then_pending(&live);
+        let context: Arc<dyn AsyncEngineContext> = response_stream.context();
+
+        let cancel = CancellationToken::new();
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_response_stream(
+                response_stream,
+                tokio::time::Instant::now() + Duration::from_secs(3600),
+                cancel,
+            ),
+        )
+        .await
+        .expect("a cancelled drain must return without waiting out its deadline");
+
+        assert_eq!(outcome, DrainOutcome::Cancelled);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert!(context.is_stopped());
+    }
+
+    #[tokio::test]
+    async fn repeated_drains_do_not_accumulate_live_streams() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for _ in 0..5 {
+            let response_stream = one_item_then_pending(&live);
+            handles.push(tokio::spawn(drain_response_stream(
+                response_stream,
+                tokio::time::Instant::now() + Duration::from_millis(100),
+                CancellationToken::new(),
+            )));
+        }
+        assert_eq!(live.load(Ordering::SeqCst), 5, "five canary intervals ran");
+
+        for handle in handles {
+            let outcome = tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("every drain must end within its budget")
+                .expect("drain task must not panic");
+            assert_eq!(outcome, DrainOutcome::TimedOut);
+        }
+
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "live response streams must return to zero rather than grow per interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminating_stream_is_drained_completely_and_promptly() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let counter = consumed.clone();
+
+        let inner = stream::iter(0..4).map(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            healthy_item()
+        });
+        let response_stream = probed_response_stream(Box::pin(inner), &live);
+        let context: Arc<dyn AsyncEngineContext> = response_stream.context();
+
+        let started = std::time::Instant::now();
+        let outcome = drain_response_stream(
+            response_stream,
+            tokio::time::Instant::now() + Duration::from_secs(3600),
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(outcome, DrainOutcome::Completed);
+        assert_eq!(
+            consumed.load(Ordering::SeqCst),
+            4,
+            "every item must still be consumed; the bound must not truncate a healthy stream"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a terminating stream must return on its own, not on the deadline"
+        );
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert!(
+            !context.is_stopped(),
+            "a stream that ended on its own needs no stop signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_does_not_extend_a_deadline_the_request_already_spent() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let response_stream = one_item_then_pending(&live);
+
+        let spent = tokio::time::Instant::now();
+
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_response_stream(response_stream, spent, CancellationToken::new()),
+        )
+        .await
+        .expect("an already-spent deadline must not buy the drain a second budget");
+
+        assert_eq!(outcome, DrainOutcome::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the drain must give up at once, not wait out a fresh budget of its own"
+        );
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn drain_keeps_reading_after_the_stop_signal() {
+        let flushed = Arc::new(AtomicUsize::new(0));
+
+        let context = Context::new(()).context();
+        let inner = FlushOnStopStream {
+            context: context.clone(),
+            flushed: flushed.clone(),
+            done: false,
+        };
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(inner), context.clone());
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_response_stream(
+                response_stream,
+                tokio::time::Instant::now() + Duration::from_millis(50),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("the grace window must be bounded");
+
+        assert_eq!(outcome, DrainOutcome::TimedOut);
+        assert!(context.is_stopped());
+        assert_eq!(
+            flushed.load(Ordering::SeqCst),
+            1,
+            "the stream must be polled again after the stop signal, not dropped unread"
+        );
+    }
+
+    struct FlushOnStopStream {
+        context: Arc<dyn AsyncEngineContext>,
+        flushed: Arc<AtomicUsize>,
+        done: bool,
+    }
+
+    impl Stream for FlushOnStopStream {
+        type Item = TestResponse;
+
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Option<TestResponse>> {
+            let me = self.get_mut();
+            if !me.context.is_stopped() {
+                return Poll::Pending;
+            }
+            if !me.done {
+                me.done = true;
+                me.flushed.fetch_add(1, Ordering::SeqCst);
+                return Poll::Ready(Some(healthy_item()));
+            }
+            Poll::Ready(None)
+        }
+    }
 }
 
 // ============================================================
