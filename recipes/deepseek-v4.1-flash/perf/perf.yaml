@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AIPerf benchmark. Set ENDPOINT and CONCURRENCY for the selected recipe.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsv41-flash-vllm-bench
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 86400
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: dsv41-flash-vllm-bench
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: nvidia.com/dynamo-component-type
+                operator: In
+                values:
+                - frontend
+              - key: nvidia.com/dynamo-graph-deployment-name
+                operator: In
+                values:
+                - dsv41-flash-vllm-b200-agg-agentic
+                - dsv41-flash-vllm-b200-disagg-agentic
+                - dsv41-flash-vllm-gb200-agg-agentic
+                - dsv41-flash-vllm-gb200-disagg-agentic
+                - dsv41-flash-vllm-h200-agg-agentic
+                - dsv41-flash-vllm-h200-disagg-agentic
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: perf
+        image: nvcr.io/nvidia/ai-dynamo/aiperf:0.10.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          ulimit -n 600000
+          EPOCH=$(date +%s)
+          ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          RUN_DIR="${ROOT_DIR}/trace_c${CONCURRENCY}"
+          mkdir -p "${RUN_DIR}"
+
+          TRACE_LINES=$(wc -l < "${TRACE_FILE}")
+
+          sha256sum "${TRACE_FILE}" > "${RUN_DIR}/trace.sha256"
+          cat > "${RUN_DIR}/client.yaml" <<EOF
+          endpoint:
+            urls: ["http://${ENDPOINT}/v1/chat/completions"]
+            type: chat
+            streaming: true
+            timeout: ${REQUEST_TIMEOUT_SECONDS}
+            use_server_token_count: true
+            extra: {ignore_eos: true}
+          models:
+            items:
+              - name: "${TARGET_MODEL}"
+          tokenizer:
+            name: "${TARGET_MODEL}"
+            trust_remote_code: true
+          datasets:
+            - name: default
+              type: file
+              path: "${TRACE_FILE}"
+              format: mooncake_trace
+              sampling: sequential
+          phases:
+            - name: profiling
+              type: concurrency
+              concurrency: ${CONCURRENCY}
+              requests: ${TRACE_LINES}
+          artifacts:
+            dir: "${RUN_DIR}/artifacts"
+            summary: [json]
+            records: [jsonl]
+          EOF
+
+          aiperf profile --config "${RUN_DIR}/client.yaml"
+          echo "Done. Artifacts: ${RUN_DIR}"
+        env:
+        - name: ENDPOINT
+          value: dsv41-flash-vllm-b200-agg-agentic-frontend:8000
+        - name: TARGET_MODEL
+          value: deepseek-ai/DeepSeek-V4.1-Flash
+        - name: TRACE_FILE
+          value: /shared-model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+        - name: CONCURRENCY
+          value: '168'
+        - name: REQUEST_TIMEOUT_SECONDS
+          value: '21600'
+        - name: AIPERF_API_PORT
+          value: '18090'
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /shared-model-cache/perf
+        - name: HF_HOME
+          value: /shared-model-cache
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        volumeMounts:
+        - name: shared-model-cache
+          mountPath: /shared-model-cache
+      restartPolicy: Never
+      volumes:
+      - name: shared-model-cache
+        persistentVolumeClaim:
+          claimName: shared-model-cache

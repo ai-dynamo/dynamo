@@ -89,6 +89,11 @@
 # the page is live.
 ^https://docs\.nvidia\.com/dynamo/dev/recipes/deepseek-v4-1-flash$
 
+# These vLLM Kustomizations and benchmark instructions land with the same
+# DeepSeek-V4.1-Flash PR as their docs links. Remove after merge.
+^https://github\.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4\.1-flash/vllm/(agg|disagg)-[a-z0-9-]+/kustomization\.yaml$
+^https://github\.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4\.1-flash/perf/README\.md$
+
 # The TokenSpeed example is introduced with its docs link in the same PR.
 # Its canonical main-branch URL returns 404 until merge. Cleanup tracked in:
 # https://github.com/ai-dynamo/dynamo/issues/15025
