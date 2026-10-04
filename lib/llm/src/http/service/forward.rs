@@ -381,7 +381,6 @@ mod tests {
                 .is_err()
         );
 
-        // A dead upstream answers 502 rather than failing the request.
         let dead = ForwardRoutes::parse("/v1/custom=http://127.0.0.1:1")
             .unwrap()
             .unwrap();
@@ -588,12 +587,36 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn from_config_prefers_explicit_routes() {
-        let routes = ForwardRoutes::from_config(Some(&["/v1/custom=http://up:8080".to_string()]))
+        temp_env::with_var(
+            env_llm::DYN_HTTP_FORWARD_ROUTES,
+            Some("/v1/env=http://env:9000"),
+            || {
+                let explicit = ["/v1/custom=http://up:8080".to_string()];
+                let routes = ForwardRoutes::from_config(Some(&explicit))
+                    .unwrap()
+                    .unwrap();
+                assert!(url(&routes, "/v1/custom/x", None).is_some());
+                assert_eq!(url(&routes, "/v1/env/x", None), None);
+                // An explicit empty list disables forwarding despite the environment.
+                assert!(ForwardRoutes::from_config(Some(&[])).unwrap().is_none());
+                // Without explicit routes, the environment applies.
+                let routes = ForwardRoutes::from_config(None).unwrap().unwrap();
+                assert!(url(&routes, "/v1/env/x", None).is_some());
+            },
+        );
+    }
+
+    #[test]
+    fn upstream_url_keeps_percent_encoded_path() {
+        let routes = ForwardRoutes::parse("/v1/custom=http://up:8080/base")
             .unwrap()
             .unwrap();
-        assert!(url(&routes, "/v1/custom/x", None).is_some());
-        assert!(ForwardRoutes::from_config(Some(&[])).unwrap().is_none());
+        assert_eq!(
+            url(&routes, "/v1/custom/files/a%2Fb%20c", Some("q=a%26b")).as_deref(),
+            Some("http://up:8080/base/v1/custom/files/a%2Fb%20c?q=a%26b")
+        );
     }
 
     #[test]
