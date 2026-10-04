@@ -66,9 +66,10 @@ thread_local! {
     /// during this thread's collections.
     ///
     /// Deferred destructors run on whichever thread collects, often a lookup, so they only
-    /// bury their garbage here, if the thread drains ([`DrainScope`]). The thread frees it
-    /// in small budgets after each lookup ([`LookupPin`]) or event, so no single call frees
-    /// a whole detached subtree and no queue is shared on the hot path.
+    /// bury their garbage here, if the thread drains ([`DrainScope`]). An event lane frees
+    /// it in budgets between events. A lookup frees a small budget after it unpins and
+    /// hands the rest to [`SHARED_GRAVEYARD`] ([`LookupPin`]), so no lookup frees a whole
+    /// detached subtree and an idle lookup thread holds no garbage.
     static LOCAL_GRAVEYARD: LocalGraveyard = const {
         LocalGraveyard {
             graves: RefCell::new(Vec::new()),
@@ -84,24 +85,30 @@ struct LocalGraveyard {
 }
 
 impl Drop for LocalGraveyard {
-    /// An exiting thread hands its garbage to the lanes, which free it iteratively and
-    /// release the retired-snapshot counts it holds.
+    /// An exiting thread hands its garbage to the lanes.
     fn drop(&mut self) {
-        for grave in self.graves.get_mut().drain(..) {
-            SHARED_GRAVEYARD.push(grave);
-        }
+        hand_off(self.graves.get_mut());
     }
 }
 
 /// Garbage no draining thread holds: overflow past [`LOCAL_GRAVEYARD_CAP`], garbage
-/// collected outside a [`DrainScope`], and garbage of exiting threads. Event lanes drain
-/// it.
+/// collected outside a [`DrainScope`], what a lookup leaves past its budget, and garbage
+/// of exiting threads. Event lanes drain it.
 static SHARED_GRAVEYARD: SegQueue<Grave> = SegQueue::new();
 
 const LOCAL_GRAVEYARD_CAP: usize = 4096;
 
-/// Graveyard work a lookup does after unpinning: graves opened plus nodes freed.
+/// Graveyard work a lookup does after unpinning, before handing the rest to the lanes:
+/// graves opened plus nodes freed.
 const LOOKUP_GRAVEYARD_BUDGET: usize = 8;
+
+/// Moves `graves` to the shared graveyard. The lanes free them iteratively and release
+/// the retired-snapshot counts they still hold.
+fn hand_off(graves: &mut Vec<Grave>) {
+    for grave in graves.drain(..) {
+        SHARED_GRAVEYARD.push(grave);
+    }
+}
 
 fn bury(grave: Grave) {
     let mut grave = Some(grave);
@@ -155,8 +162,10 @@ impl Drop for DrainScope {
     }
 }
 
-/// A lookup's epoch pin. Dropping it unpins, then pays down a little of this thread's
-/// graveyard, so collections that lookups trigger are freed a bounded amount at a time.
+/// A lookup's epoch pin. Dropping it unpins, pays down a little of this thread's
+/// graveyard, and hands any rest to the shared graveyard. A lookup thread may go idle
+/// right after, so it keeps nothing, and a collection a lookup triggers is freed a
+/// bounded amount at a time.
 pub(super) struct LookupPin {
     guard: Option<Guard>,
     _scope: DrainScope,
@@ -184,7 +193,14 @@ impl std::ops::Deref for LookupPin {
 impl Drop for LookupPin {
     fn drop(&mut self) {
         drop(self.guard.take());
-        NodeChildren::drain_graveyard_with(LOOKUP_GRAVEYARD_BUDGET, false);
+        if NodeChildren::drain_graveyard_with(LOOKUP_GRAVEYARD_BUDGET, false) {
+            return;
+        }
+        let _ = LOCAL_GRAVEYARD.try_with(|local| {
+            if let Ok(mut graves) = local.graves.try_borrow_mut() {
+                hand_off(&mut graves);
+            }
+        });
     }
 }
 
@@ -1042,6 +1058,47 @@ mod tests {
         assert!(NodeChildren::drain_graveyard_with(usize::MAX, false));
         assert_eq!(Arc::strong_count(&leaf), 1);
         assert_eq!(leaf.retired_snapshot_refs_for_test(), 0);
+    }
+
+    #[test]
+    fn lookup_hands_graveyard_leftovers_to_the_lanes() {
+        fn local_graves() -> usize {
+            LOCAL_GRAVEYARD.with(|local| local.graves.borrow().len())
+        }
+
+        let leaf = child();
+        let below: Vec<_> = (0..LOOKUP_GRAVEYARD_BUDGET).map(|_| child()).collect();
+        // Popped first; opening the snapshot under them spends the last unit of budget,
+        // which leaves `leaf` in a retired grave.
+        let above: Vec<_> = (1..LOOKUP_GRAVEYARD_BUDGET).map(|_| child()).collect();
+        let pin = LookupPin::new();
+        // What a collection inside the pin might bury.
+        for node in &below {
+            bury(Grave::Nodes(vec![node.clone()]));
+        }
+        leaf.note_retired_snapshot_ref();
+        bury(Grave::Snapshot(Box::new(ChildrenState::Singleton(
+            ChildEntry {
+                hash: LocalBlockHash(1),
+                node: leaf.clone(),
+            },
+        ))));
+        for node in &above {
+            bury(Grave::Nodes(vec![node.clone()]));
+        }
+        assert!(local_graves() > LOOKUP_GRAVEYARD_BUDGET);
+
+        drop(pin);
+        assert_eq!(local_graves(), 0);
+
+        // Lanes free the leftovers and release the snapshot's count as they drop `leaf`.
+        wait_for_strong_count(&leaf, 1);
+        // `strong_count` reads relaxed; order the count check after the drop it saw.
+        std::sync::atomic::fence(Ordering::Acquire);
+        assert_eq!(leaf.retired_snapshot_refs_for_test(), 0);
+        for node in below.iter().chain(&above) {
+            wait_for_strong_count(node, 1);
+        }
     }
 
     #[test]

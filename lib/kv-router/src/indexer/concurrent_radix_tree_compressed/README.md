@@ -195,13 +195,15 @@ Node internals use separate protection for edge state and child maps:
 - Expired epoch garbage is not freed inside the collection that releases it,
   which often runs on a `find_matches` caller. It goes to the collecting thread's
   graveyard when that thread drains one: a lookup frees a small budget after it
-  unpins, and an event lane frees some after each event and all of it when idle
-  or on `Flush`. Garbage collected on any other thread (rayon and moka pin the
-  same global collector), overflow, and garbage from exiting threads go to a
-  shared graveyard that event lanes drain. So a detached subtree never stalls
-  one lookup, and no shared queue sits on the hot path. A drain releases a
-  retired snapshot's reference counts only as it drops each child, so leftovers
-  of a spent budget stay counted.
+  unpins and hands the rest to a shared graveyard, and an event lane frees some
+  after each event and all of it when idle or on `Flush`. Garbage collected on
+  any other thread (rayon and moka pin the same global collector), overflow, and
+  garbage from exiting threads also go to the shared graveyard, which event
+  lanes drain. So a detached subtree never stalls one lookup, an idle lookup
+  thread holds no garbage, and a lookup touches the shared queue only when its
+  collection left more than its budget. A drain releases a retired snapshot's
+  reference counts only as it drops each child, so leftovers of a spent budget,
+  moved or not, stay counted.
 - `shape_gate` and `shape_version` coordinate plans that depend on the relation
   between the edge and child map.
 
