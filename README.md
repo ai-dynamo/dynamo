@@ -1,6 +1,6 @@
 # KV indexer year-over-year benchmark
 
-Achieved versus offered throughput for global KV-cache event indexers, replaying the same Mooncake trace on one host.
+Achieved versus offered throughput for global KV-cache event indexers, replaying the same Mooncake trace on AMD EPYC 9654P hosts of identical configuration: the Rust indexers on one host, llm-d on a second.
 
 ## Figures
 
@@ -28,7 +28,7 @@ The left panel plots achieved against offered block ops/s on log-log axes; the d
 - **Achieved rate:** block ops / (last completion − start).
   - A trial is discarded when its generator could not issue on schedule, that is, when the issue span exceeds 1.01 × W.
 - **Reps:** three fresh-process repetitions per window. Points are medians and error bars span min–max.
-- **Host:** one AMD EPYC 9654P (96 cores, one socket), one logical CPU per physical core.
+- **Host:** AMD EPYC 9654P (96 cores, one socket), one logical CPU per physical core.
   - 8 cores issue events, 1 core issues lookups, and the indexer runs on the remaining 87.
 
 ## Indexers
@@ -40,7 +40,7 @@ The left panel plots achieved against offered block ops/s on log-log axes; the d
 | SMG PositionalIndexer | SGLang Model Gateway `kv_index` @ `0f9f219` | 64 | Event-driven, sticky per-worker pool mirroring `KvEventMonitor`; built at opt-level 3 (SMG ships opt-level `z`) |
 | llm-d precise prefix index | llm-d-router v0.11.0 `InMemoryIndex` | 4 shards (default) | Go driver replaying the same corpus with sequence-hash keys |
 
-- **Event workers:** each line uses its best count from a scan of 16–80 workers.
+- **Event workers:** each line uses its best count from a scan of 16–80 workers. In `yoy_glibc`, `main`'s CRTC runs at 16, its best count on glibc; the other Rust lines stay at 64.
 - **Score check:** on a 1,000-request Mooncake fixture, the Feb 2026 tree and SMG returned the same overlap scores as CRTC for every lookup. So did a sequence-hash-keyed model of llm-d's index (0 mismatches each).
 - **Not included:** indexers that are approximate or that mix request history into the index.
 
