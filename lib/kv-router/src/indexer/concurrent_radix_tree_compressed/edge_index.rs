@@ -161,7 +161,6 @@ impl EdgeIndex {
         self.rebuild(edge);
     }
 
-    /// Table slots, or zero while scanning.
     #[cfg(test)]
     pub(super) fn capacity(&self) -> usize {
         self.slots.len()

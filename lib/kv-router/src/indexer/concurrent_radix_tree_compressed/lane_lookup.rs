@@ -183,7 +183,6 @@ impl LaneLookup {
         Some(self.nodes.node(id).clone())
     }
 
-    /// Whether any entry on the lane names `node`.
     pub(super) fn names(&self, node: &SharedNode) -> bool {
         self.nodes.id_of(node).is_some()
     }
@@ -209,7 +208,6 @@ impl LaneLookup {
         changed
     }
 
-    /// Points `worker`'s entry for `hash` at `node`.
     pub(super) fn insert(
         &mut self,
         worker: WorkerWithDpRank,
