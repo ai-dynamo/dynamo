@@ -50,6 +50,37 @@ async def test_connector_does_not_fallback_on_client_error(client_error, monkeyp
     parent_fetch.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("url", "falls_back"),
+    [
+        # vLLM would re-fetch it without Dynamo's redirect checks or size bound.
+        ("https://example.com/x.jpg", False),
+        # ImageLoader refuses local paths; vLLM reads them under its own allowlist.
+        ("/srv/media/x.jpg", True),
+    ],
+)
+async def test_connector_falls_back_to_vllm_only_for_local_sources(
+    url, falls_back, monkeypatch
+):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    parent_fetch = AsyncMock(return_value=Image.new("RGB", (1, 1)))
+    monkeypatch.setattr(connector_class.__mro__[1], "fetch_image_async", parent_fetch)
+    connector = object.__new__(connector_class)
+    connector._image_loader = AsyncMock()
+    connector._image_loader.load_image.side_effect = ValueError("empty body")
+
+    if falls_back:
+        await connector.fetch_image_async(url)
+        parent_fetch.assert_awaited_once()
+    else:
+        with pytest.raises(ValueError, match="empty body"):
+            await connector.fetch_image_async(url)
+        parent_fetch.assert_not_awaited()
+
+
 class TestImageLoaderCache:
     """Test the ImageLoader LRU cache used by DynamoMediaConnector."""
 

@@ -664,8 +664,10 @@ async def test_vp9_without_software_decoder_is_actionable(monkeypatch):
     async def fake_fetch(url, timeout, policy=None, max_bytes=None):
         return b"vp9-bytes"
 
-    monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
-    monkeypatch.setattr(ewh, "fetch_media_bytes", fake_fetch)
+    monkeypatch.setattr(
+        "dynamo.common.multimodal.media_source.validate_media_url", fake_validate
+    )
+    monkeypatch.setattr("dynamo.common.multimodal.media_source.fetch_bytes", fake_fetch)
     monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(ewh.importlib, "import_module", _selective_import(set()))
@@ -692,8 +694,10 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
     async def fake_fetch(url, timeout, policy=None, max_bytes=None):
         return b"vp9-bytes"
 
-    monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
-    monkeypatch.setattr(ewh, "fetch_media_bytes", fake_fetch)
+    monkeypatch.setattr(
+        "dynamo.common.multimodal.media_source.validate_media_url", fake_validate
+    )
+    monkeypatch.setattr("dynamo.common.multimodal.media_source.fetch_bytes", fake_fetch)
     monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(ewh.importlib, "import_module", _selective_import({"decord"}))
@@ -711,9 +715,7 @@ async def test_remote_video_fetch_honors_configured_media_limit(monkeypatch):
 
     monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
     fetch = AsyncMock(return_value=b"vp9-bytes")
-    # Patch the transport, not the module's fetch_media_bytes: the bound is
-    # resolved inside the shared wrapper, which is what this test pins.
-    monkeypatch.setattr("dynamo.common.http.fetch_bytes", fetch)
+    monkeypatch.setattr("dynamo.common.multimodal.media_source.fetch_bytes", fetch)
     monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(ewh.importlib, "import_module", _selective_import({"decord"}))

@@ -46,6 +46,10 @@ pytestmark = [
 ]
 
 
+async def _async_identity(url, _policy):
+    return url
+
+
 def _make_audio_handler(**config_overrides):
     """Create an AudioGenerationHandler with mocked dependencies."""
     config = MagicMock()
@@ -683,7 +687,7 @@ class TestResolveRefAudio:
 
     def test_rejects_an_oversized_data_uri_before_decoding(self):
         handler = _make_audio_handler(tts_ref_audio_max_bytes=16)
-        with pytest.raises(ValueError, match="too large"):
+        with pytest.raises(ValueError, match="exceeds the maximum allowed size"):
             asyncio.run(handler._resolve_ref_audio(self._data_uri(self._wav_bytes())))
 
     def test_accepts_a_payload_exactly_at_the_limit(self):
@@ -709,70 +713,63 @@ class TestResolveRefAudio:
         )
         assert len(data) == 1600
 
+    # -- http(s): through load_media_bytes, with only the transport stubbed ----
+
+    def test_fetches_under_the_env_policy_and_the_tts_bound(self, monkeypatch):
+        from dynamo.common.http.url_validator import UrlValidationPolicy
+        from dynamo.common.multimodal import media_source
+
+        monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+        monkeypatch.setattr(
+            media_source, "validate_media_url", _async_identity
+        )  # no DNS in unit tests
+        seen = {}
+        wav = self._wav_bytes()
+
+        async def fake_fetch(url, timeout, *, policy=None, max_bytes=None):
+            seen.update(timeout=timeout, policy=policy, max_bytes=max_bytes)
+            return wav
+
+        monkeypatch.setattr(media_source, "fetch_bytes", fake_fetch)
+        handler = _make_audio_handler()
+        asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))
+
+        assert seen["policy"] == UrlValidationPolicy.from_env()
+        assert seen["policy"].allow_private_ips is False
+        assert seen["max_bytes"] == handler.config.tts_ref_audio_max_bytes
+        assert seen["timeout"] == handler.config.tts_ref_audio_timeout
+
+    def test_operator_fault_keeps_its_type(self, monkeypatch):
+        # HttpConfigurationError is an HttpError; it must not be rewrapped as the
+        # ValueError (InvalidArgument) reserved for the caller's faults.
+        from dynamo.common.http import HttpConfigurationError
+        from dynamo.common.multimodal import media_source
+
+        async def fake_fetch(*args, **kwargs):
+            raise HttpConfigurationError("egress proxy is not trusted")
+
+        monkeypatch.setattr(media_source, "validate_media_url", _async_identity)
+        monkeypatch.setattr(media_source, "fetch_bytes", fake_fetch)
+        with pytest.raises(HttpConfigurationError):
+            asyncio.run(
+                _make_audio_handler()._resolve_ref_audio("https://example.com/v.wav")
+            )
+
+    def test_transport_failure_is_reported_as_a_client_error(self, monkeypatch):
+        from dynamo.common.http import HttpTimeoutError
+        from dynamo.common.multimodal import media_source
+
+        async def fake_fetch(*args, **kwargs):
+            raise HttpTimeoutError("timed out")
+
+        monkeypatch.setattr(media_source, "validate_media_url", _async_identity)
+        monkeypatch.setattr(media_source, "fetch_bytes", fake_fetch)
+        with pytest.raises(ValueError, match="Failed to download ref_audio"):
+            asyncio.run(
+                _make_audio_handler()._resolve_ref_audio("https://example.com/v.wav")
+            )
+
     def test_rejects_an_unsupported_scheme(self):
         handler = _make_audio_handler()
         with pytest.raises(ValueError, match="must be a URL"):
             asyncio.run(handler._resolve_ref_audio("ftp://example.com/a.wav"))
-
-    # -- the http(s) branch, which fetches through the shared media path -------
-
-    def test_forwards_the_tts_bound_and_deadline_to_the_shared_fetch(self, monkeypatch):
-        # The TTS knobs stay authoritative: this path must not silently pick up
-        # the generic media bound in place of tts_ref_audio_max_bytes.
-        import dynamo.vllm.omni.audio_handler as ah
-
-        handler = _make_audio_handler()
-        seen = {}
-
-        async def fake_fetch(url, **kwargs):
-            seen.update(kwargs)
-            return self._wav_bytes()
-
-        monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
-        asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))
-
-        assert seen["max_bytes"] == handler.config.tts_ref_audio_max_bytes
-        assert seen["timeout"] == handler.config.tts_ref_audio_timeout
-
-    @pytest.mark.parametrize(
-        ("raised", "expected"),
-        [
-            # A blocked destination or oversized body: already a ValueError
-            # (client fault, so the frontend answers 4xx), kept as is.
-            pytest.param("UrlValidationError", ValueError, id="blocked-destination"),
-            # Transport failure against the caller's URL: reported as a client
-            # fault too.
-            pytest.param("HttpTimeoutError", ValueError, id="transport-failure"),
-            # Operator fault (e.g. an untrusted egress proxy). It is an
-            # HttpError, so a bare `except HttpError` would turn it into
-            # ValueError -> InvalidArgument and blame the caller; it must keep
-            # its type.
-            pytest.param(
-                "HttpConfigurationError",
-                "HttpConfigurationError",
-                id="operator-fault-keeps-its-type",
-            ),
-        ],
-    )
-    def test_maps_fetch_failures_to_the_right_fault(
-        self, monkeypatch, raised, expected
-    ):
-        import dynamo.common.http as http
-        import dynamo.vllm.omni.audio_handler as ah
-        from dynamo.common.http.url_validator import UrlValidationError
-
-        types = {
-            "UrlValidationError": UrlValidationError,
-            "HttpTimeoutError": http.HttpTimeoutError,
-            "HttpConfigurationError": http.HttpConfigurationError,
-        }
-        exc_type = types[raised]
-        expected = types.get(expected, expected)
-        handler = _make_audio_handler()
-
-        async def fake_fetch(url, **kwargs):
-            raise exc_type("fetch failed")
-
-        monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
-        with pytest.raises(expected):
-            asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))

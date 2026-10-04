@@ -4,6 +4,7 @@
 """Unit tests for SGLang multimodal embedding cache behavior."""
 
 import asyncio
+import base64
 import importlib
 import json
 from types import SimpleNamespace
@@ -71,7 +72,7 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
     async def _passthrough_url(url, _policy):
         return url
 
-    monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", _passthrough_url)
+    _patch_validator(monkeypatch, _passthrough_url)
 
     # Keep cache-only tests independent of host NVDEC capabilities. Tests that
     # exercise the NVDEC path enable it explicitly.
@@ -81,10 +82,10 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
     # corresponding fetch stub
     async def _no_network(*_args, **_kwargs):
         raise AssertionError(
-            "unit tests must not fetch over the network; stub fetch_media_bytes"
+            "unit tests must not fetch over the network; stub media_source.fetch_bytes"
         )
 
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", _no_network)
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", _no_network)
 
     class _DummyEncoder:
         def __init__(self) -> None:
@@ -359,7 +360,7 @@ async def test_video_requests_reuse_cached_embeddings(
     video_token_id = cache_handler.video_token_id
     video_bytes = b"video-bytes"
     fetch = AsyncMock(return_value=video_bytes)
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
 
     cache_handler.encoder.encode_mock.return_value = (
         torch.tensor([2, 3, 4]),
@@ -453,7 +454,7 @@ async def test_video_request_skips_cache_key_when_cache_is_disabled(
     video_token_id = cache_handler.video_token_id
     video_bytes = b"video-bytes"
     fetch = AsyncMock(return_value=video_bytes)
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
     cache_handler._embedding_cache = None
     cache_handler._image_loader = None
     cache_handler._media_cache_key = Mock(
@@ -532,7 +533,7 @@ async def test_video_cache_key_includes_sampling_config(
 
     video_url = "https://example.com/clip.mp4"
     fetch = AsyncMock(return_value=b"video-bytes")
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
     cache_handler.encoder.encode_mock.return_value = (
         torch.tensor([[2, 3, 4]]),
         torch.arange(24, dtype=torch.float32).reshape(6, 4),
@@ -565,6 +566,15 @@ async def test_video_cache_key_includes_sampling_config(
 # --- NVDEC video routing -------------------------------------------------------
 
 _HANDLER_MOD = "dynamo.sglang.request_handlers.multimodal.encode_worker_handler"
+# load_media_bytes looks validate_media_url and fetch_bytes up here.
+_MEDIA_SOURCE = "dynamo.common.multimodal.media_source"
+
+
+def _patch_validator(monkeypatch, fn) -> None:
+    """Stub URL validation everywhere the encode path calls it: in the handler,
+    and inside load_media_bytes."""
+    for module in (_HANDLER_MOD, _MEDIA_SOURCE):
+        monkeypatch.setattr(f"{module}.validate_media_url", fn)
 
 
 # A data: URI passes the url policy without touching the network, so the
@@ -608,16 +618,17 @@ async def test_disabled_nvdec_without_software_decoder_is_actionable(
 
 
 @pytest.mark.asyncio
-async def test_disabled_nvdec_with_software_decoder_passes_urls(
+async def test_disabled_nvdec_with_software_decoder_reads_inline_video(
     nvdec_handler, monkeypatch
 ) -> None:
-    """NVDEC off but a software decoder exists: non-HTTP URLs pass through
-    unchanged for SGLang to decode."""
+    """NVDEC off but a software decoder exists: an inline video is read here,
+    under the size bound, and SGLang gets the bytes -- not the URL, which it
+    would read itself with no bound."""
     monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
     monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
 
     out = await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
-    assert out == [_INLINE_VIDEO]
+    assert out == [base64.b64decode(_INLINE_VIDEO.partition(",")[2])]
 
 
 @pytest.mark.asyncio
@@ -629,13 +640,7 @@ async def test_disabled_nvdec_fetches_remote_video_with_configured_limit(
     monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
     url = "https://example.com/clip.webm"
     fetch = AsyncMock(return_value=b"video-bytes")
-    # The fixture stubs the module's fetch_media_bytes to forbid network use;
-    # restore the real wrapper and patch the transport under it, so this pins
-    # that the bound resolved inside the wrapper reaches the fetch.
-    from dynamo.common.http import fetch_media_bytes
-
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch_media_bytes)
-    monkeypatch.setattr("dynamo.common.http.fetch_bytes", fetch)
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
 
     out = await nvdec_handler._build_encode_inputs([url], "VIDEO")
 
@@ -722,12 +727,9 @@ async def test_build_encode_inputs_swaps_only_nvdec_hits(
 async def test_maybe_nvdec_decoder_wraps_h264_only(nvdec_handler, monkeypatch) -> None:
     """H.264 yields a decoder built from the fetched bytes, not decoded frames."""
     decoder = object()
+    _patch_validator(monkeypatch, AsyncMock(return_value="https://x/clip.mp4"))
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value="https://x/clip.mp4"),
-    )
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.fetch_media_bytes", AsyncMock(return_value=b"bytes")
+        f"{_MEDIA_SOURCE}.fetch_bytes", AsyncMock(return_value=b"bytes")
     )
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
@@ -759,12 +761,9 @@ async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
     Reported by Codex on #11836. Measured on GPU against a counting HTTP server:
     two origin fetches for one request before this change, one after.
     """
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value="https://x/clip.webm"),
-    )
+    _patch_validator(monkeypatch, AsyncMock(return_value="https://x/clip.webm"))
     fetch = AsyncMock(return_value=b"vp9-bytes")
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "vp9")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
     # The passthrough contract now holds only when SGLang can actually decode
@@ -780,26 +779,21 @@ async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
 
 
 @pytest.mark.asyncio
-async def test_maybe_nvdec_decoder_rejects_non_http_scheme(
+async def test_maybe_nvdec_decoder_refuses_a_scheme_it_cannot_read(
     nvdec_handler, monkeypatch
 ) -> None:
-    """A scheme that is neither http(s) nor a permitted local source is skipped.
+    """A source that cannot be read is refused, never handed to SGLang to fetch.
 
-    Note file:// and data: are *not* in that group -- they are read through
-    read_local_media_bytes when the policy allows -- so this uses a scheme with
-    no reader at all. Validation is stubbed as succeeding so the assertion is
-    about scheme dispatch rather than about the policy refusing it.
+    Validation is stubbed as succeeding so the assertion is about reading
+    rather than about the policy refusing the scheme.
     """
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value="ftp://example.invalid/clip.mp4"),
+    _patch_validator(
+        monkeypatch, AsyncMock(return_value="ftp://example.invalid/clip.mp4")
     )
     fetch = AsyncMock()
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
-    assert (
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
+    with pytest.raises(UrlValidationError, match="Unsupported local media scheme"):
         await nvdec_handler._maybe_nvdec_decoder("ftp://example.invalid/clip.mp4")
-        is None
-    )
     fetch.assert_not_called()
 
 
@@ -819,13 +813,10 @@ async def test_fetch_failure_is_terminal(nvdec_handler, monkeypatch, error) -> N
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
     url = "https://x/clip.mp4"
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value=url),
-    )
+    _patch_validator(monkeypatch, AsyncMock(return_value=url))
     fetch = AsyncMock(side_effect=error)
     decode = Mock()
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", decode)
 
     with pytest.raises(type(error)) as exc_info:
@@ -851,12 +842,9 @@ async def test_policy_rejection_is_not_swallowed_into_url_passthrough(
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
     error = UrlValidationError("blocked IP")
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(side_effect=error),
-    )
+    _patch_validator(monkeypatch, AsyncMock(side_effect=error))
     fetch = AsyncMock()
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
+    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
 
     # The error also propagates through the batch builder rather than being
     # mapped back to the URL there. Returning None from the inner adapter
@@ -884,12 +872,9 @@ async def test_decode_failure_falls_back_to_the_fetched_bytes(
     """
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    _patch_validator(monkeypatch, AsyncMock(return_value="https://x/clip.mp4"))
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value="https://x/clip.mp4"),
-    )
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.fetch_media_bytes", AsyncMock(return_value=b"bytes")
+        f"{_MEDIA_SOURCE}.fetch_bytes", AsyncMock(return_value=b"bytes")
     )
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
@@ -927,7 +912,7 @@ async def test_disabled_nvdec_validates_url_before_reporting_decoders(
     )
     # Undo the fixture's passthrough: validation is what this test asserts.
     # The URL below is refused on scheme, so this still performs no lookup.
-    monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", validate_media_url)
+    _patch_validator(monkeypatch, validate_media_url)
 
     with pytest.raises(UrlValidationError):
         await nvdec_handler._build_encode_inputs([_BLOCKED_URL], "VIDEO")
@@ -944,12 +929,9 @@ async def test_decode_failure_without_software_decoder_is_actionable(
 
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    _patch_validator(monkeypatch, AsyncMock(return_value="https://x/clip.mp4"))
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value="https://x/clip.mp4"),
-    )
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.fetch_media_bytes", AsyncMock(return_value=b"bytes")
+        f"{_MEDIA_SOURCE}.fetch_bytes", AsyncMock(return_value=b"bytes")
     )
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
@@ -975,12 +957,9 @@ async def test_codec_probe_failure_is_not_retried(nvdec_handler, monkeypatch) ->
     """A failed codec probe is reported without probing the same bytes again."""
     from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 
+    _patch_validator(monkeypatch, AsyncMock(return_value="https://x/clip.mp4"))
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value="https://x/clip.mp4"),
-    )
-    monkeypatch.setattr(
-        f"{_HANDLER_MOD}.fetch_media_bytes", AsyncMock(return_value=b"bytes")
+        f"{_MEDIA_SOURCE}.fetch_bytes", AsyncMock(return_value=b"bytes")
     )
     probe_error = RuntimeError("codec probe failed")
     probe = Mock(side_effect=probe_error)

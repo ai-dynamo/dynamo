@@ -20,7 +20,6 @@ from dynamo.common.http.media_reference import (
     DEFAULT_MAX_MEDIA_MB,
     DYN_MM_MAX_FILE_SIZE_MB,
     MAX_MEDIA_BYTES,
-    fetch_media_bytes,
     local_media_reference,
     max_media_bytes,
 )
@@ -235,47 +234,3 @@ async def test_an_explicit_max_bytes_still_wins_over_the_env(monkeypatch) -> Non
         pass
 
     assert seen["max_bytes"] == 512
-
-
-# --- fetch_media_bytes: the shared media policy applied on the caller's behalf ---
-
-
-def _recording_fetch(seen: dict):
-    async def fake_fetch(url, timeout, *, policy=None, max_bytes=None):
-        seen.update(timeout=timeout, policy=policy, max_bytes=max_bytes)
-        return b"PNGDATA"
-
-    return fake_fetch
-
-
-async def test_fetch_media_bytes_fails_closed_without_a_policy(monkeypatch) -> None:
-    """A caller that forgets the policy gets the restrictive env one, never an
-    unchecked fetch."""
-    seen: dict = {}
-    monkeypatch.setattr("dynamo.common.http.fetch_bytes", _recording_fetch(seen))
-    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
-
-    assert await fetch_media_bytes("https://example.com/img.png") == b"PNGDATA"
-
-    assert seen["policy"] == UrlValidationPolicy.from_env()
-    assert seen["policy"].allow_private_ips is False
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "expected"),
-    [
-        pytest.param({}, 128 * 1024 * 1024, id="unset-resolves-from-env"),
-        pytest.param({"max_bytes": 512}, 512, id="explicit-wins-over-env"),
-        pytest.param({"max_bytes": None}, None, id="none-disables-the-bound"),
-    ],
-)
-async def test_fetch_media_bytes_bound(monkeypatch, kwargs, expected) -> None:
-    """The bound defaults from the env, but a caller's own value (a backend's
-    knob, or None for no bound) is never overridden by it."""
-    seen: dict = {}
-    monkeypatch.setattr("dynamo.common.http.fetch_bytes", _recording_fetch(seen))
-    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "128")
-
-    await fetch_media_bytes("https://example.com/img.png", **kwargs)
-
-    assert seen["max_bytes"] == expected

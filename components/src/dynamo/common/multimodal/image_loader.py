@@ -23,7 +23,7 @@ from ..http import (
     HttpError,
     HttpStatusError,
     HttpTimeoutError,
-    fetch_media_bytes,
+    fetch_bytes,
 )
 from ..http.media_reference import max_media_bytes
 from ..http.url_validator import (
@@ -273,10 +273,10 @@ class ImageLoader:
                         await self._shared_image_cache.delete(key)
 
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
-                content = await fetch_media_bytes(
+                content = await fetch_bytes(
                     image_url,
+                    self._http_timeout,
                     policy=self._url_policy,
-                    timeout=self._http_timeout,
                     max_bytes=self._max_bytes(),
                 )
                 if not content:

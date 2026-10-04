@@ -20,9 +20,9 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
-from dynamo.common.http import HttpConfigurationError, HttpError, fetch_media_bytes
-from dynamo.common.http.url_validator import UrlValidationError
-from dynamo.common.multimodal.media_source import decode_data_uri
+from dynamo.common.http import HttpConfigurationError, HttpError
+from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.multimodal.media_source import load_media_bytes
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
@@ -377,60 +377,35 @@ class AudioGenerationHandler:
         validate_audio_max_new_tokens(req.max_new_tokens, self.config)
 
     async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple:
-        """Download or decode reference audio for voice cloning (Base task)."""
+        """Download or decode reference audio for voice cloning (Base task).
+
+        Read through ``load_media_bytes`` under the deployment's media policy,
+        bounded by ``tts_ref_audio_max_bytes``.
+        """
         import io
 
         import soundfile as sf
 
-        if ref_audio_str.startswith(("http://", "https://")):
-            try:
-                audio_bytes = await fetch_media_bytes(
-                    ref_audio_str,
-                    timeout=self.config.tts_ref_audio_timeout,
-                    max_bytes=self.config.tts_ref_audio_max_bytes,
-                )
-            except HttpConfigurationError:
-                # An operator fault, not a verdict on the caller's URL. It must
-                # keep its type: this contract reports client faults as
-                # ValueError, which py_err_to_dynamo maps to InvalidArgument,
-                # and a misconfigured egress proxy is not the caller's bad
-                # request. Must precede HttpError, its base.
-                raise
-            except HttpError as exc:
-                # A blocked destination or an oversized body raises
-                # UrlValidationError, which is already a ValueError carrying a
-                # bounded message, so it stays the client error it is. The rest
-                # of the HttpError family is a status or transport fault against
-                # a caller-supplied URL, which this contract reports as
-                # ValueError; those messages are bounded by the fetch layer.
-                raise ValueError(f"Failed to download ref_audio: {exc}") from exc
-        elif ref_audio_str.startswith("data:"):
-            max_bytes = self.config.tts_ref_audio_max_bytes
-            # Bound the *encoded* input separately from the decoded limit. A
-            # data URI carries its payload inline, so without this an unbounded
-            # one is materialized in full before any check can look at it. The
-            # most expensive legal encoding is 4 URI characters per decoded byte
-            # (4/3 base64 characters, each percent-escaped to 3), so this cannot
-            # reject a payload that would have fit -- the exact limit is applied
-            # to the decoded bytes below, where percent escapes and padding have
-            # already been normalized away.
-            if len(ref_audio_str) > max_bytes * 4:
-                raise ValueError(
-                    f"ref_audio data URI too large (max {max_bytes} bytes decoded)"
-                )
-            try:
-                audio_bytes = decode_data_uri(ref_audio_str)
-            except UrlValidationError as exc:
-                raise ValueError(f"Invalid data: ref_audio ({exc})") from exc
-            if len(audio_bytes) > max_bytes:
-                raise ValueError(
-                    f"ref_audio data URI too large "
-                    f"({len(audio_bytes)} bytes, max {max_bytes})"
-                )
-        else:
+        if not ref_audio_str.startswith(("http://", "https://", "data:")):
             raise ValueError(
                 "ref_audio must be a URL (http/https) or base64 data URI (data:...)"
             )
+        try:
+            audio_bytes = await load_media_bytes(
+                ref_audio_str,
+                UrlValidationPolicy.from_env(),
+                timeout=self.config.tts_ref_audio_timeout,
+                max_bytes=self.config.tts_ref_audio_max_bytes,
+            )
+        except HttpConfigurationError:
+            # An operator fault (an untrusted egress proxy), not the caller's
+            # bad request; the clause below would report it as one.
+            raise
+        except HttpError as exc:
+            # A status or transport failure on the caller's URL. A refused
+            # source raises UrlValidationError, already a client-fault
+            # ValueError, and passes through untouched.
+            raise ValueError(f"Failed to download ref_audio: {exc}") from exc
 
         try:
             wav_data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")

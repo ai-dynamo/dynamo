@@ -7,7 +7,6 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Optional
-from urllib.parse import urlparse
 
 import numpy as np
 import torch
@@ -23,7 +22,7 @@ from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
 from dynamo._core import Client, Context
-from dynamo.common.http import fetch_media_bytes
+from dynamo.common.http.media_reference import max_media_bytes
 from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
@@ -43,10 +42,7 @@ from dynamo.common.multimodal.image_loader import (
     scope_image_cache_key,
 )
 from dynamo.common.multimodal.media_descriptor import decoded_content_hash_key
-from dynamo.common.multimodal.media_source import (
-    is_local_media_url,
-    read_local_media_bytes,
-)
+from dynamo.common.multimodal.media_source import load_media_bytes
 from dynamo.common.multimodal.nvdec_decoder import (
     DISABLE_ENV,
     nvdec_available,
@@ -572,7 +568,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         model_type = getattr(self.encoder, "model_type", "") or ""
         return model_type not in _NVDEC_UNSAFE_MODEL_TYPES
 
-    async def _maybe_nvdec_decoder(self, url: str) -> Optional[Any]:
+    async def _maybe_nvdec_decoder(self, url: str) -> Any:
         """Resolve a video URL to what SGLang should decode.
 
         Reads the URL (SSRF-validated for http(s); policy-gated for ``file://``
@@ -580,10 +576,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
         * an ``NvdecVideoDecoder`` for H.264/H.265 -- hardware decode;
         * the **fetched bytes** for any other codec, or if building the decoder
-          fails -- SGLang decodes what we already have;
-        * ``None`` only for unsupported schemes that are not fetched, leaving
-          the caller responsible for the URL. A failed fetch never returns
-          ``None``.
+          fails -- SGLang decodes what we already have.
+
+        It never hands back the URL: a source that cannot be read is refused.
 
         Returning the bytes rather than the URL matters for three reasons, all
         reported by Codex on #11836. SGLang would otherwise download the same
@@ -616,21 +611,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         schemes have no decoder at all, so excluding them here would drop local
         and inline video entirely rather than merely skipping acceleration.
         """
-        # Perform validation and byte acquisition before attempting decoder fallback
-        # Any failure at this stage is terminal. Passing the URL to SGLang would retry
-        # the fetch without Dynamo's policy. Only failures that occur after bytes have
-        # been successfully fetched will trigger a fallback to those bytes.
-        normalized = await validate_media_url(url, self._url_policy)
-        scheme = urlparse(normalized).scheme
-        if scheme in ("http", "https"):
-            content = await fetch_media_bytes(
-                normalized, policy=self._url_policy, timeout=30.0
-            )
-        elif is_local_media_url(normalized):
-            content = await read_local_media_bytes(normalized, self._url_policy)
-        else:
-            # If nothing is fetched and no error occurs, the caller retains the URL.
-            return None
+        # Reading is terminal on failure: handing the URL to SGLang instead
+        # would fetch it again with no policy. Only a failure after the bytes
+        # are in hand falls back to those bytes.
+        content = await load_media_bytes(
+            url, self._url_policy, timeout=30.0, max_bytes=max_media_bytes()
+        )
 
         codec: str | None = None
         try:
@@ -724,24 +710,25 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 and not _software_video_decoder_imports()
             ):
                 raise video_decoder_missing("sglang", "decord2", "decord", None)
-            fetched_inputs: list[Any] = []
-            for media_input in validated:
-                if isinstance(media_input, str) and urlparse(media_input).scheme in (
-                    "http",
-                    "https",
-                ):
-                    media_input = await fetch_media_bytes(
-                        media_input, policy=self._url_policy, timeout=30.0
-                    )
-                fetched_inputs.append(media_input)
-            return fetched_inputs
+            # Read every source here, not only http(s): SGLang would read a
+            # file:// or data: URL itself with no size bound.
+            return [
+                await load_media_bytes(
+                    media_input,
+                    self._url_policy,
+                    timeout=30.0,
+                    max_bytes=max_media_bytes(),
+                )
+                if isinstance(media_input, str)
+                else media_input
+                for media_input in validated
+            ]
         encode_inputs: list[Any] = []
         for media_input in media_inputs:
             if not isinstance(media_input, str):
                 encode_inputs.append(media_input)
                 continue
-            decoder = await self._maybe_nvdec_decoder(media_input)
-            encode_inputs.append(decoder if decoder is not None else media_input)
+            encode_inputs.append(await self._maybe_nvdec_decoder(media_input))
         return encode_inputs
 
     async def _encode_with_cache(

@@ -22,7 +22,7 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-_FETCH_BYTES_PATH = "dynamo.common.multimodal.image_loader.fetch_media_bytes"
+_FETCH_BYTES_PATH = "dynamo.common.multimodal.image_loader.fetch_bytes"
 _REDIS_CLUSTER_FACTORY_PATH = (
     "dynamo.common.multimodal.shared_image_cache.RedisCluster.from_url"
 )

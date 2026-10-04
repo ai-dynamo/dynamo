@@ -20,7 +20,7 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
-from dynamo.common.http import HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.trtllm import multimodal_processor as mmp
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -76,8 +76,12 @@ async def test_client_errors_propagate(error, monkeypatch) -> None:
     # request before video validation or fetching begins.
     video_validate = AsyncMock()
     video_fetch = AsyncMock()
-    monkeypatch.setattr(mmp, "validate_media_url", video_validate)
-    monkeypatch.setattr(mmp, "fetch_media_bytes", video_fetch)
+    monkeypatch.setattr(
+        "dynamo.common.multimodal.media_source.validate_media_url", video_validate
+    )
+    monkeypatch.setattr(
+        "dynamo.common.multimodal.media_source.fetch_bytes", video_fetch
+    )
 
     request = {
         "image_cache_scope": "session-42",
@@ -110,7 +114,7 @@ async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> N
     )
     fetch = AsyncMock(return_value=b"video bytes")
     load_video = AsyncMock(return_value=object())
-    monkeypatch.setattr(mmp, "fetch_media_bytes", fetch)
+    monkeypatch.setattr("dynamo.common.multimodal.media_source.fetch_bytes", fetch)
     monkeypatch.setattr(mmp, "async_load_video", load_video)
     url = "http://169.254.169.254/latest/meta-data/"
 
@@ -125,11 +129,42 @@ async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> N
 
     fetch.assert_awaited_once_with(
         url,
+        30.0,
         policy=processor._url_policy,
-        timeout=30.0,
         max_bytes=processor.max_file_size_bytes,
     )
     assert load_video.await_args.args[0] != url
+
+
+async def test_video_operator_fault_is_not_reported_as_a_bad_request(
+    monkeypatch,
+) -> None:
+    """An untrusted egress proxy is the deployment's fault: it must keep its
+    type rather than become the caller's 400."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    monkeypatch.setattr(
+        "dynamo.common.multimodal.media_source.validate_media_url",
+        AsyncMock(side_effect=lambda url, policy: url),
+    )
+    monkeypatch.setattr(
+        "dynamo.common.multimodal.media_source.fetch_bytes",
+        AsyncMock(side_effect=HttpConfigurationError("egress proxy is not trusted")),
+    )
+
+    with pytest.raises(HttpConfigurationError):
+        await processor.process_openai_request(
+            {
+                "multi_modal_data": {"video_url": [{"Url": "https://x/clip.mp4"}]},
+                "token_ids": [1],
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
 
 
 def test_nvdec_video_data_builds_pt_videodata(monkeypatch) -> None:
@@ -191,7 +226,10 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
         tokenizer=MagicMock(),
     )
     sentinel = object()
-    monkeypatch.setattr(mmp, "fetch_media_bytes", AsyncMock(return_value=b"h264 bytes"))
+    monkeypatch.setattr(
+        "dynamo.common.multimodal.media_source.fetch_bytes",
+        AsyncMock(return_value=b"h264 bytes"),
+    )
     monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
     monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: codec == "h264")
     nvdec = MagicMock(return_value=sentinel)
@@ -346,7 +384,10 @@ async def test_vp9_video_reports_an_unsupported_codec_error(monkeypatch) -> None
         max_file_size_mb=10,
         tokenizer=MagicMock(),
     )
-    monkeypatch.setattr(mmp, "fetch_media_bytes", AsyncMock(return_value=b"vp9 bytes"))
+    monkeypatch.setattr(
+        "dynamo.common.multimodal.media_source.fetch_bytes",
+        AsyncMock(return_value=b"vp9 bytes"),
+    )
     monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "vp9")
     # Real routing: only H.264/H.265 are hardware-decoded.
     monkeypatch.setattr(
@@ -459,7 +500,7 @@ async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
     load_video = AsyncMock(
         side_effect=ImportError("OpenCV (cv2) is required for video decoding")
     )
-    monkeypatch.setattr(mmp, "fetch_media_bytes", fetch)
+    monkeypatch.setattr("dynamo.common.multimodal.media_source.fetch_bytes", fetch)
     monkeypatch.setattr(mmp, "async_load_video", load_video)
 
     with pytest.raises(HttpStatusError) as exc_info:

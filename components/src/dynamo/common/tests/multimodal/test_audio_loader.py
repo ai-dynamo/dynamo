@@ -10,6 +10,7 @@ import pytest
 from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import audio_loader as audio_loader_module
+from dynamo.common.multimodal import media_source as media_source_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
@@ -123,9 +124,8 @@ async def test_http_fetch_honors_configured_media_limit(monkeypatch):
             return waveform, 16000.0
 
     mock_fetch = AsyncMock(return_value=b"audio")
-    # Patch the transport, not the module's fetch_media_bytes: the bound is
-    # resolved inside the shared wrapper, which is what this test pins.
-    monkeypatch.setattr("dynamo.common.http.fetch_bytes", mock_fetch)
+    # The loader reads through load_media_bytes; patch the transport under it.
+    monkeypatch.setattr(media_source_module, "fetch_bytes", mock_fetch)
     monkeypatch.setattr(loader, "_create_vllm_audio_io", lambda: _MediaIO())
 
     await loader._load_audio_with_vllm("https://example.com/limited.wav")

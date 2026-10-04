@@ -19,35 +19,28 @@ import logging
 import os
 import re
 from typing import Any, Awaitable, Dict, Final, List
-from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import (
-    HttpConfigurationError,
-    HttpStatusError,
-    fetch_media_bytes,
-)
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
-    validate_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
 )
-from dynamo.common.multimodal.media_source import (
-    is_local_media_url,
-    read_local_media_bytes,
-)
+from dynamo.common.multimodal.media_source import load_media_bytes
 from dynamo.common.multimodal.nvdec_decoder import (
     decode_video_nvdec,
     probe_video_codec,
     should_use_nvdec,
 )
 from dynamo.common.utils.runtime import run_async
+
+from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
 
 logger = logging.getLogger(__name__)
 
@@ -109,16 +102,16 @@ async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
     return await _read_decoded_media_via_nixl(*args, **kwargs)
 
 
-def _require_vllm_video_media() -> tuple[Any, Any, Any]:
+def _require_vllm_video_media() -> tuple[Any, Any]:
     try:
-        from vllm.multimodal.media import MediaConnector, VideoMediaIO
+        from vllm.multimodal.media import VideoMediaIO
         from vllm.multimodal.media.image import ImageMediaIO
     except ImportError as exc:
         raise RuntimeError(
             "vLLM multimodal media components are required to decode `video_url` "
             "inputs in the vLLM backend."
         ) from exc
-    return MediaConnector, VideoMediaIO, ImageMediaIO
+    return VideoMediaIO, ImageMediaIO
 
 
 class VideoLoader:
@@ -136,27 +129,14 @@ class VideoLoader:
         self._enable_frontend_decoding = enable_frontend_decoding
         self._url_policy = url_policy or UrlValidationPolicy.from_env()
         self._nixl_connector = None
-        self._vllm_media_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
             run_async(self._nixl_connector.initialize)
 
-    def _get_vllm_media_connector(self) -> Any:
-        if self._vllm_media_connector is None:
-            MediaConnector, _, _ = _require_vllm_video_media()
-            # Confine vLLM's own local-path access to the same prefix we enforce.
-            # Empty string matches vLLM's secure default (no local access).
-            allowed = self._url_policy.allowed_local_path or ""
-            self._vllm_media_connector = MediaConnector(
-                allowed_local_media_path=allowed
-            )
-
-        return self._vllm_media_connector
-
     def _create_vllm_video_io(
         self, media_io_kwargs: Dict[str, Any] | None = None
     ) -> Any:
-        _, VideoMediaIO, ImageMediaIO = _require_vllm_video_media()
+        VideoMediaIO, ImageMediaIO = _require_vllm_video_media()
         video_io_kwargs = VideoMediaIO.merge_kwargs(
             {"num_frames": self._num_frames}, media_io_kwargs or {}
         )
@@ -168,31 +148,18 @@ class VideoLoader:
     async def _load_video_with_vllm(
         self, video_url: str, media_io_kwargs: Dict[str, Any] | None = None
     ) -> tuple[np.ndarray, Dict[str, Any]]:
-        normalized_url = await validate_media_url(video_url, self._url_policy)
-        media_io = self._create_vllm_video_io(media_io_kwargs)
-
-        # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
-        # revalidated; vLLM's own fetcher honors redirects without re-checking.
-        # data: and file:// never touch the network, so vLLM can handle them.
-        if urlparse(normalized_url).scheme in ("http", "https"):
-            content = await fetch_media_bytes(
-                normalized_url, policy=self._url_policy, timeout=self._http_timeout
-            )
-            return await self._decode_video_bytes(content, media_io)
-
-        # file:// and data: never touch the network, but they still deserve
-        # hardware decode: without this they reach only the software decoder,
-        # which the codec-compliant images do not ship, so H.264/H.265 from a
-        # local file or data URI would fail despite NVDEC being available and
-        # able to decode it. Reading is gated by the same url policy the vLLM
-        # connector below uses, so this adds no local-read surface.
-        if is_local_media_url(normalized_url):
-            content = await read_local_media_bytes(normalized_url, self._url_policy)
-            return await self._decode_video_bytes(content, media_io)
-
-        connector = self._get_vllm_media_connector()
-        return await connector.load_from_url_async(
-            normalized_url, media_io, fetch_timeout=self._http_timeout
+        # Every scheme is read here, never by vLLM: its connector applies no
+        # size bound to file:// or data:, and its fetcher follows redirects
+        # without revalidating them. Reading local and inline sources ourselves
+        # also lets H.264/H.265 from them reach NVDEC.
+        content = await load_media_bytes(
+            video_url,
+            self._url_policy,
+            timeout=self._http_timeout,
+            max_bytes=max_media_bytes(),
+        )
+        return await self._decode_video_bytes(
+            content, self._create_vllm_video_io(media_io_kwargs)
         )
 
     async def _decode_video_bytes(

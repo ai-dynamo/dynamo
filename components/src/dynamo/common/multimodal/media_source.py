@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read media bytes from the non-HTTP sources the hardware decoder can use.
+"""Turn a client-supplied media URL into bytes, under one policy and one bound.
+
+:func:`load_media_bytes` is the entrypoint for every media fetch: it validates
+the URL, then reads it by scheme -- http(s) through ``fetch_bytes`` (SSRF
+revalidation on every redirect hop, connect-time address filtering), ``data:``
+by decoding, ``file://`` from disk -- applying the caller's size bound to all
+three. Callers decode the bytes; none of them reads a source itself.
+
+The non-HTTP readers exist for the hardware decoder:
 
 ``fetch_bytes`` only speaks HTTP(S), so ``file://`` and ``data:`` media never
 produced bytes at the routing layer and could not reach NVDEC -- they fell
@@ -23,15 +31,18 @@ import asyncio
 import base64
 import binascii
 import logging
+from pathlib import Path
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
+from dynamo.common.http import fetch_bytes
 from dynamo.common.http.url_validator import (
     SOURCE_LABEL_LIMIT,
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
     validate_local_path,
+    validate_media_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +56,7 @@ __all__ = [
     "decode_data_uri",
     "describe_media_source",
     "is_local_media_url",
+    "load_media_bytes",
     "read_local_media_bytes",
 ]
 
@@ -73,16 +85,15 @@ def decode_data_uri(url: str, max_bytes: int | None = None) -> bytes:
     if "base64" not in meta.split(";"):
         raise UrlValidationError("Unsupported data URI: expected base64 payload")
     if max_bytes is not None:
-        # unquote() below copies its whole input, so a client can defeat the
-        # size guard just by percent-escaping a huge payload: the guard would
-        # only fire after that copy already ran. Percent-unescaping a string
-        # never grows it (each `%XY` triplet collapses to one byte), so the
-        # RAW payload length upper-bounds len(body) and therefore the decoded
-        # byte count -- reject on that bound first, len() is O(1). The "- 2"
-        # gives padding the same benefit of the doubt the exact check below
-        # gives it, so this can only reject what the exact check would also
-        # reject.
-        if len(payload) // 4 * 3 - 2 > max_bytes:
+        # unquote() below copies its whole input, so reject an oversized payload
+        # before it runs. The guard has to use a LOWER bound on the decoded size,
+        # or it rejects payloads that fit: percent-escaping inflates a payload
+        # up to 3x, so the raw length overstates it. Unescaping shrinks text by
+        # at most 3x (each `%XY` triplet becomes one character), so the body is
+        # at least len(payload) / 3 long, and a body of n characters decodes to
+        # at least n // 4 * 3 - 2 bytes. len() is O(1); the exact check below
+        # makes the final call.
+        if (len(payload) // 3) // 4 * 3 - 2 > max_bytes:
             raise UrlValidationError(
                 f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
             )
@@ -99,16 +110,21 @@ def decode_data_uri(url: str, max_bytes: int | None = None) -> bytes:
         raise UrlValidationError(f"Malformed base64 in data URI: {exc}") from exc
 
 
-async def read_local_media_bytes(url: str, policy: UrlValidationPolicy) -> bytes:
+async def read_local_media_bytes(
+    url: str, policy: UrlValidationPolicy, *, max_bytes: int | None = None
+) -> bytes:
     """Return the bytes behind a ``file://`` or ``data:`` media URL.
 
+    ``max_bytes`` bounds the result for both schemes, as ``fetch_bytes`` bounds
+    a download, so a source cannot get past the limit by being local.
+
     Raises ``UrlValidationError`` when the scheme is unsupported, when local
-    access is disabled or the path escapes ``allowed_local_path``, or when a
-    data URI is malformed.
+    access is disabled or the path escapes ``allowed_local_path``, when a data
+    URI is malformed, or when the content exceeds ``max_bytes``.
     """
     scheme = urlparse(url).scheme
     if scheme == "data":
-        return decode_data_uri(url)
+        return decode_data_uri(url, max_bytes=max_bytes)
     if scheme != "file":
         raise UrlValidationError(f"Unsupported local media scheme: {scheme!r}")
 
@@ -116,4 +132,56 @@ async def read_local_media_bytes(url: str, policy: UrlValidationPolicy) -> bytes
     # check below is what actually authorizes the read.
     parsed = urlparse(url)
     path = validate_local_path(url2pathname(parsed.path), policy)
-    return await asyncio.to_thread(path.read_bytes)
+    return await asyncio.to_thread(_read_bounded, path, max_bytes)
+
+
+def _read_bounded(path: Path, max_bytes: int | None) -> bytes:
+    # Read one byte past the bound rather than trusting st_size: the file can
+    # grow between a stat and the read, and a FIFO or device reports no size.
+    with path.open("rb") as fh:
+        data = fh.read() if max_bytes is None else fh.read(max_bytes + 1)
+    if max_bytes is not None and len(data) > max_bytes:
+        raise UrlValidationError(
+            f"Media exceeds the {max_bytes} byte read limit: {describe_media_source(path.as_uri())}"
+        )
+    return data
+
+
+async def load_media_bytes(
+    url: str,
+    policy: UrlValidationPolicy,
+    *,
+    timeout: float,
+    max_bytes: int | None,
+) -> bytes:
+    """Validate a client media URL and return its bytes.
+
+    What is checked, for every scheme ``validate_media_url`` accepts:
+
+    - http(s): the URL and each redirect hop against ``policy`` (scheme, blocked
+      hostnames, every resolved address against the blocked ranges), and the
+      addresses again at connect time, so a DNS answer that changes between
+      check and connect is refused. A proxied fetch is refused unless the
+      deployment trusts the proxy to enforce destinations
+      (``DYN_MM_TRUST_EGRESS_PROXY``).
+    - ``data:``: the encoded length (``DYN_MM_MAX_DATA_URL_MB``), then the
+      decoded size against ``max_bytes``.
+    - ``file://`` and bare paths: refused unless ``policy`` allows a local
+      prefix; the resolved path must stay inside it; the read is bounded.
+
+    ``max_bytes`` bounds the result for every scheme and is enforced while
+    reading, never after buffering. It is required so each caller states the
+    limit it owns; ``None`` deliberately removes it.
+
+    Raises ``UrlValidationError`` (a ``ValueError``: the client's source was
+    refused) or, for http(s), the ``HttpError`` family. Callers map those to
+    their own error contract; ``HttpConfigurationError`` is an operator fault
+    and must not be reported to the client as a bad request.
+    """
+    normalized = await validate_media_url(url, policy)
+    if urlparse(normalized).scheme in ("http", "https"):
+        return await fetch_bytes(
+            normalized, timeout, policy=policy, max_bytes=max_bytes
+        )
+    # validate_media_url returns only http(s), data: or file://.
+    return await read_local_media_bytes(normalized, policy, max_bytes=max_bytes)
