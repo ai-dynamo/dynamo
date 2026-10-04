@@ -17,6 +17,7 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::forward::ForwardRoutes;
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
@@ -75,23 +76,34 @@ struct UnmatchedRouteState {
     /// Base path of the Anthropic Messages API, or `None` when those endpoints
     /// are disabled and every miss belongs to the OpenAI surface.
     anthropic_path: Option<Arc<str>>,
+    /// Prefixes forwarded to upstream servers (`DYN_HTTP_FORWARD_ROUTES`).
+    forward_routes: Option<Arc<ForwardRoutes>>,
+    /// Ends forwarded streams and tunnels on shutdown.
+    cancel_token: CancellationToken,
 }
 
-/// Returns a protocol-compatible JSON `404` error response for an
-/// unmatched route.
+/// Forwards the request when a configured prefix covers it; otherwise
+/// returns a protocol-compatible JSON `404` error response.
 ///
 /// Requests under the configured Anthropic Messages path receive an Anthropic
 /// error envelope. All other requests receive an OpenAI-compatible envelope.
 async fn unmatched_route_fallback(
     axum::extract::State(state): axum::extract::State<UnmatchedRouteState>,
-    method: axum::http::Method,
-    uri: axum::http::Uri,
+    request: axum::extract::Request,
 ) -> axum::response::Response {
+    let request = match &state.forward_routes {
+        Some(routes) => match routes.forward(request, state.cancel_token.clone()).await {
+            Ok(response) => return response,
+            Err(request) => request,
+        },
+        None => request,
+    };
+    let (method, uri) = (request.method(), request.uri());
     match state.anthropic_path.as_deref() {
         Some(path) if path_within_namespace(uri.path(), path) => {
-            super::anthropic::unmatched_route_response(&method, &uri)
+            super::anthropic::unmatched_route_response(method, uri)
         }
-        _ => super::openai::unmatched_route_response(&method, &uri).into_response(),
+        _ => super::openai::unmatched_route_response(method, uri).into_response(),
     }
 }
 
@@ -1487,6 +1499,8 @@ impl HttpServiceConfigBuilder {
                         .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string())
                         .into()
                 }),
+                forward_routes: ForwardRoutes::from_env()?.map(Arc::new),
+                cancel_token: state.cancel_token().clone(),
             })
             .layer(
                 // Use the inference span maker so 404s retain method, URI, and request ID

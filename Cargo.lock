@@ -2733,6 +2733,8 @@ dependencies = [
  "half",
  "hf-hub 0.4.3",
  "http-body-util",
+ "hyper 1.10.1",
+ "hyper-util",
  "image",
  "indicatif 0.18.4",
  "insta",

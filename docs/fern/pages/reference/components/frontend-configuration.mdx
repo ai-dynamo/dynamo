@@ -48,6 +48,21 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
   Environment variable: `DYN_TLS_CLIENT_CA_CERT_PATH`
 </ParamField>
 
+<ParamField path="--forward-route" type="string" default="[]">
+  Reverse-proxy a path prefix to an upstream HTTP server, as `PREFIX=URL` (for example
+  `/v1/custom=http://127.0.0.1:8080`). Use it to expose backend-specific APIs that the Frontend
+  does not implement. A prefix matches whole path segments, and the longest prefix wins. Built-in
+  routes always take precedence: only requests that no Frontend route matches are forwarded, with
+  their method, path, query, headers, and body. The response, including SSE, is streamed back.
+  Protocol upgrades such as WebSocket are tunnelled to the upstream. If the upstream is unreachable,
+  the Frontend returns `502`. Paths containing `.` or `..` segments are not forwarded. Request
+  bodies are subject to `DYN_HTTP_BODY_LIMIT_MB`. Repeat the option to forward multiple prefixes;
+  entries from the option and the environment variable are combined. Invalid or duplicate entries
+  fail startup.
+
+  Environment variable: `DYN_HTTP_FORWARD_ROUTES` accepts whitespace-separated values.
+</ParamField>
+
 HTTP client authentication is configured independently of internal TCP and NATS
 mTLS. These HTTP options do not configure either internal transport.
 

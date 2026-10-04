@@ -103,6 +103,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    forward_routes: list[str]
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -505,6 +506,22 @@ class FrontendArgGroup(ArgGroup):
                 "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
                 "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
                 "whitespace-separated values."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--forward-route",
+            env_var="DYN_HTTP_FORWARD_ROUTES",
+            default=[],
+            dest="forward_routes",
+            action="append",
+            help=(
+                "Reverse-proxy a path prefix to an upstream HTTP server, as "
+                "PREFIX=URL (e.g. /v1/custom=http://127.0.0.1:8080). Requests "
+                "no built-in route matches are forwarded with their method, "
+                "query, headers, and streamed body. May be repeated. "
+                "DYN_HTTP_FORWARD_ROUTES accepts whitespace-separated values."
             ),
         )
 

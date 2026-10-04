@@ -480,6 +480,9 @@ async def async_main():
     frontend_route_extensions = load_frontend_route_extensions(
         config.frontend_route_extensions
     )
+    if config.forward_routes:
+        # Read by the Rust HTTP service when it builds its routes.
+        os.environ["DYN_HTTP_FORWARD_ROUTES"] = " ".join(config.forward_routes)
 
     try:
         if config.interactive:
