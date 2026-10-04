@@ -20,13 +20,13 @@ export interface NightlyBackendBuild {
 }
 
 export const NIGHTLY_BACKEND_BUILDS: NightlyBackendBuild[] = [
-  { backend: "sglang", backendVersion: "0.5.19", dynamo: "1.6.0.dev20261002", date: "Oct 2, 2026", tag: "20261002-e07d871", latest: true },
+  { backend: "sglang", backendVersion: "0.5.19", dynamo: "1.6.0.dev20261003", date: "Oct 3, 2026", tag: "20261003-88750c1", latest: true },
   { backend: "sglang", backendVersion: "0.5.18", dynamo: "1.5.0.dev20260908", date: "Sep 8, 2026", tag: "20260908-946acce" },
   { backend: "sglang", backendVersion: "0.5.17", dynamo: "1.5.0.dev20260826", date: "Aug 26, 2026", tag: "20260826-27f09d5" },
-  { backend: "trtllm", backendVersion: "1.3.0rc28", dynamo: "1.6.0.dev20261002", date: "Oct 2, 2026", tag: "20261002-e07d871", latest: true },
+  { backend: "trtllm", backendVersion: "1.3.0rc29", dynamo: "1.6.0.dev20261003", date: "Oct 3, 2026", tag: "20261003-88750c1", latest: true },
+  { backend: "trtllm", backendVersion: "1.3.0rc28", dynamo: "1.6.0.dev20261002", date: "Oct 2, 2026", tag: "20261002-e07d871" },
   { backend: "trtllm", backendVersion: "1.3.0rc27", dynamo: "1.6.0.dev20260929", date: "Sep 29, 2026", tag: "20260929-51b83df" },
-  { backend: "trtllm", backendVersion: "1.3.0rc26", dynamo: "1.6.0.dev20260923", date: "Sep 23, 2026", tag: "20260923-5175723" },
-  { backend: "vllm", backendVersion: "0.30.0", dynamo: "1.6.0.dev20261002", date: "Oct 2, 2026", tag: "20261002-e07d871", latest: true },
+  { backend: "vllm", backendVersion: "0.30.0", dynamo: "1.6.0.dev20261003", date: "Oct 3, 2026", tag: "20261003-88750c1", latest: true },
   { backend: "vllm", backendVersion: "0.29.0", dynamo: "1.6.0.dev20260928", date: "Sep 28, 2026", tag: "20260928-b75173c" },
   { backend: "vllm", backendVersion: "0.28.0", dynamo: "1.5.0.dev20260914", date: "Sep 14, 2026", tag: "20260914-11b85b9" },
 ];
