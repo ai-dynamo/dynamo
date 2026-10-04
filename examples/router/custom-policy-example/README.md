@@ -32,7 +32,6 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
-| [`fetch-to-idle`](fetch-to-idle/README.md) | Move a request off a busy cache holder and fetch its KV prefix to the new worker (experimental fetch API) |
 
 The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
