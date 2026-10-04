@@ -953,6 +953,36 @@ class TestGenerateLocally:
         assert chunks[-1].get("engine_data", {}).get("kv_cache_hit") == expected
 
     @pytest.mark.asyncio
+    async def test_audio_inputs_reach_generate_async(self):
+        handler = self._make_handler()
+        audio = object()
+        handler.multimodal_processor = MagicMock()
+        handler.multimodal_processor.process_openai_request = mock.AsyncMock(
+            return_value={
+                "prompt": "<|audio|> Transcribe this",
+                "multi_modal_data": {"audio": [(audio, 16000)]},
+            }
+        )
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+
+        request = {
+            "token_ids": [1],
+            "multi_modal_data": {"audio_url": [{"Url": "data:audio/wav;base64,AA=="}]},
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks
+        inputs = handler.engine.llm.generate_async.call_args.kwargs["inputs"]
+        assert inputs["multi_modal_data"]["audio"] == [(audio, 16000)]
+        assert inputs["prompt"] == "<|audio|> Transcribe this"
+
+    @pytest.mark.asyncio
     async def test_health_check_gets_priority_1(self):
         """TrtllmHealthCheckPayload → generate_locally → generate_async priority=1.0."""
         handler = self._make_handler()

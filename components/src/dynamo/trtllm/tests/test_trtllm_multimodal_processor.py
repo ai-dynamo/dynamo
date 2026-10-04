@@ -5,10 +5,13 @@
 propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
 
 import base64
+import io
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
+import soundfile as sf
 import torch
 
 # multimodal_processor imports tensorrt_llm, whose import needs CUDA. -m selection
@@ -52,6 +55,90 @@ def test_image_loader_uses_trtllm_configured_limit(monkeypatch) -> None:
         enable_frontend_decoding=False,
         max_bytes=200 * 1024 * 1024,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_type", ["data", "https"])
+async def test_audio_is_forwarded_to_trtllm_processor(source_type, monkeypatch) -> None:
+    wav = io.BytesIO()
+    sf.write(wav, np.zeros(1600, dtype=np.float32), 16000, format="WAV")
+    audio_bytes = wav.getvalue()
+    if source_type == "data":
+        url = "data:audio/wav;base64," + base64.b64encode(audio_bytes).decode()
+    else:
+        url = "https://example.com/speech.wav"
+        monkeypatch.setattr(mmp, "validate_media_url", AsyncMock(return_value=url))
+        fetch = AsyncMock(return_value=audio_bytes)
+        monkeypatch.setattr(mmp, "fetch_bytes", fetch)
+
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    result = await processor.process_openai_request(
+        {
+            "token_ids": [1, 2],
+            "extra_args": {"formatted_prompt": "<|audio|> Transcribe this"},
+            "multi_modal_data": {"audio_url": [{"Url": url}]},
+        },
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert result["prompt"] == "<|audio|> Transcribe this"
+    assert "prompt_token_ids" not in result
+    waveform, sample_rate = result["multi_modal_data"]["audio"][0]
+    assert waveform.shape == (1600,)
+    assert sample_rate == 16000
+    if source_type == "https":
+        fetch.assert_awaited_once_with(
+            url,
+            30.0,
+            policy=processor._url_policy,
+            max_bytes=processor.max_file_size_bytes,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ["AAAA!!!!", "AAAA"])
+async def test_invalid_audio_returns_client_error(payload) -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {
+                "extra_args": {"formatted_prompt": "<|audio|> Transcribe this"},
+                "multi_modal_data": {
+                    "audio_url": [{"Url": "data:audio/wav;base64," + payload}]
+                },
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_audio_with_remote_image_embeddings_fails_closed() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"multi_modal_data": {"audio_url": [{"Url": "https://example.com/a.wav"}]}},
+            embeddings=object(),
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
 
 
 @pytest.mark.asyncio

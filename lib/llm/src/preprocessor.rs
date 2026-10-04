@@ -26,7 +26,7 @@ use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionToolChoiceOption, EncodingFormat, InputAudioFormat,
 };
 use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
 use dynamo_runtime::config::{
@@ -234,8 +234,8 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
-    fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
-        match self {
+    fn media_info(&self) -> Result<Option<(&'static str, Option<url::Url>, Option<String>)>> {
+        Ok(match self {
             Self::User(part) => match *part {
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => Some((
                     "image_url",
@@ -252,6 +252,18 @@ impl<'a> MultimodalContentPart<'a> {
                     part.audio_url.as_ref().map(|media| media.url.clone()),
                     part.uuid.clone(),
                 )),
+                ChatCompletionRequestUserMessageContentPart::InputAudio(part) => {
+                    let format = match &part.input_audio.format {
+                        InputAudioFormat::Wav => "wav",
+                        InputAudioFormat::Mp3 => "mpeg",
+                    };
+                    let url = url::Url::parse(&format!(
+                        "data:audio/{format};base64,{}",
+                        part.input_audio.data
+                    ))
+                    .map_err(|_| invalid_argument_error("Invalid input_audio data"))?;
+                    Some(("audio_url", Some(url), None))
+                }
                 _ => None,
             },
             Self::Tool(part) => match *part {
@@ -272,7 +284,7 @@ impl<'a> MultimodalContentPart<'a> {
                 )),
                 _ => None,
             },
-        }
+        })
     }
 }
 
@@ -1502,12 +1514,14 @@ fn attach_request_context_metadata(
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
-/// Other trait methods delegate to the inner request, except typed_messages:
-/// rendering must use the transformed messages rather than the original slice.
+/// Audio content parts are rendered as the model's audio placeholder.
+/// Other trait methods delegate to the inner request, rendering must use
+/// the transformed messages rather than the original slice.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
     continue_final_message: bool,
+    render_audio_placeholder: bool,
 }
 
 impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
@@ -1518,6 +1532,22 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     fn messages(&self) -> minijinja::value::Value {
         let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
             .unwrap_or_default();
+        if self.render_audio_placeholder
+            && let Some(messages) = json.as_array_mut()
+        {
+            for message in messages {
+                if let Some(parts) = message.get_mut("content").and_then(|v| v.as_array_mut()) {
+                    for part in parts {
+                        if matches!(
+                            part.get("type").and_then(|v| v.as_str()),
+                            Some("input_audio" | "audio_url")
+                        ) {
+                            *part = serde_json::json!({"type": "audio"});
+                        }
+                    }
+                }
+            }
+        }
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -3259,11 +3289,32 @@ impl OpenAIPreprocessor {
                 "Cannot continue the final message because the prompt formatter moves it before other messages",
             ));
         }
-        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
+        let render_audio_placeholder = request.typed_messages().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                multimodal_content_parts(message).is_some_and(|mut parts| {
+                    parts.any(|part| {
+                        matches!(
+                            part,
+                            MultimodalContentPart::User(
+                                ChatCompletionRequestUserMessageContentPart::InputAudio(_)
+                                    | ChatCompletionRequestUserMessageContentPart::AudioUrl(_)
+                            ) | MultimodalContentPart::Tool(
+                                ChatCompletionRequestToolMessageContentPart::AudioUrl(_)
+                            )
+                        )
+                    })
+                })
+            })
+        });
+        let formatted_prompt = if self.normalize_tool_call_args
+            || continue_final
+            || render_audio_placeholder
+        {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
                 continue_final_message: continue_final,
+                render_audio_placeholder,
             })?
         } else {
             self.apply_template_inner(request)?
@@ -3339,6 +3390,11 @@ impl OpenAIPreprocessor {
                     {
                         *url = serde_json::Value::String(String::new());
                     }
+                }
+                if let Some(audio) = part.get_mut("input_audio")
+                    && let Some(data) = audio.get_mut("data")
+                {
+                    *data = serde_json::Value::String(String::new());
                 }
             }
         }
@@ -3466,7 +3522,7 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for content_part in content_parts {
-                let Some((type_str, url, uuid)) = content_part.media_info() else {
+                let Some((type_str, url, uuid)) = content_part.media_info()? else {
                     continue;
                 };
 
@@ -7603,7 +7659,35 @@ impl
 
 #[cfg(test)]
 mod strip_tests {
-    use super::OpenAIPreprocessor;
+    use super::{NormalizedArgsRequest, OpenAIPreprocessor};
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_renderer::OAIChatLikeRequest;
+
+    #[test]
+    fn audio_parts_render_as_audio_placeholders() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "transcribe"},
+                    {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+                    {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+                ]
+            }]
+        }))
+        .unwrap();
+        let wrapped = NormalizedArgsRequest {
+            inner: &request,
+            normalize_tool_call_args: false,
+            continue_final_message: false,
+            render_audio_placeholder: true,
+        };
+        assert!(wrapped.typed_messages().is_none());
+        let messages = serde_json::to_value(wrapped.messages()).unwrap();
+        assert_eq!(messages[0]["content"][1], serde_json::json!({"type": "audio"}));
+        assert_eq!(messages[0]["content"][2], serde_json::json!({"type": "audio"}));
+    }
 
     #[test]
     fn test_strip_inline_data_urls_replaces_data_urls() {
@@ -7628,7 +7712,8 @@ mod strip_tests {
             "role": "user",
             "content": [
                 {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA..."}},
-                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}},
+                {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}
             ]
         }]);
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
@@ -7638,6 +7723,7 @@ mod strip_tests {
             parts[1]["audio_url"]["url"],
             "https://example.com/audio.wav"
         );
+        assert_eq!(parts[2]["input_audio"]["data"], "");
     }
 
     #[test]
@@ -11470,6 +11556,7 @@ mod tests {
                     inner: request,
                     normalize_tool_call_args: false,
                     continue_final_message: true,
+                    render_audio_placeholder: false,
                 })
                 .unwrap()
         } else {
