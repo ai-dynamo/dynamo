@@ -50,6 +50,9 @@ _TTS_VARIANTS = {
 _TTS_VARIANT_PATH_SUFFIX = re.compile(
     r"(?:^|[-_.])(custom[-_.]?voice|voice[-_.]?design|base)$"
 )
+# Longest reference clip decoded. Mirrors vLLM-Omni's _REF_AUDIO_MAX_DURATION and
+# bounds what a client-supplied clip can claim in memory.
+_TTS_REF_AUDIO_MAX_SECONDS = 30
 
 # Fallback language set used when model config is unavailable.
 _TTS_LANGUAGES_FALLBACK = {
@@ -508,7 +511,12 @@ class AudioGenerationHandler:
             )
 
         try:
-            wav_data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+            with sf.SoundFile(io.BytesIO(audio_bytes)) as audio:
+                sr = audio.samplerate
+                max_frames = int(sr * _TTS_REF_AUDIO_MAX_SECONDS)
+                # One frame past the cap, so an overlong clip is refused
+                # without decoding the rest of it.
+                wav_data = audio.read(max_frames + 1, dtype="float32", always_2d=True)
         except sf.LibsndfileError as exc:
             # LibsndfileError is a RuntimeError, so without this a payload that
             # is valid base64 but not audio still reaches the client as a 500.
@@ -516,9 +524,14 @@ class AudioGenerationHandler:
                 f"ref_audio is not readable audio ({len(audio_bytes)} bytes): "
                 "unrecognised format"
             ) from exc
-        # A plain list survives the trip to the engine process; a NumPy array
-        # nested in the prompt arrives there as a bare descriptor.
-        return wav_data.tolist(), int(sr)
+        if len(wav_data) > max_frames:
+            raise ValueError(
+                f"ref_audio too long (max {_TTS_REF_AUDIO_MAX_SECONDS} seconds)"
+            )
+        # Qwen3-TTS takes a mono waveform. A plain list survives the trip to the
+        # engine process; a NumPy array nested in the prompt arrives there as a
+        # bare descriptor.
+        return wav_data.mean(axis=1).tolist(), int(sr)
 
     def _estimate_tts_prompt_len(self, tts_params: Dict[str, Any]) -> int:
         """Estimate Qwen3-TTS prompt length using its tokenizer.

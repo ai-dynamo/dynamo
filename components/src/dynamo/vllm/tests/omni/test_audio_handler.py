@@ -718,7 +718,7 @@ class TestResolveRefAudio:
     """ref_audio is client-supplied, so every failure must be a clean rejection."""
 
     @staticmethod
-    def _wav_bytes(samples=1600, rate=16000):
+    def _wav_bytes(samples=1600, rate=16000, channels=1):
         import io
 
         import numpy as np
@@ -727,9 +727,8 @@ class TestResolveRefAudio:
         buf = io.BytesIO()
         # Random content so the base64 payload really contains '+' and '/'.
         rng = np.random.default_rng(0)
-        sf.write(
-            buf, rng.standard_normal(samples).astype("float32"), rate, format="WAV"
-        )
+        shape = (samples,) if channels == 1 else (samples, channels)
+        sf.write(buf, rng.standard_normal(shape).astype("float32"), rate, format="WAV")
         return buf.getvalue()
 
     @staticmethod
@@ -751,6 +750,32 @@ class TestResolveRefAudio:
             handler._resolve_ref_audio(self._data_uri(self._wav_bytes()))
         )
         assert type(data) is list and type(data[0]) is float
+
+    def test_downmixes_multichannel_audio_to_mono(self):
+        import io
+
+        import numpy as np
+        import soundfile as sf
+
+        handler = _make_audio_handler()
+        wav = self._wav_bytes(channels=2)
+        data, _ = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
+        stereo, _ = sf.read(io.BytesIO(wav), dtype="float32")
+        assert type(data[0]) is float
+        np.testing.assert_allclose(data, stereo.mean(axis=1), rtol=1e-6)
+
+    def test_accepts_a_clip_exactly_at_the_duration_limit(self):
+        handler = _make_audio_handler()
+        wav = self._wav_bytes(samples=30 * 8000, rate=8000)
+        data, _ = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
+        assert len(data) == 30 * 8000
+
+    def test_rejects_a_clip_over_the_duration_limit(self):
+        # The encoded size is fine; the decoded waveform is what costs memory.
+        handler = _make_audio_handler()
+        wav = self._wav_bytes(samples=30 * 8000 + 1, rate=8000)
+        with pytest.raises(ValueError, match="too long"):
+            asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
 
     def test_decodes_a_percent_encoded_payload(self):
         # A data URI that travelled through a URL has '+' and '/' escaped.
