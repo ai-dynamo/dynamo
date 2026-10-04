@@ -542,7 +542,6 @@ impl NodeChildren {
         })
     }
 
-    /// Inserts or replaces the child for `key`.
     pub(super) fn insert(&self, key: LocalBlockHash, child: SharedNode) {
         let guard = epoch::pin();
         let current = self.load(&guard);
@@ -616,7 +615,6 @@ impl NodeChildren {
         }
     }
 
-    /// Unlinks the child for `key`, returning whether it was present.
     pub(super) fn remove(&self, key: &LocalBlockHash) -> bool {
         let guard = epoch::pin();
         let current = self.load(&guard);

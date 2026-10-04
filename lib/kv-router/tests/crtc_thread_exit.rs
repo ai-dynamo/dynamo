@@ -51,7 +51,6 @@ fn store(parent: Option<u64>, blocks: &[u64]) -> WorkerTask {
     }))
 }
 
-/// Runs `tasks` on a fresh event lane and waits for it to stop.
 fn run_lane(tree: &Arc<ConcurrentRadixTreeCompressed>, tasks: Vec<WorkerTask>) {
     let (events, receiver) = flume::unbounded();
     let lane = {
