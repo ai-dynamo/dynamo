@@ -2698,7 +2698,7 @@ pub(super) fn payload_too_large_error() -> ErrorResponse {
 }
 
 /// Returns the standard error response when the request body cannot be read.
-fn failed_to_read_request_body_error() -> ErrorResponse {
+pub(super) fn failed_to_read_request_body_error() -> ErrorResponse {
     ErrorMessage::from_http_error(
         ErrorClass::InvalidRequest,
         HttpError {

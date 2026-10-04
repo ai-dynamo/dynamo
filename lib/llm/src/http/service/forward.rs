@@ -76,6 +76,10 @@ impl ForwardRoutes {
             let prefix = prefix.trim_end_matches('/').to_string();
             let upstream = reqwest::Url::parse(url)
                 .map_err(|e| anyhow::anyhow!("invalid forward route URL {url:?}: {e}"))?;
+            // Never echo a URL with credentials: they would reach the logs.
+            if !upstream.username().is_empty() || upstream.password().is_some() {
+                anyhow::bail!("forward route URL for {prefix:?} must not contain credentials");
+            }
             if !matches!(upstream.scheme(), "http" | "https")
                 || upstream.query().is_some()
                 || upstream.fragment().is_some()
@@ -112,23 +116,25 @@ impl ForwardRoutes {
         }))
     }
 
-    /// The upstream URL for `path` and `query`, or `None` when no prefix
-    /// covers `path`. Prefixes match whole segments: `/v1/custom` covers
-    /// `/v1/custom` and `/v1/custom/abc`, not `/v1/customx`. Paths with dot
-    /// segments or backslashes are never forwarded: URL normalization would
-    /// let them escape the prefix.
     pub(crate) fn covers(&self, path: &str) -> bool {
         self.upstream_url(path, None).is_some()
     }
 
+    /// The upstream URL for `path` and `query`, or `None` when no prefix
+    /// covers `path`. Prefixes match whole segments: `/v1/custom` covers
+    /// `/v1/custom` and `/v1/custom/abc`, not `/v1/customx`. Paths with
+    /// backslashes or dot segments, including those separated by an encoded
+    /// `/` or `\`, are never forwarded: normalization here or upstream would
+    /// let them escape the prefix. Other encoded bytes are forwarded as sent.
     fn upstream_url(&self, path: &str, query: Option<&str>) -> Option<reqwest::Url> {
+        let separated = path
+            .to_ascii_lowercase()
+            .replace("%2f", "/")
+            .replace("%5c", "/");
         if path.contains('\\')
-            || path.split('/').any(|segment| {
-                matches!(
-                    segment.to_ascii_lowercase().as_str(),
-                    "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e."
-                )
-            })
+            || separated
+                .split('/')
+                .any(|segment| matches!(segment, "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e."))
         {
             return None;
         }
@@ -165,11 +171,37 @@ impl ForwardRoutes {
         let declared = request
             .headers()
             .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
-        if declared.is_some_and(|length| length > limit) {
+            .and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
+        let (mut parts, body) = request.into_parts();
+        let exact = HttpBody::size_hint(&body).exact();
+        if declared
+            .or(exact)
+            .is_some_and(|length| length > limit as u64)
+        {
             return Ok(super::openai::payload_too_large_error().into_response());
         }
-        let (mut parts, body) = request.into_parts();
+        // A known length is enforced by the server, so that body streams. An
+        // unknown one is read within the limit first, so the upstream never
+        // sees a partial body or answers before the limit is decided.
+        let body = match exact {
+            Some(0) => None,
+            Some(_) => Some(reqwest::Body::wrap_stream(body.into_data_stream())),
+            None => {
+                match http_body_util::BodyExt::collect(http_body_util::Limited::new(body, limit))
+                    .await
+                {
+                    Ok(collected) => Some(reqwest::Body::from(collected.to_bytes())),
+                    Err(err) if err.is::<http_body_util::LengthLimitError>() => {
+                        return Ok(super::openai::payload_too_large_error().into_response());
+                    }
+                    Err(_) => {
+                        return Ok(
+                            super::openai::failed_to_read_request_body_error().into_response()
+                        );
+                    }
+                }
+            }
+        };
         // Offer an upgrade upstream only when this connection can be spliced.
         let upgrade = parts
             .headers
@@ -192,13 +224,9 @@ impl ForwardRoutes {
             None => &self.client,
         };
         let mut builder = client.request(parts.method, url.clone()).headers(headers);
-        // Send a body only when there is one, so a bodiless GET is not
-        // re-sent with `transfer-encoding: chunked`.
-        if HttpBody::size_hint(&body).exact() != Some(0) {
-            let body = http_body_util::Limited::new(body, limit);
-            builder = builder.body(reqwest::Body::wrap_stream(
-                http_body_util::BodyDataStream::new(body),
-            ));
+        // No body at all for a bodiless request, not an empty chunked one.
+        if let Some(body) = body {
+            builder = builder.body(body);
         }
         // An upstream that never answers must not outlive the drain window.
         let sent = tokio::select! {
@@ -209,9 +237,6 @@ impl ForwardRoutes {
         };
         let upstream = match sent {
             Ok(upstream) => upstream,
-            Err(err) if exceeded_body_limit(&err) => {
-                return Ok(super::openai::payload_too_large_error().into_response());
-            }
             Err(err) => {
                 tracing::warn!(%url, error = %err, "forward route upstream request failed");
                 return Ok(bad_gateway());
@@ -232,34 +257,30 @@ impl ForwardRoutes {
                 });
                 Body::empty()
             }
-            _ => Body::from_stream(
-                upstream
-                    .bytes_stream()
-                    .take_until(cancel.cancelled_owned())
-                    .map(move |chunk| {
-                        let _guard = &guard;
-                        chunk
-                    }),
-            ),
+            // Cut off by shutdown, the body ends in an error rather than a
+            // clean end, so the client can tell it was truncated.
+            _ => Body::from_stream(futures::stream::unfold(
+                Some((Box::pin(upstream.bytes_stream()), cancel, guard)),
+                |state| async move {
+                    let (mut chunks, cancel, guard) = state?;
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => Some((
+                            Err(std::io::Error::other("frontend shut down mid-response")),
+                            None,
+                        )),
+                        chunk = chunks.next() => chunk.map(|chunk| {
+                            (chunk.map_err(std::io::Error::other), Some((chunks, cancel, guard)))
+                        }),
+                    }
+                },
+            )),
         };
         let mut response = Response::new(body);
         *response.status_mut() = status;
         *response.headers_mut() = headers;
         Ok(response)
     }
-}
-
-/// Whether a failed upstream send was cut short by the client body exceeding
-/// `DYN_HTTP_BODY_LIMIT_MB`, rather than by the upstream.
-fn exceeded_body_limit(err: &(dyn std::error::Error + 'static)) -> bool {
-    let mut source = Some(err);
-    while let Some(err) = source {
-        if err.is::<http_body_util::LengthLimitError>() {
-            return true;
-        }
-        source = err.source();
-    }
-    false
 }
 
 /// Splices the client's upgraded connection to the upstream's until either
@@ -346,6 +367,10 @@ mod tests {
             );
         }
         assert!(ForwardRoutes::parse("  ").unwrap().is_none());
+        for secret in ["/a=http://user:hunter2@h:1", "/a=http://user@h:1"] {
+            let err = ForwardRoutes::parse(secret).err().unwrap().to_string();
+            assert!(!err.contains("hunter2") && !err.contains("user"), "{err}");
+        }
     }
 
     #[tokio::test]
@@ -598,6 +623,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forward_reports_shutdown_truncation_as_body_error() {
+        let upstream = axum::Router::new().route(
+            "/v1/custom/events",
+            axum::routing::get(|| async {
+                let first = futures::stream::once(async { Ok::<_, std::io::Error>("first") });
+                Body::from_stream(first.chain(futures::stream::pending()))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let routes = ForwardRoutes::parse(&format!("/v1/custom=http://{addr}"))
+            .unwrap()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let request = Request::builder()
+            .uri("/v1/custom/events")
+            .body(Body::empty())
+            .unwrap();
+        let response = routes
+            .forward(request, cancel.clone(), ())
+            .await
+            .ok()
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(&body.next().await.unwrap().unwrap()[..], b"first");
+        cancel.cancel();
+        let end = tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .expect("cancellation ends the body");
+        assert!(
+            matches!(end, Some(Err(_))),
+            "truncation must not look like a clean end"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn forward_checks_unknown_length_bodies_before_the_upstream_answers() {
+        temp_env::async_with_vars([(env_llm::DYN_HTTP_BODY_LIMIT_MB, Some("1"))], async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            // Answers with the request head's framing as soon as the head
+            // arrives, without waiting for the body.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut conn, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let mut head = Vec::new();
+                        while !head.ends_with(b"\r\n\r\n") {
+                            head.push(conn.read_u8().await.unwrap());
+                        }
+                        let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+                        let framing = head
+                            .lines()
+                            .find(|l| l.starts_with("content-length:") || l.starts_with("transfer-encoding:"))
+                            .unwrap_or("none")
+                            .to_string();
+                        let reply = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{framing}",
+                            framing.len()
+                        );
+                        let _ = conn.write_all(reply.as_bytes()).await;
+                    });
+                }
+            });
+            let routes = ForwardRoutes::parse(&format!("/v1/custom=http://{addr}"))
+                .unwrap()
+                .unwrap();
+            let chunked = |size: usize| {
+                let chunks = vec![b'x'; size]
+                    .chunks(64 * 1024)
+                    .map(|c| Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(c)))
+                    .collect::<Vec<_>>();
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/custom/push")
+                    .body(Body::from_stream(futures::stream::iter(chunks)))
+                    .unwrap()
+            };
+
+            let response = routes
+                .forward(chunked(2 * 1024 * 1024), CancellationToken::new(), ())
+                .await
+                .ok()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+            // Within the limit, the whole body is sent with its length.
+            let response = routes
+                .forward(chunked(100 * 1024), CancellationToken::new(), ())
+                .await
+                .ok()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], format!("content-length: {}", 100 * 1024).as_bytes());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn forward_send_ends_when_cancelled() {
         // Accepts connections but never answers.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -694,6 +824,9 @@ mod tests {
             "/v1/custom/%2e/x",
             "/v1/custom/..\\..\\metrics",
             "/v1/custom/a\\b",
+            "/v1/custom/a%2f..%2fmetrics",
+            "/v1/custom/a%5C..%5Cmetrics",
+            "/v1/custom/a%2F%2e%2E%2Fmetrics",
         ] {
             assert_eq!(
                 url(&routes, path, None),

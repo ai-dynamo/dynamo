@@ -57,14 +57,26 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
 <ParamField path="--forward-route" type="string" default="[]">
   Reverse-proxy a path prefix to an upstream HTTP server, as `PREFIX=URL` (for example
   `/v1/custom=http://127.0.0.1:8080`). Use it to expose backend-specific APIs that the Frontend
-  does not implement. A prefix matches whole path segments, and the longest prefix wins. Built-in
-  routes always take precedence: only requests that no Frontend route matches are forwarded, with
-  their method, path, query, headers, and body. The response, including SSE, is streamed back.
-  Protocol upgrades such as WebSocket are tunnelled to the upstream. If the upstream is unreachable,
-  the Frontend returns `502`. Paths containing `.` or `..` segments or backslashes are not
-  forwarded. Request
-  bodies are subject to `DYN_HTTP_BODY_LIMIT_MB`. Repeat the option to forward multiple prefixes;
-  the option replaces the environment variable. Invalid or duplicate entries fail startup.
+  does not implement. Repeat the option to forward multiple prefixes; the option replaces the
+  environment variable. Invalid or duplicate entries, and URLs that contain credentials, fail
+  startup.
+
+  A prefix matches whole path segments, and the longest prefix wins. Built-in routes always take
+  precedence: only requests that no Frontend route matches are forwarded, with their method, path,
+  query, end-to-end headers, and body. Responses, including SSE, are streamed back, and protocol
+  upgrades such as WebSocket are tunnelled over HTTP/1.1. Paths containing `.` or `..` segments,
+  including ones separated by an encoded `/` or `\`, or backslashes are not forwarded.
+
+  Request bodies are subject to `DYN_HTTP_BODY_LIMIT_MB` (`413`); a body without a known length is
+  read within that limit before it is sent. The Frontend returns `502` if the upstream is
+  unreachable, and `503` while it drains for shutdown. Open forwarded responses and tunnels are
+  held for up to `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, then closed; a response cut short
+  ends with an error rather than a clean end of stream.
+
+  The proxy adds no `X-Forwarded-*` headers, passes redirects and other responses through
+  unchanged, uses one upstream per prefix, and follows the standard `HTTP_PROXY`/`HTTPS_PROXY`
+  environment variables. There are no per-route TLS settings or credentials, no timeouts other
+  than a connect timeout, and no retries.
 
   Environment variable: `DYN_HTTP_FORWARD_ROUTES` accepts whitespace-separated values.
 </ParamField>
