@@ -95,7 +95,7 @@ async fn unmatched_route_fallback(
         Some(routes) => {
             let permit = state.service.acquire_inflight();
             match routes
-                .forward(request, state.service.cancel_token().clone(), permit)
+                .forward(request, state.service.stopping_token().clone(), permit)
                 .await
             {
                 Ok(response) => return response,
@@ -342,6 +342,9 @@ pub struct ServiceObserver {
     stage: AtomicU8,
     inflight_inference: AtomicU64,
     inflight_zero: Notify,
+    /// Cancelled on entering `Stopping`, after inflight bodies drained or the
+    /// graceful shutdown timeout expired.
+    stopping: CancellationToken,
 }
 
 impl Default for ServiceObserver {
@@ -350,6 +353,7 @@ impl Default for ServiceObserver {
             stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
             inflight_inference: AtomicU64::new(0),
             inflight_zero: Notify::new(),
+            stopping: CancellationToken::new(),
         }
     }
 }
@@ -391,6 +395,7 @@ impl ServiceObserver {
         );
         self.stage
             .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
+        self.stopping.cancel();
     }
 
     /// Track one admitted inference response body.
@@ -618,6 +623,12 @@ impl State {
 
     pub fn acquire_inflight(&self) -> InflightPermit {
         self.service_observer.acquire_inflight()
+    }
+
+    /// Cancelled once shutdown has drained (or timed out); unlike
+    /// [`Self::cancel_token`], it does not fire when shutdown begins.
+    pub fn stopping_token(&self) -> &CancellationToken {
+        &self.service_observer.stopping
     }
 
     pub fn inflight_count(&self) -> u64 {
@@ -2189,6 +2200,64 @@ mod tests {
         );
 
         handle.abort();
+    }
+
+    /// Verifies that shutdown holds an open forwarded stream through the drain
+    /// window and then ends it, when the service shares the runtime's token
+    /// (as the frontend entrypoint wires it).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_shutdown_drains_forwarded_stream_then_ends_it() {
+        use futures::StreamExt;
+
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("2"))],
+            async move {
+                // An event stream that never ends on its own.
+                let upstream = axum::Router::new().route(
+                    "/v1/custom/events",
+                    axum::routing::get(|| async {
+                        let first =
+                            futures::stream::once(async { Ok::<_, std::io::Error>("connected") });
+                        Body::from_stream(first.chain(futures::stream::pending()))
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let upstream_addr = listener.local_addr().unwrap();
+                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+                let runtime = CancellationToken::new();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder()
+                    .port(port)
+                    .cancel_token(Some(runtime.clone()))
+                    .forward_routes(Some(vec![format!("/v1/custom=http://{upstream_addr}")]))
+                    .build()
+                    .unwrap();
+                let handle = tokio::spawn({
+                    let runtime = runtime.clone();
+                    async move { service.run_with_listener(runtime, listener).await }
+                });
+
+                let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/events"))
+                    .await
+                    .expect("request failed");
+                assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"connected");
+
+                let started = std::time::Instant::now();
+                runtime.cancel();
+                let ended = tokio::time::timeout(Duration::from_secs(10), resp.chunk()).await;
+                let held = started.elapsed();
+                assert!(ended.is_ok(), "the stream must end after the drain window");
+                assert!(
+                    held >= Duration::from_millis(1500),
+                    "the stream must be held through the drain window, ended after {held:?}"
+                );
+                handle.await.unwrap().unwrap();
+            },
+        )
+        .await;
     }
 
     async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
