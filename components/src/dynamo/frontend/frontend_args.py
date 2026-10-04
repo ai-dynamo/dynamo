@@ -31,6 +31,19 @@ from dynamo.common.configuration.utils import (
 from . import __version__
 
 _U32_MAX = 2**32 - 1
+
+
+class _AppendReplacingDefault(argparse.Action):
+    """``append`` whose first CLI value replaces the env-derived default
+    instead of extending it."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = getattr(namespace, self.dest)
+        if items is self.default:
+            items = []
+        setattr(namespace, self.dest, [*items, values])
+
+
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
@@ -521,13 +534,13 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_HTTP_FORWARD_ROUTES",
             default=[],
             dest="forward_routes",
-            action="append",
+            action=_AppendReplacingDefault,
             help=(
                 "Reverse-proxy a path prefix to an upstream HTTP server, as "
                 "PREFIX=URL (e.g. /v1/custom=http://127.0.0.1:8080). Requests "
                 "no built-in route matches are forwarded with their method, "
-                "query, headers, and streamed body. May be repeated. "
-                "DYN_HTTP_FORWARD_ROUTES accepts whitespace-separated values."
+                "query, headers, and streamed body. May be repeated; replaces "
+                "DYN_HTTP_FORWARD_ROUTES, which accepts whitespace-separated values."
             ),
         )
 

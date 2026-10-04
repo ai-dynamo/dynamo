@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Reverse proxy for operator-configured path prefixes
-//! (`DYN_HTTP_FORWARD_ROUTES`), for backend-specific HTTP APIs the frontend
-//! does not implement. Built-in routes always win: a request is forwarded only
+//! Reverse proxy for operator-configured path prefixes (`--forward-route`, or
+//! `DYN_HTTP_FORWARD_ROUTES` when none is configured), for backend-specific
+//! HTTP APIs the frontend does not implement. Built-in routes always win: a request is forwarded only
 //! when no frontend route matched it. Protocol upgrades (e.g. WebSocket) are
 //! tunnelled: on the upstream's `101`, both connections are spliced together.
 
@@ -40,16 +40,20 @@ struct ForwardRoute {
     upstream: reqwest::Url,
 }
 
-/// Path prefixes forwarded verbatim (method, path, query, headers, streamed
-/// body) to an upstream HTTP server.
+/// Path prefixes forwarded to an upstream HTTP server with the request's
+/// method, path, query, end-to-end headers and streamed body.
 pub(crate) struct ForwardRoutes {
     routes: Vec<ForwardRoute>,
     client: reqwest::Client,
+    /// HTTP/1.1 only: an `https` upstream could otherwise negotiate HTTP/2,
+    /// which has no `Upgrade`.
+    upgrade_client: reqwest::Client,
 }
 
 impl ForwardRoutes {
-    /// The explicitly configured `PREFIX=URL` entries, or `DYN_HTTP_FORWARD_ROUTES`
-    /// when none were given (direct Rust entrypoints); `None` when neither has any.
+    /// Parses `routes` when given (an empty list disables forwarding);
+    /// otherwise falls back to `DYN_HTTP_FORWARD_ROUTES` (direct Rust
+    /// entrypoints). `None` when the chosen source has no entries.
     pub(crate) fn from_config(routes: Option<&[String]>) -> anyhow::Result<Option<Self>> {
         match routes {
             Some(routes) => Self::parse(&routes.join(" ")),
@@ -60,8 +64,6 @@ impl ForwardRoutes {
         }
     }
 
-    /// Parses whitespace-separated `PREFIX=URL` entries, e.g.
-    /// `/v1/custom=http://127.0.0.1:8080`.
     fn parse(spec: &str) -> anyhow::Result<Option<Self>> {
         let mut routes: Vec<ForwardRoute> = Vec::new();
         for entry in spec.split_whitespace() {
@@ -92,33 +94,42 @@ impl ForwardRoutes {
         }
         // Longest prefix first, so the most specific route matches.
         routes.sort_by_key(|r| std::cmp::Reverse(r.prefix.len()));
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let builder = || {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+        };
+        let client = builder().build()?;
+        let upgrade_client = builder().http1_only().build()?;
         for route in &routes {
             tracing::info!(prefix = %route.prefix, upstream = %route.upstream, "forwarding HTTP route");
         }
-        Ok(Some(Self { routes, client }))
+        Ok(Some(Self {
+            routes,
+            client,
+            upgrade_client,
+        }))
     }
 
     /// The upstream URL for `path` and `query`, or `None` when no prefix
     /// covers `path`. Prefixes match whole segments: `/v1/custom` covers
     /// `/v1/custom` and `/v1/custom/abc`, not `/v1/customx`. Paths with dot
-    /// segments are never forwarded: URL normalization would let them escape
-    /// the prefix.
+    /// segments or backslashes are never forwarded: URL normalization would
+    /// let them escape the prefix.
     pub(crate) fn covers(&self, path: &str) -> bool {
         self.upstream_url(path, None).is_some()
     }
 
     fn upstream_url(&self, path: &str, query: Option<&str>) -> Option<reqwest::Url> {
-        if path.split('/').any(|segment| {
-            matches!(
-                segment.to_ascii_lowercase().as_str(),
-                "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e."
-            )
-        }) {
+        if path.contains('\\')
+            || path.split('/').any(|segment| {
+                matches!(
+                    segment.to_ascii_lowercase().as_str(),
+                    "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e."
+                )
+            })
+        {
             return None;
         }
         let route = self.routes.iter().find(|r| {
@@ -129,7 +140,12 @@ impl ForwardRoutes {
         let base = url.path().trim_end_matches('/').to_string();
         url.set_path(&format!("{base}{path}"));
         url.set_query(query);
-        Some(url)
+        // Defence in depth: whatever normalization did, stay under the route.
+        let scope = format!("{base}{}", route.prefix);
+        url.path()
+            .strip_prefix(scope.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            .then_some(url)
     }
 
     /// Forwards `request` when a prefix covers its path; otherwise hands it
@@ -154,22 +170,28 @@ impl ForwardRoutes {
             return Ok(super::openai::payload_too_large_error().into_response());
         }
         let (mut parts, body) = request.into_parts();
-        let upgrade = parts.headers.get(header::UPGRADE).cloned();
-        let client_upgrade = upgrade
-            .as_ref()
-            .and_then(|_| parts.extensions.remove::<hyper::upgrade::OnUpgrade>());
+        // Offer an upgrade upstream only when this connection can be spliced.
+        let upgrade = parts
+            .headers
+            .get(header::UPGRADE)
+            .cloned()
+            .and_then(|upgrade| {
+                let client = parts.extensions.remove::<hyper::upgrade::OnUpgrade>()?;
+                Some((upgrade, client))
+            });
         let mut headers = strip_hop_by_hop(parts.headers);
-        if let Some(upgrade) = &upgrade {
+        if let Some((upgrade, _)) = &upgrade {
             headers.insert(
                 header::CONNECTION,
                 header::HeaderValue::from_static("upgrade"),
             );
             headers.insert(header::UPGRADE, upgrade.clone());
         }
-        let mut builder = self
-            .client
-            .request(parts.method, url.clone())
-            .headers(headers);
+        let client = match upgrade {
+            Some(_) => &self.upgrade_client,
+            None => &self.client,
+        };
+        let mut builder = client.request(parts.method, url.clone()).headers(headers);
         // Send a body only when there is one, so a bodiless GET is not
         // re-sent with `transfer-encoding: chunked`.
         if HttpBody::size_hint(&body).exact() != Some(0) {
@@ -197,8 +219,8 @@ impl ForwardRoutes {
         };
         let status = upstream.status();
         let mut headers = strip_hop_by_hop(upstream.headers().clone());
-        let body = match client_upgrade {
-            Some(client_upgrade) if status == StatusCode::SWITCHING_PROTOCOLS => {
+        let body = match upgrade {
+            Some((_, client_upgrade)) if status == StatusCode::SWITCHING_PROTOCOLS => {
                 for name in [header::CONNECTION, header::UPGRADE] {
                     if let Some(value) = upstream.headers().get(&name) {
                         headers.insert(name, value.clone());
@@ -315,6 +337,7 @@ mod tests {
             "/a=not-a-url",
             "/a=ftp://h:1",
             "/a=http://h:1/?q=1",
+            "/a=http://h:1/#frag",
             "/a=http://h:1 /a/=http://h:2",
         ] {
             assert!(
@@ -336,8 +359,20 @@ mod tests {
                  uri: axum::http::Uri,
                  headers: HeaderMap,
                  body: String| async move {
-                    let auth = headers[header::AUTHORIZATION].to_str().unwrap().to_string();
-                    let chunks = [id, uri.query().unwrap_or("").to_string(), auth, body];
+                    let header = |name| {
+                        headers
+                            .get(name)
+                            .map_or("-", |v| v.to_str().unwrap())
+                            .to_string()
+                    };
+                    let chunks = [
+                        id,
+                        uri.query().unwrap_or("").to_string(),
+                        header("authorization"),
+                        header("host"),
+                        header("x-internal"),
+                        body,
+                    ];
                     let stream = futures::stream::iter(
                         chunks.map(|c| Ok::<_, std::io::Error>(format!("{c};"))),
                     );
@@ -356,7 +391,9 @@ mod tests {
             .method("POST")
             .uri("/v1/custom/s1/push?x=1")
             .header(header::AUTHORIZATION, "Bearer k")
-            .header(header::CONNECTION, "close")
+            .header(header::HOST, "frontend.example")
+            .header(header::CONNECTION, "close, x-internal")
+            .header("x-internal", "secret")
             .body(Body::from("hello"))
             .unwrap();
         let response = routes
@@ -368,7 +405,10 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(&body[..], b"s1;x=1;Bearer k;hello;");
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            format!("s1;x=1;Bearer k;{addr};-;hello;")
+        );
 
         let unmatched = Request::builder()
             .uri("/v1/models")
@@ -400,25 +440,28 @@ mod tests {
     async fn forward_tunnels_protocol_upgrades() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        // Upstream: accept one upgrade, answer 101, then echo bytes.
+        // Upstream: answer each upgrade with 101, then echo bytes.
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         tokio::spawn(async move {
-            let (mut conn, _) = upstream.accept().await.unwrap();
-            let mut head = Vec::new();
-            while !head.ends_with(b"\r\n\r\n") {
-                head.push(conn.read_u8().await.unwrap());
+            while let Ok((mut conn, _)) = upstream.accept().await {
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        head.push(conn.read_u8().await.unwrap());
+                    }
+                    let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+                    assert!(head.starts_with("get /v1/custom/s1/ws "), "{head}");
+                    assert!(head.contains("upgrade: echo") && head.contains("connection: upgrade"));
+                    conn.write_all(
+                        b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                    let (mut read, mut write) = conn.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
             }
-            let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
-            assert!(head.starts_with("get /v1/custom/s1/ws "), "{head}");
-            assert!(head.contains("upgrade: echo") && head.contains("connection: upgrade"));
-            conn.write_all(
-                b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n",
-            )
-            .await
-            .unwrap();
-            let (mut read, mut write) = conn.split();
-            tokio::io::copy(&mut read, &mut write).await.unwrap();
         });
 
         let routes = std::sync::Arc::new(
@@ -435,49 +478,63 @@ mod tests {
         }
         let live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let held = live.clone();
+        let cancel = CancellationToken::new();
+        let shutdown = cancel.clone();
         let frontend = axum::Router::new().fallback(move |request: Request| {
-            let (routes, live) = (routes.clone(), live.clone());
+            let (routes, live, cancel) = (routes.clone(), live.clone(), cancel.clone());
             async move {
                 live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                routes
-                    .forward(request, CancellationToken::new(), Guard(live))
-                    .await
-                    .unwrap()
+                routes.forward(request, cancel, Guard(live)).await.unwrap()
             }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, frontend).await.unwrap() });
 
-        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client
-            .write_all(b"GET /v1/custom/s1/ws HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n")
-            .await
-            .unwrap();
-        let mut head = Vec::new();
-        while !head.ends_with(b"\r\n\r\n") {
-            head.push(client.read_u8().await.unwrap());
-        }
-        assert!(
-            head.starts_with(b"HTTP/1.1 101"),
-            "{}",
-            String::from_utf8_lossy(&head)
-        );
-        client.write_all(b"ping").await.unwrap();
-        let mut echoed = [0u8; 4];
-        client.read_exact(&mut echoed).await.unwrap();
-        assert_eq!(&echoed, b"ping");
-        let live = || held.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(live(), 1, "open tunnel holds its guard");
-
-        drop(client);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while live() > 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let open_tunnel = || async {
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(b"GET /v1/custom/s1/ws HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n")
+                .await
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(client.read_u8().await.unwrap());
             }
-        })
-        .await
-        .expect("closed tunnel releases its guard");
+            let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+            assert!(head.starts_with("http/1.1 101"), "{head}");
+            assert!(head.contains("upgrade: echo") && head.contains("connection: upgrade"));
+            client.write_all(b"ping").await.unwrap();
+            let mut echoed = [0u8; 4];
+            client.read_exact(&mut echoed).await.unwrap();
+            assert_eq!(&echoed, b"ping");
+            client
+        };
+        let live = || held.load(std::sync::atomic::Ordering::SeqCst);
+        let released = |what: &'static str| async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while live() > 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect(what);
+        };
+
+        let client = open_tunnel().await;
+        assert_eq!(live(), 1, "open tunnel holds its guard");
+        drop(client);
+        released("closed tunnel releases its guard").await;
+
+        let mut client = open_tunnel().await;
+        assert_eq!(live(), 1, "open tunnel holds its guard");
+        shutdown.cancel();
+        released("cancelled tunnel releases its guard").await;
+        let mut rest = Vec::new();
+        let closed = tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut rest))
+            .await
+            .expect("cancelled tunnel closes the client connection");
+        assert!(closed.is_err() || rest.is_empty());
     }
 
     #[tokio::test]
@@ -499,18 +556,22 @@ mod tests {
                 .unwrap();
             let oversized = vec![b'x'; 2 * 1024 * 1024];
 
-            // Declared length: refused before anything is sent.
+            // Declared length: refused before anything is sent. The body is
+            // tiny, so only the Content-Length check can answer.
             let declared = Request::builder()
                 .method("POST")
                 .uri("/v1/custom/push")
                 .header(header::CONTENT_LENGTH, oversized.len())
-                .body(Body::from(oversized.clone()))
+                .body(Body::from("x"))
                 .unwrap();
-            let response = routes
-                .forward(declared, CancellationToken::new(), ())
-                .await
-                .ok()
-                .unwrap();
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                routes.forward(declared, CancellationToken::new(), ()),
+            )
+            .await
+            .expect("a declared oversized body is refused up front")
+            .ok()
+            .unwrap();
             assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
             // Chunked: cut off while streaming.
@@ -628,6 +689,11 @@ mod tests {
             "/v1/custom/../metrics",
             "/v1/custom/%2E%2e/x",
             "/v1/custom/./x",
+            "/v1/custom/.%2e/x",
+            "/v1/custom/%2e./x",
+            "/v1/custom/%2e/x",
+            "/v1/custom/..\\..\\metrics",
+            "/v1/custom/a\\b",
         ] {
             assert_eq!(
                 url(&routes, path, None),

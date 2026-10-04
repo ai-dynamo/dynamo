@@ -2159,9 +2159,6 @@ mod tests {
         (port, state, handle)
     }
 
-    /// Verifies that explicitly configured forward routes proxy unmatched
-    /// requests and count streaming forwarded responses as inflight, so
-    /// graceful shutdown waits for them.
     #[tokio::test]
     async fn test_forwarded_stream_is_tracked_inflight() {
         use futures::StreamExt;
@@ -2211,9 +2208,8 @@ mod tests {
         handle.abort();
     }
 
-    /// Verifies that shutdown holds an open forwarded stream through the drain
-    /// window and then ends it, when the service shares the runtime's token
-    /// (as the frontend entrypoint wires it).
+    /// The service shares the runtime's token, as the frontend entrypoint wires
+    /// it, so the stream must outlive that token's cancellation.
     #[tokio::test]
     #[serial_test::serial]
     async fn test_shutdown_drains_forwarded_stream_then_ends_it() {
