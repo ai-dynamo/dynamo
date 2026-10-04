@@ -48,11 +48,15 @@ pub(crate) struct ForwardRoutes {
 }
 
 impl ForwardRoutes {
-    /// Reads `DYN_HTTP_FORWARD_ROUTES`; `None` when unset or empty.
-    pub(crate) fn from_env() -> anyhow::Result<Option<Self>> {
-        match std::env::var(env_llm::DYN_HTTP_FORWARD_ROUTES) {
-            Ok(spec) => Self::parse(&spec),
-            Err(_) => Ok(None),
+    /// The explicitly configured `PREFIX=URL` entries, or `DYN_HTTP_FORWARD_ROUTES`
+    /// when none were given (direct Rust entrypoints); `None` when neither has any.
+    pub(crate) fn from_config(routes: Option<&[String]>) -> anyhow::Result<Option<Self>> {
+        match routes {
+            Some(routes) => Self::parse(&routes.join(" ")),
+            None => match std::env::var(env_llm::DYN_HTTP_FORWARD_ROUTES) {
+                Ok(spec) => Self::parse(&spec),
+                Err(_) => Ok(None),
+            },
         }
     }
 
@@ -218,7 +222,19 @@ async fn tunnel(
     }
 }
 
+/// Removes the fixed hop-by-hop headers and any header the `Connection`
+/// header names (RFC 9110 §7.6.1).
 fn strip_hop_by_hop(mut headers: HeaderMap) -> HeaderMap {
+    let nominated: Vec<header::HeaderName> = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|token| header::HeaderName::from_bytes(token.trim().as_bytes()).ok())
+        .collect();
+    for name in &nominated {
+        headers.remove(name);
+    }
     for name in &HOP_BY_HOP_HEADERS {
         headers.remove(name);
     }
@@ -395,6 +411,30 @@ mod tests {
         let mut echoed = [0u8; 4];
         client.read_exact(&mut echoed).await.unwrap();
         assert_eq!(&echoed, b"ping");
+    }
+
+    #[test]
+    fn strip_hop_by_hop_removes_connection_nominated_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONNECTION,
+            "x-internal, keep-alive".parse().unwrap(),
+        );
+        headers.insert("x-internal", "secret".parse().unwrap());
+        headers.insert(header::AUTHORIZATION, "Bearer k".parse().unwrap());
+        let headers = strip_hop_by_hop(headers);
+        assert!(!headers.contains_key("x-internal"));
+        assert!(!headers.contains_key(header::CONNECTION));
+        assert!(headers.contains_key(header::AUTHORIZATION));
+    }
+
+    #[test]
+    fn from_config_prefers_explicit_routes() {
+        let routes = ForwardRoutes::from_config(Some(&["/v1/custom=http://up:8080".to_string()]))
+            .unwrap()
+            .unwrap();
+        assert!(url(&routes, "/v1/custom/x", None).is_some());
+        assert!(ForwardRoutes::from_config(Some(&[])).unwrap().is_none());
     }
 
     #[test]

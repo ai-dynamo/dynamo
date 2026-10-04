@@ -76,10 +76,11 @@ struct UnmatchedRouteState {
     /// Base path of the Anthropic Messages API, or `None` when those endpoints
     /// are disabled and every miss belongs to the OpenAI surface.
     anthropic_path: Option<Arc<str>>,
-    /// Prefixes forwarded to upstream servers (`DYN_HTTP_FORWARD_ROUTES`).
+    /// Prefixes forwarded to upstream servers (`--forward-route`).
     forward_routes: Option<Arc<ForwardRoutes>>,
-    /// Ends forwarded streams and tunnels on shutdown.
-    cancel_token: CancellationToken,
+    /// Counts forwarded responses as inflight, and ends forwarded streams and
+    /// tunnels once shutdown has drained.
+    service: Arc<State>,
 }
 
 /// Forwards the request when a configured prefix covers it; otherwise
@@ -92,10 +93,16 @@ async fn unmatched_route_fallback(
     request: axum::extract::Request,
 ) -> axum::response::Response {
     let request = match &state.forward_routes {
-        Some(routes) => match routes.forward(request, state.cancel_token.clone()).await {
-            Ok(response) => return response,
-            Err(request) => request,
-        },
+        Some(routes) => {
+            let permit = state.service.acquire_inflight();
+            match routes
+                .forward(request, state.service.cancel_token().clone())
+                .await
+            {
+                Ok(response) => return hold_permit_until_body_ends(response, permit),
+                Err(request) => request,
+            }
+        }
         None => request,
     };
     let (method, uri) = (request.method(), request.uri());
@@ -119,8 +126,6 @@ async fn track_inflight_inference(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
-
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
         return super::openai::ErrorMessage::_service_unavailable().into_response();
@@ -134,10 +139,18 @@ async fn track_inflight_inference(
         return super::openai::ErrorMessage::_service_unavailable().into_response();
     }
 
-    let response = next.run(request).await;
+    hold_permit_until_body_ends(next.run(request).await, permit)
+}
+
+/// Keeps `permit` alive until the full response body, including streams,
+/// finishes or is dropped.
+fn hold_permit_until_body_ends(
+    response: axum::response::Response,
+    permit: InflightPermit,
+) -> axum::response::Response {
+    use futures::StreamExt;
+
     let (parts, body) = response.into_parts();
-    // Keep the permit alive until the full response body, including streams,
-    // finishes or is dropped.
     let stream = body.into_data_stream().map(move |result| {
         let _permit = &permit;
         result
@@ -755,6 +768,11 @@ pub struct HttpServiceConfig {
     /// Each extension is invoked with a read-only [`FrontendExtensionContext`].
     #[builder(default)]
     frontend_route_extensions: Vec<FrontendRouteExtension>,
+
+    /// Path prefixes reverse-proxied to upstream servers, as `PREFIX=URL`
+    /// entries. `None` falls back to `DYN_HTTP_FORWARD_ROUTES`.
+    #[builder(default)]
+    forward_routes: Option<Vec<String>>,
 
     #[builder(default = "false")]
     enable_chat_endpoints: bool,
@@ -1499,8 +1517,9 @@ impl HttpServiceConfigBuilder {
                         .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string())
                         .into()
                 }),
-                forward_routes: ForwardRoutes::from_env()?.map(Arc::new),
-                cancel_token: state.cancel_token().clone(),
+                forward_routes: ForwardRoutes::from_config(config.forward_routes.as_deref())?
+                    .map(Arc::new),
+                service: state.clone(),
             })
             .layer(
                 // Use the inference span maker so 404s retain method, URI, and request ID
@@ -2125,6 +2144,58 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         (port, state, handle)
+    }
+
+    /// Verifies that explicitly configured forward routes proxy unmatched
+    /// requests and count streaming forwarded responses as inflight, so
+    /// graceful shutdown waits for them.
+    #[tokio::test]
+    async fn test_forwarded_stream_is_tracked_inflight() {
+        use futures::StreamExt;
+
+        let release = Arc::new(Notify::new());
+        let released = release.clone();
+        let upstream = axum::Router::new().route(
+            "/v1/custom/stream",
+            axum::routing::get(move || async move {
+                let first = futures::stream::once(async { Ok::<_, std::io::Error>("first") });
+                let last = futures::stream::once(async move {
+                    released.notified().await;
+                    Ok::<_, std::io::Error>("last")
+                });
+                Body::from_stream(first.chain(last))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let (port, state, handle) = spawn_service(|builder| {
+            builder.forward_routes(Some(vec![format!("/v1/custom=http://{upstream_addr}")]))
+        })
+        .await;
+        let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/stream"))
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"first");
+        assert_eq!(
+            state.inflight_count(),
+            1,
+            "open forwarded stream counts as inflight"
+        );
+
+        release.notify_one();
+        assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"last");
+        assert!(resp.chunk().await.unwrap().is_none());
+        assert!(
+            state
+                .wait_inflight_zero_or_timeout(Duration::from_secs(5))
+                .await,
+            "finished forwarded stream releases its permit"
+        );
+
+        handle.abort();
     }
 
     async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {
