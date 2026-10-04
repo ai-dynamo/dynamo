@@ -17,8 +17,8 @@ before changing locking, versioning, split, remove, or lookup-repair behavior.
 - Do not replace lazy lookup repair with eager/global repair without
   benchmarking. Direction-aware and batched repair are intentional.
 - `find_matches` may undercount during races, but must never overcount past a
-  valid reachable prefix, except through the documented equal-size skip (see
-  `README.md`). Do not add new overcount paths.
+  valid reachable prefix. Do not add overcount paths, such as skipping the
+  per-hop coverage intersection when set sizes match (see `README.md`).
 - Any hot-path change to locking, versioning, lookup repair, split/remove, child
   insertion, or read traversal must include before/after benchmark numbers in
   the PR.

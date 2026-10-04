@@ -29,11 +29,11 @@ impl ConcurrentRadixTreeCompressed {
     pub(super) fn resolve_lookup(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker: WorkerWithDpRank,
+        worker: EventWorker<'_>,
         hash: ExternalSequenceBlockHash,
         direction: LookupRepairDirection,
     ) -> Option<SharedNode> {
-        let node = lookup.get(&worker)?.get(&hash)?.clone();
+        let node = lookup.get(&worker.rank)?.get(&hash)?.clone();
 
         // Fast path: hash is still in this node's edge_index.
         if node.contains_edge_hash(hash) {
@@ -46,14 +46,27 @@ impl ConcurrentRadixTreeCompressed {
         self.bench_metrics
             .lookup_repair_scans
             .fetch_add(1, Ordering::Relaxed);
-        self.repair_lookup_for_resolved_node(lookup, hash, &resolved, direction);
+        self.repair_lookup_for_resolved_node(
+            lookup,
+            worker.table,
+            hash,
+            &node,
+            &resolved,
+            direction,
+        );
         Some(resolved)
     }
 
+    /// Repoints this lane's entries that still name `stale` at `resolved`, over the range
+    /// of `resolved`'s edge each rank covers on the side of `hash` that `direction` picks.
+    /// Entries naming any other node are left to their own lazy repair, so an entry never
+    /// moves onto a node only because a recycled slot inherited stale bits there.
     pub(super) fn repair_lookup_for_resolved_node(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        table: &SlotTable,
         hash: ExternalSequenceBlockHash,
+        stale: &SharedNode,
         resolved: &SharedNode,
         direction: LookupRepairDirection,
     ) {
@@ -61,9 +74,13 @@ impl ConcurrentRadixTreeCompressed {
         let mut changed_entries_total = 0u64;
 
         for (&worker, worker_lookup) in lookup.iter_mut() {
-            let _changed_entries = update_existing_arc_lookup_for_keys(
+            let Some(slot) = table.slot_of(worker) else {
+                continue;
+            };
+            let _changed_entries = redirect_arc_lookup_for_keys(
                 worker_lookup,
-                resolved.lookup_hashes_for_worker_repair(worker, hash, direction),
+                resolved.lookup_hashes_for_slot_repair(slot, hash, direction),
+                stale,
                 resolved,
             );
             #[cfg(feature = "bench")]

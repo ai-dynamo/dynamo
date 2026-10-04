@@ -3,8 +3,9 @@
 
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
+use super::coverage::{Slot, SlotSet, SlotTable};
 use super::node::Node;
 use crate::protocols::*;
 
@@ -33,12 +34,13 @@ impl WorkerRemovalTarget {
     }
 }
 
-pub(super) struct MatchWalkResult {
-    // NOTE(perf): Replacing this set with a Vec did not improve throughput. Keep
-    // uniqueness by construction unless a new profile justifies changing it.
-    pub(super) active: FxHashSet<WorkerWithDpRank>,
-    pub(super) matched_depth: u32,
-    pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
+/// The rank an event applies to, the slot it writes coverage with, and the slot table
+/// the slot was resolved in. The table stays valid for the event's epoch guard.
+#[derive(Clone, Copy)]
+pub(super) struct EventWorker<'g> {
+    pub(super) rank: WorkerWithDpRank,
+    pub(super) slot: Slot,
+    pub(super) table: &'g SlotTable,
 }
 
 // For short anchored reads this avoids a Vec allocation. For long suffixes,
@@ -103,8 +105,9 @@ pub(super) struct FindStepInput<'a, S: HashSequence> {
     pub(super) first_node: bool,
     pub(super) prev_depth: u32,
     pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
-    pub(super) active: &'a mut FxHashSet<WorkerWithDpRank>,
-    pub(super) active_count: usize,
+    /// Maps slots to the ranks credited for them, loaded once per walk.
+    pub(super) table: &'a SlotTable,
+    pub(super) active: &'a mut SlotSet,
     pub(super) scores: &'a mut OverlapScores,
     pub(super) last_matched_hashes:
         Option<&'a mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
@@ -164,9 +167,17 @@ pub(super) struct ParentEdgePlan {
 
 pub(super) enum ParentEdgePlanAction {
     InsertFromParent,
-    ReuseExistingEdge { cutoff: usize },
-    ReuseSuffixAndExtendLeaf { append_start: usize },
-    Split { split_pos: usize },
+    /// `covers_edge` records whether `cutoff` reaches the end of the edge as planned.
+    ReuseExistingEdge {
+        cutoff: usize,
+        covers_edge: bool,
+    },
+    ReuseSuffixAndExtendLeaf {
+        append_start: usize,
+    },
+    Split {
+        split_pos: usize,
+    },
 }
 
 pub(super) struct ChildEdgeScan {

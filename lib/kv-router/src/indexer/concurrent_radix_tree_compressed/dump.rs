@@ -17,34 +17,52 @@ impl ConcurrentRadixTreeCompressed {
         let mut queue = VecDeque::new();
 
         for child_node in self.root.live_children() {
-            queue.push_back((child_node, None::<ExternalSequenceBlockHash>));
+            queue.push_back(DumpStart {
+                node: child_node,
+                parent_hash: None,
+                parent_ranks: None,
+            });
         }
 
-        Self::append_dump_events_from_queue(&mut events, &mut event_id, queue);
+        self.append_dump_events_from_queue(&mut events, &mut event_id, queue);
 
         let mut anchor_queue = VecDeque::new();
         for anchor in self.anchor_nodes.iter() {
             let anchor_id = *anchor.key();
-            for child_node in anchor.value().live_children() {
-                anchor_queue.push_back((child_node, Some(anchor_id)));
+            let snapshot = {
+                let guard = crossbeam_epoch::pin();
+                anchor.value().dump_snapshot(self.slots.table(&guard))
+            };
+            let parent_ranks = Arc::new(FxHashSet::from_iter(snapshot.full_edge_workers));
+            for child_node in snapshot.live_children {
+                anchor_queue.push_back(DumpStart {
+                    node: child_node,
+                    parent_hash: Some(anchor_id),
+                    parent_ranks: Some(parent_ranks.clone()),
+                });
             }
         }
-        Self::append_dump_events_from_queue(&mut events, &mut event_id, anchor_queue);
+        self.append_dump_events_from_queue(&mut events, &mut event_id, anchor_queue);
 
         events
     }
 
     fn append_dump_events_from_queue(
+        &self,
         events: &mut Vec<RouterEvent>,
         event_id: &mut u64,
-        mut queue: VecDeque<(SharedNode, Option<ExternalSequenceBlockHash>)>,
+        mut queue: VecDeque<DumpStart>,
     ) {
-        while let Some((start_node, parent_hash)) = queue.pop_front() {
+        while let Some(start) = queue.pop_front() {
             let mut merged_edge: Vec<(LocalBlockHash, ExternalSequenceBlockHash)> = Vec::new();
-            let mut current = start_node;
+            let mut current = start.node;
+            // One pin and slot table per merged chain: the merge compares raw slots, so
+            // every node of the chain must map them to ranks the same way.
+            let guard = crossbeam_epoch::pin();
+            let table = self.slots.table(&guard);
 
             loop {
-                let snapshot = current.dump_snapshot();
+                let mut snapshot = current.dump_snapshot(table);
 
                 if !snapshot.has_any_workers && snapshot.children_empty {
                     break;
@@ -65,23 +83,51 @@ impl ConcurrentRadixTreeCompressed {
                     break;
                 }
 
+                // Like a reader, credit a rank below a parent only if it covers the
+                // parent's whole edge. This also keeps a node unlinked after it was
+                // queued, whose stale bits a recycled slot now maps to another rank,
+                // from crediting that rank.
+                if let Some(parent_ranks) = &start.parent_ranks {
+                    snapshot
+                        .full_edge_workers
+                        .retain(|worker| parent_ranks.contains(worker));
+                    snapshot
+                        .worker_cutoffs
+                        .retain(|(worker, _)| parent_ranks.contains(worker));
+                }
+
                 let last_ext = merged_edge.last().unwrap().1;
 
                 append_dump_events(
                     events,
                     event_id,
-                    parent_hash,
+                    start.parent_hash,
                     &merged_edge,
                     &snapshot.full_edge_workers,
                     &snapshot.worker_cutoffs,
                 );
 
+                if snapshot.full_edge_workers.is_empty() {
+                    break;
+                }
+                let parent_ranks = Arc::new(FxHashSet::from_iter(snapshot.full_edge_workers));
                 for child in snapshot.live_children {
-                    queue.push_back((child, Some(last_ext)));
+                    queue.push_back(DumpStart {
+                        node: child,
+                        parent_hash: Some(last_ext),
+                        parent_ranks: Some(parent_ranks.clone()),
+                    });
                 }
 
                 break;
             }
         }
     }
+}
+
+struct DumpStart {
+    node: SharedNode,
+    parent_hash: Option<ExternalSequenceBlockHash>,
+    /// Ranks covering the parent's whole edge; `None` below the root.
+    parent_ranks: Option<Arc<FxHashSet<WorkerWithDpRank>>>,
 }

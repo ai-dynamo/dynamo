@@ -140,7 +140,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     resp,
                 } => {
                     approximate_lru.forget_worker(worker_id);
-                    self.erase_worker_coverage(
+                    self.remove_worker_coverage(
                         &mut lookup,
                         WorkerRemovalTarget::WorkerId(worker_id),
                         sweep_tree,
@@ -153,7 +153,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     sweep_tree,
                 } => {
                     approximate_lru.forget_rank(WorkerWithDpRank::new(worker_id, dp_rank));
-                    self.erase_worker_coverage(
+                    self.remove_worker_coverage(
                         &mut lookup,
                         WorkerRemovalTarget::DpRank(WorkerWithDpRank::new(worker_id, dp_rank)),
                         sweep_tree,
@@ -220,7 +220,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
             entry.clone()
         };
 
-        anchor_node.promote_worker_to_full_edge(worker);
+        let guard = crossbeam_epoch::pin();
+        let slot = self.slots.acquire(worker, &guard)?;
+        anchor_node.promote_slot_to_full_edge(slot);
         Ok(())
     }
 
