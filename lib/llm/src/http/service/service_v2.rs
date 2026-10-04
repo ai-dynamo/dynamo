@@ -76,7 +76,6 @@ struct UnmatchedRouteState {
     /// Base path of the Anthropic Messages API, or `None` when those endpoints
     /// are disabled and every miss belongs to the OpenAI surface.
     anthropic_path: Option<Arc<str>>,
-    /// Prefixes forwarded to upstream servers (`--forward-route`).
     forward_routes: Option<Arc<ForwardRoutes>>,
     /// Counts forwarded responses as inflight, and ends forwarded streams and
     /// tunnels once shutdown has drained.
@@ -96,10 +95,10 @@ async fn unmatched_route_fallback(
         Some(routes) => {
             let permit = state.service.acquire_inflight();
             match routes
-                .forward(request, state.service.cancel_token().clone())
+                .forward(request, state.service.cancel_token().clone(), permit)
                 .await
             {
-                Ok(response) => return hold_permit_until_body_ends(response, permit),
+                Ok(response) => return response,
                 Err(request) => request,
             }
         }
@@ -126,6 +125,8 @@ async fn track_inflight_inference(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    use futures::StreamExt;
+
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
         return super::openai::ErrorMessage::_service_unavailable().into_response();
@@ -139,18 +140,10 @@ async fn track_inflight_inference(
         return super::openai::ErrorMessage::_service_unavailable().into_response();
     }
 
-    hold_permit_until_body_ends(next.run(request).await, permit)
-}
-
-/// Keeps `permit` alive until the full response body, including streams,
-/// finishes or is dropped.
-fn hold_permit_until_body_ends(
-    response: axum::response::Response,
-    permit: InflightPermit,
-) -> axum::response::Response {
-    use futures::StreamExt;
-
+    let response = next.run(request).await;
     let (parts, body) = response.into_parts();
+    // Keep the permit alive until the full response body, including streams,
+    // finishes or is dropped.
     let stream = body.into_data_stream().map(move |result| {
         let _permit = &permit;
         result

@@ -129,16 +129,26 @@ impl ForwardRoutes {
     }
 
     /// Forwards `request` when a prefix covers its path; otherwise hands it
-    /// back unchanged. Forwarded responses and tunnels end when `cancel`
-    /// fires, so they cannot hold up shutdown.
-    pub(crate) async fn forward(
+    /// back unchanged. `guard` lives as long as the forwarded exchange (the
+    /// response body, or the tunnel), so callers can count it as inflight.
+    /// Forwarded responses and tunnels end when `cancel` fires.
+    pub(crate) async fn forward<G: Send + Sync + 'static>(
         &self,
         request: Request,
         cancel: CancellationToken,
+        guard: G,
     ) -> Result<Response, Request> {
         let Some(url) = self.upstream_url(request.uri().path(), request.uri().query()) else {
             return Err(request);
         };
+        let limit = super::openai::get_body_limit();
+        let declared = request
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
+        if declared.is_some_and(|length| length > limit) {
+            return Ok(super::openai::payload_too_large_error().into_response());
+        }
         let (mut parts, body) = request.into_parts();
         let upgrade = parts.headers.get(header::UPGRADE).cloned();
         let client_upgrade = upgrade
@@ -159,13 +169,16 @@ impl ForwardRoutes {
         // Send a body only when there is one, so a bodiless GET is not
         // re-sent with `transfer-encoding: chunked`.
         if HttpBody::size_hint(&body).exact() != Some(0) {
-            let body = http_body_util::Limited::new(body, super::openai::get_body_limit());
+            let body = http_body_util::Limited::new(body, limit);
             builder = builder.body(reqwest::Body::wrap_stream(
                 http_body_util::BodyDataStream::new(body),
             ));
         }
         let upstream = match builder.send().await {
             Ok(upstream) => upstream,
+            Err(err) if exceeded_body_limit(&err) => {
+                return Ok(super::openai::payload_too_large_error().into_response());
+            }
             Err(err) => {
                 tracing::warn!(%url, error = %err, "forward route upstream request failed");
                 return Ok(bad_gateway());
@@ -180,16 +193,40 @@ impl ForwardRoutes {
                         headers.insert(name, value.clone());
                     }
                 }
-                tokio::spawn(tunnel(client_upgrade, upstream, url, cancel));
+                tokio::spawn(async move {
+                    tunnel(client_upgrade, upstream, url, cancel).await;
+                    drop(guard);
+                });
                 Body::empty()
             }
-            _ => Body::from_stream(upstream.bytes_stream().take_until(cancel.cancelled_owned())),
+            _ => Body::from_stream(
+                upstream
+                    .bytes_stream()
+                    .take_until(cancel.cancelled_owned())
+                    .map(move |chunk| {
+                        let _guard = &guard;
+                        chunk
+                    }),
+            ),
         };
         let mut response = Response::new(body);
         *response.status_mut() = status;
         *response.headers_mut() = headers;
         Ok(response)
     }
+}
+
+/// Whether a failed upstream send was cut short by the client body exceeding
+/// `DYN_HTTP_BODY_LIMIT_MB`, rather than by the upstream.
+fn exceeded_body_limit(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(err);
+    while let Some(err) = source {
+        if err.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        source = err.source();
+    }
+    false
 }
 
 /// Splices the client's upgraded connection to the upstream's until either
@@ -241,6 +278,7 @@ fn strip_hop_by_hop(mut headers: HeaderMap) -> HeaderMap {
     headers
 }
 
+/// The `502` returned when the upstream cannot be reached.
 fn bad_gateway() -> Response {
     let code = StatusCode::BAD_GATEWAY;
     let body = serde_json::json!({
@@ -312,7 +350,7 @@ mod tests {
             .body(Body::from("hello"))
             .unwrap();
         let response = routes
-            .forward(request, CancellationToken::new())
+            .forward(request, CancellationToken::new(), ())
             .await
             .ok()
             .unwrap();
@@ -328,7 +366,7 @@ mod tests {
             .unwrap();
         assert!(
             routes
-                .forward(unmatched, CancellationToken::new())
+                .forward(unmatched, CancellationToken::new(), ())
                 .await
                 .is_err()
         );
@@ -342,7 +380,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let response = dead
-            .forward(request, CancellationToken::new())
+            .forward(request, CancellationToken::new(), ())
             .await
             .ok()
             .unwrap();
@@ -374,17 +412,26 @@ mod tests {
             tokio::io::copy(&mut read, &mut write).await.unwrap();
         });
 
-        // Frontend: forwards everything through the fallback.
         let routes = std::sync::Arc::new(
             ForwardRoutes::parse(&format!("/v1/custom=http://{upstream_addr}"))
                 .unwrap()
                 .unwrap(),
         );
+        // Stands in for the inflight permit, which must outlive the 101.
+        struct Guard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let held = live.clone();
         let frontend = axum::Router::new().fallback(move |request: Request| {
-            let routes = routes.clone();
+            let (routes, live) = (routes.clone(), live.clone());
             async move {
+                live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 routes
-                    .forward(request, CancellationToken::new())
+                    .forward(request, CancellationToken::new(), Guard(live))
                     .await
                     .unwrap()
             }
@@ -411,6 +458,72 @@ mod tests {
         let mut echoed = [0u8; 4];
         client.read_exact(&mut echoed).await.unwrap();
         assert_eq!(&echoed, b"ping");
+        let live = || held.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(live(), 1, "open tunnel holds its guard");
+
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while live() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("closed tunnel releases its guard");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn forward_rejects_oversized_bodies_with_413() {
+        temp_env::async_with_vars([(env_llm::DYN_HTTP_BODY_LIMIT_MB, Some("1"))], async move {
+            // Accepts connections but never answers: only the body limit can end a request.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((conn, _)) = listener.accept().await {
+                    held.push(conn);
+                }
+            });
+            let routes = ForwardRoutes::parse(&format!("/v1/custom=http://{addr}"))
+                .unwrap()
+                .unwrap();
+            let oversized = vec![b'x'; 2 * 1024 * 1024];
+
+            // Declared length: refused before anything is sent.
+            let declared = Request::builder()
+                .method("POST")
+                .uri("/v1/custom/push")
+                .header(header::CONTENT_LENGTH, oversized.len())
+                .body(Body::from(oversized.clone()))
+                .unwrap();
+            let response = routes
+                .forward(declared, CancellationToken::new(), ())
+                .await
+                .ok()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+            // Chunked: cut off while streaming.
+            let chunks = oversized
+                .chunks(64 * 1024)
+                .map(|c| Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(c)))
+                .collect::<Vec<_>>();
+            let chunked = Request::builder()
+                .method("POST")
+                .uri("/v1/custom/push")
+                .body(Body::from_stream(futures::stream::iter(chunks)))
+                .unwrap();
+            let response = tokio::time::timeout(
+                Duration::from_secs(10),
+                routes.forward(chunked, CancellationToken::new(), ()),
+            )
+            .await
+            .expect("an oversized chunked body must not hang")
+            .ok()
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        })
+        .await;
     }
 
     #[test]

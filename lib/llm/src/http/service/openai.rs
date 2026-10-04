@@ -2683,7 +2683,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
 
 /// Returns the standard error response for a request body that exceeds the
 /// configured size limit.
-fn payload_too_large_error() -> ErrorResponse {
+pub(super) fn payload_too_large_error() -> ErrorResponse {
     ErrorMessage::from_http_error(
         ErrorClass::PayloadTooLarge,
         HttpError {
