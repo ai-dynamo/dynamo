@@ -2269,8 +2269,6 @@ mod tests {
         .await;
     }
 
-    /// Verifies that a draining frontend refuses new forwarded requests with
-    /// `503`, like inference routes, while other unmatched routes keep `404`.
     #[tokio::test]
     async fn test_draining_refuses_new_forwarded_requests() {
         // Never contacted: admission is refused before forwarding.

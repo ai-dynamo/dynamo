@@ -108,7 +108,6 @@ impl ForwardRoutes {
     /// `/v1/custom` and `/v1/custom/abc`, not `/v1/customx`. Paths with dot
     /// segments are never forwarded: URL normalization would let them escape
     /// the prefix.
-    /// Whether a prefix covers `path`, so [`Self::forward`] would forward it.
     pub(crate) fn covers(&self, path: &str) -> bool {
         self.upstream_url(path, None).is_some()
     }
@@ -179,7 +178,14 @@ impl ForwardRoutes {
                 http_body_util::BodyDataStream::new(body),
             ));
         }
-        let upstream = match builder.send().await {
+        // An upstream that never answers must not outlive the drain window.
+        let sent = tokio::select! {
+            sent = builder.send() => sent,
+            _ = cancel.cancelled() => {
+                return Ok(super::openai::ErrorMessage::_service_unavailable().into_response());
+            }
+        };
+        let upstream = match sent {
             Ok(upstream) => upstream,
             Err(err) if exceeded_body_limit(&err) => {
                 return Ok(super::openai::payload_too_large_error().into_response());
@@ -479,13 +485,14 @@ mod tests {
     #[serial_test::serial]
     async fn forward_rejects_oversized_bodies_with_413() {
         temp_env::async_with_vars([(env_llm::DYN_HTTP_BODY_LIMIT_MB, Some("1"))], async move {
-            // Accepts connections but never answers: only the body limit can end a request.
+            // Reads everything but never answers: only the body limit can end a request.
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move {
-                let mut held = Vec::new();
-                while let Ok((conn, _)) = listener.accept().await {
-                    held.push(conn);
+                while let Ok((mut conn, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let _ = tokio::io::copy(&mut conn, &mut tokio::io::sink()).await;
+                    });
                 }
             });
             let routes = ForwardRoutes::parse(&format!("/v1/custom=http://{addr}"))
@@ -528,6 +535,41 @@ mod tests {
             assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn forward_send_ends_when_cancelled() {
+        // Accepts connections but never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((conn, _)) = listener.accept().await {
+                held.push(conn);
+            }
+        });
+        let routes = ForwardRoutes::parse(&format!("/v1/custom=http://{addr}"))
+            .unwrap()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                cancel.cancel();
+            }
+        });
+        let request = Request::builder()
+            .uri("/v1/custom/stuck")
+            .body(Body::empty())
+            .unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_secs(5), routes.forward(request, cancel, ()))
+                .await
+                .expect("a stuck upstream must not outlive cancellation")
+                .ok()
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
