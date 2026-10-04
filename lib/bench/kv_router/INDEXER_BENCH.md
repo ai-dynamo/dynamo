@@ -28,7 +28,7 @@ Preparation consumes and releases the parsed trace, generated replay artifacts,
 worker timelines, and intermediate payload owners. The timed process retains
 only the prepared schedule, one flattened query-hash slab, and backend state.
 On Linux, the benchmark returns free preparation pages with `malloc_trim` and
-waits a fixed five seconds before constructing backend workers. It then
+`mi_collect` and waits a fixed five seconds before constructing backend workers. It then
 page-touches the schedule once and performs the fixed lookup warm-up before
 timing. This explicit quiescence prevents the parallel event-generation phase
 and released allocator arenas from affecting the timed backend drain; JSON
@@ -88,6 +88,14 @@ the engine re-chunks synthesized prompt tokens at that size.
 
 Linux uses absolute `CLOCK_MONOTONIC` sleeps followed by the configured spin.
 macOS uses a portable sleep-plus-spin timer for correctness tests only.
+
+The router benches (`mooncake_bench`, `active_sequences_bench`,
+`approximate_lru_bench`) use mimalloc as the global allocator, matching the
+Python extension that runs the router in production (`lib/bindings/python`).
+The allocator is part of the measured system. Under glibc malloc, CRTC event
+workers serialize on arena locks: write capacity stops rising after about 16
+event workers and falls beyond that. Compare allocators or event-worker counts
+only between builds and runs that differ in that one variable.
 
 ### Single CRTC trial
 

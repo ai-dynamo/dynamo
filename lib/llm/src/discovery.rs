@@ -25,6 +25,7 @@ pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 mod controller;
 
 mod allocator;
+pub use allocator::register_allocator_trim_hook;
 
 mod worker_set;
 pub use worker_set::WorkerSet;

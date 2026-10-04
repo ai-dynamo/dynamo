@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use dynamo_llm::local_model::{
     LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
 };
@@ -285,6 +289,14 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
 }
 
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Model teardown trims glibc arenas, which no longer hold this extension's Rust
+    // allocations; also return mimalloc's freed memory.
+    #[cfg(feature = "mimalloc")]
+    dynamo_llm::discovery::register_allocator_trim_hook(|| {
+        // SAFETY: mi_collect only releases memory mimalloc already considers free.
+        unsafe { libmimalloc_sys::mi_collect(true) }
+    });
+
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();

@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// Match the production allocator: the router runs inside the Python extension,
+// which routes Rust allocations through mimalloc (`lib/bindings/python`).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::{HashMap, HashSet};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -1149,6 +1154,7 @@ async fn quiesce(milliseconds: u64) {
     #[cfg(target_os = "linux")]
     unsafe {
         libc::malloc_trim(0);
+        libmimalloc_sys::mi_collect(true);
     }
     if milliseconds > 0 {
         tokio::time::sleep(Duration::from_millis(milliseconds)).await;
