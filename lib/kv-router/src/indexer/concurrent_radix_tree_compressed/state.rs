@@ -157,13 +157,16 @@ impl CrtcNodeState {
 
     /// Position of `hash` in the edge, checking the neighbors of `near` before the index:
     /// a removal run usually lists adjacent blocks, so most of its lookups skip the index.
-    /// Sequence hashes are unique along a path, so a neighbor match is the position.
+    /// The shortcut runs only on a table-backed edge whose table saw no repeated hash, where a
+    /// neighbor match is the position; otherwise the index finds the last copy.
     pub(super) fn position_near(
         &self,
         hash: ExternalSequenceBlockHash,
         near: Option<usize>,
     ) -> Option<usize> {
-        if let Some(near) = near {
+        if let Some(near) = near
+            && self.edge_index.neighbors_are_unique()
+        {
             for pos in [near + 1, near.wrapping_sub(1)] {
                 if self
                     .edge
@@ -373,19 +376,65 @@ mod tests {
         assert!(!state.has_any_workers(&full));
     }
 
-    #[test]
-    fn position_near_agrees_with_the_index_for_any_hint() {
-        let state = CrtcNodeState::for_blocks(&[block(7), block(3), block(9), block(1), block(5)]);
+    fn assert_position_near_matches_index(state: &CrtcNodeState) {
         let hints = std::iter::once(None).chain((0..state.edge.len() + 1).map(Some));
         for near in hints {
             for &(_, hash) in &state.edge {
-                assert_eq!(state.position_near(hash, near), state.position(hash));
+                assert_eq!(
+                    state.position_near(hash, near),
+                    state.position(hash),
+                    "{hash:?} near {near:?}"
+                );
             }
             assert_eq!(
                 state.position_near(ExternalSequenceBlockHash(42), near),
                 None
             );
         }
+    }
+
+    #[test]
+    fn position_near_agrees_with_the_index_for_any_hint() {
+        let state = CrtcNodeState::for_blocks(&[block(7), block(3), block(9), block(1), block(5)]);
+        assert_position_near_matches_index(&state);
+    }
+
+    /// A hint next to an earlier copy of a repeated hash must still find the last copy,
+    /// whether the edge scans or keeps a table, and whether it was built or appended to.
+    #[test]
+    fn position_near_finds_the_last_copy_of_a_repeated_hash() {
+        let slot = Slot::new(1);
+        let full = FullCoverage::single(slot);
+        let long: Vec<u64> = std::iter::once(1)
+            .chain(100..100 + SCAN_MAX_LEN as u64)
+            .chain([1])
+            .collect();
+        for edge in [vec![1, 2, 3, 1], long] {
+            let (head, tail) = edge.split_at(edge.len() - 1);
+            for state in [
+                CrtcNodeState::for_blocks(&blocks(&edge)),
+                replay(&[head.to_vec(), tail.to_vec()], &full, slot),
+            ] {
+                assert_eq!(state.edge_index.capacity() > 0, edge.len() > SCAN_MAX_LEN);
+                assert_eq!(
+                    state.position(ExternalSequenceBlockHash(1)),
+                    Some(edge.len() - 1)
+                );
+                assert_position_near_matches_index(&state);
+            }
+        }
+
+        // A split that keeps the prefix's table must keep remembering its repeat.
+        let mut edge: Vec<u64> = std::iter::once(1)
+            .chain(100..100 + SCAN_MAX_LEN as u64)
+            .chain([1])
+            .collect();
+        let split = edge.len();
+        edge.extend([200, 201]);
+        let mut state = CrtcNodeState::for_blocks(&blocks(&edge));
+        let _suffix = state.split_off_suffix(&full, split);
+        assert!(state.edge_index.capacity() > 0);
+        assert_position_near_matches_index(&state);
     }
 
     #[test]
