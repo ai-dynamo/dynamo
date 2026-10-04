@@ -53,14 +53,17 @@ PRESETS = {
 }
 
 
-def fn(name, desc, props, required, additional=None):
+def fn(name, desc, props, required, additional=None, strict=None):
     params = {"type": "object", "properties": props, "required": required}
     if additional is not None:
         params["additionalProperties"] = additional
-    return {
+    tool = {
         "type": "function",
         "function": {"name": name, "description": desc, "parameters": params},
     }
+    if strict is not None:
+        tool["function"]["strict"] = strict
+    return tool
 
 
 S = {"type": "string"}
@@ -111,6 +114,20 @@ TOOLS = {
         "Record a mixed-type scalar tuple.",
         {"count": INTEGER, "ratio": N, "enabled": B, "label": S},
         ["count", "ratio", "enabled", "label"],
+    ),
+    "record_scalars_strict_true": fn(
+        "record_scalars",
+        "Record a mixed-type scalar tuple with strict schema enforcement.",
+        {"count": INTEGER, "ratio": N, "enabled": B, "label": S},
+        ["count", "ratio", "enabled", "label"],
+        strict=True,
+    ),
+    "record_scalars_strict_false": fn(
+        "record_scalars",
+        "Record a mixed-type scalar tuple without strict argument enforcement.",
+        {"count": INTEGER, "ratio": N, "enabled": B, "label": S},
+        ["count", "ratio", "enabled", "label"],
+        strict=False,
     ),
     "store_text": fn(
         "store_text", "Store a text value verbatim.", {"text": S}, ["text"]
@@ -578,6 +595,39 @@ case(
     tool_choice="required",
     exact_tool_calls=1,
     expected_tool_calls=[tc("store_text", {"text": 'she said "hi"'})],
+)
+
+# ---------------------------------------------------------------------------
+# F3b Explicit OpenAI strict policy. These paired auto cases use the same
+#     function name, prompt, and schema so the only request difference is the
+#     function-level strict value. strict=true checks typed schema enforcement;
+#     strict=false checks that the opt-out still preserves the tool envelope.
+# ---------------------------------------------------------------------------
+case(
+    "qx_policy_explicit_strict_true_auto",
+    "strict=true auto call enforces mixed scalar argument types",
+    "Use record_scalars exactly once with count=7, ratio=0.25, enabled=false, label=beta.",
+    tools=["record_scalars_strict_true"],
+    tool_choice="auto",
+    exact_tool_calls=1,
+    expected_tool_names=["record_scalars"],
+    expected_tool_calls=[
+        tc(
+            "record_scalars",
+            {"count": 7, "ratio": 0.25, "enabled": False, "label": "beta"},
+        )
+    ],
+    validate_schema=True,
+)
+case(
+    "qx_policy_explicit_strict_false_auto",
+    "strict=false auto call keeps envelope guidance while arguments are best effort",
+    "Use record_scalars exactly once with count=7, ratio=0.25, enabled=false, label=beta.",
+    tools=["record_scalars_strict_false"],
+    tool_choice="auto",
+    exact_tool_calls=1,
+    expected_tool_names=["record_scalars"],
+    validate_schema=False,
 )
 
 # ---------------------------------------------------------------------------

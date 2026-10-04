@@ -6,8 +6,8 @@
     "nonstream",
     "stream"
   ],
-  "logical_cases": 61,
-  "expected_records": 122,
+  "logical_cases": 63,
+  "expected_records": 126,
   "defaults": {
     "forbidden_output_fragments": [
       "<parameter=",
@@ -235,6 +235,68 @@
             "label"
           ]
         }
+      }
+    },
+    "record_scalars_strict_true": {
+      "type": "function",
+      "function": {
+        "name": "record_scalars",
+        "description": "Record a mixed-type scalar tuple with strict schema enforcement.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer"
+            },
+            "ratio": {
+              "type": "number"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "count",
+            "ratio",
+            "enabled",
+            "label"
+          ]
+        },
+        "strict": true
+      }
+    },
+    "record_scalars_strict_false": {
+      "type": "function",
+      "function": {
+        "name": "record_scalars",
+        "description": "Record a mixed-type scalar tuple without strict argument enforcement.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer"
+            },
+            "ratio": {
+              "type": "number"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "count",
+            "ratio",
+            "enabled",
+            "label"
+          ]
+        },
+        "strict": false
       }
     },
     "store_text": {
@@ -1535,6 +1597,78 @@
       "content_pattern": null,
       "expect_reasoning": null,
       "normalize_argument_strings": false
+    },
+    {
+      "case_id": "qx_policy_explicit_strict_true_auto",
+      "description": "strict=true auto call enforces mixed scalar argument types",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Use record_scalars exactly once with count=7, ratio=0.25, enabled=false, label=beta."
+        }
+      ],
+      "tools": [
+        "record_scalars_strict_true"
+      ],
+      "tool_choice": "auto",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [
+        "record_scalars"
+      ],
+      "expected_tool_calls": [
+        {
+          "name": "record_scalars",
+          "arguments": {
+            "count": 7,
+            "ratio": 0.25,
+            "enabled": false,
+            "label": "beta"
+          }
+        }
+      ],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false,
+      "validate_schema": true
+    },
+    {
+      "case_id": "qx_policy_explicit_strict_false_auto",
+      "description": "strict=false auto call keeps envelope guidance while arguments are best effort",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Use record_scalars exactly once with count=7, ratio=0.25, enabled=false, label=beta."
+        }
+      ],
+      "tools": [
+        "record_scalars_strict_false"
+      ],
+      "tool_choice": "auto",
+      "request_preset": "template_default",
+      "max_tokens": 2048,
+      "expected_finish_reasons": [
+        "tool_calls"
+      ],
+      "expect_no_tool_calls": false,
+      "min_tool_calls": 1,
+      "exact_tool_calls": 1,
+      "expected_tool_names": [
+        "record_scalars"
+      ],
+      "expected_tool_calls": [],
+      "expected_content": null,
+      "content_pattern": null,
+      "expect_reasoning": null,
+      "normalize_argument_strings": false,
+      "validate_schema": false
     },
     {
       "case_id": "qx_parallel_two_different_tools",

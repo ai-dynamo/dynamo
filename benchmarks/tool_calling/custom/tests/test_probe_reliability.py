@@ -95,8 +95,31 @@ def test_kimi_k2_adds_only_its_model_specific_customer_regressions() -> None:
 def test_qwen36_27b_resolves_to_the_complete_qwen_xml_profile() -> None:
     assert probe.model_case_profile("Qwen/Qwen3.6-27B") == "qwen3_coder_xml"
     cases = probe.build_cases("qwen3_coder_xml")
-    assert len(cases) == 61
+    assert len(cases) == 63
     assert all(case.request_overrides == {} for case in cases)
+
+
+def test_qwen_xml_profile_covers_explicit_strict_policy() -> None:
+    cases = probe.build_cases("qwen3_coder_xml")
+    strict_true = case_by_id(cases, "qx_policy_explicit_strict_true_auto")
+    strict_false = case_by_id(cases, "qx_policy_explicit_strict_false_auto")
+
+    assert strict_true.tool_choice == strict_false.tool_choice == "auto"
+    assert strict_true.messages == strict_false.messages
+    assert strict_true.tools[0]["function"]["strict"] is True
+    assert strict_false.tools[0]["function"]["strict"] is False
+    assert strict_true.validate_schema is True
+    assert strict_false.validate_schema is False
+
+    for case, expected_strict in ((strict_true, True), (strict_false, False)):
+        payload = probe.build_payload(
+            case,
+            model="Qwen/Qwen3.6-27B",
+            stream=False,
+            temperature=0.0,
+            default_max_tokens=1024,
+        )
+        assert payload["tools"][0]["function"]["strict"] is expected_strict
 
 
 def test_customer_regressions_are_in_the_qualification_profile() -> None:

@@ -134,11 +134,11 @@ def test_qwen36_27b_uses_complete_qwen_xml_profile() -> None:
     assert selection["resolved_case_profile"] == "qwen3_coder_xml"
     assert selection["case_groups"]["generic"] == []
     assert selection["case_groups"]["model_specific"] == []
-    assert len(selection["case_groups"]["complete_profile"]) == 61
-    assert len(selection["case_ids"]) == 61
-    assert selection["complete_profile_case_count"] == 61
-    assert selection["complete_profile_record_count"] == 122
-    assert selection["record_count"] == 122
+    assert len(selection["case_groups"]["complete_profile"]) == 63
+    assert len(selection["case_ids"]) == 63
+    assert selection["complete_profile_case_count"] == 63
+    assert selection["complete_profile_record_count"] == 126
+    assert selection["record_count"] == 126
     assert selection["temperature"] == 0.0
     assert len(selection_hash) == 64
 
@@ -197,6 +197,34 @@ def test_bfcl_dry_run_writes_normalized_contract(tmp_path: Path) -> None:
     assert result["coverage"]["resolved_case_count"] == 50
     assert len(result["provenance"]["selection_hash"]) == 64
     assert "@sha256:" in result["provenance"]["runner_image"]
+
+
+@pytest.mark.parametrize("runtime", ("vllm-serve", "sglang-serve"))
+def test_native_runtime_labels_round_trip_in_suite_result(
+    tmp_path: Path, runtime: str
+) -> None:
+    output_dir = tmp_path / runtime
+
+    exit_code = main(
+        [
+            "--suite",
+            "bfcl",
+            "--base-url",
+            "http://127.0.0.1:8000/v1",
+            "--model",
+            "example/model",
+            "--runtime",
+            runtime,
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads((output_dir / "suite-result.json").read_text())
+    assert result["runtime"] == runtime
+    assert result["execution_status"] == "planned"
 
 
 def test_bfcl_completes_only_after_exact_generation_and_scoring(
