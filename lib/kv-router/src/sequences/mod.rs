@@ -9,6 +9,7 @@ mod prompt_membership_trie;
 mod prompt_registry;
 mod replica_sync;
 mod request_maps;
+mod sharded_lock;
 pub mod single;
 pub mod topology;
 

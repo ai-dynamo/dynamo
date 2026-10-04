@@ -39,10 +39,14 @@ from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
 )
-from dynamo.common.multimodal.image_loader import ImageLoader
-from dynamo.common.multimodal.media_source import describe_media_source
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
+from dynamo.common.multimodal.media_source import decode_data_uri, describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -163,7 +167,8 @@ class MultimodalRequestProcessor:
             self.tokenizer = tokenizer_factory(model_dir)
 
         self.image_loader = ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding,
+            max_bytes=self.max_file_size_bytes,
         )
 
         # Reuse the shared default so this preprocessor and the vLLM/SGLang
@@ -516,7 +521,8 @@ class MultimodalRequestProcessor:
                 if image_urls:
                     try:
                         pil_images = await self.image_loader.load_image_batch(
-                            image_urls
+                            image_urls,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                         if pil_images:
                             processed_mm_data["image"] = pil_images
@@ -586,16 +592,21 @@ class MultimodalRequestProcessor:
                     )
                 try:
                     normalized_url = await validate_media_url(url, self._url_policy)
-                    if urlparse(normalized_url).scheme in ("http", "https"):
-                        # This backend already has an operator-configured file
-                        # limit, so pass it rather than take the shared media
-                        # default: an explicit bound wins over the env one.
-                        content = await fetch_media_bytes(
-                            normalized_url,
-                            policy=self._url_policy,
-                            timeout=30.0,
-                            max_bytes=self.max_file_size_bytes,
-                        )
+                    scheme = urlparse(normalized_url).scheme
+                    if scheme in ("http", "https", "data"):
+                        if scheme == "data":
+                            content = decode_data_uri(
+                                normalized_url, max_bytes=self.max_file_size_bytes
+                            )
+                        else:
+                            # This backend has its own operator-configured file limit, so pass
+                            # it: an explicit bound wins over the shared media default.
+                            content = await fetch_media_bytes(
+                                normalized_url,
+                                policy=self._url_policy,
+                                timeout=30.0,
+                                max_bytes=self.max_file_size_bytes,
+                            )
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
                         nvdec_video = None
@@ -706,7 +717,7 @@ class MultimodalRequestProcessor:
                     processed_inputs["multi_modal_uuids"] = {"image": list(mm_hashes)}
 
         # Get token_ids from request (already tokenized by Rust frontend)
-        token_ids = request.get("token_ids")
+        token_ids = token_ids_to_list(request.get("token_ids"))
         if not token_ids:
             logging.warning("No token_ids in request")
             return None
