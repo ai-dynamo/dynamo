@@ -92,8 +92,17 @@ async fn unmatched_route_fallback(
     request: axum::extract::Request,
 ) -> axum::response::Response {
     let request = match &state.forward_routes {
-        Some(routes) => {
+        Some(routes) if routes.covers(request.uri().path()) => {
+            // Admit forwarded work like inference: not while draining, and
+            // close the race with a drain that starts after the first check.
+            if !state.service.is_ready() {
+                return super::openai::ErrorMessage::_service_unavailable().into_response();
+            }
             let permit = state.service.acquire_inflight();
+            if !state.service.is_ready() {
+                drop(permit);
+                return super::openai::ErrorMessage::_service_unavailable().into_response();
+            }
             match routes
                 .forward(request, state.service.stopping_token().clone(), permit)
                 .await
@@ -102,7 +111,7 @@ async fn unmatched_route_fallback(
                 Err(request) => request,
             }
         }
-        None => request,
+        _ => request,
     };
     let (method, uri) = (request.method(), request.uri());
     match state.anthropic_path.as_deref() {
@@ -2258,6 +2267,36 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// Verifies that a draining frontend refuses new forwarded requests with
+    /// `503`, like inference routes, while other unmatched routes keep `404`.
+    #[tokio::test]
+    async fn test_draining_refuses_new_forwarded_requests() {
+        // Never contacted: admission is refused before forwarding.
+        let (port, state, handle) = spawn_service(|builder| {
+            builder.forward_routes(Some(vec!["/v1/custom=http://127.0.0.1:1".to_string()]))
+        })
+        .await;
+        state.start_draining();
+
+        let client = reqwest::Client::new();
+        let forwarded = client
+            .get(format!("http://localhost:{port}/v1/custom/events"))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(forwarded.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.inflight_count(), 0);
+
+        let unmatched = client
+            .get(format!("http://localhost:{port}/v1/unknown"))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(unmatched.status(), reqwest::StatusCode::NOT_FOUND);
+
+        handle.abort();
     }
 
     async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {

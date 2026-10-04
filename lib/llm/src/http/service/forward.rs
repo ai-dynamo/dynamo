@@ -108,6 +108,11 @@ impl ForwardRoutes {
     /// `/v1/custom` and `/v1/custom/abc`, not `/v1/customx`. Paths with dot
     /// segments are never forwarded: URL normalization would let them escape
     /// the prefix.
+    /// Whether a prefix covers `path`, so [`Self::forward`] would forward it.
+    pub(crate) fn covers(&self, path: &str) -> bool {
+        self.upstream_url(path, None).is_some()
+    }
+
     fn upstream_url(&self, path: &str, query: Option<&str>) -> Option<reqwest::Url> {
         if path.split('/').any(|segment| {
             matches!(
@@ -278,7 +283,6 @@ fn strip_hop_by_hop(mut headers: HeaderMap) -> HeaderMap {
     headers
 }
 
-/// The `502` returned when the upstream cannot be reached.
 fn bad_gateway() -> Response {
     let code = StatusCode::BAD_GATEWAY;
     let body = serde_json::json!({
