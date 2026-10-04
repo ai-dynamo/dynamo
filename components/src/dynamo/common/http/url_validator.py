@@ -72,6 +72,13 @@ def max_data_url_bytes() -> int:
 # Source: RFC1918 (private), RFC6598 (CGNAT), RFC5735 (loopback, link-local,
 # 0.0.0.0/8), RFC4193 (ULA), RFC4291 (IPv6 loopback / link-local), RFC6890
 # (reserved). Link-local 169.254/16 covers the AWS / OpenStack metadata IP.
+# IPv6 special-purpose ranges that can reach or embed a non-public address:
+# local-use NAT64 64:ff9b:1::/48 (RFC 8215), discard 100::/64 (RFC 6666), IETF
+# protocol assignments 2001::/23 incl. Teredo (RFC 2928, 4380), documentation
+# 2001:db8::/32 (RFC 3849), and 6to4 2002::/16 (RFC 3056, deprecated by
+# RFC 7526), which embeds an IPv4 address such as 10.0.0.1. The well-known
+# NAT64 prefix 64:ff9b::/96 is deliberately absent: on an IPv6-only cluster
+# every IPv4 destination is reached through it.
 _BLOCKED_IP_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -91,6 +98,11 @@ _BLOCKED_IP_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] 
     ipaddress.ip_network("::/128"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("::ffff:0:0/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("100::/64"),
+    ipaddress.ip_network("2001::/23"),
+    ipaddress.ip_network("2001:db8::/32"),
+    ipaddress.ip_network("2002::/16"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("ff00::/8"),
