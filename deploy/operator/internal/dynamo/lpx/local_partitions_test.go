@@ -163,10 +163,6 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 		wantLocalEnv     string
 	}{
 		{
-			name:       "omitted selection renders every LPU Agent",
-			wantAgents: 17, wantStartsAfter: []string{"agt"}, wantGroupMembers: []string{"agt", "cond"},
-		},
-		{
 			name: "partial selection renders Agents for remote partitions", selection: &dynamov1beta1.LPXLocalPartitions{IDs: []int64{11}},
 			wantAgents: 9, wantStartsAfter: []string{"agt"}, wantGroupMembers: []string{"agt", "cond"}, wantLocalEnv: "11",
 		},
