@@ -18,18 +18,19 @@ import (
 
 const localPartitionIDsEnv = "LPX_LOCAL_PARTITION_IDS"
 
-// selectRemotePartitions splits a hybrid build's physical partitions into the
-// partitions that remain on LPUs and the sorted runtime partition IDs that run
-// on the Cyborg GPU. build is a nonnil physical build that has not collapsed its
-// selected prop-sync chains. A nil selection keeps every partition on LPUs.
-// Neither input is mutated.
+// selectRemotePartitions filters partitions, the scheduler reservations derived
+// from build, to those that remain on LPUs and returns the sorted runtime
+// partition IDs that run on the Cyborg GPU. build is a nonnil physical build that
+// has not collapsed its selected prop-sync chains. A nil selection returns
+// partitions unchanged. No input is mutated.
 func selectRemotePartitions(
 	selection *dynamov1beta1.LPXLocalPartitions,
 	pipeline Pipeline,
 	build *Build,
+	partitions []BuildPartition,
 ) ([]BuildPartition, []int, error) {
 	if selection == nil {
-		return build.Partitions, nil, nil
+		return partitions, nil, nil
 	}
 	if pipeline != PipelineLPX {
 		return nil, nil, fmt.Errorf("%w: localPartitions requires a hybrid build with a Cyborg conductor", ErrUnsupportedRuntime)
@@ -67,8 +68,8 @@ func selectRemotePartitions(
 		local[id] = true
 	}
 
-	remote := make([]BuildPartition, 0, len(build.Partitions))
-	for _, partition := range build.Partitions {
+	remote := make([]BuildPartition, 0, len(partitions))
+	for _, partition := range partitions {
 		if !local[runtimeOwner[partition.SourcePartitionID]] {
 			remote = append(remote, partition)
 		}

@@ -71,12 +71,8 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 			build := normalized.build
 			build.CompilationMode = BuildCompilationModeHybrid
-			firstTopology, err := build.Partitions[0].Topology.withChipCount(8)
-			require.NoError(t, err)
-			secondTopology, err := build.Partitions[1].Topology.withChipCount(64)
-			require.NoError(t, err)
-			build.Partitions[0].Topology = firstTopology
-			build.Partitions[1].Topology = secondTopology
+			build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
+			build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
 			third := build.Partitions[1]
 			third.SourcePartitionID = 11
 			third.PartPath = testPart11Path
@@ -188,12 +184,8 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 			build := normalized.build
 			build.CompilationMode = BuildCompilationModeHybrid
-			firstTopology, err := build.Partitions[0].Topology.withChipCount(8)
-			require.NoError(t, err)
-			chainTopology, err := build.Partitions[1].Topology.withChipCount(64)
-			require.NoError(t, err)
-			build.Partitions[0].Topology = firstTopology
-			build.Partitions[1].Topology = chainTopology
+			build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
+			build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
 			third := build.Partitions[1]
 			third.SourcePartitionID = 11
 			third.PartPath = testPart11Path

@@ -1124,6 +1124,26 @@ class TestParseOmniRequest:
         assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
         assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
 
+    def test_video_request_uses_nvext_negative_prompt(self):
+        request = {
+            "model": "test-model",
+            "prompt": "a small boat",
+            "size": "320x192",
+            "nvext": {"negative_prompt": "blurry, distorted"},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["video"]))
+
+        assert result["engine_inputs"]["negative_prompt"] == "blurry, distorted"
+        assert result["original_prompt"]["negative_prompt"] == "blurry, distorted"
+
+    def test_video_request_without_negative_prompt_omits_it(self):
+        request = {"model": "test-model", "prompt": "a small boat", "size": "320x192"}
+
+        result = asyncio.run(parse_omni_request(request, ["video"]))
+
+        assert "negative_prompt" not in result["engine_inputs"]
+
     def test_image_request_uses_nvext_dimensions_consistently(self):
         request = {
             "prompt": "a red apple",
