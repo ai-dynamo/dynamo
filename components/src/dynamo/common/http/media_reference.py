@@ -181,17 +181,14 @@ async def local_media_reference(
     http(s) URL — notably ``data:``, which ``validate_url`` allows but which is
     a URI, not a path, and would reach the generator as one.
     """
-    if isinstance(max_bytes, _FromEnv):
-        max_bytes = max_media_bytes()
-
     resolved = await validate_media_reference(reference, policy)
     scheme = urlparse(resolved).scheme
     if scheme in ("http", "https"):
-        # Imported here, not at module scope, so tests can monkeypatch
-        # ``dynamo.common.http.fetch_bytes`` and see the patched function.
-        from . import fetch_bytes
-
-        data = await fetch_bytes(resolved, timeout, policy=policy, max_bytes=max_bytes)
+        # The bytes come from the shared media entrypoint, which resolves an
+        # unset bound from the environment; this only adds the temp file.
+        data = await fetch_media_bytes(
+            resolved, policy=policy, timeout=timeout, max_bytes=max_bytes
+        )
         fd, tmp = tempfile.mkstemp(suffix=_temp_suffix(resolved))
         try:
             with os.fdopen(fd, "wb") as fh:

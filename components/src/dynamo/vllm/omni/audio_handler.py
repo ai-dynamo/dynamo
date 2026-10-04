@@ -383,12 +383,14 @@ class AudioGenerationHandler:
         import soundfile as sf
 
         if ref_audio_str.startswith(("http://", "https://")):
-            # Fetch through the shared media path rather than a local client, so
-            # this inherits the destination policy every other media fetch uses:
-            # the full blocklist (link-local metadata, CGNAT, IPv6 ULA, blocked
-            # hostnames) instead of a private/loopback test, revalidated on every
-            # redirect hop rather than followed unchecked, and a bound applied
-            # while the body streams rather than after it is buffered whole.
+            # Fetch through the shared media path rather than a local client.
+            # A local is_private/is_loopback check already rejects link-local,
+            # ULA and RFC 1918 addresses; what it cannot do is (a) check redirect
+            # targets -- aiohttp follows them unchecked -- (b) stop DNS
+            # rebinding, since it resolves the host separately from the connect,
+            # (c) bound the body before buffering it whole, or (d) cover CGNAT
+            # and the blocked hostnames. The shared client does all four: it
+            # revalidates each hop and filters addresses again at connect time.
             # The TTS-specific knobs stay the bound and the deadline.
             try:
                 audio_bytes = await fetch_media_bytes(

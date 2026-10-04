@@ -734,47 +734,45 @@ class TestResolveRefAudio:
         assert seen["max_bytes"] == handler.config.tts_ref_audio_max_bytes
         assert seen["timeout"] == handler.config.tts_ref_audio_timeout
 
-    def test_keeps_a_blocked_destination_a_client_error(self, monkeypatch):
-        # UrlValidationError is a ValueError, and has to stay one so the
-        # frontend still answers 4xx rather than 500.
+    @pytest.mark.parametrize(
+        ("raised", "expected"),
+        [
+            # A blocked destination or oversized body: already a ValueError
+            # (client fault, so the frontend answers 4xx), kept as is.
+            pytest.param("UrlValidationError", ValueError, id="blocked-destination"),
+            # Transport failure against the caller's URL: reported as a client
+            # fault too.
+            pytest.param("HttpTimeoutError", ValueError, id="transport-failure"),
+            # Operator fault (e.g. an untrusted egress proxy). It is an
+            # HttpError, so a bare `except HttpError` would turn it into
+            # ValueError -> InvalidArgument and blame the caller; it must keep
+            # its type.
+            pytest.param(
+                "HttpConfigurationError",
+                "HttpConfigurationError",
+                id="operator-fault-keeps-its-type",
+            ),
+        ],
+    )
+    def test_maps_fetch_failures_to_the_right_fault(
+        self, monkeypatch, raised, expected
+    ):
+        import dynamo.common.http as http
         import dynamo.vllm.omni.audio_handler as ah
         from dynamo.common.http.url_validator import UrlValidationError
 
+        types = {
+            "UrlValidationError": UrlValidationError,
+            "HttpTimeoutError": http.HttpTimeoutError,
+            "HttpConfigurationError": http.HttpConfigurationError,
+        }
+        exc_type = types[raised]
+        expected = types.get(expected, expected)
         handler = _make_audio_handler()
 
         async def fake_fetch(url, **kwargs):
-            raise UrlValidationError("blocked destination")
+            raise exc_type("fetch failed")
 
         monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
-        with pytest.raises(ValueError, match="blocked destination"):
-            asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))
-
-    def test_does_not_turn_an_operator_fault_into_a_client_error(self, monkeypatch):
-        # HttpConfigurationError is an HttpError, so a bare `except HttpError`
-        # here would convert a deployment misconfiguration (an egress proxy the
-        # operator has not trusted) into a ValueError -> InvalidArgument, and
-        # blame the caller for a URL that is fine.
-        import dynamo.vllm.omni.audio_handler as ah
-        from dynamo.common.http import HttpConfigurationError
-
-        handler = _make_audio_handler()
-
-        async def fake_fetch(url, **kwargs):
-            raise HttpConfigurationError("egress proxy is not trusted")
-
-        monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
-        with pytest.raises(HttpConfigurationError):
-            asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))
-
-    def test_reports_a_transport_failure_as_a_client_error(self, monkeypatch):
-        import dynamo.vllm.omni.audio_handler as ah
-        from dynamo.common.http import HttpTimeoutError
-
-        handler = _make_audio_handler()
-
-        async def fake_fetch(url, **kwargs):
-            raise HttpTimeoutError("timed out")
-
-        monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
-        with pytest.raises(ValueError, match="Failed to download ref_audio"):
+        with pytest.raises(expected):
             asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))
