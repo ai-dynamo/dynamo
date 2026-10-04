@@ -2640,6 +2640,7 @@ dependencies = [
  "blake3",
  "chrono",
  "criterion",
+ "crossbeam-epoch",
  "crossbeam-queue",
  "crossbeam-utils",
  "dashmap",

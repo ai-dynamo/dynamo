@@ -182,8 +182,26 @@ shared CRTC nodes concurrently.
 Node internals use separate protection for edge state and child maps:
 
 - `NodeState` is protected by a `parking_lot::RwLock`.
-- `children` publishes compact snapshots through `ArcSwap`, promoting to a
+- `children` publishes compact snapshots reclaimed through epochs (`crossbeam-epoch`), promoting to a
   `DashMap` when fanout exceeds four children.
+- Every child `Arc` a reachable child map owns is released through the epoch:
+  retired compact snapshots and `Arc`s a `DashMap` unlinks in place. A dropped
+  node frees its own map inline, which is safe because no reader can reach a node
+  whose last `Arc` is gone. Dropping the whole tree also frees every map inline,
+  since exclusive access rules out readers. `find_matches` pins once per walk and
+  borrows each node under that pin instead of cloning its `Arc`, so a node it
+  stands on stays allocated even if a writer unlinks it meanwhile. Writers still
+  hold `Arc`s.
+- Expired epoch garbage is not freed inside the collection that releases it,
+  which often runs on a `find_matches` caller. It goes to the collecting thread's
+  graveyard when that thread drains one: a lookup frees a small budget after it
+  unpins, and an event lane frees some after each event and all of it when idle
+  or on `Flush`. Garbage collected on any other thread (rayon and moka pin the
+  same global collector), overflow, and garbage from exiting threads go to a
+  shared graveyard that event lanes drain. So a detached subtree never stalls
+  one lookup, and no shared queue sits on the hot path. A drain releases a
+  retired snapshot's reference counts only as it drops each child, so leftovers
+  of a spent budget stay counted.
 - `shape_gate` and `shape_version` coordinate plans that depend on the relation
   between the edge and child map.
 
@@ -194,9 +212,11 @@ exclusive shape gate.
 
 `find_matches` is best-effort during concurrent shape changes. It reads node
 state and child pointers without taking `shape_gate` on the hot step, so it may
-observe adjacent tree shapes during a split and undercount. It must not panic,
-and apart from the equal-size skip below it must not return a match past a
-valid reachable prefix.
+observe adjacent tree shapes during a split and undercount. Because reads hold
+no reference counts, stale-leaf cleanup can also unlink an empty leaf a read is
+standing on; that leaf has no workers, so the read cannot overcount there. It
+must not panic, and apart from the equal-size skip below it must not return a
+match past a valid reachable prefix.
 
 ### Equal-size skip
 

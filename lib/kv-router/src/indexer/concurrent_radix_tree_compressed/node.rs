@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{self, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
+use crossbeam_epoch::Guard;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
@@ -42,6 +43,9 @@ pub(super) struct Node {
     internal: AtomicBool,
     state: RwLock<NodeState>,
     children: NodeChildren,
+    /// Strong references to this node held by retired child-map snapshots that are
+    /// awaiting epoch reclamation. Never larger than the actual number.
+    retired_snapshot_refs: AtomicUsize,
 }
 
 impl Node {
@@ -115,7 +119,35 @@ impl Node {
             internal: AtomicBool::new(internal),
             state: RwLock::new(state),
             children,
+            retired_snapshot_refs: AtomicUsize::new(0),
         }
+    }
+
+    pub(super) fn note_retired_snapshot_ref(&self) {
+        self.retired_snapshot_refs.fetch_add(1, Ordering::Release);
+    }
+
+    pub(super) fn release_retired_snapshot_ref(&self) {
+        self.retired_snapshot_refs.fetch_sub(1, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn retired_snapshot_refs_for_test(&self) -> usize {
+        self.retired_snapshot_refs.load(Ordering::Acquire)
+    }
+
+    /// Strong references other than those held by retired child-map snapshots, or
+    /// `None` if a snapshot was reclaimed during the read.
+    ///
+    /// Callers hold the parent's exclusive shape gate, so no snapshot holding this node
+    /// can be retired meanwhile; the count can only fall. Equal reads before and after
+    /// the strong count therefore bracket a strong count with no reclamation in between.
+    fn live_strong_count(this: &SharedNode) -> Option<usize> {
+        let retired = this.retired_snapshot_refs.load(Ordering::Acquire);
+        let strong = Arc::strong_count(this);
+        atomic::fence(Ordering::Acquire);
+        (this.retired_snapshot_refs.load(Ordering::Acquire) == retired)
+            .then(|| strong.saturating_sub(retired))
     }
 
     fn with_shape_plan<R>(&self, plan: impl FnOnce(&NodeState, &NodeChildren, u64) -> R) -> R {
@@ -165,13 +197,15 @@ impl Node {
         Some(result)
     }
 
-    pub(super) fn take_children(&self) -> Vec<SharedNode> {
-        let _gate = self.shape_gate.write();
-        let children = self.children.values_snapshot();
-        if self.children.clear() {
-            self.shape_version.fetch_add(1, Ordering::Release);
-        }
-        children
+    /// Takes this node's child `Arc`s and frees its child map now instead of through the
+    /// epoch, for a tree being dropped.
+    ///
+    /// # Safety
+    ///
+    /// No thread may still walk this node's children: the caller owns the tree exclusively.
+    pub(super) unsafe fn take_children(&self) -> Vec<SharedNode> {
+        // SAFETY: forwarded from the caller.
+        unsafe { self.children.take_exclusive() }
     }
 
     #[cfg(test)]
@@ -189,8 +223,23 @@ impl Node {
         self.children.entries_snapshot()
     }
 
+    #[cfg(test)]
     pub(super) fn child_snapshot(&self, local_hash: LocalBlockHash) -> Option<SharedNode> {
         self.children.get(&local_hash)
+    }
+
+    /// Borrows a child for the life of `guard`; see [`NodeChildren::get_ref`].
+    pub(super) fn child_ref<'g>(
+        &'g self,
+        local_hash: LocalBlockHash,
+        guard: &'g Guard,
+    ) -> Option<&'g Node> {
+        self.children.get_ref(&local_hash, guard)
+    }
+
+    /// Takes this node's child `Arc`s so the graveyard can free a subtree iteratively.
+    pub(super) fn into_child_arcs(self) -> Vec<SharedNode> {
+        self.children.into_child_arcs()
     }
 
     /// Number of leading `hashes` present in this node's edge, read under one lock.
@@ -504,7 +553,7 @@ impl Node {
         self.apply_edge_shape_update(shape_version, |state, children| {
             let split = self.split_at_locked(state, split_pos);
             state.promote_to_full(worker);
-            let _ = children.insert(tail_first_local, tail_node.clone());
+            children.insert(tail_first_local, tail_node.clone());
             (SplitStoreOutcome::Done { split, tail_node }, true)
         })
         .unwrap_or(SplitStoreOutcome::Stale)
@@ -642,7 +691,7 @@ impl Node {
             },
             suffix_children,
         ));
-        let _ = self.children.insert(suffix_first_local, suffix.clone());
+        self.children.insert(suffix_first_local, suffix.clone());
         self.internal.store(true, Ordering::Release);
 
         SplitLookupData { suffix }
@@ -681,10 +730,11 @@ impl Node {
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
-    pub(super) fn find_match_step<S: HashSequence>(
-        &self,
+    pub(super) fn find_match_step<'g, S: HashSequence>(
+        &'g self,
         mut input: FindStepInput<'_, S>,
-    ) -> FindStepOutcome {
+        guard: &'g Guard,
+    ) -> FindStepOutcome<'g> {
         // NOTE: This read intentionally does not take shape_gate. A concurrent
         // split can make the edge snapshot and child lookup come from adjacent
         // tree shapes; find_matches tolerates that brief best-effort race.
@@ -788,7 +838,7 @@ impl Node {
             && input.seq_pos + edge_match_len < input.sequence.len()
         {
             self.children
-                .get(&input.sequence.at(input.seq_pos + edge_match_len))
+                .get_ref(&input.sequence.at(input.seq_pos + edge_match_len), guard)
         } else {
             None
         };
@@ -804,6 +854,8 @@ impl Node {
 
     pub(super) fn remove_child_if_stale_leaf(&self, key: LocalBlockHash, child: &SharedNode) {
         let _parent_gate = self.shape_gate.write();
+        // Pin after the gate so a parked wait does not hold back epoch reclamation.
+        let _guard = crossbeam_epoch::pin();
         let still_attached = self
             .children
             .get(&key)
@@ -818,11 +870,16 @@ impl Node {
         if child.state.read().has_any_workers() || !child.children.is_empty() {
             return;
         }
-        if Arc::strong_count(child) != 2 {
+        // The parent map and the caller's candidate must hold the only live references;
+        // any other holder is a writer that may still cover or extend this node. Readers
+        // borrow children without a reference, so this can unlink a leaf a read is
+        // standing on. That read sees no workers here and so cannot overcount, and the
+        // epoch keeps the node allocated until it unpins.
+        if Self::live_strong_count(child) != Some(2) {
             return;
         }
 
-        let _ = self.children.remove(&key);
+        self.children.remove(&key);
         self.shape_version.fetch_add(1, Ordering::Release);
     }
 }

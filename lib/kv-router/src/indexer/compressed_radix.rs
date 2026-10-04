@@ -241,16 +241,14 @@ impl NodeState {
         debug_assert!(!blocks.is_empty());
 
         let old_len = self.edge.len();
-        let downgraded_workers = self
-            .full_edge_workers
-            .iter()
-            .copied()
-            .filter(|&full_worker| full_worker != worker)
-            .collect::<Vec<_>>();
-        for downgraded_worker in downgraded_workers {
-            self.full_edge_workers.remove(&downgraded_worker);
-            self.worker_cutoffs.insert(downgraded_worker, old_len);
-        }
+        let worker_cutoffs = &mut self.worker_cutoffs;
+        self.full_edge_workers.retain(|&full_worker| {
+            if full_worker == worker {
+                return true;
+            }
+            worker_cutoffs.insert(full_worker, old_len);
+            false
+        });
         self.promote_to_full(worker);
 
         self.edge.reserve(blocks.len());

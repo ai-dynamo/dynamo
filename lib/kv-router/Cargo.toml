@@ -34,6 +34,7 @@ dynamo-truthy = { workspace = true }
 # workspace
 anyhow = { workspace = true }
 arc-swap = "1.9.1"
+crossbeam-epoch = "0.9"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 dashmap = { workspace = true }

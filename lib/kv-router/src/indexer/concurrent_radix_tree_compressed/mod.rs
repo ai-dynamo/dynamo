@@ -86,10 +86,17 @@ impl Default for ConcurrentRadixTreeCompressed {
 impl Drop for ConcurrentRadixTreeCompressed {
     fn drop(&mut self) {
         self.anchor_nodes.clear();
-        let mut stack = self.root.take_children();
+        // SAFETY: `&mut self` rules out every lookup and writer, so no thread can still
+        // walk a child map, and the maps are freed now instead of through the epoch.
+        let mut stack = unsafe { self.root.take_children() };
         while let Some(node) = stack.pop() {
-            stack.extend(node.take_children());
+            // SAFETY: as above.
+            stack.extend(unsafe { node.take_children() });
         }
+        // Snapshots retired before the drop can still own nodes unlinked earlier; hand
+        // them to the collector and free whatever has already expired.
+        children::NodeChildren::flush_retired();
+        children::NodeChildren::drain_graveyard(usize::MAX);
     }
 }
 
@@ -259,9 +266,18 @@ impl ConcurrentRadixTreeCompressed {
         let (id, op) = (kv_event.event_id, kv_event.data);
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
+        // One pin per store or remove: child-map loads and publications nest inside it.
+        // A clear walks the whole tree and pins per node instead, so it cannot hold back
+        // epoch reclamation for the length of the walk.
         match op {
-            KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id, counters),
-            KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
+            KvCacheEventData::Stored(op) => {
+                let _guard = crossbeam_epoch::pin();
+                self.apply_stored(lookup, worker, op, id, counters)
+            }
+            KvCacheEventData::Removed(op) => {
+                let _guard = crossbeam_epoch::pin();
+                self.apply_removed(lookup, worker, op, id)
+            }
             KvCacheEventData::Cleared => {
                 self.erase_worker_coverage(lookup, WorkerRemovalTarget::DpRank(worker), true);
                 Ok(())
