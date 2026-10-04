@@ -263,7 +263,8 @@ jobs:
             shopt -s nullglob
             profiles=("$ARTIFACTS"/perf/*/*_trace_c"$concurrencies"_*/profile_export_aiperf.json)
             (( ${#profiles[@]} == 1 ))
-            jq -e '.request_count.avg > 0 and (.error_request_count.avg // 0) == 0 and
+            # The CI trace has 20 conversations with 10 turns each.
+            jq -e '.request_count.avg == 200 and (.error_request_count.avg // 0) == 0 and
               .output_sequence_length.avg > 0 and .was_cancelled != true' "${profiles[0]}"
             exit 0
           fi
