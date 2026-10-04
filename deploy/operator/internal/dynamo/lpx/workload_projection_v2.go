@@ -45,7 +45,6 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
 	}
 
-	// Remove GPU-local runtime partitions, with their chain members, before deriving LPU demand.
 	partitions, localPartitionIDs, err := selectRemotePartitions(intent.LocalPartitions, intent.Pipeline, &configured, partitions)
 	if err != nil {
 		return nil, err
