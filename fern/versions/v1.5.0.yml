@@ -43,6 +43,10 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
+  agent-skills:
+    display-name: Agent Skills
+    icon: robot
+    slug: agent-skills
   reference:
     display-name: Reference
     icon: book
@@ -877,6 +881,24 @@ navigation:
             path: ../pages-v1.5.0/recipes/feature-benchmarks/kv-router-a-b-testing.md
             slug: kv-router-ab-testing
             hidden: true
+  - tab: agent-skills
+    layout:
+      - page: Overview
+        icon: robot
+        path: ../pages-v1.5.0/agent-skills/overview.mdx
+        slug: overview
+      - page: Deployment and Operations
+        icon: screwdriver-wrench
+        path: ../pages-v1.5.0/agent-skills/deployment.mdx
+        slug: deployment
+      - page: Performance Optimization
+        icon: gauge-high
+        path: ../pages-v1.5.0/agent-skills/optimization.mdx
+        slug: optimization
+      - page: Development and Documentation
+        icon: code
+        path: ../pages-v1.5.0/agent-skills/development.mdx
+        slug: development
   - tab: reference
     layout:
       - page: Compatibility
@@ -942,6 +964,7 @@ navigation:
         icon: robot
         path: ../pages-v1.5.0/reference/general/agent-skills.mdx
         slug: agent-skills
+        hidden: true
       # ==================== API Reference ====================
       # docs/fern/scripts/gen_python_api.py generates the Python landing page
       # and one deterministic MDX per curated module. Each per-module page is a
