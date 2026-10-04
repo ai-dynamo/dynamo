@@ -173,7 +173,6 @@ func v2Connectors(
 	// Scheduler output follows physical order, not chain declaration order.
 	slices.Sort(edgePositions)
 
-	// Rebase selected physical edges onto the retained partitions; both endpoints must remain.
 	retainedOrdinal := make(map[int]int, len(partitions))
 	for ordinal, partition := range partitions {
 		retainedOrdinal[partition.SourcePartitionID] = ordinal
