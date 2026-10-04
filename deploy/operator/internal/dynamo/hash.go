@@ -63,7 +63,7 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 
 	workerDCDs := make(map[string]workerTemplate, len(dcds))
 	for _, dcd := range dcds {
-		if dcd != nil && IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+		if dcd != nil && (IsWorkerComponent(string(dcd.Spec.ComponentType)) || dcd.Spec.IsLPX()) {
 			componentName := GetDCDComponentName(dcd)
 			if componentName == "" {
 				return "", fmt.Errorf("generated worker DCD %q has no component name label", dcd.Name)
@@ -98,6 +98,15 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.Replicas = nil
 	spec.MinAvailable = nil
 	spec.ScalingAdapter = nil
+	if spec.IsLPX() {
+		// Agent-only replicas expand speculative models; conductor replicas scale engines.
+		spec.LPX.Scheduling = nil
+		if conductor := spec.ComponentRole(v1beta1.ComponentRoleLPXConductor); conductor != nil {
+			conductor.Replicas = nil
+		} else {
+			spec.Replicas = ptr.To(ptr.Deref(dcd.Spec.Replicas, 1))
+		}
+	}
 
 	// Hash the resolved version separately so equivalent image-derived and
 	// explicit versions produce the same worker hash.
