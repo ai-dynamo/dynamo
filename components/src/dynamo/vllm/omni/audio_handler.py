@@ -46,7 +46,7 @@ _TTS_VARIANTS = {
     "voicedesign": "VoiceDesign",
     "base": "Base",
 }
-# Variant marker ending a model path component, for re-exports without metadata.
+# Variant marker ending the checkpoint directory name, for re-exports without metadata.
 _TTS_VARIANT_PATH_SUFFIX = re.compile(
     r"(?:^|[-_.])(custom[-_.]?voice|voice[-_.]?design|base)$"
 )
@@ -153,9 +153,10 @@ class AudioGenerationHandler:
     def _tts_model_variant(self) -> str | None:
         """Task served by the loaded Qwen3-TTS checkpoint, or None if unknown.
 
-        Checkpoint metadata wins. Only when it is absent or unrecognised are the
-        model path components inspected, leaf first, and a marker must end a
-        component so names like ``database`` do not read as ``Base``.
+        Checkpoint metadata wins. Only when it is absent or unrecognised is the
+        checkpoint directory name inspected (``models--org--name`` for a Hugging
+        Face ``snapshots/<revision>`` path), never its ancestors, and a marker
+        must end the name so ``database`` does not read as ``Base``.
         """
         model_config = getattr(self.engine_client, "model_config", None)
         hf_config = getattr(model_config, "hf_config", None)
@@ -168,11 +169,13 @@ class AudioGenerationHandler:
         model_path = getattr(model_config, "model", None)
         if not isinstance(model_path, str):
             return None
-        for component in reversed(re.split(r"[\\/]+", model_path.rstrip("/\\"))):
-            match = _TTS_VARIANT_PATH_SUFFIX.search(component.lower())
-            if match is not None:
-                return _TTS_VARIANTS[re.sub(r"[-_.]", "", match.group(1))]
-        return None
+        parts = [part for part in re.split(r"[\\/]+", model_path) if part]
+        if len(parts) > 2 and parts[-2] == "snapshots":
+            parts = parts[:-2]
+        match = _TTS_VARIANT_PATH_SUFFIX.search(parts[-1].lower()) if parts else None
+        if match is None:
+            return None
+        return _TTS_VARIANTS[re.sub(r"[-_.]", "", match.group(1))]
 
     # -- TTS model detection --------------------------------------------------
 

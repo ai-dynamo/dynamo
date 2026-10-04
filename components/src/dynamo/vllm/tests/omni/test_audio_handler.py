@@ -214,7 +214,10 @@ class TestCheckpointVariant:
         "model, task",
         [
             ("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", "Base"),
-            ("/models/Qwen3-TTS-12Hz-1.7B-Base/snapshots", "CustomVoice"),
+            (
+                "/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base/snapshots/abc123",
+                "CustomVoice",
+            ),
             ("/models/qwen3_tts.voice-design", "CustomVoice"),
         ],
     )
@@ -237,9 +240,10 @@ class TestCheckpointVariant:
         else:
             handler._validate_tts_request(req)
 
-    def test_unknown_variant_is_not_restricted(self):
-        # "database" must not read as a Base checkpoint.
-        handler = self._handler(tts_model_type="other", model="/data/database")
+    @pytest.mark.parametrize("model", ["/data/database", "/models/base/export"])
+    def test_unknown_variant_is_not_restricted(self, model):
+        # Neither "database" nor an ancestor named "base" makes a Base checkpoint.
+        handler = self._handler(tts_model_type="other", model=model)
         handler._validate_tts_request(self._request("CustomVoice"))
 
     def test_metadata_wins_over_the_model_path(self):
