@@ -2240,6 +2240,8 @@ dependencies = [
  "half",
  "hf-hub 0.4.3",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "image",
  "ipnet",
  "json-five",
