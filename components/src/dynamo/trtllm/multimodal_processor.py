@@ -599,8 +599,6 @@ class MultimodalRequestProcessor:
                                 normalized_url, max_bytes=self.max_file_size_bytes
                             )
                         else:
-                            # This backend has its own operator-configured file limit, so pass
-                            # it: an explicit bound wins over the shared media default.
                             content = await fetch_media_bytes(
                                 normalized_url,
                                 policy=self._url_policy,

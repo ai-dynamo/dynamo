@@ -121,12 +121,21 @@ async def fetch_media_bytes(
     URL (rather than a materialized local path -- see ``local_media_reference``).
     It applies the shared media guarantees so no caller re-implements them:
 
-    - **SSRF**: ``policy`` defaults to ``UrlValidationPolicy.from_env()``; the
-      client revalidates every redirect hop against it.
+    - **SSRF**: ``policy`` defaults to ``UrlValidationPolicy.from_env()``. The
+      URL and every redirect hop are checked against it -- scheme (https, plus
+      http only when allowed), blocked hostnames, and every resolved address
+      against the blocked ranges (loopback, RFC 1918, link-local, CGNAT, ULA,
+      multicast, reserved) -- and the connector filters the addresses again at
+      connect time, so a DNS answer that changes between check and connect
+      (rebinding) is still refused.
     - **Size**: ``max_bytes`` defaults to ``DYN_MM_MAX_FILE_SIZE_MB``
-      (``max_media_bytes()``), refused while the body streams. ``None`` disables.
+      (``max_media_bytes()``) and is enforced while the body streams, before it
+      is buffered whole. ``None`` disables it.
     - **Error masking**: failures raise the unified ``HttpError`` family, whose
       messages are already bounded for the client-facing path.
+
+    An explicit ``policy`` or ``max_bytes`` always wins over its default, so a
+    backend with its own configured limit passes that instead.
 
     This is for raw *media* (image / audio / video) bytes. General URL fetches --
     and non-media artifacts such as precomputed embedding tensors that carry
