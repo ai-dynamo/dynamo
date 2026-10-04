@@ -9,7 +9,6 @@
 mod active_set;
 pub(crate) mod cleanup;
 pub mod conditional_disagg;
-mod lookup_update;
 
 pub mod identity;
 pub mod indexer;

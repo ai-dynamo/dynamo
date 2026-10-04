@@ -12,7 +12,7 @@ use crossbeam_epoch::Guard;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
@@ -20,15 +20,18 @@ use super::{
     MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::cleanup::{CleanupGuard, CleanupState};
-use crate::lookup_update::{redirect_arc_lookup_for_keys, update_arc_lookup_for_keys};
 use crate::protocols::*;
 
+mod block_lookup;
 mod children;
 mod coverage;
+mod edge_index;
+mod lane_lookup;
 mod node;
 mod state;
 mod types;
 use coverage::{Slot, SlotRegistry, SlotSet, SlotTable, wait_for_pinned_threads};
+use lane_lookup::LaneLookup;
 use node::*;
 use types::*;
 
@@ -52,18 +55,18 @@ pub struct ConcurrentRadixTreeCompressed {
     slots: SlotRegistry,
     cleanup: CleanupState,
     lifecycle: super::HashLifecycle,
-    #[cfg(feature = "bench")]
+    #[cfg(any(test, feature = "bench"))]
     bench_metrics: CrtcBenchMetrics,
 }
 
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 struct CrtcBenchMetrics {
     node_splits: AtomicU64,
     lookup_repair_scans: AtomicU64,
     lookup_repair_entries: AtomicU64,
 }
 
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 impl CrtcBenchMetrics {
     fn new() -> Self {
         Self {
@@ -131,7 +134,7 @@ impl ConcurrentRadixTreeCompressed {
             slots: SlotRegistry::default(),
             cleanup: CleanupState::new(),
             lifecycle: super::HashLifecycle::default(),
-            #[cfg(feature = "bench")]
+            #[cfg(any(test, feature = "bench"))]
             bench_metrics: CrtcBenchMetrics::new(),
         }
     }
@@ -216,23 +219,29 @@ impl ConcurrentRadixTreeCompressed {
 
     fn resolve_anchor_lookup(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         worker: EventWorker<'_>,
         hash: ExternalSequenceBlockHash,
     ) -> Option<SharedNode> {
         let node = self.anchor_nodes.get(&hash)?.clone();
         node.promote_slot_to_full_edge(worker.slot);
-        lookup
-            .entry(worker.rank)
-            .or_default()
-            .insert(hash, node.clone());
+        lookup.insert(worker.rank, hash, &node);
         Some(node)
     }
 
+    /// Whether `node`, whose edge contains `hash`, is the branch anchor for `hash`.
+    ///
+    /// The node flag is exact: anchors are created only by `apply_anchor`, stay in
+    /// `anchor_nodes` until the tree is dropped, and keep their one-block edge, so an
+    /// anchor containing `hash` is the map entry for `hash`.
     fn is_anchor_node(&self, hash: ExternalSequenceBlockHash, node: &SharedNode) -> bool {
-        self.anchor_nodes
-            .get(&hash)
-            .is_some_and(|anchor| Arc::ptr_eq(anchor.value(), node))
+        debug_assert_eq!(
+            node.is_anchor(),
+            self.anchor_nodes
+                .get(&hash)
+                .is_some_and(|anchor| Arc::ptr_eq(anchor.value(), node)),
+        );
+        node.is_anchor()
     }
 
     // ------------------------------------------------------------------
@@ -250,42 +259,38 @@ impl ConcurrentRadixTreeCompressed {
     /// bits there are stale, which a recycled slot can inherit on an unlinked subtree.
     fn apply_split_lookup(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         table: &SlotTable,
         prefix: &SharedNode,
         split: SplitLookupData,
     ) {
-        #[cfg(feature = "bench")]
+        #[cfg(any(test, feature = "bench"))]
         self.bench_metrics
             .node_splits
             .fetch_add(1, Ordering::Relaxed);
+        if !lookup.names(prefix) {
+            return;
+        }
         let (hashes, cutoffs) = split
             .suffix
-            .covered_prefixes(lookup.keys().map(|&worker| table.slot_of(worker)));
-        for (wl, cutoff) in lookup.values_mut().zip(cutoffs) {
-            if cutoff > 0 {
-                redirect_arc_lookup_for_keys(
-                    wl,
-                    hashes[..cutoff].iter().copied(),
-                    prefix,
-                    &split.suffix,
-                );
-            }
-        }
+            .covered_prefixes(lookup.workers().map(|worker| table.slot_of(worker)));
+        // `redirect` visits ranks in `workers` order, matching `cutoffs`.
+        let mut cutoffs = cutoffs.into_iter();
+        lookup.redirect(prefix, &split.suffix, |_| {
+            let cutoff = cutoffs.next().unwrap_or(0);
+            hashes[..cutoff].iter().copied()
+        });
     }
 
     fn update_lookup_for_blocks(
         &self,
         worker: WorkerWithDpRank,
-        worker_lookup: &mut WorkerLookup,
+        lookup: &mut LaneLookup,
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
     ) -> bool {
-        let changed = update_arc_lookup_for_keys(
-            worker_lookup,
-            blocks.iter().map(|block| block.block_hash),
-            node,
-        ) > 0;
+        let changed =
+            lookup.upsert_all(worker, blocks.iter().map(|block| block.block_hash), node) > 0;
         if self.lifecycle.is_enabled() {
             for block in blocks {
                 self.lifecycle.insert(worker, block.block_hash);
@@ -301,7 +306,7 @@ impl ConcurrentRadixTreeCompressed {
     #[cfg_attr(feature = "profile", inline(never))]
     fn apply_event(
         &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        lookup: &mut LaneLookup,
         event: RouterEvent,
         counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
