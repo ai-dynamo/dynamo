@@ -85,7 +85,7 @@ async def test_load_audio_preserves_client_error(client_error):
 
 
 @pytest.mark.asyncio
-async def test_load_audio_uses_vllm_media_connector():
+async def test_load_audio_reads_bytes_and_decodes_with_vllm():
     loader = AudioLoader()
     loader._url_policy = UrlValidationPolicy()
     waveform = np.random.randn(16000).astype(np.float32)

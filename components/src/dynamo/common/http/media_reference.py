@@ -151,11 +151,4 @@ async def local_media_reference(
             f"file: {describe_media_source(reference)}"
         )
     else:
-        # A local reference is handed on as a path, not read here, so check its
-        # size up front: it must not get past the bound a remote copy would hit.
-        if max_bytes is not None and os.stat(resolved).st_size > max_bytes:
-            raise UrlValidationError(
-                f"Media exceeds the {max_bytes} byte read limit: "
-                f"{describe_media_source(reference)}"
-            )
         yield resolved

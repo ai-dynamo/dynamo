@@ -76,12 +76,16 @@ try:
                 # another loader should retry the same rejected URL.
                 raise
             except (ValueError, FileNotFoundError, OSError) as exc:
-                # ImageLoader refuses local paths, so those fall back to vLLM,
-                # which reads them under its own allowed_local_media_path. An
-                # http(s) URL must not: ImageLoader already fetched it under
-                # Dynamo's policy, and vLLM would fetch it again following
-                # redirects without revalidating them and with no size bound.
+                # Local paths (which ImageLoader refuses) and data: URLs it cannot
+                # decode fall back to vLLM, which reads local paths under its own
+                # allowed_local_media_path. An http(s) URL must not: ImageLoader
+                # already fetched it under Dynamo's policy, and vLLM would fetch
+                # it again following redirects without revalidating them and
+                # with no size bound. PIL reports a corrupt body as a bare
+                # OSError; surface it as the client error vLLM's decoder would.
                 if urlparse(image_url).scheme in ("http", "https"):
+                    if isinstance(exc, OSError):
+                        raise ValueError(f"Failed to load image: {exc}") from exc
                     raise
                 logger.debug(
                     "DynamoMediaConnector: falling back to parent for %s (%s)",

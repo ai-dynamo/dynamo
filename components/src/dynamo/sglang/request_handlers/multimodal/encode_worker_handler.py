@@ -672,14 +672,10 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         """Map video URL inputs to NVDEC-backed decoders where applicable.
 
         Returns a list positionally aligned with ``media_inputs``: each video
-        URL entry is an
-        ``NvdecVideoDecoder`` (H.264/H.265), the fetched bytes (any other codec,
-        so SGLang does not re-download what we already validated and hold), or
-        the original URL string when nothing was fetched.
-        Non-video modalities and decoded inputs are returned unchanged. When
-        NVDEC is disabled or ineligible, remote URLs are fetched under Dynamo's
-        policy and size limit and passed to SGLang as bytes; other URLs remain
-        policy-validated and normalized.
+        URL entry becomes an ``NvdecVideoDecoder`` (H.264/H.265) or the bytes
+        read through ``load_media_bytes`` (any other codec, or NVDEC off), so
+        SGLang never fetches a URL itself. Non-video modalities and decoded
+        inputs are returned unchanged.
 
         Called from both the cached and uncached encode paths. The embedding
         cache is disabled by default, so routing this only through the cached

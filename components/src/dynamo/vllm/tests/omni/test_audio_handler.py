@@ -739,6 +739,14 @@ class TestResolveRefAudio:
         assert seen["max_bytes"] == handler.config.tts_ref_audio_max_bytes
         assert seen["timeout"] == handler.config.tts_ref_audio_timeout
 
+    def test_plain_http_is_refused_like_any_other_media(self, monkeypatch):
+        # Same scheme rule as every media fetch: http needs DYN_MM_ALLOW_INTERNAL.
+        monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+        with pytest.raises(ValueError, match="http"):
+            asyncio.run(
+                _make_audio_handler()._resolve_ref_audio("http://example.com/v.wav")
+            )
+
     def test_operator_fault_keeps_its_type(self, monkeypatch):
         # HttpConfigurationError is an HttpError; it must not be rewrapped as the
         # ValueError (InvalidArgument) reserved for the caller's faults.

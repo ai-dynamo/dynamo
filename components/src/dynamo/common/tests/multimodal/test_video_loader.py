@@ -75,7 +75,7 @@ async def test_load_video_preserves_client_error(client_error):
 
 
 @pytest.mark.asyncio
-async def test_load_video_uses_vllm_media_connector():
+async def test_load_video_reads_bytes_and_decodes_with_vllm():
     loader = VideoLoader()
     # data: scheme is in the default allowlist regardless of env flags.
     loader._url_policy = UrlValidationPolicy()

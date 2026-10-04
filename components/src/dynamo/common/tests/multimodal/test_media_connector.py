@@ -81,6 +81,24 @@ async def test_connector_falls_back_to_vllm_only_for_local_sources(
         parent_fetch.assert_not_awaited()
 
 
+async def test_connector_reports_a_corrupt_http_image_as_a_client_error(
+    monkeypatch,
+):
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    parent_fetch = AsyncMock()
+    monkeypatch.setattr(connector_class.__mro__[1], "fetch_image_async", parent_fetch)
+    connector = object.__new__(connector_class)
+    connector._image_loader = AsyncMock()
+    connector._image_loader.load_image.side_effect = OSError("image file is truncated")
+
+    with pytest.raises(ValueError, match="truncated"):
+        await connector.fetch_image_async("https://example.com/x.jpg")
+    parent_fetch.assert_not_awaited()
+
+
 class TestImageLoaderCache:
     """Test the ImageLoader LRU cache used by DynamoMediaConnector."""
 

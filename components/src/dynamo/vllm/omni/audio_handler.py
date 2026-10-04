@@ -82,6 +82,8 @@ class AudioGenerationHandler:
         self.media_output_http_url = media_output_http_url
         self._tts_tokenizer: Any = None
         self.audex = AudexRequestAdapter(config, engine_client)
+        # Built once, like every other media fetcher's policy.
+        self._url_policy = UrlValidationPolicy.from_env()
 
         # Cache TTS capabilities from model config at init.
         self._tts_supported_speakers: set = self._load_supported_speakers()
@@ -377,11 +379,7 @@ class AudioGenerationHandler:
         validate_audio_max_new_tokens(req.max_new_tokens, self.config)
 
     async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple:
-        """Download or decode reference audio for voice cloning (Base task).
-
-        Read through ``load_media_bytes`` under the deployment's media policy,
-        bounded by ``tts_ref_audio_max_bytes``.
-        """
+        """Download or decode reference audio for voice cloning (Base task)."""
         import io
 
         import soundfile as sf
@@ -393,7 +391,7 @@ class AudioGenerationHandler:
         try:
             audio_bytes = await load_media_bytes(
                 ref_audio_str,
-                UrlValidationPolicy.from_env(),
+                self._url_policy,
                 timeout=self.config.tts_ref_audio_timeout,
                 max_bytes=self.config.tts_ref_audio_max_bytes,
             )

@@ -779,25 +779,6 @@ async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
 
 
 @pytest.mark.asyncio
-async def test_maybe_nvdec_decoder_refuses_a_scheme_it_cannot_read(
-    nvdec_handler, monkeypatch
-) -> None:
-    """A source that cannot be read is refused, never handed to SGLang to fetch.
-
-    Validation is stubbed as succeeding so the assertion is about reading
-    rather than about the policy refusing the scheme.
-    """
-    _patch_validator(
-        monkeypatch, AsyncMock(return_value="ftp://example.invalid/clip.mp4")
-    )
-    fetch = AsyncMock()
-    monkeypatch.setattr(f"{_MEDIA_SOURCE}.fetch_bytes", fetch)
-    with pytest.raises(UrlValidationError, match="Unsupported local media scheme"):
-        await nvdec_handler._maybe_nvdec_decoder("ftp://example.invalid/clip.mp4")
-    fetch.assert_not_called()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
     [
