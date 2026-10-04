@@ -82,7 +82,7 @@ def decode_data_uri(url: str, max_bytes: int | None = None) -> bytes:
             )
     body = unquote(payload)
     if max_bytes is not None:
-        # The decoder also accepts padding after complete base64 quartets.
+        # Some Python versions accept padding after complete base64 quartets.
         if len(body.rstrip("=")) * 3 // 4 > max_bytes:
             raise UrlValidationError(
                 f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"

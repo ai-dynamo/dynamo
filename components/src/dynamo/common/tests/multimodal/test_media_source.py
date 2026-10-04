@@ -124,9 +124,9 @@ def test_decode_data_uri_size_bound_is_exact(size, escaped):
 
 
 def test_extra_padding_does_not_lower_decoded_size():
-    # Python accepts unnecessary padding after a complete base64 quartet.
+    # Extra padding is accepted only on some Python versions; the size
+    # guard must reject this payload before strict decoding either way.
     url = "data:image/png;base64," + base64.b64encode(b"abc").decode() + "=="
-    assert decode_data_uri(url, max_bytes=3) == b"abc"
     with pytest.raises(UrlValidationError, match="maximum allowed size"):
         decode_data_uri(url, max_bytes=2)
 
