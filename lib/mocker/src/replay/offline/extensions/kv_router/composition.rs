@@ -94,6 +94,8 @@ pub(in crate::replay) struct KvReplayComposition {
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
+    // TODO: Expose opt-in, per-replay selector seeding through the public CLI/Python
+    // APIs, separate from arrival_seed, and retain stable ordering for seeded ties.
     determinism: ReplayDeterminism,
 }
 
