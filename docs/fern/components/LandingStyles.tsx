@@ -15,10 +15,10 @@
  * at publish (#11952) -- production ships no main.css <link> at all. Same
  * pattern as ReferenceStyles.tsx and RecipeStyles.tsx.
  *
- * main.css content does still reach production, mirrored verbatim into
- * CustomFooter.tsx's SITE_CSS by sync_site_css.py, and that block does render
- * on these pages. It is not somewhere to put landing rules, though: it is
- * generated, so any hand edit is overwritten on the next sync.
+ * The theme also replaces the custom footer, so the main.css mirror in
+ * CustomFooter.tsx's SITE_CSS does not reach these pages either. That holds
+ * for custom properties too: a variable defined only in main.css resolves to
+ * nothing in production and silently drops every declaration that reads it.
  *
  * Injected via dangerouslySetInnerHTML, like RecipeStyles.tsx, not as a text
  * child like ReferenceStyles.tsx. A text child is escaped on render, which
@@ -1584,10 +1584,30 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   }
 }
 
+/* hide-toc removes the TOC aside that normally holds the right page margin,
+   so the content wrapper runs to the viewport edge and the centered article
+   drifts right of the header on wide screens. Reserve that margin the way
+   Fern's reference layout does. Keyed on #fern-toc because Fern renders that
+   aside before the content wrapper, out of reach of a sibling combinator. */
+.fern-main:not(:has(> #fern-toc)) .fern-layout-guide:has(.dynamo-community-page) {
+  padding-right: calc(var(--page-padding, 2rem) + var(--aside-offset, 0px));
+}
+
 article:has(.dynamo-community-page) {
   width: 100% !important;
   max-width: 1200px !important;
   margin-inline: auto;
+}
+
+/* Defined here rather than in main.css, which production never loads. */
+.dynamo-community-page {
+  --dynamo-community-green: #76b900;
+  --dynamo-community-green-bright: #8ed600;
+  --dynamo-community-ink: var(--grayscale-a12);
+  --dynamo-community-muted: var(--grayscale-a10);
+  --dynamo-community-rule: color-mix(in srgb, var(--grayscale-a12) 14%, transparent);
+  --dynamo-community-soft: #f3f4f3;
+  --dynamo-community-titlebar-text: #555755;
 }
 
 .dark .dynamo-community-page {
