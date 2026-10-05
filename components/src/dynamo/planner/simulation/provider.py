@@ -1063,8 +1063,6 @@ def _planner_config_payload(
     decode_min_endpoint: int | None,
     max_num_gpus: int | None = None,
 ) -> dict[str, JSONValue]:
-    """Resolve concrete replay settings through the real Planner configuration."""
-
     mode = str(sample["deployment_mode"])
     payload: dict[str, JSONValue] = {
         "mode": mode,

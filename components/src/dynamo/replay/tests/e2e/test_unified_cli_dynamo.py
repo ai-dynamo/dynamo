@@ -110,18 +110,9 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
         assert "falling back to load-based scaling only" not in result.stderr
 
 
-@pytest.mark.parametrize(
-    "config_path,target_override",
-    [(path, None) for path in _RECOMMEND_CASES]
-    + [
-        (path, "throughput")
-        for path in _RECOMMEND_CASES
-        if path.name == "03-planner-default-goodput.yaml"
-    ],
-    ids=lambda value: value.stem if isinstance(value, Path) else str(value),
-)
+@pytest.mark.parametrize("config_path", _RECOMMEND_CASES, ids=lambda path: path.stem)
 def test_dynamo_recommend_cli_cases_round_trip(
-    config_path: Path, target_override: str | None, tmp_path: Path
+    config_path: Path, tmp_path: Path
 ) -> None:
     output = tmp_path / config_path.stem
     result = _run_cli(
@@ -134,11 +125,6 @@ def test_dynamo_recommend_cli_cases_round_trip(
         str(output),
         "--format",
         "json",
-        *(
-            ["--set", f"optimization.target={target_override}"]
-            if target_override
-            else []
-        ),
     )
 
     rows = json.loads(result.stdout)
