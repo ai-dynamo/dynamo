@@ -140,7 +140,9 @@ The final audit requires each of the following next to the claim.
     depends on the perturbation (\cref{sec:res-robustness}).
   \item \textbf{It is not ``learning beats every heuristic''.} The baseline pool lacks faithful
     LMetric, which lies inside M1-v2's class; added to the default cost, it carries most of M1-v2's
-    validation margin (\cref{sec:res-fairness}).
+    validation margin (\cref{sec:res-fairness}). ``The branch's ported heuristics'' means the ports as
+    evaluated: the \policy{lmetric} port has since been fixed to count queued prefill, and that fixed
+    port is not in this comparison (\cref{sec:ports}).
   \item \textbf{It holds at the calibrated SLO and looser.} At SLO scales 1 to 3 it is significant;
     at 0.75 and 0.5 the sign holds but significance does not, and at 0.75 all four session segments
     turn against M1-v2 (\cref{sec:res-robustness}).
@@ -577,7 +579,7 @@ Equal footing was verified from the raw tuning histories by two auditors: every 
 or baseline, ran three restarts of 400 evaluations with the same cells, replicates, validation
 schedule, objective and reference, and the splits share no trace files. The fairness audit then found
 a gap that equal budgets do not close. By operator decision the baseline pool holds the branch's
-ports as implemented, and the \policy{lmetric} port lacks LMetric's queued-prefill term
+ports as implemented, and the \policy{lmetric} port as evaluated lacks LMetric's queued-prefill term
 (\cref{sec:ports}). Faithful LMetric is inside M1-v2's hypothesis class, and M1-v2's restart s3
 started from default plus 20.7 times the faithful LMetric point. \Cref{tab:fairness} shows what that
 heuristic does on its own.
@@ -621,6 +623,16 @@ heuristic does on its own.
     baseline, each tuned with the equal budget and evaluated on fresh segments or on live runs over
     cells outside the frozen test set, has not been run and is not part of this paper.
     (The live runs of \cref{sec:live} used frozen test cells and so cannot serve it.)
+  \item \textbf{The port has changed since.} After the campaign froze its results, the
+    \policy{lmetric} port in ai-dynamo/dynamo\#15450 was fixed to count the worker's queued prefill,
+    so it now scores the same product as the faithful LMetric rows above, plus its hot-spot filter.
+    The diagnostic is unchanged: its faithful LMetric rows are points of M1-v2's class, not the
+    port, and the tuned baselines it compares against include the \policy{lmetric} port before the
+    fix, as does every \policy{lmetric} number in this paper. The fixed port was not evaluated here,
+    and the follow-up above has still not been run.
+    % src: CR/CONTRACT.md A21; CR/facts/fairness_in_class_heuristic.json policies.lmetric_faithful
+    %      (learned-choice v2, theta = -(e_log_ptok + e_log_bs): argmin (active_prefill + new_prefill) x
+    %      (active_requests + 1))
 \end{itemize}
 % src: CR/facts/fairness_in_class_heuristic.json; CR/report/REPORT.md section 9 (increment +0.0110 per
 %      segment, SE 0.0065, 5/6; cell +0.0174; mostly Mooncake w1 +0.044); CR/audits/final/fix.md (escalation)

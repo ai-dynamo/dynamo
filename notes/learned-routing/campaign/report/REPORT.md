@@ -4,9 +4,15 @@ SPDX-License-Identifier: Apache-2.0 -->
 # Learned routing in AISim: final report
 
 - **Campaign:** learned worker selection for Dynamo's KV router, developed in AIS-timed offline replay
-  (AISim). Plan: `notes/learned-routing/PLAN.md`. Contract and amendments A1–A20:
+  (AISim). Plan: `notes/learned-routing/PLAN.md`. Contract and amendments A1–A21:
   `CR/CONTRACT.md`. `CR` is the campaign root named in `notes/learned-routing/README.md`.
 - **Report written:** 2026-10-05, after the final audit checkpoint and its fixer.
+- **The `lmetric` port changed after the freeze (A21).** After this campaign froze its results, the
+  `lmetric` port in ai-dynamo/dynamo#15450 was fixed to count the worker's queued prefill
+  (`active_prefill_tokens`) in LMetric's P-token, as the LMetric paper defines it. The campaign
+  branch keeps the port as evaluated. Every `lmetric` number in this report, the in-class
+  faithful-LMetric diagnostic (§9) and the headline's scope refer to the port before that fix; none
+  was re-run.
 - **Deployment (fixed by the operator):** Qwen/Qwen3-32B, vLLM 0.24.0, H100 SXM, TP2, aggregated,
   `max_model_len` 131,072. Engine timing from AIS. Every number in §1–§14 is **simulated**; nothing
   there was measured on GPUs except the one-cell live smoke in §11. §15, added after the live
@@ -42,7 +48,9 @@ Read it with these limits, each of which the final audit requires:
    (MDE 0.038) and below the spread that timing perturbations induce (0.060, LR-14). The magnitude
    depends on the perturbation.
 2. **It is not "learning beats every heuristic".** CONTRACT A2.5 kept paper-faithful baselines out
-   of the pool, so the pool's `lmetric` port lacks LMetric's queued-prefill term (LR-04). Faithful
+   of the pool, so the pool's `lmetric` port lacks LMetric's queued-prefill term (LR-04). That is the
+   port as evaluated: it has since been fixed to count queued prefill (A21), and "the branch's ported
+   heuristics" in the claim means the ports as evaluated here. Faithful
    LMetric is inside M1-v2's hypothesis class and was its s3 initialization. Untuned, it beats all
    11 tuned baselines on validation, and default + faithful LMetric reproduces 53–66% of M1-v2's
    fresh-validation margin over ramjet. The learned increment over that heuristic is about
@@ -86,7 +94,8 @@ Secondary statements that hold:
 **Policies.** Every policy is one configuration, tuned on the pooled train split with the same
 CMA-ES budget, then selected on validation (A2.1, LR-10):
 
-- **Tuned baselines (11).** `dynamo-default-cost-fn` (M0), two-tier, the branch's `lmetric`,
+- **Tuned baselines (11).** `dynamo-default-cost-fn` (M0), two-tier, the branch's `lmetric` (as
+  evaluated, without queued prefill; fixed after the freeze, A21),
   `ramjet`, `dualmap`, `chwbl`, `llm-d-precise-prefix` and `llm-d-optimized-baseline` (throughput)
   ports, `sticky-session` hard and bounded, and ramjet with a tuned `router_queue_threshold`
   (ablation a's baseline arm).
@@ -900,6 +909,12 @@ validation and train only; the test split was not evaluated**; `facts/fairness_i
   segments or live runs over cells outside the frozen test set, never the frozen test cells
   (`audits/final/fix.md`). The A20 live finalist runs used frozen test cells (§15), so they cannot
   serve that follow-up.
+- **The port has changed since (A21).** After the freeze, the `lmetric` port in
+  ai-dynamo/dynamo#15450 was fixed to count queued prefill, so it now scores the same product as the
+  faithful LMetric rows above, plus its hot-spot filter. This diagnostic is unchanged: its faithful
+  LMetric rows are `learned-choice` points (θ = −(e_log_ptok + e_log_bs)), not the port, and the tuned
+  baselines it compares against include the pre-fix `lmetric` port. The fixed port was not evaluated
+  here, and the equal-budget follow-up has still not been run.
 
 **Asymmetric iteration** (refute-headline-2 F2).
 - The learned side was redesigned on validation evidence:
@@ -1126,7 +1141,7 @@ higher. Lower is better for latencies; higher is better for throughput and reuse
    above 32K context is less validated.
 4. **Selection exposure and redesign.** N = 6 is selection-exposed. The learned arms were
    redesigned on validation evidence, while the baseline pool lacks faithful LMetric and SMetric
-   (§9).
+   (§9). Its `lmetric` is the port before the A21 fix that adds queued prefill.
 5. **Single model and deployment.** Aggregated serving with identical workers only. Heterogeneous
    worker sets, disaggregation, DP > 1 and other models are out of scope (A5.2).
 6. **Loads.** Loads are knee-matched per N, with no per-worker-matched check (LR-12). The sessions
@@ -1248,7 +1263,8 @@ From `facts/UPSTREAM_FOLLOWUPS.md`. "Upstream-worthy" is the stage's verdict.
 | 19 | Harness: remote ingest stores a record whose per-request rows have not landed yet | restored by hand after hash verification; added by this report stage | n |
 
 **Escalated to the operator, not done:**
-- the equal-budget faithful-LMetric and SMetric follow-up (§9);
+- the equal-budget faithful-LMetric and SMetric follow-up (§9); still not run after the A21 port
+  fix;
 - the A13.2 live finalist runs (§12); they have since run, in phase 3 (§15).
 
 ## 14. Reproduction

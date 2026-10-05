@@ -42,7 +42,9 @@ are reported for context.
 All of them are catalog policies, selected by the same kind of policy YAML as \lc{}
 (\cref{fig:api}), and in the headline league every one reads only inputs the live router has. They are evaluated as implemented on the campaign branch: the default cost
 function and the two-tier policy as on Dynamo's main branch, the six ported policies as in the
-pull-request stack \#15450 and \#15453, and \policy{sticky-session} as written for this campaign.
+pull-request stack \#15450 and \#15453 at the commit the campaign branch starts from (the stack's
+\policy{lmetric} has changed since; \cref{sec:ports}), and \policy{sticky-session} as written for
+this campaign.
 \Cref{tab:baselines} summarizes their rules at shipped defaults, which
 \cref{sec:baseline-policies} describes in the API's terms; \cref{sec:baseline-spaces} gives what is
 tuned and \cref{sec:ports} how the ports differ from the methods they are named after.
@@ -260,10 +262,16 @@ preliminary (pilot, train subset).
 %      DualMap pdf p.7; VERIFIED)
 The known differences between the ports and the published methods are these.
 \begin{itemize}
-  \item \policy{lmetric} omits the prefill already queued on a worker from its prefill factor.
-    The paper credits that term for its advantage over a cache-hit-ratio indicator
+  \item \policy{lmetric}, as evaluated, omits the prefill already queued on a worker from its
+    prefill factor. The paper credits that term for its advantage over a cache-hit-ratio indicator
     \citep{zhang2026lmetric}. The port also counts its hot-spot window in decisions rather than
-    time.
+    time. After the campaign froze its results, the port in ai-dynamo/dynamo\#15450 was fixed to
+    count the worker's queued prefill in the prefill factor, so it now matches the paper's
+    definition of that factor. The campaign branch keeps the port as evaluated: the
+    \policy{lmetric} baseline, its tuning and every \policy{lmetric} number in this paper are from
+    the port before the fix; this study did not evaluate the fixed port.
+    % src: CR/CONTRACT.md A21; policy-stack commit "fix(router-plugins): count queued prefill in
+    %      lmetric's P-token" (on #15450, after the campaign froze; not on the campaign branch)
   \item \policy{dualmap}'s budget is a fixed default; the paper derives it as the prefill backlog
     a GPU can clear within the TTFT SLO \citep{yuan2026dualmap}, and our SLO has no TTFT term.
     The port uses rendezvous hashing in place of the paper's consistent-hash rings, and it omits
@@ -285,8 +293,8 @@ The known differences between the ports and the published methods are these.
 %      penalty searched, "only their product matters")
 Tuning absorbs two of these: \policy{dualmap}'s budget is searched directly, and a miscalibrated
 prefill rate in the optimized baseline is equivalent to a different TTFT penalty, which is
-searched. The missing queued-prefill term in \policy{lmetric} is structural, and no parameter
-setting adds it.
+searched. The missing queued-prefill term in \policy{lmetric} as evaluated is structural, and no
+parameter setting adds it.
 % src: FEATURES.md "Representability" (theta = -(e_log_ptok + e_log_bs) takes the argmin of
 %      (active_prefill + new_prefill) x (active_requests + 1)); CR/CONTRACT.md A17.1 (M1-v2, init s3)
 The learned family is not limited the same way. Feature set \code{v2} can express the paper's

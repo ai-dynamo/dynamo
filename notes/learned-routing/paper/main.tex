@@ -15,7 +15,7 @@
 %      The mirrored copies under notes/learned-routing/campaign/ are equally valid sources.
 %      Never write an absolute host path, a cluster, node, partition, account or job name, or an
 %      internal URL, in text or comments (public-content rule, contract amendment A18).
-%   2. Results that do not exist yet use \pending{...} (inline, short) or the pendingblock
+%   2. Results that do not exist yet use the \pending macro (inline, short) or the pendingblock
 %      environment. Never write a placeholder number.
 %   3. Pilot numbers always carry \prelim ("preliminary (pilot, validation split)").
 %   4. Symbols come from macros.tex; their meaning is fixed in sections/notation.tex.
@@ -94,8 +94,8 @@
 
 \title{Learning a Worker-Selection Policy for Dynamo's KV Router\\in Offline Replay\\[4pt]
   \large A simulation study on Qwen3-32B (vLLM, TP2, H100), aggregated serving}
-% Authorship is not decided; do not add names without the operator's say-so.
-\author{Dynamo routing team\\\pending{author list}}
+% Author list as the operator set it (CR/facts/PAPER_REQUESTS.md R3); add no affiliation or email.
+\author{Rudy Pei}
 % src: CR/facts/STATE.md (last stage line at the time of this draft)
 \newcommand{\snapshot}{2026-10-05; phase 2, the frozen test pass and the live GPU check complete}
 \date{Draft: \snapshot}
@@ -109,8 +109,7 @@
   \fcolorbox{red}{red!4}{\parbox{0.9\linewidth}{\centering\color{red}\sffamily
     \textbf{\draftbanner.}\\[2pt]
     \small The headline and every result outside \cref{sec:live} come from AISim offline replay,
-    not from GPUs; \cref{sec:live} checks the ranking on GPUs. Boxed PENDING items mark
-    the open items.}}
+    not from GPUs; \cref{sec:live} checks the ranking on GPUs.}}
 \end{center}
 
 \input{sections/abstract}

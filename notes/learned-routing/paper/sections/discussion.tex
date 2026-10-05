@@ -60,7 +60,7 @@ between policies (\cref{sec:live}).
     Selection and redesign on validation & inflates validation numbers & single frozen test pass;
       symmetric selection & disclosed \\
     Ports differ from papers & inflates & stated per port; in-class diagnostic & headline scoped to
-      the ports \\
+      the ports as evaluated; \policy{lmetric} since fixed, not re-run \\
     Equal budget, unequal search & unknown & equal $\budget$ and restarts; disclosed starts & no
       baseline under-tuned \\
     \bottomrule
@@ -307,7 +307,11 @@ tuning can close them:
     the learned model's feature set \code{v2}, which the headline arm uses; this asymmetry is why
     the headline is scoped to the branch's ports: the default cost plus faithful LMetric carries most
     of the validation margin, and faithful LMetric alone, untuned, beats every tuned baseline on
-    validation (\cref{sec:res-fairness}).
+    validation (\cref{sec:res-fairness}). This describes the port as evaluated. After the campaign
+    froze its results, the port in ai-dynamo/dynamo\#15450 was fixed to include the queued-prefill
+    term, so it now matches the paper's definition; every \policy{lmetric} number here is from the
+    port before the fix, the headline's scope refers to the ports as evaluated, and no equal-budget
+    comparison with the fixed port has been run.
   \item \policy{dualmap} ships a pending-prefill budget of \num{65536} tokens and
     \policy{llm-d-optimized-baseline} a peak prefill rate of \num{15928} tokens/s, both from other
     deployments \citep{yuan2026dualmap}. Tuning reaches both: the budget is a free parameter, and

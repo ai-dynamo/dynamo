@@ -90,3 +90,14 @@ Read this first after any compaction or restart. For full detail, see:
 - Phase 3 is RUNNING as workflow `<workflow-run>` (script `.../workflows/scripts/learned-routing-phase3-<workflow-run>.js`). Two tracks run in parallel: (1) live prep, then live relays on the GPU cluster, then live analysis, then the live audit; (2) the paper draft. Then paper-final, the publication audit, and publish (only `rupei/learned-routing-public`). CONTRACT A20.
 - Waiting on the operator: (a) a faithful-LMetric/SMetric equal-budget follow-up; (b) whether to fix the `lmetric` port on #15450 to add the paper's queued-prefill term.
 - Owed, top-level: check aisimulate#378 and dynamo#15589 at milestones (both are bound in the app with Auto-fix on); end-of-campaign batched cleanup.
+
+## Update 2026-10-05 09:30 PDT: cleanup approved (operator)
+
+- **Operator:** "ok 3 also just standing approval on it, do it when you feel like it can be done, just make sure the major campaign logs / notes are saved to that remote branch as we talked about, without any exposing internal info".
+- **Order:**
+  1. Wait for the paper follow-up `<workflow-run>` to finish (it pushes the public branch).
+  2. Archive pass: make sure `rupei/learned-routing-public` carries the major logs and notes (STATE, CONTRACT, DEVIATIONS, UPSTREAM_FOLLOWUPS, audits, REPORT, LIVE, the paper, literature notes, plus a sanitized copy of the worklog worklog), only through `publish.sh` with a fail-closed scan.
+  3. Inventory: CLEANUP.md plus the resume list plus remote scratch, each with a keep/delete call.
+  4. Delete, top-level, by exact path, and log every path and size in the worklog.
+  5. Independent verification.
+- **Keep:** the campaign root's facts, runs records, cache and anything the freeze pins; the main campaign worktree; every local branch (remove worktrees only).

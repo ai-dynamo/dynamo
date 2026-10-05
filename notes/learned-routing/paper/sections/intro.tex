@@ -168,7 +168,8 @@ qualifications travel with the result.
   \item Only the sign is a claim: the effect is below the pre-registered minimum detectable effect
     (0.038) and below the spread the timing perturbations induce (0.060).
   \item It is not ``learning beats every heuristic''. The baseline pool holds the branch's ports as
-    implemented, and its \policy{lmetric} port lacks LMetric's queued-prefill term. Faithful LMetric
+    implemented, and its \policy{lmetric} port lacks LMetric's queued-prefill term (a fix made to the
+    port after the campaign froze adds it; \cref{sec:ports}). Faithful LMetric
     lies inside the learned model's class; untuned, it beats every tuned baseline on validation, and
     with the default cost it reproduces 53--66\% of the learned model's validation margin
     (\cref{sec:res-fairness}).

@@ -442,7 +442,7 @@ git commit -s -m "docs(learned-routing): sync campaign records"
   - `MAX_BYTES` is 5 MiB per file, also applied to gzipped `results.jsonl`. Larger files are
     skipped with a message.
   - `BUDGET_BYTES` is 25 MiB total, and only produces a warning.
-- The published mirror at this snapshot is 35,502,806 bytes in 592 files under `campaign/`,
+- The published mirror at this snapshot is 35,509,656 bytes in 592 files under `campaign/`,
   without the per-job compute records. Its largest file is `runs/phase2/local/stickyhard-s3/results.jsonl.gz` at
   4,405,645 bytes; the script skips any file over 5 MiB.
 - After a sync, update the Status section above if the newest `STATE.md` entry changed it.

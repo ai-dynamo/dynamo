@@ -52,10 +52,14 @@ and the \ais{} league can be checked against the mirrored facts but not yet rebu
 sources.
 % src: CR/CONTRACT.md A20 "Publication" (only the sanitized copy of the campaign branch is pushed);
 %      CR/facts/robustness.json execution (lag records on the lag build, timing records on the tuning build)
-\file{REPRODUCE.md} rebuilds the campaign to its calibrated, frozen cells; the later stages are
-reproduced from the mirrored facts and the analysis scripts named in the final report's reproduction
-section. \pending{a REPRODUCE.md revision that walks through the pilot, phase 2, the test pass and
-the robustness pass}
+\file{REPRODUCE.md} rebuilds the campaign to its calibrated, frozen cells. Its section~15 describes
+how the later stages ran (the pilot, phase 2, the test pass, the robustness pass and the live runs):
+the commands and frozen inputs each used, the facts file each wrote, and which of their records the
+mirror holds. Their numbers are re-derived from the records by the analysis scripts that the final
+report's reproduction section names; those scripts and the bulky records stay in the campaign root,
+and the mirrored facts carry every resulting number.
+% src: WT/notes/learned-routing/REPRODUCE.md section 15 "Later stages, as run"; CR/report/REPORT.md
+%      section 14
 
 \subsection{Environment}
 
@@ -265,5 +269,5 @@ The sources are in \file{notes/learned-routing/paper/}; \code{make} there runs \
 \code{pdflatex} and BibTeX and writes \file{build/main.pdf}, and \code{make tables}, given the
 campaign root, regenerates \file{generated/} from the final report's table fragments. The figures in
 \file{fig/} are copies of the final report's. Every number in the text carries a source comment
-(\code{\% src:}) naming the campaign file it comes from, and results that do not exist yet are
-marked with a boxed \textsc{pending} tag.
+(\code{\% src:}) naming the campaign file it comes from. Items that were open while drafting
+carried a boxed \textsc{pending} tag; none remains.

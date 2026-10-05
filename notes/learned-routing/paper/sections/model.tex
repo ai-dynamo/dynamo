@@ -248,8 +248,9 @@ keep their indices. They are used by the M1-v2 arm (\cref{sec:ladder}). They add
 LMetric's multiplicative rule \citep{zhang2026lmetric} lies inside the model class:
 $\theta = -(\basis{8} + \basis{10})$ routes to the minimum of
 $(\Lpf_i + (\ISL_j - \hit_i)^+)(\Lreq_i + 1)$, LMetric's product with queued prefill, and
-$\theta = -(\basis{9} + \basis{10})$ reproduces the branch's \code{lmetric} port without its
-hot-spot filter when cached tokens are whole overlapping blocks, as in replay; a unit test checks
+$\theta = -(\basis{9} + \basis{10})$ reproduces the branch's \code{lmetric} port as evaluated
+(\cref{sec:ports}) without its hot-spot filter when cached tokens are whole overlapping blocks, as in
+replay; a unit test checks
 both on \num{1000} random tables. A prefix-hash home indicator marks two hash-chosen candidates per
 prompt prefix, the consistent-hash candidate membership of DualMap and Lodestar
 \citep{yuan2026dualmap,lim2026lodestar}.

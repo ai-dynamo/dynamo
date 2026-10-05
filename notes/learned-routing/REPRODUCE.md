@@ -3,10 +3,10 @@
 
 # Reproducing the learned-routing campaign
 
-These steps rebuild the campaign on a clean Linux x86_64 machine up to its current state: the
-calibrated cells after calibration fix r0 (lr-cells-v5) and their frozen test set. Later stages
-are marked **TBD** and show the commands the contract plans for them. Start with
-[README.md](README.md) for what the campaign is.
+These steps rebuild the campaign on a clean Linux x86_64 machine up to the calibrated cells after
+calibration fix r0 (lr-cells-v5) and their frozen test set. The later stages, from the pilot
+through phase 2's test and robustness passes to the live runs, are described as they ran in
+[section 15](#15-later-stages-as-run). Start with [README.md](README.md) for what the campaign is.
 
 **Off the original host, git plus the public sources are enough.** Every small file the steps
 need is mirrored under `$NOTES/campaign/`: all six AgentX base manifests, both calibration driver
@@ -1272,35 +1272,80 @@ with a diagnostic report.
   - router-state lag {0, 50, 200} ms (A5);
   - `speedup_ratio` and `decode_speedup_ratio` at 0.8 and 1.2.
 
-## 15. Stages not yet run (TBD)
+## 15. Later stages, as run
 
-These commands follow CONTRACT "Harness API" and PLAN "Campaign control". Budgets, popsizes,
-subsets and spaces are **not decided yet**.
+The pilot, phase 2 (tuning and selection, the test pass and the robustness pass) and the live runs
+came after the frozen cells. This section says how each ran and where its record is; the commands
+are those of section 13, on the cells of step 7 and the replicates of step 12. Each stage's facts
+file records the worktree head it ran at.
 
-- **Re-audit of calibration fix r0 (pending):** an independent re-run audit of the lr-cells-v5
-  calibration. It is not in the mirror yet; see the README status table.
-- **Step 3, pilot (TBD):**
-  - Tune M0 (`spaces/default_cost_fn.yaml`) and train M1 (`spaces/learned_choice_m1.yaml`) on a
-    train subset, with `lr-train ... --budget-evals N --max-wall-seconds 540` in chunks.
-  - Score on validation with `lr-eval --repeats 3`.
-  - Apply the gate (section 14).
-- **Step 4, full (TBD):**
-  - Tune every baseline, with its shipped parameters and `router_config` knobs, on the same
-    budget.
-  - Climb M1 → M2 (→ M3). M2 uses `context {p, q}` or the named-source form.
-  - Run ablations (a) `router_queue_threshold` and (b) simulator-only signals.
-  - Midway audit for overfitting, degenerate policies and simulator exploitation.
-  - Per A9, once the CPU-cluster lane is `ok`, run tuning jobs one per node (`remote/submit_train.sh`) and
-    shard large `lr-eval` batches (`remote/submit_eval.sh`); see section 13.
-- **Step 5, test (TBD):**
-  - Verify `test_freeze.json` (section 11), then run one `lr-eval --repeats 3` pass on
-    `cells/test.jsonl`.
-  - Check robustness under timing perturbation and router-state lag. The lag knob needs a replay
-    patch, and lag 0 must be byte-identical to unpatched replay (A5).
-  - Compute bootstrap CIs with `lr-report --cluster segment`.
-- **Step 6, report (TBD):**
-  - Write `CR/report/REPORT.md` and its figures.
-  - `sync_from_campaign.sh` mirrors them into `campaign/report/`.
+**What the mirror holds.** The facts files (the public copy leaves out the per-allocation compute
+records), the audits, `report/REPORT.md` and `report/LIVE.md`, each tuning run's `best.json`,
+`best_policy.yaml` and gzipped `history.jsonl`, the gzipped `results.jsonl` of the smaller runs, and
+`runs/policies.tar.gz` with every evaluated policy YAML. **Only in the CR:** the stage scripts under
+`CR/runs/<stage>/scripts/` and `CR/report/scripts/`, the phase-2 space files, the test and
+robustness record files, the raw live exports and the result cache. The facts that cite them record
+their SHA-256 (for example `facts/test_results.json` `inputs`), so the mirrored facts and REPORT
+carry every number, but the analysis can be re-run only against the original CR.
+
+**Pilot (PLAN step 3, done 2026-10-03).**
+- Four `lr-train` runs: M0 (the default cost function's knobs) and M1 (`learned-choice`, feature
+  set v1), two restarts each, 480 evaluations each (30 generations of 16), on a 12-cell train
+  subset (`facts/pilot.json` `train_subset`).
+- Alongside: an untuned screen of the heuristics on that subset (k = 0, 1), then validation of the
+  selected configurations at k = 0–2 and on fresh replicates k = 3–10.
+- The gate of section 14 is `facts/gate.json` (decision: escalate). Its `full_plan` fixed the budget
+  and protocol that phase 2 ran. Records: `campaign/runs/pilot/`.
+
+**Tuning and selection (PLAN step 4 and the selection half of step 5, done 2026-10-04).**
+- Every tuned policy, baseline or learned, ran 3 restarts of 400 CMA-ES evaluations (25 generations
+  of 16) on all 34 train cells, 2 CRN replicates per evaluation, with validation every 5
+  generations on the 14 val cells at k = 0–2 (`facts/gate.json` `full_plan`).
+- Spaces and step sizes: `facts/phase2_prep.json` (each space file's SHA-256, free parameters and
+  `sigma0`); the AIS league's: `facts/phase2_ais_prep.json`.
+- The phase-2 orchestrator `benchmarks/learned_routing/remote/p2orch.py` placed the runs on the
+  remote CPU lane (section 13); a few restarts finished locally.
+- Results: `facts/tierA.json` and `facts/tierBC.json` (equal budget verified there); the mid-phase
+  fix that added the sign constraints (A11.2): `facts/phase2_mid_fix.json`.
+- Selection: each policy's best checkpoint on val k = 0–2, then the val-best baseline and the
+  headline learned arm on fresh val k = 3–10. `facts/finalists.json` froze the result before the
+  test pass, with the full spec of every policy the test pass ran.
+
+**Test pass (PLAN step 5).**
+- Verify `cells/test.jsonl` against `facts/test_freeze.json` first (section 11).
+- One `lr-eval --repeats 3` pass over the 60 test cells for the 33 policies of
+  `facts/finalists.json`: 29 on the tuning build, and the 4 AIS-league policies plus
+  default@defaults on the AIS build, with 0 errors (`facts/test_results.json` `execution`). To
+  re-run a finalist, copy its spec from `finalists.json` into a JSONL file and pass that to
+  `lr-eval`, as in section 13.
+- The headline is the pre-registered test of section 14 (`facts/HEADLINE_TEST.json`);
+  `lr-report --cluster segment` gives the bootstrap CIs. Results and the wording every summary
+  must keep: `facts/test_results.json` (`headline`, `report_must_state`). Secondary metrics:
+  `facts/secondary_metrics_test.json`.
+
+**Robustness pass.** Router-state lag of 10, 50 and 200 ms on the lag build (branch
+`rupei/learned-routing-lag`, not published), checked at lag 0 against the tuning build; engine
+timing at `speedup_ratio` and `decode_speedup_ratio` 0.8 and 1.2 on the tuning build. Records,
+conditions and checks: `facts/robustness.json`.
+
+**Analysis and report.** `campaign/report/REPORT.md` §14 lists the scripts that rebuild every
+number from the records, in order: the test and robustness analysis, the secondary and fairness
+scripts, then `build_report_data.py` and `assemble_report.py`. They run in the CR only (see above).
+
+**Live runs (A13.2, A20, done 2026-10-05).** Validation only: they never change a finalist, the
+headline or a frozen number.
+- Pre-registration: `facts/live_plan.json` (cells, policies, run order, validity rule and
+  analysis), written before the first finalist run.
+- Deployment: Qwen3-32B on vLLM 0.24.0, N = 4 workers at TP2 on one 8×H100 SXM node per job,
+  behind the Dynamo frontend running each frozen policy YAML; AIPerf replays the cell's arrival
+  schedule. The lane and its recipe are `benchmarks/learned_routing/live/` and its `deploy/`
+  directory, each with a README.
+- Runs: 6 frozen N = 4 test cells, 42 cell runs and 4 idle-calibration runs, all valid
+  (`facts/live_results.json` `completeness`). Each run's simulated counterpart is the test pass's
+  record of the same cell and policy at k = 0.
+- Analysis: `facts/live_results.json` and `campaign/report/LIVE.md`. In the CR,
+  `runs/live/finalists/scripts/live_results.py verify` re-scores every run from its raw
+  load-generator export, and `build` re-runs the registered analysis (REPORT §14).
 
 ## 16. Expected costs
 

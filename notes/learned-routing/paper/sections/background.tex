@@ -329,8 +329,13 @@ odds of its share of the last \code{window\_requests} (1000) decisions exceed th
 holders to non-holders. While it is alarmed, once twice as many consecutive class requests as
 there are holders would have gone to a holder, later ones go to the best non-holder. The paper
 measures the window in time; the port counts decisions so that replay stays deterministic. The
-paper's prefill factor also counts the prefill already queued on the worker, $\Lpf_i$; the port omits
-that term, a gap that matters for the scope of the headline (\cref{sec:ports,sec:res-fairness}).
+paper's prefill factor also counts the prefill already queued on the worker, $\Lpf_i$; the port as
+evaluated here omits that term, a gap that matters for the scope of the headline
+(\cref{sec:ports,sec:res-fairness}). After the campaign froze its results, the port in the policy-stack
+pull request (ai-dynamo/dynamo\#15450) was fixed to add $\Lpf_i$ to the prefill factor, as the paper
+defines it. Every \policy{lmetric} result in this paper is from the port before that fix.
+% src: CR/CONTRACT.md A21 (operator, 2026-10-05: lmetric P-token now includes active_prefill_tokens on
+%      #15450; the campaign's frozen lmetric baseline is the pre-fix port)
 
 \paragraph{Ramjet.}
 % src: WT/lib/router-plugins/builtin/src/ramjet.rs (module doc: Helix Ramjet src/router.rs;
@@ -447,7 +452,7 @@ or limits, of its parameter space.
   \item A large positive session coefficient is hard stickiness (\cref{sec:sticky}).
   \item With the extended feature set \code{v2}, $\theta = -(\basis{8} + \basis{10})$ takes the
     argmin of LMetric's product with the queued-prefill term, and $-(\basis{9} + \basis{10})$
-    reproduces the branch's \code{lmetric} port without its hot-spot filter
+    reproduces the branch's \code{lmetric} port as evaluated, without its hot-spot filter
     (\cref{sec:features}).
   \item \code{v2}'s \code{hash\_home} indicator marks the two rendezvous-hashed candidates of a
     prompt prefix, the candidate set of DualMap and Lodestar \citep{yuan2026dualmap,lim2026lodestar}.
