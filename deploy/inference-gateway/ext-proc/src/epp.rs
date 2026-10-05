@@ -103,7 +103,8 @@ fn load_thresholds_from_lookup(
             return Ok(None);
         };
         let raw = raw.trim();
-        if raw.is_empty() {
+        // `None` disables a threshold, as in the Frontend's parser.
+        if raw.is_empty() || raw == "None" {
             return Ok(None);
         }
         raw.parse()
@@ -1722,11 +1723,14 @@ mod tests {
     #[test]
     fn load_thresholds_parse_from_env() {
         assert!(!thresholds(&[]).unwrap().is_configured());
-        assert!(
-            !thresholds(&[(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, " ")])
-                .unwrap()
-                .is_configured()
-        );
+        for disabled in [" ", "None"] {
+            assert!(
+                !thresholds(&[(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, disabled)])
+                    .unwrap()
+                    .is_configured(),
+                "{disabled:?}"
+            );
+        }
 
         let config = thresholds(&[
             (DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, "0.85"),
