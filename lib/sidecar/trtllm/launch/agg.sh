@@ -80,13 +80,12 @@ trtllm_resolve_context_length "${EXTRA_ARGS[@]}"
 trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-GPU_MEM_ARGS=$(build_trtllm_override_args_with_mem)
-TRTLLM_GPU_MEM_ARGS=()
-if [[ -n "$GPU_MEM_ARGS" ]]; then
-    TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
-    printf '%s\n' "$GPU_MEM_ARGS" > "$TRTLLM_EXTRA_CONFIG"
-    TRTLLM_GPU_MEM_ARGS=(--extra_llm_api_options "$TRTLLM_EXTRA_CONFIG")
-fi
+# Dynamo sends a required or named tool_choice as a JSON schema, which
+# TensorRT-LLM enforces only with a guided-decoding backend.
+TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
+build_trtllm_override_args_with_mem \
+    --merge-with-json '{"guided_decoding_backend": "xgrammar"}' \
+    > "$TRTLLM_EXTRA_CONFIG"
 
 print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \
@@ -102,7 +101,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --host 127.0.0.1 \
     --port "$TRTLLM_GRPC_PORT" \
     "${TRTLLM_MAX_SEQ_LEN_ARGS[@]}" \
-    "${TRTLLM_GPU_MEM_ARGS[@]}" \
+    --extra_llm_api_options "$TRTLLM_EXTRA_CONFIG" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \

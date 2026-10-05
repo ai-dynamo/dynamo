@@ -108,10 +108,11 @@ trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"
 
 # Both engines need a cache transceiver or the handoff has nothing to move the
 # KV cache over. NIXL picks its own underlying transport (UCX where there is no
-# RDMA fabric) and is the path Dynamo uses elsewhere for disaggregation.
+# RDMA fabric) and is the path Dynamo uses elsewhere for disaggregation. Both
+# also need a guided-decoding backend to enforce a required or named tool_choice.
 TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
 build_trtllm_override_args_with_mem \
-    --merge-with-json "{\"cache_transceiver_config\": {\"backend\": \"${TRTLLM_CACHE_TRANSCEIVER_BACKEND}\"}}" \
+    --merge-with-json "{\"cache_transceiver_config\": {\"backend\": \"${TRTLLM_CACHE_TRANSCEIVER_BACKEND}\"}, \"guided_decoding_backend\": \"xgrammar\"}" \
     > "$TRTLLM_EXTRA_CONFIG"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
