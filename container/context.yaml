@@ -62,10 +62,12 @@ dynamo:
   enable_kvbm: "true"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
-  # 8.1.2 is an upstream maintenance release that picks up security fixes over
-  # 8.1; combined with the narrowed decoder set in wheel_builder it trims the
-  # media decode surface. Keep in sync with native_packages.yaml's ffmpeg entry.
-  ffmpeg_version: "8.1.2"
+  # Built from source in wheel_builder with a narrow codec allowlist and
+  # --build-suffix=_dynamo, so the SONAMEs cannot collide with the FFmpeg another
+  # wheel vendors. Keep in sync with native_packages.yaml's ffmpeg entry and with
+  # the ffmpeg-next/video-rs pins in lib/llm/Cargo.toml, which track the FFmpeg
+  # major.
+  ffmpeg_version: "9.0.1"
   # ffmpeg build inputs (only consumed when ENABLE_MEDIA_FFMPEG=true).
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
