@@ -396,6 +396,7 @@ impl RuntimeConfig {
                 discovery_backend,
                 request_plane,
                 event_plane,
+                ..Default::default()
             },
         }
     }

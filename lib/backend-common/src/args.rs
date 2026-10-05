@@ -28,6 +28,9 @@ use crate::disagg::DisaggregationMode;
 /// ```
 #[derive(Args, Clone, Debug)]
 pub struct CommonArgs {
+    #[command(flatten)]
+    pub runtime: crate::RuntimeConfig,
+
     /// Dynamo namespace for discovery routing. `DYN_NAMESPACE_WORKER_SUFFIX`
     /// is appended as `-{suffix}` unless it is empty or already present.
     #[arg(
