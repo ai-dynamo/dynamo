@@ -1,0 +1,58 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Multimodal Serving Examples
+sidebar-title: Overview
+subtitle: Explore multimodal serving, routing, disaggregation, and custom encoder examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose a multimodal example, then filter its available deployment platforms and inference backends.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="multimodal" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_multimodal.sh agg_multimodal_xpu.sh agg_vision.sh">
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Aggregated Multimodal Serving](multimodal.mdx)
+Serve image and video inputs with an aggregated language-model worker.
+<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="multimodal-routing" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_multimodal_router.sh agg_multimodal_router_chat_processor.sh agg_multimodal_router_chat_processor_xpu.sh agg_multimodal_router_xpu.sh">
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Multimodal KV Routing](multimodal-routing.mdx)
+Route multimodal requests using text and media cache overlap.
+<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="encode-pd" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_e_pd.sh disagg_multimodal_e_pd.sh multimodal_epd.sh">
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Separate Encode and PD](encode-pd.mdx)
+A dedicated encoder with a combined prefill/decode worker (E/PD).
+<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="encode-prefill-decode" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_multimodal_epd.sh disagg_multimodal_epd_xpu.sh epd_disagg.sh epd_multimodal_image_and_embeddings.sh multimodal_disagg.sh">
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Separate Encode, Prefill, and Decode](encode-prefill-decode.mdx)
+Dedicated encode, prefill, and decode workers (E/P/D).
+<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="multimodal-prefill-decode" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:trtllm local:vllm" data-keywords="disagg_multimodal.sh disagg_multimodal_p_d.sh">
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Multimodal Prefill and Decode](multimodal-prefill-decode.mdx)
+Multimodal prefill/decode separation without a dedicated encoder.
+<div className="dynamo-example-badges"><span>Local / CLI: TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="custom-encoders" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:vllm" data-keywords="agg_custom.sh agg_qwen3_5_native.sh">
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Custom Encoders](custom-encoders.mdx)
+Launch a language-model backend with a custom vision encoder.
+<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+</div>
+
+</ExamplesCatalog>

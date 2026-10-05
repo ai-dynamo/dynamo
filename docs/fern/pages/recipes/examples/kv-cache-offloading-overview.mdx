@@ -1,0 +1,37 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: KV Cache Offloading Examples
+sidebar-title: Overview
+subtitle: Explore KVBM, LMCache, and FlexKV deployment examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose a KV cache offloading example, then filter its available deployment platforms and backends.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="kvbm" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="kubernetes:vllm local:vllm" data-keywords="agg_kvbm.sh agg_kvbm.yaml agg_kvbm_router.sh disagg_kvbm.sh disagg_kvbm.yaml disagg_kvbm_2p2d.sh disagg_kvbm_2p2d.yaml disagg_kvbm_router.sh disagg_kvbm_tp2.yaml">
+<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
+### [KV Block Manager](kvbm.mdx)
+Aggregated and disaggregated vLLM with KVBM offloading.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span><span>Local / CLI: vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="lmcache" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="kubernetes:vllm local:vllm" data-keywords="agg_lmcache.sh agg_lmcache.yaml agg_lmcache_mp.sh agg_lmcache_multiproc.sh agg_lmcache_multiproc_xpu.sh agg_lmcache_xpu.sh disagg_lmcache.sh">
+<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
+### [LMCache](lmcache.mdx)
+In-process and external LMCache examples for vLLM.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span><span>Local / CLI: vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="flexkv" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="local:vllm" data-keywords="agg_flexkv.sh agg_flexkv_router.sh disagg_flexkv.sh">
+<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
+### [FlexKV](flexkv.mdx)
+Local vLLM cache offloading with FlexKV.
+<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+</div>
+
+</ExamplesCatalog>

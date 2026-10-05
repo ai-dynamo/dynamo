@@ -1,0 +1,51 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Observability and Recovery Examples
+sidebar-title: Overview
+subtitle: Explore tracing, metrics, GPU memory, failover, and snapshot restore examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose an observability or recovery example, then filter its available platforms and backends.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="tracing" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:vllm local:vllm local:sglang local:trtllm" data-keywords="agg.sh agg_tracing.sh agg_tracing.yaml agg_tracing_xpu_dra.yaml disagg.sh disagg_tracing.sh disagg_tracing.yaml disagg_tracing_xpu_dra.yaml">
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [OpenTelemetry Tracing](tracing.mdx)
+Trace requests through aggregated or disaggregated workers.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span><span>Local / CLI: vLLM, SGLang, TensorRT-LLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="logging-metrics" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:sglang local:trtllm" data-keywords="agg_logging.yaml agg_metrics.sh">
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [Logging and Metrics](logging-metrics.mdx)
+SGLang structured logging and TensorRT-LLM worker metrics.
+<div className="dynamo-example-badges"><span>Kubernetes: SGLang</span><span>Local / CLI: TensorRT-LLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="gpu-memory-service" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:sglang kubernetes:vllm" data-keywords="agg_gms.yaml">
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [GPU Memory Service](gpu-memory-service.mdx)
+Aggregated workers with a GPU Memory Service sidecar.
+<div className="dynamo-example-badges"><span>Kubernetes: SGLang, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="failover" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:vllm" data-keywords="agg_failover.yaml gms-failover.yaml">
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [GPU Failover](failover.mdx)
+Active-passive and multinode GPU Memory Service failover.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="snapshot-restore" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:trtllm" data-keywords="snapshot-restore.yaml">
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [Snapshot Restore](snapshot-restore.mdx)
+Restore a TensorRT-LLM worker from a checkpoint.
+<div className="dynamo-example-badges"><span>Kubernetes: TensorRT-LLM</span></div>
+</div>
+
+</ExamplesCatalog>

@@ -1,0 +1,58 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Routing Examples
+sidebar-title: Overview
+subtitle: Explore KV-aware, approximate, request-plane, gateway, and session-affinity routing
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose a routing example, then filter its available deployment platforms and inference backends.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="aggregated-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="agg_router.sh agg_router.yaml agg_router_replicas.sh agg_router_xpu.sh agg_router_xpu_dra.yaml">
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Aggregated KV-Aware Routing](aggregated-kv-routing.mdx)
+Cache-aware routing to aggregated workers.
+<div className="dynamo-example-badges"><span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="disaggregated-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="disagg_router.sh disagg_router.yaml disagg_router_gaudi.sh disagg_router_xpu_dra.yaml disagg_router_xpu_gdr.sh">
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Disaggregated KV-Aware Routing](disaggregated-kv-routing.mdx)
+Cache-aware routing to separate prefill and decode workers.
+<div className="dynamo-example-badges"><span>Kubernetes: TensorRT-LLM, vLLM</span><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="approximate-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:vllm local:trtllm local:vllm" data-keywords="agg_router_approx.sh agg_router_approx_xpu.sh agg_router_kv_approx.yaml agg_router_kv_approx_xpu_dra.yaml">
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Approximate Cache Tracking](approximate-kv-routing.mdx)
+KV-aware routing without worker cache-event publishing.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span><span>Local / CLI: TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="request-planes" data-topic="routing" data-topic-label="Routing" data-targets="local:vllm" data-keywords="agg_request_planes.sh agg_request_planes_xpu.sh">
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Request-Plane Transports](request-planes.mdx)
+Select the transport used for worker requests.
+<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="gateway-api" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:vllm" data-keywords="agg.yaml disagg.yaml">
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Gateway API Routing](gateway-api.mdx)
+Aggregated and disaggregated vLLM behind an Endpoint Picker.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="session-affinity" data-topic="routing" data-topic-label="Routing" data-targets="local:sglang" data-keywords="agg_agent.sh">
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Session Affinity](session-affinity.mdx)
+SGLang agentic serving with sticky sessions and KV-aware routing.
+<div className="dynamo-example-badges"><span>Local / CLI: SGLang</span></div>
+</div>
+
+</ExamplesCatalog>
