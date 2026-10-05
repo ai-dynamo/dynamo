@@ -126,7 +126,7 @@ impl LocalModelBuilder {
         self
     }
 
-    /// The HF name of the model before we downloaded it, or a local path if
+    /// The HF name or NGC URI before we downloaded the model, or a local path if
     /// that was given on the cmd line. We need this because `model_path` is always
     /// a local path.
     pub fn source_path(&mut self, source_path: PathBuf) -> &mut Self {
@@ -697,7 +697,9 @@ impl LocalModel {
         }
 
         let source_path = PathBuf::from(self.card.source_path());
-        if !source_path.exists() {
+        // NGC retains worker HTTP/file locations; the frontend can fall back to NGC
+        // when a worker's local metadata files are not accessible there.
+        if !source_path.exists() && !self.card.source_path().starts_with("ngc://") {
             // The consumers of MDC (frontend) might not have the same local path as us, so
             // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
             //

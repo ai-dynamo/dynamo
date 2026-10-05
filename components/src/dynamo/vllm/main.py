@@ -157,11 +157,12 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     local dir lets `register_model` take its `fs::exists` shortcut.
 
     Temporary vLLM-only workaround until `hub.rs` learns object-storage routing.
-    Otherwise use the fetched NGC directory or the original HF/local source.
+    Otherwise preserve the original source so NGC identity is independent of
+    each worker's local cache directory.
     """
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
-    return config.model_source_path
+    return config.model
 
 
 async def worker(argv: list[str] | None = None) -> None:

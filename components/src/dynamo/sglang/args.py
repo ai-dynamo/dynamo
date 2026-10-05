@@ -62,6 +62,8 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 
     component: str
     diffusion_worker: bool = False
+    # Preserve NGC identity for registration while SGLang loads the local path.
+    model_source_uri: Optional[str] = None
     # Whether this worker publishes KV events. Distinct from the router-side
     # `use_kv_events` on `router_advertisement`, which means the router
     # subscribes to them -- the reason the two live on separate objects.
@@ -693,6 +695,7 @@ async def parse_args(args: list[str]) -> Config:
     if should_fetch_model(parsed_args, model_path):
         local_path = await fetch_model(model_path)
         if needs_local_model_path(model_path):
+            dynamo_config.model_source_uri = model_path
             parsed_args.model_path = model_path = local_path
 
     snapshot_enabled = is_snapshot_enabled()

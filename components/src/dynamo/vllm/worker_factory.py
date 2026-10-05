@@ -1025,7 +1025,7 @@ class WorkerFactory:
             ModelInput.Tokens,
             ModelType.Empty,
             generate_endpoint,
-            config.model_source_path,
+            config.model,
             model_name=config.served_model_name or config.model,
             worker_type=WorkerType.Encode,
             needs=[

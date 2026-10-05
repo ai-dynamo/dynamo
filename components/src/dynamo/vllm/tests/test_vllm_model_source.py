@@ -45,7 +45,28 @@ async def test_ngc_is_resolved_before_offline_engine_args(
     assert config.model_source_path == str(tmp_path)
     engine_config = SimpleNamespace(model_config=SimpleNamespace(model_weights=""))
     vllm_main = importlib.import_module("dynamo.vllm.main")
-    assert vllm_main._register_model_source_path(config, engine_config) == str(tmp_path)
+    assert vllm_main._register_model_source_path(config, engine_config) == model
+
+
+@pytest.mark.parametrize("scheme", ["ngc", "s3", "gs", "az"])
+def test_registration_source_across_local_caches(tmp_path, scheme):
+    model = f"{scheme}://example/team/model:1"
+    vllm_main = importlib.import_module("dynamo.vllm.main")
+    for worker in ("prefill", "decode"):
+        local_path = str(tmp_path / worker / "model")
+        config = vllm_args.Config()
+        config.model = model
+        config.engine_args = SimpleNamespace(model=local_path)
+        engine_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                model=local_path,
+                model_weights="" if scheme == "ngc" else model,
+            )
+        )
+
+        source = vllm_main._register_model_source_path(config, engine_config)
+
+        assert source == (model if scheme == "ngc" else local_path)
 
 
 @pytest.mark.asyncio
