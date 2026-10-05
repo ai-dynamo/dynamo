@@ -910,7 +910,7 @@ pub fn run_mocker_trace_replay(
                 }
             }
             let router_mode = parse_replay_router_mode(router_mode)?;
-            let external_policy = if let Some(affinity_json) = affinity_json {
+            let affinity = if let Some(affinity_json) = affinity_json {
                 if router_mode != dynamo_mocker::replay::ReplayRouterMode::KvRouter {
                     return Err(PyValueError::new_err(
                         "conversation affinity requires KV routing",
@@ -921,30 +921,18 @@ pub fn run_mocker_trace_replay(
                         "conversation affinity requires static worker pools and does not support an AIS router prefill-load estimator",
                     ));
                 }
-                let affinity: serde_json::Value =
-                    serde_json::from_str(&affinity_json).map_err(|error| {
-                        PyValueError::new_err(format!("invalid router affinity: {error}"))
-                    })?;
-                if !affinity.is_object() {
-                    return Err(PyValueError::new_err("router affinity must be an object"));
-                }
-                // The policy host is native Dynamo; AISimulate owns all engines,
-                // replay execution and the owned-data Python policy bridge.
-                let factory = py
-                    .get_type::<super::kv::NativeReplayPolicy>()
-                    .into_any()
-                    .unbind();
                 Some(
-                    aisimulate_core::replay::python_policy::PythonPolicyComposition::new(
-                        factory,
-                        serde_json::to_string(&json!({"policy":"kv_router", "affinity":affinity}))
-                            .map_err(to_pyerr)?,
-                    ),
+                    serde_json::from_str::<dynamo_mocker::replay::ReplayAffinityConfig>(
+                        &affinity_json,
+                    )
+                    .map_err(|error| {
+                        PyValueError::new_err(format!("invalid router affinity: {error}"))
+                    })?,
                 )
             } else {
                 None
             };
-            let prefill_load_estimator = if external_policy.is_some() {
+            let prefill_load_estimator = if affinity.is_some() {
                 None
             } else {
                 load_replay_prefill_load_estimator(
@@ -988,7 +976,7 @@ pub fn run_mocker_trace_replay(
                     router_mode,
                     router_config,
                     prefill_load_estimator,
-                    external_policy,
+                    affinity,
                     capture,
                     scaling_policy,
                     telemetry,

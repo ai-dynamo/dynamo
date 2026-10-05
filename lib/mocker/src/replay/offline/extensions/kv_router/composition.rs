@@ -15,7 +15,7 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use super::{KvReplayMetadata, KvRouterPlacement};
+use super::{KvReplayMetadata, KvRouterPlacement, ReplayAffinityConfig, RoutingEvidence};
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
@@ -103,9 +103,23 @@ pub(in crate::replay) struct KvReplayComposition {
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
     determinism: ReplayDeterminism,
+    affinity: Option<ReplayAffinityConfig>,
+    capture_decisions: bool,
+    evidence: RoutingEvidence,
 }
 
 impl KvReplayComposition {
+    pub(in crate::replay) fn with_affinity(
+        mut self,
+        config: Option<ReplayAffinityConfig>,
+        capture: bool,
+        evidence: RoutingEvidence,
+    ) -> Self {
+        self.affinity = config;
+        self.capture_decisions = capture;
+        self.evidence = evidence;
+        self
+    }
     #[cfg(feature = "python-replay")]
     pub(in crate::replay) fn from_spec(
         router_config: Option<KvRouterConfig>,
@@ -119,6 +133,9 @@ impl KvReplayComposition {
             scaling_enabled: scaling_policy.is_some(),
             scaling_policy,
             determinism: ReplayDeterminism::Random,
+            affinity: None,
+            capture_decisions: false,
+            evidence: RoutingEvidence::default(),
         }
     }
     pub(in crate::replay) fn aggregated(
@@ -139,6 +156,9 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            affinity: None,
+            capture_decisions: false,
+            evidence: RoutingEvidence::default(),
         }
     }
 
@@ -164,6 +184,9 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            affinity: None,
+            capture_decisions: false,
+            evidence: RoutingEvidence::default(),
         }
     }
 }
@@ -182,6 +205,37 @@ impl ReplayComposition for KvReplayComposition {
             )));
         }
         validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)?;
+        if self.affinity.is_some() {
+            let invalid = aisimulate_core::replay::ReplayError::InvalidSpec;
+            if self.scaling_enabled {
+                return Err(invalid(
+                    "conversation affinity requires static worker pools".into(),
+                ));
+            }
+            let engine: aisimulate_core::replay::ReplayEngineConfig = if spec.engine.is_null() {
+                Default::default()
+            } else {
+                serde_json::from_value(spec.engine.clone())
+                    .map_err(|error| invalid(error.to_string()))?
+            };
+            let device_only = |rank: &aisimulate_core::engine::EngineConfig| {
+                rank.native_host_offload.is_none() && rank.g3_offload.is_none()
+            };
+            if !(device_only(&engine.rank)
+                && engine
+                    .prefill
+                    .as_ref()
+                    .is_none_or(|role| device_only(&role.rank))
+                && engine
+                    .decode
+                    .as_ref()
+                    .is_none_or(|role| device_only(&role.rank)))
+            {
+                return Err(invalid(
+                    "conversation affinity supports device KV cache only".into(),
+                ));
+            }
+        }
         #[cfg(feature = "python-replay")]
         if let KvTopologyConfig::FromReplaySpec(engine) = &self.topology {
             *engine.borrow_mut() = Some(if spec.engine.is_null() {
@@ -222,6 +276,12 @@ impl ReplayComposition for KvReplayComposition {
             self.prefill_load_estimator.take(),
             topology.len(),
             self.determinism.selector_seed(),
+        )?
+        .with_affinity(
+            self.affinity.clone(),
+            "aggregated",
+            self.capture_decisions,
+            self.evidence.clone(),
         )
     }
 
@@ -299,7 +359,13 @@ impl ReplayComposition for KvReplayComposition {
             prefill_topology.len(),
             self.determinism.selector_seed(),
         )
-        .context("constructing prefill KV Router placement")?;
+        .context("constructing prefill KV Router placement")?
+        .with_affinity(
+            self.affinity.clone(),
+            "prefill",
+            self.capture_decisions,
+            self.evidence.clone(),
+        )?;
         let decode = KvRouterPlacement::new_with_selector_seed(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
@@ -307,7 +373,13 @@ impl ReplayComposition for KvReplayComposition {
             decode_topology.len(),
             self.determinism.selector_seed(),
         )
-        .context("constructing decode KV Router placement")?;
+        .context("constructing decode KV Router placement")?
+        .with_affinity(
+            self.affinity.clone(),
+            "decode",
+            self.capture_decisions,
+            self.evidence.clone(),
+        )?;
         Ok((prefill, decode))
     }
 

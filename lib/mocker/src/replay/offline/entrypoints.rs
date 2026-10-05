@@ -17,7 +17,8 @@ use anyhow::Result;
 
 use super::extensions::kv_events;
 use super::extensions::kv_router::{
-    KvReplayComposition, ReplayKvRouterConfig, RoundRobinReplayComposition, provider_spec,
+    KvReplayComposition, ReplayAffinityConfig, ReplayKvRouterConfig, RoundRobinReplayComposition,
+    RoutingEvidence, provider_spec,
 };
 use super::normalize_trace_requests;
 use crate::common::handoff::NormalizedHandoffConformance;
@@ -40,20 +41,20 @@ pub fn run_canonical_replay_json(
     router_mode: ReplayRouterMode,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    external_policy: Option<aisimulate_core::replay::python_policy::PythonPolicyComposition>,
+    affinity: Option<ReplayAffinityConfig>,
     capture: ReplayCaptureOptions,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<String> {
     anyhow::ensure!(
-        external_policy.is_none() || router_mode == ReplayRouterMode::KvRouter,
+        affinity.is_none() || router_mode == ReplayRouterMode::KvRouter,
         "conversation affinity requires KV routing"
     );
     anyhow::ensure!(
-        external_policy.is_none() || scaling_policy.is_none(),
+        affinity.is_none() || scaling_policy.is_none(),
         "conversation affinity requires static worker pools without a Planner"
     );
-    if external_policy.is_some() {
+    if affinity.is_some() {
         super::extensions::kv_router::validate_affinity_router_config(router_config.as_ref())?;
         anyhow::ensure!(
             prefill_load_estimator.is_none(),
@@ -83,16 +84,9 @@ pub fn run_canonical_replay_json(
         router_mode == ReplayRouterMode::KvRouter || requested_provider == Some("round_robin"),
         "native KV placement requires router_mode='kv_router'"
     );
-    *placement = serde_json::to_value(if external_policy.is_some() {
-        ProviderSpec {
-            provider: "external_policy".into(),
-            config: serde_json::Value::Null,
-        }
-    } else {
-        match router_mode {
-            ReplayRouterMode::RoundRobin => ProviderSpec::round_robin(),
-            ReplayRouterMode::KvRouter => native_provider,
-        }
+    *placement = serde_json::to_value(match router_mode {
+        ReplayRouterMode::RoundRobin => ProviderSpec::round_robin(),
+        ReplayRouterMode::KvRouter => native_provider,
     })?;
     let scaling = spec
         .pointer_mut("/adapters/scaling")
@@ -125,20 +119,22 @@ pub fn run_canonical_replay_json(
             .unwrap_or(true);
     let payload = serde_json::to_string(&payload)?;
     let telemetry = telemetry.map(|options| (options.sample_interval_ms, options.observer));
-    let evidence = external_policy.as_ref().map(|policy| policy.evidence());
-    let mut result = match (external_policy, router_mode) {
-        (Some(policy), _) => {
-            aisimulate_core::execute_replay_with_composition(&payload, policy, capture, telemetry)?
-        }
-        (None, ReplayRouterMode::RoundRobin) => aisimulate_core::execute_replay_with_composition(
+    let evidence = affinity.as_ref().map(|_| RoutingEvidence::default());
+    let mut result = match router_mode {
+        ReplayRouterMode::RoundRobin => aisimulate_core::execute_replay_with_composition(
             &payload,
             RoundRobinReplayComposition::new(scaling_policy),
             capture,
             telemetry,
         )?,
-        (None, ReplayRouterMode::KvRouter) => aisimulate_core::execute_replay_with_composition(
+        ReplayRouterMode::KvRouter => aisimulate_core::execute_replay_with_composition(
             &payload,
-            KvReplayComposition::from_spec(router_config, prefill_load_estimator, scaling_policy),
+            KvReplayComposition::from_spec(router_config, prefill_load_estimator, scaling_policy)
+                .with_affinity(
+                    affinity,
+                    capture_per_request,
+                    evidence.clone().unwrap_or_default(),
+                ),
             capture,
             telemetry,
         )?,

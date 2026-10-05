@@ -44,6 +44,8 @@ pub enum ReplayArgsMode {
     Disagg,
 }
 
+pub use offline::extensions::kv_router::{ReplayAffinityConfig, ReplayAffinityMode};
+
 pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
 
 #[derive(Clone, Debug)]
