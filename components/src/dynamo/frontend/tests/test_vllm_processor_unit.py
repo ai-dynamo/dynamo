@@ -3708,25 +3708,27 @@ def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
 
 def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module):
     built = vllm_processor_module._chat_choice_logprobs(
-        [10],
-        [-0.5],
         [
-            [
-                {
-                    "rank": 2,
-                    "token_id": 11,
-                    "token": "Yo",
-                    "logprob": -1.5,
-                    "bytes": [89, 111],
-                },
-                {
-                    "rank": 1,
-                    "token_id": 10,
-                    "token": "Hi",
-                    "logprob": -0.5,
-                    "bytes": [72, 105],
-                },
-            ]
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    {
+                        "rank": 2,
+                        "token_id": 11,
+                        "token": "Yo",
+                        "logprob": -1.5,
+                        "bytes": [89, 111],
+                    },
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    },
+                ],
+            }
         ],
         1,
     )
@@ -3742,18 +3744,20 @@ def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module):
 
 def test_chat_choice_logprobs_zero_top_count_omits_alternatives(vllm_processor_module):
     built = vllm_processor_module._chat_choice_logprobs(
-        [10],
-        [-0.5],
         [
-            [
-                {
-                    "rank": 1,
-                    "token_id": 10,
-                    "token": "Hi",
-                    "logprob": -0.5,
-                    "bytes": [72, 105],
-                }
-            ]
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    }
+                ],
+            }
         ],
         0,
     )
@@ -3764,25 +3768,29 @@ def test_chat_choice_logprobs_zero_top_count_omits_alternatives(vllm_processor_m
     assert entry["top_logprobs"] == []
 
 
-def test_chat_choice_logprobs_rejects_misaligned_chunk(vllm_processor_module):
-    assert vllm_processor_module._chat_choice_logprobs([1, 2], [-0.1], None, 0) is None
+def test_append_worker_logprobs_drops_misaligned_chunk(vllm_processor_module):
+    pending: list = []
+    vllm_processor_module._append_worker_logprobs(pending, [1, 2], [-0.1], None)
+    assert pending == []
 
 
 def test_chat_choice_logprobs_skips_non_dict_top_entry(vllm_processor_module):
     built = vllm_processor_module._chat_choice_logprobs(
-        [10],
-        [-0.5],
         [
-            [
-                None,
-                {
-                    "rank": 1,
-                    "token_id": 10,
-                    "token": "Hi",
-                    "logprob": -0.5,
-                    "bytes": [72, 105],
-                },
-            ]
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    None,
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    },
+                ],
+            }
         ],
         1,
     )

@@ -134,37 +134,24 @@ def _utf8_bytes(token: str | None) -> list[int] | None:
 
 
 def _chat_choice_logprobs(
-    token_ids: list[int],
-    log_probs: Any,
-    top_logprobs: Any,
+    records: list[dict[str, Any]],
     top_count: int | None,
 ) -> dict[str, Any] | None:
-    """Build OpenAI ``choices[].logprobs`` from worker token records.
+    """Build OpenAI ``choices[].logprobs`` from normalized worker records.
 
-    ``log_probs`` is one float per emitted token. ``top_logprobs`` is a list
-    of ``{rank, token_id, token, logprob, bytes}`` per position, and that
-    list includes the sampled token. The content entry keeps the sampled
-    token. ``top_logprobs`` on the entry is the rank-sorted prefix of length
+    Each record has ``token_id``, ``logprob``, and ``top``. ``top`` is the
+    raw per-position list of ``{rank, token_id, token, logprob, bytes}``,
+    including the sampled token. The content entry keeps the sampled token.
+    ``top_logprobs`` on the entry is the rank-sorted prefix of length
     ``top_count``. ``0`` is an empty list. ``token_id`` is omitted.
     """
-    if (
-        not isinstance(log_probs, list)
-        or not token_ids
-        or len(log_probs) != len(token_ids)
-    ):
+    if not records:
         return None
-    positions = top_logprobs if isinstance(top_logprobs, list) else []
     content: list[dict[str, Any]] = []
-    for index, token_id in enumerate(token_ids):
-        try:
-            selected_logprob = float(log_probs[index])
-        except (TypeError, ValueError):
-            return None
-        raw_position = (
-            positions[index]
-            if index < len(positions) and isinstance(positions[index], list)
-            else []
-        )
+    for record in records:
+        token_id = record["token_id"]
+        selected_logprob = record["logprob"]
+        raw_position = record["top"]
         ranked_position = sorted(
             (entry for entry in raw_position if isinstance(entry, dict)),
             key=lambda entry: (
@@ -325,13 +312,7 @@ def _apply_choice_logprobs(
     if taken is None or not taken:
         choice["logprobs"] = None
         return
-    built = _chat_choice_logprobs(
-        [record["token_id"] for record in taken],
-        [record["logprob"] for record in taken],
-        [record["top"] for record in taken],
-        top_count,
-    )
-    choice["logprobs"] = built if built is not None else None
+    choice["logprobs"] = _chat_choice_logprobs(taken, top_count)
 
 
 class _ReasoningUsageAnnotator:
