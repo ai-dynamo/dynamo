@@ -304,6 +304,9 @@ overrides:
   - { ecosystem: dpkg, name: libnvptxcompiler-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvvm-13-0,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: mlnx-dpdk,                        license: "BSD-3-Clause", source: "Mellanox build of upstream DPDK — https://www.dpdk.org/about/legal/" }
+  # TRT-LLM 1.3.0rc27's base removes this package and keeps its ld.so.conf.d conffile.
+  # The .deb (DOCA 3.5.0 repo) ships no copyright file; its only SPDX tags are BSD-3-Clause.
+  - { ecosystem: dpkg, name: dpdk-community,                   license: "BSD-3-Clause", source: "NVIDIA DOCA build of upstream DPDK — https://www.dpdk.org/about/legal/" }
 
   # --- NVIDIA DOCA SDK (cuda-dl-base 25.11 ships these) ---
   - { ecosystem: dpkg, name: doca-sdk-common,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }

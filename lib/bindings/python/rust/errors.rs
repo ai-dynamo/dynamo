@@ -12,6 +12,7 @@
 //! in sync.
 
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass};
+use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -134,6 +135,32 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
 );
 
+/// Preserve explicitly public validation errors across Rust-to-Python streams.
+/// Other errors retain the iterator's existing `ValueError` behavior; diagnostic
+/// text must never be promoted into a public `InvalidArgument` message.
+pub(crate) fn check_response_error<R>(response: Annotated<R>) -> PyResult<Annotated<R>> {
+    if response.is_error()
+        && let Some(message) = response
+            .error
+            .as_ref()
+            .and_then(public_invalid_request_message)
+    {
+        return Err(InvalidArgument::new_err(message.to_owned()));
+    }
+
+    response
+        .ok()
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+fn public_invalid_request_message(error: &DynamoError) -> Option<&str> {
+    if error.class() == ErrorClass::InvalidRequest {
+        error.public_message()
+    } else {
+        None
+    }
+}
+
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
 /// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
@@ -216,6 +243,41 @@ mod tests {
     struct LegacyHttpError {
         code: u16,
         message: String,
+    }
+
+    #[test]
+    fn invalid_request_conversion_uses_only_public_message() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("private backend detail")
+            .public_message("Invalid JSON schema")
+            .build();
+        assert_eq!(
+            public_invalid_request_message(&error),
+            Some("Invalid JSON schema")
+        );
+
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("private validation detail")
+            .build();
+        assert_eq!(public_invalid_request_message(&error), None);
+    }
+
+    #[test]
+    fn other_error_classes_are_not_promoted_to_invalid_arguments() {
+        for class in [
+            ErrorClass::Internal,
+            ErrorClass::Cancelled,
+            ErrorClass::Unavailable,
+        ] {
+            let error = DynamoError::builder()
+                .class(class)
+                .diagnostic("private backend detail")
+                .public_message("Public error message")
+                .build();
+            assert_eq!(public_invalid_request_message(&error), None);
+        }
     }
 
     #[test]

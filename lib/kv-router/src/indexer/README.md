@@ -1,6 +1,6 @@
 # ⚡ FlashIndexer — KV Router Index Data Structures
 
-This document explains the KV cache index implementations: `RadixTree` (and its concurrent variant `ConcurrentRadixTree`) and `PositionalIndexer` (NestedMap).
+This document explains the KV cache index implementations: `RadixTree` (and its concurrent compressed variant `ConcurrentRadixTreeCompressed`) and `PositionalIndexer` (NestedMap).
 
 The concurrent indexers achieve a combined throughput of over **10 million events + requests per second** with **p99 latency under 10 microseconds**.
 
@@ -16,9 +16,9 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 | `kv_indexer.rs` | `KvIndexer` — single-threaded async wrapper around `RadixTree` with tokio mpsc channels |
 | `compressed_radix.rs` | Shared immutable compressed-edge and worker-coverage state |
 | `radix_tree.rs` | `RadixTree` — single-threaded compressed tree with `Rc<RefCell<RadixBlock>>` nodes |
-| `concurrent_radix_tree.rs` | `ConcurrentRadixTree` — thread-safe variant with `Arc<RwLock<Block>>` nodes and `DashMap` lookup |
+| `concurrent_radix_tree_compressed/` | `ConcurrentRadixTreeCompressed` — thread-safe compressed trie; see its `README.md` |
 | `positional.rs` | `PositionalIndexer` — flat `DashMap<(pos, hash), SeqEntry>` with jump optimization |
-| `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTree` or `PositionalIndexer` |
+| `thread_pool.rs` | `ThreadPoolIndexer<T: SyncIndexer>` — N OS threads for sticky-routed writes, inline reads; wraps `ConcurrentRadixTreeCompressed` or `PositionalIndexer` |
 | `local.rs` | `LocalKvIndexer` — thin wrapper around `KvIndexer` with a circular event buffer for worker-side decentralized routing |
 | `pruning.rs` | `PruneManager` — TTL-based approximate expiration via 100ms buckets and per-worker pruning queues |
 | `naive.rs` | Brute-force baseline indexers (bench-only, behind `bench` feature flag) |
@@ -56,7 +56,7 @@ let indexer = KvIndexer::builder(
 .build();
 ```
 
-`RadixTree`, `ConcurrentRadixTree`, `ConcurrentRadixTreeCompressed`, `PositionalIndexer`, and `LowerTierIndexer` expose `new_with_delegate`. Construct the backend before passing it to `ThreadPoolIndexer`. `LocalKvIndexer::new_with_delegate` observes its primary device index. Lower-tier delegates observe one tier index, including cache-owner residency when present.
+`RadixTree`, `ConcurrentRadixTreeCompressed`, `PositionalIndexer`, and `LowerTierIndexer` expose `new_with_delegate`. Construct the backend before passing it to `ThreadPoolIndexer`. `LocalKvIndexer::new_with_delegate` observes its primary device index. Lower-tier delegates observe one tier index, including cache-owner residency when present.
 
 `BranchShardedIndexer::new_with_delegate` constructs local compressed shards with one shared ownership tracker. Router prefixes and shard suffixes participate in the same lifecycle. Synthetic anchors do not count as owners. Remote shard handles cannot transport an in-process delegate. Install delegates at the process that owns the index.
 
@@ -235,23 +235,15 @@ Where W = number of workers.
 
 ---
 
-## ConcurrentRadixTree: Thread-Safe Variant
+## ConcurrentRadixTreeCompressed: Thread-Safe Variant
 
-`ConcurrentRadixTree` adapts the `RadixTree` for concurrent access. The key change is replacing `Rc<RefCell<>>` with `Arc<RwLock<>>` per node, and using a `DashMap` for the per-worker lookup table:
+`ConcurrentRadixTreeCompressed` is the concurrent tree used on the router side. Each non-root node is a shared `Arc` node whose compressed edge holds a run of `(LocalBlockHash, ExternalSequenceBlockHash)` pairs, and `find_matches` reads the tree concurrently with writes. Its locking, versioning, split, and lookup-repair rules are documented in [`concurrent_radix_tree_compressed/README.md`](concurrent_radix_tree_compressed/README.md).
 
-```
-ConcurrentRadixTree
-├── root: SharedBlock (Arc<RwLock<Block>>)
-└── lookup: DashMap<Worker, RwLock<HashMap<SeqHash, SharedBlock>>>
-```
-
-The `DashMap` distributes lock contention across shards, while each worker's block map is behind its own `RwLock`. This means `find_matches` only takes read locks — on the tree nodes and on the lookup — so multiple reads can proceed in parallel without blocking each other.
-
-Writes (`store_blocks`, `remove_blocks`) take write locks on the affected nodes using hand-over-hand locking (parent before child). To avoid write–write contention, `ConcurrentRadixTree` is designed to be wrapped in a `ThreadPoolIndexer`, which uses per-worker sticky routing: each `WorkerId` is assigned to a dedicated OS thread via a `DashMap<WorkerId, usize>` mapping, and events are dispatched through per-thread `flume` channels. Since KV events for a given worker always land on the same thread, writes to that worker's subtree are serialized without cross-thread locking.
+To avoid write–write contention, `ConcurrentRadixTreeCompressed` is designed to be wrapped in a `ThreadPoolIndexer`, which uses per-worker sticky routing: each `WorkerId` is assigned to a dedicated OS thread via a `DashMap<WorkerId, usize>` mapping, and events are dispatched through per-thread `flume` channels. Since KV events for a given worker always land on the same thread, writes to that worker's coverage are serialized without cross-thread coordination.
 
 ```
                    ┌──────────────────────────────────┐
-find_matches() ──→ │   Arc<ConcurrentRadixTree>       │ ← reads go inline
+find_matches() ──→ │ Arc<ConcurrentRadixTreeCompressed> │ ← reads go inline
                    │                                  │
  KV events ──→ flume[0] ──→ thread 0 (W0, W3) ──→     │
            ──→ flume[1] ──→ thread 1 (W1, W4) ──→     │ ← writes via sticky
@@ -382,7 +374,7 @@ Where J = jump_size, W = number of workers. The jump optimization reduces D sequ
 | Aspect | RadixTree | PositionalIndexer |
 |--------|-----------|-------------------|
 | **Structure** | Tree with Rc<RefCell<>> nodes | DashMap with compound keys |
-| **Concurrent variant** | ConcurrentRadixTree (Arc<RwLock<>> + DashMap) | Thread-safe by default (DashMap + RwLock) |
+| **Concurrent variant** | ConcurrentRadixTreeCompressed (shared compressed-edge nodes) | Thread-safe by default (DashMap + RwLock) |
 | **find_matches** | O(D×W) tree traversal | O(D/J) with jump optimization |
 | **store_blocks** | O(N) node creation | O(N) DashMap inserts |
 | **remove_blocks** | O(N) with cascading cleanup | O(N) with entry cleanup |
@@ -412,16 +404,15 @@ let workers_at_128 = index.get(&(128, local_hashes[128]));  // O(1) lookup
 
 ## Indexer Selection Guide
 
-There are four main production indexer shapes. This section maps deployment scenarios to the right choice.
+There are three main production indexer shapes. This section maps deployment scenarios to the right choice. CRTC abbreviates `ConcurrentRadixTreeCompressed`.
 
 ### Variant Summary
 
 | Variant | Struct | Concurrency | Routing | When to use |
 |---------|--------|-------------|---------|-------------|
 | `RadixTree` | `RadixTree` | Single-threaded | N/A (local) | Worker-side `LocalKvIndexer`, unit tests |
-| `ConcurrentRadixTree` (CRT) | `ConcurrentRadixTree` | Thread-safe reads | N/A (local) | Single-node, moderate traffic |
-| `ThreadPoolIndexer<CRT>` (CRTC) | `ThreadPoolIndexer<ConcurrentRadixTree>` | N write threads + inline reads | Full-mesh, all workers | Default for most deployments |
-| `BranchShardedIndexer<CRTC>` (BSI) | `BranchShardedIndexer<ThreadPoolIndexer<CRT>>` | Sharded write pools | Prefix TRIE + anchors | High worker counts, correctness-first sharding |
+| `ThreadPoolIndexer<CRTC>` | `ThreadPoolIndexer<ConcurrentRadixTreeCompressed>` | N write threads + inline reads | Full-mesh, all workers | Default for most deployments |
+| `BranchShardedIndexer<CRTC>` (BSI) | `BranchShardedIndexer<ThreadPoolIndexer<CRTC>>` | Sharded write pools | Prefix TRIE + anchors | High worker counts, correctness-first sharding |
 
 ### When to use each
 
@@ -430,11 +421,7 @@ There are four main production indexer shapes. This section maps deployment scen
 - Correct choice inside `LocalKvIndexer` — worker-side, single-tokio-task access, no lock needed.
 - Also useful in unit tests where you want a simple, deterministic index.
 
-**`ConcurrentRadixTree` alone (not inside a ThreadPoolIndexer)**
-- Only if you have a single dedicated writer with many concurrent readers and prefer simpler code over maximum throughput.
-- In practice, `ThreadPoolIndexer<CRT>` dominates: it gives you both safe concurrent writes *and* higher throughput.
-
-**`ThreadPoolIndexer<ConcurrentRadixTree>` (CRTC)**
+**`ThreadPoolIndexer<ConcurrentRadixTreeCompressed>`**
 - The default. Start here.
 - One global index, all workers. Read path (`find_matches`) is always O(depth × workers).
 - Works well up to ~1 000 workers. Above that, `find_matches` p99 climbs because every query scans all workers.
@@ -457,12 +444,12 @@ Start
   │      └─ RadixTree
   │
   ├─ < ~1 000 workers, no sharding needed?
-  │      └─ CRTC (ThreadPoolIndexer<ConcurrentRadixTree>)
+  │      └─ ThreadPoolIndexer<ConcurrentRadixTreeCompressed>
   │
   └─ ≥ ~1 000 workers or need one-shard lookups?
          │
          ├─ Need approximate pruning?
-         │      └─ CRTC or a future coordinated-pruning design
+         │      └─ ThreadPoolIndexer<CRTC> or a future coordinated-pruning design
          │
          └─ Need routing-correct sharding without approximate pruning?
                 └─ BranchShardedIndexer<CRTC>

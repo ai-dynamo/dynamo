@@ -102,11 +102,8 @@ COMMON_ENV=(
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-# Per-worker DYN_SYSTEM_PORT{i} is set by xdist for parallel test runs; fall
-# back to script defaults otherwise. KV-event ports always come from the
-# script's own KV_EVENTS_PORT_BASE block (29090+) — xdist only reserves one
-# DYN_VLLM_KV_EVENT_PORT so deriving `base + (i-1)` from it would collide
-# with adjacent test slots.
+# Per-worker DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i} come from the test
+# harness for parallel runs; standalone runs fall back to the script's port bases.
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
@@ -114,7 +111,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     HARNESS_VAR="DYN_SYSTEM_PORT${i}"
     WORKER_PORT="${!HARNESS_VAR:-${DEFAULT_WORKER_PORT}}"
     WORKER_PORTS+=("${WORKER_PORT}")
-    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
+    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))
     KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
@@ -127,6 +124,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     python -m dynamo.sglang \
         --model-path "${MODEL}" \
         --served-model-name "${MODEL}" \
+        --frontend-decoding \
         --page-size "${BLOCK_SIZE}" \
         --context-length "${MAX_MODEL_LEN}" \
         --tp 1 \
@@ -172,7 +170,7 @@ echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
     # Use the actual port values from the launch loop above so the
-    # summary reflects DYN_SYSTEM_PORT{i} / KV_EVENTS_PORT_BASE overrides
+    # summary reflects DYN_SYSTEM_PORT{i} / DYN_VLLM_KV_EVENT_PORT{i} overrides
     # the harness may have applied (instead of the default formula).
     echo "Worker $i health: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
     echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORTS[i-1]}"
@@ -180,7 +178,7 @@ done
 echo
 echo "Architecture: Rust frontend (MM-aware KV router) -> ${NUM_WORKERS}x SGLang workers"
 echo "  - mm_hashes forwarded to SGLang GenerateReqInput.mm_hashes -> matching pad_value"
-echo "  - Image dims via header-only HTTP fetch (Range: bytes=0-65535)"
+echo "  - Images and videos decoded once in the frontend and transferred over NIXL"
 echo "  - No PyO3, no GIL, no Python deps in the routing path"
 echo
 echo "Press Ctrl+C to stop all services"
