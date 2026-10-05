@@ -19,6 +19,7 @@ package dynamo
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -152,6 +153,24 @@ func TestResolveSGLangProfileGeometryCanonicalIdentity(t *testing.T) {
 	assert.Equal(t, canonical, aliases)
 }
 
+func TestResolveSGLangElasticEPProfileInitialSize(t *testing.T) {
+	for _, initialReplicas := range []int32{4, 0} {
+		t.Run(fmt.Sprintf("initial replicas %d", initialReplicas), func(t *testing.T) {
+			t.Log("build a launch template with either an explicit seed or a derived seed")
+			source := newTestSGLangProfileGeometrySource()
+			source.InitialReplicas = initialReplicas
+
+			t.Log("resolve membership bounds from immutable launch geometry")
+			profile, err := ResolveSGLangElasticEPProfile(source)
+			require.NoError(t, err)
+
+			t.Log("verify the live target is not needed to recover the creation seed")
+			assert.Equal(t, int32(4), profile.InitialReplicas)
+			assert.Equal(t, int32(8), profile.MaximumReplicas)
+		})
+	}
+}
+
 func TestResolveSGLangProfileGeometryFingerprintIncludesStorageEPSize(t *testing.T) {
 	t.Log("resolve two immutable expert-storage layouts under the same maximum")
 	initialFour := newTestSGLangProfileGeometrySource()
@@ -193,9 +212,9 @@ func TestResolveSGLangProfileGeometryConfigurationErrors(t *testing.T) {
 	}{
 		{
 			name:            "invalid creation target",
-			initialReplicas: 0,
+			initialReplicas: -1,
 			gpusPerPod:      1,
-			wantError:       "initial replicas must be positive",
+			wantError:       "initial replicas must not be negative",
 		},
 		{
 			name:            "creation target conflicts with launch size",

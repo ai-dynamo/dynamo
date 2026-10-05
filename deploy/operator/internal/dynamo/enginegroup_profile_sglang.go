@@ -110,7 +110,8 @@ func (e *UnsupportedSGLangProfileSourceError) Unwrap() []error {
 
 // SGLangProfileGeometrySource contains the declarative inputs needed to resolve the merged SGLang scale-up profile.
 // Command and Args must be provider-resolved Kubernetes exec-form argv; only the managed initial target may be
-// omitted. WorkloadRevisionDigest must exclude creation-time and live replica targets. Resolution does not mutate
+// omitted (InitialReplicas == 0 derives it from the engine's launch geometry).
+// WorkloadRevisionDigest must exclude creation-time and live replica targets. Resolution does not mutate
 // the slices.
 type SGLangProfileGeometrySource struct {
 	Command                    []string
@@ -201,9 +202,9 @@ func ResolveSGLangProfileGeometry(source SGLangProfileGeometrySource) (enginegro
 // ResolveSGLangElasticEPProfile resolves both immutable capacity geometry and
 // the explicit SGLang membership bounds needed by a runtime adapter.
 func ResolveSGLangElasticEPProfile(source SGLangProfileGeometrySource) (ResolvedSGLangElasticEPProfile, error) {
-	// Require a valid creation-time target before comparing it with SGLang's launch-time assertions.
-	if source.InitialReplicas <= 0 {
-		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("initial replicas must be positive, got %d", source.InitialReplicas)
+	// A runtime observer may derive the initial size from the immutable launch template.
+	if source.InitialReplicas < 0 {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("initial replicas must not be negative, got %d", source.InitialReplicas)
 	}
 
 	// Resolve only the exact, merged growth profile whose logical-to-physical mapping is statically known.
@@ -422,7 +423,8 @@ func validateSGLangScaleUpSizes(tp, dp, initial, maximum int64) error {
 
 func validateSGLangScaleUpGeometry(geometry parsedSGLangProfileGeometry, initialReplicas int32, mainContainerGPUs int64) error {
 	// Bind the Kubernetes logical target to every SGLang launch-time cardinality assertion.
-	if geometry.tensorParallelSize != int64(initialReplicas) || geometry.dataParallelSize != int64(initialReplicas) {
+	if initialReplicas != 0 && (geometry.tensorParallelSize != int64(initialReplicas) ||
+		geometry.dataParallelSize != int64(initialReplicas)) {
 		return fmt.Errorf(
 			"initial replicas %d conflict with SGLang TP/DP launch size %d",
 			initialReplicas,
