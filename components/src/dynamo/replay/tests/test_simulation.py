@@ -493,6 +493,58 @@ def test_legacy_identity_normalization_preserves_config_and_rejects_conflicts():
         simulation._normalize_legacy_spec(replace(spec, backend_deployment=conflicting))
 
 
+def test_legacy_disagg_model_projection_preserves_input_and_prefill_metadata():
+    metadata = {"prefill": {"label": "keep", "config": {"dp_size": 2}}}
+    deployment = replace(
+        _agg_deployment(),
+        deployment_mode="disagg",
+        agg_engine_args=None,
+        prefill_engine_args=_fixed_args(),
+        decode_engine_args={"ais_perf_config": {"model": "target-model"}},
+        performance_model_metadata=metadata,
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "legacy.jsonl", "trace_format": "agentic_mooncake"},
+        goal={},
+    )
+    normalized = simulation._normalize_legacy_spec(spec)
+    assert normalized.backend_deployment.performance_model_metadata["prefill"] == {
+        "label": "keep",
+        "config": {"dp_size": 2, "model": "target-model"},
+    }
+    assert metadata == {"prefill": {"label": "keep", "config": {"dp_size": 2}}}
+    assert deployment.decode_engine_args == {
+        "ais_perf_config": {"model": "target-model"}
+    }
+    assert "source_type" not in spec.workload
+
+
+@pytest.mark.parametrize(
+    "source_type,prefill_model",
+    [(None, "different-model"), ("trace", None)],
+    ids=["legacy-explicit-mismatch", "canonical-missing-prefill"],
+)
+def test_disagg_model_projection_keeps_shared_validation(source_type, prefill_model):
+    metadata = {"decode": {"config": {"model": "target-model"}}}
+    if prefill_model is not None:
+        metadata["prefill"] = {"config": {"model": prefill_model}}
+    deployment = replace(
+        _agg_deployment(),
+        deployment_mode="disagg",
+        agg_engine_args=None,
+        prefill_engine_args=_fixed_args(),
+        decode_engine_args=_fixed_args(),
+        performance_model_metadata=metadata,
+    )
+    workload = {"trace_path": "legacy.jsonl", "trace_format": "agentic_mooncake"}
+    if source_type is not None:
+        workload.update(source_type=source_type, load_type="trace_timestamps")
+    spec = ReplaySpec(backend_deployment=deployment, workload=workload, goal={})
+    with pytest.raises(ValueError, match="same configured target model"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+
 def test_canonical_affinity_forwards_optional_telemetry_sinks(monkeypatch, tmp_path):
     seen = _capture_native(monkeypatch, {"completed_requests": 1})
 

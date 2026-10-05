@@ -16,7 +16,11 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
-from aisimulate.runner import EngineReplayRunner, EngineReplayRunnerFactory
+from aisimulate.runner import (
+    EngineReplayRunner,
+    EngineReplayRunnerFactory,
+    _execution_target_model,
+)
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -321,6 +325,35 @@ def _normalize_legacy_spec(spec: ReplaySpec) -> ReplaySpec:
         workload.get("trace_path") is not None
         or workload.get("trace_paths") is not None
     ):
+        deployment = spec.backend_deployment
+        if deployment.deployment_mode == "disagg" and workload.get("trace_format") in {
+            "weka",
+            "agentic_mooncake",
+            "dynamo",
+        }:
+            # The legacy runner used decode's model as the shared trace
+            # projection. Fill only an absent prefill identity; the shared
+            # runner still rejects explicitly different models.
+            prefill_model = _execution_target_model(
+                deployment, "prefill", deployment.prefill_engine_args or {}
+            )
+            decode_model = _execution_target_model(
+                deployment, "decode", deployment.decode_engine_args or {}
+            )
+            if prefill_model is None and decode_model is not None:
+                metadata = dict(deployment.performance_model_metadata)
+                prefill = dict(metadata.get("prefill", {}))
+                prefill["config"] = {
+                    **prefill.get("config", {}),
+                    "model": decode_model,
+                }
+                metadata["prefill"] = prefill
+                spec = replace(
+                    spec,
+                    backend_deployment=replace(
+                        deployment, performance_model_metadata=metadata
+                    ),
+                )
         workload["source_type"] = "trace"
         default_load = (
             "concurrency"
