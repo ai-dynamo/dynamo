@@ -1508,8 +1508,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 //
 // If the error does not match any known category, "unknown" is returned.
 func GetGPUDiscoveryFailureReason(err error) string {
+	const unknownReason = "unknown"
+
 	if err == nil {
-		return "unknown"
+		return unknownReason
 	}
 	errMsg := strings.ToLower(err.Error())
 
@@ -1540,7 +1542,7 @@ func GetGPUDiscoveryFailureReason(err error) string {
 	case strings.Contains(errMsg, "failed to create helm path"):
 		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
 	}
-	return "unknown"
+	return unknownReason
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource.
@@ -2454,6 +2456,8 @@ func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, d
 		totalReplicas += component.Replicas
 		if component.AvailableReplicas != nil {
 			totalAvailable += *component.AvailableReplicas
+		} else if component.ReadyReplicas != nil {
+			totalAvailable += *component.ReadyReplicas
 		}
 	}
 

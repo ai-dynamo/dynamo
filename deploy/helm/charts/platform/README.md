@@ -46,6 +46,24 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### v1.6.0
+
+#### Dependency compatibility
+
+**Change:** The bundled Grove version is now `v0.1.0-alpha.14-rc1`. It provides the group-wide pod
+index and environment-variable ordering used by Dynamo's backend-independent `DYNAMO_RANK` and
+`DYNAMO_LEADER_ADDRESS` aliases.
+
+**Affected:** New multinode DGDs created by Dynamo 1.6.0 when Grove is managed outside the platform
+chart.
+
+**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.14-rc1` or later before
+creating new multinode DGDs.
+
+**Existing deployments:** The operator origin version gates alias injection. An operator-only
+upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
+add the aliases.
+
 ### v1.5.0
 
 #### CRD and admission breaking changes
@@ -239,7 +257,7 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.6.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.13 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.14-rc1 |
 | oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
@@ -260,6 +278,8 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
+| dynamo-operator.lpx.enabled | bool | `false` | EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API. |
+| dynamo-operator.lpx.modelRegistryURL | string | `""` | Configure the LPU model registry used by the LPX integration. |
 | dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments. |
 | dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production. |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEVELOPMENT AND TESTING ONLY: Target namespace. Defaults to the Helm release namespace. |
@@ -323,6 +343,14 @@ Kubernetes: `>=1.30.0-0`
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 
+### LPX Integration
+
+LPX is experimental and may change incompatibly. Enable it with `dynamo-operator.lpx.enabled=true`.
+It requires Grove and the externally installed `scheduling.lpu.nvidia.com/v1alpha1`
+`LpuPipelineRequest` API. The installer applies `lpxgraphdeployments.nvidia.com` only when enabled;
+with `upgradeCRD=false` or a namespace-restricted operator, install that CRD separately first.
+See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx) for behavior when LPX is disabled.
+
 ### NATS Configuration
 
 NATS is **not required** by the default Dynamo request and event planes, which use TCP and ZMQ,
@@ -382,10 +410,12 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
+| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14-rc1 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
 [v1.4.0 upgrade notes](#v140) for the topology API transition and the
-[v1.5.0 upgrade notes](#v150) for Grove CRD installation and the required KAI staleness setting.
+[v1.5.0 upgrade notes](#v150) for Grove CRD installation and the required KAI staleness setting,
+and the [v1.6.0 upgrade notes](#v160) for the multinode topology aliases.
 
 After installing them separately, enable Dynamo integration:
 
