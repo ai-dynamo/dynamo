@@ -562,7 +562,11 @@ impl<T> PolicyQueue<T> {
         }
     }
 
-    pub(crate) fn recheck_all_workers(&mut self) {
+    /// Reconsider blocked worker lanes after host-owned capacity or eligibility changes.
+    ///
+    /// Call before draining with `pop_next`; request priorities and queue ordering
+    /// remain unchanged. The next drain checks each lane's current availability.
+    pub fn recheck_all_workers(&mut self) {
         for class in &mut self.classes {
             class.recheck_all_workers();
         }

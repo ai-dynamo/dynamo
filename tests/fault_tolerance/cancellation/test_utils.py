@@ -35,6 +35,8 @@ class _StreamingResponse:
 def _request_with_stream(*lines: bytes) -> CancellableRequest:
     request = CancellableRequest()
     request.response = _StreamingResponse(*lines)
+    # Mirror post() publishing the response before signaling its completion.
+    request._response_ready.set()
     return request
 
 
