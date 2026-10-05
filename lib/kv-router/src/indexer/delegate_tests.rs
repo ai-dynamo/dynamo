@@ -332,3 +332,202 @@ async fn delegate_matches_dump_after_mixed_owner_changes(
         "shutdown must not synthesize evictions"
     );
 }
+
+// A delegate consumer that tracks blocks fleet-wide needs one key per content across workers,
+// and, to join a request to its blocks, a key equal to the hash the frontend computes for the
+// request. The tests below take vLLM-format BlockStored events through the ZMQ decoder and the
+// normalizer, as the event listener does.
+
+/// Block size and prompt shared with the vLLM block hasher test,
+/// `components/src/dynamo/vllm/tests/test_vllm_block_hash_identity.py`.
+const VLLM_BLOCK_SIZE: u32 = 16;
+
+fn vllm_prompt() -> Vec<u32> {
+    (1..=4 * VLLM_BLOCK_SIZE).collect()
+}
+
+/// vLLM 0.30 KV event block hashes of `vllm_prompt()` (sha256, integer event hashes) on a worker
+/// with `PYTHONHASHSEED=0`, and on one with `PYTHONHASHSEED=1`. The Python test asserts the same
+/// values against vLLM's own block hasher.
+const VLLM_HASHES_SEED_0: [u64; 4] = [
+    0x6896_072a_e8b3_1325,
+    0x7d92_dcbb_5b55_9e31,
+    0xbbc7_ecb5_486a_3322,
+    0xc0c5_12ea_dd3f_7a91,
+];
+const VLLM_HASHES_SEED_1: [u64; 4] = [
+    0xb3c6_2a8b_8d1a_4706,
+    0x91d3_abee_af6a_2ace,
+    0x9bd6_dacd_8202_afd2,
+    0x9ed1_2b85_db86_845e,
+];
+
+#[derive(serde::Serialize)]
+struct SglangNamespace {
+    cache_salt: &'static str,
+}
+
+/// Where a BlockStored event carries its LoRA adapter or cache salt.
+#[derive(Clone, Copy, Debug)]
+enum Scope {
+    Plain,
+    Lora(&'static str),
+    CacheSalt(&'static str),
+}
+
+/// One BlockStored event in the msgpack sequence form, decoded as the ZMQ listener does.
+/// Position 7 is the LoRA name (vLLM) or a map with the cache salt (SGLang).
+fn vllm_stored(hashes: &[u64], tokens: &[u32], scope: Scope) -> crate::zmq_wire::RawKvEvent {
+    use crate::zmq_wire::BlockHashValue;
+    let hashes: Vec<BlockHashValue> = hashes
+        .iter()
+        .copied()
+        .map(BlockHashValue::Unsigned)
+        .collect();
+    let (tag, parent, size, lora_id, medium) = (
+        "BlockStored",
+        Option::<BlockHashValue>::None,
+        VLLM_BLOCK_SIZE as usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+    );
+    let tokens = tokens.to_vec();
+    let bytes = match scope {
+        Scope::Plain => rmp_serde::to_vec(&(tag, hashes, parent, tokens, size, lora_id, medium)),
+        Scope::Lora(name) => {
+            rmp_serde::to_vec(&(tag, hashes, parent, tokens, size, lora_id, medium, name))
+        }
+        Scope::CacheSalt(cache_salt) => rmp_serde::to_vec_named(&(
+            tag,
+            hashes,
+            parent,
+            tokens,
+            size,
+            lora_id,
+            medium,
+            SglangNamespace { cache_salt },
+        )),
+    }
+    .unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
+
+fn normalized(raw: crate::zmq_wire::RawKvEvent, worker_id: u64) -> RouterEvent {
+    crate::zmq_wire::ZmqEventNormalizer::new(VLLM_BLOCK_SIZE)
+        .normalize(raw, 1, WorkerWithDpRank::new(worker_id, 0))
+        .expect("a text BlockStored event normalizes")
+        .into_router_event()
+        .expect("a device-tier event targets the primary index")
+}
+
+/// The sequence hashes the frontend computes for a request's blocks.
+fn frontend_hashes(tokens: &[u32], scope: Scope) -> Vec<u64> {
+    let (lora_name, cache_namespace) = match scope {
+        Scope::Plain => (None, None),
+        Scope::Lora(name) => (Some(name), None),
+        Scope::CacheSalt(salt) => (None, Some(salt)),
+    };
+    let local = compute_block_hash_for_seq(
+        tokens,
+        VLLM_BLOCK_SIZE,
+        BlockHashOptions {
+            lora_name,
+            cache_namespace,
+            ..BlockHashOptions::default()
+        },
+    );
+    compute_seq_hash_for_block(&local)
+}
+
+/// The keys a radix-tree delegate reports as gaining a first owner.
+async fn engine_keys(events: Vec<RouterEvent>) -> Vec<u64> {
+    let recorder = Arc::new(Recorder::default());
+    let indexer = KvIndexer::builder(
+        CancellationToken::new(),
+        VLLM_BLOCK_SIZE,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+    )
+    .delegate(recorder.clone())
+    .build();
+    for event in events {
+        indexer.apply_event(event).await;
+    }
+    indexer.flush().await;
+    indexer.shutdown();
+    let notes = recorder.take();
+    assert!(notes.iter().all(|(created, _)| *created), "no removal here");
+    notes.into_iter().map(|(_, hash)| hash.0).collect()
+}
+
+/// The keys the cuckoo delegate reports as gaining a first owner, as a set.
+fn canonical_keys(events: Vec<RouterEvent>) -> std::collections::BTreeSet<u64> {
+    let recorder = Arc::new(CanonicalRecorder::default());
+    let mut state =
+        cuckoo::DcCkfState::new_with_delegate(cuckoo::CkfConfig::new(1024), recorder.clone())
+            .unwrap();
+    for event in events {
+        let outcome = state.apply_event(event);
+        assert!(
+            outcome.first_error().is_none(),
+            "{:?}",
+            outcome.first_error()
+        );
+    }
+    let notes = recorder.take();
+    let keys: std::collections::BTreeSet<u64> =
+        notes.iter().map(|(_, hash)| hash.as_u64()).collect();
+    assert_eq!(keys.len(), notes.len(), "one notification per key");
+    keys
+}
+
+/// The radix-tree delegate keys a block by the engine's hash. Two vLLM workers with one
+/// `PYTHONHASHSEED` give one content one key per block; workers with different seeds give it
+/// two, so a consumer would see a block's last copy go while another worker still holds it.
+#[tokio::test]
+async fn engine_keys_agree_across_vllm_workers_only_with_one_seed() {
+    let prompt = vllm_prompt();
+    let alike = engine_keys(vec![
+        normalized(vllm_stored(&VLLM_HASHES_SEED_0, &prompt, Scope::Plain), 1),
+        normalized(vllm_stored(&VLLM_HASHES_SEED_0, &prompt, Scope::Plain), 2),
+    ])
+    .await;
+    assert_eq!(alike, VLLM_HASHES_SEED_0);
+
+    let apart = engine_keys(vec![
+        normalized(vllm_stored(&VLLM_HASHES_SEED_0, &prompt, Scope::Plain), 1),
+        normalized(vllm_stored(&VLLM_HASHES_SEED_1, &prompt, Scope::Plain), 2),
+    ])
+    .await;
+    let mut expected = VLLM_HASHES_SEED_0.to_vec();
+    expected.extend(VLLM_HASHES_SEED_1);
+    assert_eq!(apart, expected, "one key per block per seed");
+}
+
+/// The radix-tree delegate's key (vLLM's hash) never equals the frontend's sequence hash. The
+/// cuckoo delegate's canonical key does, for plain, LoRA, and salted blocks, and it depends on
+/// the tokens only: workers with different seeds still give one key per block.
+#[tokio::test]
+async fn the_canonical_key_equals_the_frontend_hash_and_the_engine_key_does_not() {
+    let prompt = vllm_prompt();
+    for scope in [
+        Scope::Plain,
+        Scope::Lora("adapter-a"),
+        Scope::CacheSalt("tenant-a"),
+    ] {
+        let frontend = frontend_hashes(&prompt, scope);
+        let engine = engine_keys(vec![normalized(
+            vllm_stored(&VLLM_HASHES_SEED_0, &prompt, scope),
+            1,
+        )])
+        .await;
+        assert!(
+            engine.iter().all(|hash| !frontend.contains(hash)),
+            "{scope:?}: an engine key matched a frontend hash"
+        );
+        let canonical = canonical_keys(vec![
+            normalized(vllm_stored(&VLLM_HASHES_SEED_0, &prompt, scope), 1),
+            normalized(vllm_stored(&VLLM_HASHES_SEED_1, &prompt, scope), 2),
+        ]);
+        assert_eq!(canonical, frontend.into_iter().collect(), "{scope:?}");
+    }
+}

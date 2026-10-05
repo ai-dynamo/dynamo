@@ -810,8 +810,8 @@ fn stored_hashes(events: &[KvCacheEvent]) -> Vec<u64> {
 }
 
 /// Two Mocker workers that serve the same request store one content under one key per block,
-/// and the key is the sequence hash the frontend computes for the request. A KV history ledger
-/// built on the ownership delegate depends on both (wcep plan steps K0a and K0b).
+/// and the key is the sequence hash the frontend computes for the request: a delegate consumer
+/// that tracks blocks across workers, and joins requests to their blocks, relies on both.
 #[tokio::test]
 async fn two_mocker_workers_store_one_content_under_the_frontend_hash() {
     use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
@@ -829,6 +829,16 @@ async fn two_mocker_workers_store_one_content_under_the_frontend_hash() {
 
     let first = stored_events_of_one_worker(&tokens, 1).await;
     let second = stored_events_of_one_worker(&tokens, 2).await;
+    // The pool holds 128 blocks and the request uses 4: nothing is evicted, so every event is a
+    // store. A scheduler change that evicts here fails on this line, not as a key diff below.
+    for events in [&first, &second] {
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event.data, KvCacheEventData::Stored(_))),
+            "{events:?}"
+        );
+    }
     assert_eq!(stored_hashes(&first), frontend, "worker 1 keys");
     assert_eq!(stored_hashes(&second), frontend, "worker 2 keys");
 

@@ -38,6 +38,23 @@ pytestmark = [
 BLOCK_SIZE = 16
 TOKENS = list(range(1, 4 * BLOCK_SIZE + 1))
 
+# vLLM 0.30 KV event block hashes of TOKENS (sha256) per PYTHONHASHSEED. The router's delegate
+# test (lib/kv-router/src/indexer/delegate_tests.rs) feeds these same values as two workers.
+GOLDEN_SHA256 = {
+    "0": [
+        0x6896072AE8B31325,
+        0x7D92DCBB5B559E31,
+        0xBBC7ECB5486A3322,
+        0xC0C512EADD3F7A91,
+    ],
+    "1": [
+        0xB3C62A8B8D1A4706,
+        0x91D3ABEEAF6A2ACE,
+        0x9BD6DACD8202AFD2,
+        0x9ED12B85DB86845E,
+    ],
+}
+
 
 def worker_block_hashes(monkeypatch, seed, algorithm):
     """The KV event block hashes one fresh worker emits for ``TOKENS``."""
@@ -62,6 +79,8 @@ def worker_block_hashes(monkeypatch, seed, algorithm):
     )
     hashes = [kv_cache_utils.maybe_convert_block_hash(h) for h in request.block_hashes]
     assert len(hashes) == len(TOKENS) // BLOCK_SIZE
+    # The router decodes event block hashes as 64-bit integers.
+    assert all(isinstance(h, int) and 0 <= h < 1 << 64 for h in hashes)
     return hashes
 
 
@@ -69,12 +88,10 @@ def worker_block_hashes(monkeypatch, seed, algorithm):
 def restore_none_hash(monkeypatch):
     from vllm.v1.core import kv_cache_utils
 
-    monkeypatch.setattr(
-        kv_cache_utils,
-        "NONE_HASH",
-        getattr(kv_cache_utils, "NONE_HASH", None),
-        raising=False,
-    )
+    for name in ("NONE_HASH", "_NONE_HASH_SEED"):
+        monkeypatch.setattr(
+            kv_cache_utils, name, getattr(kv_cache_utils, name, None), raising=False
+        )
 
 
 @pytest.mark.parametrize(
@@ -130,3 +147,13 @@ def test_the_dynamo_vllm_entry_point_pins_the_seed(given, expected):
         timeout=60,
     )
     assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("seed", ["0", "1"])
+def test_sha256_block_hashes_match_the_router_test_vectors(
+    monkeypatch, restore_none_hash, seed
+):
+    """The values the router's delegate test uses are what vLLM emits for each seed."""
+    if Version(version("vllm")) < Version("0.30.0"):
+        pytest.skip("the vectors are from vLLM 0.30")
+    assert worker_block_hashes(monkeypatch, seed, "sha256") == GOLDEN_SHA256[seed]
