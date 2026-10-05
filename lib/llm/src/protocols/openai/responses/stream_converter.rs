@@ -405,6 +405,12 @@ impl ResponseStreamConverter {
                         .as_ref()
                         .and_then(|d| d.cached_tokens)
                         .unwrap_or(0),
+                    cache_write_tokens: Some(
+                        u.prompt_tokens_details
+                            .as_ref()
+                            .and_then(|d| d.cache_write_tokens)
+                            .unwrap_or(0),
+                    ),
                 },
                 output_tokens: u.completion_tokens,
                 output_tokens_details: OutputTokenDetails {
@@ -1145,27 +1151,12 @@ impl Serialize for ResponseForSpec<'_> {
         serialize_optional_entry(&mut map, "top_logprobs", &response.top_logprobs)?;
         serialize_optional_entry(&mut map, "top_p", &response.top_p)?;
         serialize_optional_entry(&mut map, "truncation", &response.truncation)?;
-        let usage = response.usage.as_ref().map(ResponseUsageForSpec);
-        map.serialize_entry("usage", &usage)?;
+        map.serialize_entry("usage", &response.usage)?;
         map.serialize_entry("presence_penalty", &self.spec.presence_penalty)?;
         map.serialize_entry("frequency_penalty", &self.spec.frequency_penalty)?;
         map.serialize_entry("store", &self.spec.store)?;
 
         map.end()
-    }
-}
-
-/// Limit the compatibility JSON round-trip to the usage subtree to preserve
-/// streaming serialization performance.
-struct ResponseUsageForSpec<'a>(&'a ResponseUsage);
-
-impl Serialize for ResponseUsageForSpec<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut value = serde_json::to_value(self.0).map_err(serde::ser::Error::custom)?;
-        if let serde_json::Value::Object(usage) = &mut value {
-            super::patch_response_usage_for_spec(usage);
-        }
-        value.serialize(serializer)
     }
 }
 
@@ -2784,6 +2775,56 @@ mod tests {
                 "response.function_call_arguments.delta".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_stream_usage_defaults_and_preserves_cache_write_tokens() {
+        use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
+
+        for (prompt_tokens_details, expected_cached_tokens, expected_cache_write_tokens) in [
+            (None, 0, 0),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    ..Default::default()
+                }),
+                3,
+                0,
+            ),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    cache_write_tokens: Some(7),
+                    ..Default::default()
+                }),
+                3,
+                7,
+            ),
+        ] {
+            let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+            let mut chunk = finish_chunk(FinishReason::Stop);
+            chunk.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 13,
+                completion_tokens: 2,
+                total_tokens: 15,
+                prompt_tokens_details,
+                completion_tokens_details: None,
+            });
+            let mut events = Vec::new();
+            conv.append_chunk_events(&chunk, &mut events);
+            let event = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+                sequence_number: conv.next_seq(),
+                response: conv.make_response(Status::Completed, vec![]),
+            });
+            let json = optimized_event_json(&conv, &event);
+            assert_eq!(
+                json["response"]["usage"]["input_tokens_details"],
+                serde_json::json!({
+                    "cached_tokens": expected_cached_tokens,
+                    "cache_write_tokens": expected_cache_write_tokens,
+                }),
+            );
+        }
     }
 
     #[test]

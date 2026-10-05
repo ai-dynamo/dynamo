@@ -139,24 +139,12 @@ pub(crate) fn patch_response_for_spec(
     obj.insert("store".into(), serde_json::json!(store));
 }
 
-fn patch_response_usage_for_spec(usage: &mut serde_json::Map<String, serde_json::Value>) {
-    if let Some(serde_json::Value::Object(input_details)) = usage.get_mut("input_tokens_details") {
-        input_details
-            .entry("cache_write_tokens")
-            .or_insert(serde_json::json!(0));
-    }
-}
-
 impl Serialize for NvResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut value = serde_json::to_value(&self.inner).map_err(serde::ser::Error::custom)?;
         let serde_json::Value::Object(obj) = &mut value else {
             return value.serialize(serializer);
         };
-
-        if let Some(serde_json::Value::Object(usage)) = obj.get_mut("usage") {
-            patch_response_usage_for_spec(usage);
-        }
 
         patch_response_for_spec(
             obj,
@@ -1376,8 +1364,14 @@ pub fn chat_completion_to_response(
             input_tokens_details: InputTokenDetails {
                 cached_tokens: u
                     .prompt_tokens_details
-                    .map(|d| d.cached_tokens.unwrap_or(0))
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens)
                     .unwrap_or(0),
+                cache_write_tokens: Some(
+                    u.prompt_tokens_details
+                        .and_then(|d| d.cache_write_tokens)
+                        .unwrap_or(0),
+                ),
             },
             output_tokens: u.completion_tokens,
             output_tokens_details: OutputTokenDetails {
@@ -4154,21 +4148,48 @@ mod tests {
     }
 
     #[test]
-    fn test_usage_compatibility_patch_defaults_and_preserves_cache_write_tokens() {
-        let mut missing = serde_json::json!({
-            "input_tokens_details": {"cached_tokens": 3}
-        });
-        patch_response_usage_for_spec(missing.as_object_mut().unwrap());
-        assert_eq!(missing["input_tokens_details"]["cache_write_tokens"], 0);
+    fn test_response_usage_defaults_and_preserves_cache_write_tokens() {
+        use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
 
-        let mut populated = serde_json::json!({
-            "input_tokens_details": {
-                "cached_tokens": 3,
-                "cache_write_tokens": 7
-            }
-        });
-        patch_response_usage_for_spec(populated.as_object_mut().unwrap());
-        assert_eq!(populated["input_tokens_details"]["cache_write_tokens"], 7);
+        for (prompt_tokens_details, expected_cached_tokens, expected_cache_write_tokens) in [
+            (None, 0, 0),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    ..Default::default()
+                }),
+                3,
+                0,
+            ),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    cache_write_tokens: Some(7),
+                    ..Default::default()
+                }),
+                3,
+                7,
+            ),
+        ] {
+            let mut chat_resp = make_chat_resp_with_text("hello");
+            chat_resp.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 13,
+                completion_tokens: 2,
+                total_tokens: 15,
+                prompt_tokens_details,
+                completion_tokens_details: None,
+            });
+            let response =
+                chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(
+                json["usage"]["input_tokens_details"],
+                serde_json::json!({
+                    "cached_tokens": expected_cached_tokens,
+                    "cache_write_tokens": expected_cache_write_tokens,
+                }),
+            );
+        }
     }
 
     /// Validate the JSON wire shape of NvResponse matches the OpenResponses
