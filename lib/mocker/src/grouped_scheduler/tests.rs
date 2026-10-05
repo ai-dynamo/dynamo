@@ -372,6 +372,107 @@ async fn native_host_offload_restore_wakes_idle_engine_and_publishes_g1_residenc
     assert!(zmq_tiers.iter().all(|tier| *tier == StorageTier::Device));
 }
 
+#[tokio::test(start_paused = true)]
+async fn command_after_a_due_host_restore_drains_the_restore_first() {
+    let effects = Arc::new(CapturedEffects::default());
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let engine_args = MockEngineArgs::builder()
+        .num_gpu_blocks(1)
+        .block_size(4)
+        .max_num_seqs(Some(1))
+        .max_num_batched_tokens(Some(4))
+        .kv_cache_bytes_per_token(Some(250_000))
+        .native_host_offload(Some(
+            NativeHostOffloadConfig::new(2).with_bandwidths(0.0, 0.01),
+        ))
+        .perf_model(Arc::new(PerfModel::Fixed {
+            prefill_ms: 0.0,
+            decode_ms: 0.0,
+        }))
+        .build()
+        .unwrap();
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(
+        engine_args,
+        vec![GroupedSchedulerRankSinks {
+            output_tx: Some(output_tx),
+            kv_event_publishers: KvEventPublishers::new(
+                Some(Arc::clone(&effects) as Arc<dyn KvCacheEventSink>),
+                None,
+            ),
+            ..GroupedSchedulerRankSinks::default()
+        }],
+        Some(cancel.clone()),
+    )
+    .unwrap();
+    let sender = schedulers[0].request_sender();
+    let send = |id: u128, tokens: Vec<u32>| {
+        sender
+            .send(DirectRequest {
+                tokens,
+                max_output_tokens: 0,
+                uuid: Some(Uuid::from_u128(id)),
+                ..DirectRequest::default()
+            })
+            .unwrap();
+    };
+
+    // Seed A, then evict it from the single G1 block into G2.
+    for (id, tokens) in [(1, vec![1, 2, 3, 4]), (2, vec![5, 6, 7, 8])] {
+        send(id, tokens);
+        let outputs = output_rx.recv().await.unwrap();
+        assert!(outputs.last().unwrap().completed);
+    }
+    // A's repeat starts a 100 ms G2 restore (1 MB at 0.01 GB/s).
+    send(3, vec![1, 2, 3, 4]);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Queue a submit, then move past the restore deadline. The actor's biased
+    // select sees the command before the timer, so the command arrives while
+    // the restore is already due.
+    send(4, vec![9, 10, 11, 12]);
+    tokio::time::advance(Duration::from_millis(200)).await;
+
+    let mut completed = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while completed.len() < 2 {
+            for output in output_rx.recv().await.unwrap() {
+                assert!(!output.rejected);
+                if output.completed {
+                    completed.push(output.uuid);
+                }
+            }
+        }
+    })
+    .await
+    .expect("a command arriving after the restore deadline must still be applied");
+    assert_eq!(completed, [Uuid::from_u128(3), Uuid::from_u128(4)]);
+
+    cancel.cancel();
+    actor.await.unwrap().unwrap();
+    let kv = effects.kv.lock().unwrap();
+    let tiers = effects.kv_tiers.lock().unwrap();
+    let KvCacheEventData::Stored(seed) = &kv[0].data else {
+        panic!("seed must publish its initial G1 residency");
+    };
+    let seed_hash = seed.blocks[0].block_hash;
+    let device_stores = kv
+        .iter()
+        .zip(tiers.iter())
+        .filter(|(_, tier)| **tier == StorageTier::Device)
+        .filter_map(|(event, _)| match &event.data {
+            KvCacheEventData::Stored(stored) => Some(stored.blocks[0].block_hash),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // Seed, B, the restored seed, then the new request.
+    assert_eq!(device_stores.len(), 4);
+    assert_eq!(device_stores[0], seed_hash);
+    assert_eq!(device_stores[2], seed_hash);
+    assert_ne!(device_stores[3], seed_hash);
+}
+
 #[tokio::test]
 async fn same_rank_receive_burst_is_batched_into_one_native_pass() {
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();

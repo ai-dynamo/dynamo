@@ -36,7 +36,6 @@ def _engine_args(native_host_offload, num_gpu_blocks):
 
 
 def _write_trace(tmp_path, prompts):
-    """One request per prompt, 100 ms apart; each prompt is 10 tokens."""
     trace_path = tmp_path / "trace.jsonl"
     rows = [
         {

@@ -103,20 +103,34 @@ token IDs that the simulated G2 does not carry; a router consuming that stream s
 </ParamField>
 
 Offline replay can also simulate one G2 pool shared by every worker of the simulated deployment.
-Set `native_host_offload` in the JSON passed to `--extra-engine-args`:
+Live mocker workers reject this scope, so pass it through the offline replay Python API:
 
-```json
-{
-  "native_host_offload": {
-    "scope": "cluster_shared",
-    "num_host_blocks": 65536,
-    "kv_layout_id": "llama-3-8b-tp1"
-  }
-}
+```python
+from dynamo.mocker import MockEngineArgs
+from dynamo.replay import run_trace_replay
+
+engine_args = MockEngineArgs(
+    engine_type="vllm",
+    kv_bytes_per_token=131072,
+    native_host_offload={
+        "scope": "cluster_shared",
+        "num_host_blocks": 65536,
+        "kv_layout_id": "llama-3-8b-tp1",
+    },
+)
+report = run_trace_replay(
+    "trace.jsonl",
+    extra_engine_args=engine_args,
+    num_workers=4,
+    replay_mode="offline",
+    router_mode="kv_router",
+)
 ```
 
-The JSON form also accepts `kv_cache_bytes_per_token`, `latency_to_first_byte_ms`, and the
-shared-pool bandwidth caps. Live mocker workers support only per-rank G2.
+Offline replay does not compute bytes per token from a model, so set `kv_bytes_per_token` (or
+`kv_cache_bytes_per_token`) explicitly. `native_host_offload` also accepts
+`latency_to_first_byte_ms` and the shared-pool bandwidth caps. G2 host offload does not support
+MTP (`--ais-nextn`).
 
 ## Scheduling
 

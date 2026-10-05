@@ -33,6 +33,7 @@ use dynamo_kv_router::{
 };
 use dynamo_tokens::SequenceHash;
 use futures::executor::block_on;
+use futures::future::try_join_all;
 use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -88,6 +89,34 @@ impl KvEventSummary {
             },
             dynamo_kv_router::protocols::KvCacheEventData::Cleared => Self::Cleared,
         }
+    }
+}
+
+struct KvEventLabel {
+    worker_id: WorkerId,
+    dp_rank: u32,
+    event_id: u64,
+    summary: KvEventSummary,
+}
+
+impl KvEventLabel {
+    fn new(event: &RouterEvent) -> Self {
+        Self {
+            worker_id: event.worker_id,
+            dp_rank: event.event.dp_rank,
+            event_id: event.event.event_id,
+            summary: KvEventSummary::from_data(&event.event.data),
+        }
+    }
+}
+
+impl fmt::Display for KvEventLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "worker={} dp_rank={} event_id={} data={}",
+            self.worker_id, self.dp_rank, self.event_id, self.summary
+        )
     }
 }
 
@@ -260,19 +289,39 @@ impl SyncReplayIndexer {
         TieredMatchDetails { device, lower_tier }
     }
 
-    fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
-        self.has_indexed_events = true;
-        if event.storage_tier.is_gpu() {
-            return self.tree.apply_event(event).map_err(Into::into);
+    /// Applies a batch in order. Lower-tier events are queued on their indexer
+    /// threads without a per-event round trip; one wait at the end acks them
+    /// all, so later placements still observe the whole batch.
+    fn apply_events(&mut self, events: Vec<RouterEvent>) -> Result<()> {
+        let mut lower_tier_acks = Vec::new();
+        for event in events {
+            let label = KvEventLabel::new(&event);
+            self.has_indexed_events = true;
+            if event.storage_tier.is_gpu() {
+                self.tree
+                    .apply_event(event)
+                    .with_context(|| format!("failed to apply replay KV event {label}"))?;
+                continue;
+            }
+            let block_size = self.block_size;
+            let indexer = self
+                .lower_tier
+                .get_or_insert_with(|| LowerTierIndexers::new(1, block_size))
+                .get_or_create(event.storage_tier);
+            lower_tier_acks.push(async move {
+                indexer
+                    .apply_event_and_wait(event)
+                    .await
+                    .with_context(|| format!("failed to apply replay KV event {label}"))
+            });
         }
-        let block_size = self.block_size;
-        let indexer = self
-            .lower_tier
-            .get_or_insert_with(|| LowerTierIndexers::new(1, block_size))
-            .get_or_create(event.storage_tier);
-        // The lower-tier index applies events on its own worker thread; wait
-        // for the ack so later placements observe this event deterministically.
-        block_on(indexer.apply_event_and_wait(event)).map_err(Into::into)
+        block_on(try_join_all(lower_tier_acks))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
+        self.apply_events(vec![event])
     }
 
     fn remove_worker(&mut self, worker_id: WorkerId) {
@@ -708,17 +757,7 @@ impl OfflineReplayRouter {
     }
 
     pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
-        for event in events {
-            let worker_id = event.worker_id;
-            let event_id = event.event.event_id;
-            let dp_rank = event.event.dp_rank;
-            let summary = KvEventSummary::from_data(&event.event.data);
-            self.indexer.apply_event(event).with_context(|| {
-                format!(
-                    "failed to apply replay KV event worker={worker_id} dp_rank={dp_rank} event_id={event_id} data={summary}"
-                )
-            })?;
-        }
+        self.indexer.apply_events(events)?;
         Ok(RouterEffects::default())
     }
 
@@ -1404,18 +1443,31 @@ mod tests {
         local_hashes: &[LocalBlockHash],
         storage_tier: StorageTier,
     ) -> RouterEvent {
+        chain_store_event(worker_id, event_id, 0, local_hashes, storage_tier)
+    }
+
+    /// Stores `local_hashes` as prompt blocks `first..`, chained under block
+    /// `first - 1` so a lower tier can continue a device match.
+    fn chain_store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        first: usize,
+        local_hashes: &[LocalBlockHash],
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        let block_hash = |index: usize| ExternalSequenceBlockHash(1_000 + index as u64);
         RouterEvent::with_storage_tier(
             worker_id,
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
+                    parent_hash: first.checked_sub(1).map(block_hash),
                     start_position: None,
                     blocks: local_hashes
                         .iter()
                         .enumerate()
-                        .map(|(index, hash)| KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(1_000 + index as u64),
+                        .map(|(offset, hash)| KvCacheStoredBlockData {
+                            block_hash: block_hash(first + offset),
                             tokens_hash: *hash,
                             mm_extra_info: None,
                         })
@@ -1450,6 +1502,40 @@ mod tests {
         let effects = router.on_request_arrival(&target, None, 0.0).unwrap();
         // Four G2 blocks at the default host_cache_hit_weight of 0.75 score
         // three effective blocks, counted the same way for best and selected.
+        assert_eq!(
+            effects.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(1),
+                worker_idx: 1,
+                overlap_blocks: 3,
+                best_available_overlap_blocks: 3,
+                isl_blocks: 4,
+            }]
+        );
+    }
+
+    #[test]
+    fn host_pinned_blocks_extend_a_partial_device_match() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(router_config()), None, 2)
+            .expect("router construction");
+        let target = request_with_priorities(1, 7, 256, 0, 0);
+        let local_hashes = compute_block_hash_for_seq(
+            &target.tokens,
+            router.block_size,
+            BlockHashOptions::default(),
+        );
+        assert_eq!(local_hashes.len(), 4);
+        // Worker 1 holds block 0 in G1 and blocks 1..4 in G2.
+        router
+            .on_kv_events(vec![
+                chain_store_event(1, 1, 0, &local_hashes[..1], StorageTier::Device),
+                chain_store_event(1, 2, 1, &local_hashes[1..], StorageTier::HostPinned),
+            ])
+            .unwrap();
+
+        let effects = router.on_request_arrival(&target, None, 0.0).unwrap();
+        // One G1 block plus three G2 blocks at 0.75 is 3.25, rounded to 3.
+        // Without the device-to-host continuation the G2 chain would not match.
         assert_eq!(
             effects.admissions,
             vec![WorkerAdmission {

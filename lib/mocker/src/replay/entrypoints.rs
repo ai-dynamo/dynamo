@@ -2856,14 +2856,23 @@ mod tests {
     }
 
     /// A finishes on one worker, B pins the other, then C evicts A from the
-    /// first worker's G1. A's repeat has no G1 copy anywhere.
+    /// first worker's G1. A's repeat has no G1 copy anywhere, and when it
+    /// arrives both workers are decoding: C (3 blocks) on A's worker, the
+    /// shorter B (2 blocks) on the other, so load alone prefers B's worker.
     fn evicted_prefix_requests() -> Vec<DirectRequest> {
         vec![
             prompt_request(1, 0, 0.0, 1),
             // B pins the other worker (one slow decode step) while A runs.
-            prompt_request(2, 1_000, 0.5, 2),
-            // C lands on A's idle worker and evicts A from that worker's G1.
-            prompt_request(3, 2_000, 20.0, 1),
+            DirectRequest {
+                tokens: (1_000..1_005).collect(),
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(2)),
+                arrival_timestamp_ms: Some(0.5),
+                ..Default::default()
+            },
+            // C lands on A's idle worker, evicts A from that worker's G1, and
+            // is still decoding when A repeats.
+            prompt_request(3, 2_000, 20.0, 2),
             prompt_request(4, 0, 50.0, 1),
         ]
     }
@@ -2872,6 +2881,16 @@ mod tests {
         let history = &record(report, id).routing_history;
         assert_eq!(history.len(), 1);
         history[0].clone()
+    }
+
+    #[test]
+    fn without_host_offload_the_repeat_follows_load() {
+        let report = replay_with_records(host_offload_args(None), evicted_prefix_requests(), 2);
+        assert_eq!(report.request_counts.completed_requests, 4);
+        assert_eq!(
+            route(&report, 4).logical_worker_id,
+            route(&report, 2).logical_worker_id
+        );
     }
 
     #[test]

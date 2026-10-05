@@ -1304,11 +1304,6 @@ impl MockEngineArgs {
                 }
             }
         }
-        // G2 host blocks hold the engine's KV footprint, which kv_bytes_per_token
-        // already describes unless the cache geometry is set separately.
-        if self.native_host_offload.is_some() && self.kv_cache_bytes_per_token.is_none() {
-            self.kv_cache_bytes_per_token = self.kv_bytes_per_token;
-        }
     }
 
     fn validate_config(&mut self) -> anyhow::Result<()> {
@@ -1632,31 +1627,6 @@ mod tests {
         .unwrap();
         assert_eq!(args.ais_gemm_dtype.as_deref(), Some("fp8_block"));
         assert_eq!(args.ais_kv_cache_dtype.as_deref(), Some("fp8"));
-    }
-
-    #[test]
-    fn native_host_offload_defaults_cache_geometry_to_kv_bytes_per_token() {
-        let args = MockEngineArgs::from_json_str(
-            &json!({"kv_bytes_per_token": 4096, "native_host_offload": {"num_host_blocks": 8}})
-                .to_string(),
-        )
-        .unwrap()
-        .normalized()
-        .unwrap();
-        assert_eq!(args.kv_cache_bytes_per_token, Some(4096));
-
-        let explicit = MockEngineArgs::from_json_str(
-            &json!({
-                "kv_bytes_per_token": 4096,
-                "kv_cache_bytes_per_token": 2048,
-                "native_host_offload": {"num_host_blocks": 8},
-            })
-            .to_string(),
-        )
-        .unwrap()
-        .normalized()
-        .unwrap();
-        assert_eq!(explicit.kv_cache_bytes_per_token, Some(2048));
     }
 
     #[test]

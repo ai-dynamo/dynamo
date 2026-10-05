@@ -886,6 +886,65 @@ policy_classes:
     }
 
     #[tokio::test]
+    async fn online_kv_router_continues_a_device_match_into_host_pinned() {
+        let args = MockEngineArgs::builder().block_size(64).build().unwrap();
+        let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 2).unwrap();
+        let mut request = priority_request(100, 0, 0);
+        request.tokens = vec![100; 256];
+        let hashes = compute_block_hash_for_seq(&request.tokens, 64, BlockHashOptions::default());
+        let ReplayRouter::Kv(kv_router) = &router else {
+            unreachable!("test constructed a KV replay router")
+        };
+        // Worker 1 holds block 0 in G1 and blocks 1..4 in G2, chained under it.
+        let store = |event_id, first: usize, tier| {
+            let block_hash = |index: usize| ExternalSequenceBlockHash(1_000 + index as u64);
+            RouterEvent::with_storage_tier(
+                1,
+                KvCacheEvent {
+                    event_id,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: first.checked_sub(1).map(block_hash),
+                        start_position: None,
+                        blocks: (first..if first == 0 { 1 } else { 4 })
+                            .map(|index| KvCacheStoredBlockData {
+                                block_hash: block_hash(index),
+                                tokens_hash: hashes[index],
+                                mm_extra_info: None,
+                            })
+                            .collect(),
+                    }),
+                    dp_rank: 0,
+                },
+                tier,
+            )
+        };
+        kv_router
+            .indexer
+            .apply_event(store(1, 0, StorageTier::Device))
+            .await;
+        kv_router
+            .indexer
+            .apply_event(store(2, 1, StorageTier::HostPinned))
+            .await;
+        kv_router.indexer.flush().await;
+
+        let tiered = kv_router
+            .indexer
+            .find_matches_for_request(&request.tokens, None)
+            .await
+            .unwrap();
+        let worker = WorkerWithDpRank::new(1, 0);
+        assert_eq!(tiered.device.overlap_scores.scores.get(&worker), Some(&1));
+        assert_eq!(
+            tiered.lower_tier[&StorageTier::HostPinned]
+                .hits
+                .get(&worker),
+            Some(&3)
+        );
+        router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn online_kv_router_routes_to_a_host_pinned_prefix() {
         let args = MockEngineArgs::builder().block_size(64).build().unwrap();
         let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 2).unwrap();
