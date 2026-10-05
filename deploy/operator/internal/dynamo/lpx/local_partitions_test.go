@@ -141,7 +141,36 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 			name:     "resolved selection replaces authored values",
 			localIDs: []int{0, 2, 12},
 			env:      []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
-			wantEnv:  []corev1.EnvVar{{Name: "OTHER", Value: "kept"}, {Name: localPartitionIDsEnv, Value: "0,2,12"}},
+			wantEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "0,2,12"}, {Name: "OTHER", Value: "kept"}},
+		},
+		{
+			name:     "resolved selection precedes dependent values",
+			localIDs: []int{11},
+			env: []corev1.EnvVar{
+				{Name: "FIRST", Value: "kept"},
+				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
+				{Name: localPartitionIDsEnv, Value: "authored"},
+				{Name: "LAST", Value: "kept"},
+			},
+			wantEnv: []corev1.EnvVar{
+				{Name: localPartitionIDsEnv, Value: "11"},
+				{Name: "FIRST", Value: "kept"},
+				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
+				{Name: "LAST", Value: "kept"},
+			},
+		},
+		{
+			name:    "envFrom shadow precedes dependent values",
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "authored"}}}},
+			env: []corev1.EnvVar{
+				{Name: "FIRST", Value: "kept"},
+				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
+			},
+			wantEnv: []corev1.EnvVar{
+				{Name: localPartitionIDsEnv},
+				{Name: "FIRST", Value: "kept"},
+				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
+			},
 		},
 	}
 

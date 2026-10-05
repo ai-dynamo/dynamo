@@ -406,6 +406,8 @@ spec:
             - --
             - /usr/local/bin/cyborg
             env:
+            - name: LPX_LOCAL_PARTITION_IDS
+              value: 0,15,16
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
@@ -464,8 +466,6 @@ spec:
               value: "19877"
             - name: SERVER_HOSTS_FILE
               value: /tmp/lpu_servers
-            - name: LPX_LOCAL_PARTITION_IDS
-              value: 0,15,16
             image: example.invalid/gpu-runtime:test
             livenessProbe:
               failureThreshold: 1

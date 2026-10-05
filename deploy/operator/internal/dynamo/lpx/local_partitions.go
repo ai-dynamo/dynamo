@@ -87,19 +87,21 @@ func selectRemotePartitions(
 // it sets an empty value only when envFrom sources could otherwise supply one;
 // Cyborg treats an empty value as no selection.
 func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection) {
-	container.Env = slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool {
-		return variable.Name == localPartitionIDsEnv
-	})
-	if len(projection.localPartitionIDs) == 0 {
-		if len(container.EnvFrom) > 0 {
-			container.Env = append(container.Env, corev1.EnvVar{Name: localPartitionIDsEnv})
-		}
-		return
-	}
-
 	ids := make([]string, len(projection.localPartitionIDs))
 	for index, id := range projection.localPartitionIDs {
 		ids[index] = strconv.Itoa(id)
 	}
-	container.Env = append(container.Env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
+	publish := len(ids) > 0 || len(container.EnvFrom) > 0
+
+	// Kubernetes expands environment references in order; publish the selection before authored bindings.
+	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
+	if publish {
+		env = append(env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
+	}
+	for _, variable := range container.Env {
+		if variable.Name != localPartitionIDsEnv {
+			env = append(env, variable)
+		}
+	}
+	container.Env = env
 }

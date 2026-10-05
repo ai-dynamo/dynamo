@@ -69,6 +69,8 @@ spec:
             - --
             - /opt/gpu-runtime
             env:
+            - name: LPX_LOCAL_PARTITION_IDS
+              value: "0"
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
@@ -125,8 +127,6 @@ spec:
               value: "19877"
             - name: SERVER_HOSTS_FILE
               value: /tmp/lpu_servers
-            - name: LPX_LOCAL_PARTITION_IDS
-              value: "0"
             image: example.invalid/gpu-runtime:test
             livenessProbe:
               failureThreshold: 1
