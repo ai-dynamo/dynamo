@@ -527,6 +527,10 @@ impl MediaLoader {
         media_io_kwargs: Option<&MediaDecoder>,
         _hash_video: bool,
     ) -> Result<RdmaMediaDataDescriptor> {
+        // Drain before the cache lookup: the worker also reads cached buffers, so cache
+        // hits add notifications too.
+        drain_nixl_notifications(&self.nixl_agent);
+
         // Image-only fast path: cache lookup keyed by URL/datauri string.
         // Video/audio aren't cached yet (their lifetime/content semantics
         // are different — easy to add later if profiling justifies it).
@@ -612,7 +616,6 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
-        drain_nixl_notifications(&self.nixl_agent);
         let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
 
         // Insert into the cache on the way out. We only cache image inputs
