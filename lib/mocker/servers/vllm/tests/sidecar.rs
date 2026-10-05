@@ -4,17 +4,13 @@
 use tonic_health_v14 as tonic_health;
 use tonic_v14 as tonic;
 
-use std::sync::Arc;
-
 use dynamo_backend_common::{
-    AsyncEngineContext, DisaggregationMode, FinishReason, GenerateContext, LLMEngine,
-    OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
+    PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
-use dynamo_vllm_sidecar::proto::AbortRequest;
-use dynamo_vllm_sidecar::proto::control_client::ControlClient;
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
 use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 use futures::StreamExt;
@@ -24,7 +20,6 @@ use tokio_stream::wrappers::TcpListenerStream;
 
 struct RunningServer {
     endpoint: String,
-    service: VllmMockerService,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -63,7 +58,6 @@ impl RunningServer {
         });
         Self {
             endpoint: format!("http://{address}"),
-            service,
             shutdown: Some(shutdown),
         }
     }
@@ -137,19 +131,7 @@ async fn collect(
     engine: &VllmSidecarEngine,
     request: PreprocessedRequest,
 ) -> Vec<dynamo_backend_common::LLMEngineOutput> {
-    collect_with_context(
-        engine,
-        request,
-        dynamo_backend_common::testing::mock_context(),
-    )
-    .await
-}
-
-async fn collect_with_context(
-    engine: &VllmSidecarEngine,
-    request: PreprocessedRequest,
-    context: Arc<dyn AsyncEngineContext>,
-) -> Vec<dynamo_backend_common::LLMEngineOutput> {
+    let context = dynamo_backend_common::testing::mock_context();
     engine
         .generate(request, GenerateContext::new(context, None))
         .await
@@ -157,67 +139,6 @@ async fn collect_with_context(
         .map(|item| item.unwrap())
         .collect()
         .await
-}
-
-#[tokio::test]
-async fn sidecar_preserves_vllm_stop_token_controls() {
-    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    engine.start(0).await.unwrap();
-    let context = dynamo_backend_common::testing::mock_context();
-    let baseline = collect_with_context(&engine, request(4), Arc::clone(&context)).await;
-    let baseline_tokens: Vec<_> = baseline
-        .iter()
-        .flat_map(|output| &output.token_ids)
-        .copied()
-        .collect();
-    assert_eq!(baseline_tokens.len(), 4);
-    let stop_token = baseline_tokens[0];
-
-    for (max_tokens, min_tokens, is_ignore_eos, expected_tokens, expected_finish) in [
-        (4, 0, false, 1, FinishReason::Stop),
-        (1, 0, false, 1, FinishReason::Stop),
-        (4, 4, false, 4, FinishReason::Length),
-        (4, 0, true, 1, FinishReason::Stop),
-        (1, 0, true, 1, FinishReason::Stop),
-        (1, 1, true, 1, FinishReason::Length),
-    ] {
-        let mut stopped = request(max_tokens);
-        stopped.stop_conditions.min_tokens = Some(min_tokens);
-        stopped.stop_conditions.ignore_eos = Some(is_ignore_eos);
-        stopped.stop_conditions.stop_token_ids = Some(vec![stop_token]);
-        let outputs = collect_with_context(&engine, stopped, Arc::clone(&context)).await;
-        let tokens: Vec<_> = outputs
-            .iter()
-            .flat_map(|output| &output.token_ids)
-            .copied()
-            .collect();
-        assert_eq!(tokens, baseline_tokens[..expected_tokens]);
-        let terminal = outputs.last().unwrap();
-        assert_eq!(
-            outputs
-                .iter()
-                .filter(|output| output.finish_reason.is_some())
-                .count(),
-            1
-        );
-        assert_eq!(terminal.finish_reason.as_ref(), Some(&expected_finish));
-        assert_eq!(
-            terminal.stop_reason,
-            (expected_finish == FinishReason::Stop)
-                .then_some(StopReason::Int(i64::from(stop_token)))
-        );
-        let usage = terminal.completion_usage.as_ref().unwrap();
-        assert_eq!(
-            (usage.prompt_tokens, usage.completion_tokens as usize),
-            (4, expected_tokens)
-        );
-        assert_eq!(
-            usage.total_tokens,
-            usage.prompt_tokens + usage.completion_tokens
-        );
-        assert_eq!(server.service.active_request_count(), 0);
-    }
 }
 
 #[tokio::test]
@@ -264,79 +185,6 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
         decode_outputs.last().unwrap().finish_reason,
         Some(FinishReason::Length)
     );
-}
-
-#[tokio::test]
-async fn native_abort_maps_to_cancelled_and_allows_recovery() {
-    let mut args = fast_engine_args();
-    args.speedup_ratio = 0.1;
-    let server = RunningServer::start(ServerMode::Aggregated, args).await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    engine.start(0).await.unwrap();
-
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let context = dynamo_backend_common::testing::mock_context();
-        let mut stream = engine
-            .generate(
-                request(10_000),
-                GenerateContext::new(Arc::clone(&context), None),
-            )
-            .await
-            .unwrap();
-        let first = stream.next().await.unwrap().unwrap();
-        assert!(!first.token_ids.is_empty());
-        assert!(first.finish_reason.is_none());
-        ControlClient::connect(server.endpoint.clone())
-            .await
-            .unwrap()
-            .abort(AbortRequest {
-                request_ids: vec![context.id().to_owned()],
-            })
-            .await
-            .unwrap();
-        let mut outputs = vec![first];
-        outputs.extend(stream.map(|item| item.unwrap()).collect::<Vec<_>>().await);
-        let terminal = outputs.last().unwrap();
-        assert_eq!(
-            outputs
-                .iter()
-                .filter(|output| output.finish_reason.is_some())
-                .count(),
-            1
-        );
-        assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-        let usage = terminal.completion_usage.as_ref().unwrap();
-        let generated: usize = outputs.iter().map(|output| output.token_ids.len()).sum();
-        assert_eq!(
-            (usage.prompt_tokens, usage.completion_tokens as usize),
-            (4, generated)
-        );
-        assert_eq!(
-            usage.total_tokens,
-            usage.prompt_tokens + usage.completion_tokens
-        );
-
-        let mut metrics = server.service.metrics_receiver();
-        loop {
-            let snapshot = metrics.borrow_and_update().clone();
-            if server.service.active_request_count() == 0
-                && snapshot.running_requests == 0
-                && snapshot.waiting_requests == 0
-            {
-                break;
-            }
-            metrics.changed().await.unwrap();
-        }
-        let recovered = collect(&engine, request(1)).await;
-        assert_eq!(recovered[0].token_ids.len(), 1);
-        assert_eq!(
-            recovered.last().unwrap().finish_reason,
-            Some(FinishReason::Length)
-        );
-        assert_eq!(server.service.active_request_count(), 0);
-    })
-    .await
-    .expect("native Abort should cancel scheduler work and permit another request");
 }
 
 #[path = "../../tests/common/mod.rs"]

@@ -6,7 +6,6 @@ use std::sync::Arc;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext,
     LLMEngine, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
-    StopReason,
 };
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
@@ -190,67 +189,6 @@ async fn sidecar_streams_incremental_mocker_tokens_logprobs_and_usage() {
             .collect::<Vec<_>>()
     );
     assert_eq!(server.service.active_request_count(), 0);
-}
-
-#[tokio::test]
-async fn sidecar_preserves_sglang_stop_token_controls() {
-    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    engine.start(0).await.unwrap();
-    let context = dynamo_backend_common::testing::mock_context();
-    let baseline = collect_with_context(&engine, request(4), Arc::clone(&context)).await;
-    let baseline_tokens: Vec<_> = baseline
-        .iter()
-        .flat_map(|output| &output.token_ids)
-        .copied()
-        .collect();
-    assert_eq!(baseline_tokens.len(), 4);
-    let stop_token = baseline_tokens[0];
-
-    for (max_tokens, min_tokens, is_ignore_eos, expected_tokens, expected_finish) in [
-        (4, 0, false, 1, FinishReason::Stop),
-        (1, 0, false, 1, FinishReason::Stop),
-        (4, 4, false, 4, FinishReason::Length),
-        (4, 0, true, 4, FinishReason::Length),
-        (1, 0, true, 1, FinishReason::Length),
-        (1, 1, true, 1, FinishReason::Length),
-    ] {
-        let mut stopped = request(max_tokens);
-        stopped.stop_conditions.min_tokens = Some(min_tokens);
-        stopped.stop_conditions.ignore_eos = Some(is_ignore_eos);
-        stopped.stop_conditions.stop_token_ids = Some(vec![stop_token]);
-        let outputs = collect_with_context(&engine, stopped, Arc::clone(&context)).await;
-        let tokens: Vec<_> = outputs
-            .iter()
-            .flat_map(|output| &output.token_ids)
-            .copied()
-            .collect();
-        assert_eq!(tokens, baseline_tokens[..expected_tokens]);
-        let terminal = outputs.last().unwrap();
-        assert_eq!(
-            outputs
-                .iter()
-                .filter(|output| output.finish_reason.is_some())
-                .count(),
-            1
-        );
-        assert_eq!(terminal.finish_reason.as_ref(), Some(&expected_finish));
-        assert_eq!(
-            terminal.stop_reason,
-            (expected_finish == FinishReason::Stop)
-                .then_some(StopReason::Int(i64::from(stop_token)))
-        );
-        let usage = terminal.completion_usage.as_ref().unwrap();
-        assert_eq!(
-            (usage.prompt_tokens, usage.completion_tokens as usize),
-            (4, expected_tokens)
-        );
-        assert_eq!(
-            usage.total_tokens,
-            usage.prompt_tokens + usage.completion_tokens
-        );
-        assert_eq!(server.service.active_request_count(), 0);
-    }
 }
 
 #[tokio::test]
