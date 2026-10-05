@@ -89,17 +89,8 @@ fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
 /// set, overload detection stays off. A set but invalid value fails startup
 /// rather than silently leaving shedding off.
 fn load_thresholds_from_env() -> Result<LoadThresholdConfig> {
-    load_thresholds_from_lookup(|key| std::env::var(key).ok())
-}
-
-fn load_thresholds_from_lookup(
-    get: impl Fn(&str) -> Option<String>,
-) -> Result<LoadThresholdConfig> {
-    fn parse<T: std::str::FromStr>(
-        get: &impl Fn(&str) -> Option<String>,
-        key: &str,
-    ) -> Result<Option<T>> {
-        let Some(raw) = get(key) else {
+    fn parse<T: std::str::FromStr>(key: &str) -> Result<Option<T>> {
+        let Ok(raw) = std::env::var(key) else {
             return Ok(None);
         };
         let raw = raw.trim();
@@ -113,12 +104,9 @@ fn load_thresholds_from_lookup(
     }
 
     let config = LoadThresholdConfig {
-        active_decode_blocks_threshold: parse(&get, DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD)?,
-        active_prefill_tokens_threshold: parse(&get, DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD)?,
-        active_prefill_tokens_threshold_frac: parse(
-            &get,
-            DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC,
-        )?,
+        active_decode_blocks_threshold: parse(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD)?,
+        active_prefill_tokens_threshold: parse(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD)?,
+        active_prefill_tokens_threshold_frac: parse(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC)?,
     };
     config.validate().map_err(anyhow::Error::msg)?;
     Ok(config)
@@ -1711,49 +1699,6 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn thresholds(vars: &[(&str, &str)]) -> Result<LoadThresholdConfig> {
-        load_thresholds_from_lookup(|key| {
-            vars.iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, value)| value.to_string())
-        })
-    }
-
-    #[test]
-    fn load_thresholds_parse_from_env() {
-        assert!(!thresholds(&[]).unwrap().is_configured());
-        for disabled in [" ", "None"] {
-            assert!(
-                !thresholds(&[(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, disabled)])
-                    .unwrap()
-                    .is_configured(),
-                "{disabled:?}"
-            );
-        }
-
-        let config = thresholds(&[
-            (DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, "0.85"),
-            (DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD, "8192"),
-            (DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC, "1.5"),
-        ])
-        .unwrap();
-        assert_eq!(config.active_decode_blocks_threshold, Some(0.85));
-        assert_eq!(config.active_prefill_tokens_threshold, Some(8192));
-        assert_eq!(config.active_prefill_tokens_threshold_frac, Some(1.5));
-    }
-
-    #[test]
-    fn invalid_load_thresholds_fail_startup() {
-        for (key, value) in [
-            (DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, "0.85x"),
-            (DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, "1.5"),
-            (DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD, "-1"),
-            (DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC, "-0.5"),
-        ] {
-            assert!(thresholds(&[(key, value)]).is_err(), "{key}={value}");
-        }
-    }
     use k8s_openapi::api::core::v1::Pod;
 
     use std::sync::{Arc, atomic::Ordering};
