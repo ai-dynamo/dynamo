@@ -392,10 +392,8 @@ def _build_dynamo_preproc(
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     thinking_token_budget = resolve_thinking_token_budget(request)
-    if thinking_token_budget is not None and not force_reasoning:
-        raise InvalidArgument(
-            "thinking_token_budget requires reasoning to be enabled for the request"
-        )
+    if not force_reasoning:
+        thinking_token_budget = None
     require_reasoning = require_reasoning or thinking_token_budget is not None
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 

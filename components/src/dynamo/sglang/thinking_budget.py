@@ -135,12 +135,23 @@ def apply_thinking_budget(
             "unavailable with --use-sglang-tokenizer"
         )
 
+    _validate_server_config(server_args, engine)
+
+    if request.get("require_reasoning") is False:
+        custom_params = result.get("custom_params")
+        if isinstance(custom_params, Mapping) and "thinking_budget" in custom_params:
+            result["custom_params"] = {
+                key: value
+                for key, value in custom_params.items()
+                if key != "thinking_budget"
+            }
+        return result
+
     if request.get("require_reasoning") is not True:
         raise InvalidArgument(
             "thinking_token_budget requires reasoning to be enabled for the request"
         )
 
-    _validate_server_config(server_args, engine)
     # Disaggregated multimodal requests can forward backend sampling parameters.
     if result.get("custom_logit_processor") is not None:
         raise InvalidArgument(

@@ -3405,7 +3405,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
 
-    def test_qwen3_thinking_budget_rejects_explicit_thinking_opt_out(self, tokenizer):
+    def test_qwen3_thinking_budget_is_unset_with_explicit_thinking_opt_out(self, tokenizer):
         request = {
             "model": MODEL,
             "messages": [{"role": "user", "content": "Hello"}],
@@ -3420,14 +3420,15 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
 
         assert pre.force_reasoning is False
-        with pytest.raises(InvalidArgument, match="requires reasoning to be enabled"):
-            _build_dynamo_preproc(
-                request,
-                pre.prompt_token_ids,
-                MODEL,
-                None,
-                force_reasoning=pre.force_reasoning,
-            )
+        result = _build_dynamo_preproc(
+            request,
+            pre.prompt_token_ids,
+            MODEL,
+            None,
+            force_reasoning=pre.force_reasoning,
+        )
+        assert result["stop_conditions"]["max_thinking_tokens"] is None
+        assert result["require_reasoning"] is False
 
     # Only the explicit case is covered: with no `thinking` key we deliberately
     # do NOT materialize one, so the K3 chat template applies its own default

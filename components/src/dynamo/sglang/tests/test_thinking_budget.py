@@ -135,15 +135,41 @@ def test_apply_thinking_budget_rejects_unsupported_server_config(overrides, mess
         )
 
 
-def test_apply_thinking_budget_rejects_disabled_request_reasoning():
+def test_apply_thinking_budget_ignores_budget_when_request_reasoning_disabled():
+    sampling = {"custom_params": {"thinking_budget": 8, "other": True}}
+    original = deepcopy(sampling)
+    actual = apply_thinking_budget(
+        {
+            "stop_conditions": {"max_thinking_tokens": 32},
+            "require_reasoning": False,
+        },
+        sampling,
+        _server_args(),
+    )
+    assert actual == {"custom_params": {"other": True}}
+    assert sampling == original
+
+
+def test_apply_thinking_budget_rejects_missing_request_reasoning():
     with pytest.raises(InvalidArgument, match="requires reasoning to be enabled"):
+        apply_thinking_budget(
+            {
+                "stop_conditions": {"max_thinking_tokens": 32},
+            },
+            {},
+            _server_args(),
+        )
+
+
+def test_disabled_reasoning_does_not_bypass_unsupported_server_validation():
+    with pytest.raises(InvalidArgument, match="--enable-strict-thinking"):
         apply_thinking_budget(
             {
                 "stop_conditions": {"max_thinking_tokens": 32},
                 "require_reasoning": False,
             },
             {},
-            _server_args(),
+            _server_args(enable_strict_thinking=False),
         )
 
 
