@@ -666,14 +666,39 @@ class TestMsgpackDecodeRestrictions:
     def test_decode_refuses_pickle_extension_code(self):
         """A frame carrying msgpack's pickle extension code must raise.
 
-        vLLM honors that code only when VLLM_ALLOW_INSECURE_SERIALIZATION is
-        set, which Dynamo never sets, so the decoder refuses it and the receiver
+        The decoder accepts only the raw tensor-view code, so it refuses this
+        code whatever VLLM_ALLOW_INSECURE_SERIALIZATION says, and the receiver
         falls back. The frame is built directly with msgspec, so no pickle
         object is created.
         """
         from msgspec import msgpack
+        from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
 
-        # CUSTOM_TYPE_PICKLE == 1 in vllm.v1.serial_utils.
-        frame = _pack_buffers([msgpack.encode(msgpack.Ext(1, b"ignored"))])
+        ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+        frame = _pack_buffers([msgpack.encode(ext)])
+        with pytest.raises(NotImplementedError, match="Extension type code 1"):
+            decode_mm_kwargs_item(frame)
+
+    def test_decode_refuses_pickle_extension_code_with_insecure_flag(self, monkeypatch):
+        """The refusal holds when VLLM_ALLOW_INSECURE_SERIALIZATION is set.
+
+        vLLM's own decoder honors the pickle code when the variable is set, so
+        with these dummy bytes it would fail with an unpickling error instead
+        of refusing the code. The frame carries no pickle object.
+        """
+        import vllm.envs as envs
+        from msgspec import msgpack
+        from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+        # vLLM caches its environment after an engine starts. Read it live, and
+        # prove that the decoder sees the variable change in this process.
+        envs.disable_envs_cache()
+        monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
+        assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is False
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is True
+
+        ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+        frame = _pack_buffers([msgpack.encode(ext)])
         with pytest.raises(NotImplementedError, match="Extension type code 1"):
             decode_mm_kwargs_item(frame)

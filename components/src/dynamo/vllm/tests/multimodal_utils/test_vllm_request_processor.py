@@ -1408,6 +1408,7 @@ def _undecodable_payload(case: str) -> bytes:
     import struct
 
     from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
 
     from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
 
@@ -1422,7 +1423,7 @@ def _undecodable_payload(case: str) -> bytes:
         # A well-formed frame whose message is not a kwargs item.
         return _pack_buffers([msgpack.encode(_LOG_SENTINEL)])
     # A frame that carries the serializer's pickle extension code.
-    return _pack_buffers([msgpack.encode(msgpack.Ext(1, sentinel))])
+    return _pack_buffers([msgpack.encode(msgpack.Ext(CUSTOM_TYPE_PICKLE, sentinel))])
 
 
 @pytest.mark.asyncio
@@ -1456,6 +1457,55 @@ async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
     # Positive control: the failure itself was logged and captured.
     assert "falling back" in caplog.text
     assert _LOG_SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_receive_refuses_pickle_extension_code_with_insecure_flag(
+    monkeypatch, caplog
+):
+    """With VLLM_ALLOW_INSECURE_SERIALIZATION set, the worker still refuses.
+
+    The frame carries the pickle extension code with dummy bytes, not a pickle
+    object. vLLM's own decoder would try to unpickle them when the variable is
+    set. The worker must refuse the code instead and take its fallback path.
+    """
+    import vllm.envs as envs
+    from msgspec import msgpack
+    from vllm.v1.serial_utils import CUSTOM_TYPE_PICKLE
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    assert envs.VLLM_ALLOW_INSECURE_SERIALIZATION is True
+
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    ext = msgpack.Ext(CUSTOM_TYPE_PICKLE, b"\x00 not a pickle")
+    receiver = SimpleNamespace(
+        receive=AsyncMock(
+            return_value={
+                "__pickled_kwargs_item__": [_pack_buffers([msgpack.encode(ext)])]
+            }
+        )
+    )
+
+    with caplog.at_level("DEBUG"):
+        result = await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    assert result is None
+    assert "falling back" in caplog.text
+    # The logged cause is the refusal, not an attempt to unpickle the data.
+    assert "Extension type code 1 is not supported" in caplog.text
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(

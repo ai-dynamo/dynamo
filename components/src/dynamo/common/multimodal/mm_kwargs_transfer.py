@@ -22,6 +22,7 @@ This module provides:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import multiprocessing.shared_memory as shm
 import os
@@ -43,8 +44,9 @@ logger = logging.getLogger(__name__)
 # The mm_kwargs transfer serializes vLLM's Python-only MultiModalKwargsItem
 # objects. We use vLLM's own typed msgpack serializer (vllm.v1.serial_utils),
 # the same one vLLM uses for its engine-core<->worker MultiModalKwargs transfer.
-# It is typed and restricted to the target type by default, so the receiver
-# reconstructs only MultiModalKwargsItem values. MsgpackEncoder.encode() returns
+# It is typed and restricted to the target type, so the receiver reconstructs
+# only MultiModalKwargsItem values, and the receiver refuses every msgpack
+# extension code except the raw tensor view. MsgpackEncoder.encode() returns
 # a sequence of buffers (msgpack plus any large-tensor "aux" buffers); the
 # SHM/NIXL transport carries a single bytes blob per item, so we frame the
 # sequence with a small length prefix and reverse it on receive. The vllm
@@ -104,16 +106,36 @@ def encode_mm_kwargs_item(obj) -> bytes:
     return _pack_buffers(MsgpackEncoder().encode(obj))
 
 
+@functools.lru_cache(maxsize=1)
+def _raw_view_only_decoder_cls():
+    """Return a vLLM ``MsgpackDecoder`` subclass that accepts only raw views.
+
+    vLLM's decoder honors its pickle extension codes when the process-wide
+    ``VLLM_ALLOW_INSECURE_SERIALIZATION`` is set, and other vLLM features can
+    need that variable. This decoder refuses every extension code except the
+    raw tensor view, whatever the variable says.
+    """
+    from vllm.v1.serial_utils import CUSTOM_TYPE_RAW_VIEW, MsgpackDecoder
+
+    class _RawViewOnlyMsgpackDecoder(MsgpackDecoder):
+        def ext_hook(self, code: int, data: memoryview) -> Any:
+            if code == CUSTOM_TYPE_RAW_VIEW:
+                return data
+            raise NotImplementedError(f"Extension type code {code} is not supported")
+
+    return _RawViewOnlyMsgpackDecoder
+
+
 def decode_mm_kwargs_item(blob):
     """Deserialize bytes from :func:`encode_mm_kwargs_item` back into a
-    ``MultiModalKwargsItem``. Pickle-free and type-restricted: the decoder only
-    yields the target type, and with ``VLLM_ALLOW_INSECURE_SERIALIZATION`` unset
-    (vLLM's default) it refuses any pickle extension. A fresh decoder is used per
-    call (not thread-safe)."""
+    ``MultiModalKwargsItem``. The decoder yields only the target type and
+    accepts only the raw tensor-view extension code, so it refuses the pickle
+    extension codes even when ``VLLM_ALLOW_INSECURE_SERIALIZATION`` is set. A
+    fresh decoder is used per call (not thread-safe)."""
     from vllm.multimodal.inputs import MultiModalKwargsItem
-    from vllm.v1.serial_utils import MsgpackDecoder
 
-    return MsgpackDecoder(MultiModalKwargsItem).decode(_unpack_buffers(blob))
+    decoder_cls = _raw_view_only_decoder_cls()
+    return decoder_cls(MultiModalKwargsItem).decode(_unpack_buffers(blob))
 
 
 # Upper bound on how long cleanup() waits for the backend to read a transferred
