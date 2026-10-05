@@ -360,7 +360,6 @@ class TestVllmRendererApi:
         and reads EngineCoreRequest fields by name, but the request still
         crosses vLLM boundaries using array-like serialization.
         """
-        # vLLM 0.29 and 0.30 share the same core request and output schemas.
         expected_request_fields = (
             "request_id",
             "prompt_token_ids",
@@ -403,6 +402,10 @@ class TestVllmRendererApi:
             "new_sampling_mask",
             "spec_decode_metrics",
         )
+
+        if Version(_vllm.__version__) >= Version("0.31.0"):
+            expected_request_fields += ("kv_hints",)
+            expected_output_fields += ("prompt_token_id_logprobs",)
 
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
             omni = importlib.import_module("vllm_omni")
