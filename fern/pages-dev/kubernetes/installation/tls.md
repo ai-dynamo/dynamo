@@ -87,7 +87,11 @@ paths referenced above. The operator injects the **paths** (via env vars),
 not the volumes — the cert files must exist at those paths in every DGD pod.
 
 A common setup is to issue a `Certificate` with cert-manager, store it in a
-Kubernetes `Secret`, and mount that Secret as a volume in the pod template:
+Kubernetes `Secret`, and mount that Secret as a volume in the pod template.
+
+### Combined Mode
+
+Mount the certificates on the `main` container in each component that uses TLS:
 
 ```yaml
 spec:
@@ -125,10 +129,58 @@ spec:
               path: ca.pem
 ```
 
-This example shows a single component (`Frontend`); every component that
-receives the TLS env vars needs the same volume mounts. If you are using the
-operator's auto-injection, apply these mounts in each component's
-`podTemplate`.
+### Dynamo Sidecar Mode
+
+In [Dynamo sidecar mode](../../reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode),
+the operator injects `DYN_TCP_TLS_*` and `NATS_TLS_*` into the `runtime` init container.
+Mount the certificates there. The `main` container runs the engine.
+
+This DGD fragment shows the certificate mounts for a worker. Replace the image
+placeholders and retain the launch commands and probes from your sidecar deployment:
+
+```yaml
+spec:
+  components:
+  - name: worker
+    type: worker
+    podTemplate:
+      spec:
+        initContainers:
+        - name: runtime
+          image: <dynamo-sidecar-image>
+          restartPolicy: Always
+          volumeMounts:
+          - name: tls-server-certs
+            mountPath: /etc/certs/server
+            readOnly: true
+          - name: tls-ca-cert
+            mountPath: /etc/certs/ca
+            readOnly: true
+        containers:
+        - name: main
+          image: <engine-image>
+        volumes:
+        - name: tls-server-certs
+          secret:
+            secretName: dynamo-tls-server
+            items:
+            - key: tls.crt
+              path: cert.pem
+            - key: tls.key
+              path: key.pem
+        - name: tls-ca-cert
+          secret:
+            secretName: dynamo-tls-ca
+            items:
+            - key: ca.crt
+              path: ca.pem
+```
+
+When switching an existing TLS-enabled worker to sidecar mode, add the runtime's
+certificate mounts in the same update.
+
+If `spec.components[*].frontendSidecar` selects a co-located frontend, explicitly add
+the same certificate mounts to that container; it does not inherit the runtime's mounts.
 
 <Note>
 For NATS TLS to work, the NATS server itself must also be
