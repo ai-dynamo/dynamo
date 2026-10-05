@@ -452,7 +452,14 @@ def run_synthetic_trace_replay(
     capture_planner_details=True,
     telemetry_options=None,
 ) -> ReplayReport | dict[str, Any]:
-    """Run synthetic replay with the same optional ``TelemetryOptions`` contract."""
+    """Run synthetic replay with the same optional ``TelemetryOptions`` contract.
+
+    ``arrival_seed`` seeds request-arrival generation only, not KV-router worker
+    selection. With ``router_mode="kv_router"``, equal-cost workers are selected
+    randomly even at router temperature zero. A fixed arrival seed therefore
+    does not guarantee identical routing, prefix reuse, or latency across runs,
+    including offline replay.
+    """
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
