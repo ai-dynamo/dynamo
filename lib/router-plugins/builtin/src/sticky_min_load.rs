@@ -117,8 +117,10 @@ impl StickyMinLoadPicker {
             return Some(least_loaded(rows, &active_requests));
         };
         if let Some(binding) = self.bindings.get_mut(session_id) {
+            // The sweep runs only periodically, so an expired binding may still be present.
+            let expired = now.saturating_duration_since(binding.last_access) > self.max_idle;
             binding.last_access = now;
-            if let Some(row) = (0..rows).find(|&row| worker(row) == binding.worker) {
+            if !expired && let Some(row) = (0..rows).find(|&row| worker(row) == binding.worker) {
                 return Some(row);
             }
             let row = least_loaded(rows, &active_requests);
@@ -223,7 +225,6 @@ mod tests {
         StickyMinLoadPicker::new(Parameters::default())
     }
 
-    /// Select among `(worker_id, active_requests)` rows.
     fn select(
         picker: &mut StickyMinLoadPicker,
         session_id: Option<&str>,
@@ -305,7 +306,7 @@ mod tests {
     fn idle_bindings_expire() {
         let mut picker = StickyMinLoadPicker::new(Parameters {
             max_idle_secs: 10,
-            eviction_interval_secs: 0,
+            eviction_interval_secs: 60,
         });
         let start = Instant::now();
         assert_eq!(select(&mut picker, Some("s"), &[(A, 0), (B, 9)], start), A);
