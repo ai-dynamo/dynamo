@@ -212,7 +212,7 @@ func TestClusterFrontendDependencyStartup(t *testing.T) {
 
 			t.Log("Check that container startup skew leaves time for dependency recovery")
 			if skew := laterStart.Sub(earliestStart); skew >= 15*time.Second {
-				t.Skipf("container start skew %s reaches the 15s test fixture limit", skew)
+				t.Fatalf("container start skew %s reaches the 15s test fixture limit", skew)
 			}
 
 			t.Log("Keep the dependency unavailable for 60 seconds while both original pods stay unready without restarting")

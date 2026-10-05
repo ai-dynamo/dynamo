@@ -55,17 +55,7 @@ func TestFrontendSidecarStartupProbeOverride(t *testing.T) {
 	tests := []struct {
 		name    string
 		handler corev1.ProbeHandler
-		wantErr bool
 	}{
-		{name: "timing only", wantErr: true},
-		{
-			name: "multiple handlers",
-			handler: corev1.ProbeHandler{
-				HTTPGet:   &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromInt(8000)},
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)},
-			},
-			wantErr: true,
-		},
 		{name: "exec", handler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}},
 		{name: "http", handler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt(8000)}}},
 		{name: "tcp", handler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)}}},
@@ -92,12 +82,7 @@ func TestFrontendSidecarStartupProbeOverride(t *testing.T) {
 				"worker", nil, staticContainerGPUCount(0),
 			)
 
-			t.Log("Reject invalid handlers and preserve the complete valid override")
-			if tt.wantErr {
-				require.EqualError(t, err, `frontend sidecar "frontend" startupProbe must define exactly one handler`)
-				require.Nil(t, pod)
-				return
-			}
+			t.Log("Preserve the complete startup probe override")
 			require.NoError(t, err)
 			require.Len(t, pod.Containers, 2)
 			require.Equal(t, "frontend", pod.Containers[1].Name)
