@@ -14,12 +14,31 @@ type LPXConfig struct {
 	// +optional
 	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
 
+	// experimental groups opt-in LPX options whose API shape may change in
+	// breaking ways between v1beta1 releases. See ExperimentalSpec for the
+	// stability caveat.
+	// +optional
+	Experimental *LPXExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// LPXExperimentalSpec groups experimental LPX options. See ExperimentalSpec for
+// the stability caveat.
+type LPXExperimentalSpec struct {
 	// localPartitions selects partitions of a hybrid build that the Cyborg
 	// conductor runs on its own GPU. The operator schedules LPU Agents only for
 	// the remaining partitions, and schedules none when every partition is
 	// local. Omission runs every partition on LPUs.
 	// +optional
 	LocalPartitions *LPXLocalPartitions `json:"localPartitions,omitempty"`
+}
+
+// LocalPartitions returns the experimental local-partition selection, or nil
+// when none is set. The receiver may be nil.
+func (c *LPXConfig) LocalPartitions() *LPXLocalPartitions {
+	if c == nil || c.Experimental == nil {
+		return nil
+	}
+	return c.Experimental.LocalPartitions
 }
 
 // LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.

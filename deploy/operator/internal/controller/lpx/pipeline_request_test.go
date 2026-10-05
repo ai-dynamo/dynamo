@@ -379,7 +379,7 @@ func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Resolve a hybrid workload with the selected local partitions")
 			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-			dgd.Spec.Components[0].LPX.LocalPartitions = tc.localPartitions
+			dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{LocalPartitions: tc.localPartitions}
 			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 
 			t.Log("Publish one request per remote workload replica, listing only remote compiler partitions")

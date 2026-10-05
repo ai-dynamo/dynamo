@@ -2505,6 +2505,23 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
 | `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
+| `experimental` _[LPXExperimentalSpec](#lpxexperimentalspec)_ | experimental groups opt-in LPX options whose API shape may change in<br />breaking ways between v1beta1 releases. See ExperimentalSpec for the<br />stability caveat. |  | Optional: \{\} <br /> |
+
+
+#### LPXExperimentalSpec
+
+
+
+LPXExperimentalSpec groups experimental LPX options. See ExperimentalSpec for
+the stability caveat.
+
+
+
+_Appears in:_
+- [LPXConfig](#lpxconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
 | `localPartitions` _[LPXLocalPartitions](#lpxlocalpartitions)_ | localPartitions selects partitions of a hybrid build that the Cyborg<br />conductor runs on its own GPU. The operator schedules LPU Agents only for<br />the remaining partitions, and schedules none when every partition is<br />local. Omission runs every partition on LPUs. |  | Optional: \{\} <br /> |
 
 
@@ -2519,7 +2536,7 @@ partitions. A selected prop-sync chain is identified by its first partition.
 
 
 _Appears in:_
-- [LPXConfig](#lpxconfig)
+- [LPXExperimentalSpec](#lpxexperimentalspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |

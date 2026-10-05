@@ -11523,30 +11523,37 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
-                          localPartitions:
+                          experimental:
                             description: |-
-                              localPartitions selects partitions of a hybrid build that the Cyborg
-                              conductor runs on its own GPU. The operator schedules LPU Agents only for
-                              the remaining partitions, and schedules none when every partition is
-                              local. Omission runs every partition on LPUs.
+                              experimental groups opt-in LPX options whose API shape may change in
+                              breaking ways between v1beta1 releases. See ExperimentalSpec for the
+                              stability caveat.
                             properties:
-                              all:
-                                description: all runs every partition on the Cyborg GPU.
-                                type: boolean
-                              ids:
-                                description: ids lists the compiler partition IDs that run on the Cyborg GPU.
-                                items:
-                                  format: int64
-                                  maximum: 4294967295
-                                  minimum: 0
-                                  type: integer
-                                minItems: 1
-                                type: array
-                                x-kubernetes-list-type: set
+                              localPartitions:
+                                description: |-
+                                  localPartitions selects partitions of a hybrid build that the Cyborg
+                                  conductor runs on its own GPU. The operator schedules LPU Agents only for
+                                  the remaining partitions, and schedules none when every partition is
+                                  local. Omission runs every partition on LPUs.
+                                properties:
+                                  all:
+                                    description: all runs every partition on the Cyborg GPU.
+                                    type: boolean
+                                  ids:
+                                    description: ids lists the compiler partition IDs that run on the Cyborg GPU.
+                                    items:
+                                      format: int64
+                                      maximum: 4294967295
+                                      minimum: 0
+                                      type: integer
+                                    minItems: 1
+                                    type: array
+                                    x-kubernetes-list-type: set
+                                type: object
+                                x-kubernetes-validations:
+                                  - message: 'set either all: true or ids'
+                                    rule: (has(self.all) && self.all) != has(self.ids)
                             type: object
-                            x-kubernetes-validations:
-                              - message: 'set either all: true or ids'
-                                rule: (has(self.all) && self.all) != has(self.ids)
                           scheduling:
                             description: |-
                               scheduling configures this component's LPX scheduling attempts.
@@ -21079,30 +21086,37 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
-                          localPartitions:
+                          experimental:
                             description: |-
-                              localPartitions selects partitions of a hybrid build that the Cyborg
-                              conductor runs on its own GPU. The operator schedules LPU Agents only for
-                              the remaining partitions, and schedules none when every partition is
-                              local. Omission runs every partition on LPUs.
+                              experimental groups opt-in LPX options whose API shape may change in
+                              breaking ways between v1beta1 releases. See ExperimentalSpec for the
+                              stability caveat.
                             properties:
-                              all:
-                                description: all runs every partition on the Cyborg GPU.
-                                type: boolean
-                              ids:
-                                description: ids lists the compiler partition IDs that run on the Cyborg GPU.
-                                items:
-                                  format: int64
-                                  maximum: 4294967295
-                                  minimum: 0
-                                  type: integer
-                                minItems: 1
-                                type: array
-                                x-kubernetes-list-type: set
+                              localPartitions:
+                                description: |-
+                                  localPartitions selects partitions of a hybrid build that the Cyborg
+                                  conductor runs on its own GPU. The operator schedules LPU Agents only for
+                                  the remaining partitions, and schedules none when every partition is
+                                  local. Omission runs every partition on LPUs.
+                                properties:
+                                  all:
+                                    description: all runs every partition on the Cyborg GPU.
+                                    type: boolean
+                                  ids:
+                                    description: ids lists the compiler partition IDs that run on the Cyborg GPU.
+                                    items:
+                                      format: int64
+                                      maximum: 4294967295
+                                      minimum: 0
+                                      type: integer
+                                    minItems: 1
+                                    type: array
+                                    x-kubernetes-list-type: set
+                                type: object
+                                x-kubernetes-validations:
+                                  - message: 'set either all: true or ids'
+                                    rule: (has(self.all) && self.all) != has(self.ids)
                             type: object
-                            x-kubernetes-validations:
-                              - message: 'set either all: true or ids'
-                                rule: (has(self.all) && self.all) != has(self.ids)
                           scheduling:
                             description: |-
                               scheduling configures this component's LPX scheduling attempts.
