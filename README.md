@@ -242,10 +242,19 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source $HOME/.
 # Create venv and build
 uv venv dynamo && source dynamo/bin/activate
 uv pip install pip 'maturin[patchelf]'
-cd lib/bindings/python && maturin develop --uv && cd $PROJECT_ROOT
+(cd lib/bindings/python && maturin develop --uv)
 uv pip install -e lib/gpu_memory_service
-uv pip install -e .
+uv pip install -r container/deps/requirements.aisimulate.txt -e .
 ```
+
+For AISimulate offline replay, add `--features ais-forward-pass` to the
+`maturin develop --uv` command above.
+
+The source requirements build AISimulate from the same immutable commit as the
+Rust dependency on Python 3.11–3.13, using the Rust tools above. This development
+checkout reports version `0.13.0`. Retain `-r` until a published Python wheel and
+Rust crate contain the required replay APIs at the same exact version, then
+update all pins together. A container or prebuilt local wheelhouse is optional.
 
 > VSCode/Cursor users: see the [`.devcontainer`](.devcontainer/README.md) for a pre-configured dev environment.
 

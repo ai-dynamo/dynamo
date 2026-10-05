@@ -543,3 +543,11 @@ def test_adapter_does_not_expose_legacy_prediction_passthroughs():
         "find_best_engine_agg_rps",
     ):
         assert not hasattr(PlannerEnginePerfModel, name)
+
+
+def test_mocker_regression_requires_underlying_backend():
+    config = PlannerConfig.model_construct(ais_perf_model=None, backend="mocker")
+    with pytest.raises(ValueError, match="underlying vllm, sglang, or trtllm backend"):
+        PlannerEnginePerfModel(
+            worker_type="decode", config=config, capabilities=_caps()
+        )

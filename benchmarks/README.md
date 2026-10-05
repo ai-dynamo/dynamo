@@ -19,6 +19,22 @@ This directory contains benchmarking tools and scripts for Dynamo deployments. B
 
 ## Quick Start
 
+### Install from a source checkout
+
+Use Python 3.11–3.13 with Git and the Rust toolchain described in the root
+[source build guide](../README.md#building-from-source). From the repository
+root, install the benchmark package with its matching AISimulate source:
+
+```bash
+uv pip install -r container/deps/requirements.aisimulate.txt -e benchmarks
+```
+
+The requirements supply the public, immutable AISimulate revision used by
+Dynamo's Rust dependency and enforce its exact version. This command builds
+that development source without a container or local wheelhouse. Keep `-r`
+until a published Python wheel and Rust crate contain the required replay APIs
+at the same exact version, then update all pins together.
+
 ### Benchmark a Dynamo Deployment
 First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx), then:
 

@@ -6,6 +6,8 @@ pub(crate) use crate::replay::normalize_trace_requests;
 mod entrypoints;
 pub(crate) mod extensions;
 
+#[cfg(feature = "python-replay")]
+pub use entrypoints::run_canonical_replay_json;
 pub use entrypoints::run_offline_handoff_conformance;
 pub(crate) use entrypoints::{
     generate_trace_worker_artifacts, generate_trace_worker_artifacts_with_visibility,

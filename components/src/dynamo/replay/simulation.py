@@ -11,14 +11,16 @@ hooks and translates the neutral spec to the existing replay entry points.
 from __future__ import annotations
 
 import json
-import math
-from collections.abc import Mapping
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from enum import Enum
-from numbers import Real
-from typing import Any
+from typing import Any, Literal
 
-from aisimulate.runner import EngineReplayRunnerFactory
+from aisimulate.runner import (
+    EngineReplayRunner,
+    EngineReplayRunnerFactory,
+    _execution_target_model,
+)
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -32,10 +34,13 @@ from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import (
     TelemetryOptions,
-    run_synthetic_trace_replay,
+    _add_agentic_model_projection,
+    _planner_config_arg,
+    _planner_replay_adapter,
     run_trace_replay,
 )
 from dynamo.replay.config import lower_upstream_engine_args
+from dynamo.router.simulation.config import ConversationAffinityConfig
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -48,6 +53,7 @@ _ROUTER_HOOK = HookCapability(
     api_version=1,
 )
 _REPLAY_SPEC_API_VERSION = 1
+_RouterMode = Literal["round_robin", "kv_router"]
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,12 @@ class DynamoReplayRunnerFactory:
                 if topology in ("agg", "disagg")
             ),
             supported_agentic_backends=engine_capabilities.supported_agentic_backends,
+            supports_state_cache=True,
+            supports_agentic_snapshots=True,
+            supports_agentic_warmup=True,
+            supports_agentic_profile=True,
+            supports_agentic_host_offload=False,
+            supports_agentic_speculative_decoding=False,
             agentic_qualification="functional_only",
         )
 
@@ -122,60 +134,81 @@ class DynamoReplayRunner:
         *,
         output_requirements: ReplayOutputRequirements | None = None,
     ) -> ReplayReport:
-        """Execute one trace or synthetic replay with requested Dynamo hooks."""
+        """Run every supported offline workload through the shared executor."""
 
-        output_requirements = output_requirements or ReplayOutputRequirements()
+        output = output_requirements or ReplayOutputRequirements()
+        spec = _normalize_legacy_spec(spec)
         self.capabilities.require_compatible(spec)
-        execution_model = self._execution_target_model(spec)
         (
-            planner_config,
+            planner,
             router_mode,
             router_config,
             ais_perf_config,
+            affinity,
         ) = self._resolve_hooks(spec.runtime_hooks)
-        common: dict[str, Any] = {
-            "router_mode": router_mode,
-            "router_config": router_config,
-            "ais_perf_config": ais_perf_config,
-            "arrival_speedup_ratio": self._arrival_speedup_ratio(spec),
-            "replay_concurrency": self._effective_in_flight_cap(spec),
-            "planner_config": planner_config,
-            "performance_model_metadata": (
-                getattr(spec.backend_deployment, "performance_model_metadata", {})
-            ),
-            "benchmark_granularity": self.benchmark_granularity,
-            # Sweeper uses the lightweight default. CLI and other callers can
-            # explicitly request detailed output through the Runner contract.
-            "capture_per_request": output_requirements.capture_per_request,
-            "capture_planner_details": output_requirements.include_raw_report,
-            "telemetry_options": (
-                TelemetryOptions(
-                    sample_interval_ms=output_requirements.telemetry_sample_interval_ms
-                )
-                if output_requirements.capture_telemetry
-                else None
-            ),
-            **self._goodput_sla_kwargs(spec),
-        }
-
-        if self._is_trace(spec):
-            report = self._run_trace(spec, common, execution_model=execution_model)
-        else:
-            common.update(self._synthetic_kwargs(spec))
-            report = self._run_synthetic(spec, common)
-
-        metrics, metadata = self._normalize_report(report, output_requirements)
-        trace_format = spec.workload.get("trace_format")
-        agentic_lanes = spec.workload.get("agentic_lanes")
-        if trace_format in {"weka", "agentic_mooncake"} or (
-            trace_format == "dynamo" and agentic_lanes is not None
-        ):
-            metadata.update(
-                agentic_qualification=self.capabilities.agentic_qualification,
-                agentic_input_format=trace_format,
-                agentic_lanes=agentic_lanes,
+        profile = spec.workload.get("agentic_profile")
+        if planner is not None and (affinity is not None or profile is not None):
+            raise ValueError(
+                "conversation affinity and AgentX profiles require static worker pools without a Planner"
             )
-        self._require_goodput_metric(metrics, spec)
+        if affinity is not None and router_mode != "kv_router":
+            raise ValueError("conversation affinity requires router.policy='kv_router'")
+        if (
+            affinity is not None or profile is not None
+        ) and spec.backend_deployment.backend not in {"vllm", "sglang"}:
+            raise ValueError("Dynamo conversation replay supports vllm or sglang")
+        runtime = _DynamoReplayRuntime(
+            spec,
+            router_mode,
+            router_config,
+            ais_perf_config,
+            affinity,
+            planner,
+            self.benchmark_granularity,
+            output,
+        )
+        runner = EngineReplayRunner(
+            worker_id=self.worker_id,
+            capabilities=self.capabilities,
+            trace_block_size=self.trace_block_size,
+            runtime=runtime,
+        )
+        try:
+            # The native observer owns telemetry. The shared runner still owns
+            # input materialization and report normalization for every policy.
+            report = runner.run(
+                # Dynamo hooks have been resolved into this runtime's composition;
+                # they are not a second request for the engine's local adapters.
+                replace(spec, adapters={}),
+                output_requirements=replace(
+                    output,
+                    include_raw_report=True,
+                    capture_telemetry=False,
+                ),
+            )
+        finally:
+            runner.close()
+        self._require_goodput_metric(report.metrics, spec)
+        metrics = dict(report.metrics)
+        metadata = dict(report.metadata)
+        native = metadata.pop("native_report")
+        for name in ("agentic_graph", "agentic_model_projection", "routing_policy"):
+            if name in native:
+                metadata[name] = native[name]
+        planner_details = native.get("planner")
+        if planner_details is not None:
+            ticks = int(planner_details["total_ticks"])
+            metrics["planner_total_ticks"] = float(ticks)
+            metadata["planner_total_ticks"] = ticks
+        if output.capture_telemetry:
+            metadata["telemetry"] = native["telemetry"]
+        if (
+            output.include_raw_report
+            or output.capture_per_request
+            or output.capture_memory_diagnostics
+            or output.capture_performance_diagnostics
+        ):
+            metadata["native_report"] = {**native, "summary": metrics}
         return ReplayReport(metrics=metrics, metadata=metadata)
 
     def close(self) -> None:
@@ -190,14 +223,16 @@ class DynamoReplayRunner:
         hooks: tuple[RuntimeHookSpec, ...],
     ) -> tuple[
         dict[str, JSONValue] | None,
-        str,
+        _RouterMode,
         KvRouterConfig | None,
         AisPerfConfig | None,
+        dict[str, JSONValue] | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
-        router_mode = "round_robin"
+        router_mode: _RouterMode = "round_robin"
         router_config: KvRouterConfig | None = None
         ais_perf_config: AisPerfConfig | None = None
+        affinity: dict[str, JSONValue] | None = None
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -220,13 +255,26 @@ class DynamoReplayRunner:
                         "ReplaySpec contains multiple Router placement hooks"
                     )
                 router_seen = True
-                router_mode = str(hook.config.get("router_mode", "kv_router"))
+                raw_mode = str(hook.config.get("router_mode", "kv_router"))
+                if raw_mode == "round_robin":
+                    router_mode = "round_robin"
+                elif raw_mode == "kv_router":
+                    router_mode = "kv_router"
+                else:
+                    raise ValueError(
+                        "Dynamo Router hook router_mode must be 'round_robin' or 'kv_router'"
+                    )
                 raw_config = hook.config.get("router_config")
                 if not isinstance(raw_config, dict):
                     raise TypeError(
                         "Dynamo Router hook config requires a router_config mapping"
                     )
                 router_config = KvRouterConfig.from_json(json.dumps(raw_config))
+                raw_affinity = hook.config.get("affinity")
+                if raw_affinity is not None:
+                    affinity = ConversationAffinityConfig.model_validate(
+                        raw_affinity
+                    ).model_dump(mode="json")
                 raw_ais = hook.config.get("ais_perf_config")
                 if raw_ais is not None:
                     if not isinstance(raw_ais, dict):
@@ -239,295 +287,7 @@ class DynamoReplayRunner:
                 f"unsupported Dynamo runtime hook "
                 f"{hook.provider}:{hook.kind}@{hook.api_version}"
             )
-        return planner_config, router_mode, router_config, ais_perf_config
-
-    @staticmethod
-    def _is_trace(spec: ReplaySpec) -> bool:
-        return (
-            spec.workload.get("trace_path") is not None
-            or spec.workload.get("trace_paths") is not None
-        )
-
-    @staticmethod
-    def _arrival_speedup_ratio(spec: ReplaySpec) -> float:
-        if DynamoReplayRunner._is_trace(spec):
-            return _float_value(
-                spec.workload.get("arrival_speedup_ratio", 1.0),
-                "arrival_speedup_ratio",
-            )
-        return 1.0
-
-    @staticmethod
-    def _effective_in_flight_cap(spec: ReplaySpec) -> int | None:
-        if DynamoReplayRunner._is_trace(spec):
-            value = spec.workload.get("replay_concurrency")
-            return (
-                _int_value(value, "replay_concurrency") if value is not None else None
-            )
-        if spec.concurrency is not None:
-            return spec.concurrency
-        value = spec.workload.get("concurrency")
-        if value is not None:
-            return _int_value(value, "concurrency")
-        if spec.workload.get("kv_load_ratio") is not None:
-            return _kv_load_concurrency(spec)
-        return None
-
-    @staticmethod
-    def _goodput_sla_kwargs(spec: ReplaySpec) -> dict[str, float | None]:
-        raw_sla = spec.goal.get("sla")
-        if not isinstance(raw_sla, dict):
-            return {}
-        return {
-            "sla_ttft_ms": _optional_float(raw_sla.get("ttft_ms"), "sla.ttft_ms"),
-            "sla_itl_ms": _optional_float(raw_sla.get("itl_ms"), "sla.itl_ms"),
-            "sla_e2e_ms": _optional_float(raw_sla.get("e2e_ms"), "sla.e2e_ms"),
-        }
-
-    @staticmethod
-    def _execution_target_model(spec: ReplaySpec) -> str | None:
-        if not DynamoReplayRunner._is_trace(spec):
-            return None
-        trace_format = spec.workload.get("trace_format", "mooncake")
-        if trace_format not in {"weka", "agentic_mooncake", "dynamo"}:
-            return None
-
-        deployment = spec.backend_deployment
-        if deployment.deployment_mode == "agg":
-            role = "aggregated"
-            raw_engine_args = deployment.agg_engine_args
-        else:
-            role = "decode"
-            raw_engine_args = deployment.decode_engine_args
-
-        # Accept both the upstream wire spelling and the canonical AIS identity.
-        candidates: list[Any] = []
-        metadata = deployment.performance_model_metadata.get(role)
-        if isinstance(metadata, Mapping):
-            config = metadata.get("config")
-            if isinstance(config, Mapping):
-                candidates += [config.get("model_path"), config.get("model")]
-        if isinstance(raw_engine_args, Mapping):
-            candidates.append(raw_engine_args.get("aic_model_path"))
-            ais_config = raw_engine_args.get("ais_perf_config")
-            if isinstance(ais_config, Mapping):
-                candidates.append(ais_config.get("model"))
-        for model in candidates:
-            if isinstance(model, str) and model.strip():
-                return model.strip()
-        if trace_format == "dynamo":
-            # The native loader distinguishes standard from agentic Dynamo
-            # traces and enforces a target model only for the latter.
-            return None
-        raise ValueError("agentic execution requires a configured target model")
-
-    @staticmethod
-    def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
-        if payload is None:
-            raise ValueError("ReplaySpec is missing required engine arguments")
-        return MockEngineArgs.from_json(json.dumps(lower_upstream_engine_args(payload)))
-
-    def _run_trace(
-        self,
-        spec: ReplaySpec,
-        common: dict[str, Any],
-        *,
-        execution_model: str | None,
-    ):
-        deployment = spec.backend_deployment
-        raw_paths = spec.workload.get("trace_paths")
-        trace_files: str | list[str]
-        if raw_paths is not None:
-            if not isinstance(raw_paths, list) or not all(
-                isinstance(path, str) for path in raw_paths
-            ):
-                raise TypeError("trace workload trace_paths must be a string list")
-            trace_files = raw_paths
-        else:
-            trace_path = spec.workload["trace_path"]
-            if not isinstance(trace_path, str):
-                raise TypeError("trace workload requires a string trace_path")
-            trace_files = trace_path
-        trace_format = spec.workload.get("trace_format", "mooncake")
-        if not isinstance(trace_format, str):
-            raise TypeError("trace workload requires a string trace_format")
-        agentic_lanes = spec.workload.get("agentic_lanes")
-        trace_block_size = spec.workload.get("trace_block_size")
-        # Weka and Dynamo traces carry their source block size in the trace
-        # metadata. Leave it unset so AISimulate can validate and use that
-        # embedded value instead of imposing the synthetic-workload default.
-        if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
-            trace_block_size = self.trace_block_size
-        if deployment.deployment_mode == "agg":
-            return run_trace_replay(
-                trace_files=trace_files,
-                trace_format=trace_format,
-                weka_nested_timestamp_basis=spec.workload.get(
-                    "weka_nested_timestamp_basis"
-                ),
-                trace_block_size=trace_block_size,
-                max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
-                agentic_lanes=agentic_lanes,
-                execution_model=execution_model,
-                extra_engine_args=self._engine_args(deployment.agg_engine_args),
-                num_workers=deployment.num_workers,
-                **common,
-            )
-        return run_trace_replay(
-            trace_files=trace_files,
-            trace_format=trace_format,
-            weka_nested_timestamp_basis=spec.workload.get(
-                "weka_nested_timestamp_basis"
-            ),
-            trace_block_size=trace_block_size,
-            max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
-            agentic_lanes=agentic_lanes,
-            execution_model=execution_model,
-            prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
-            decode_engine_args=self._engine_args(deployment.decode_engine_args),
-            num_prefill_workers=deployment.num_prefill_workers,
-            num_decode_workers=deployment.num_decode_workers,
-            **common,
-        )
-
-    def _run_synthetic(self, spec: ReplaySpec, common: dict[str, Any]):
-        deployment = spec.backend_deployment
-        if deployment.deployment_mode == "agg":
-            return run_synthetic_trace_replay(
-                extra_engine_args=self._engine_args(deployment.agg_engine_args),
-                num_workers=deployment.num_workers,
-                **common,
-            )
-        return run_synthetic_trace_replay(
-            prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
-            decode_engine_args=self._engine_args(deployment.decode_engine_args),
-            num_prefill_workers=deployment.num_prefill_workers,
-            num_decode_workers=deployment.num_decode_workers,
-            **common,
-        )
-
-    @staticmethod
-    def _synthetic_kwargs(spec: ReplaySpec) -> dict[str, JSONValue]:
-        workload = spec.workload
-        request_rate = workload.get("request_rate")
-        rate: float | None = None
-        raw_interval = workload.get("arrival_interval_ms")
-        arrival_interval_ms = (
-            _float_value(raw_interval, "arrival_interval_ms")
-            if raw_interval is not None
-            else None
-        )
-        if request_rate is not None:
-            rate = _float_value(request_rate, "request_rate")
-            if rate <= 0.0:
-                raise ValueError(
-                    f"synthetic replay requires a positive request_rate, got {rate}"
-                )
-        if rate is not None and arrival_interval_ms is not None:
-            raise ValueError("synthetic replay cannot set both rate and interval")
-        load: float
-        if spec.concurrency is not None:
-            load = float(spec.concurrency)
-        elif workload.get("concurrency") is not None:
-            load = _float_value(workload["concurrency"], "concurrency")
-        elif rate is not None:
-            load = rate
-        elif arrival_interval_ms is not None and arrival_interval_ms > 0:
-            load = 1000.0 / arrival_interval_ms
-        elif workload.get("kv_load_ratio") is not None:
-            load = float(_kv_load_concurrency(spec))
-        else:
-            raise ValueError(
-                "synthetic replay requires concrete concurrency or request_rate"
-            )
-        raw_count = workload.get("request_count")
-        request_count = (
-            _int_value(raw_count, "request_count")
-            if raw_count is not None
-            else max(
-                1,
-                round(
-                    _float_value(workload["num_request_ratio"], "num_request_ratio")
-                    * load
-                ),
-            )
-        )
-        load_type = str(workload.get("load_type", "constant_rate"))
-        return {
-            "input_tokens": _int_value(workload["isl"], "isl"),
-            "output_tokens": _int_value(workload["osl"], "osl"),
-            "request_count": request_count,
-            "request_rate": rate if load_type == "poisson" else None,
-            "arrival_interval_ms": (
-                arrival_interval_ms
-                if arrival_interval_ms is not None
-                else (1000.0 / rate if rate is not None else None)
-            )
-            if load_type != "poisson"
-            else None,
-            "arrival_seed": _int_value(
-                workload.get("arrival_seed", 42), "arrival_seed"
-            ),
-            "turns_per_session": _int_value(
-                workload.get("turns_per_session", 1), "turns_per_session"
-            ),
-            "shared_prefix_ratio": _float_value(
-                workload.get("shared_prefix_ratio", 0.0), "shared_prefix_ratio"
-            ),
-            "num_prefix_groups": _int_value(
-                workload.get("num_prefix_groups", 0), "num_prefix_groups"
-            ),
-            "inter_turn_delay_ms": _float_value(
-                workload.get("inter_turn_delay_ms", 0.0), "inter_turn_delay_ms"
-            ),
-        }
-
-    @staticmethod
-    def _normalize_report(
-        report: Any,
-        output_requirements: ReplayOutputRequirements,
-    ) -> tuple[dict[str, float], dict[str, JSONValue]]:
-        metadata: dict[str, JSONValue] = {}
-        if hasattr(report, "summary"):
-            trace_report = dict(report.summary)
-            planner = getattr(report, "planner", None)
-            if planner is not None:
-                trace_report["planner_total_ticks"] = float(planner.total_ticks)
-                metadata["planner_total_ticks"] = int(planner.total_ticks)
-        elif hasattr(report, "trace_report"):
-            trace_report = dict(report.trace_report)
-            if hasattr(report, "total_ticks"):
-                trace_report["planner_total_ticks"] = float(report.total_ticks)
-                metadata["planner_total_ticks"] = int(report.total_ticks)
-        else:
-            trace_report = dict(report)
-
-        for name in ("agentic_graph", "agentic_model_projection"):
-            value = trace_report.get(name)
-            if isinstance(value, dict):
-                metadata[name] = value
-        resolved_weka_basis = trace_report.get("weka_nested_timestamp_basis")
-        if isinstance(resolved_weka_basis, str):
-            metadata["weka_nested_timestamp_basis"] = resolved_weka_basis
-
-        metrics: dict[str, float] = {}
-        for name, value in trace_report.items():
-            if isinstance(value, Real):
-                metrics[str(name)] = float(value)
-        if (
-            output_requirements.include_raw_report
-            or output_requirements.capture_per_request
-        ):
-            if hasattr(report, "to_dict"):
-                native_report = report.to_dict()
-            elif hasattr(report, "trace_report"):
-                native_report = {"trace_report": dict(report.trace_report)}
-            else:
-                native_report = dict(report)
-            metadata["native_report"] = native_report
-        if output_requirements.capture_telemetry:
-            metadata["telemetry"] = report.telemetry.to_dict()
-        return metrics, metadata
+        return planner_config, router_mode, router_config, ais_perf_config, affinity
 
     @staticmethod
     def _require_goodput_metric(metrics: dict[str, float], spec: ReplaySpec) -> None:
@@ -549,53 +309,152 @@ class DynamoReplayRunner:
         )
 
 
+def _normalize_legacy_spec(spec: ReplaySpec) -> ReplaySpec:
+    """Translate legacy input spelling without constructing engines or traffic."""
+    deployment = spec.backend_deployment
+    roles = {}
+    for role in ("agg_engine_args", "prefill_engine_args", "decode_engine_args"):
+        args = getattr(deployment, role)
+        if args is not None and args.get("ais_perf_config") is not None:
+            args = dict(args)
+            if args.get("timing_model") is not None:
+                raise ValueError("ais_perf_config cannot be combined with timing_model")
+            args["timing_model"] = {
+                "type": "external",
+                "provider": "aic",
+                "config": args.pop("ais_perf_config"),
+            }
+            roles[role] = args
+    if roles:
+        spec = replace(spec, backend_deployment=replace(deployment, **roles))
+    workload = dict(spec.workload)
+    if workload.get("source_type") is not None:
+        return spec
+    if (
+        workload.get("trace_path") is not None
+        or workload.get("trace_paths") is not None
+    ):
+        deployment = spec.backend_deployment
+        if deployment.deployment_mode == "disagg" and workload.get("trace_format") in {
+            "weka",
+            "agentic_mooncake",
+            "dynamo",
+        }:
+            # The legacy runner used decode's model as the shared trace
+            # projection. Fill only an absent prefill identity; the shared
+            # runner still rejects explicitly different models.
+            prefill_model = _execution_target_model(
+                deployment, "prefill", deployment.prefill_engine_args or {}
+            )
+            decode_model = _execution_target_model(
+                deployment, "decode", deployment.decode_engine_args or {}
+            )
+            if prefill_model is None and decode_model is not None:
+                metadata = dict(deployment.performance_model_metadata)
+                prefill = dict(metadata.get("prefill", {}))
+                prefill["config"] = {
+                    **prefill.get("config", {}),
+                    "model": decode_model,
+                }
+                metadata["prefill"] = prefill
+                spec = replace(
+                    spec,
+                    backend_deployment=replace(
+                        deployment, performance_model_metadata=metadata
+                    ),
+                )
+        workload["source_type"] = "trace"
+        default_load = (
+            "concurrency"
+            if workload.get("replay_concurrency") is not None
+            else "trace_timestamps"
+        )
+    else:
+        workload["source_type"] = (
+            "synthetic-session"
+            if workload.get("turns_per_session", 1) != 1
+            else "synthetic"
+        )
+        if spec.concurrency is not None:
+            workload["concurrency"] = spec.concurrency
+        if workload.get("concurrency") is not None:
+            default_load = "concurrency"
+        elif workload.get("kv_load_ratio") is not None:
+            default_load = "kv_capacity_fraction"
+        else:
+            # Legacy request_rate is evenly spaced unless Poisson is explicit.
+            default_load = "constant_rate"
+    if workload.get("load_type") is None:
+        workload["load_type"] = default_load
+    return replace(spec, workload=workload)
+
+
+@dataclass(frozen=True)
+class _DynamoReplayRuntime:
+    """Supply Dynamo policies and optional observers to the shared executor."""
+
+    spec: ReplaySpec
+    router_mode: _RouterMode
+    router_config: KvRouterConfig | None
+    ais_perf_config: AisPerfConfig | None
+    affinity: dict[str, JSONValue] | None
+    planner_config: dict[str, JSONValue] | None
+    benchmark_granularity: int
+    output: ReplayOutputRequirements
+
+    def run_replay_json(self, execution_spec_json: str) -> str:
+        scope = nullcontext(None)
+        if self.planner_config is not None:
+            deployment = self.spec.backend_deployment
+
+            def args(payload):
+                return (
+                    None
+                    if payload is None
+                    else MockEngineArgs.from_json(
+                        json.dumps(lower_upstream_engine_args(payload))
+                    )
+                )
+
+            scope = _planner_replay_adapter()(
+                extra_engine_args=args(deployment.agg_engine_args),
+                prefill_engine_args=args(deployment.prefill_engine_args),
+                decode_engine_args=args(deployment.decode_engine_args),
+                planner_config_arg=_planner_config_arg(self.planner_config),
+                performance_model_metadata=deployment.performance_model_metadata,
+                benchmark_granularity=self.benchmark_granularity,
+                capture_details=self.output.include_raw_report,
+            )
+        with scope as planner:
+            report = json.loads(
+                run_trace_replay(
+                    [],
+                    router_mode=self.router_mode,
+                    router_config=self.router_config,
+                    ais_perf_config=self.ais_perf_config,
+                    replay_spec_json=execution_spec_json,
+                    affinity=self.affinity,
+                    scaling_policy=planner,
+                    capture_planner_details=self.output.include_raw_report,
+                    telemetry_options=(
+                        TelemetryOptions(
+                            sample_interval_ms=self.output.telemetry_sample_interval_ms,
+                        )
+                        if self.output.capture_telemetry
+                        else None
+                    ),
+                )
+            )
+            if isinstance(report.get("agentic_graph"), dict):
+                traffic = json.loads(execution_spec_json).get("traffic", {})
+                _add_agentic_model_projection(report, traffic.get("execution_model"))
+            report["planner"] = (
+                planner.finalize(report["lifecycle_operations"]).to_dict()
+                if planner is not None
+                else None
+            )
+            return json.dumps(report, allow_nan=False)
+
+
 def _plain(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
-
-
-def _numeric_value(value: JSONValue, name: str) -> str | int | float:
-    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        raise TypeError(f"replay field {name} must be numeric")
-    return value
-
-
-def _float_value(value: JSONValue, name: str) -> float:
-    return float(_numeric_value(value, name))
-
-
-def _int_value(value: JSONValue, name: str) -> int:
-    return int(_numeric_value(value, name))
-
-
-def _optional_float(value: JSONValue, name: str) -> float | None:
-    return _float_value(value, name) if value is not None else None
-
-
-def _kv_load_concurrency(spec: ReplaySpec) -> int:
-    """Resolve direct-predict KV-relative load from concrete engine capacity."""
-
-    ratio = _float_value(spec.workload["kv_load_ratio"], "kv_load_ratio")
-    if not math.isfinite(ratio) or ratio < 0.0:
-        raise ValueError(f"kv_load_ratio must be finite and non-negative, got {ratio}")
-    deployment = spec.backend_deployment
-    if deployment.deployment_mode == "disagg":
-        payload = deployment.decode_engine_args
-        replicas = deployment.num_decode_workers
-        role = "decode"
-    else:
-        payload = deployment.agg_engine_args
-        replicas = deployment.num_workers
-        role = "aggregated"
-    args = DynamoReplayRunner._engine_args(payload)
-    capacity_tokens = (
-        args.num_gpu_blocks * args.block_size * max(args.dp_size, 1) * max(replicas, 1)
-    )
-    expected_tokens = _int_value(spec.workload["isl"], "isl") + (
-        _int_value(spec.workload["osl"], "osl") // 2
-    )
-    if expected_tokens <= 0 or capacity_tokens < expected_tokens:
-        raise ValueError(
-            f"{role} KV capacity {capacity_tokens} tokens cannot hold one "
-            f"request averaging {expected_tokens} tokens"
-        )
-    return max(1, int(ratio * (capacity_tokens // expected_tokens)))
