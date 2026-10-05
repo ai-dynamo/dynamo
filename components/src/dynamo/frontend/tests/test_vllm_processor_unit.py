@@ -1254,7 +1254,7 @@ def vllm_processor_module(monkeypatch):
 def _logprobs_processor(vllm_processor_module):
     return vllm_processor_module.VllmProcessor(
         tokenizer=object(),
-        input_processor=object(),
+        input_processor=SimpleNamespace(renderer=object(), model_config=None),
         output_processor=object(),
         tool_parser_class=None,
         reasoning_parser_class=None,
@@ -3698,7 +3698,11 @@ def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
     assert count(True, -1) is None
     assert count(True, -2) is None
     assert count(None, None) is None
-    assert count(False, 3) is None
+    assert count(False, 3) == 3
+    assert count(None, 5) == 5
+    assert count(False, 0) is None
+    assert count(None, 0) is None
+    assert count(False, True) is None
     assert count(3, None) is None
 
 

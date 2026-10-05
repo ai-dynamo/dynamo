@@ -73,12 +73,19 @@ def _sampling_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
     """Map OpenAI chat logprobs onto vLLM ``SamplingParams.logprobs``.
 
     ``SamplingParams.logprobs`` is an integer count of extra alternatives.
-    vLLM's chat API sets it from ``top_logprobs`` when ``logprobs`` is true.
-    An omitted ``top_logprobs`` is ``0``: the sampled token, with an empty
-    alternative list. ``0`` is a real count, so callers must distinguish it
-    from ``None``.
+    When ``logprobs`` is true, the count comes from ``top_logprobs``. An
+    omitted ``top_logprobs`` is ``0``: the sampled token, with an empty
+    alternative list. A positive integer ``top_logprobs`` enables that count
+    on its own, including when ``logprobs`` is false or omitted. ``0`` is a
+    real count, so callers must distinguish it from ``None``.
     """
     if logprobs is not True:
+        if (
+            isinstance(top_logprobs, int)
+            and not isinstance(top_logprobs, bool)
+            and top_logprobs > 0
+        ):
+            return top_logprobs
         return None
     if top_logprobs is None:
         return 0
