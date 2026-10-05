@@ -1096,6 +1096,24 @@ class SglangStreamingPostProcessor:
             ):
                 self.reasoning_parser = reasoning_parser = None
             self._fast_plain_text = reasoning_parser is None
+        # Parsers must see their closing delimiters before display trimming.
+        # Prefer the complete declaration over the legacy single-tool closer.
+        if isinstance(tool_call_parser, JsonArrayParser):
+            detector = tool_call_parser
+        elif tool_call_parser is not None:
+            detector = tool_call_parser.detector
+        else:
+            detector = None
+        closers = getattr(detector, "tool_close_literals", None)
+        if closers is None:
+            eot_token = getattr(detector, "eot_token", "")
+            closers = [eot_token] if isinstance(eot_token, str) and eot_token else []
+        self._tool_close_literals = set(closers)
+        # Preserve existing explicit opt-ins, including reasoning-only parsers.
+        self._no_stop_trim = any(
+            getattr(getattr(parser, "detector", None), "no_stop_trim", False) is True
+            for parser in (tool_call_parser, reasoning_parser)
+        )
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
@@ -1140,7 +1158,7 @@ class SglangStreamingPostProcessor:
         self, token_ids: list[int], stop_reason: Any
     ) -> list[int]:
         """Remove only the engine-reported token-stop suffix from display IDs."""
-        if not token_ids:
+        if not token_ids or self._no_stop_trim:
             return token_ids
 
         known_stop_ids = self._eos_token_ids | self._request_stop_token_ids
@@ -1163,7 +1181,15 @@ class SglangStreamingPostProcessor:
         else:
             matched_ids = []
 
-        if matched_ids and token_ids[-len(matched_ids) :] == matched_ids:
+        if (
+            matched_ids
+            and token_ids[-len(matched_ids) :] == matched_ids
+            and (
+                not self._tool_close_literals
+                or self.tokenizer.decode(matched_ids, skip_special_tokens=False)
+                not in self._tool_close_literals
+            )
+        ):
             del token_ids[-len(matched_ids) :]
         return token_ids
 
@@ -1403,13 +1429,16 @@ class SglangStreamingPostProcessor:
         match = self._find_stop_string(text, stop_reason)
         if match is not None:
             match_index, matched_stop_string = match
-            suppressed_text = text[match_index:]
+            retained_end = match_index
+            if self._no_stop_trim or matched_stop_string in self._tool_close_literals:
+                retained_end += len(matched_stop_string)
+            suppressed_text = text[retained_end:]
             suppressed_count = self._trailing_logprobs_count(suppressed_text)
             if suppressed_count:
                 del self._pending_logprobs_content[-suppressed_count:]
             self._locally_finished = True
             self._local_stop_reason = matched_stop_string
-            return text[:match_index], True
+            return text[:retained_end], True
 
         if finish_reason or not text or not self._stop_strings:
             return text, False
