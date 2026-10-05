@@ -210,6 +210,8 @@ jobs:
     # cuda_version empty -- name: cpu, linux/amd64
     name: Build multi-arch ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
+    env:
+      ECR_REGISTRY_EAST: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
     # contents: read for checkout; actions: read lets the compliance-extract
     # action download a PRIOR run's baseline compliance artifact (cross-run) to
     # diff this build's OSRB CSV against. Callers must also grant actions: read
@@ -233,6 +235,7 @@ jobs:
         with:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_registry_east: ${{ inputs.push_image && env.ECR_REGISTRY_EAST || '' }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
@@ -321,15 +324,19 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           EXTRA_TAGS: ${{ inputs.extra_tags }}
+          IMAGE_URI: ${{ steps.calculate-target-tag.outputs.image_uri }}
           MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.mutable_image_uri }}
           EXPLICIT_CUDA_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_image_uri }}
           EXPLICIT_CUDA_MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_mutable_image_uri }}
         run: |
+          set -euo pipefail
           RESULT=""
+          RESULT+="${IMAGE_URI/$ECR_REGISTRY/$ECR_REGISTRY_EAST}"$'\n'
           if [ -n "$EXTRA_TAGS" ]; then
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
                 RESULT+="${ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}"$'\n'
+                RESULT+="${ECR_REGISTRY_EAST}/${ECR_REPOSITORY}:${tag}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
           fi
@@ -337,14 +344,17 @@ jobs:
           # (e.g. vllm-runtime-cuda12-nightly). Empty for non-nightly builds.
           if [ -n "${MUTABLE_IMAGE_URI}" ]; then
             RESULT+="${MUTABLE_IMAGE_URI}"$'\n'
+            RESULT+="${MUTABLE_IMAGE_URI/$ECR_REGISTRY/$ECR_REGISTRY_EAST}"$'\n'
           fi
           # Append explicit -cuda13 aliases for cuda13 builds. Empty for
           # cuda12 / cpu builds.
           if [ -n "${EXPLICIT_CUDA_IMAGE_URI}" ]; then
             RESULT+="${EXPLICIT_CUDA_IMAGE_URI}"$'\n'
+            RESULT+="${EXPLICIT_CUDA_IMAGE_URI/$ECR_REGISTRY/$ECR_REGISTRY_EAST}"$'\n'
           fi
           if [ -n "${EXPLICIT_CUDA_MUTABLE_IMAGE_URI}" ]; then
             RESULT+="${EXPLICIT_CUDA_MUTABLE_IMAGE_URI}"$'\n'
+            RESULT+="${EXPLICIT_CUDA_MUTABLE_IMAGE_URI/$ECR_REGISTRY/$ECR_REGISTRY_EAST}"$'\n'
           fi
           if [ -n "$RESULT" ]; then
             echo "tags<<EOF" >> $GITHUB_OUTPUT
@@ -617,6 +627,7 @@ jobs:
           IMAGE_URI: ${{ steps.calculate-target-tag.outputs.image_uri }}
           TEST_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
         run: |
+          set -euo pipefail
           PUSH_ARGS=""
           if [ "${{ inputs.push_image }}" == "true" ]; then
             PUSH_ARGS="--push"
@@ -643,11 +654,15 @@ jobs:
             PYPI_SECRET_ARGS+=(--secret "id=pypi-netrc,src=${NETRC}")
           fi
 
-          TEST_TAG_ARGS=(-t "${TEST_IMAGE_URI}")
+          TEST_TAG_ARGS=(
+            -t "${TEST_IMAGE_URI}"
+            -t "${TEST_IMAGE_URI/$ECR_REGISTRY/$ECR_REGISTRY_EAST}"
+          )
           if [ -n "$TEST_EXTRA_TAGS" ]; then
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
                 TEST_TAG_ARGS+=(-t "${ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}")
+                TEST_TAG_ARGS+=(-t "${ECR_REGISTRY_EAST}/${ECR_REPOSITORY}:${tag}")
               fi
             done <<< "$TEST_EXTRA_TAGS"
           fi

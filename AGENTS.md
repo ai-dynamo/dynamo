@@ -174,7 +174,7 @@ Sibling repositories this repo integrates with:
 | `docs/fern/` | Fern docs site: `pages/` holds every page, the rest is site config (`index.yml`, `docs.yml`, `main.css`, `components/`, `scripts/`, `translations/`). Read [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) before editing, and [`docs/fern/pages/AGENTS.md`](docs/fern/pages/AGENTS.md) before adding a page |
 | `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
-| `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
+| `.ai/` | Agent topic guidelines: `ais-perf-model-guidelines.md` (canonical AISimulate interface), `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
 
 ## Build
