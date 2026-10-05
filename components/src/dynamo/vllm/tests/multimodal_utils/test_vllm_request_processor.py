@@ -1350,7 +1350,7 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
     input_processor.inject_into_mm_cache.assert_not_called()
 
 
-def _real_kwargs_item():
+def _real_kwargs_item(key: str = "pixel_values"):
     """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
     import torch
     from vllm.multimodal.inputs import (
@@ -1363,7 +1363,7 @@ def _real_kwargs_item():
         data=torch.arange(8, dtype=torch.float32),
         field=MultiModalBatchedField(),
     )
-    return MultiModalKwargsItem({"pixel_values": elem})
+    return MultiModalKwargsItem({key: elem})
 
 
 @pytest.mark.asyncio
@@ -1371,9 +1371,10 @@ async def test_receive_transferred_kwargs_rejects_pickle_payload():
     """A pickle-format payload must fall back, not deserialize.
 
     The transfer uses vLLM's typed msgpack decoder, so a payload in the old
-    pickle wire format (or any foreign bytes) fails the decode and the request
-    routes to normal multimodal processing. The pre-fix worker ran pickle.loads
-    on this payload and accepted the item, so this assertion fails there.
+    pickle wire format (or any foreign bytes) fails the decode and the receive
+    path returns ``None``, which is its fallback. The pre-fix worker ran
+    pickle.loads on this payload and accepted the item, so this assertion fails
+    there.
     """
     import pickle
 
@@ -1396,6 +1397,65 @@ async def test_receive_transferred_kwargs_rejects_pickle_payload():
     )
 
     assert result is None
+
+
+_LOG_SENTINEL = "zzsentinelzz"
+
+
+def _undecodable_payload(case: str) -> bytes:
+    """Return a payload that fails to decode and carries the log sentinel."""
+    import pickle
+    import struct
+
+    from msgspec import msgpack
+
+    from dynamo.common.multimodal.mm_kwargs_transfer import _pack_buffers
+
+    sentinel = _LOG_SENTINEL.encode()
+    if case == "pickle_format":
+        # The wire format of a frontend on the previous release.
+        return pickle.dumps(_real_kwargs_item(key=_LOG_SENTINEL))
+    if case == "short_frame":
+        # The declared buffer length runs past the end of the frame.
+        return struct.pack("<I", 1) + struct.pack("<Q", 999) + sentinel
+    if case == "wrong_structure":
+        # A well-formed frame whose message is not a kwargs item.
+        return _pack_buffers([msgpack.encode(_LOG_SENTINEL)])
+    # A frame that carries the serializer's pickle extension code.
+    return _pack_buffers([msgpack.encode(msgpack.Ext(1, sentinel))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["pickle_format", "short_frame", "wrong_structure", "pickle_ext_code"]
+)
+async def test_receive_transfer_failure_log_omits_payload_bytes(case, caplog):
+    """A payload that fails to decode falls back without logging its bytes."""
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=None)
+    payload = _undecodable_payload(case)
+    # The sentinel is in the payload, so an echo of the bytes would show it.
+    assert _LOG_SENTINEL.encode() in payload
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [payload]})
+    )
+
+    with caplog.at_level("DEBUG"):
+        result = await processor._receive_mm_kwargs(
+            {
+                "mm_hashes": ["0123456789abcdef"],
+                "mm_placeholders": [[1, 2]],
+                "expanded_token_ids": [10, 11, 12],
+            },
+            "shm",
+            receiver,
+            SimpleNamespace(modality="image", mm_hashes=[]),
+        )
+
+    assert result is None
+    # Positive control: the failure itself was logged and captured.
+    assert "falling back" in caplog.text
+    assert _LOG_SENTINEL not in caplog.text
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(
