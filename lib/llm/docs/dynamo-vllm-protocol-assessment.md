@@ -7,9 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 
 Use the direct assessment to answer: **what differs, what changed, what remains
 unresolved, and what needs action?** Start with `report.md`, not an inventory diff.
-The upstream-to-upstream tools in [the B1 guide](vllm-protocol-tooling.md) remain
-available as supporting source-change analysis; they cannot discover a
-longstanding Dynamo gap when upstream has not changed.
+One workflow combines direct comparison with selected upstream source-change
+analysis. Unlike an upstream-only diff, it discovers longstanding Dynamo gaps
+even when upstream has not changed. See the [tooling package](../../../scripts/protocol_compatibility/README.md)
+for its module layout and command reference.
 
 ## Scope and invariants
 
@@ -64,12 +65,35 @@ Always use a new output directory. Commands below do not check out source branch
 modify runtime pins, or write decisions. `FULL_*_SHA` means a full lowercase
 40-character commit SHA, not a tag or branch name.
 
+Run all commands from the repository root. The single entry point is
+`python -m scripts.protocol_compatibility`. Internal modules are not standalone
+scripts. Choose `assess --platform` for configured pins or `assess
+--upstream-commit` for an explicit revision; the two modes are mutually exclusive.
+
+### Verify pins and regenerate artifacts
+
+```sh
+python -m scripts.protocol_compatibility check-pins --upstream-repo /path/to/vllm
+python -m scripts.protocol_compatibility generate-inventory --upstream-repo /path/to/vllm
+python -m scripts.protocol_compatibility generate-inventory --upstream-repo /path/to/vllm --check
+```
+
+Only the compact `vllm_fields.rs` vocabulary is committed. Add
+`--inventory-output /path/to/inventory.json` when detailed declarations are useful
+for debugging; routine assessment review does not require this file. Generated
+vocabulary membership means a native field is known, not that Dynamo supports it.
+
+Historical N-2 adapter fixtures remain consumed by separate mixed-version tests.
+Regenerate them with `python -m scripts.protocol_compatibility
+generate-release-fixtures` and check freshness with `--check`. Their generation
+does not execute historical source or establish mixed-version interoperability.
+
 ### Initial baseline
 
 Select a configured platform, because CPU/XPU and CUDA may pin different versions:
 
 ```sh
-python scripts/run_protocol_assessment.py \
+python -m scripts.protocol_compatibility assess \
   --dynamo-commit FULL_DYNAMO_SHA --platform cpu \
   --upstream-repo /path/to/vllm --crate-cache /path/to/crates \
   --output-dir /path/to/new-baseline
@@ -87,7 +111,7 @@ version, immutable source pin, and generated compact vocabulary together. Compar
 the pre-change and proposed Dynamo revisions:
 
 ```sh
-python scripts/run_protocol_assessment.py \
+python -m scripts.protocol_compatibility assess \
   --dynamo-commit FULL_PROPOSED_DYNAMO_SHA \
   --baseline-dynamo FULL_PRE_CHANGE_DYNAMO_SHA --platform cpu \
   --upstream-repo /path/to/vllm --crate-cache /path/to/crates \
@@ -104,13 +128,13 @@ CLI and explicitly select the upstream commit. Generate a baseline, then assess
 the proposed Dynamo revision against the **same** upstream commit:
 
 ```sh
-python scripts/assess_protocol_compatibility.py \
+python -m scripts.protocol_compatibility assess \
   --dynamo-repo /path/to/dynamo \
   --dynamo-commit FULL_PRE_CHANGE_DYNAMO_SHA \
   --upstream-repo /path/to/vllm --upstream-commit FULL_UPSTREAM_SHA \
   --crate-cache /path/to/crates --output-dir /path/to/historical-baseline
 # Exit 1 means the report exists but action remains; inspect it before continuing.
-python scripts/assess_protocol_compatibility.py \
+python -m scripts.protocol_compatibility assess \
   --dynamo-repo /path/to/dynamo \
   --dynamo-commit FULL_PROPOSED_DYNAMO_SHA \
   --upstream-repo /path/to/vllm --upstream-commit FULL_UPSTREAM_SHA \
@@ -130,7 +154,7 @@ new baseline, rather than silently resolving old findings.
 ### Explicit candidate or periodic check
 
 ```sh
-python scripts/run_protocol_assessment.py \
+python -m scripts.protocol_compatibility assess \
   --dynamo-commit FULL_DYNAMO_SHA --platform cpu \
   --upstream-candidate FULL_CANDIDATE_VLLM_SHA \
   --upstream-repo /path/to/vllm --crate-cache /path/to/crates \
@@ -142,7 +166,7 @@ the candidate at the **same** Dynamo revision. It does not adopt the candidate.
 Rechecking the same candidate still reports existing Dynamo differences.
 
 For arbitrary exact revision pairs without configured-platform selection, use
-`scripts/assess_protocol_compatibility.py --dynamo-repo ... --dynamo-commit ...
+`python -m scripts.protocol_compatibility assess --dynamo-repo ... --dynamo-commit ...
 --upstream-repo ... --upstream-commit ... --output-dir ...`.
 
 ### Reproducible real-source version-bump rehearsal
@@ -225,10 +249,12 @@ across revisions; it does not carry runtime evidence. Changed contract or handli
 facts invalidate the decision. Source-location moves alone do not. Evidence URLs
 are references, not fetched or independently verified by this tool.
 
-Legacy B1 files under `compatibility/decisions/PREVIOUS_SHA-CANDIDATE_SHA.json`
-remain valid only for upstream-pair drift reports. They are not silently migrated
-or accepted by the direct-assessment registry. Review the corresponding direct
-finding and create a new entry with its own identity, facts, scope, and evidence.
+The consolidated tooling has one decision registry. Experimental upstream-pair
+decisions from earlier B1 revisions are not accepted or silently reinterpreted.
+Retain those historical reports as evidence, then review the corresponding direct
+finding and create an entry with its own identity, facts, scope, and evidence.
+There is no separate `--require-triage` mode: assessment always evaluates the
+extraction and review gates.
 
 ## Gate and release policy
 
@@ -323,7 +349,7 @@ not automatically triage requirements. Broader behavior stays outside this scope
 Run the source-only regression suite with:
 
 ```sh
-python -m unittest discover -s scripts -p 'test_*protocol*.py' -v
+python -m unittest discover -s scripts/protocol_compatibility/tests -t . -v
 ```
 
 The Git/CLI tests use synthetic source repositories and are labeled accordingly;

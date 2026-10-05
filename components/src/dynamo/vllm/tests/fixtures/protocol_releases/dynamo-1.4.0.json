@@ -1,5 +1,5 @@
 {
-  "_generated": "Do not edit; run scripts/generate_protocol_release_fixtures.py",
+  "_generated": "Do not edit; run python -m scripts.protocol_compatibility generate-release-fixtures",
   "_license": "Apache-2.0; Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.",
   "constants": {},
   "dynamo_commit": "03014943323e78feb5bd672ef08b72caea0918ac",
