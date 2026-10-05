@@ -340,8 +340,8 @@ Benchmarking uses a synthetic acceptance length with the SpeedBench coding AL.
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
 | Agentic (15% subset) | SGLang | Aggregated (2 workers) | GB200 | 28 | 32.9 | 56.1 | 828 |
 | Agentic (15% subset) | SGLang | Disaggregated (2P1D) | GB200 | 24 | 29.3 | 77.9 | 3,090 |
-| Agentic (15% subset) | SGLang | Aggregated (3 workers) | GB300 | 54 | 84.4 | 51.3 | 573 |
-| Agentic (15% subset) | SGLang | Disaggregated (1P1D) | GB300 | 18 | 61.0 | 75.9 | 4,809 |
+| Agentic (15% subset) | SGLang | Aggregated (3 workers) | GB300 | 54 | 89.7 | 56.6 | 478 |
+| Agentic (15% subset) | SGLang | Disaggregated (1P1D) | GB300 | 18 | 61.9 | 77.6 | 4,861 |
 | Agentic (15% subset) | vLLM | Aggregated (1 worker) | H200 | 4 | 3.54 | 39.95 | 3660 |
 | Agentic (15% subset) | vLLM | Aggregated (1 worker) | GB200 | 7 | 20.1 | 56.1 | 638 |
 | Agentic (15% subset) | vLLM | Aggregated (1 worker) | GB300 | 24 | 62.2 | 57.8 | 879 |
@@ -359,6 +359,19 @@ Benchmarking uses a synthetic acceptance length with the SpeedBench coding AL.
 | SGLang | GB300 | Disaggregated (1P1D) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
 | SGLang | GB200 | Aggregated (2 workers) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
 | SGLang | GB200 | Disaggregated (2P1D) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
+
+## Workaround: Health Check During Long Prefill
+
+With some Dynamo operator versions, the canary health check of a worker has a timeout of 3 seconds. During a long prefill, the check can wait for more than 3 seconds. The liveness probe then fails, and Kubernetes restarts a worker that is busy but healthy.
+
+The worker log shows `Health check timeout for generate` before the restart. If you see this message, add these environment variables to each SGLang worker:
+
+```yaml
+- name: DYN_HEALTH_CHECK_ENABLED
+  value: "false"
+- name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+  value: "300"
+```
 
 ## Limitations
 
