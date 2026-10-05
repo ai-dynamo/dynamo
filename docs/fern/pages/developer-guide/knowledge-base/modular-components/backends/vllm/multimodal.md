@@ -475,11 +475,12 @@ Dynamo does not serve `/v1/audio/transcriptions`. Send audio through `/v1/chat/c
 
 #### Streaming Transcription
 
-vLLM serves streaming transcription for Qwen3-ASR through its `Qwen3ASRRealtimeGeneration` architecture on `/v1/realtime`. The realtime path does not tokenize in the frontend, so it runs with the default Rust frontend:
+vLLM serves streaming transcription for Qwen3-ASR through its `Qwen3ASRRealtimeGeneration` architecture on `/v1/realtime`. The launcher does not pick an architecture from the model name, so select it with `--hf-overrides`. The realtime path does not tokenize in the frontend, so it runs with the default Rust frontend:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-1.7B
+bash launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-1.7B \
+  --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}'
 ```
 
 Stream a sample clip from a second terminal:
