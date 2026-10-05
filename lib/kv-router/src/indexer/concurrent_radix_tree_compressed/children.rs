@@ -417,7 +417,6 @@ impl NodeChildren {
         state.into_box().into_child_arcs()
     }
 
-    /// Takes every child `Arc` out of a map no one else can reach.
     pub(super) fn into_child_arcs(self) -> Vec<SharedNode> {
         // SAFETY: `self` is owned, so no thread can load this state.
         unsafe { self.take_exclusive() }
