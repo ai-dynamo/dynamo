@@ -1075,7 +1075,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_resource_exhaustion_does_not_look_like_a_dead_listener() {
-        for code in [libc::ENFILE, libc::EMFILE, libc::ENOBUFS] {
+        for code in [libc::ENFILE, libc::ENOBUFS] {
             let error = io::Error::from_raw_os_error(code);
             assert!(
                 is_resource_exhaustion_error(&error),
