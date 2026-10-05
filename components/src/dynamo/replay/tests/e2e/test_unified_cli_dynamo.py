@@ -20,8 +20,14 @@ pytest.importorskip(
     reason="AISimulate is an optional Dynamo simulation dependency",
 )
 
+from aisimulate.compiler import prediction_to_replay_spec
 from aisimulate.config.cli import CorePredictionConfig
 from aisimulate.config.common import split_config_sections
+from aisimulate.config_adapter import PredictionAdapterContext
+from aisimulate.sweeper.replay import ReplayOutputRequirements
+
+from dynamo.replay.simulation import DynamoReplayRunnerFactory
+from dynamo.router.simulation.provider import create_provider
 
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and
@@ -329,10 +335,14 @@ def _predict_conversations(tmp_path: Path, config: dict, name: str, *, stack=Non
     ]
     if stack is not None:
         args.extend(["--stack", stack])
-    _run_cli(*args)
+    result = _run_cli(*args)
     report = json.loads((output / "prediction.json").read_text())
-    assert report["summary"]["completed_requests"] == report["completed_requests"]
-    assert report["coverage"]["per_request_records"] == len(report["per_request"])
+    assert (
+        json.loads(result.stdout)["completed_requests"] == report["completed_requests"]
+    )
+    if stack == "dynamo":
+        assert report["summary"]["completed_requests"] == report["completed_requests"]
+        assert report["coverage"]["per_request_records"] == len(report["per_request"])
     assert report["per_request"] == [
         json.loads(line)
         for line in (output / "requests.jsonl").read_text().splitlines()
@@ -341,14 +351,25 @@ def _predict_conversations(tmp_path: Path, config: dict, name: str, *, stack=Non
 
 
 def _assert_conversation_bindings(report: dict, topology: str, mode: str):
-    policy = report["dynamo_policy"]
-    assert policy["native_policy"] is True
-    assert policy["routing_provider"] == "dynamo.DefaultWorkerSelector"
-    assert policy["physical_kv_events"] > 0
-    assert policy["post_dispatch_checks"] == policy["decision_count"]
-    assert policy["dispatch_aborts"] == 0
+    policies = report["routing_policy"]["roles"]
     roles = {"aggregated"} if topology == "aggregated" else {"prefill", "decode"}
-    decisions = {(row["request_id"], row["role"]): row for row in policy["decisions"]}
+    assert set(policies) == roles
+    decisions = {}
+    expected_requests = {row["uuid"] for row in report["per_request"]} | {
+        row["uuid"] for row in report.get("agentic_phases", {}).get("requests", [])
+    }
+    for role, policy in policies.items():
+        assert policy["native_policy"] == "dynamo.SelectionCore"
+        assert policy["physical_kv_events"] > 0
+        assert policy["decisions_captured"] is True
+        assert policy["decision_count"] == len(policy["decisions"])
+        assert {row["request_id"] for row in policy["decisions"]} == expected_requests
+        for row in policy["decisions"]:
+            assert row["native_policy"] == "dynamo.SelectionCore"
+            assert row["role"] == role
+            key = (row["request_id"], role)
+            assert key not in decisions
+            decisions[key] = row
     bindings: dict[tuple, set] = {}
     group_keys: dict[tuple, set] = {}
     observations = 0
@@ -375,6 +396,12 @@ def _assert_conversation_bindings(report: dict, topology: str, mode: str):
             pair = decision["worker_id"], decision["dp_rank"]
             assert pair == (route["logical_worker_id"], route["dp_rank"])
             assert all(value in (0, 1) for value in pair)
+            assert route["outcome"] == "immediate"
+            assert route["selected_overlap_blocks"] == decision["overlap_blocks"]
+            assert (
+                route["best_available_overlap_blocks"]
+                == decision["best_available_overlap_blocks"]
+            )
             bindings.setdefault((group, role), set()).add(pair)
             group_keys.setdefault(group, set()).add(decision["group_key"])
             observations += 1
@@ -383,24 +410,37 @@ def _assert_conversation_bindings(report: dict, topology: str, mode: str):
     assert all(len(pairs) == 1 for pairs in bindings.values())
     assert all(len(keys) == 1 for keys in group_keys.values())
     assert len({next(iter(keys)) for keys in group_keys.values()}) == len(group_keys)
-    assert any(row["binding_reused"] for row in policy["decisions"])
+    assert any(row["binding_reused"] for row in decisions.values())
     assert report["first_admission_prefix_cache_reused_ratio"] > 0
-    assert any(row["reused_input_tokens"] > 0 for row in report["per_request"])
+    records = report["per_request"]
+    actual_reused_tokens = sum(row["reused_input_tokens"] for row in records)
+    assert actual_reused_tokens > 0
+    # Aggregated records have no P/D-specific prefill_route_overlap_tokens.
+    assert all(
+        row["reused_input_tokens"] <= route["selected_overlap_blocks"] * 64
+        for row in records
+        for route in row["routing_history"]
+        if route["pool"] in ("agg", "prefill")
+    )
+    assert report["first_admission_prefix_cache_reused_ratio"] == pytest.approx(
+        actual_reused_tokens / sum(row["input_length"] for row in records)
+    )
 
 
+@pytest.mark.parametrize("stack", [None, "dynamo"], ids=["engine", "dynamo"])
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 @pytest.mark.parametrize("topology", ["aggregated", "disaggregated"])
 @pytest.mark.parametrize("mode", ["session", "sibling_group"])
 def test_conversation_yaml_uses_existing_native_router(
-    tmp_path, backend, topology, mode
+    tmp_path, backend, topology, mode, stack
 ):
     config = _conversation_prediction(tmp_path, backend, topology, mode)
-    report = _predict_conversations(tmp_path, config, "affinity")
+    report = _predict_conversations(tmp_path, config, "affinity", stack=stack)
     assert report["completed_requests"] == 10
     _assert_conversation_bindings(report, topology, mode)
     for worker in config["engine"]["workers"].values():
         worker["kv_cache"]["prefix_caching"] = False
-    cold = _predict_conversations(tmp_path, config, "cache-disabled", stack="dynamo")
+    cold = _predict_conversations(tmp_path, config, "cache-disabled", stack=stack)
     assert cold["completed_requests"] == report["completed_requests"]
     assert cold["first_admission_prefix_cache_reused_ratio"] == 0
     assert all(row["reused_input_tokens"] == 0 for row in cold["per_request"])
@@ -435,8 +475,54 @@ def test_conversation_duration_reuses_snapshot_warmup_pipeline(
     measured = {row["uuid"] for row in report["per_request"]}
     prepared = {row["uuid"] for row in phases["requests"]}
     assert prepared - measured
-    decisions = {row["request_id"] for row in report["dynamo_policy"]["decisions"]}
-    assert measured | prepared <= decisions
+    for policy in report["routing_policy"]["roles"].values():
+        decisions = {row["request_id"] for row in policy["decisions"]}
+        assert measured | prepared == decisions
+
+
+@pytest.mark.parametrize("affinity", [False, True], ids=["kv", "affinity"])
+def test_native_compositions_preserve_telemetry_and_capture(tmp_path, affinity):
+    """Both C compositions retain the existing native observer and report capture."""
+    raw = _conversation_prediction(tmp_path, "vllm", "aggregated", "session")
+    router = raw.pop("router")
+    if not affinity:
+        router.pop("affinity")
+    config = CorePredictionConfig.model_validate(raw)
+    adapter = create_provider().compile_prediction(
+        router,
+        PredictionAdapterContext(
+            engine=config.engine.model_dump(mode="json"),
+            traffic=config.traffic.model_dump(mode="json"),
+            evaluation=config.evaluation.model_dump(mode="json"),
+        ),
+    )
+    spec = prediction_to_replay_spec(config, adapter_specs={"dynamo.router": adapter})
+    runner = DynamoReplayRunnerFactory().create(0)
+    try:
+        report = runner.run(
+            spec,
+            output_requirements=ReplayOutputRequirements(
+                include_raw_report=True,
+                capture_per_request=True,
+                capture_telemetry=True,
+                telemetry_sample_interval_ms=1.0,
+            ),
+        )
+    finally:
+        runner.close()
+    native = report.metadata["native_report"]
+    assert native["completed_requests"] == len(native["per_request"]) == 10
+    telemetry = report.metadata["telemetry"]
+    assert telemetry == native["telemetry"]
+    assert telemetry["sample_interval_ms"] == 1.0
+    assert telemetry["samples"]
+    if affinity:
+        _assert_conversation_bindings(native, "aggregated", "session")
+        assert report.metadata["routing_policy"] == native["routing_policy"]
+    else:
+        assert "routing_policy" not in native
+        assert "routing_policy" not in report.metadata
+        assert native["first_admission_prefix_cache_reused_ratio"] > 0
 
 
 def test_native_report_storage_exhaustion_returns_resource_exit(tmp_path, monkeypatch):
