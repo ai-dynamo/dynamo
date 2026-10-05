@@ -58,6 +58,7 @@ def _handler(*, enable_trace: bool = True) -> eh.EmbeddingWorkerHandler:
     handler = eh.EmbeddingWorkerHandler.__new__(eh.EmbeddingWorkerHandler)
     handler.engine = _Engine()
     handler.enable_trace = enable_trace
+    handler._max_input_token_id = 151935
     return handler
 
 

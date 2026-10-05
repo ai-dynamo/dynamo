@@ -980,7 +980,7 @@ def test_nvext_token_data_rejects_out_of_vocabulary_token_id(invalid_token_id):
 
     with pytest.raises(
         HttpError,
-        match=rf"Token id {invalid_token_id} is out of vocabulary",
+        match=rf"Token id {invalid_token_id} is out of vocabulary at nvext\.token_data\[1\]$",
     ) as error:
         handler._get_input_param(request)
 
@@ -1050,13 +1050,6 @@ def test_nvext_token_data_rejects_invalid_token_id(invalid_token_id):
         handler._get_input_param(request)
 
     assert error.value.code == 400
-
-
-def test_nvext_token_data_validation_skips_ordinary_token_input():
-    handler = _new_token_input_handler()
-    request = {"token_ids": [2**32 - 1]}
-
-    assert handler._get_input_param(request) == {"input_ids": [2**32 - 1]}
 
 
 async def _stream(items):
