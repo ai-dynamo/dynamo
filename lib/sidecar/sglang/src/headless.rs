@@ -31,7 +31,6 @@ pub(crate) struct HeadlessSidecar {
     grpc_endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
     common: CommonArgs,
-    discovery_timeout: Duration,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,7 +50,6 @@ impl HeadlessSidecar {
             grpc_endpoint: args.sidecar.grpc_endpoint,
             transport: args.sidecar.grpc.config(),
             common: args.sidecar.common,
-            discovery_timeout: Duration::from_secs(args.leader_discovery_timeout_secs),
         })
     }
 
@@ -108,7 +106,9 @@ impl HeadlessSidecar {
         tracing::info!(node_rank = metadata.node_rank, group = group_id,
             endpoint = %endpoint.id(), "Waiting for SGLang leader for local KV publishing");
         let mut configs = runtime_config_watch(&endpoint, shutdown.clone()).await?;
-        let (worker_id, config) = tokio::time::timeout(self.discovery_timeout,
+        // Leader registration follows engine readiness, so use the same startup
+        // allowance as local engine discovery rather than a separate setting.
+        let (worker_id, config) = tokio::time::timeout(self.transport.startup_deadline,
             wait_for_leader(&mut configs, group_id, &shutdown)).await
             .context("timed out waiting for SGLang leader; check namespace, component, endpoint, and dist_init_addr")??;
         let leader = validate_leader(metadata, &config)?;
