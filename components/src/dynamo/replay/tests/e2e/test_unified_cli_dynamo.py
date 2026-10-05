@@ -340,9 +340,8 @@ def _predict_conversations(tmp_path: Path, config: dict, name: str, *, stack=Non
     assert (
         json.loads(result.stdout)["completed_requests"] == report["completed_requests"]
     )
-    if stack == "dynamo":
-        assert report["summary"]["completed_requests"] == report["completed_requests"]
-        assert report["coverage"]["per_request_records"] == len(report["per_request"])
+    assert report["summary"]["completed_requests"] == report["completed_requests"]
+    assert report["coverage"]["per_request_records"] == len(report["per_request"])
     assert report["per_request"] == [
         json.loads(line)
         for line in (output / "requests.jsonl").read_text().splitlines()
@@ -359,13 +358,20 @@ def _assert_conversation_bindings(report: dict, topology: str, mode: str):
         row["uuid"] for row in report.get("agentic_phases", {}).get("requests", [])
     }
     for role, policy in policies.items():
-        assert policy["native_policy"] == "dynamo.SelectionCore"
-        assert policy["physical_kv_events"] > 0
+        assert policy["native_policy"] == "dynamo.DefaultWorkerSelector"
+        if role == "decode":
+            # The existing decode adapter uses native load selection. Its engine
+            # cache reuse is checked independently through transfer timing below.
+            assert policy["physical_kv_events"] == 0
+        else:
+            assert policy["physical_kv_events"] > 0
         assert policy["decisions_captured"] is True
         assert policy["decision_count"] == len(policy["decisions"])
+        assert policy["post_dispatch_checks"] == policy["decision_count"]
+        assert policy["dispatch_aborts"] == 0
         assert {row["request_id"] for row in policy["decisions"]} == expected_requests
         for row in policy["decisions"]:
-            assert row["native_policy"] == "dynamo.SelectionCore"
+            assert row["native_policy"] == "dynamo.DefaultWorkerSelector"
             assert row["role"] == role
             key = (row["request_id"], role)
             assert key not in decisions
@@ -427,7 +433,7 @@ def _assert_conversation_bindings(report: dict, topology: str, mode: str):
     )
 
 
-@pytest.mark.parametrize("stack", [None, "dynamo"], ids=["engine", "dynamo"])
+@pytest.mark.parametrize("stack", [None, "dynamo"], ids=["auto", "explicit-dynamo"])
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 @pytest.mark.parametrize("topology", ["aggregated", "disaggregated"])
 @pytest.mark.parametrize("mode", ["session", "sibling_group"])
@@ -443,6 +449,53 @@ def test_conversation_yaml_uses_existing_native_router(
     cold = _predict_conversations(tmp_path, config, "cache-disabled", stack=stack)
     assert cold["completed_requests"] == report["completed_requests"]
     assert cold["first_admission_prefix_cache_reused_ratio"] == 0
+    assert all(row["reused_input_tokens"] == 0 for row in cold["per_request"])
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_conversation_cli_reuses_actual_decode_destination_cache(tmp_path, backend):
+    config = _conversation_prediction(tmp_path, backend, "disaggregated", "session")
+    trace = Path(config["traffic"]["source"]["paths"][0])
+    rows = [json.loads(line) for line in trace.read_text().splitlines()]
+    first = rows[1]
+    repeated = {
+        **first,
+        "request_id": "first-repeat",
+        "not_before_ms": 1000,
+        "dependencies": [
+            {
+                "request_id": first["request_id"],
+                "relation": "sequence",
+                "trigger": "completion",
+                "delay_ms": 1000,
+            }
+        ],
+    }
+    trace.write_text(
+        "".join(json.dumps(row) + "\n" for row in [rows[0], first, repeated])
+    )
+    config["engine"]["kv_transfer"] = {
+        "bandwidth_gb_per_second": 1,
+        "timing_mode": "destination_missing",
+    }
+    missing = _predict_conversations(tmp_path, config, "destination-missing")
+    _assert_conversation_bindings(missing, "disaggregated", "session")
+    config["engine"]["kv_transfer"]["timing_mode"] = "full_prompt"
+    full = _predict_conversations(tmp_path, config, "full-prompt")
+    config["engine"]["kv_transfer"]["timing_mode"] = "destination_missing"
+    for worker in config["engine"]["workers"].values():
+        worker["kv_cache"]["prefix_caching"] = False
+    cold = _predict_conversations(tmp_path, config, "uncached-destination")
+
+    def transfer_span(report):
+        assert report["completed_requests"] == 2
+        record = max(report["per_request"], key=lambda row: row["arrival_time_ms"])
+        return record["destination_activated_ms"] - record["destination_reserved_ms"]
+
+    # This reads actual engine handoff timestamps. A policy overlap estimate or
+    # the presence of an affinity configuration cannot satisfy these assertions.
+    assert transfer_span(missing) < transfer_span(full) - 1e-6
+    assert transfer_span(cold) == pytest.approx(transfer_span(full), abs=1e-6)
     assert all(row["reused_input_tokens"] == 0 for row in cold["per_request"])
 
 
