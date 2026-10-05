@@ -729,18 +729,6 @@ def _serialize_routed_experts(
     }
 
 
-def _rerun_post_init(sampling_params: SamplingParams) -> None:
-    """Apply vLLM's SamplingParams.__post_init__ to the setattr overlays.
-
-    setattr skips its temperature clamp, _verify_args, and greedy reset. vLLM
-    validates the params (for example min_p under speculative decoding) before
-    the process_inputs clone that reruns them, so rerun them here. A direct
-    call runs the same steps in vLLM's order without a second deep copy, and
-    each step gives the same result when it runs again.
-    """
-    sampling_params.__post_init__()
-
-
 def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
@@ -903,7 +891,9 @@ def build_sampling_params(
     sampling_params.detokenize = False
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
 
-    _rerun_post_init(sampling_params)
+    # setattr skips __post_init__ (temperature clamp, _verify_args, greedy reset),
+    # and vLLM validates before the process_inputs clone reruns it.
+    sampling_params.__post_init__()
     return sampling_params
 
 
@@ -1026,7 +1016,8 @@ def build_sampling_params_openai(
     ):
         sampling_params.thinking_token_budget = thinking_token_budget
 
-    _rerun_post_init(sampling_params)
+    # Same setattr gap as in build_sampling_params.
+    sampling_params.__post_init__()
     return sampling_params
 
 
