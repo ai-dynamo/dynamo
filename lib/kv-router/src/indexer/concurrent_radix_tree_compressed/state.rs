@@ -469,7 +469,6 @@ mod tests {
         hashes.iter().map(|&hash| block(hash)).collect()
     }
 
-    /// Builds a node state from `chunks[0]` and appends each later chunk as a leaf extension.
     fn replay(chunks: &[Vec<u64>], full: &FullCoverage, slot: Slot) -> CrtcNodeState {
         let mut state = CrtcNodeState::for_blocks(&blocks(&chunks[0]));
         for chunk in &chunks[1..] {
