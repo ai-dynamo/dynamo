@@ -11514,6 +11514,7 @@ mod tests {
             inner: &request,
             normalize_tool_call_args: true,
             continue_final_message: true,
+            render_audio_placeholder: false,
         };
         assert!(request.typed_messages().is_some());
         assert!(normalized.typed_messages().is_none());
