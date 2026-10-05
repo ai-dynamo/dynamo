@@ -32,11 +32,7 @@ for current protocol limitations.
 
 From a Dynamo source checkout, build or install Dynamo so
 `dynamo-vllm-sidecar` is on `PATH`. Install a vLLM build that provides
-`vllm-rs` and its native gRPC server. For video requests, also install the
-`ffmpeg` and `ffprobe` executables on the `PATH` of each vLLM engine host, with
-an `ffmpeg` decoder for the codec of each input video. The Dynamo vLLM runtime
-image does not include `ffprobe`, its image build policy does not allow adding
-it, and its `ffmpeg` decodes only VP8, VP9, and raw video.
+`vllm-rs` and its native gRPC server.
 
 Start Dynamo's local discovery services, then run the aggregated launcher:
 
