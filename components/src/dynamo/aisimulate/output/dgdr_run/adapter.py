@@ -1,0 +1,506 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Live DGDRRun output adapter (``--output dgdr_run``).
+
+Independent of the standalone ``dgd`` adapter, which is called once with the
+final recommendation. This adapter subscribes to Sweeper's ``on_round`` and
+``on_candidate`` callbacks for the whole search, keeps the *current bounded
+projection* of the run in memory, and periodically publishes it as an
+atomically replaced ``dgdr_run_snapshot.yaml`` (see ``snapshot.py``) that the
+publisher sidecar in the same pod consumes.
+
+Both adapters share one Candidate-to-DGD implementation through
+``dynamo.aisimulate.output.dgd.materialization``; nothing else is shared.
+
+Design points (all adapter-specific, none of them shared with ``dgd``):
+
+* **Callbacks never block and never lose state.** They only update the latest
+  in-memory projection under a short lock and wake the writer. Nothing is
+  queued, so nothing can be dropped under pressure: only *file writes* are
+  coalesced, never logical state changes.
+* **Bounded.** At most ``max_candidates`` points are retained and published,
+  no matter how many are evaluated. The bound comes from the run's
+  ``recommendation.maxCandidates``; it is not derived from any transport.
+* **Rate limited.** The writer publishes the latest complete state at most once
+  per ``snapshot_interval_seconds``. The initial snapshot (``start()``) and the
+  terminal snapshot (``close()``) bypass the limit.
+* **Materialize once.** A point's DGD is rendered the first time it enters the
+  projection and cached by its stable id, so progress or ordering changes never
+  re-render retained points.
+* **Terminal snapshot is a completion barrier.** ``close()`` stops accepting
+  updates, folds in everything accepted so far, and synchronously writes the
+  terminal snapshot before returning. A failure to write it is raised, never
+  swallowed, so the Sweeper container cannot exit successfully without it.
+
+Scalar searches only for now (best-first ordering by score); a Pareto
+selection policy is a separate piece of work and is rejected explicitly.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import threading
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, Protocol
+
+from aisimulate.output_adapter import OUTPUT_ADAPTER_API_VERSION
+from aisimulate.sweeper.config import SmartSearchConfig
+from aisimulate.sweeper.result import SweepResult
+from pydantic import BaseModel, ConfigDict, Field
+
+from dynamo.aisimulate.output.dgd.materialization import (
+    CandidateMaterializationError,
+    DGDGenerationOptions,
+    render_dgd,
+)
+from dynamo.aisimulate.output.dgdr_run.snapshot import (
+    SNAPSHOT_FILE_NAME,
+    CandidateOutcome,
+    DGDRRunSnapshot,
+    RunPhase,
+    SnapshotCandidate,
+    write_snapshot,
+)
+
+logger = logging.getLogger(__name__)
+
+_ID_PREFIX = "evaluated-point-"
+_ID_HEX_LENGTH = 12
+
+
+class CandidateRecordLike(Protocol):
+    """The subset of aisimulate's ``CandidateRecord`` this adapter reads."""
+
+    candidate_id: str
+    status: Any  # aisimulate.sweeper.result.CandidateStatus
+    score: float | None
+    used_gpus: int | None
+    config: dict[str, Any]
+
+
+def _plain(value: Any) -> Any:
+    """Copy ``value`` into plain, YAML-safe containers (detached from the caller)."""
+    return json.loads(json.dumps(value, default=str, sort_keys=True))
+
+
+def candidate_id_for(parameters: Mapping[str, Any]) -> str:
+    """Stable identity of an evaluated point.
+
+    Depends only on the point's resolved parameters: never on rank, list
+    position, or the order in which points were observed.
+    """
+    canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"{_ID_PREFIX}{digest[:_ID_HEX_LENGTH]}"
+
+
+def _is_feasible(record: CandidateRecordLike) -> bool:
+    # By value, not identity: callers may pass aisimulate's CandidateStatus
+    # enum, a plain string, or a test double.
+    return str(getattr(record.status, "value", record.status)) == "feasible"
+
+
+@dataclass(frozen=True)
+class _Retained:
+    """One retained point: immutable evaluation facts, no rendering."""
+
+    id: str
+    score: float
+    used_gpus: int
+    parameters: dict[str, Any]
+    metrics: dict[str, Any]
+
+    @property
+    def rank_key(self) -> tuple[float, int, str]:
+        """Ascending sort key: best first.
+
+        Highest score, then fewer GPUs, then id so that equal points order
+        deterministically. Matches Sweeper's own scalar ranking.
+        """
+        return (-self.score, self.used_gpus, self.id)
+
+
+@dataclass(frozen=True)
+class _Terminal:
+    phase: RunPhase
+    message: str
+    error: str
+
+
+class DGDRRunOutputConfig(BaseModel):
+    """Configuration accepted for ``--output dgdr_run``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    snapshot_dir: str | None = Field(default=None, min_length=1)
+    namespace: str | None = None
+    renderer: Literal["aic", "direct"] = "aic"
+    runtime_image: str = Field(min_length=1)
+    runtime_version_override: str | None = None
+    num_gpus_per_node: int = Field(gt=0)
+    max_candidates: int = Field(default=5, ge=1)
+    snapshot_interval_seconds: float = Field(default=5.0, ge=0)
+
+    def generation_options(self) -> DGDGenerationOptions:
+        return DGDGenerationOptions(
+            runtime_image=self.runtime_image,
+            runtime_version_override=self.runtime_version_override,
+            namespace=self.namespace,
+            num_gpus_per_node=self.num_gpus_per_node,
+        )
+
+
+class DGDRRunOutputAdapter:
+    """Publishes the current bounded projection of one Sweeper run.
+
+    One instance per run. Pass the bound methods to ``Sweeper.run`` and use the
+    adapter as a context manager (or call ``start()``/``close()``) so the
+    terminal snapshot is always written, including when the run raises::
+
+        with DGDRRunOutputAdapter(config, workload, snapshot_dir=path) as adapter:
+            sweeper.run(on_round=adapter.on_round, on_candidate=adapter.on_candidate)
+    """
+
+    def __init__(
+        self,
+        config: DGDRRunOutputConfig,
+        workload: Any,
+        *,
+        snapshot_dir: Path | None = None,
+        is_pareto: bool = False,
+    ) -> None:
+        if is_pareto:
+            raise NotImplementedError(
+                "dgdr_run only supports scalar objectives so far; Pareto "
+                "retention needs its own selection policy rather than an "
+                "approximation of top-N-by-score"
+            )
+        directory = snapshot_dir if snapshot_dir is not None else config.snapshot_dir
+        if directory is None:
+            raise ValueError("a snapshot directory is required")
+        self._directory = Path(directory)
+        self._config = config
+        self._options = config.generation_options()
+        self._workload = workload
+        self._max_candidates = config.max_candidates
+        self._interval = config.snapshot_interval_seconds
+
+        # Latest in-memory desired state. Callbacks mutate it under _lock.
+        self._lock = threading.Lock()
+        self._retained: dict[str, _Retained] = {}
+        self._round_no = 0
+        self._evaluated = 0
+        self._terminal: _Terminal | None = None
+        self._accepting = True
+
+        # Writer coordination.
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._next_allowed = float("-inf")
+
+        # Materialization cache, keyed by stable id. Touched only while
+        # holding _publish_lock.
+        self._publish_lock = threading.Lock()
+        self._materialized: dict[str, SnapshotCandidate] = {}
+        self._writes = 0
+
+    # -- observability ---------------------------------------------------
+
+    @property
+    def snapshot_writes(self) -> int:
+        """Number of snapshots written so far (initial and terminal included)."""
+        return self._writes
+
+    @property
+    def snapshot_path(self) -> Path:
+        return self._directory / SNAPSHOT_FILE_NAME
+
+    # -- Sweeper callbacks: update latest state, never block, never raise --
+
+    def on_candidate(self, record: CandidateRecordLike) -> None:
+        try:
+            retained = self._retain(record) if _is_feasible(record) else None
+        except Exception:  # a callback must not break the search
+            logger.exception("dgdr_run: ignoring candidate that could not be read")
+            retained = None
+        with self._lock:
+            if not self._accepting:
+                return
+            self._evaluated += 1
+            # First observation wins: an evaluated point is immutable, so a
+            # re-evaluation of the same point never changes what was published.
+            if retained is not None and retained.id not in self._retained:
+                self._retained[retained.id] = retained
+                if len(self._retained) > self._max_candidates:
+                    worst = max(self._retained.values(), key=lambda r: r.rank_key)
+                    del self._retained[worst.id]
+            self._wake.set()
+
+    def on_round(self, round_number: int, candidates: list[Any]) -> None:
+        del candidates  # cumulative feasible list: the adapter tracks its own set
+        with self._lock:
+            if not self._accepting:
+                return
+            self._round_no = max(self._round_no, round_number)
+            self._wake.set()
+
+    @staticmethod
+    def _retain(record: CandidateRecordLike) -> _Retained | None:
+        if record.score is None or record.used_gpus is None:
+            logger.warning(
+                "dgdr_run: feasible candidate %s has no score/used_gpus; skipped",
+                record.candidate_id,
+            )
+            return None
+        parameters = _plain(dict(record.config))
+        metrics: dict[str, Any] = {
+            "score": float(record.score),
+            "usedGpus": int(record.used_gpus),
+        }
+        objectives = getattr(record, "objectives", None)
+        if objectives:
+            metrics["objectives"] = _plain(dict(objectives))
+        return _Retained(
+            id=candidate_id_for(parameters),
+            score=float(record.score),
+            used_gpus=int(record.used_gpus),
+            parameters=parameters,
+            metrics=metrics,
+        )
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self) -> None:
+        """Write the initial snapshot immediately, then start the writer."""
+        if self._thread is not None:
+            raise RuntimeError("DGDRRunOutputAdapter already started")
+        self._publish()
+        self._next_allowed = time.monotonic() + self._interval
+        self._thread = threading.Thread(
+            target=self._writer_loop, name="dgdr-run-snapshot-writer", daemon=True
+        )
+        self._thread.start()
+
+    def close(
+        self,
+        *,
+        phase: RunPhase = RunPhase.SUCCEEDED,
+        message: str = "",
+        error: str = "",
+    ) -> None:
+        """Write the terminal snapshot; returns only once it is on disk.
+
+        Stops accepting updates, folds in every update accepted before this
+        call, bypasses the rate limit, and replaces the file synchronously.
+        Raises if the terminal snapshot cannot be written. Safe to call without
+        ``start()`` and safe to call twice (the second call is a no-op).
+        """
+        if not phase.terminal:
+            raise ValueError("close() requires a terminal phase")
+        with self._lock:
+            if self._terminal is not None:
+                return
+            self._accepting = False
+            self._terminal = _Terminal(phase=phase, message=message, error=error)
+        self._stop.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join()
+        self._publish()
+
+    def __enter__(self) -> DGDRRunOutputAdapter:
+        self.start()
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, *_: Any) -> None:
+        if exc_type is None:
+            self.close(phase=RunPhase.SUCCEEDED)
+            return
+        try:
+            self.close(phase=RunPhase.FAILED, error=exc_type.__name__)
+        except Exception:  # never mask the run's own exception
+            logger.exception("dgdr_run: could not write the terminal snapshot")
+
+    # -- writer ----------------------------------------------------------
+
+    def _writer_loop(self) -> None:
+        while True:
+            self._wake.wait()
+            if self._stop.is_set():
+                return
+            delay = self._next_allowed - time.monotonic()
+            if delay > 0 and self._stop.wait(delay):
+                return
+            try:
+                self._publish()
+            except Exception:  # keep the writer alive; retry
+                logger.exception("dgdr_run: snapshot write failed; will retry")
+                self._wake.set()
+            self._next_allowed = time.monotonic() + self._interval
+
+    def _publish(self) -> None:
+        with self._publish_lock:
+            with self._lock:
+                # Cleared together with the copy so no update is ever lost: an
+                # update after this point sets the event again.
+                self._wake.clear()
+                ordered = sorted(self._retained.values(), key=lambda r: r.rank_key)
+                round_no = self._round_no
+                evaluated = self._evaluated
+                terminal = self._terminal
+            candidates = tuple(self._materialize(item) for item in ordered)
+            live_ids = {item.id for item in ordered}
+            for stale in set(self._materialized) - live_ids:
+                del self._materialized[stale]
+            write_snapshot(
+                self._directory,
+                DGDRRunSnapshot(
+                    phase=terminal.phase if terminal else RunPhase.RUNNING,
+                    round_no=round_no,
+                    evaluated=evaluated,
+                    candidates=candidates,
+                    message=terminal.message if terminal else "",
+                    error=terminal.error if terminal else "",
+                ),
+            )
+            self._writes += 1
+
+    def _materialize(self, item: _Retained) -> SnapshotCandidate:
+        cached = self._materialized.get(item.id)
+        if cached is not None:
+            return cached
+        try:
+            manifest = render_dgd(
+                _RenderInput(config=item.parameters),
+                self._workload,
+                self._options,
+                dgd_name=f"{self._config.name}-{item.id.removeprefix(_ID_PREFIX)}",
+                renderer=self._config.renderer,
+            )
+            entry = SnapshotCandidate(
+                id=item.id,
+                outcome=CandidateOutcome.MATERIALIZED,
+                parameters=item.parameters,
+                metrics=item.metrics,
+                manifest=manifest,
+            )
+        except CandidateMaterializationError as exc:
+            # Cached too: a deterministic failure is not retried on every write.
+            entry = SnapshotCandidate(
+                id=item.id,
+                outcome=CandidateOutcome.MATERIALIZATION_FAILED,
+                parameters=item.parameters,
+                metrics=item.metrics,
+                error=str(exc),
+            )
+        self._materialized[item.id] = entry
+        return entry
+
+
+@dataclass(frozen=True)
+class _RenderInput:
+    """What ``render_dgd`` reads from a candidate: its resolved config."""
+
+    config: dict[str, Any]
+
+
+class DGDRRunOutputPlugin:
+    """The object AISimulate discovers for ``--output dgdr_run``.
+
+    ``live()`` is the primary entry point: it returns the adapter whose
+    ``on_round``/``on_candidate`` the host subscribes to the Sweeper. ``write()``
+    is the plugin protocol's end-of-run hook and only writes a terminal
+    snapshot of the final selection, for hosts that cannot subscribe live.
+    """
+
+    name = "dgdr_run"
+    api_version = OUTPUT_ADAPTER_API_VERSION
+
+    def subscribe(self, config: Mapping[str, Any]) -> None:
+        """Validate result-independent output configuration before search starts.
+
+        Mirrors ``DGDOutputAdapter.subscribe`` so both adapters satisfy the same
+        AISimulate plugin contract.
+        """
+        DGDRRunOutputConfig.model_validate(dict(config)).generation_options()
+
+    def live(
+        self,
+        config: Mapping[str, Any],
+        *,
+        workload: Any,
+        is_pareto: bool = False,
+    ) -> DGDRRunOutputAdapter:
+        resolved = DGDRRunOutputConfig.model_validate(dict(config))
+        return DGDRRunOutputAdapter(resolved, workload, is_pareto=is_pareto)
+
+    def write(
+        self,
+        config: Mapping[str, Any],
+        *,
+        result: SweepResult,
+        output_dir: Path,
+    ) -> Sequence[str | Path]:
+        resolved = DGDRRunOutputConfig.model_validate(dict(config))
+        if result.views.pareto_front:
+            raise NotImplementedError("dgdr_run does not support Pareto results yet")
+        selected = list(result.selected_candidates)[: resolved.max_candidates]
+        if not selected:
+            raise CandidateMaterializationError("no feasible candidate found")
+        workload = SmartSearchConfig.model_validate(result.provenance.config).workload
+        adapter = DGDRRunOutputAdapter(
+            resolved,
+            workload,
+            snapshot_dir=Path(resolved.snapshot_dir or output_dir),
+        )
+        for candidate in selected:
+            adapter.on_candidate(_as_feasible(candidate))
+        adapter.close(phase=RunPhase.SUCCEEDED)
+        return [Path(SNAPSHOT_FILE_NAME)]
+
+
+@dataclass(frozen=True)
+class _FinalCandidate:
+    candidate_id: str
+    config: dict[str, Any]
+    score: float | None
+    used_gpus: int | None
+    status: str = "feasible"
+
+
+def _as_feasible(candidate: Any) -> _FinalCandidate:
+    score = getattr(candidate, "score", None)
+    used_gpus = getattr(candidate, "used_gpus", None)
+    if score is None or used_gpus is None:
+        raise CandidateMaterializationError(
+            "selected candidate has no score/used_gpus, so it cannot be ranked"
+        )
+    return _FinalCandidate(
+        candidate_id=str(getattr(candidate, "candidate_id", "")),
+        config=dict(candidate.config),
+        score=score,
+        used_gpus=used_gpus,
+    )
+
+
+def create_adapter() -> DGDRRunOutputPlugin:
+    """Create the Dynamo plugin discovered by AISimulate."""
+    return DGDRRunOutputPlugin()
+
+
+__all__ = [
+    "CandidateRecordLike",
+    "DGDRRunOutputAdapter",
+    "DGDRRunOutputConfig",
+    "DGDRRunOutputPlugin",
+    "candidate_id_for",
+    "create_adapter",
+]

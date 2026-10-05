@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from dynamo.aisimulate.output.dgd import adapter as adapter_module
 from dynamo.aisimulate.output.dgd.adapter import DGDOutputConfig, create_adapter
-from dynamo.aisimulate.output.dgd.renderers import CandidateMaterializationError
+from dynamo.aisimulate.output.dgd.materialization import CandidateMaterializationError
 
 pytestmark = [
     pytest.mark.unit,

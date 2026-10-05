@@ -8,12 +8,12 @@ from dynamo.aisimulate.output.dgd.adapter import (
     DGDOutputConfig,
     create_adapter,
 )
-from dynamo.aisimulate.output.dgd.renderers import (
+from dynamo.aisimulate.output.dgd.materialization import (
     CandidateMaterializationError,
     DGDGenerationOptions,
-    DGDRenderer,
     render_dgd,
 )
+from dynamo.aisimulate.output.dgd.materialization.render import DGDRenderer
 
 __all__ = [
     "CandidateMaterializationError",

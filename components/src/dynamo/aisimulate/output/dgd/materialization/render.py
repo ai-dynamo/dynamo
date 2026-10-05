@@ -1,24 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lazy registry for Sweeper DGD renderers."""
+"""Lazy renderer registry and the single Candidate-to-DGD entry point."""
 
 from __future__ import annotations
 
 import importlib
 from typing import Any, Literal
 
-from dynamo.aisimulate.output.dgd.renderers.base import (
-    CandidateLike,
+from dynamo.aisimulate.output.dgd.materialization.errors import (
     CandidateMaterializationError,
-    DGDGenerationOptions,
+)
+from dynamo.aisimulate.output.dgd.materialization.options import DGDGenerationOptions
+from dynamo.aisimulate.output.dgd.materialization.renderers.base import (
+    CandidateLike,
     validate_candidate,
 )
 
 DGDRenderer = Literal["aic", "direct"]
 _RENDERER_MODULES: dict[str, str] = {
-    "aic": "dynamo.aisimulate.output.dgd.renderers.aic.renderer",
-    "direct": "dynamo.aisimulate.output.dgd.renderers.direct.renderer",
+    "aic": "dynamo.aisimulate.output.dgd.materialization.renderers.aic.renderer",
+    "direct": "dynamo.aisimulate.output.dgd.materialization.renderers.direct.renderer",
 }
 
 
@@ -52,9 +54,4 @@ def render_dgd(
     )
 
 
-__all__ = [
-    "CandidateMaterializationError",
-    "DGDGenerationOptions",
-    "DGDRenderer",
-    "render_dgd",
-]
+__all__ = ["DGDRenderer", "render_dgd"]

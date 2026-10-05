@@ -24,7 +24,10 @@ from typing import Any
 
 import yaml
 
-from dynamo.aisimulate.output.dgd.renderers import DGDGenerationOptions, render_dgd
+from dynamo.aisimulate.output.dgd.materialization import (
+    DGDGenerationOptions,
+    render_dgd,
+)
 from dynamo.aisimulate.output.dgd.writers.atomic import replace_text
 
 _ROOT = Path(__file__).parent

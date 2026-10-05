@@ -14,7 +14,7 @@ from aisimulate.sweeper.config import SmartSearchConfig
 from aisimulate.sweeper.result import SweepResult
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from dynamo.aisimulate.output.dgd.renderers import (
+from dynamo.aisimulate.output.dgd.materialization import (
     CandidateMaterializationError,
     DGDGenerationOptions,
     render_dgd,

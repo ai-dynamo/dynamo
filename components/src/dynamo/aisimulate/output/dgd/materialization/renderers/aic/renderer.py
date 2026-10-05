@@ -8,7 +8,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from dynamo.aisimulate.output.dgd.renderers.base import (
+from dynamo.aisimulate.output.dgd.materialization.renderers.base import (
     CandidateLike,
     CandidateMaterializationError,
     DGDGenerationOptions,
