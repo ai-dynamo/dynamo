@@ -2022,6 +2022,8 @@ class MockEngineArgs:
         trtllm: Optional[TrtllmArgs] = None,
         max_model_len: Optional[int] = None,
         ais_perf_config: Optional[Mapping[str, Any]] = None,
+        kv_cache_bytes_per_token: Optional[int] = None,
+        native_host_offload: Optional[Mapping[str, Any]] = None,
     ) -> None:
         ...
 
@@ -2072,6 +2074,16 @@ class MockEngineArgs:
 
     @property
     def engine_type(self) -> str: ...
+
+    @property
+    def kv_cache_bytes_per_token(self) -> Optional[int]:
+        """KV-cache bytes per token for G2 host blocks; defaults to kv_bytes_per_token."""
+        ...
+
+    @property
+    def native_host_offload(self) -> Optional[Dict[str, Any]]:
+        """AISimulate native G2 host-offload config (vLLM), or None when disabled."""
+        ...
 
     @property
     def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...

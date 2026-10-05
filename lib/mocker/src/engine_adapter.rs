@@ -129,6 +129,7 @@ pub(crate) fn engine_components(
         emit_kv_token_ids,
         kv_transfer_bytes_per_token: args.kv_bytes_per_token,
         kv_cache_bytes_per_token: args.kv_cache_bytes_per_token,
+        native_host_offload: args.native_host_offload.clone(),
         kv_transfer_bandwidth: args.kv_transfer_bandwidth,
         kv_transfer_timing_mode,
         timing_model,
