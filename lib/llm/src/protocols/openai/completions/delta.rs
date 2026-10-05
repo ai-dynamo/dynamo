@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
@@ -11,10 +11,7 @@ use crate::{
             extensions::{NvExtProvider, NvExtResponseInput},
             timing::RequestTracker,
         },
-        openai::{
-            convert_backend_top_logprobs,
-            delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
-        },
+        openai::delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
     },
     types::TokenIdType,
 };
@@ -36,12 +33,20 @@ impl NvCreateCompletionRequest {
             self.inner.logprobs.is_some(),
             self.nvext(),
         );
-        DeltaGenerator::new(self.inner.model.clone(), options, request_id)
+        let mut generator = DeltaGenerator::new(self.inner.model.clone(), options, request_id);
+        generator.capture_prompt_logprobs = self.common.prompt_logprobs.is_some();
+        // Native vLLM returns the sampled token plus the requested top-k.
+        generator.top_logprobs_limit = self.inner.logprobs.map(|count| count as usize + 1);
+        generator
     }
 }
 
 pub struct DeltaGenerator {
     state: DeltaGeneratorState,
+    top_logprobs_limit: Option<usize>,
+    /// Streaming offsets are relative to the text already emitted for each choice.
+    text_offsets: HashMap<u32, u32>,
+    capture_prompt_logprobs: bool,
 }
 
 impl DeltaGenerator {
@@ -53,6 +58,9 @@ impl DeltaGenerator {
                 model,
                 options,
             ),
+            top_logprobs_limit: None,
+            text_offsets: HashMap::new(),
+            capture_prompt_logprobs: false,
         }
     }
 
@@ -84,21 +92,52 @@ impl DeltaGenerator {
         let tok_lps = toks
             .iter()
             .zip(logprobs.unwrap())
-            .map(|(_, lp)| lp as f32)
+            .map(|(_, lp)| (lp as f32).max(-9999.0))
             .collect::<Vec<f32>>();
 
         let return_as_ids = self.state.options().return_tokens_as_token_ids;
-        let top_lps = top_logprobs.map_or(vec![], |top_logprobs| {
-            toks.iter()
-                .zip(tok_lps.iter())
-                .zip(top_logprobs.iter())
-                .map(|(((t, tid), lp), top_lps)| {
-                    let converted =
-                        convert_backend_top_logprobs(top_lps, t, *tid, *lp, return_as_ids);
-                    serde_json::to_value(converted).unwrap()
-                })
-                .collect()
-        });
+        let top_lps = toks
+            .iter()
+            .zip(tok_lps.iter())
+            .enumerate()
+            .map(|(position, ((t, tid), lp))| {
+                let entries = top_logprobs
+                    .as_ref()
+                    .and_then(|positions| positions.get(position))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let selected = if return_as_ids {
+                    format!("token_id:{tid}")
+                } else {
+                    t.clone()
+                };
+                // Completion top_logprobs is a map, unlike chat's token-object list.
+                // Preserve backend order, including last-value-wins when two IDs
+                // decode to the same string. Supply the sampled token when an
+                // older worker sends only alternatives; it counts in top-k + 1.
+                let mut result = serde_json::Map::new();
+                let missing_selected = !entries.iter().any(|entry| entry.token_id == *tid);
+                if missing_selected {
+                    result.insert(selected, serde_json::json!(lp));
+                }
+                let limit = self
+                    .top_logprobs_limit
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(usize::from(missing_selected));
+                for entry in entries.iter().take(limit) {
+                    let token = if return_as_ids {
+                        format!("token_id:{}", entry.token_id)
+                    } else {
+                        entry.token.clone().unwrap_or_default()
+                    };
+                    result.insert(
+                        token,
+                        serde_json::json!((entry.logprob as f32).max(-9999.0)),
+                    );
+                }
+                serde_json::Value::Object(result)
+            })
+            .collect();
 
         let tokens_out: Vec<String> = toks
             .iter()
@@ -111,10 +150,19 @@ impl DeltaGenerator {
             })
             .collect();
 
+        let mut offset = 0;
+        let text_offset = tokens_out
+            .iter()
+            .map(|token| {
+                let current = offset;
+                offset += token.chars().count() as u32;
+                current
+            })
+            .collect();
         Some(dynamo_protocols::types::Logprobs {
             tokens: tokens_out,
             token_logprobs: tok_lps.into_iter().map(Some).collect(),
-            text_offset: vec![],
+            text_offset,
             top_logprobs: top_lps,
         })
     }
@@ -150,7 +198,10 @@ impl DeltaGenerator {
             },
         };
 
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner: inner.into(),
+            nvext: None,
+        }
     }
 
     /// Creates a final usage-only chunk for OpenAI compliance.
@@ -171,7 +222,10 @@ impl DeltaGenerator {
             usage: Some(usage),
         };
 
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner: inner.into(),
+            nvext: None,
+        }
     }
 
     /// Check if usage tracking is enabled
@@ -203,12 +257,22 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             } else {
                 None
             };
-        let logprobs = self.create_logprobs(
+        let index = delta.index.unwrap_or(0);
+        let mut logprobs = self.create_logprobs(
             delta.tokens,
             delta.token_ids,
             delta.log_probs,
             delta.top_logprobs,
         );
+        if self.state.options().enable_logprobs {
+            let offset = self.text_offsets.entry(index).or_default();
+            if let Some(logprobs) = logprobs.as_mut() {
+                for token_offset in &mut logprobs.text_offset {
+                    *token_offset += *offset;
+                }
+            }
+            *offset += delta.text.as_deref().unwrap_or_default().chars().count() as u32;
+        }
 
         // Backend errors are response errors, not successful OpenAI stop reasons.
         // Keep completions aligned with the chat-completions delta generator.
@@ -223,7 +287,6 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let stop_reason = delta.stop_reason.clone();
 
         // create choice
-        let index = delta.index.unwrap_or(0);
         let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
@@ -236,8 +299,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
-        let prompt_logprobs_payload =
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        let prompt_logprobs_payload = if self.capture_prompt_logprobs
+            || self.state.options().response_fields.prompt_logprobs
+        {
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+        } else {
+            None
+        };
+        if self.capture_prompt_logprobs {
+            response.inner.choices[0].internal_prompt_logprobs = prompt_logprobs_payload.clone();
+        }
         if let Some(nvext_response) =
             self.state
                 .options()
@@ -524,7 +595,11 @@ mod tests {
 
         assert_eq!(logprobs.tokens, vec!["hello"]);
         assert_eq!(logprobs.token_logprobs, vec![Some(-0.5)]);
-        assert!(logprobs.top_logprobs.is_empty());
+        assert_eq!(
+            logprobs.top_logprobs,
+            vec![serde_json::json!({"hello": -0.5})]
+        );
+        assert_eq!(logprobs.text_offset, vec![0]);
     }
 
     #[test]
@@ -550,20 +625,86 @@ mod tests {
             .expect("logprobs");
 
         assert_eq!(logprobs.tokens, vec!["token_id:123"]);
-        let top_logprobs = logprobs.top_logprobs[0]
-            .as_array()
-            .expect("top_logprobs array");
-        let other = top_logprobs
-            .iter()
-            .find(|item| item["token"] == "token_id:999")
-            .expect("top token_id formatting");
-        assert_eq!(other["bytes"], serde_json::json!(b"token_id:999"));
-        let selected = top_logprobs
-            .iter()
-            .find(|item| item["token"] == "token_id:123")
-            .expect("selected token fallback");
-        assert_eq!(selected["token"], "token_id:123");
-        assert_eq!(selected["bytes"], serde_json::json!(b"token_id:123"));
+        assert_eq!(
+            logprobs.top_logprobs[0],
+            serde_json::json!({
+                "token_id:999": -1.0, "token_id:123": -0.5
+            })
+        );
+        assert_eq!(logprobs.text_offset, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn test_completion_unicode_offsets_across_choices_chunks_and_aggregation() {
+        use crate::protocols::{Annotated, openai::ParsingOptions};
+        use futures::stream;
+
+        for return_ids in [false, true] {
+            let mut request = create_test_request();
+            request.inner.logprobs = Some(0);
+            request.return_tokens_as_token_ids = Some(return_ids);
+            let mut generator = request.response_generator("offsets".into());
+            let mut chunks = Vec::new();
+            // Choice 1 must not inherit choice 0's offset; Unicode is counted
+            // in code points, not UTF-8 bytes or UTF-16 code units.
+            for (index, tokens, ids, text, expected_offsets) in [
+                (
+                    0,
+                    vec!["é", "🦀"],
+                    vec![1, 22],
+                    "é🦀",
+                    if return_ids { vec![0, 10] } else { vec![0, 1] },
+                ),
+                (1, vec!["x"], vec![3], "x", vec![0]),
+                (0, vec!["z"], vec![4], "z", vec![2]),
+            ] {
+                let mut output = final_backend_output();
+                output.index = Some(index);
+                output.text = Some(text.into());
+                output.log_probs = Some(vec![-0.5; tokens.len()]);
+                output.tokens = tokens.into_iter().map(|token| Some(token.into())).collect();
+                output.token_ids = ids;
+                let response = generator.choice_from_postprocessor(output).unwrap();
+                assert_eq!(
+                    response.inner.choices[0]
+                        .logprobs
+                        .as_ref()
+                        .unwrap()
+                        .text_offset,
+                    expected_offsets
+                );
+                chunks.push(Annotated {
+                    data: Some(response),
+                    id: None,
+                    event: None,
+                    comment: None,
+                    error: None,
+                });
+            }
+            let response = NvCreateCompletionResponse::from_annotated_stream(
+                stream::iter(chunks),
+                ParsingOptions::default(),
+            )
+            .await
+            .unwrap();
+            let logprobs = response.inner.choices[0].logprobs.as_ref().unwrap();
+            assert_eq!(
+                logprobs.text_offset,
+                if return_ids {
+                    vec![0, 10, 21]
+                } else {
+                    vec![0, 1, 2]
+                }
+            );
+            assert_eq!(
+                response.inner.choices[1]
+                    .logprobs
+                    .as_ref()
+                    .unwrap()
+                    .text_offset,
+                vec![0]
+            );
+        }
     }
 
     #[test]

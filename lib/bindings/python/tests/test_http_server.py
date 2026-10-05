@@ -83,7 +83,7 @@ class MockHttpEngine:
         response_text = "This is a mock response."
         for i, char in enumerate(response_text):
             finish_reason = "stop" if i == len(response_text) - 1 else None
-            yield {
+            chunk = {
                 "id": f"chatcmpl-{context.id()}",
                 "object": "chat.completion.chunk",
                 "created": created,
@@ -96,6 +96,14 @@ class MockHttpEngine:
                     }
                 ],
             }
+            if i == 0 and request.get("prompt_logprobs") is not None:
+                # Integer map keys exercise direct Python -> Rust decoding,
+                # unlike a JSON-only fixture where object keys are strings.
+                chunk["internal_prompt_logprobs"] = [
+                    None,
+                    {7: {"logprob": -10000.0, "rank": 1, "decoded_token": "x"}},
+                ]
+            yield chunk
             await asyncio.sleep(0.01)
 
 
@@ -227,6 +235,41 @@ async def test_chat_completion_success(http_server):
                         content += chunk["choices"][0]["delta"]["content"]
 
             assert content == "This is a mock response."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_prompt_logprobs_python_bridge_is_unary_only(http_server, stream):
+    base_url, model_name = http_server
+    data = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "prompt_logprobs": 1,
+        "stream": stream,
+    }
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            response.raise_for_status()
+            if stream:
+                chunks = []
+                async for line in response.content:
+                    if line.startswith(b"data: ") and line.strip() != b"data: [DONE]":
+                        chunks.append(json.loads(line[len(b"data: ") :]))
+                assert chunks
+                for chunk in chunks:
+                    assert "prompt_logprobs" not in chunk
+                    assert "internal_prompt_logprobs" not in chunk
+            else:
+                body = await response.json()
+                assert body["prompt_logprobs"] == [
+                    None,
+                    {"7": {"logprob": -10000.0, "rank": 1, "decoded_token": "x"}},
+                ]
+                assert "internal_prompt_logprobs" not in body
 
 
 HTTP_ERROR_CASES = (

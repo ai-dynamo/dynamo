@@ -440,14 +440,7 @@ impl OpenAIStopConditionsProvider for UnifiedRequest {
 
 impl OpenAIOutputOptionsProvider for UnifiedRequest {
     fn get_logprobs(&self) -> Option<u32> {
-        match self.inner.inner.logprobs {
-            Some(true) => match self.inner.inner.top_logprobs {
-                Some(top_logprobs) => Some(top_logprobs as u32),
-                None => Some(1_u32),
-            },
-            Some(false) => None,
-            None => None,
-        }
+        OpenAIOutputOptionsProvider::get_logprobs(&self.inner)
     }
 
     fn get_prompt_logprobs(&self) -> Option<u32> {

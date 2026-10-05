@@ -41,7 +41,6 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
@@ -54,6 +53,11 @@ from .utils import (
     make_internal_error,
     random_uuid,
     resolve_chat_template,
+)
+from .vllm_logprobs import (
+    chat_logprob_content,
+    wants_sample_logprobs,
+    worker_sample_logprobs,
 )
 
 logger = logging.getLogger(__name__)
@@ -639,19 +643,6 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
-        logprobs = request.get("logprobs")
-        top_logprobs = request.get("top_logprobs")
-        if (
-            logprobs is True
-            or (isinstance(logprobs, int) and not isinstance(logprobs, bool))
-            or top_logprobs not in (None, 0)
-        ):
-            raise HttpError(
-                400,
-                "Validation: `logprobs` and `top_logprobs` are not supported by the "
-                "vLLM chat processor (--dyn-chat-processor vllm).",
-            )
-
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
         # Preserve user cache UUIDs alongside URL-backed media. UUID-only image
@@ -716,6 +707,11 @@ class VllmProcessor:
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
+        # Native chat converts the boolean request into a count, preserving
+        # explicit null and the omitted-count default of zero.
+        sampling_params.logprobs = (
+            request_for_sampling.top_logprobs if request_for_sampling.logprobs else None
+        )
         # nvext.max_thinking_tokens is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
@@ -904,6 +900,8 @@ class VllmProcessor:
         sp = vllm_preproc.sampling_params
         output_request_ids: dict[int, str]
         registered_request_ids: list[str]
+        capture_logprobs = wants_sample_logprobs(request)
+        pending_logprobs: dict[int, list[dict[str, Any]]] = {}
 
         if sp.n == 1:
             self.output_processor.add_request(vllm_preproc, None)
@@ -1033,6 +1031,10 @@ class VllmProcessor:
                     "stop_reason": stop_reason,
                 }
                 output_fields = getattr(EngineCoreOutput, "__struct_fields__", ())
+                if capture_logprobs:
+                    output_kwargs["new_logprobs"] = worker_sample_logprobs(
+                        engine_response
+                    )
                 if "is_segment_finished" in output_fields:
                     output_kwargs["is_segment_finished"] = engine_response.get(
                         "is_segment_finished", False
@@ -1069,8 +1071,19 @@ class VllmProcessor:
                             )
                             postprocess_error = True
                             break
+                        if capture_logprobs:
+                            pending_logprobs.setdefault(output.index, []).extend(
+                                chat_logprob_content(output, request, self.tokenizer)
+                            )
                         choice = post.process_output(output)
                         if choice:
+                            if capture_logprobs:
+                                content = pending_logprobs.pop(output.index, [])
+                                # Keep the postprocessor's reasoning-suppression
+                                # policy. Buffered tool/text deltas retain their
+                                # probabilities until that choice is emitted.
+                                if choice.get("logprobs") is not None:
+                                    choice["logprobs"] = {"content": content}
                             choices.append(choice)
 
                 if postprocess_error:
@@ -1080,7 +1093,12 @@ class VllmProcessor:
                 # One envelope per iteration carries both data and metrics so
                 # client cancellation can't drop the annotation between yields.
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
-                if choices:
+                prompt_logprobs = (
+                    (engine_response.get("engine_data") or {}).get("prompt_logprobs")
+                    if request.get("prompt_logprobs") is not None
+                    else None
+                )
+                if choices or prompt_logprobs is not None:
                     dynamo_out = {
                         "id": request_id,
                         "choices": choices,
@@ -1090,6 +1108,20 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
+                    if prompt_logprobs is not None:
+                        # Consumed by Rust's unary aggregator; the typed stream
+                        # response never serializes this field to client SSE.
+                        # Unlike serde_json, the direct Python deserializer does
+                        # not coerce JSON object keys into Rust token-ID integers.
+                        dynamo_out["internal_prompt_logprobs"] = [
+                            None
+                            if position is None
+                            else {
+                                int(token_id): entry
+                                for token_id, entry in position.items()
+                            }
+                            for position in prompt_logprobs
+                        ]
                     envelope["data"] = dynamo_out
 
                 metrics = {

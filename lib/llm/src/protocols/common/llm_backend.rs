@@ -28,6 +28,66 @@ pub struct PromptLogprobEntry {
 /// is `None` (no logprob exists for BOS / the very first prompt token).
 pub type PromptLogprobs = Vec<Option<std::collections::HashMap<TokenIdType, PromptLogprobEntry>>>;
 
+/// Restore numeric JSON map keys even after Serde's flattened wrappers have
+/// buffered them as strings. Also accept integer keys from the Python bridge.
+/// This parses typed entries directly instead of copying the prompt into a JSON DOM.
+pub(crate) fn deserialize_optional_prompt_logprobs<'de, D>(
+    deserializer: D,
+) -> Result<Option<PromptLogprobs>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Key {
+        Integer(TokenIdType),
+        Text(String),
+    }
+
+    struct Position(std::collections::HashMap<TokenIdType, PromptLogprobEntry>);
+
+    impl<'de> Deserialize<'de> for Position {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Position;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("a prompt logprob map keyed by unsigned token IDs")
+                }
+                fn visit_map<M: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: M,
+                ) -> Result<Position, M::Error> {
+                    let mut entries = std::collections::HashMap::new();
+                    while let Some((key, value)) = map.next_entry::<Key, PromptLogprobEntry>()? {
+                        let id = match key {
+                            Key::Integer(id) => id,
+                            Key::Text(key) => key
+                                .parse::<TokenIdType>()
+                                .map_err(serde::de::Error::custom)?,
+                        };
+                        if entries.insert(id, value).is_some() {
+                            return Err(serde::de::Error::custom(
+                                "duplicate prompt logprob token ID",
+                            ));
+                        }
+                    }
+                    Ok(Position(entries))
+                }
+            }
+            deserializer.deserialize_map(Visitor)
+        }
+    }
+
+    let positions = Option::<Vec<Option<Position>>>::deserialize(deserializer)?;
+    Ok(positions.map(|positions| {
+        positions
+            .into_iter()
+            .map(|position| position.map(|p| p.0))
+            .collect()
+    }))
+}
+
 /// Output type discriminator for different modalities
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -390,10 +450,16 @@ impl LLMEngineOutput {
 
 pub(crate) fn prompt_logprobs_from_engine_data(
     engine_data: Option<&serde_json::Value>,
-) -> Option<PromptLogprobs> {
-    engine_data?
-        .get("prompt_logprobs")
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
+) -> anyhow::Result<Option<PromptLogprobs>> {
+    let Some(value) = engine_data
+        .and_then(|data| data.get("prompt_logprobs"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("Malformed backend prompt_logprobs payload"))
 }
 
 impl MaybeError for LLMEngineOutput {

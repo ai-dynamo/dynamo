@@ -1363,6 +1363,7 @@ mod tests {
     fn chunk(text: &str, finish: bool) -> Annotated<NvCreateChatCompletionStreamResponse> {
         #[allow(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -2910,6 +2911,7 @@ mod tests {
             };
             #[allow(deprecated)]
             let response = NvCreateChatCompletionStreamResponse {
+                internal_prompt_logprobs: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test".to_string(),
                     choices: vec![make(0, index0.0, index0.1), make(1, index1.0, index1.1)],
@@ -3302,6 +3304,7 @@ mod tests {
         ) -> Annotated<NvCreateChatCompletionStreamResponse> {
             #[allow(deprecated)]
             let response = NvCreateChatCompletionStreamResponse {
+                internal_prompt_logprobs: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test".to_string(),
                     choices,

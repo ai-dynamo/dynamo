@@ -1252,11 +1252,11 @@ def vllm_processor_module(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generator_rejects_logprobs_including_zero_top_logprobs(
+async def test_generator_admits_logprobs_including_zero_top_logprobs(
     vllm_processor_module,
     monkeypatch,
 ):
-    preprocess_chat_request = AsyncMock()
+    preprocess_chat_request = AsyncMock(side_effect=RuntimeError("preprocess reached"))
     monkeypatch.setattr(
         vllm_processor_module,
         "preprocess_chat_request",
@@ -1265,14 +1265,14 @@ async def test_generator_rejects_logprobs_including_zero_top_logprobs(
 
     processor = vllm_processor_module.VllmProcessor(
         tokenizer=object(),
-        input_processor=object(),
+        input_processor=SimpleNamespace(renderer=object(), model_config=object()),
         output_processor=object(),
         tool_parser_class=None,
         reasoning_parser_class=None,
         routed_engine=object(),
     )
 
-    with pytest.raises(HttpError) as excinfo:
+    with pytest.raises(RuntimeError, match="preprocess reached"):
         await anext(
             processor._generator_inner(
                 {
@@ -1284,9 +1284,98 @@ async def test_generator_rejects_logprobs_including_zero_top_logprobs(
             )
         )
 
-    assert excinfo.value.code == 400
-    assert "logprobs" in excinfo.value.message
-    preprocess_chat_request.assert_not_awaited()
+    preprocess_chat_request.assert_awaited_once()
+
+
+@pytest.mark.parametrize("count", ["omitted", None, 0, 1])
+def test_generated_logprob_request_selection(vllm_processor_module, count):
+    request = {"logprobs": True}
+    if count != "omitted":
+        request["top_logprobs"] = count
+    assert vllm_processor_module.wants_sample_logprobs(request) is (count is not None)
+    request["logprobs"] = False
+    assert not vllm_processor_module.wants_sample_logprobs(request)
+
+
+def test_worker_logprob_rows_preserve_ragged_sampled_first_order(vllm_processor_module):
+    response = {
+        "token_ids": [5, 6],
+        "log_probs": [-0.5, -0.6],
+        "top_logprobs": [
+            [{"token_id": 5, "logprob": -0.5, "rank": 1}],
+            [
+                {"token_id": 9, "logprob": -0.1, "rank": 1},
+                {"token_id": 6, "logprob": -0.6, "rank": 2},
+            ],
+        ],
+    }
+    result = vllm_processor_module.worker_sample_logprobs(response)
+    assert [row.tolist() for row in result.logprob_token_ids] == [[5], [6, 9]]
+    assert [row.tolist() for row in result.logprobs] == [[-0.5], [-0.6, -0.1]]
+    assert result.sampled_token_ranks.tolist() == [1, 2]
+    assert vllm_processor_module.worker_sample_logprobs({"token_ids": []}) is None
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        None,
+        [],
+        [[]],
+        [[{}]],
+        [[{"token_id": 1, "logprob": float("nan"), "rank": 1}]],
+        [[{"token_id": 2, "logprob": -0.1, "rank": 1}]],
+    ],
+)
+def test_worker_logprobs_reject_malformed_without_silent_truncation(
+    vllm_processor_module, entries
+):
+    with pytest.raises((ValueError, TypeError), match="worker response"):
+        vllm_processor_module.worker_sample_logprobs(
+            {
+                "token_ids": [1],
+                "log_probs": [-0.1],
+                "top_logprobs": entries,
+            }
+        )
+
+
+@pytest.mark.parametrize("count", [None, 0, 1])
+@pytest.mark.parametrize("return_ids", [False, True])
+def test_chat_logprob_projection_bytes_count_and_selection(
+    vllm_processor_module, count, return_ids
+):
+    output = SimpleNamespace(
+        token_ids=[5],
+        logprobs=[
+            {
+                5: SimpleNamespace(logprob=-0.5, decoded_token="é"),
+                0: SimpleNamespace(logprob=float("-inf"), decoded_token="!"),
+            }
+        ],
+    )
+    request = {
+        "top_logprobs": count,
+        "return_tokens_as_token_ids": return_ids,
+    }
+    result = vllm_processor_module.chat_logprob_content(output, request, object())[0]
+    assert result["token"] == ("token_id:5" if return_ids else "é")
+    assert result["bytes"] == [195, 169]
+    assert len(result["top_logprobs"]) == (count or 0)
+
+
+@pytest.mark.parametrize("selected", [None, False, "-0.1", -0.2])
+def test_worker_logprobs_reject_conflicting_sampled_values(
+    vllm_processor_module, selected
+):
+    with pytest.raises(ValueError, match="Conflicting sampled"):
+        vllm_processor_module.worker_sample_logprobs(
+            {
+                "token_ids": [1],
+                "log_probs": [selected],
+                "top_logprobs": [[{"token_id": 1, "logprob": -0.1, "rank": 1}]],
+            }
+        )
 
 
 @pytest.mark.asyncio
@@ -1534,7 +1623,9 @@ def _base_preproc():
     }
 
 
-async def _run_generate(processor, preproc, *, mm_routing_info=None, context=None):
+async def _run_generate(
+    processor, preproc, *, mm_routing_info=None, context=None, request=None
+):
     vllm_preproc = SimpleNamespace(
         sampling_params=SimpleNamespace(n=1),
         request_id="vllm-request",
@@ -1546,7 +1637,7 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
         item
         async for item in processor._generate_and_stream(
             "request-id",
-            {"model": MODEL},
+            {"model": MODEL} if request is None else request,
             preproc,
             preproc["token_ids"],
             vllm_preproc,
@@ -1558,6 +1649,37 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("count", [None, 0, 1])
+    async def test_prompt_logprobs_use_internal_unary_projection(
+        self, vllm_processor_module, count
+    ):
+        payload = [None, {"0": {"logprob": -0.25, "rank": 1, "decoded_token": "!"}}]
+        routed_engine = _FakeRoutedEngine(
+            [
+                {
+                    "token_ids": [0],
+                    "index": 0,
+                    "engine_data": {"prompt_logprobs": payload},
+                }
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request={
+                "model": MODEL,
+                "prompt_logprobs": count,
+            },
+        )
+        data = chunks[0]["data"]
+        assert data.get("internal_prompt_logprobs") == (
+            [None, {0: payload[1]["0"]}] if count is not None else None
+        )
+        assert "prompt_logprobs" not in data
+        assert "nvext" not in data
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module

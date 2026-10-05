@@ -61,6 +61,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
     use dynamo_llm::protocols::common::SamplingOptionsProvider;
 
     let request = NvCreateChatCompletionRequest {
+        top_logprobs_explicit_null: false,
         add_generation_prompt: None,
         continue_final_message: None,
         inner: Default::default(),
@@ -319,6 +320,7 @@ fn test_completions_common_values() {
 fn test_serialization_preserves_structure() {
     // Test that serialization preserves the flattened structure
     let request = NvCreateChatCompletionRequest {
+        top_logprobs_explicit_null: false,
         add_generation_prompt: None,
         continue_final_message: None,
         inner: dynamo_protocols::types::CreateChatCompletionRequest {
@@ -390,6 +392,7 @@ fn test_sampling_parameters_extraction() {
 
     // Test that top_k and repetition_penalty are extracted in sampling options when passed a top level
     let request = NvCreateChatCompletionRequest {
+        top_logprobs_explicit_null: false,
         add_generation_prompt: None,
         continue_final_message: None,
         inner: Default::default(),

@@ -150,6 +150,7 @@ mod tests {
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {

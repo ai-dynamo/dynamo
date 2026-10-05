@@ -323,6 +323,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -366,6 +367,7 @@ fn mock_multi_choice_content_chunk(
         .collect();
 
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,
@@ -406,6 +408,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -441,6 +444,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -463,6 +467,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
 fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
     use dynamo_protocols::types::{CompletionUsage, CreateChatCompletionStreamResponse};
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![],
@@ -509,6 +514,7 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         })
         .collect();
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,

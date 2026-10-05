@@ -396,6 +396,7 @@ fn create_response_with_linear_probs(
     };
 
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices: vec![choice],
@@ -480,6 +481,7 @@ fn create_multi_choice_response(
         .collect();
 
     NvCreateChatCompletionStreamResponse {
+        internal_prompt_logprobs: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices,

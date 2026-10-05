@@ -990,6 +990,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         let service_tier = resp.inner.service_tier.as_ref().map(convert_service_tier);
 
         Ok(NvCreateChatCompletionRequest {
+            top_logprobs_explicit_null: false,
             add_generation_prompt: None,
             continue_final_message: None,
             inner: CreateChatCompletionRequest {
@@ -3003,6 +3004,7 @@ mod tests {
     fn test_into_nvresponse_from_chat_response() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3058,6 +3060,7 @@ mod tests {
     fn test_response_with_tool_calls() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3131,6 +3134,7 @@ mod tests {
     #[test]
     fn test_response_with_namespaced_tool_call() {
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3354,6 +3358,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3390,6 +3395,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3418,6 +3424,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3443,6 +3450,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3595,6 +3603,7 @@ mod tests {
             ChatChoice, ChatCompletionMessageContent, ChatCompletionResponseMessage, FinishReason,
         };
         NvCreateChatCompletionResponse {
+            prompt_logprobs: None,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![ChatChoice {
                     index: 0,

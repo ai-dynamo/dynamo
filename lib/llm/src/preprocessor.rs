@@ -5948,6 +5948,7 @@ impl OpenAIPreprocessor {
             });
             let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                    internal_prompt_logprobs: None,
                     inner,
                     nvext,
                     llm_metrics,
@@ -6060,6 +6061,7 @@ impl OpenAIPreprocessor {
                 } else {
                     p.response_template.take().map(|inner| Annotated {
                         data: Some(NvCreateChatCompletionStreamResponse {
+                            internal_prompt_logprobs: None,
                             inner,
                             nvext,
                             llm_metrics,
@@ -8017,6 +8019,7 @@ mod tests {
             logprobs: None,
         };
         Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            internal_prompt_logprobs: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
