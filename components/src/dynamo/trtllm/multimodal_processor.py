@@ -32,7 +32,6 @@ from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.http import (
-    HttpConfigurationError,
     HttpConnectionError,
     HttpStatusError,
     HttpTimeoutError,
@@ -427,14 +426,10 @@ class MultimodalRequestProcessor:
                 raise HttpStatusError(400, "Unsupported audio URL scheme", source)
         except UrlValidationError as exc:
             raise HttpStatusError(400, str(exc), source) from exc
-        except HttpStatusError:
-            raise
         except HttpTimeoutError as exc:
             raise HttpStatusError(408, "Timed out loading audio", source) from exc
         except HttpConnectionError as exc:
             raise HttpStatusError(400, "Could not load audio URL", source) from exc
-        except HttpConfigurationError:
-            raise
 
         try:
             waveform, sample_rate = await asyncio.to_thread(
