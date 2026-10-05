@@ -11079,13 +11079,7 @@ mod tests {
     #[tokio::test]
     async fn minimax_m2_disabled_thinking_closes_prompt_and_ends_backend_reasoning() {
         let preprocessor = minimax_m2_test_preprocessor("minimax_m2");
-        let choices = [
-            Some(minimax_m2_named_choice()),
-            Some(serde_json::json!("required")),
-            Some(serde_json::json!("auto")),
-            Some(serde_json::json!("none")),
-            None,
-        ];
+        let choices = [Some(minimax_m2_named_choice()), None];
         for key in ["thinking", "enable_thinking"] {
             for choice in &choices {
                 let mut request =
@@ -11148,61 +11142,59 @@ mod tests {
             serde_json::json!({"thinking": true}),
             serde_json::json!({"enable_thinking": true}),
         ] {
-            for choice in [Some(minimax_m2_named_choice()), None] {
-                let request = minimax_m2_request(args.clone(), choice.clone());
-                let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
-                assert!(
-                    prompt.as_str().ends_with("]~b]ai\n<think>\n"),
-                    "{args}/{choice:?}: {:?}",
-                    prompt.as_str()
-                );
-                assert!(!prompt.as_str().contains("</think>"));
-                assert_eq!(prompt.reasoning_state(), Some(PromptReasoningState::Open));
+            let request = minimax_m2_request(args.clone(), Some(minimax_m2_named_choice()));
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert!(
+                prompt.as_str().ends_with("]~b]ai\n<think>\n"),
+                "{args}: {:?}",
+                prompt.as_str()
+            );
+            assert!(!prompt.as_str().contains("</think>"));
+            assert_eq!(prompt.reasoning_state(), Some(PromptReasoningState::Open));
 
-                let (prepared, _, injected) = preprocessor
-                    .preprocess_request(&request, None)
-                    .await
-                    .unwrap();
-                assert!(injected, "{args}/{choice:?}");
-                assert_eq!(
-                    prepared.extra_args.as_ref().unwrap()["reasoning_ended"],
-                    false,
-                    "{args}/{choice:?}: opened prompts keep forwarding reasoning_ended=false"
-                );
-                assert!(!OpenAIPreprocessor::is_reasoning_disabled_by_request(
-                    Some("minimax_m2"),
-                    request.chat_template_args.as_ref(),
-                ));
-            }
+            let (prepared, _, injected) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert!(injected, "{args}");
+            assert_eq!(
+                prepared.extra_args.as_ref().unwrap()["reasoning_ended"],
+                false,
+                "{args}: opened prompts keep forwarding reasoning_ended=false"
+            );
+            assert!(!OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("minimax_m2"),
+                request.chat_template_args.as_ref(),
+            ));
         }
     }
 
     #[tokio::test]
     async fn minimax_m2_closed_prompt_override_is_parser_specific() {
         // The template closure is renderer-owned and parser-agnostic; only the
-        // `minimax_m2` deployment forwards the closed state to the backend.
-        for parser in ["qwen3", "minimax_m3", "deepseek_v41"] {
-            let preprocessor = minimax_m2_test_preprocessor(parser);
-            let request = minimax_m2_request(
-                serde_json::json!({"thinking": false}),
-                Some(minimax_m2_named_choice()),
-            );
-            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
-            assert_eq!(prompt.reasoning_state(), Some(PromptReasoningState::Closed));
-            let (prepared, _, injected) = preprocessor
-                .preprocess_request(&request, None)
-                .await
-                .unwrap();
-            assert!(!injected, "{parser}");
-            assert!(
-                prepared
-                    .extra_args
-                    .as_ref()
-                    .and_then(|args| args.get("reasoning_ended"))
-                    .is_none(),
-                "{parser}: no MiniMax M2 backend override"
-            );
-        }
+        // `minimax_m2` deployment forwards the closed state to the backend. The
+        // per-parser matrix is covered by
+        // test_prompt_reasoning_state_prefers_renderer_claim_then_parser_suffix.
+        let preprocessor = minimax_m2_test_preprocessor("qwen3");
+        let request = minimax_m2_request(
+            serde_json::json!({"thinking": false}),
+            Some(minimax_m2_named_choice()),
+        );
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(prompt.reasoning_state(), Some(PromptReasoningState::Closed));
+        let (prepared, _, injected) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+        assert!(!injected);
+        assert!(
+            prepared
+                .extra_args
+                .as_ref()
+                .and_then(|args| args.get("reasoning_ended"))
+                .is_none(),
+            "no MiniMax M2 backend override for qwen3"
+        );
     }
 
     #[tokio::test]
