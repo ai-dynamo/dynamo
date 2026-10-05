@@ -3342,6 +3342,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     @staticmethod
+    def _kv_cache_hit_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
+        """Expose final cache counters for internal router observability."""
+        prompt_tokens = request_output.prompt_token_ids
+        cached_tokens = request_output.num_cached_tokens
+        if prompt_tokens is None or cached_tokens is None:
+            return {}
+        return {
+            "prompt_tokens": len(prompt_tokens),
+            "reused_tokens": cached_tokens,
+        }
+
+    @staticmethod
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
@@ -3400,6 +3412,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
         session_id=None,
+        report_kv_cache_hit=True,
         want_engine_data=False,
     ):
         try:
@@ -3486,7 +3499,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     finish_reason,
                     stop_reason,
                 ) in prepared_outputs:
-                    out = {
+                    out: Dict[str, Any] = {
                         "index": output_idx,
                         "token_ids": token_ids,
                     }
@@ -3523,6 +3536,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        # With n > 1, later samples hit the prompt blocks earlier
+                        # ones just cached, and vLLM keeps the first buffered
+                        # sample's count when it merges outputs, so no sample's
+                        # count reliably measures prior reuse.
+                        kv_cache_hit = (
+                            BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                            if report_kv_cache_hit and sampling_params.n == 1
+                            else {}
+                        )
+                        if kv_cache_hit:
+                            out.setdefault("engine_data", {})[
+                                "kv_cache_hit"
+                            ] = kv_cache_hit
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
@@ -4022,6 +4048,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
                         session_id=session_id,
+                        # Transferred prefill KV counts as cached in vLLM, so a
+                        # decode attempt's count would not be local reuse.
+                        report_kv_cache_hit=kv_params is None,
                         want_engine_data=want_engine_data,
                     ):
                         if abort_guard is not None:
@@ -4346,6 +4375,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         request_output=res,
                     ),
                 }
+                # Parallel samples make the count unreliable; see generate_tokens.
+                kv_cache_hit = (
+                    BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                    if sampling_params.n == 1
+                    else {}
+                )
+                if kv_cache_hit:
+                    output["engine_data"] = {"kv_cache_hit": kv_cache_hit}
 
                 # Log prefill completion with LoRA info
                 self._log_with_lora_context(

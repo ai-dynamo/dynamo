@@ -44,6 +44,7 @@ func configureHybridCyborg(
 	if err := applyCyborgManifestPath(container, projection, modelStoragePath); err != nil {
 		return err
 	}
+	applyLocalPartitionIDs(container, projection)
 
 	cyborg.Annotations = roleAnnotations(
 		cyborg.Annotations,

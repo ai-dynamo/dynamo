@@ -5,6 +5,7 @@ package dynamo
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -113,7 +114,7 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 			t.Log("Render the role before runtime-specific lowering")
 			template, err := renderSelectedLPXRole(component, source, nil,
 				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
-				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()})
+				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: "serving"})
 			require.NoError(t, err)
 
 			t.Log("Retain authored security and use the ordinary shared memory default unless resized or disabled")
@@ -216,7 +217,7 @@ func TestLPXInputRevision(t *testing.T) {
 	source := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "hybrid", Namespace: "test", UID: "source", Generation: 1},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-			{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+			{ComponentName: "a-long-independent-prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeLPX, Replicas: ptr.To(int32(2)), LPX: &v1beta1.LPXConfig{BuildID: "hybrid-build"},
 				Roles: []v1beta1.ComponentRoleSpec{
 					{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{}},
@@ -228,22 +229,28 @@ func TestLPXInputRevision(t *testing.T) {
 	require.NoError(t, err)
 	require.Regexp(t, `^sha256:[a-f0-9]{64}$`, want)
 
-	t.Log("Prefill-only edits and DGD bookkeeping do not alter the LPX revision")
+	t.Log("Prefill capacity and DGD bookkeeping do not alter the LPX revision")
 	source.Generation++
 	source.ResourceVersion = "2"
 	source.Labels = map[string]string{"unrelated": "metadata"}
 	source.Annotations = map[string]string{"unrelated": "bookkeeping"}
-	source.Spec.Components[0].ComponentName = "a-long-independent-prefill"
 	source.Spec.Components[0].Replicas = ptr.To(int32(5))
 	source.Spec.Restart = &v1beta1.Restart{ID: "not-yet-selected"}
 	got, err := LPXInputRevision(source, "")
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 
-	t.Log("Each LPX component or shared-input change invalidates the revision; ordinary edits do not")
+	t.Log("LPX intent and cooperating worker serving edits invalidate the revision")
 	source.GetComponentByName("decode").LPX.Scheduling = &v1beta1.SchedulingSpec{}
 	want, err = LPXInputRevision(source, "")
 	require.NoError(t, err)
+	servingHash := mustComputeBetaDGDWorkersSpecHash(t, source)
+	servingChanges := map[string]bool{
+		"component/build": true, "agent/image": true, "conductor/image": true,
+		"conductor/arguments": true, "shared/environment": true, "ordinary/image": true,
+		"component/replicas": false, "component/min-available": false, "conductor/replicas": false,
+		"scheduling/deadline": false, "ignored/ordinary-replicas": false, "ignored/role-order": false,
+	}
 	for _, test := range []struct {
 		name       string
 		wantChange bool
@@ -281,6 +288,12 @@ func TestLPXInputRevision(t *testing.T) {
 		{"conductor/image", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "conductor:next"}}
 		}},
+		{"conductor/arguments", true, func(d *v1beta1.DynamoGraphDeployment) {
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Args: []string{"--setting", "new"}}}
+		}},
+		{"ignored/role-order", false, func(d *v1beta1.DynamoGraphDeployment) {
+			slices.Reverse(d.GetComponentByName("decode").Roles)
+		}},
 		{"agent/placement", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeSelector = map[string]string{"lpu": "new"}
 		}},
@@ -310,9 +323,10 @@ func TestLPXInputRevision(t *testing.T) {
 			d.Spec.Restart = &v1beta1.Restart{ID: "restart-selected"}
 			d.Status.Restart = &v1beta1.RestartStatus{ObservedID: d.Spec.Restart.ID, Phase: v1beta1.RestartPhaseRestarting, InProgress: []string{"decode"}}
 		}},
-		{"ignored/backend", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = "vllm" }},
+		{"shared/backend", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = "vllm" }},
+		{"ordinary/name", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].ComponentName = "new-prefill" }},
 		{"ignored/ordinary-replicas", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].Replicas = ptr.To(int32(9)) }},
-		{"ignored/ordinary-image", false, func(d *v1beta1.DynamoGraphDeployment) {
+		{"ordinary/image", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "prefill:next"}}}}
 		}},
 		{"ignored/ordinary-restart", false, func(d *v1beta1.DynamoGraphDeployment) {
@@ -335,6 +349,9 @@ func TestLPXInputRevision(t *testing.T) {
 			got, err := LPXInputRevision(changed, LPXRestartToken(changed, ""))
 			require.NoError(t, err)
 			require.Equal(t, test.wantChange, got != want)
+			if changes, checked := servingChanges[test.name]; checked {
+				require.Equal(t, changes, servingHash != mustComputeBetaDGDWorkersSpecHash(t, changed))
+			}
 		})
 	}
 
@@ -371,8 +388,10 @@ func TestLPXInputRevision(t *testing.T) {
 	target.Replicas = ptr.To(int32(1))
 	draft := target.DeepCopy()
 	draft.ComponentName = "small-model"
+	draft.Replicas = nil
 	draft.Roles = []v1beta1.ComponentRoleSpec{*draft.ComponentRole(v1beta1.ComponentRoleLPXAgent)}
 	pair.Spec.Components = append(pair.Spec.Components, *draft)
+	pairHash := mustComputeBetaDGDWorkersSpecHash(t, pair)
 	pairRevision, err := LPXInputRevision(pair, "")
 	require.NoError(t, err)
 	for _, name := range []string{draft.ComponentName, target.ComponentName} {
@@ -381,7 +400,13 @@ func TestLPXInputRevision(t *testing.T) {
 		after, err := LPXInputRevision(changed, "")
 		require.NoError(t, err)
 		require.NotEqual(t, pairRevision, after, name)
+		require.NotEqual(t, pairHash, mustComputeBetaDGDWorkersSpecHash(t, changed))
 	}
+	pair.GetComponentByName(draft.ComponentName).Replicas = ptr.To(int32(1))
+	require.Equal(t, pairHash, mustComputeBetaDGDWorkersSpecHash(t, pair))
+	pair.GetComponentByName(draft.ComponentName).Replicas = ptr.To(int32(2))
+	require.NotEqual(t, pairHash, mustComputeBetaDGDWorkersSpecHash(t, pair))
+	require.Equal(t, servingHash, mustComputeBetaDGDWorkersSpecHash(t, source))
 	got, err = LPXInputRevision(source, "selected-restart")
 	require.NoError(t, err)
 	require.NotEqual(t, want, got)

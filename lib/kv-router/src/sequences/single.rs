@@ -214,18 +214,18 @@ impl ActiveSequences {
             None
         };
 
+        if let Some(prefill) = prefill {
+            self.prefill.insert(&request_id, prefill, decay_now);
+        }
+
         self.requests.insert(
-            request_id.clone(),
+            request_id,
             RequestState {
                 blocks,
                 started_at,
                 expected_output_tokens,
             },
         );
-
-        if let Some(prefill) = prefill {
-            self.prefill.insert(&request_id, prefill, decay_now);
-        }
 
         self.validate_state();
         outcome

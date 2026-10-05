@@ -3,6 +3,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use prometheus::IntCounter;
+
 use crate::{
     kv_router::{
         KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
@@ -66,6 +68,37 @@ struct MaterializedOutputBlocks {
     blocks: Vec<ApproximateLruBlock>,
     start_position: usize,
     private_blocks: usize,
+}
+
+/// Router-side cached-prefix estimate captured for one tracked routing attempt: the prompt
+/// length, the best cached prefix among eligible workers, and the cached prefix on the
+/// selected worker (all raw tokens).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RouteObservation {
+    pub(super) prompt_tokens: u64,
+    pub(super) best_router_tokens: u64,
+    pub(super) selected_router_tokens: u64,
+}
+
+struct KvHitTracking {
+    prompt_tokens: u64,
+    /// Taken by the first valid worker report, so an attempt counts at most once.
+    reused_tokens: Option<IntCounter>,
+}
+
+/// Cache-hit report the worker attaches to its final chunk (`engine_data.kv_cache_hit`).
+#[derive(serde::Deserialize)]
+struct WorkerCacheHitReport {
+    prompt_tokens: u64,
+    reused_tokens: u64,
+}
+
+fn worker_cache_hit_tokens(prompt_tokens: u64, value: &serde_json::Value) -> Option<u64> {
+    let report = <WorkerCacheHitReport as serde::Deserialize>::deserialize(value).ok()?;
+    if report.prompt_tokens != prompt_tokens {
+        return None;
+    }
+    Some(report.reused_tokens)
 }
 
 pub(crate) fn prompt_private_blocks(
@@ -574,31 +607,16 @@ pub(super) struct RequestGuard {
     record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
+    kv_hit: Option<KvHitTracking>,
     _lora_load: Option<LoraLoadGuard>,
 }
 
 impl RequestGuard {
-    pub(super) fn new_kv(
-        chooser: Arc<KvRouter>,
-        request_metrics: Arc<RouterRequestMetrics>,
-        context_id: String,
-        worker: WorkerWithDpRank,
-        booking: Option<BookingHandle>,
-        request: &PreprocessedRequest,
-        request_lifecycle: Option<Box<RequestLifecycle>>,
-    ) -> Self {
-        Self::new_kv_with_cleanup(
-            request_metrics,
-            KvRequestCleanup::new(chooser, context_id, worker, booking),
-            request,
-            request_lifecycle,
-        )
-    }
-
     pub(super) fn new_kv_with_cleanup(
         request_metrics: Arc<RouterRequestMetrics>,
         mut cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
+        kv_route: Option<RouteObservation>,
         mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         if let Some(lifecycle) = request_lifecycle.as_mut() {
@@ -620,6 +638,15 @@ impl RequestGuard {
         if attempt_id.is_some() {
             request_metrics.requests_started_total.inc();
         }
+        let kv_hit = kv_route.map(|route| KvHitTracking {
+            prompt_tokens: route.prompt_tokens,
+            reused_tokens: Some(request_metrics.observe_kv_route_estimate(
+                request.phase(),
+                &request.model,
+                route.best_router_tokens,
+                route.selected_router_tokens,
+            )),
+        });
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
             .as_ref()
@@ -638,6 +665,7 @@ impl RequestGuard {
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            kv_hit,
             _lora_load: None,
         }
     }
@@ -667,6 +695,7 @@ impl RequestGuard {
             record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            kv_hit: None,
             _lora_load: lora_load,
         }
     }
@@ -800,6 +829,7 @@ impl RequestGuard {
             );
         }
         self.observability.observe_tokens(new_tokens);
+        self.capture_kv_worker_hit(item);
         let cumulative_osl = self.observability.cumulative_osl();
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
@@ -860,6 +890,28 @@ impl RequestGuard {
         }
         self.cleanup.finish().await;
     }
+
+    /// Count a worker report once, even if the stream subsequently fails or is cancelled.
+    fn capture_kv_worker_hit(&mut self, item: &Annotated<LLMEngineOutput>) {
+        let Some(kv) = self.kv_hit.as_mut() else {
+            return;
+        };
+        if kv.reused_tokens.is_none() {
+            return;
+        }
+        let Some(reused) = item
+            .data
+            .as_ref()
+            .and_then(|data| data.engine_data.as_ref())
+            .and_then(|data| data.get("kv_cache_hit"))
+            .and_then(|value| worker_cache_hit_tokens(kv.prompt_tokens, value))
+        else {
+            return;
+        };
+        if let Some(counter) = kv.reused_tokens.take() {
+            counter.inc_by(reused);
+        }
+    }
 }
 
 impl Drop for RequestGuard {
@@ -867,6 +919,48 @@ impl Drop for RequestGuard {
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
+    }
+}
+
+#[cfg(test)]
+mod kv_cache_hit_tests {
+    use super::*;
+
+    fn report(reused: u64) -> serde_json::Value {
+        serde_json::json!({
+            "prompt_tokens": 100,
+            "reused_tokens": reused,
+        })
+    }
+
+    #[test]
+    fn worker_values_may_exceed_router_estimate_and_prompt_length() {
+        assert_eq!(worker_cache_hit_tokens(100, &report(135)), Some(135));
+    }
+
+    #[test]
+    fn missing_invalid_or_mismatched_reports_are_rejected() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"prompt_tokens": 100}),
+            serde_json::json!({"prompt_tokens": 99, "reused_tokens": 70}),
+            serde_json::json!({"prompt_tokens": 100, "reused_tokens": -1}),
+            serde_json::json!({"prompt_tokens": 100, "reused_tokens": null}),
+        ] {
+            assert_eq!(worker_cache_hit_tokens(100, &value), None);
+        }
+    }
+
+    #[test]
+    fn zero_reports_and_additive_extensions_are_accepted() {
+        let mut value = report(0);
+        value["tiers"] = serde_json::json!({"device": 0});
+        value["lookup_tokens"] = 0.into();
+        assert_eq!(worker_cache_hit_tokens(100, &value), Some(0));
+        assert_eq!(
+            worker_cache_hit_tokens(100, &report(u64::MAX)),
+            Some(u64::MAX)
+        );
     }
 }
 
@@ -1081,32 +1175,7 @@ mod prefill_start_tests {
     }
 
     fn test_metrics() -> Arc<RouterRequestMetrics> {
-        fn hist(name: &str) -> prometheus::Histogram {
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
-        }
-        fn hist_vec(name: &str) -> prometheus::HistogramVec {
-            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
-                .unwrap()
-        }
-        Arc::new(RouterRequestMetrics {
-            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
-                .unwrap(),
-            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
-            time_to_first_token_seconds: hist("ttft_seconds"),
-            inter_token_latency_seconds: hist("itl_seconds"),
-            input_sequence_tokens: hist("isl_tokens"),
-            output_sequence_tokens: hist("osl_tokens"),
-            kv_hit_rate: hist("kv_hit_rate"),
-            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
-            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
-            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
-            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
-                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
-                &["reason"],
-            )
-            .unwrap(),
-            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
-        })
+        RouterRequestMetrics::for_test(&dynamo_runtime::MetricsRegistry::new())
     }
 
     async fn dispatch_once(phase: RequestPhase, annotations: Vec<String>) -> Arc<RequestTracker> {
