@@ -13,7 +13,10 @@ use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
     KvIndexerInterface, ObservationError, SyncIndexer, ThreadPoolIndexer, ThreadPoolObservationPlan,
 };
-use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent};
+use dynamo_kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    KvCacheStoredBlockData, RouterEvent,
+};
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};
 
@@ -21,8 +24,20 @@ pub use dynamo_bench::kv_router_common::issuer::parse_cpu_list;
 use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_current_thread};
 
 use super::mooncake_shared::{MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry};
+use super::scaling_diag::{
+    CorrectnessReport, CountSummary, PrepTimings, ProcessMemory, ProcessThreadSnapshot,
+    ReferenceIndex, ScoreMismatch, THREAD_NAME_EVENT_ISSUER, THREAD_NAME_QUERY_ISSUER,
+    ThreadCpuReport, WorkloadDiagnostics, compare_scores, count_summary, process_memory,
+    snapshot_process_threads, thread_cpu_report,
+};
 
-const RESULT_SCHEMA_VERSION: u32 = 3;
+const RESULT_SCHEMA_VERSION: u32 = 4;
+/// Sequence and local hash of the throwaway block used to register every rank before timing.
+const REGISTRATION_BLOCK_HASH: u64 = 0x9E37_79B9_7F4A_7C15;
+/// Matched-rank bucket upper bounds for the query-service breakdown.
+const MATCHED_BUCKET_BOUNDS: [u32; 7] = [0, 8, 64, 256, 1024, 4096, u32::MAX];
+/// At most this many per-operation failure reasons are listed by ID.
+const MAX_LISTED_FAILED_EVENTS: usize = 16;
 const EMPTY_OPERATION_ID: u32 = u32::MAX;
 
 #[derive(Clone, Debug)]
@@ -35,6 +50,10 @@ pub struct OpenLoopConfig {
     pub issuer_cpus: Vec<usize>,
     pub query_issuer_cpu: Option<usize>,
     pub backend_cpus: Vec<usize>,
+    /// Register every rank (one store plus remove per rank, then flush) before timing.
+    pub pre_register_ranks: bool,
+    pub guard_lag_p99_us: u64,
+    pub guard_issuer_active_fraction: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -92,12 +111,9 @@ pub(crate) struct PreparedMooncakeCorpus {
     block_size: u32,
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-impl PreparedMooncakeCorpus {
-    pub(crate) fn query_hashes(&self, operation_id: u32) -> anyhow::Result<&[LocalBlockHash]> {
+impl QueryCorpus {
+    fn query_hashes(&self, operation_id: u32) -> anyhow::Result<&[LocalBlockHash]> {
         let spec = self
-            .query_corpus
             .specs
             .get(operation_id as usize)
             .filter(|spec| spec.valid)
@@ -106,11 +122,19 @@ impl PreparedMooncakeCorpus {
         let end = start
             .checked_add(spec.len as usize)
             .ok_or_else(|| anyhow::anyhow!("query {operation_id} hash range overflow"))?;
-        self.query_corpus.hashes.get(start..end).ok_or_else(|| {
+        self.hashes.get(start..end).ok_or_else(|| {
             anyhow::anyhow!(
                 "query {operation_id} hash range {start}..{end} exceeds the flattened slab"
             )
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+impl PreparedMooncakeCorpus {
+    pub(crate) fn query_hashes(&self, operation_id: u32) -> anyhow::Result<&[LocalBlockHash]> {
+        self.query_corpus.query_hashes(operation_id)
     }
 
     pub(crate) fn test_block_totals(&self) -> (usize, usize) {
@@ -141,9 +165,28 @@ pub struct PreparedOpenLoopTrial {
     lane_capacities: Vec<usize>,
     expected_events_by_worker: Vec<(u64, usize)>,
     deadline_query_counts: Vec<u32>,
+    /// Per operation ID: 0 query, 1 stored, 2 removed, 3 cleared.
+    operation_kinds: Box<[u8]>,
     totals: MooncakeTraceTotals,
     benchmark_duration_ns: u64,
     block_size: u32,
+}
+
+fn event_kind_code(data: &KvCacheEventData) -> u8 {
+    match data {
+        KvCacheEventData::Stored(_) => 1,
+        KvCacheEventData::Removed(_) => 2,
+        KvCacheEventData::Cleared => 3,
+    }
+}
+
+fn event_kind_name(code: u8) -> &'static str {
+    match code {
+        1 => "stored",
+        2 => "removed",
+        3 => "cleared",
+        _ => "unknown",
+    }
 }
 
 impl PreparedOpenLoopTrial {
@@ -341,12 +384,17 @@ pub(crate) fn prepare_open_loop_trial(
     } = corpus;
     let mut dispatch = Vec::with_capacity(operations.len());
     let mut operation_workers = Vec::with_capacity(operations.len());
+    let mut operation_kinds = Vec::with_capacity(operations.len());
     let mut lane_capacities = vec![0usize; query_lanes];
     let mut deadline_query_counts = Vec::<u32>::new();
     let mut previous_deadline = None;
 
     for operation in operations {
         operation_workers.push(operation.worker_id);
+        operation_kinds.push(match &operation.payload {
+            MooncakeOperationPayload::Query => 0,
+            MooncakeOperationPayload::Event(event) => event_kind_code(&event.event.data),
+        });
         if previous_deadline != Some(operation.deadline_ns) {
             previous_deadline = Some(operation.deadline_ns);
             deadline_query_counts.push(0);
@@ -378,6 +426,7 @@ pub(crate) fn prepare_open_loop_trial(
         lane_capacities,
         expected_events_by_worker,
         deadline_query_counts,
+        operation_kinds: operation_kinds.into_boxed_slice(),
         totals,
         benchmark_duration_ns,
         block_size,
@@ -429,6 +478,8 @@ struct QueryCompletion {
     id: u32,
     started_ns: u64,
     finished_ns: u64,
+    /// Ranks in the returned score map; read from its length, so no O(M) work is added.
+    matched: u32,
     success: bool,
 }
 
@@ -483,12 +534,14 @@ async fn query_lane_worker<T: SyncIndexer>(
             };
             let started_ns = elapsed_ns(epoch);
             let output = indexer.backend().find_matches(hashes, false);
+            let matched = u32::try_from(output.scores.len()).unwrap_or(u32::MAX);
             black_box(output);
             let finished_ns = elapsed_ns(epoch);
             *slot = QueryCompletion {
                 id,
                 started_ns,
                 finished_ns,
+                matched,
                 success: true,
             };
             consumed += 1;
@@ -554,7 +607,28 @@ struct IssuerOutput {
     records: Box<[LocalIssueRecord]>,
     written: usize,
     issuer_cpu_ns: u64,
+    activity: IssuerActivity,
     failure: Option<IssuerFailure>,
+}
+
+/// Issuer time spent issuing rather than waiting for a deadline (or, for event issuers, for
+/// the deadline's queries). A group's active time runs from the moment its deadline was reached
+/// (or the issuer arrived late) to the acceptance of its last operation.
+#[derive(Clone, Copy, Debug, Default)]
+struct IssuerActivity {
+    active_ns: u64,
+    deadline_groups: usize,
+    late_groups: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IssuerRawStats {
+    role: &'static str,
+    index: usize,
+    cpu: Option<usize>,
+    ops: usize,
+    cpu_ns: u64,
+    activity: IssuerActivity,
 }
 
 struct IssuerStorage {
@@ -617,6 +691,7 @@ fn issue_queries(
 ) -> IssuerOutput {
     let cpu_started = thread_cpu_time_ns();
     let mut failure = initial_failure;
+    let mut activity = IssuerActivity::default();
     let mut entries = dispatch.into_iter().peekable();
 
     while failure.is_none() {
@@ -625,9 +700,12 @@ fn issue_queries(
         };
         let deadline_ns = first.deadline_ns;
         let deadline_group = first.deadline_group as usize;
-        context
+        let (group_start_ns, waited) = context
             .clock
             .wait_until(context.start_ns.saturating_add(deadline_ns));
+        activity.deadline_groups += 1;
+        activity.late_groups += usize::from(!waited);
+        let mut last_accepted_ns = group_start_ns;
         storage.touched_lanes.clear();
 
         while entries
@@ -652,9 +730,10 @@ fn issue_queries(
                         storage.touched_flags[lane] = true;
                         storage.touched_lanes.push(lane);
                     }
+                    last_accepted_ns = context.clock.now_ns();
                     let record = IssueRecord {
                         scheduled_ns,
-                        accepted_ns: context.clock.now_ns(),
+                        accepted_ns: last_accepted_ns,
                         queue_id: lane as u16,
                         kind: OperationKind::Query,
                         accepted: true,
@@ -673,6 +752,7 @@ fn issue_queries(
             &mut storage.touched_flags,
             &storage.touched_lanes,
         );
+        activity.active_ns += last_accepted_ns.saturating_sub(group_start_ns);
         if failure.is_some() {
             context.peer_failed.store(true, Ordering::Release);
             break;
@@ -691,6 +771,7 @@ fn issue_queries(
         records: storage.records,
         written: storage.written,
         issuer_cpu_ns: thread_cpu_time_ns().saturating_sub(cpu_started),
+        activity,
         failure,
     }
 }
@@ -703,6 +784,7 @@ fn issue_events<T: SyncIndexer>(
 ) -> IssuerOutput {
     let cpu_started = thread_cpu_time_ns();
     let mut failure = initial_failure;
+    let mut activity = IssuerActivity::default();
     let mut entries = dispatch.into_iter().peekable();
 
     while failure.is_none() {
@@ -711,16 +793,23 @@ fn issue_events<T: SyncIndexer>(
         };
         let deadline_ns = first.deadline_ns;
         let deadline_group = first.deadline_group as usize;
-        context
+        let (mut group_start_ns, waited) = context
             .clock
             .wait_until(context.start_ns.saturating_add(deadline_ns));
-        if !wait_for_deadline_queries(
+        let Some(spun) = wait_for_deadline_queries(
             context.deadline_ready.get(deadline_group),
             context.peer_failed,
-        ) {
+        ) else {
             failure = Some(IssuerFailure::PeerFailed);
             break;
+        };
+        if spun {
+            // Waiting on the query issuer is idle time, not issuing work.
+            group_start_ns = context.clock.now_ns();
         }
+        activity.deadline_groups += 1;
+        activity.late_groups += usize::from(!waited);
+        let mut last_accepted_ns = group_start_ns;
 
         while entries
             .peek()
@@ -740,6 +829,7 @@ fn issue_events<T: SyncIndexer>(
                     let enqueue_result = enqueue_event(&context, event, entry.id);
                     match enqueue_result {
                         Ok((event_worker, accepted_ns)) => {
+                            last_accepted_ns = accepted_ns;
                             let record = IssueRecord {
                                 scheduled_ns,
                                 accepted_ns,
@@ -760,6 +850,7 @@ fn issue_events<T: SyncIndexer>(
                 }
             }
         }
+        activity.active_ns += last_accepted_ns.saturating_sub(group_start_ns);
     }
 
     if failure.is_some() {
@@ -769,6 +860,7 @@ fn issue_events<T: SyncIndexer>(
         records: storage.records,
         written: storage.written,
         issuer_cpu_ns: thread_cpu_time_ns().saturating_sub(cpu_started),
+        activity,
         failure,
     }
 }
@@ -785,20 +877,22 @@ fn enqueue_event<T: SyncIndexer>(
         .map_err(|_| ())
 }
 
+/// Spin until the deadline's queries are published. Returns `None` when a peer failed and
+/// `Some(spun)` otherwise, where `spun` says whether the queries were not yet published.
 fn wait_for_deadline_queries(
     deadline_ready: Option<&AtomicBool>,
     peer_failed: &AtomicBool,
-) -> bool {
-    let Some(ready) = deadline_ready else {
-        return false;
-    };
+) -> Option<bool> {
+    let ready = deadline_ready?;
+    let mut spun = false;
     while !ready.load(Ordering::Acquire) {
         if peer_failed.load(Ordering::Acquire) {
-            return false;
+            return None;
         }
+        spun = true;
         std::hint::spin_loop();
     }
-    true
+    Some(spun)
 }
 
 fn publish_touched(
@@ -897,6 +991,85 @@ pub struct OpenLoopResult {
     pub failure_reasons: Vec<String>,
     pub backend_timing_report: String,
     pub provenance: Option<RunProvenance>,
+    pub scaling: ScalingDiagnostics,
+    /// Untimed preparation phases, filled in by the bench entrypoint.
+    pub prep: Option<PrepTimings>,
+    /// Per-inference-worker workload shape, filled in by the bench entrypoint.
+    pub workload: Option<WorkloadDiagnostics>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct RegistrationStats {
+    pub enabled: bool,
+    pub ranks: usize,
+    pub elapsed_ms: f64,
+    pub failures: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct IssuerThreadStats {
+    pub role: &'static str,
+    pub index: usize,
+    pub cpu: Option<usize>,
+    pub ops: usize,
+    pub deadline_groups: usize,
+    /// Groups whose deadline had already passed when the issuer reached them.
+    pub late_groups: usize,
+    pub active_ns: u64,
+    pub cpu_ns: u64,
+    /// `active_ns / issue_span_ns`. Headroom metric: issuers sleep and then busy-spin up to
+    /// `--issuer-spin-us` before each deadline, so `cpu_fraction` is near 1 whenever deadlines
+    /// are denser than the spin interval and does not measure headroom.
+    pub active_fraction: f64,
+    pub cpu_fraction: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct MatchedBucket {
+    pub min_ranks: u32,
+    pub max_ranks: u32,
+    pub queries: usize,
+    pub service: Distribution,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct HarnessGuard {
+    pub generator_valid: bool,
+    pub lag_p99_threshold_us: u64,
+    pub read_issue_lag_p99_ok: bool,
+    pub update_issue_lag_p99_ok: bool,
+    pub issuer_active_threshold: f64,
+    pub max_issuer_active_fraction: f64,
+    pub issuer_active_ok: bool,
+    pub no_failed_events: bool,
+    pub no_registration_failures: bool,
+    pub pass: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ScalingDiagnostics {
+    pub inference_workers: usize,
+    pub registration: RegistrationStats,
+    pub issuers: Vec<IssuerThreadStats>,
+    pub threads: ThreadCpuReport,
+    pub memory_at_window_start: ProcessMemory,
+    pub memory_at_end: ProcessMemory,
+    pub matched_ranks_per_query: CountSummary,
+    pub queries_with_more_than_256_matches: usize,
+    pub query_service_by_matched_ranks: Vec<MatchedBucket>,
+    pub failed_events: usize,
+    pub failed_events_by_kind: BTreeMap<&'static str, usize>,
+    pub harness_guard: HarnessGuard,
+}
+
+/// Untimed inputs to the scaling diagnostics, collected around the measured window.
+struct ScalingInput {
+    registration: RegistrationStats,
+    issuers: Vec<IssuerRawStats>,
+    threads_before: ProcessThreadSnapshot,
+    threads_after: ProcessThreadSnapshot,
+    memory_at_window_start: ProcessMemory,
+    memory_at_end: ProcessMemory,
 }
 
 fn partition_dispatch(
@@ -936,6 +1109,87 @@ fn partition_dispatch(
         }
     }
     Ok((queries, event_shards))
+}
+
+fn issuer_raw_stats(outputs: &[IssuerOutput], config: &OpenLoopConfig) -> Vec<IssuerRawStats> {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(position, output)| {
+            let (role, index, cpu) = if position == 0 {
+                ("query", 0, config.query_issuer_cpu)
+            } else {
+                (
+                    "event",
+                    position - 1,
+                    config.issuer_cpus.get(position - 1).copied(),
+                )
+            };
+            IssuerRawStats {
+                role,
+                index,
+                cpu,
+                ops: output.written,
+                cpu_ns: output.issuer_cpu_ns,
+                activity: output.activity,
+            }
+        })
+        .collect()
+}
+
+fn registration_event(worker_id: u64, store: bool) -> RouterEvent {
+    let hash = ExternalSequenceBlockHash(REGISTRATION_BLOCK_HASH);
+    let data = if store {
+        KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: None,
+            start_position: None,
+            blocks: vec![KvCacheStoredBlockData {
+                block_hash: hash,
+                tokens_hash: LocalBlockHash(REGISTRATION_BLOCK_HASH),
+                mm_extra_info: None,
+            }],
+        })
+    } else {
+        KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![hash],
+        })
+    };
+    RouterEvent::new(
+        worker_id,
+        KvCacheEvent {
+            event_id: u64::MAX - u64::from(store),
+            data,
+            dp_rank: 0,
+        },
+    )
+}
+
+/// Register every rank before timing so first-sight registration (the CRTC slot table is
+/// copied per new rank under one mutex, O(W^2) in total) does not land at t=0 of the window.
+/// Ranks are visited in ascending ID order, the same order `begin_observation` uses, so the
+/// rank-to-event-thread assignment is unchanged. Each rank stores and then removes one
+/// throwaway block whose local hash no query contains.
+async fn pre_register_ranks<T: SyncIndexer>(
+    indexer: &ThreadPoolIndexer<T>,
+    workers: &[(u64, usize)],
+) -> RegistrationStats {
+    let started = Instant::now();
+    let mut failures = 0usize;
+    for store in [true, false] {
+        for &(worker_id, _) in workers {
+            let applied = indexer
+                .apply_event_and_wait(registration_event(worker_id, store))
+                .await;
+            failures += usize::from(applied.is_err());
+        }
+    }
+    failures += usize::from(indexer.flush_and_wait().await.is_err());
+    RegistrationStats {
+        enabled: true,
+        ranks: workers.len(),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
+        failures,
+    }
 }
 
 fn aggregate_issuer_outputs(
@@ -984,6 +1238,11 @@ pub async fn run_open_loop<T: SyncIndexer>(
     config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
     trial.page_touch_untimed();
+    let registration = if config.pre_register_ranks {
+        pre_register_ranks(indexer.as_ref(), &trial.expected_events_by_worker).await
+    } else {
+        RegistrationStats::default()
+    };
     let clock = BenchmarkClock::new(config.spin_us.saturating_mul(1_000))?;
     let epoch = clock.epoch();
 
@@ -1034,6 +1293,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         .map(|shard| IssuerStorage::new(shard.len(), lanes.len()))
         .collect::<Vec<_>>();
     let deadline_ready = deadline_readiness(trial.deadline_query_counts);
+    let inference_workers = trial.expected_events_by_worker.len();
     let observation = indexer
         .begin_observation(ThreadPoolObservationPlan {
             epoch,
@@ -1044,6 +1304,9 @@ pub async fn run_open_loop<T: SyncIndexer>(
     let start_signal = AtomicU64::new(0);
     let ready_barrier = Barrier::new(issuer_count + 2);
     let start_barrier = Barrier::new(issuer_count + 2);
+    // Untimed: sampled before the issuers exist, so their CPU is measured in-thread instead.
+    let memory_at_window_start = process_memory();
+    let threads_before = snapshot_process_threads(clock.now_ns());
     let (start_ns, issuer_outputs) = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(issuer_count + 1);
         let query_clock = &clock;
@@ -1054,31 +1317,36 @@ pub async fn run_open_loop<T: SyncIndexer>(
         let query_start_barrier = &start_barrier;
         let query_start_signal = &start_signal;
         let query_cpu = config.query_issuer_cpu;
-        handles.push(scope.spawn(move || {
-            let mut initial_failure = pin_current_thread(query_cpu)
-                .err()
-                .map(|_| IssuerFailure::Affinity);
-            if initial_failure.is_some() {
-                query_peer_failed.store(true, Ordering::Release);
-            }
-            query_ready_barrier.wait();
-            query_start_barrier.wait();
-            if initial_failure.is_none() && query_peer_failed.load(Ordering::Acquire) {
-                initial_failure = Some(IssuerFailure::PeerFailed);
-            }
-            issue_queries(
-                QueryIssuerContext {
-                    lanes: query_lanes,
-                    deadline_ready: query_deadline_ready,
-                    peer_failed: query_peer_failed,
-                    clock: query_clock,
-                    start_ns: query_start_signal.load(Ordering::Acquire),
-                },
-                query_dispatch,
-                query_storage,
-                initial_failure,
-            )
-        }));
+        let query_thread = std::thread::Builder::new().name(THREAD_NAME_QUERY_ISSUER.to_string());
+        handles.push(
+            query_thread
+                .spawn_scoped(scope, move || {
+                    let mut initial_failure = pin_current_thread(query_cpu)
+                        .err()
+                        .map(|_| IssuerFailure::Affinity);
+                    if initial_failure.is_some() {
+                        query_peer_failed.store(true, Ordering::Release);
+                    }
+                    query_ready_barrier.wait();
+                    query_start_barrier.wait();
+                    if initial_failure.is_none() && query_peer_failed.load(Ordering::Acquire) {
+                        initial_failure = Some(IssuerFailure::PeerFailed);
+                    }
+                    issue_queries(
+                        QueryIssuerContext {
+                            lanes: query_lanes,
+                            deadline_ready: query_deadline_ready,
+                            peer_failed: query_peer_failed,
+                            clock: query_clock,
+                            start_ns: query_start_signal.load(Ordering::Acquire),
+                        },
+                        query_dispatch,
+                        query_storage,
+                        initial_failure,
+                    )
+                })
+                .expect("spawn query issuer thread"),
+        );
         for (issuer_idx, (dispatch, storage)) in event_dispatch_shards
             .into_iter()
             .zip(issuer_storages)
@@ -1092,31 +1360,37 @@ pub async fn run_open_loop<T: SyncIndexer>(
             let issuer_ready_barrier = &ready_barrier;
             let issuer_start_barrier = &start_barrier;
             let issuer_start_signal = &start_signal;
-            handles.push(scope.spawn(move || {
-                let mut initial_failure = pin_current_thread(issuer_cpu)
-                    .err()
-                    .map(|_| IssuerFailure::Affinity);
-                if initial_failure.is_some() {
-                    issuer_peer_failed.store(true, Ordering::Release);
-                }
-                issuer_ready_barrier.wait();
-                issuer_start_barrier.wait();
-                if initial_failure.is_none() && issuer_peer_failed.load(Ordering::Acquire) {
-                    initial_failure = Some(IssuerFailure::PeerFailed);
-                }
-                issue_events(
-                    EventIssuerContext {
-                        indexer: issuer_indexer,
-                        deadline_ready: issuer_deadline_ready,
-                        peer_failed: issuer_peer_failed,
-                        clock: issuer_clock,
-                        start_ns: issuer_start_signal.load(Ordering::Acquire),
-                    },
-                    dispatch,
-                    storage,
-                    initial_failure,
-                )
-            }));
+            let issuer_thread =
+                std::thread::Builder::new().name(format!("{THREAD_NAME_EVENT_ISSUER}{issuer_idx}"));
+            handles.push(
+                issuer_thread
+                    .spawn_scoped(scope, move || {
+                        let mut initial_failure = pin_current_thread(issuer_cpu)
+                            .err()
+                            .map(|_| IssuerFailure::Affinity);
+                        if initial_failure.is_some() {
+                            issuer_peer_failed.store(true, Ordering::Release);
+                        }
+                        issuer_ready_barrier.wait();
+                        issuer_start_barrier.wait();
+                        if initial_failure.is_none() && issuer_peer_failed.load(Ordering::Acquire) {
+                            initial_failure = Some(IssuerFailure::PeerFailed);
+                        }
+                        issue_events(
+                            EventIssuerContext {
+                                indexer: issuer_indexer,
+                                deadline_ready: issuer_deadline_ready,
+                                peer_failed: issuer_peer_failed,
+                                clock: issuer_clock,
+                                start_ns: issuer_start_signal.load(Ordering::Acquire),
+                            },
+                            dispatch,
+                            storage,
+                            initial_failure,
+                        )
+                    })
+                    .expect("spawn event issuer thread"),
+            );
         }
 
         ready_barrier.wait();
@@ -1152,13 +1426,24 @@ pub async fn run_open_loop<T: SyncIndexer>(
     let query_results = query_results?;
     let snapshot = sealed.harvest().await?;
     KvIndexerInterface::flush(indexer.as_ref()).await;
+    let threads_after = snapshot_process_threads(clock.now_ns());
+    let memory_at_end = process_memory();
     // Timing ends at the last completed operation. Closing lanes, sealing and
     // harvesting completion buffers, and aggregating issue records are bookkeeping.
     // A run with no completions (a failed issuer) ends at producer stop.
     let end_ns = last_completion_ns(&query_results, &snapshot).unwrap_or(producer_stop_ns);
+    let issuers = issuer_raw_stats(&issuer_outputs, &config);
     let issuer_analysis =
         aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
     let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
+    let scaling = ScalingInput {
+        registration,
+        issuers,
+        threads_before,
+        threads_after,
+        memory_at_window_start,
+        memory_at_end,
+    };
 
     Ok(analyze_result(
         backend_name,
@@ -1169,11 +1454,14 @@ pub async fn run_open_loop<T: SyncIndexer>(
         trial.benchmark_duration_ns,
         trial.block_size,
         &trial.operation_workers,
+        &trial.operation_kinds,
+        inference_workers,
         config,
         issuer_analysis,
         query_results,
         snapshot,
         backend_timing_report,
+        scaling,
     ))
 }
 
@@ -1205,11 +1493,14 @@ fn analyze_result(
     benchmark_duration_ns: u64,
     block_size: u32,
     operation_workers: &[u64],
+    operation_kinds: &[u8],
+    inference_workers: usize,
     config: OpenLoopConfig,
     issuer: IssuerAnalysisInput,
     query_results: Vec<QueryLaneResult>,
     snapshot: dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
     backend_timing_report: String,
+    scaling_input: ScalingInput,
 ) -> OpenLoopResult {
     let IssuerAnalysisInput {
         records,
@@ -1313,6 +1604,10 @@ fn analyze_result(
     let mut delayed_reads = 0usize;
     let mut delayed_updates = 0usize;
     let mut post_acceptance_completion_races = 0usize;
+    let mut matched_ranks = Vec::with_capacity(totals.requests);
+    let mut service_by_bucket = vec![Vec::new(); MATCHED_BUCKET_BOUNDS.len()];
+    let mut failed_events = 0usize;
+    let mut failed_events_by_kind = BTreeMap::<&'static str, usize>::new();
     let tolerance_ns = config
         .issue_lag_diagnostic_threshold_us
         .saturating_mul(1_000);
@@ -1337,7 +1632,14 @@ fn analyze_result(
                     failure_reasons.push(format!("failed_query_{id}"));
                 }
                 query_queue_wait.push(completion.started_ns.saturating_sub(record.accepted_ns));
-                query_service.push(completion.finished_ns.saturating_sub(completion.started_ns));
+                let service_ns = completion.finished_ns.saturating_sub(completion.started_ns);
+                query_service.push(service_ns);
+                matched_ranks.push(u64::from(completion.matched));
+                let bucket = MATCHED_BUCKET_BOUNDS
+                    .iter()
+                    .position(|&bound| completion.matched <= bound)
+                    .unwrap_or(MATCHED_BUCKET_BOUNDS.len() - 1);
+                service_by_bucket[bucket].push(service_ns);
                 query_end_to_end.push(completion.finished_ns.saturating_sub(record.scheduled_ns));
                 accepted_query_edges.push((record.accepted_ns, 1i8));
                 accepted_query_edges.push((completion.started_ns.max(record.accepted_ns), -1i8));
@@ -1353,7 +1655,12 @@ fn analyze_result(
                     continue;
                 };
                 if !completion.success {
-                    failure_reasons.push(format!("failed_event_{id}"));
+                    if failed_events < MAX_LISTED_FAILED_EVENTS {
+                        failure_reasons.push(format!("failed_event_{id}"));
+                    }
+                    failed_events += 1;
+                    let kind = event_kind_name(operation_kinds.get(id).copied().unwrap_or(0));
+                    *failed_events_by_kind.entry(kind).or_default() += 1;
                 }
                 if completion.finished_ns < record.accepted_ns {
                     post_acceptance_completion_races += 1;
@@ -1400,9 +1707,94 @@ fn analyze_result(
     let achieved_seconds = elapsed_ns as f64 / 1e9;
     let issue_seconds = issue_span_ns.max(1) as f64 / 1e9;
 
+    if failed_events > 0 {
+        failure_reasons.push(format!("failed_events={failed_events}"));
+    }
+    let registration = scaling_input.registration;
+    if registration.failures > 0 {
+        failure_reasons.push(format!("registration_failures={}", registration.failures));
+    }
     let issue_span_valid = issue_span_ns <= benchmark_duration_ns.saturating_mul(101) / 100;
     let generator_valid = failure_reasons.is_empty() && issue_span_valid;
     let kept_up = generator_valid && elapsed_ns <= benchmark_duration_ns.saturating_mul(110) / 100;
+
+    let issuers = scaling_input
+        .issuers
+        .iter()
+        .map(|raw| {
+            let span = issue_span_ns.max(1) as f64;
+            IssuerThreadStats {
+                role: raw.role,
+                index: raw.index,
+                cpu: raw.cpu,
+                ops: raw.ops,
+                deadline_groups: raw.activity.deadline_groups,
+                late_groups: raw.activity.late_groups,
+                active_ns: raw.activity.active_ns,
+                cpu_ns: raw.cpu_ns,
+                active_fraction: raw.activity.active_ns as f64 / span,
+                cpu_fraction: raw.cpu_ns as f64 / span,
+            }
+        })
+        .collect::<Vec<_>>();
+    let max_issuer_active_fraction = issuers
+        .iter()
+        .map(|issuer| issuer.active_fraction)
+        .fold(0.0, f64::max);
+    let queries_with_more_than_256_matches = matched_ranks
+        .iter()
+        .filter(|&&matched| matched > 256)
+        .count();
+    let query_service_by_matched_ranks = service_by_bucket
+        .into_iter()
+        .enumerate()
+        .filter(|(_, values)| !values.is_empty())
+        .map(|(bucket, values)| MatchedBucket {
+            min_ranks: if bucket == 0 {
+                0
+            } else {
+                MATCHED_BUCKET_BOUNDS[bucket - 1] + 1
+            },
+            max_ranks: MATCHED_BUCKET_BOUNDS[bucket],
+            queries: values.len(),
+            service: distribution(values),
+        })
+        .collect();
+    let read_issue_lag = distribution(read_issue_lag);
+    let update_issue_lag = distribution(update_issue_lag);
+    let lag_threshold_ns = config.guard_lag_p99_us.saturating_mul(1_000);
+    let mut harness_guard = HarnessGuard {
+        generator_valid,
+        lag_p99_threshold_us: config.guard_lag_p99_us,
+        read_issue_lag_p99_ok: read_issue_lag.p99_ns <= lag_threshold_ns,
+        update_issue_lag_p99_ok: update_issue_lag.p99_ns <= lag_threshold_ns,
+        issuer_active_threshold: config.guard_issuer_active_fraction,
+        max_issuer_active_fraction,
+        issuer_active_ok: max_issuer_active_fraction < config.guard_issuer_active_fraction,
+        no_failed_events: failed_events == 0,
+        no_registration_failures: registration.failures == 0,
+        pass: false,
+    };
+    harness_guard.pass = harness_guard.generator_valid
+        && harness_guard.read_issue_lag_p99_ok
+        && harness_guard.update_issue_lag_p99_ok
+        && harness_guard.issuer_active_ok
+        && harness_guard.no_failed_events
+        && harness_guard.no_registration_failures;
+    let scaling = ScalingDiagnostics {
+        inference_workers,
+        registration,
+        issuers,
+        threads: thread_cpu_report(&scaling_input.threads_before, &scaling_input.threads_after),
+        memory_at_window_start: scaling_input.memory_at_window_start,
+        memory_at_end: scaling_input.memory_at_end,
+        matched_ranks_per_query: count_summary(matched_ranks),
+        queries_with_more_than_256_matches,
+        query_service_by_matched_ranks,
+        failed_events,
+        failed_events_by_kind,
+        harness_guard,
+    };
 
     OpenLoopResult {
         schema_version: RESULT_SCHEMA_VERSION,
@@ -1433,8 +1825,8 @@ fn analyze_result(
         offered_block_ops_per_sec: total_block_ops as f64 / offered_seconds,
         actual_issue_block_ops_per_sec: total_block_ops as f64 / issue_seconds,
         achieved_block_ops_per_sec: total_block_ops as f64 / achieved_seconds,
-        read_issue_lag: distribution(read_issue_lag),
-        update_issue_lag: distribution(update_issue_lag),
+        read_issue_lag,
+        update_issue_lag,
         generator_gate: "issue_span_exact_completion",
         query_queue_wait: distribution(query_queue_wait),
         query_service: distribution(query_service),
@@ -1457,6 +1849,9 @@ fn analyze_result(
         failure_reasons,
         backend_timing_report,
         provenance: None,
+        scaling,
+        prep: None,
+        workload: None,
     }
 }
 
@@ -1524,9 +1919,12 @@ impl BenchmarkClock {
         elapsed_ns(self.epoch)
     }
 
-    fn wait_until(&self, target_ns: u64) {
+    /// Wait for `target_ns`. Returns the last clock reading (at or after the target) and
+    /// whether the target was still in the future on entry; no extra clock reads are added.
+    fn wait_until(&self, target_ns: u64) -> (u64, bool) {
         let sleep_target = target_ns.saturating_sub(self.spin_ns);
-        let now = self.now_ns();
+        let mut now = self.now_ns();
+        let waited = now < target_ns;
         #[cfg(target_os = "linux")]
         if sleep_target > now {
             sleep_until_monotonic(self.monotonic_epoch_ns.saturating_add(sleep_target));
@@ -1537,7 +1935,11 @@ impl BenchmarkClock {
                 std::thread::sleep(Duration::from_nanos(sleep_target - now));
             }
         }
-        while self.now_ns() < target_ns {
+        loop {
+            now = self.now_ns();
+            if now >= target_ns {
+                return (now, waited);
+            }
             std::hint::spin_loop();
         }
     }
@@ -1605,6 +2007,93 @@ fn thread_cpu_time_ns() -> u64 {
         }
     }
     0
+}
+
+/// Quiescent score check (never timed): replay the prepared corpus in operation order,
+/// applying every event to the stack and to an independent reference index, and compare the
+/// stack's scores with the reference for every `stride`-th query after a full flush.
+pub async fn run_correctness_check<T: SyncIndexer>(
+    backend_name: &str,
+    indexer: Arc<ThreadPoolIndexer<T>>,
+    corpus: PreparedMooncakeCorpus,
+    max_checked_queries: usize,
+    pre_register_ranks_first: bool,
+) -> anyhow::Result<CorrectnessReport> {
+    let started = Instant::now();
+    let PreparedMooncakeCorpus {
+        operations,
+        query_corpus,
+        expected_events_by_worker,
+        ..
+    } = corpus;
+    let registration = if pre_register_ranks_first {
+        pre_register_ranks(indexer.as_ref(), &expected_events_by_worker).await
+    } else {
+        RegistrationStats::default()
+    };
+    let total_queries = operations
+        .iter()
+        .filter(|operation| matches!(operation.payload, MooncakeOperationPayload::Query))
+        .count();
+    let stride = (total_queries / max_checked_queries.max(1)).max(1);
+    let mut reference = ReferenceIndex::default();
+    let mut report = CorrectnessReport {
+        mode: "correctness",
+        backend: backend_name.to_string(),
+        workers: expected_events_by_worker.len(),
+        total_queries,
+        stride,
+        registration_failures: registration.failures,
+        ..CorrectnessReport::default()
+    };
+    let mut matched = Vec::new();
+    let mut query_ordinal = 0usize;
+    for operation in operations {
+        match operation.payload {
+            MooncakeOperationPayload::Event(event) => {
+                reference.apply(&event);
+                report.events_applied += 1;
+                KvIndexerInterface::apply_event(indexer.as_ref(), event).await;
+            }
+            MooncakeOperationPayload::Query => {
+                query_ordinal += 1;
+                if !query_ordinal.is_multiple_of(stride) && query_ordinal != total_queries {
+                    continue;
+                }
+                indexer.flush_and_wait().await?;
+                let hashes = query_corpus.query_hashes(operation.id)?;
+                let actual = indexer.backend().find_matches(hashes, false);
+                let expected = reference.scores(hashes);
+                report.checked_queries += 1;
+                matched.push(expected.len() as u64);
+                report.checked_queries_with_more_than_256_matches +=
+                    usize::from(expected.len() > 256);
+                let Some(first_difference) = compare_scores(&expected, &actual) else {
+                    continue;
+                };
+                report.mismatches += 1;
+                if report.mismatch_examples.len() < 8 {
+                    report.mismatch_examples.push(ScoreMismatch {
+                        query_ordinal,
+                        operation_id: operation.id,
+                        query_len: hashes.len(),
+                        expected_ranks: expected.len(),
+                        actual_ranks: actual.scores.len(),
+                        first_difference,
+                    });
+                }
+            }
+        }
+    }
+    report.checked_matched_ranks = count_summary(matched);
+    report.reference_inconsistent_links = reference.inconsistent_links;
+    report.reference_resident_blocks_at_end = reference.resident_blocks();
+    report.elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+    report.pass = report.checked_queries > 0
+        && report.mismatches == 0
+        && report.registration_failures == 0
+        && report.reference_inconsistent_links == 0;
+    Ok(report)
 }
 
 pub fn validate_cpu_partition(

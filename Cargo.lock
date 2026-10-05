@@ -2443,6 +2443,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-tokens",
  "flate2",
+ "flume 0.12.0",
  "futures-util",
  "hf-hub 0.4.3",
  "indicatif 0.18.4",

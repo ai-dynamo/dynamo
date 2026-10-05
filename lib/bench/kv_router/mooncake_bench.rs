@@ -5,6 +5,8 @@
 mod mooncake_open_loop;
 #[path = "mooncake_shared.rs"]
 mod mooncake_shared;
+#[path = "scaling_diag.rs"]
+mod scaling_diag;
 
 use clap::{Parser, Subcommand};
 use dynamo_bench::kv_router_common::args::CommonArgs;
@@ -15,14 +17,22 @@ use dynamo_kv_router::indexer::KvIndexerMetrics;
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer};
 use mooncake_open_loop::{
     OpenLoopConfig, OpenLoopResult, RunProvenance, parse_cpu_list, prepare_mooncake_corpus,
-    prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
+    prepare_open_loop_trial, run_correctness_check, run_open_loop, validate_cpu_partition,
 };
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
     merge_worker_traces, prepare_scaled_benchmark,
 };
+use scaling_diag::{
+    CorrectnessReport, NullIndexer, PrepTimings, THREAD_NAME_EVENT, THREAD_NAME_TOKIO,
+    current_thread_name, set_current_thread_name, workload_diagnostics,
+};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// CRTC coverage slots are u16, so one tree holds at most this many ranks.
+const MAX_CRTC_RANKS: usize = 1 << 16;
 
 #[cfg(target_os = "linux")]
 const PRE_RUN_QUIESCENCE_MS: u64 = 5_000;
@@ -49,6 +59,14 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Harness-ceiling control: accepts every event and returns no matches, with the same
+    /// event threads, query lanes, and issuers as a real backend.
+    Null {
+        /// Number of OS threads that consume KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -60,6 +78,9 @@ impl IndexerArgs {
             } => MooncakeIndexerConfig::nested_map(*jump_size, *num_event_workers),
             IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
                 MooncakeIndexerConfig::concurrent_radix_tree_compressed(*num_event_workers)
+            }
+            IndexerArgs::Null { num_event_workers } => {
+                MooncakeIndexerConfig::null(*num_event_workers)
             }
         }
     }
@@ -130,6 +151,33 @@ struct Args {
     #[clap(long, default_value = "1")]
     benchmark_runs: usize,
 
+    /// Prepare the corpus, write its per-worker workload shape to the result path, and exit
+    /// without building an indexer or timing anything.
+    #[clap(long)]
+    prep_only: bool,
+
+    /// Instead of a timed run, replay the corpus quiescently and compare the backend's scores
+    /// with an independent reference index for about this many evenly spaced queries.
+    #[clap(long, default_value = "0")]
+    correctness_check_queries: usize,
+
+    /// Skip registering every rank before the measured window.
+    #[clap(long)]
+    no_pre_register_ranks: bool,
+
+    /// Idle keep-alive for Tokio blocking threads (corpus generation), so they exit during
+    /// pre-run quiescence instead of inside the measured window.
+    #[clap(long, default_value = "500")]
+    blocking_thread_keep_alive_ms: u64,
+
+    /// Harness guard: maximum p99 read and update issue lag.
+    #[clap(long, default_value = "250")]
+    guard_lag_p99_us: u64,
+
+    /// Harness guard: every issuer's active fraction must stay below this value.
+    #[clap(long, default_value = "0.7")]
+    guard_issuer_active_fraction: f64,
+
     /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
     /// with `--num-event-workers` event threads.
     #[clap(subcommand)]
@@ -176,6 +224,16 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
     if !args.common.sweep && args.benchmark_runs != 1 {
         anyhow::bail!("repetitions must use fresh processes; invoke one trial per process");
     }
+    let ranks = args
+        .common
+        .num_unique_inference_workers
+        .saturating_mul(args.common.inference_worker_duplication_factor);
+    if ranks > MAX_CRTC_RANKS {
+        anyhow::bail!("{ranks} ranks exceed the CRTC slot capacity of {MAX_CRTC_RANKS}");
+    }
+    if (args.prep_only || args.correctness_check_queries > 0) && args.common.sweep {
+        anyhow::bail!("--prep-only and --correctness-check-queries do not support --sweep");
+    }
     if args.common.mooncake_trace_path.is_none() {
         return Ok(());
     }
@@ -188,11 +246,16 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
         };
         if !matches!(
             config.kind,
-            MooncakeIndexerKind::NestedMap | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+            MooncakeIndexerKind::NestedMap
+                | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+                | MooncakeIndexerKind::Null
         ) {
             anyhow::bail!(
-                "corrected Mooncake replay supports only nested-map and concurrent-radix-tree-compressed; got {name}"
+                "corrected Mooncake replay supports only nested-map, concurrent-radix-tree-compressed, and null; got {name}"
             );
+        }
+        if config.kind == MooncakeIndexerKind::Null && args.correctness_check_queries > 0 {
+            anyhow::bail!("the null backend returns no matches; it has no score check");
         }
     }
     Ok(())
@@ -251,7 +314,24 @@ fn parse_open_loop_config(args: &Args) -> anyhow::Result<OpenLoopConfig> {
         issuer_cpus,
         query_issuer_cpu: args.query_issuer_cpu,
         backend_cpus,
+        pre_register_ranks: !args.no_pre_register_ranks,
+        guard_lag_p99_us: args.guard_lag_p99_us,
+        guard_issuer_active_fraction: args.guard_issuer_active_fraction,
     })
+}
+
+/// Build an indexer with its event threads named for per-thread CPU accounting. The threads
+/// are spawned inside `dynamo-kv-router` and inherit the creating thread's name.
+fn with_event_thread_name<R>(build: impl FnOnce() -> R) -> R {
+    let original = current_thread_name();
+    set_current_thread_name(THREAD_NAME_EVENT);
+    let built = build();
+    set_current_thread_name(&original);
+    built
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1e3
 }
 
 async fn run_open_loop_for_config(
@@ -259,35 +339,56 @@ async fn run_open_loop_for_config(
     config: &MooncakeIndexerConfig,
     prepared: PreparedMooncakeBenchmark,
     bench_config: MooncakeBenchmarkConfig,
+    mut timings: PrepTimings,
 ) -> anyhow::Result<OpenLoopResult> {
     if config.num_event_workers > u16::MAX as usize {
         anyhow::bail!("Mooncake event-worker count exceeds the u16 queue-ID space");
     }
+    let workload = workload_diagnostics(&prepared, args.common.num_gpu_blocks);
+    let started = Instant::now();
     let corpus =
         prepare_mooncake_corpus(prepared, bench_config.inference_worker_duplication_factor)?;
     let trial = prepare_open_loop_trial(corpus, args.query_lanes)?;
+    timings.corpus_and_dispatch_ms = elapsed_ms(started);
+    let started = Instant::now();
     quiesce_prepared_heap();
+    timings.quiescence_ms = elapsed_ms(started);
     let metrics = || Some(Arc::new(KvIndexerMetrics::new_unregistered()));
     let open_config = parse_open_loop_config(args)?;
     pin_current_thread_to_cpus(&open_config.backend_cpus)?;
 
-    match config.kind {
+    let mut result = match config.kind {
         MooncakeIndexerKind::NestedMap => {
-            let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
-                PositionalIndexer::new(config.jump_size),
-                config.num_event_workers,
-                args.common.block_size,
-                metrics(),
-            ));
+            let indexer = with_event_thread_name(|| {
+                Arc::new(ThreadPoolIndexer::new_with_metrics(
+                    PositionalIndexer::new(config.jump_size),
+                    config.num_event_workers,
+                    args.common.block_size,
+                    metrics(),
+                ))
+            });
             run_backend(config.short_name(), indexer, trial, open_config).await
         }
         MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
-            let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
-                ConcurrentRadixTreeCompressed::new(),
-                config.num_event_workers,
-                args.common.block_size,
-                metrics(),
-            ));
+            let indexer = with_event_thread_name(|| {
+                Arc::new(ThreadPoolIndexer::new_with_metrics(
+                    ConcurrentRadixTreeCompressed::new(),
+                    config.num_event_workers,
+                    args.common.block_size,
+                    metrics(),
+                ))
+            });
+            run_backend(config.short_name(), indexer, trial, open_config).await
+        }
+        MooncakeIndexerKind::Null => {
+            let indexer = with_event_thread_name(|| {
+                Arc::new(ThreadPoolIndexer::new_with_metrics(
+                    NullIndexer::default(),
+                    config.num_event_workers,
+                    args.common.block_size,
+                    metrics(),
+                ))
+            });
             run_backend(config.short_name(), indexer, trial, open_config).await
         }
         MooncakeIndexerKind::RadixTree | MooncakeIndexerKind::BranchShardedCrtc => {
@@ -295,6 +396,46 @@ async fn run_open_loop_for_config(
                 "{} is not supported by corrected Mooncake replay",
                 config.short_name()
             )
+        }
+    }?;
+    result.prep = Some(timings);
+    result.workload = Some(workload);
+    Ok(result)
+}
+
+async fn run_correctness_for_config(
+    args: &Args,
+    config: &MooncakeIndexerConfig,
+    prepared: PreparedMooncakeBenchmark,
+    bench_config: MooncakeBenchmarkConfig,
+) -> anyhow::Result<CorrectnessReport> {
+    let corpus =
+        prepare_mooncake_corpus(prepared, bench_config.inference_worker_duplication_factor)?;
+    let backend_cpus = parse_open_loop_config(args)?.backend_cpus;
+    pin_current_thread_to_cpus(&backend_cpus)?;
+    let pre_register = !args.no_pre_register_ranks;
+    let checked = args.correctness_check_queries;
+    match config.kind {
+        MooncakeIndexerKind::NestedMap => {
+            let indexer = Arc::new(ThreadPoolIndexer::new(
+                PositionalIndexer::new(config.jump_size),
+                config.num_event_workers,
+                args.common.block_size,
+            ));
+            run_correctness_check(config.short_name(), indexer, corpus, checked, pre_register).await
+        }
+        MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
+            let indexer = Arc::new(ThreadPoolIndexer::new(
+                ConcurrentRadixTreeCompressed::new(),
+                config.num_event_workers,
+                args.common.block_size,
+            ));
+            run_correctness_check(config.short_name(), indexer, corpus, checked, pre_register).await
+        }
+        MooncakeIndexerKind::RadixTree
+        | MooncakeIndexerKind::BranchShardedCrtc
+        | MooncakeIndexerKind::Null => {
+            anyhow::bail!("{} has no score check", config.short_name())
         }
     }
 }
@@ -331,6 +472,26 @@ async fn run_backend<T: dynamo_kv_router::indexer::SyncIndexer>(
     Ok(result)
 }
 
+fn print_scaling_summary(result: &OpenLoopResult) {
+    let scaling = &result.scaling;
+    println!(
+        "Matched ranks per query mean/p99/max: {:.1}/{}/{} | >256: {}",
+        scaling.matched_ranks_per_query.mean,
+        scaling.matched_ranks_per_query.p99,
+        scaling.matched_ranks_per_query.max,
+        scaling.queries_with_more_than_256_matches,
+    );
+    println!(
+        "Registration: {} ranks in {:.1} ms | threads at window start: {} | max issuer active: {:.3} | failed events: {} | guard pass: {}",
+        scaling.registration.ranks,
+        scaling.registration.elapsed_ms,
+        scaling.threads.threads_at_window_start,
+        scaling.harness_guard.max_issuer_active_fraction,
+        scaling.failed_events,
+        scaling.harness_guard.pass,
+    );
+}
+
 fn print_open_loop_result(result: &OpenLoopResult) {
     println!(
         "Offered logical throughput: {:.0} ops/s | achieved: {:.0} ops/s",
@@ -353,6 +514,7 @@ fn print_open_loop_result(result: &OpenLoopResult) {
         result.issue_span_ns as f64 / 1e6,
         result.drain_ns as f64 / 1e6,
     );
+    print_scaling_summary(result);
     if !result.backend_timing_report.is_empty() {
         println!("{}", result.backend_timing_report);
     }
@@ -417,13 +579,17 @@ fn benchmark_config(args: &Args, benchmark_duration_ms: u64) -> MooncakeBenchmar
 async fn prepare_benchmark(
     args: &Args,
     benchmark_duration_ms: u64,
-) -> anyhow::Result<Option<PreparedMooncakeBenchmark>> {
+) -> anyhow::Result<Option<(PreparedMooncakeBenchmark, PrepTimings)>> {
     let Some(path) = args.common.mooncake_trace_path.as_deref() else {
         eprintln!("No mooncake_trace_path provided, skipping benchmark");
         return Ok(None);
     };
 
+    let mut timings = PrepTimings::default();
+    let started = Instant::now();
     let traces = args.common.load_mooncake_trace(path)?;
+    timings.trace_load_ms = elapsed_ms(started);
+    let started = Instant::now();
     let artifacts = generate_replay_artifacts(
         &traces,
         args.common.num_gpu_blocks,
@@ -432,11 +598,65 @@ async fn prepare_benchmark(
     )
     .await?;
     drop(traces);
+    timings.simulation_ms = elapsed_ms(started);
+    let started = Instant::now();
     let merged = merge_worker_traces(artifacts, args.common.block_size)?;
-    Ok(Some(prepare_scaled_benchmark(
-        merged,
-        benchmark_duration_ms,
-    )))
+    let prepared = prepare_scaled_benchmark(merged, benchmark_duration_ms);
+    timings.merge_and_rescale_ms = elapsed_ms(started);
+    Ok(Some((prepared, timings)))
+}
+
+#[derive(serde::Serialize)]
+struct PrepOnlyReport {
+    mode: &'static str,
+    prep: PrepTimings,
+    workload: scaling_diag::WorkloadDiagnostics,
+    provenance: RunProvenance,
+}
+
+async fn run_prep_only_mode(args: &Args, indexer_names: &[String]) -> anyhow::Result<()> {
+    let name = indexer_names.first().map(String::as_str).unwrap_or("null");
+    let config = indexer_config(args, name)?;
+    let provenance = run_provenance(args, &config)?;
+    let Some((prepared, prep)) = prepare_benchmark(args, args.common.benchmark_duration_ms).await?
+    else {
+        return Ok(());
+    };
+    let report = PrepOnlyReport {
+        mode: "prep_only",
+        prep,
+        workload: workload_diagnostics(&prepared, args.common.num_gpu_blocks),
+        provenance,
+    };
+    let json = serde_json::to_string_pretty(&report)?;
+    println!("{json}");
+    std::fs::write(&args.result_json_output, json)?;
+    Ok(())
+}
+
+async fn run_correctness_mode(args: &Args, indexer_names: &[String]) -> anyhow::Result<()> {
+    for name in indexer_names {
+        let config = indexer_config(args, name)?;
+        let bench_config = benchmark_config(args, args.common.benchmark_duration_ms);
+        let Some((prepared, _)) =
+            prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
+        else {
+            return Ok(());
+        };
+        let report = run_correctness_for_config(args, &config, prepared, bench_config).await?;
+        println!(
+            "Correctness {}: workers={} checked={} mismatches={} pass={}",
+            report.backend, report.workers, report.checked_queries, report.mismatches, report.pass
+        );
+        let path = if indexer_names.len() == 1 {
+            args.result_json_output.clone()
+        } else {
+            open_loop_output_path(&args.result_json_output, config.short_name(), None)
+        };
+        std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
+        println!("Correctness report written to {path}");
+    }
+    Ok(())
 }
 
 async fn run_open_loop_repeated_mode(args: &Args, indexer_names: &[String]) -> anyhow::Result<()> {
@@ -445,11 +665,13 @@ async fn run_open_loop_repeated_mode(args: &Args, indexer_names: &[String]) -> a
         // Record provenance before the run so it describes the inputs actually read.
         let provenance = run_provenance(args, &config)?;
         let bench_config = benchmark_config(args, args.common.benchmark_duration_ms);
-        let Some(prepared) = prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
+        let Some((prepared, timings)) =
+            prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
         else {
             return Ok(());
         };
-        let mut result = run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+        let mut result =
+            run_open_loop_for_config(args, &config, prepared, bench_config, timings).await?;
         result.provenance = Some(provenance);
         print_open_loop_result(&result);
         let path = if indexer_names.len() == 1 {
@@ -479,13 +701,13 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
                 duration_ms
             );
             let bench_config = benchmark_config(args, duration_ms);
-            let Some(prepared) =
+            let Some((prepared, timings)) =
                 prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
             else {
                 return Ok(());
             };
             let mut result =
-                run_open_loop_for_config(args, &config, prepared, bench_config).await?;
+                run_open_loop_for_config(args, &config, prepared, bench_config, timings).await?;
             result.provenance = Some(provenance.clone());
             print_open_loop_result(&result);
             let path = open_loop_output_path(
@@ -502,7 +724,11 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
 async fn async_main(args: Args) -> anyhow::Result<()> {
     let indexer_names = indexer_names(&args);
 
-    if args.common.sweep {
+    if args.prep_only {
+        run_prep_only_mode(&args, &indexer_names).await?;
+    } else if args.correctness_check_queries > 0 {
+        run_correctness_mode(&args, &indexer_names).await?;
+    } else if args.common.sweep {
         run_open_loop_sweep_mode(&args, &indexer_names).await?;
     } else {
         run_open_loop_repeated_mode(&args, &indexer_names).await?;
@@ -517,10 +743,17 @@ fn main() -> anyhow::Result<()> {
     let config = open_loop_config(&args)?;
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
-    runtime.enable_all();
+    runtime
+        .enable_all()
+        .thread_name(THREAD_NAME_TOKIO)
+        .thread_keep_alive(Duration::from_millis(args.blocking_thread_keep_alive_ms));
     if !config.backend_cpus.is_empty() {
         pin_current_thread_to_cpus(&config.backend_cpus)?;
-        runtime.worker_threads(config.backend_cpus.len());
+        // One simulation thread per backend CPU is as fast as the 512-thread default and
+        // leaves fewer threads to retire before the window.
+        runtime
+            .worker_threads(config.backend_cpus.len())
+            .max_blocking_threads(config.backend_cpus.len());
     }
 
     let runtime = runtime.build()?;

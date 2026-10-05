@@ -22,6 +22,8 @@ pub enum MooncakeIndexerKind {
     NestedMap,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
+    /// Accepts every event and returns no matches; bounds the harness ceiling.
+    Null,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +66,14 @@ impl MooncakeIndexerConfig {
         }
     }
 
+    pub fn null(num_event_workers: usize) -> Self {
+        Self {
+            kind: MooncakeIndexerKind::Null,
+            num_event_workers,
+            ..Self::radix_tree()
+        }
+    }
+
     pub fn branch_sharded_crtc(
         num_shards: usize,
         num_event_workers_per_shard: usize,
@@ -86,6 +96,7 @@ impl MooncakeIndexerConfig {
                 "concurrent-radix-tree-compressed"
             }
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
+            MooncakeIndexerKind::Null => "null",
         }
     }
 
@@ -97,8 +108,9 @@ impl MooncakeIndexerConfig {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
+            "null" => Self::null(num_event_workers),
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree-compressed, branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree-compressed, branch-sharded-crtc, null",
                 name
             ),
         };
@@ -147,6 +159,9 @@ impl MooncakeIndexerConfig {
                     block_size,
                 ))
             }
+            MooncakeIndexerKind::Null => {
+                anyhow::bail!("the null backend is built only by mooncake_bench")
+            }
         };
         Ok(indexer)
     }
@@ -184,6 +199,9 @@ impl MooncakeIndexerConfig {
             }
             MooncakeIndexerKind::BranchShardedCrtc => {
                 anyhow::bail!("branch-sharded-crtc does not support approximate pruning")
+            }
+            MooncakeIndexerKind::Null => {
+                anyhow::bail!("the null backend does not support approximate pruning")
             }
         };
         Ok(indexer)

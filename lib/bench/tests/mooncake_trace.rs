@@ -10,6 +10,9 @@ mod dc_ckf_parity;
 mod mooncake_open_loop;
 #[path = "../kv_router/mooncake_shared.rs"]
 mod mooncake_shared;
+#[allow(dead_code)]
+#[path = "../kv_router/scaling_diag.rs"]
+mod scaling_diag;
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
@@ -39,12 +42,13 @@ use dynamo_mocker::replay::{
 };
 use mooncake_open_loop::{
     MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
-    prepare_open_loop_trial, run_open_loop,
+    prepare_open_loop_trial, run_correctness_check, run_open_loop,
 };
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, PreparedMooncakeBenchmark, WorkerTraceEntry,
     merge_worker_traces, prepare_scaled_benchmark,
 };
+use scaling_diag::{NullIndexer, ReferenceIndex, compare_scores};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
@@ -1089,6 +1093,9 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
             issuer_cpus: Vec::new(),
             query_issuer_cpu: None,
             backend_cpus: Vec::new(),
+            pre_register_ranks: true,
+            guard_lag_p99_us: 250,
+            guard_issuer_active_fraction: 0.7,
         },
     )
     .await?;
@@ -1102,7 +1109,205 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
     );
     assert_eq!(result.queue_depth_at_stop.len(), 2);
     assert!(result.update_scheduled_to_finished.max_ns > 0);
+
+    let scaling = &result.scaling;
+    assert_eq!(scaling.inference_workers, 2);
+    assert_eq!(scaling.registration.ranks, 2);
+    assert_eq!(scaling.registration.failures, 0);
+    assert_eq!(scaling.failed_events, 0);
+    assert_eq!(scaling.matched_ranks_per_query.count, result.total_requests);
+    assert!(scaling.matched_ranks_per_query.max <= 2);
+    assert!(scaling.matched_ranks_per_query.max > 0);
+    assert_eq!(
+        scaling
+            .query_service_by_matched_ranks
+            .iter()
+            .map(|bucket| bucket.queries)
+            .sum::<usize>(),
+        result.total_requests
+    );
+    let issuer_roles = scaling
+        .issuers
+        .iter()
+        .map(|issuer| issuer.role)
+        .collect::<Vec<_>>();
+    assert_eq!(issuer_roles, ["query", "event", "event", "event"]);
+    assert_eq!(
+        scaling
+            .issuers
+            .iter()
+            .map(|issuer| issuer.ops)
+            .sum::<usize>(),
+        result.total_logical_ops
+    );
+    assert!(scaling.issuers.iter().all(|issuer| {
+        issuer.active_fraction >= 0.0 && issuer.deadline_groups >= issuer.late_groups
+    }));
+    if cfg!(target_os = "linux") {
+        assert!(scaling.threads.threads_at_window_start > 0);
+        assert!(scaling.memory_at_end.vm_hwm_kb > 0);
+    }
     Ok(())
+}
+
+async fn fixture_corpus(
+    num_workers: usize,
+    trace_duplication_factor: usize,
+    num_gpu_blocks: usize,
+    benchmark_duration_ms: u64,
+) -> anyhow::Result<PreparedMooncakeCorpus> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces = process_mooncake_trace(
+        &fixture,
+        TRACE_BLOCK_SIZE,
+        1,
+        trace_duplication_factor,
+        num_workers,
+        42,
+    )?;
+    let artifacts = generate_replay_artifacts(&traces, num_gpu_blocks, BLOCK_SIZE, None).await?;
+    let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?;
+    let prepared = prepare_scaled_benchmark(merged, benchmark_duration_ms);
+    prepare_mooncake_corpus(prepared, 1)
+}
+
+/// The reference index must agree with CRTC on every query, including above 256 ranks where
+/// CRTC coverage moves from inline words into heap chunks. A small per-worker cache forces
+/// evictions so removals are checked too; trace duplication keeps every worker non-empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crtc_scores_match_reference_index_below_and_above_inline_slots() -> anyhow::Result<()> {
+    for (num_workers, trace_duplication_factor) in [(4, 1), (300, 4)] {
+        let corpus = fixture_corpus(
+            num_workers,
+            trace_duplication_factor,
+            2048,
+            BENCHMARK_DURATION_MS,
+        )
+        .await?;
+        assert!(corpus.test_block_totals().1 > 0);
+        let indexer = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            NUM_EVENT_WORKERS,
+            BLOCK_SIZE,
+        ));
+        let report = run_correctness_check(
+            "concurrent-radix-tree-compressed",
+            indexer,
+            corpus,
+            usize::MAX,
+            true,
+        )
+        .await?;
+        assert_eq!(report.workers, num_workers);
+        assert_eq!(report.stride, 1);
+        assert_eq!(report.checked_queries, report.total_queries);
+        assert!(report.checked_matched_ranks.max > 0);
+        assert!(report.pass, "W={num_workers}: {report:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn null_backend_completes_every_event_and_matches_nothing() -> anyhow::Result<()> {
+    let corpus = fixture_corpus(3, 1, NUM_GPU_BLOCKS, 2_000).await?;
+    let trial = prepare_open_loop_trial(corpus, 2)?;
+    let indexer = Arc::new(ThreadPoolIndexer::new(
+        NullIndexer::default(),
+        2,
+        BLOCK_SIZE,
+    ));
+    let result = run_open_loop(
+        "null",
+        Arc::clone(&indexer),
+        trial,
+        OpenLoopConfig {
+            query_lanes: 2,
+            issuer_threads: 2,
+            spin_us: 50,
+            issue_lag_diagnostic_threshold_us: 250,
+            pre_run_quiescence_ms: 0,
+            issuer_cpus: Vec::new(),
+            query_issuer_cpu: None,
+            backend_cpus: Vec::new(),
+            pre_register_ranks: true,
+            guard_lag_p99_us: 250,
+            guard_issuer_active_fraction: 0.7,
+        },
+    )
+    .await?;
+
+    assert!(
+        result.failure_reasons.is_empty(),
+        "{:?}",
+        result.failure_reasons
+    );
+    assert_eq!(result.scaling.matched_ranks_per_query.max, 0);
+    assert_eq!(result.scaling.failed_events, 0);
+    // Every corpus event plus one registration store and remove per rank.
+    assert_eq!(
+        indexer.backend().events_seen(),
+        result.total_events as u64 + 2 * 3
+    );
+    Ok(())
+}
+
+fn stored_event(
+    worker_id: u64,
+    parent: Option<u64>,
+    blocks: &[(u64, u64)],
+) -> dynamo_kv_router::protocols::RouterEvent {
+    dynamo_kv_router::protocols::RouterEvent::new(
+        worker_id,
+        KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent.map(ExternalSequenceBlockHash),
+                start_position: None,
+                blocks: blocks
+                    .iter()
+                    .map(|&(sequence, local)| KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(sequence),
+                        tokens_hash: LocalBlockHash(local),
+                        mm_extra_info: None,
+                    })
+                    .collect(),
+            }),
+            dp_rank: 0,
+        },
+    )
+}
+
+#[test]
+fn reference_index_scores_stop_at_the_first_block_a_rank_lacks() {
+    let mut reference = ReferenceIndex::default();
+    reference.apply(&stored_event(1, None, &[(10, 1), (11, 2), (12, 3)]));
+    reference.apply(&stored_event(2, None, &[(10, 1), (11, 2)]));
+    reference.apply(&stored_event(3, Some(10), &[(11, 2), (12, 3)]));
+    // Rank 1 loses its middle block: its score ends before the gap.
+    reference.apply(&dynamo_kv_router::protocols::RouterEvent::new(
+        1,
+        KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(11)],
+            }),
+            dp_rank: 0,
+        },
+    ));
+    let query = [LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
+    let scores = reference.scores(&query);
+    let rank = |worker_id| WorkerWithDpRank::new(worker_id, 0);
+    assert_eq!(scores.get(&rank(1)), Some(&1));
+    assert_eq!(scores.get(&rank(2)), Some(&2));
+    // Rank 3 never held the root block, so it scores nothing.
+    assert_eq!(scores.get(&rank(3)), None);
+
+    let mut actual = OverlapScores::new();
+    actual.scores.insert(rank(1), 1);
+    actual.scores.insert(rank(2), 2);
+    assert!(compare_scores(&scores, &actual).is_none());
+    actual.scores.insert(rank(2), 3);
+    assert!(compare_scores(&scores, &actual).is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
