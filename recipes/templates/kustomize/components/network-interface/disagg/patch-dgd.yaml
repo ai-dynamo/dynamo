@@ -13,53 +13,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-- op: test
-  path: /spec/components/1/name
-  value: PrefillWorker
-- op: test
-  path: /spec/components/1/type
-  value: prefill
-- op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/name
-  value: main
-- op: add
-  path: /spec/components/1/podTemplate/spec/containers/0/env/-
-  value:
-    name: NCCL_SOCKET_IFNAME
-    value: "your-prefill-socket-interface"
-- op: add
-  path: /spec/components/1/podTemplate/spec/containers/0/env/-
-  value:
-    name: GLOO_SOCKET_IFNAME
-    value: "your-prefill-socket-interface"
-- op: add
-  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/your-rdma.example.com~1device"
-  value: "your-prefill-rdma-resource-count"
-- op: add
-  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/your-rdma.example.com~1device"
-  value: "your-prefill-rdma-resource-count"
-- op: test
-  path: /spec/components/2/name
-  value: DecodeWorker
-- op: test
-  path: /spec/components/2/type
-  value: decode
-- op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/name
-  value: main
-- op: add
-  path: /spec/components/2/podTemplate/spec/containers/0/env/-
-  value:
-    name: NCCL_SOCKET_IFNAME
-    value: "your-decode-socket-interface"
-- op: add
-  path: /spec/components/2/podTemplate/spec/containers/0/env/-
-  value:
-    name: GLOO_SOCKET_IFNAME
-    value: "your-decode-socket-interface"
-- op: add
-  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/your-rdma.example.com~1device"
-  value: "your-decode-rdma-resource-count"
-- op: add
-  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/your-rdma.example.com~1device"
-  value: "your-decode-rdma-resource-count"
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  # The root patch target selects the DGD by group, version, and kind. Kustomize
+  # ignores this name; it exists only because a strategic merge patch needs one.
+  name: canonical-recipe
+spec:
+  components:
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: NCCL_SOCKET_IFNAME
+                  value: "your-prefill-socket-interface"
+                - name: GLOO_SOCKET_IFNAME
+                  value: "your-prefill-socket-interface"
+              resources:
+                requests:
+                  your-rdma.example.com/device: "your-prefill-rdma-resource-count"
+                limits:
+                  your-rdma.example.com/device: "your-prefill-rdma-resource-count"
+    - name: DecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: NCCL_SOCKET_IFNAME
+                  value: "your-decode-socket-interface"
+                - name: GLOO_SOCKET_IFNAME
+                  value: "your-decode-socket-interface"
+              resources:
+                requests:
+                  your-rdma.example.com/device: "your-decode-rdma-resource-count"
+                limits:
+                  your-rdma.example.com/device: "your-decode-rdma-resource-count"

@@ -23,9 +23,8 @@ ARG TARGETARCH
 # Superset of the build dependencies required by all sidecar crates:
 # aws-lc-sys/ring need cmake and a C toolchain (plus perl); bindgen needs
 # libclang; tonic-build (build.rs) needs protoc, and libprotobuf-dev supplies
-# the well-known protos the engine .proto files import (vllm_grpc.proto pulls
-# in google/protobuf/struct.proto); utoipa-swagger-ui downloads its pinned web
-# asset through the system curl binary.
+# the well-known protos the engine .proto files import. utoipa-swagger-ui
+# downloads its pinned web asset through the system curl binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -73,6 +72,14 @@ COPY .cargo/ .cargo/
 COPY lib/ lib/
 COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
+
+# The `/src/target` cache below is keyed by a name that changes whenever a
+# build-script *input* is renamed or removed. The TensorRT-LLM sidecar's
+# vendored protos moved from `proto/trtllm_service.proto` to
+# `proto/openengine/v1/`, and a cached build-script binary compiled against the
+# old layout keeps asking protoc for a file this tree no longer has. Bumping the
+# id costs one cold build and makes that impossible.
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
@@ -89,7 +96,7 @@ ARG TARGETARCH
 # build do not serialize against each other.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
     && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
@@ -101,7 +108,7 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar \
     && install -D target/release/dynamo-sglang-sidecar /out/dynamo-sglang-sidecar
@@ -113,7 +120,7 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-trtllm-sidecar \
     && strip target/release/dynamo-trtllm-sidecar \
     && install -D target/release/dynamo-trtllm-sidecar /out/dynamo-trtllm-sidecar
@@ -238,6 +245,16 @@ RUN python3 -m compliance.generators \
 
 FROM scratch AS compliance_artifact
 COPY --from=licenses /legal/ /
+
+# ---- CI-only: sidecar binaries as a buildx local-output target --------------
+# CI extracts these via `docker buildx build --target sidecar-binaries
+# --output=type=local`, not `docker pull` + `docker create` + `docker cp`: the
+# builder runners route to a remote BuildKit worker with no local docker
+# daemon (see shared-build-sidecar.yml). Not used for any shipped image.
+FROM scratch AS sidecar-binaries
+COPY --from=vllm-builder /out/dynamo-vllm-sidecar /
+COPY --from=sglang-builder /out/dynamo-sglang-sidecar /
+COPY --from=trtllm-builder /out/dynamo-trtllm-sidecar /
 
 # ---- shipped runtime ---------------------------------------------------------
 FROM runtime-base AS runtime

@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
 use dynamo_kv_router::{
-    protocols::{KvTransferEnforcement, RouterHintWorkerMetadata},
-    router_hint::{
-        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
+    kv_hints::{
+        KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
     },
+    protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
+    sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
@@ -32,9 +33,6 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
-
-/// Resource-safety bound for rank ranges advertised by one worker.
-pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
 
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
@@ -101,6 +99,18 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 /// older workers that predate this runtime contract.
 pub const VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
     "vllm_qwen_video_processor_contract";
+
+/// Worker-reported Qwen3 video prompt-expansion contract used by SGLang.
+///
+/// SGLang performs an additional frame-selection and spatial-resize stage
+/// before the Transformers processor, so this cannot share vLLM's contract.
+pub const SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
+    "sglang_qwen_video_processor_contract";
+
+/// Worker-reported Nemotron Nano Omni video prompt-expansion contract used by
+/// vLLM. Absence disables exact video routing for mixed-version safety.
+pub const VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
+    "vllm_nemotron_video_processor_contract";
 
 /// Worker-reported vLLM setting that makes multimodal cache identities depend
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
@@ -424,15 +434,11 @@ impl ModelRuntimeConfig {
         self.runtime_flag_enabled(capability)
     }
 
-    fn router_hints_enabled(&self) -> bool {
-        self.supports_runtime_capability(ROUTER_HINT_RUNTIME_CAPABILITY_KEY)
-    }
-
-    fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+    fn kv_hint_transfer_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
         let dp_rank = dp_rank.to_string();
         let endpoint = self
             .runtime_data
-            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
+            .get(KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
             .as_object()?
             .get(&dp_rank)?
             .as_str()?;
@@ -457,25 +463,25 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
-    fn router_hint_metadata_for_dp_rank(
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         dp_rank: u32,
-    ) -> Option<RouterHintWorkerMetadata<'_>> {
-        if !self.router_hints_enabled() {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        if !self.supports_runtime_capability(KV_HINT_TRANSFER_CAPABILITY_KEY) {
             return None;
         }
 
         let worker_type = self
             .runtime_data
-            .get(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY)?
+            .get(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY)?
             .as_str()?;
         if worker_type.is_empty() {
             return None;
         }
 
-        Some(RouterHintWorkerMetadata {
+        Some(KvHintTransferWorkerMetadata {
             worker_type,
-            source_control_endpoint: self.router_hint_endpoint_for_dp_rank(dp_rank),
+            source_control_endpoint: self.kv_hint_transfer_endpoint_for_dp_rank(dp_rank),
         })
     }
 
@@ -620,6 +626,18 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
         return Err(validation_error(
             "missing_kv_transfer_preferred_weight",
             "kv_transfer_preferred_weight is required when kv_transfer_enforcement is preferred",
+        ));
+    }
+
+    // Range validation alone accepts NaN. Enforce finite routing weights
+    // here so every configuration source receives the same validation.
+    if config
+        .kv_transfer_preferred_weight
+        .is_some_and(|weight| !weight.is_finite())
+    {
+        return Err(validation_error(
+            "invalid_kv_transfer_preferred_weight",
+            "kv_transfer_preferred_weight must be finite",
         ));
     }
 
@@ -1083,56 +1101,56 @@ mod tests {
     }
 
     #[test]
-    fn router_hint_support_requires_explicit_true() {
+    fn kv_hint_transfer_support_requires_explicit_true() {
         use dynamo_kv_router::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, true)
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, true)
             .unwrap();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill")
+            .set_engine_specific(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, "prefill")
             .unwrap();
-        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
         assert!(info.source_control_endpoint.is_none());
 
         config
             .set_engine_specific(
-                ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
                 serde_json::json!({"0": "tcp://127.0.0.1:23280"}),
             )
             .unwrap();
-        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
         assert_eq!(info.source_control_endpoint, Some("tcp://127.0.0.1:23280"));
         assert_eq!(
             config
-                .router_hint_metadata_for_dp_rank(1)
+                .kv_hint_transfer_metadata_for_dp_rank(1)
                 .unwrap()
                 .source_control_endpoint,
             None
         );
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "true")
             .unwrap();
         assert_eq!(
             config
-                .router_hint_metadata_for_dp_rank(0)
+                .kv_hint_transfer_metadata_for_dp_rank(0)
                 .unwrap()
                 .worker_type,
             "prefill"
         );
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "false")
             .unwrap();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]
@@ -1285,6 +1303,13 @@ mod tests {
     fn test_validate_config_rejects_invalid_topology_components() {
         for config in [
             ModelRuntimeConfig {
+                topology_domains: HashMap::from([(
+                    "zone".to_string(),
+                    "invalid=value".to_string(),
+                )]),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
                 topology_domains: HashMap::from([("".to_string(), "us-east-1a".to_string())]),
                 ..Default::default()
             },
@@ -1297,6 +1322,23 @@ mod tests {
             },
         ] {
             assert!(config.validate_config().is_err());
+        }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_invalid_kv_transfer_weights() {
+        for weight in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            let config = ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "zone-a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
+                kv_transfer_preferred_weight: Some(weight),
+                ..Default::default()
+            };
+            assert!(
+                config.validate_config().is_err(),
+                "invalid preferred weight {weight} must be rejected"
+            );
         }
     }
 

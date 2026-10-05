@@ -91,10 +91,6 @@ pub mod name_prefix {
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
 
-    /// Prefix for request admission/rejection control metrics (e.g.
-    /// `dynamo_rejection_request_total`).
-    pub const REJECTION: &str = "dynamo_rejection";
-
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 
@@ -180,6 +176,9 @@ pub mod frontend_service {
     /// Total number of LLM requests accepted by the frontend handler
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
 
+    /// Total number of terminal semantic request failures.
+    pub const FAILURES_TOTAL: &str = "failures_total";
+
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
 
@@ -205,6 +204,17 @@ pub mod frontend_service {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
+
+    /// Raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
+    pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "kv_best_eligible_cached_prefix_tokens_total";
+
+    /// Raw cached prefix tokens on the selected worker and DP rank at selection
+    pub const KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "kv_selected_cached_prefix_tokens_total";
+
+    /// Backend-reported cache-hit tokens
+    pub const KV_WORKER_REUSED_TOKENS_TOTAL: &str = "kv_worker_reused_tokens_total";
 
     /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
@@ -466,10 +476,8 @@ pub mod work_handler {
     /// Configured capacity of the bounded work queue (gauge, static)
     pub const QUEUE_CAPACITY: &str = "queue_capacity";
 
-    /// Total times enqueuing work failed because the dispatcher channel was closed.
-    /// A full queue is shed via try_reserve() and counted under
-    /// `dynamo_rejection_request_total`. Saturation shows up as rising `QUEUE_DEPTH`
-    /// toward `QUEUE_CAPACITY`.
+    /// Requests rejected before TCP worker dispatch because the bounded work queue
+    /// was full or the dispatcher channel was closed.
     pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
 
     /// Time spent waiting to acquire a worker-pool permit (histogram)
@@ -663,6 +671,17 @@ pub mod router {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
+
+    /// Raw cached prefix tokens on the best eligible worker (counter, per routing attempt)
+    pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "router_kv_best_eligible_cached_prefix_tokens_total";
+
+    /// Raw cached prefix tokens on the selected worker and DP rank (counter)
+    pub const KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL: &str =
+        "router_kv_selected_cached_prefix_tokens_total";
+
+    /// Backend-reported cache-hit tokens (counter)
+    pub const KV_WORKER_REUSED_TOKENS_TOTAL: &str = "router_kv_worker_reused_tokens_total";
 
     /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";

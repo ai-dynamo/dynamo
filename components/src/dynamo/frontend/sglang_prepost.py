@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeAlias
 
+from jinja2.exceptions import TemplateError
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.entrypoints.openai.protocol import ToolChoice as SglangToolChoice
@@ -26,7 +27,7 @@ from sglang.srt.parser.jinja_template_utils import (
     detect_jinja_template_content_format,
     process_content_for_template_format,
 )
-from sglang.srt.parser.reasoning_parser import ReasoningParser
+from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
@@ -280,6 +281,7 @@ def create_parsers(
     reasoning_parser_name: str | None,
     sglang_tools: list[SglangTool] | None = None,
     force_reasoning: bool = False,
+    tokenizer: Any | None = None,
 ) -> tuple[ToolCallParserType | None, ReasoningParser | None]:
     """Create tool call and reasoning parsers for a request.
 
@@ -307,6 +309,7 @@ def create_parsers(
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
             )
 
     reasoning_parser = None
@@ -319,6 +322,7 @@ def create_parsers(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
             force_reasoning=force_reasoning,
+            **_parser_tokenizer_kwargs(ReasoningParser, tokenizer),
         )
 
     return tool_call_parser, reasoning_parser
@@ -347,14 +351,31 @@ def named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None:
     return None
 
 
-def _guided_tool_choice_requires_reasoning(
-    request: dict[str, Any], force_reasoning: bool
+def _guided_output_requires_reasoning(
+    request: dict[str, Any],
+    force_reasoning: bool,
+    reasoning_parser_name: str | None = None,
+    guided_decoding: dict[str, Any] | None = None,
 ) -> bool:
-    """Return whether SGLang should reason before guided tool-call JSON."""
+    """Return whether SGLang should reason before guided output."""
+    if not force_reasoning:
+        return False
+
     tool_choice = request.get("tool_choice", "auto")
-    return force_reasoning and (
-        tool_choice == "required" or _is_named_tool_choice(tool_choice)
-    )
+    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        return True
+
+    # Explicit legacy constraints take precedence over response_format.
+    if legacy_guided_decoding(request):
+        return False
+
+    response_format = request.get("response_format")
+    if isinstance(response_format, dict) and response_format.get("type") != "text":
+        return reasoning_parser_name != "gpt-oss"
+
+    # An auto tool-call grammar forbids the end-of-thinking marker, so it must
+    # also wait for thinking to finish.
+    return guided_decoding is not None and "structural_tag" in guided_decoding
 
 
 def _normalize_deepseek_v4_hint(value: Any) -> str:
@@ -562,10 +583,17 @@ def _call_with_optional_parallel_tool_calls(
     return func(*args)
 
 
+def _parser_tokenizer_kwargs(parser: Any, tokenizer: Any) -> dict[str, Any]:
+    if tokenizer is not None and _callable_accepts_kwarg(parser, "tokenizer"):
+        return {"tokenizer": tokenizer}
+    return {}
+
+
 def build_tool_call_guided_decoding(
     request: dict[str, Any],
     *,
     tool_call_parser_name: str | None,
+    tokenizer: Any | None = None,
     sglang_tools: list[SglangTool] | None,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
@@ -620,6 +648,7 @@ def build_tool_call_guided_decoding(
         parser = FunctionCallParser(
             tools=sglang_tools,
             tool_call_parser=tool_call_parser_name,
+            **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
         )
         constraint = _call_with_optional_parallel_tool_calls(
             parser.get_structure_constraint,
@@ -764,11 +793,12 @@ def preprocess_chat_request(
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
 
-    # Reject a named tool_choice whose function is missing from tools —
-    # otherwise the chat template would render with zero tools while
-    # guided decoding still constrains the output to that function's
-    # schema, producing confusing model behavior.
+    # Reject a forced tool_choice that cannot be satisfied by the provided tools.
+    # Otherwise the chat template and guided decoding cannot enforce the request.
     tool_choice = request.get("tool_choice", "auto")
+    forced_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
+    if tool_choice == "required" and not sglang_tools:
+        raise PreprocessError('tool_choice is "required" but tools is empty')
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         available_names = {t.function.name for t in (sglang_tools or [])}
@@ -777,6 +807,17 @@ def preprocess_chat_request(
                 f"tool_choice names function {chosen_name!r}, but it is not "
                 f"present in tools (available: {sorted(available_names) or 'none'})"
             )
+
+    response_format = request.get("response_format")
+    if (
+        forced_tool_choice
+        and isinstance(response_format, dict)
+        and response_format.get("type") == "structural_tag"
+    ):
+        raise PreprocessError(
+            "tool_choice forces a tool call and cannot be combined with a "
+            "structural_tag response format"
+        )
 
     template_tools = _filter_template_tools(
         request,
@@ -818,9 +859,14 @@ def preprocess_chat_request(
 
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 
-        prompt_token_ids = _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(template_messages, **template_kwargs)
-        )
+        try:
+            rendered = tokenizer.apply_chat_template(
+                template_messages, **template_kwargs
+            )
+        except (TemplateError, TypeError) as exc:
+            # Jinja filters such as tojson can raise TypeError for invalid inputs.
+            raise PreprocessError(str(exc)) from exc
+        prompt_token_ids = _normalize_prompt_token_ids(rendered)
 
     # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
     # while still sharing the existing Dynamo parser/guided-decoding behavior.
@@ -830,29 +876,31 @@ def preprocess_chat_request(
         reasoning_parser_name=effective_reasoning_parser_name,
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
+        tokenizer=tokenizer,
     )
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
+        tokenizer=tokenizer,
     )
-    # TODO: response_format wins here even when tool_choice is "required" or names
-    # a function, so a request that demanded a tool call can come back with none
-    # -- the tool constraint is dropped and only logged. The other two paths do
-    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
-    # and keeps the tool constraint, and prepost.py does the same after narrowing
-    # its conflict check. response_format is scoped by the OpenAI spec to the
-    # message the model returns to the user, not to tool calls, so the tool
-    # constraint is the one that must survive.
-    #
+    # This path also never reads the legacy guided_json / guided_regex /
+    # guided_grammar / guided_choice fields at all, so those are dropped silently
+    # while both other paths honor them (and reject them against a forced choice).
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
     ):
-        logger.warning(
-            "Tool-call guided decoding will be ignored because of response_format already exists."
-        )
+        if forced_tool_choice:
+            logger.warning(
+                "response_format guided decoding will be ignored because tool_choice is forced."
+            )
+        else:
+            logger.warning(
+                "Tool-call guided decoding will be ignored because response_format already exists."
+            )
+
     # A forced tool choice and a legacy guided_* constrain the same token stream,
     # so honoring the guided_* would drop the tool constraint while the forced-tool
     # parser stays selected. Reject that rather than drop one silently, matching
@@ -863,24 +911,23 @@ def preprocess_chat_request(
     # guided_regex; nothing is displaced, and named_zero_arg_tool below still
     # recognizes it. Rejecting an identical constraint would refuse a request the
     # two paths agree on.
-    tool_choice = request.get("tool_choice", "auto")
     if (
         legacy_guidance
         and tool_call_guided_decoding is not None
         and legacy_guidance != tool_call_guided_decoding
-        and (tool_choice == "required" or _is_named_tool_choice(tool_choice))
+        and forced_tool_choice
     ):
         raise InvalidArgument(
             "tool_choice forces a tool call and cannot be combined with an "
             "explicit guided_* constraint."
         )
 
-    # Explicit legacy constraints outrank automatic guidance, matching the vLLM
-    # processor. response_format is NOT covered by the check above -- see the TODO
-    # further up: it still wins over a forced tool choice here, unlike the other
-    # two paths.
     guided_decoding = (
-        legacy_guidance or response_format_guided_decoding or tool_call_guided_decoding
+        tool_call_guided_decoding
+        if forced_tool_choice
+        else legacy_guidance
+        or response_format_guided_decoding
+        or tool_call_guided_decoding
     )
 
     return SglangPreprocessResult(
@@ -991,6 +1038,13 @@ def _try_parse_json_array(text: str) -> list | None:
     return None
 
 
+def resolve_skip_special_tokens(requested: bool | None, *, has_parser: bool) -> bool:
+    """Honor explicit decoding options without hiding parser delimiters."""
+    if has_parser:
+        return False
+    return True if requested is None else requested
+
+
 class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
@@ -1013,6 +1067,9 @@ class SglangStreamingPostProcessor:
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
+        stop_token_ids: set[int] | None = None,
+        skip_special_tokens: bool | None = None,
+        guided_json_is_content: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1026,7 +1083,37 @@ class SglangStreamingPostProcessor:
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a parser is active so tool-call and
         # reasoning delimiters remain visible during incremental decoding.
-        self._skip_special_tokens = self._fast_plain_text
+        self._skip_special_tokens = resolve_skip_special_tokens(
+            skip_special_tokens, has_parser=not self._fast_plain_text
+        )
+        # Bare answer JSON is already structured by generation. Keep the original
+        # decoding policy, and retain the parser for forced tool-call JSON arrays.
+        if guided_json_is_content and not isinstance(tool_call_parser, JsonArrayParser):
+            self.tool_call_parser = tool_call_parser = None
+            # GPT-OSS still uses Harmony channels without the reasoning gate.
+            if reasoning_parser is None or not isinstance(
+                reasoning_parser.detector, GptOssDetector
+            ):
+                self.reasoning_parser = reasoning_parser = None
+            self._fast_plain_text = reasoning_parser is None
+        # Parsers must see their closing delimiters before display trimming.
+        # Prefer the complete declaration over the legacy single-tool closer.
+        if isinstance(tool_call_parser, JsonArrayParser):
+            detector = tool_call_parser
+        elif tool_call_parser is not None:
+            detector = tool_call_parser.detector
+        else:
+            detector = None
+        closers = getattr(detector, "tool_close_literals", None)
+        if closers is None:
+            eot_token = getattr(detector, "eot_token", "")
+            closers = [eot_token] if isinstance(eot_token, str) and eot_token else []
+        self._tool_close_literals = set(closers)
+        # Preserve existing explicit opt-ins, including reasoning-only parsers.
+        self._no_stop_trim = any(
+            getattr(getattr(parser, "detector", None), "no_stop_trim", False) is True
+            for parser in (tool_call_parser, reasoning_parser)
+        )
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
@@ -1034,7 +1121,11 @@ class SglangStreamingPostProcessor:
         self._pending_guided_reasoning_parts: list[str] | None = (
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
+        # The frontend owns text shaping. Keep every stop token in the raw
+        # engine stream, but exclude a matched stop suffix when decoding
+        # user-visible text.
         self._eos_token_ids = set(eos_token_ids or [])
+        self._request_stop_token_ids = set(stop_token_ids or [])
         self._stop_strings = stop_strings or set()
         self._pending_stop_text = ""
         self._locally_finished = False
@@ -1063,11 +1154,43 @@ class SglangStreamingPostProcessor:
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
 
-    def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
-        if not self._eos_token_ids:
+    def _strip_matched_stop_token_ids(
+        self, token_ids: list[int], stop_reason: Any
+    ) -> list[int]:
+        """Remove only the engine-reported token-stop suffix from display IDs."""
+        if not token_ids or self._no_stop_trim:
             return token_ids
-        while token_ids and token_ids[-1] in self._eos_token_ids:
-            token_ids.pop()
+
+        known_stop_ids = self._eos_token_ids | self._request_stop_token_ids
+        if isinstance(stop_reason, int) and not isinstance(stop_reason, bool):
+            matched_ids = [stop_reason] if stop_reason in known_stop_ids else []
+        elif (
+            isinstance(stop_reason, list)
+            and stop_reason
+            and all(
+                isinstance(token_id, int)
+                and not isinstance(token_id, bool)
+                and token_id in known_stop_ids
+                for token_id in stop_reason
+            )
+        ):
+            matched_ids = stop_reason
+        elif stop_reason is None and token_ids[-1] in self._eos_token_ids:
+            # Model EOS is intentionally omitted from the public stop_reason.
+            matched_ids = [token_ids[-1]]
+        else:
+            matched_ids = []
+
+        if (
+            matched_ids
+            and token_ids[-len(matched_ids) :] == matched_ids
+            and (
+                not self._tool_close_literals
+                or self.tokenizer.decode(matched_ids, skip_special_tokens=False)
+                not in self._tool_close_literals
+            )
+        ):
+            del token_ids[-len(matched_ids) :]
         return token_ids
 
     def _tool_call_id(self, name: str, index: int) -> str:
@@ -1306,13 +1429,16 @@ class SglangStreamingPostProcessor:
         match = self._find_stop_string(text, stop_reason)
         if match is not None:
             match_index, matched_stop_string = match
-            suppressed_text = text[match_index:]
+            retained_end = match_index
+            if self._no_stop_trim or matched_stop_string in self._tool_close_literals:
+                retained_end += len(matched_stop_string)
+            suppressed_text = text[retained_end:]
             suppressed_count = self._trailing_logprobs_count(suppressed_text)
             if suppressed_count:
                 del self._pending_logprobs_content[-suppressed_count:]
             self._locally_finished = True
             self._local_stop_reason = matched_stop_string
-            return text[:match_index], True
+            return text[:retained_end], True
 
         if finish_reason or not text or not self._stop_strings:
             return text, False
@@ -1391,9 +1517,12 @@ class SglangStreamingPostProcessor:
         stop_reason = engine_response.get("stop_reason")
         log_probs = engine_response.get("log_probs")
         top_logprobs = engine_response.get("top_logprobs")
-        if finish_reason is not None:
+        stop_terminated = engine_response.get(
+            "stop_terminated", finish_reason == "stop"
+        )
+        if stop_terminated:
             raw_token_count = len(token_ids)
-            token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
             retained_token_count = len(token_ids)
             if log_probs is not None and len(log_probs) == raw_token_count:
                 log_probs = log_probs[:retained_token_count]
@@ -1580,6 +1709,9 @@ class SglangStreamingPostProcessor:
                             fcp = FunctionCallParser(
                                 tools=self._sglang_tools,
                                 tool_call_parser=self._tool_call_parser_name,
+                                **_parser_tokenizer_kwargs(
+                                    FunctionCallParser, self.tokenizer
+                                ),
                             )
                             _, final_calls = fcp.parse_non_stream(full_text)
                         except (

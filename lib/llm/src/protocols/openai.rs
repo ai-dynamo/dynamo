@@ -26,6 +26,7 @@ pub mod generate;
 pub mod images;
 pub mod models;
 pub mod pooling;
+pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;
@@ -33,8 +34,8 @@ pub mod validate;
 pub mod videos;
 
 use validate::{
-    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
-    TEMPERATURE_RANGE, validate_range, validate_top_p,
+    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MAX_STOP_SEQUENCES, MIN_P_RANGE, N_RANGE,
+    PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, validate_range, validate_top_p,
 };
 
 /// Key under `extra_args` where media handlers nest a request's captured
@@ -118,9 +119,13 @@ pub(crate) trait OpenAIStopConditionsProvider {
     }
 
     /// Get max_thinking_tokens from nvext
-    /// NOTE: This is currently a passthrough for future thinking budget implementation
+    /// NOTE: This is a legacy passthrough; prefer root-level `thinking_token_budget`.
     fn get_max_thinking_tokens(&self) -> Option<u32> {
         self.nvext().and_then(|nv| nv.max_thinking_tokens)
+    }
+
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        None
     }
 }
 
@@ -134,6 +139,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_formatted_prompt(&self) -> Option<bool>;
 
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        None
+    }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
         None
     }
 }
@@ -217,17 +226,27 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
         let stop_token_ids = self.get_stop_token_ids();
-        let max_thinking_tokens = self.get_max_thinking_tokens();
+        let max_thinking_tokens = self
+            .get_thinking_token_budget()
+            .or_else(|| self.get_max_thinking_tokens());
 
         if let Some(stop) = &stop
-            && stop.len() > 4
+            && stop.len() > MAX_STOP_SEQUENCES
         {
-            anyhow::bail!("stop conditions must be less than 4")
+            return Err(common::invalid_argument_error(format!(
+                "Maximum of {} stop sequences allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                stop.len()
+            )));
         }
         if let Some(stop_token_ids) = &stop_token_ids
-            && stop_token_ids.len() > 4
+            && stop_token_ids.len() > MAX_STOP_SEQUENCES
         {
-            anyhow::bail!("stop token IDs must be less than 4")
+            return Err(common::invalid_argument_error(format!(
+                "Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                stop_token_ids.len()
+            )));
         }
 
         // Use the trait method to get ignore_eos, which handles precedence
@@ -260,6 +279,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
             skip_special_tokens,
             formatted_prompt,
             return_tokens_as_token_ids,
+            no_stop_trim: self.get_no_stop_trim(),
         })
     }
 }

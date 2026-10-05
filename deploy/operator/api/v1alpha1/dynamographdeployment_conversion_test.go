@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -147,6 +148,39 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	}
 	got := roundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGD_RoundTrip_RolePodTemplates(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name: v1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "leader:1.5.0",
+						}}}},
+					},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "worker:1.5.0",
+						}}}},
+					},
+				},
+			}},
+		},
+	}
+
+	got := roundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -723,6 +757,7 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 }
 
 func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
+	t.Log("Define native Pod metadata, scheduling fields and main-container settings")
 	shm := resource.MustParse("4Gi")
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "pt", Namespace: "ns"},
@@ -738,12 +773,50 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 							Labels:      map[string]string{"tier": "gpu"},
 						},
 						Spec: corev1.PodSpec{
+							NodeSelector:       map[string]string{"node-pool": "gpu"},
+							ServiceAccountName: "dynamo-sa",
+							ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "ghcr-creds"}},
+							Tolerations: []corev1.Toleration{
+								{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+							},
+							Volumes: []corev1.Volume{
+								{
+									Name: "cache",
+									VolumeSource: corev1.VolumeSource{
+										EmptyDir: &corev1.EmptyDirVolumeSource{},
+									},
+								},
+							},
 							Containers: []corev1.Container{
 								{
 									Name:  "main",
 									Image: "dynamo:latest",
 									Env: []corev1.EnvVar{
 										{Name: "DYN_COMPONENT", Value: "worker"},
+									},
+									EnvFrom: []corev1.EnvFromSource{
+										{
+											SecretRef: &corev1.SecretEnvSource{
+												LocalObjectReference: corev1.LocalObjectReference{Name: "aws-secret"},
+											},
+										},
+									},
+									LivenessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstrFromInt32(8080)},
+										},
+										InitialDelaySeconds: 5,
+									},
+									ReadinessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstrFromInt32(8080)},
+										},
+									},
+									StartupProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{Path: "/startup", Port: intstrFromInt32(8080)},
+										},
+										FailureThreshold: 30,
 									},
 									Resources: corev1.ResourceRequirements{
 										Requests: corev1.ResourceList{
@@ -759,13 +832,10 @@ func TestDGD_RoundTrip_PodTemplate(t *testing.T) {
 			},
 		},
 	}
+
+	t.Log("Round-trip through alpha and compare the complete native template and shared memory")
 	got := roundTripFromV1beta1(t, src)
-	// corev1.ResourceList equality can be quantity-representation-sensitive;
-	// use cmpopts to compare canonical forms.
-	opts := cmp.Options{
-		cmpopts.EquateEmpty(),
-	}
-	if diff := cmp.Diff(src, got, opts); diff != "" {
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -927,15 +997,18 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 			},
 			Components: map[string]v1beta1.ComponentReplicaStatus{
 				"worker": {
-					ComponentKind:     v1beta1.ComponentKindDeployment,
-					ComponentNames:    []string{"dgd-worker-0", "dgd-worker-1"},
-					RuntimeNamespace:  "ns-status-worker-abc123",
-					GPUsPerEngine:     ptr.To(int64(2)),
-					GPUsPerReplica:    ptr.To(int64(3)),
-					Replicas:          2,
-					UpdatedReplicas:   2,
-					ReadyReplicas:     ptr.To(int32(2)),
-					AvailableReplicas: ptr.To(int32(2)),
+					ComponentKind:        v1beta1.ComponentKindDeployment,
+					ComponentNames:       []string{"dgd-worker-0", "dgd-worker-1"},
+					RuntimeNamespace:     "ns-status-worker-abc123",
+					ServedModelName:      "Qwen/Qwen3-8B",
+					RuntimeComponentName: "custom-worker",
+					GPUPowerLimitWatts:   ptr.To(int64(300)),
+					GPUsPerEngine:        ptr.To(int64(2)),
+					GPUsPerReplica:       ptr.To(int64(3)),
+					Replicas:             2,
+					UpdatedReplicas:      2,
+					ReadyReplicas:        ptr.To(int32(2)),
+					AvailableReplicas:    ptr.To(int32(2)),
 				},
 			},
 			Restart: &v1beta1.RestartStatus{
@@ -988,6 +1061,27 @@ func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 					ComponentType:         v1beta1.ComponentTypeWorker,
 					GlobalDynamoNamespace: true,
 					Multinode:             &v1beta1.MultinodeSpec{NodeCount: 4},
+					Roles: []v1beta1.ComponentRoleSpec{
+						{
+							Name:     v1beta1.ComponentRoleLeader,
+							Replicas: ptr.To(int32(1)),
+							PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+								Name: "main", Image: "leader:latest",
+							}}}},
+						},
+						{
+							Name:     v1beta1.ComponentRoleWorker,
+							Replicas: ptr.To(int32(3)),
+							PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+								Name: "main", Image: "worker:latest",
+							}}}},
+							ProviderOverride: &v1beta1.ProviderOverride{
+								APIVersion: "grove.io/v1alpha1",
+								Target:     "PodCliqueTemplateSpec",
+								Value:      apiextensionsv1.JSON{Raw: []byte(`{"topologyConstraint":{"pack":{"required":"rack"}}}`)},
+							},
+						},
+					},
 					ModelRef: &v1beta1.ModelReference{
 						Name:     "llama-3-70b-instruct",
 						Revision: "v1",
@@ -1000,101 +1094,6 @@ func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 	}
 	got := roundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got); diff != "" {
-		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
-	}
-}
-
-// TestDGD_RoundTrip_PodTemplateProbesAndEnvFrom covers the main-container
-// fields that decomposePodTemplate preserves through ExtraPodSpec.MainContainer:
-// EnvFrom, LivenessProbe, ReadinessProbe, StartupProbe.
-func TestDGD_RoundTrip_PodTemplateProbesAndEnvFrom(t *testing.T) {
-	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "probes", Namespace: "ns"},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				{
-					ComponentName: "worker",
-					ComponentType: v1beta1.ComponentTypeWorker,
-					PodTemplate: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "main",
-									Image: "dynamo:latest",
-									EnvFrom: []corev1.EnvFromSource{
-										{
-											SecretRef: &corev1.SecretEnvSource{
-												LocalObjectReference: corev1.LocalObjectReference{Name: "aws-secret"},
-											},
-										},
-									},
-									LivenessProbe: &corev1.Probe{
-										ProbeHandler: corev1.ProbeHandler{
-											HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstrFromInt32(8080)},
-										},
-										InitialDelaySeconds: 5,
-									},
-									ReadinessProbe: &corev1.Probe{
-										ProbeHandler: corev1.ProbeHandler{
-											HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstrFromInt32(8080)},
-										},
-									},
-									StartupProbe: &corev1.Probe{
-										ProbeHandler: corev1.ProbeHandler{
-											HTTPGet: &corev1.HTTPGetAction{Path: "/startup", Port: intstrFromInt32(8080)},
-										},
-										FailureThreshold: 30,
-									},
-								},
-							},
-						},
-					}},
-			},
-		},
-	}
-	got := roundTripFromV1beta1(t, src)
-	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
-		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
-	}
-}
-
-// TestDGD_RoundTrip_PodSpecExtras covers the non-main-container PodSpec fields
-// that flow through ExtraPodSpec.PodSpec: NodeSelector, Tolerations,
-// ServiceAccountName, ImagePullSecrets, Volumes.
-func TestDGD_RoundTrip_PodSpecExtras(t *testing.T) {
-	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "extras", Namespace: "ns"},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				{
-					ComponentName: "worker",
-					ComponentType: v1beta1.ComponentTypeWorker,
-					PodTemplate: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							NodeSelector:       map[string]string{"node-pool": "gpu"},
-							ServiceAccountName: "dynamo-sa",
-							ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "ghcr-creds"}},
-							Tolerations: []corev1.Toleration{
-								{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
-							},
-							Volumes: []corev1.Volume{
-								{
-									Name: "cache",
-									VolumeSource: corev1.VolumeSource{
-										EmptyDir: &corev1.EmptyDirVolumeSource{},
-									},
-								},
-							},
-							Containers: []corev1.Container{
-								{Name: "main", Image: "dynamo:latest"},
-							},
-						},
-					}},
-			},
-		},
-	}
-	got := roundTripFromV1beta1(t, src)
-	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }

@@ -41,7 +41,7 @@ spec:
           # GB200 benchmark pods need build tools to compile it from source.
           apt update && apt install -y --no-install-recommends curl jq git build-essential
 
-          pip install --no-cache-dir "aiperf==0.10.0"
+          pip install --no-cache-dir "aiperf==0.12.0"
           python -c "import aiperf; print('aiperf', aiperf.__version__, 'OK')"
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."

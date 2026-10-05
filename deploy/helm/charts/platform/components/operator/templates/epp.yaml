@@ -13,6 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# RBAC for `epp-serviceaccount`: EPP components the operator builds from a
+# DynamoGraphDeployment, which run the Dynamo runtime (`DYN_EPP_MODE=dynamo`).
+# The grants below are what that mode reads. Standalone mode is a separate code
+# path that reads a different set, carried on its own ServiceAccount and Role
+# (deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml). Grant standalone
+# permissions there.
 {{- if .Values.namespaceRestriction.enabled }}
 # Namespace-restricted mode: Role + ServiceAccount + RoleBinding
 ---

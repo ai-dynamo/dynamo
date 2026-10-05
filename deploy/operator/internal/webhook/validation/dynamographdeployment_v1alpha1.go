@@ -62,6 +62,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 			dynamoNamespace,
 		)...)
 	}
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntimeV1Alpha1(spec, fldPath)...)
+	}
 	return allErrs
 }
 
