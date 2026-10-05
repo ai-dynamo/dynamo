@@ -93,7 +93,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
   <Indent>
     <ParamField path="localPartitions" type="LPXLocalPartitions">
-      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set exactly one of `all: true` or `ids`. Omission runs every partition on LPUs. LPU-only, speculative, and HX builds reject this field.
+      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. LPU-only, speculative, and HX builds reject this field.
 
       The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the conductor's `lpu_servers` and the Agents' partition configuration. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
 

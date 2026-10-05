@@ -2540,8 +2540,26 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `all` _boolean_ | all runs every partition on the Cyborg GPU. |  | Optional: \{\} <br /> |
-| `ids` _integer array_ | ids lists the compiler partition IDs that run on the Cyborg GPU. |  | MinItems: 1 <br />items:Maximum: 4.294967295e+09 <br />items:Minimum: 0 <br />Optional: \{\} <br /> |
+| `mode` _[LPXLocalPartitionsMode](#lpxlocalpartitionsmode)_ | mode selects the partitions that run on the Cyborg GPU. `All` runs every<br />partition; `IDs` runs the partitions listed in ids. |  | Enum: [All IDs] <br />Required: \{\} <br /> |
+| `ids` _integer array_ | ids lists the compiler partition IDs that run on the Cyborg GPU.<br />Required when mode is `IDs` and forbidden otherwise. |  | MinItems: 1 <br />items:Maximum: 4.294967295e+09 <br />items:Minimum: 0 <br />Optional: \{\} <br /> |
+
+
+#### LPXLocalPartitionsMode
+
+_Underlying type:_ _string_
+
+LPXLocalPartitionsMode selects how LPXLocalPartitions chooses partitions.
+
+_Validation:_
+- Enum: [All IDs]
+
+_Appears in:_
+- [LPXLocalPartitions](#lpxlocalpartitions)
+
+| Field | Description |
+| --- | --- |
+| `All` | LPXLocalPartitionsModeAll runs every partition on the Cyborg GPU.<br /> |
+| `IDs` | LPXLocalPartitionsModeIDs runs the partitions listed in ids on the Cyborg GPU.<br /> |
 
 
 #### MockerSpec

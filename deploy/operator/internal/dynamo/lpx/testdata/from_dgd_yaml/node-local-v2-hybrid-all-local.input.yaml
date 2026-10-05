@@ -17,7 +17,7 @@ spec:
         buildId: node-local-v2-connected-lpx
         experimental:
           localPartitions:
-            all: true
+            mode: All
       roles:
       - name: conductor
         replicas: 1

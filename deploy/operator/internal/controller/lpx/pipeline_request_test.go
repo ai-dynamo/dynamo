@@ -374,7 +374,7 @@ func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
 		localPartitions *v1beta1.LPXLocalPartitions
 		wantPartitions  [][]int64
 	}{
-		{name: "all-local selection requests no LPU placement", localPartitions: &v1beta1.LPXLocalPartitions{All: true}, wantPartitions: [][]int64{}},
+		{name: "all-local selection requests no LPU placement", localPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll}, wantPartitions: [][]int64{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Resolve a hybrid workload with the selected local partitions")

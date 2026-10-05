@@ -41,16 +41,29 @@ func (c *LPXConfig) LocalPartitions() *LPXLocalPartitions {
 	return c.Experimental.LocalPartitions
 }
 
+// LPXLocalPartitionsMode selects how LPXLocalPartitions chooses partitions.
+// +kubebuilder:validation:Enum=All;IDs
+type LPXLocalPartitionsMode string
+
+const (
+	// LPXLocalPartitionsModeAll runs every partition on the Cyborg GPU.
+	LPXLocalPartitionsModeAll LPXLocalPartitionsMode = "All"
+	// LPXLocalPartitionsModeIDs runs the partitions listed in ids on the Cyborg GPU.
+	LPXLocalPartitionsModeIDs LPXLocalPartitionsMode = "IDs"
+)
+
 // LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
 // Partition IDs are the compiler partition IDs of the build's runtime
 // partitions. A selected prop-sync chain is identified by its first partition.
-// +kubebuilder:validation:XValidation:rule="(has(self.all) && self.all) != has(self.ids)",message="set either all: true or ids"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'IDs' ? has(self.ids) : !has(self.ids)",message="ids is required when mode is IDs and forbidden otherwise"
 type LPXLocalPartitions struct {
-	// all runs every partition on the Cyborg GPU.
-	// +optional
-	All bool `json:"all,omitempty"`
+	// mode selects the partitions that run on the Cyborg GPU. `All` runs every
+	// partition; `IDs` runs the partitions listed in ids.
+	// +required
+	Mode LPXLocalPartitionsMode `json:"mode"`
 
 	// ids lists the compiler partition IDs that run on the Cyborg GPU.
+	// Required when mode is `IDs` and forbidden otherwise.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MinItems=1

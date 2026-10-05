@@ -48,24 +48,28 @@ func selectRemotePartitions(
 	}
 
 	local := make(map[int]bool)
-	if selection.All {
+	switch selection.Mode {
+	case dynamov1beta1.LPXLocalPartitionsModeAll:
 		for _, owner := range runtimeOwner {
 			local[owner] = true
 		}
-	}
-	for _, requested := range selection.IDs {
-		id := int(requested)
-		owner, exists := runtimeOwner[id]
-		if !exists {
-			return nil, nil, fmt.Errorf("localPartitions references partition %d, which the build does not contain", id)
+	case dynamov1beta1.LPXLocalPartitionsModeIDs:
+		for _, requested := range selection.IDs {
+			id := int(requested)
+			owner, exists := runtimeOwner[id]
+			if !exists {
+				return nil, nil, fmt.Errorf("localPartitions references partition %d, which the build does not contain", id)
+			}
+			if owner != id {
+				return nil, nil, fmt.Errorf(
+					"localPartitions references partition %d of the prop-sync chain that starts at partition %d; select %d",
+					id, owner, owner,
+				)
+			}
+			local[id] = true
 		}
-		if owner != id {
-			return nil, nil, fmt.Errorf(
-				"localPartitions references partition %d of the prop-sync chain that starts at partition %d; select %d",
-				id, owner, owner,
-			)
-		}
-		local[id] = true
+	default:
+		return nil, nil, fmt.Errorf("localPartitions has unsupported mode %q", selection.Mode)
 	}
 
 	remote := make([]BuildPartition, 0, len(partitions))

@@ -17,6 +17,7 @@ spec:
         buildId: llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
         experimental:
           localPartitions:
+            mode: IDs
             ids: [0, 15, 16]
       roles:
       - name: conductor

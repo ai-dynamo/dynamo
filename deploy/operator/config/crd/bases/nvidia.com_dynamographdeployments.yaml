@@ -11536,11 +11536,10 @@ spec:
                                   the remaining partitions, and schedules none when every partition is
                                   local. Omission runs every partition on LPUs.
                                 properties:
-                                  all:
-                                    description: all runs every partition on the Cyborg GPU.
-                                    type: boolean
                                   ids:
-                                    description: ids lists the compiler partition IDs that run on the Cyborg GPU.
+                                    description: |-
+                                      ids lists the compiler partition IDs that run on the Cyborg GPU.
+                                      Required when mode is `IDs` and forbidden otherwise.
                                     items:
                                       format: int64
                                       maximum: 4294967295
@@ -11549,10 +11548,20 @@ spec:
                                     minItems: 1
                                     type: array
                                     x-kubernetes-list-type: set
+                                  mode:
+                                    description: |-
+                                      mode selects the partitions that run on the Cyborg GPU. `All` runs every
+                                      partition; `IDs` runs the partitions listed in ids.
+                                    enum:
+                                      - All
+                                      - IDs
+                                    type: string
+                                required:
+                                  - mode
                                 type: object
                                 x-kubernetes-validations:
-                                  - message: 'set either all: true or ids'
-                                    rule: (has(self.all) && self.all) != has(self.ids)
+                                  - message: ids is required when mode is IDs and forbidden otherwise
+                                    rule: 'self.mode == ''IDs'' ? has(self.ids) : !has(self.ids)'
                             type: object
                           scheduling:
                             description: |-
@@ -21099,11 +21108,10 @@ spec:
                                   the remaining partitions, and schedules none when every partition is
                                   local. Omission runs every partition on LPUs.
                                 properties:
-                                  all:
-                                    description: all runs every partition on the Cyborg GPU.
-                                    type: boolean
                                   ids:
-                                    description: ids lists the compiler partition IDs that run on the Cyborg GPU.
+                                    description: |-
+                                      ids lists the compiler partition IDs that run on the Cyborg GPU.
+                                      Required when mode is `IDs` and forbidden otherwise.
                                     items:
                                       format: int64
                                       maximum: 4294967295
@@ -21112,10 +21120,20 @@ spec:
                                     minItems: 1
                                     type: array
                                     x-kubernetes-list-type: set
+                                  mode:
+                                    description: |-
+                                      mode selects the partitions that run on the Cyborg GPU. `All` runs every
+                                      partition; `IDs` runs the partitions listed in ids.
+                                    enum:
+                                      - All
+                                      - IDs
+                                    type: string
+                                required:
+                                  - mode
                                 type: object
                                 x-kubernetes-validations:
-                                  - message: 'set either all: true or ids'
-                                    rule: (has(self.all) && self.all) != has(self.ids)
+                                  - message: ids is required when mode is IDs and forbidden otherwise
+                                    rule: 'self.mode == ''IDs'' ? has(self.ids) : !has(self.ids)'
                             type: object
                           scheduling:
                             description: |-
