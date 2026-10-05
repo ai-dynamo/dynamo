@@ -18,3 +18,13 @@
 # series once the override is in force. Drop this entry once aiperf widens its
 # own constraint.
 pillow>=12.3.0,<13
+
+# Same story for aiohttp. aiperf declares aiohttp~=3.13.3 on every published
+# version, which holds the frontend below the 3.14.3 floor that pyproject.toml
+# and requirements.common.txt set for every other image. The planner already
+# carries this override for the same reason.
+#
+# The upper bound is required for the same reason as above: without it this
+# image would be the only one that accepts a 4.x release. Drop this entry once
+# aiperf widens its own constraint.
+aiohttp>=3.14.3,<4.0
