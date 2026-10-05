@@ -967,8 +967,8 @@ shared:
   owners:
   - operator
   - lpx
-# Keep both teams routed; the main-branch Ruleset separately requires Operator
-# approval for the same LPX path pattern.
+# Keep both teams routed. To require Operator approval, configure the
+# main-branch Ruleset with this same LPX path pattern.
 - glob: deploy/**/*lpx*
   owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
