@@ -294,7 +294,8 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
-        let kv_event_sources = discover_kv_event_sources(&discovery, &mut config, &self.endpoint)?;
+        let kv_event_sources =
+            discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
         self.state
@@ -686,9 +687,10 @@ fn is_routable_host(host: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn local_kv_event_sources(
+async fn local_kv_event_sources(
     metadata: &NodeMetadata,
     config: &mut EngineConfig,
+    deadline: Instant,
 ) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
     let llm = config
         .llm
@@ -698,7 +700,8 @@ fn local_kv_event_sources(
         .validate_registration(llm.data_parallel_size.unwrap_or(1), llm.kv_cache_block_size)
         .map_err(|error| client::invalid_arg(error.to_string()))?;
     if let Some(group_id) = metadata
-        .worker_group_id()
+        .worker_group_id(deadline)
+        .await
         .map_err(|error| client::invalid_arg(error.to_string()))?
     {
         config
@@ -720,17 +723,18 @@ fn local_kv_event_sources(
         .collect())
 }
 
-fn discover_kv_event_sources(
+async fn discover_kv_event_sources(
     discovery: &Discovery,
     engine_config: &mut EngineConfig,
     grpc_endpoint: &GrpcEndpoint,
+    deadline: Instant,
 ) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
     // An explicit list is authoritative, including an empty list. Only older
     // engines without this field may use the legacy single-node descriptor.
     if let Some(metadata) = NodeMetadata::from_server_info(&discovery.server_info)
         .map_err(|error| client::protocol_error(error.to_string()))?
     {
-        return local_kv_event_sources(&metadata, engine_config);
+        return local_kv_event_sources(&metadata, engine_config, deadline).await;
     }
     let Some(descriptor) = discovery.server_info.get("kv_events") else {
         return Ok(Vec::new());
@@ -1071,6 +1075,9 @@ fn build_engine_config(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
     use clap::Parser;
     use dynamo_backend_common::{BackendError, ErrorType, ModelInput};
     use dynamo_sidecar_common::GrpcEndpoint;
@@ -1220,40 +1227,6 @@ mod tests {
                 .to_string()
                 .contains("route-to-encoder is not supported")
         );
-    }
-
-    #[test]
-    fn discovery_roles_accept_native_aliases_and_reject_unknown_strings() {
-        for (value, expected) in [
-            (json!(null), DisaggregationMode::Aggregated),
-            (json!("null"), DisaggregationMode::Aggregated),
-            (json!("agg"), DisaggregationMode::Aggregated),
-            (json!("aggregated"), DisaggregationMode::Aggregated),
-            (json!("prefill"), DisaggregationMode::Prefill),
-            (json!("decode"), DisaggregationMode::Decode),
-        ] {
-            assert_eq!(
-                crate::client::discovery_mode(&json!({"disaggregation_mode": value})).unwrap(),
-                expected
-            );
-        }
-        assert_eq!(
-            crate::client::discovery_mode(&json!({})).unwrap(),
-            DisaggregationMode::Aggregated
-        );
-        for mode in ["encode", "unknown", ""] {
-            let error =
-                crate::client::discovery_mode(&json!({"disaggregation_mode": mode})).unwrap_err();
-            assert_eq!(
-                error.error_type(),
-                ErrorType::Backend(BackendError::Unknown)
-            );
-            assert!(
-                error
-                    .to_string()
-                    .contains("unsupported SGLang disaggregation_mode")
-            );
-        }
     }
 
     #[test]
@@ -1420,12 +1393,18 @@ mod tests {
         (discovery, config, endpoint)
     }
 
-    #[test]
-    fn kv_event_descriptor_is_optional_but_validated_when_present() {
+    #[tokio::test]
+    async fn kv_event_descriptor_is_optional_but_validated_when_present() {
         let (mut discovery, mut config, endpoint) = kv_discovery();
         for value in [json!(null), json!([]), json!("zmq")] {
             discovery.server_info["kv_events"] = value.clone();
-            let result = discover_kv_event_sources(&discovery, &mut config, &endpoint);
+            let result = discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await;
             if value.is_null() {
                 assert!(result.unwrap().is_empty());
             } else {
@@ -1439,9 +1418,15 @@ mod tests {
         }
         discovery.server_info = json!({});
         assert!(
-            discover_kv_event_sources(&discovery, &mut config, &endpoint)
-                .unwrap()
-                .is_empty()
+            discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
 
         for (field, value) in [
@@ -1458,7 +1443,14 @@ mod tests {
         ] {
             let (mut discovery, mut config, endpoint) = kv_discovery();
             discovery.server_info["kv_events"][field] = value;
-            let error = discover_kv_event_sources(&discovery, &mut config, &endpoint).unwrap_err();
+            let error = discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(
                 error.error_type(),
                 ErrorType::Backend(BackendError::Unknown)
@@ -1467,8 +1459,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn kv_events_require_matching_registration_and_rank_coverage() {
+    #[tokio::test]
+    async fn kv_events_require_matching_registration_and_rank_coverage() {
         for (block_size, dp_size, dp_start, message) in [
             (64, 2, 0, "block size"),
             (128, 1, 0, "reports 2 DP ranks"),
@@ -1480,7 +1472,14 @@ mod tests {
             llm.kv_cache_block_size = Some(block_size);
             llm.data_parallel_size = Some(dp_size);
             llm.data_parallel_start_rank = Some(dp_start);
-            let error = discover_kv_event_sources(&discovery, &mut config, &endpoint).unwrap_err();
+            let error = discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(
                 error.error_type(),
                 ErrorType::Backend(BackendError::Unknown)
@@ -1490,15 +1489,21 @@ mod tests {
         let (discovery, mut config, endpoint) = kv_discovery();
         config.llm = None;
         assert!(
-            discover_kv_event_sources(&discovery, &mut config, &endpoint)
-                .unwrap_err()
-                .to_string()
-                .contains("require an LLM engine registration")
+            discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("require an LLM engine registration")
         );
     }
 
-    #[test]
-    fn kv_events_reject_unmapped_multi_node_dp_and_port_overflow() {
+    #[tokio::test]
+    async fn kv_events_reject_unmapped_multi_node_dp_and_port_overflow() {
         for (nnodes, base_port, message) in [
             (2, 5557, "multi-node DP are unsupported"),
             (1, 65535, "port overflows 65535"),
@@ -1506,7 +1511,14 @@ mod tests {
             let (mut discovery, mut config, endpoint) = kv_discovery();
             discovery.server_info["nnodes"] = json!(nnodes);
             discovery.server_info["kv_events"]["endpoint_port_base"] = json!(base_port);
-            let error = discover_kv_event_sources(&discovery, &mut config, &endpoint).unwrap_err();
+            let error = discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(
                 error.error_type(),
                 ErrorType::Backend(BackendError::Unknown)
@@ -1799,8 +1811,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn discovers_ranked_kv_event_sources_from_server_info() {
+    #[tokio::test]
+    async fn discovers_ranked_kv_event_sources_from_server_info() {
         let discovery = discovery(json!({
             "page_size": 64,
             "dcp_size": 2,
@@ -1819,7 +1831,14 @@ mod tests {
             build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
         let endpoint = GrpcEndpoint::parse("http://worker.example:30001", "test").unwrap();
 
-        let sources = discover_kv_event_sources(&discovery, &mut config, &endpoint).unwrap();
+        let sources = discover_kv_event_sources(
+            &discovery,
+            &mut config,
+            &endpoint,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             sources,
@@ -1838,8 +1857,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn local_metadata_overrides_global_sources_without_shrinking_registration() {
+    #[tokio::test]
+    async fn local_metadata_overrides_global_sources_without_shrinking_registration() {
         use crate::client::{KV_CONFIG_KEY, WORKER_GROUP_KEY};
 
         let mut discovery = discovery(json!({
@@ -1860,7 +1879,14 @@ mod tests {
         let mut config =
             build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
         let endpoint = GrpcEndpoint::parse("http://127.0.0.1:30001", "test").unwrap();
-        let sources = discover_kv_event_sources(&discovery, &mut config, &endpoint).unwrap();
+        let sources = discover_kv_event_sources(
+            &discovery,
+            &mut config,
+            &endpoint,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             sources
                 .iter()
@@ -1879,9 +1905,15 @@ mod tests {
         // An explicit empty source list must not fall back to all global ranks.
         discovery.server_info["kv_event_sources"] = json!([]);
         assert!(
-            discover_kv_event_sources(&discovery, &mut config, &endpoint)
-                .unwrap()
-                .is_empty()
+            discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
         assert_eq!(
             config.runtime_data[KV_CONFIG_KEY]["local_dp_ranks"],
@@ -1895,6 +1927,15 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("kv_event_sources");
-        assert!(discover_kv_event_sources(&discovery, &mut config, &endpoint).is_err());
+        assert!(
+            discover_kv_event_sources(
+                &discovery,
+                &mut config,
+                &endpoint,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .is_err()
+        );
     }
 }

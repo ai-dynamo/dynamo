@@ -62,7 +62,8 @@ impl HeadlessSidecar {
         // model discovery, HealthCheck, connection pool, or native HTTP client.
         let (mut client, metadata, mode) = self.connect_local_engine().await?;
         let group_id = metadata
-            .worker_group_id()?
+            .worker_group_id(Instant::now() + self.transport.startup_deadline)
+            .await?
             .context("telemetry-only mode requires a multinode group")?;
 
         // Supervise the local engine while waiting for the leader too. Engines

@@ -124,7 +124,10 @@ impl NodeMetadata {
         Ok(())
     }
 
-    pub(crate) fn worker_group_id(&self) -> anyhow::Result<Option<String>> {
+    pub(crate) async fn worker_group_id(
+        &self,
+        deadline: Instant,
+    ) -> anyhow::Result<Option<String>> {
         if self.nnodes == 1 {
             return Ok(None);
         }
@@ -146,8 +149,36 @@ impl NodeMetadata {
         validate_endpoint(&url)?;
         // Match the in-process group key using the shared rendezvous address,
         // not the local source or gRPC address.
-        worker_group_id_from_addresses(address.socket_addrs(|| None)?).map(Some)
+        resolve_rendezvous(move || address.socket_addrs(|| None), deadline)
+            .await
+            .and_then(worker_group_id_from_addresses)
+            .map(Some)
     }
+}
+
+// getaddrinfo cannot be cancelled. Keep it off Tokio's workers and blocking
+// pool so dropping startup or shutting down the runtime never waits for DNS.
+// Each startup performs one lookup; an abandoned thread exits when DNS returns.
+async fn resolve_rendezvous(
+    resolve: impl FnOnce() -> std::io::Result<Vec<SocketAddr>> + Send + 'static,
+    deadline: Instant,
+) -> anyhow::Result<Vec<SocketAddr>> {
+    anyhow::ensure!(
+        Instant::now() < deadline,
+        "rendezvous DNS startup deadline elapsed"
+    );
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("sglang-rendezvous-dns".into())
+        .spawn(move || {
+            let _ = tx.send(resolve());
+        })
+        .context("failed to start rendezvous DNS resolver")?;
+    timeout_at(deadline, rx)
+        .await
+        .context("timed out resolving SGLang rendezvous address")?
+        .context("rendezvous DNS resolver stopped")?
+        .context("failed to resolve SGLang rendezvous address")
 }
 
 fn worker_group_id_from_addresses(mut resolved: Vec<SocketAddr>) -> anyhow::Result<String> {
@@ -667,8 +698,8 @@ mod tests {
         })
     }
 
-    #[test]
-    fn parses_node_local_sources_and_ignores_unrelated_server_fields() {
+    #[tokio::test]
+    async fn parses_node_local_sources_and_ignores_unrelated_server_fields() {
         let mut raw = node_metadata_json();
         raw["model_path"] = json!("model-repo");
         // Live-only relaying does not interpret the engine's optional replay field.
@@ -676,7 +707,11 @@ mod tests {
         let metadata = NodeMetadata::from_server_info(&raw).unwrap().unwrap();
         assert_eq!(metadata.kv_event_sources[0].dp_rank, 4);
         assert_eq!(
-            metadata.worker_group_id().unwrap().as_deref(),
+            metadata
+                .worker_group_id(Instant::now() + std::time::Duration::from_secs(1))
+                .await
+                .unwrap()
+                .as_deref(),
             Some("dist_init:tcp://127.0.0.1:2345")
         );
         metadata.validate_registration(8, Some(64)).unwrap();
@@ -726,16 +761,80 @@ mod tests {
         assert!(NodeMetadata::from_server_info(&raw).is_err());
     }
 
-    #[test]
-    fn normalizes_ipv6_group_id_and_accepts_bound_ipc_sources() {
+    #[tokio::test]
+    async fn normalizes_ipv6_group_id_and_accepts_bound_ipc_sources() {
         let mut raw = node_metadata_json();
         raw["dist_init_addr"] = json!("tcp://[::1]:2345");
         raw["kv_event_sources"][0]["endpoint"] = json!("ipc:///engine/kv-events");
         let metadata = NodeMetadata::from_server_info(&raw).unwrap().unwrap();
         assert_eq!(
-            metadata.worker_group_id().unwrap().as_deref(),
+            metadata
+                .worker_group_id(Instant::now() + std::time::Duration::from_secs(1))
+                .await
+                .unwrap()
+                .as_deref(),
             Some("dist_init:tcp://[::1]:2345")
         );
+    }
+
+    #[tokio::test]
+    async fn rendezvous_dns_deadline_bounds_a_blocked_resolver() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let error = super::resolve_rendezvous(
+            move || {
+                let _ = blocked.recv_timeout(std::time::Duration::from_secs(3));
+                Ok(vec![])
+            },
+            Instant::now() + std::time::Duration::from_millis(25),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out resolving"));
+        drop(release);
+    }
+
+    #[test]
+    fn cancelling_dns_does_not_hold_up_runtime_shutdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        runtime.block_on(async {
+            let lookup = super::resolve_rendezvous(
+                move || {
+                    let _ = started_tx.send(());
+                    // Bound the injected delay even if runtime shutdown regresses.
+                    let _ = blocked.recv_timeout(std::time::Duration::from_secs(3));
+                    Ok(vec![])
+                },
+                Instant::now() + std::time::Duration::from_secs(10),
+            );
+            tokio::select! {
+                result = lookup => panic!("resolver returned before cancellation: {result:?}"),
+                _ = started_rx => {},
+            }
+        });
+        let shutdown_started = std::time::Instant::now();
+        drop(runtime);
+        let elapsed = shutdown_started.elapsed();
+        drop(release);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "shutdown waited for DNS: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rendezvous_dns_propagates_resolution_errors() {
+        let error = super::resolve_rendezvous(
+            || Err(std::io::Error::other("injected resolver failure")),
+            Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected resolver failure"));
     }
 
     #[test]
@@ -758,22 +857,38 @@ mod tests {
     }
 
     #[test]
-    fn discovery_mode_reads_only_server_metadata() {
+    fn discovery_roles_accept_native_aliases_and_reject_unknown_strings() {
         use dynamo_backend_common::DisaggregationMode;
 
+        for (value, expected) in [
+            (json!(null), DisaggregationMode::Aggregated),
+            (json!("null"), DisaggregationMode::Aggregated),
+            (json!("agg"), DisaggregationMode::Aggregated),
+            (json!("aggregated"), DisaggregationMode::Aggregated),
+            (json!("prefill"), DisaggregationMode::Prefill),
+            (json!("decode"), DisaggregationMode::Decode),
+        ] {
+            assert_eq!(
+                discovery_mode(&json!({"disaggregation_mode": value})).unwrap(),
+                expected
+            );
+        }
         assert_eq!(
             discovery_mode(&json!({})).unwrap(),
             DisaggregationMode::Aggregated
         );
-        assert_eq!(
-            discovery_mode(&json!({"disaggregation_mode": "prefill"})).unwrap(),
-            DisaggregationMode::Prefill
-        );
-        assert_eq!(
-            discovery_mode(&json!({"disaggregation_mode": "decode"})).unwrap(),
-            DisaggregationMode::Decode
-        );
-        assert!(discovery_mode(&json!({"disaggregation_mode": "unknown"})).is_err());
+        for mode in ["encode", "unknown", ""] {
+            let error = discovery_mode(&json!({"disaggregation_mode": mode})).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported SGLang disaggregation_mode")
+            );
+        }
     }
 
     #[test]
