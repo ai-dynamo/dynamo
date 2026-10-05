@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "agentic_prep.rs"]
+mod agentic_prep;
 #[path = "mooncake_open_loop.rs"]
 mod mooncake_open_loop;
 #[path = "mooncake_shared.rs"]
@@ -8,7 +10,11 @@ mod mooncake_shared;
 #[path = "scaling_diag.rs"]
 mod scaling_diag;
 
-use clap::{Parser, Subcommand};
+use agentic_prep::{AgenticEngine, prepare_agentic_benchmark};
+use clap::{Parser, Subcommand, ValueEnum};
+use dynamo_bench::kv_router_common::agentic::{
+    AgenticCorpusConfig, AgenticPool, AgenticPrepReport,
+};
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
@@ -38,6 +44,24 @@ const MAX_CRTC_RANKS: usize = 1 << 16;
 const PRE_RUN_QUIESCENCE_MS: u64 = 5_000;
 #[cfg(not(target_os = "linux"))]
 const PRE_RUN_QUIESCENCE_MS: u64 = 0;
+
+/// Corpus source for the open-loop replay.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum Workload {
+    /// Mooncake trace, partitioned by session and re-simulated per worker.
+    Mooncake,
+    /// Agentic (Weka/AgentX) row pool, replayed closed loop per worker in virtual time.
+    Agentic,
+}
+
+impl Workload {
+    fn name(self) -> &'static str {
+        match self {
+            Workload::Mooncake => "mooncake",
+            Workload::Agentic => "agentic",
+        }
+    }
+}
 
 /// Indexer backend selection and its backend-specific parameters.
 #[derive(Subcommand, Debug, Clone)]
@@ -178,6 +202,56 @@ struct Args {
     #[clap(long, default_value = "0.7")]
     guard_issuer_active_fraction: f64,
 
+    /// Corpus source. With `agentic`, the positional path is an agentic row pool written by
+    /// `--write-agentic-pool`.
+    #[clap(long, value_enum, default_value = "mooncake")]
+    workload: Workload,
+
+    /// Import the Weka corpus at the positional path with AISimulate's importer, write the
+    /// row pool to this path, print its provenance, and exit.
+    #[clap(long)]
+    write_agentic_pool: Option<String>,
+
+    /// Fail closed unless the agentic row pool has this SHA-256.
+    #[clap(long)]
+    agentic_pool_sha256: Option<String>,
+
+    /// Target plays per worker; copies of the pool are K = ceil(S * W / plays) (TDF analog).
+    #[clap(long, default_value = "32")]
+    agentic_plays_per_worker: usize,
+
+    /// Concurrent closed-loop lanes (plays in flight) per worker.
+    #[clap(long, default_value = "4")]
+    agentic_lanes_per_worker: usize,
+
+    /// Soft virtual-time cap of each worker's closed-loop replay; sets per-worker load.
+    #[clap(long)]
+    agentic_sim_ms: Option<u64>,
+
+    /// Cap on every dependency (think/tool) delay.
+    #[clap(long, default_value = "300000")]
+    agentic_idle_cap_ms: f64,
+
+    /// Worker phase offsets are drawn from [0, spread * sim_ms).
+    #[clap(long, default_value = "0.05")]
+    agentic_phase_spread: f64,
+
+    /// Hash-depth multiplier per request (TLF analog).
+    #[clap(long, default_value = "1")]
+    agentic_length_factor: usize,
+
+    /// Mock engine speedup ratio for the agentic capture (the Mooncake prep uses 10).
+    #[clap(long, default_value = "1.0")]
+    agentic_speedup_ratio: f64,
+
+    /// Allow closed-loop lanes to run out of plays before the cap (plumbing smokes only).
+    #[clap(long)]
+    agentic_allow_exhausted_lanes: bool,
+
+    /// Skip the cross-worker shared-hash statistics (and their fail-closed post-salt check).
+    #[clap(long)]
+    agentic_no_collision_stats: bool,
+
     /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
     /// with `--num-event-workers` event threads.
     #[clap(subcommand)]
@@ -234,6 +308,12 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
     if (args.prep_only || args.correctness_check_queries > 0) && args.common.sweep {
         anyhow::bail!("--prep-only and --correctness-check-queries do not support --sweep");
     }
+    if args.write_agentic_pool.is_some() && args.common.mooncake_trace_path.is_none() {
+        anyhow::bail!("--write-agentic-pool needs the Weka corpus as the positional path");
+    }
+    if args.workload == Workload::Agentic {
+        validate_agentic_args(args)?;
+    }
     if args.common.mooncake_trace_path.is_none() {
         return Ok(());
     }
@@ -259,6 +339,45 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_agentic_args(args: &Args) -> anyhow::Result<()> {
+    let common = &args.common;
+    if common.trace_length_factor != 1 || common.trace_duplication_factor != 1 {
+        anyhow::bail!(
+            "the agentic workload scales with --agentic-plays-per-worker and --agentic-length-factor, not --trace-*-factor"
+        );
+    }
+    if common.inference_worker_duplication_factor != 1 {
+        anyhow::bail!("the agentic workload does not support -d worker duplication");
+    }
+    if common.trace_simulation_duration_ms.is_some() {
+        anyhow::bail!("the agentic workload sets per-worker load with --agentic-sim-ms");
+    }
+    if args.write_agentic_pool.is_none() && args.agentic_sim_ms.is_none() {
+        anyhow::bail!("the agentic workload requires --agentic-sim-ms");
+    }
+    if !args.agentic_speedup_ratio.is_finite() || args.agentic_speedup_ratio <= 0.0 {
+        anyhow::bail!("--agentic-speedup-ratio must be finite and positive");
+    }
+    Ok(())
+}
+
+fn agentic_corpus_config(args: &Args) -> anyhow::Result<AgenticCorpusConfig> {
+    Ok(AgenticCorpusConfig {
+        workers: args.common.num_unique_inference_workers,
+        plays_per_worker: args.agentic_plays_per_worker,
+        lanes_per_worker: args.agentic_lanes_per_worker,
+        sim_ms: args
+            .agentic_sim_ms
+            .ok_or_else(|| anyhow::anyhow!("the agentic workload requires --agentic-sim-ms"))?,
+        idle_cap_ms: args.agentic_idle_cap_ms,
+        phase_spread: args.agentic_phase_spread,
+        length_factor: args.agentic_length_factor,
+        seed: args.common.seed,
+        allow_exhausted_lanes: args.agentic_allow_exhausted_lanes,
+        collision_stats: !args.agentic_no_collision_stats,
+    })
 }
 
 fn indexer_names(args: &Args) -> Vec<String> {
@@ -566,6 +685,8 @@ fn run_provenance(args: &Args, config: &MooncakeIndexerConfig) -> anyhow::Result
             .then_some(config.jump_size),
         issuer_spin_us: args.issuer_spin_us,
         issue_lag_diagnostic_threshold_us: args.issue_lag_diagnostic_threshold_us,
+        workload: args.workload.name().to_string(),
+        agentic: None,
     })
 }
 
@@ -576,14 +697,36 @@ fn benchmark_config(args: &Args, benchmark_duration_ms: u64) -> MooncakeBenchmar
     }
 }
 
+/// A prepared corpus, its untimed preparation phases, and (agentic only) its provenance.
+type PreparedInput = (
+    PreparedMooncakeBenchmark,
+    PrepTimings,
+    Option<AgenticPrepReport>,
+);
+
 async fn prepare_benchmark(
     args: &Args,
     benchmark_duration_ms: u64,
-) -> anyhow::Result<Option<(PreparedMooncakeBenchmark, PrepTimings)>> {
+) -> anyhow::Result<Option<PreparedInput>> {
     let Some(path) = args.common.mooncake_trace_path.as_deref() else {
         eprintln!("No mooncake_trace_path provided, skipping benchmark");
         return Ok(None);
     };
+    if args.workload == Workload::Agentic {
+        let (prepared, timings, report) = prepare_agentic_benchmark(
+            std::path::Path::new(path),
+            args.agentic_pool_sha256.as_deref(),
+            &agentic_corpus_config(args)?,
+            AgenticEngine {
+                num_gpu_blocks: args.common.num_gpu_blocks,
+                block_size: args.common.block_size,
+                speedup_ratio: args.agentic_speedup_ratio,
+            },
+            benchmark_duration_ms,
+        )
+        .await?;
+        return Ok(Some((prepared, timings, Some(report))));
+    }
 
     let mut timings = PrepTimings::default();
     let started = Instant::now();
@@ -603,7 +746,13 @@ async fn prepare_benchmark(
     let merged = merge_worker_traces(artifacts, args.common.block_size)?;
     let prepared = prepare_scaled_benchmark(merged, benchmark_duration_ms);
     timings.merge_and_rescale_ms = elapsed_ms(started);
-    Ok(Some((prepared, timings)))
+    Ok(Some((prepared, timings, None)))
+}
+
+fn agentic_json(report: Option<AgenticPrepReport>) -> anyhow::Result<Option<serde_json::Value>> {
+    report
+        .map(|report| serde_json::to_value(report).map_err(Into::into))
+        .transpose()
 }
 
 #[derive(serde::Serialize)]
@@ -612,21 +761,46 @@ struct PrepOnlyReport {
     prep: PrepTimings,
     workload: scaling_diag::WorkloadDiagnostics,
     provenance: RunProvenance,
+    totals: PrepTotals,
+}
+
+/// Corpus totals in the units the open-loop rate is defined in.
+#[derive(serde::Serialize)]
+struct PrepTotals {
+    requests: usize,
+    request_blocks: usize,
+    stored_events: usize,
+    stored_blocks: usize,
+    removed_events: usize,
+    removed_blocks: usize,
+    total_block_ops: usize,
 }
 
 async fn run_prep_only_mode(args: &Args, indexer_names: &[String]) -> anyhow::Result<()> {
     let name = indexer_names.first().map(String::as_str).unwrap_or("null");
     let config = indexer_config(args, name)?;
-    let provenance = run_provenance(args, &config)?;
-    let Some((prepared, prep)) = prepare_benchmark(args, args.common.benchmark_duration_ms).await?
+    let mut provenance = run_provenance(args, &config)?;
+    let Some((prepared, prep, agentic)) =
+        prepare_benchmark(args, args.common.benchmark_duration_ms).await?
     else {
         return Ok(());
     };
+    provenance.agentic = agentic_json(agentic)?;
+    let totals = prepared.totals;
     let report = PrepOnlyReport {
         mode: "prep_only",
         prep,
         workload: workload_diagnostics(&prepared, args.common.num_gpu_blocks),
         provenance,
+        totals: PrepTotals {
+            requests: totals.requests,
+            request_blocks: totals.request_blocks,
+            stored_events: totals.stored_events,
+            stored_blocks: totals.stored_blocks,
+            removed_events: totals.removed_events,
+            removed_blocks: totals.removed_blocks,
+            total_block_ops: totals.total_block_ops(),
+        },
     };
     let json = serde_json::to_string_pretty(&report)?;
     println!("{json}");
@@ -638,12 +812,13 @@ async fn run_correctness_mode(args: &Args, indexer_names: &[String]) -> anyhow::
     for name in indexer_names {
         let config = indexer_config(args, name)?;
         let bench_config = benchmark_config(args, args.common.benchmark_duration_ms);
-        let Some((prepared, _)) =
+        let Some((prepared, _, agentic)) =
             prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
         else {
             return Ok(());
         };
-        let report = run_correctness_for_config(args, &config, prepared, bench_config).await?;
+        let mut report = run_correctness_for_config(args, &config, prepared, bench_config).await?;
+        report.agentic = agentic_json(agentic)?;
         println!(
             "Correctness {}: workers={} checked={} mismatches={} pass={}",
             report.backend, report.workers, report.checked_queries, report.mismatches, report.pass
@@ -663,13 +838,14 @@ async fn run_open_loop_repeated_mode(args: &Args, indexer_names: &[String]) -> a
     for name in indexer_names {
         let config = indexer_config(args, name)?;
         // Record provenance before the run so it describes the inputs actually read.
-        let provenance = run_provenance(args, &config)?;
+        let mut provenance = run_provenance(args, &config)?;
         let bench_config = benchmark_config(args, args.common.benchmark_duration_ms);
-        let Some((prepared, timings)) =
+        let Some((prepared, timings, agentic)) =
             prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
         else {
             return Ok(());
         };
+        provenance.agentic = agentic_json(agentic)?;
         let mut result =
             run_open_loop_for_config(args, &config, prepared, bench_config, timings).await?;
         result.provenance = Some(provenance);
@@ -701,14 +877,16 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
                 duration_ms
             );
             let bench_config = benchmark_config(args, duration_ms);
-            let Some((prepared, timings)) =
+            let Some((prepared, timings, agentic)) =
                 prepare_benchmark(args, bench_config.benchmark_duration_ms).await?
             else {
                 return Ok(());
             };
             let mut result =
                 run_open_loop_for_config(args, &config, prepared, bench_config, timings).await?;
-            result.provenance = Some(provenance.clone());
+            let mut provenance = provenance.clone();
+            provenance.agentic = agentic_json(agentic)?;
+            result.provenance = Some(provenance);
             print_open_loop_result(&result);
             let path = open_loop_output_path(
                 &args.result_json_output,
@@ -721,7 +899,45 @@ async fn run_open_loop_sweep_mode(args: &Args, indexer_names: &[String]) -> anyh
     Ok(())
 }
 
+/// Import a Weka corpus once and write the agentic row pool.
+fn write_agentic_pool(args: &Args, output: &str) -> anyhow::Result<()> {
+    let source = args
+        .common
+        .mooncake_trace_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--write-agentic-pool needs a Weka source path"))?;
+    let started = Instant::now();
+    let pool = AgenticPool::import_weka(std::path::Path::new(source))?;
+    let sha256 = pool.write(std::path::Path::new(output))?;
+    let summary = serde_json::json!({
+        "mode": "write_agentic_pool",
+        "pool_path": output,
+        "pool_sha256": sha256,
+        "source_path": pool.source_path,
+        "source_sha256": pool.source_sha256,
+        "source_digest": pool.header.source.digest,
+        "block_size": pool.header.block_size,
+        "files": pool.import_files,
+        "plays": pool.plays.len(),
+        "requests": pool.request_count(),
+        "hash_ids": pool
+            .plays
+            .iter()
+            .flat_map(|play| &play.rows)
+            .map(|row| row.hash_ids.as_ref().map_or(0, Vec::len))
+            .sum::<usize>(),
+        "raw_zero_outputs": pool.import_raw_zero_outputs,
+        "nested_timestamp_basis": pool.nested_timestamp_basis,
+        "elapsed_ms": elapsed_ms(started),
+    });
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
 async fn async_main(args: Args) -> anyhow::Result<()> {
+    if let Some(output) = args.write_agentic_pool.as_deref() {
+        return write_agentic_pool(&args, output);
+    }
     let indexer_names = indexer_names(&args);
 
     if args.prep_only {

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "mooncake")]
+pub mod agentic;
 #[cfg(any(
     feature = "active-sequences",
     feature = "mooncake",

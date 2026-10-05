@@ -2450,6 +2450,7 @@ dependencies = [
  "libc",
  "rand 0.9.4",
  "reqwest 0.12.28",
+ "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -2461,6 +2462,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -426,6 +426,29 @@ pub fn generate_trace_worker_artifacts_offline(
     crate::replay::offline::generate_trace_worker_artifacts(args, trace)
 }
 
+/// Generate one worker's offline replay artifacts from a closed-loop agentic workload: `lanes`
+/// concurrent plays dispatch each turn when its dependencies complete, until the soft
+/// virtual-time cap `max_sim_time_ms`. Benchmark corpus plumbing; not a stable API.
+#[doc(hidden)]
+pub fn generate_agentic_worker_artifacts_offline(
+    args: MockEngineArgs,
+    trace: AgenticTrace,
+    lanes: usize,
+    max_sim_time_ms: Option<f64>,
+) -> Result<ReplayWorkerArtifacts> {
+    if lanes == 0 {
+        bail!("agentic artifact generation requires at least one lane");
+    }
+    let args = args.normalized()?;
+    crate::replay::offline::generate_agentic_worker_artifacts_with_visibility(
+        args,
+        trace,
+        lanes,
+        max_sim_time_ms,
+        None,
+    )
+}
+
 /// Generate offline replay artifacts with a test visibility override for KV events.
 pub fn generate_trace_worker_artifacts_offline_with_kv_event_visibility(
     args: MockEngineArgs,

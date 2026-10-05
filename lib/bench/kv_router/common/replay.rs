@@ -45,10 +45,19 @@ pub fn default_mock_engine_args(
     num_gpu_blocks: usize,
     block_size: usize,
 ) -> anyhow::Result<MockEngineArgs> {
+    mock_engine_args_with_speedup(num_gpu_blocks, block_size, 10.0)
+}
+
+/// [`default_mock_engine_args`] with an explicit engine speedup ratio.
+pub fn mock_engine_args_with_speedup(
+    num_gpu_blocks: usize,
+    block_size: usize,
+    speedup_ratio: f64,
+) -> anyhow::Result<MockEngineArgs> {
     Ok(MockEngineArgs::builder()
         .num_gpu_blocks(num_gpu_blocks)
         .block_size(block_size)
-        .speedup_ratio(10.0)
+        .speedup_ratio(speedup_ratio)
         .enable_prefix_caching(true)
         .max_num_batched_tokens(None)
         .max_num_seqs(None)

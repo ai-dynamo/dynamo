@@ -554,6 +554,9 @@ pub struct CorrectnessReport {
     pub registration_failures: usize,
     pub elapsed_ms: f64,
     pub pass: bool,
+    /// Agentic corpus provenance and validity checks (agentic workload only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agentic: Option<serde_json::Value>,
 }
 
 pub fn compare_scores(

@@ -391,7 +391,32 @@ pub(crate) fn prepare_scaled_benchmark(
             timestamp_us,
         },
     );
+    prepared_with_totals(worker_traces, benchmark_duration_ms, merged.block_size)
+}
 
+/// Like [`prepare_scaled_benchmark`], but with one shared time origin and span for all
+/// workers, so deliberate per-worker phase offsets survive the rescale.
+#[allow(dead_code)]
+pub(crate) fn prepare_scaled_benchmark_global(
+    merged: MergedMooncakeBenchmark,
+    benchmark_duration_ms: u64,
+) -> PreparedMooncakeBenchmark {
+    let worker_traces = merged.worker_traces.into_rescaled_global(
+        benchmark_duration_ms,
+        |entry| entry.timestamp_us,
+        |entry, timestamp_us| WorkerTrace {
+            entry: entry.entry,
+            timestamp_us,
+        },
+    );
+    prepared_with_totals(worker_traces, benchmark_duration_ms, merged.block_size)
+}
+
+fn prepared_with_totals(
+    worker_traces: WorkerTimelines<WorkerTrace>,
+    benchmark_duration_ms: u64,
+    block_size: u32,
+) -> PreparedMooncakeBenchmark {
     let mut totals = MooncakeTraceTotals::default();
 
     for entry in worker_traces.iter().flatten() {
@@ -418,6 +443,6 @@ pub(crate) fn prepare_scaled_benchmark(
         worker_traces,
         totals,
         benchmark_duration_ms,
-        block_size: merged.block_size,
+        block_size,
     }
 }

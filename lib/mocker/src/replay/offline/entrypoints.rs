@@ -391,6 +391,22 @@ pub(crate) fn generate_trace_worker_artifacts_with_visibility(
     kv_events::generate_trace_worker_artifacts_with_visibility(args, trace, visibility)
 }
 
+pub(crate) fn generate_agentic_worker_artifacts_with_visibility(
+    args: MockEngineArgs,
+    trace: AgenticTrace,
+    lanes: usize,
+    max_sim_time_ms: Option<f64>,
+    visibility: Option<RouterEventVisibility>,
+) -> Result<ReplayWorkerArtifacts> {
+    kv_events::generate_agentic_worker_artifacts_with_visibility(
+        args,
+        trace,
+        lanes,
+        max_sim_time_ms,
+        visibility,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_with_scaling_policy(
     args: MockEngineArgs,

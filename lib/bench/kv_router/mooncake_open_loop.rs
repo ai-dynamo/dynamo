@@ -935,6 +935,11 @@ pub struct RunProvenance {
     pub jump_size: Option<usize>,
     pub issuer_spin_us: u64,
     pub issue_lag_diagnostic_threshold_us: u64,
+    /// `mooncake` or `agentic`.
+    pub workload: String,
+    /// Agentic corpus provenance and validity checks (agentic workload only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agentic: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

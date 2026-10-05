@@ -7,7 +7,7 @@ use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
 
 use crate::common::protocols::{MockEngineArgs, OutputSignal};
 use crate::engine_observations::dynamo_kv_event;
-use crate::loadgen::Trace;
+use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
@@ -177,9 +177,38 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
     router_event_visibility_override: Option<RouterEventVisibility>,
 ) -> anyhow::Result<ReplayWorkerArtifacts> {
     let args = args.normalized()?;
-    let engine_block_size = args.block_size;
+    let driver = trace.into_trace_driver_with_block_size(args.block_size)?;
+    run_single_worker_artifacts(args, driver, None, router_event_visibility_override)
+}
+
+/// Closed-loop agentic counterpart of [`generate_trace_worker_artifacts_with_visibility`]:
+/// one aggregated DP1 worker drives `lanes` concurrent plays, dispatching each turn when its
+/// dependencies complete, until the soft virtual-time cap `max_sim_time_ms`.
+pub(in crate::replay) fn generate_agentic_worker_artifacts_with_visibility(
+    args: MockEngineArgs,
+    trace: AgenticTrace,
+    lanes: usize,
+    max_sim_time_ms: Option<f64>,
+    router_event_visibility_override: Option<RouterEventVisibility>,
+) -> anyhow::Result<ReplayWorkerArtifacts> {
+    let args = args.normalized()?;
+    let lanes = crate::replay::effective_agentic_lanes(Some(lanes), trace.play_count());
+    let driver = trace.into_trace_driver_with_options(args.block_size, true, lanes)?;
+    run_single_worker_artifacts(
+        args,
+        driver,
+        max_sim_time_ms,
+        router_event_visibility_override,
+    )
+}
+
+fn run_single_worker_artifacts(
+    args: MockEngineArgs,
+    driver: WorkloadDriver,
+    max_sim_time_ms: Option<f64>,
+    router_event_visibility_override: Option<RouterEventVisibility>,
+) -> anyhow::Result<ReplayWorkerArtifacts> {
     let (engine, factory) = crate::engine_adapter::aggregated_replay_setup(&args)?;
-    let driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
     let spec = ReplaySpec {
         version: CURRENT_REPLAY_SPEC_VERSION,
         topology: ReplayTopology::Aggregated {
@@ -190,7 +219,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
             placement: ProviderSpec::round_robin(),
             scaling: ProviderSpec::no_scaling(),
         },
-        max_sim_time_ms: None,
+        max_sim_time_ms,
         max_in_flight: None,
         record_per_request: false,
         sla: Default::default(),

@@ -89,7 +89,8 @@ pub struct ReplayRuntimeObservers {
     pub telemetry: Option<ReplayTelemetryOptions>,
 }
 pub use entrypoints::{
-    ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
+    ReplayKvEventVisibility, generate_agentic_worker_artifacts_offline,
+    generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
     simulate_agentic_trace_live_workload_with_router_mode_and_options,
     simulate_agentic_trace_workload_disagg_with_router_mode,

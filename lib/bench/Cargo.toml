@@ -54,9 +54,12 @@ mooncake = [
   "dep:flume",
   "dep:indicatif",
   "dep:libc",
+  "dep:rand",
+  "dep:rmp-serde",
   "dep:rustc-hash",
   "dep:sha2",
   "dep:tokio-util",
+  "dep:xxhash-rust",
 ]
 multiturn = [
   "kv-router-stress-support",
@@ -130,6 +133,11 @@ path = "offline_replay_bench.rs"
 harness = false
 required-features = ["offline-replay"]
 
+[[test]]
+name = "agentic_corpus"
+path = "tests/agentic_corpus.rs"
+required-features = ["mooncake"]
+
 [[bench]]
 name = "mooncake_bench"
 path = "kv_router/mooncake_bench.rs"
@@ -177,6 +185,7 @@ hf-hub = { workspace = true, features = ["ureq"], optional = true }
 indicatif = { version = "0.18", optional = true }
 rand = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+rmp-serde = { workspace = true, optional = true }
 rustc-hash = { version = "2", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -190,6 +199,7 @@ tokenizers = { version = "0.21.4", default-features = false, features = [
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
+xxhash-rust = { workspace = true, optional = true }
 dynamo-tokens = { workspace = true, optional = true }
 dynamo-data-gen = { workspace = true, optional = true }
 dynamo-mocker = { workspace = true, optional = true }
