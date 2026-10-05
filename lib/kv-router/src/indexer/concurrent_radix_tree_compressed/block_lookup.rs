@@ -181,8 +181,6 @@ impl<V> BlockLookup<V> {
         }
     }
 
-    /// Runs `op` on each key while prefetching the home slot of the key a few positions
-    /// ahead.
     fn for_each_prefetched<I>(
         &mut self,
         keys: I,
