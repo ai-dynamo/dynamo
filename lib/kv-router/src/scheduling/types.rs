@@ -317,7 +317,7 @@ pub enum WorkerSelectionInputTrigger {
     Other,
 }
 
-/// Session metadata supplied to a custom worker-selection policy.
+/// Session metadata supplied to custom router plugins.
 ///
 /// The internal request protocol supplies these values. Optional values remain
 /// absent when the request does not include them.
@@ -331,7 +331,7 @@ pub struct SessionContext {
 }
 
 impl SessionContext {
-    /// Create the session metadata available to worker selection.
+    /// Create the session metadata available to router plugins.
     pub fn new(
         session_id: String,
         parent_session_id: Option<String>,

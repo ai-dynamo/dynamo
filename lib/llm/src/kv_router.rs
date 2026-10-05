@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
@@ -20,6 +20,7 @@ use dynamo_kv_router::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
     },
     kv_hints::KvHint,
+    plugins::kv_hint::{KvHintPolicy, KvHintPolicyContext},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, PrefillLoadHint, RouterEvent, RouterRequest,
@@ -596,6 +597,7 @@ pub struct KvRouter {
     indexer: Indexer,
     selection: embedded::EmbeddedSelection,
     required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
+    worker_type: WorkerType,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
@@ -615,6 +617,8 @@ pub struct KvRouter {
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Optional session-aware logical prefix index.
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
+    /// Optional post-selection policy that formulates additional request KV hints.
+    kv_hint_policy: OnceLock<Box<dyn KvHintPolicy>>,
 }
 
 fn resolve_tracking_model_name(
@@ -900,6 +904,7 @@ impl KvRouter {
             indexer,
             selection,
             required_worker_inputs,
+            worker_type,
             workers_with_configs,
             block_size,
             kv_router_config,
@@ -916,6 +921,7 @@ impl KvRouter {
             endpoint_registration: None,
             teardown_task_guard: None,
             session_prefix_index,
+            kv_hint_policy: OnceLock::new(),
         })
     }
 
@@ -965,6 +971,59 @@ impl KvRouter {
                 })
                 .collect()
         })
+    }
+
+    /// Attach a catalog-created KV-hint policy before placing this router into service.
+    pub fn install_kv_hint_policy(&self, policy: Box<dyn KvHintPolicy>) -> Result<()> {
+        self.kv_hint_policy
+            .set(policy)
+            .map_err(|_| anyhow::anyhow!("KV-hint policy is already configured"))?;
+        tracing::info!(model = %self.tracking_model_name, "installed linked KV-hint policy");
+        Ok(())
+    }
+
+    pub(crate) fn has_kv_hint_policy(&self) -> bool {
+        self.kv_hint_policy.get().is_some()
+    }
+
+    pub(crate) fn formulate_kv_hint_actions(
+        &self,
+        request_id: &str,
+        session_context: Option<&dynamo_kv_router::SessionContext>,
+        selected_worker: WorkerWithDpRank,
+    ) -> Vec<dynamo_kv_router::kv_hints::KvHintAction> {
+        let Some(policy) = self.kv_hint_policy.get() else {
+            return Vec::new();
+        };
+        let context = KvHintPolicyContext::new(
+            request_id,
+            session_context,
+            selected_worker,
+            self.session_prefix_index.as_deref(),
+        );
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| policy.formulate(&context)))
+        {
+            Ok(Ok(actions)) => actions,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    request_id,
+                    worker_id = selected_worker.worker_id,
+                    dp_rank = selected_worker.dp_rank,
+                    %error,
+                    "KV-hint policy failed; dispatching without its actions"
+                );
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::error!(
+                    request_id,
+                    worker_id = selected_worker.worker_id,
+                    dp_rank = selected_worker.dp_rank,
+                    "KV-hint policy panicked; dispatching without its actions"
+                );
+                Vec::new()
+            }
+        }
     }
 
     pub(crate) fn begin_request_lifecycle(
@@ -2631,6 +2690,34 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn kv_hint_policy_panic_fails_open() {
+        struct PanickingPolicy;
+
+        impl KvHintPolicy for PanickingPolicy {
+            fn formulate(
+                &self,
+                _context: &KvHintPolicyContext<'_>,
+            ) -> Result<
+                Vec<dynamo_kv_router::kv_hints::KvHintAction>,
+                Box<dynamo_kv_router::plugins::kv_hint::KvHintPolicyError>,
+            > {
+                panic!("policy failure")
+            }
+        }
+
+        let router = tracked_router("kv-hint-policy-panic").await;
+        router
+            .install_kv_hint_policy(Box::new(PanickingPolicy))
+            .unwrap();
+
+        assert!(
+            router
+                .formulate_kv_hint_actions("request", None, WorkerWithDpRank::new(0, 0),)
+                .is_empty()
+        );
     }
 
     #[rstest::rstest]

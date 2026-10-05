@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::{RouterPluginRegistry, request_classifier, worker_selection};
+use dynamo_kv_router::plugins::{
+    RouterPluginRegistry, kv_hint, request_classifier, worker_selection,
+};
 use dynamo_kv_router::scheduling::{ClassifyFuture, ClassifyRequest, RequestClassifier};
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerCandidates, WorkerFilter,
@@ -84,6 +86,28 @@ impl RequestClassifier for LegacyClassifier {
     }
 }
 
+struct HintPolicy;
+
+impl kv_hint::KvHintPolicy for HintPolicy {
+    fn formulate(
+        &self,
+        context: &kv_hint::KvHintPolicyContext<'_>,
+    ) -> Result<Vec<dynamo_kv_router::kv_hints::KvHintAction>, Box<kv_hint::KvHintPolicyError>>
+    {
+        let _: &str = context.request_id();
+        let _: Option<&dynamo_kv_router::SessionContext> = context.session_context();
+        let _: dynamo_kv_router::protocols::WorkerWithDpRank = context.selected_worker();
+        if let Some(session) = context.session_context() {
+            let _ = context.get_session_block_lineage(
+                session.session_id(),
+                context.selected_worker(),
+                None,
+            )?;
+        }
+        Ok(Vec::new())
+    }
+}
+
 fn legacy_provider(
     _parameters: &dynamo_kv_router::plugins::WorkerSelectionPolicyParameters,
 ) -> Result<
@@ -127,6 +151,40 @@ fn legacy_plugins_resolve_through_the_common_registry() {
         WorkerType::Aggregated,
         RoutingPartitionRef::new("model", "default"),
     );
+}
+
+#[test]
+fn kv_hint_policy_resolves_through_the_common_registry() {
+    let mut registry = RouterPluginRegistry::default();
+    registry
+        .register_kv_hint_policy(
+            "hint-policy",
+            Arc::new(|parameters, _, _, _| {
+                let _: serde_yaml::Value = parameters.deserialize()?;
+                Ok(Box::new(HintPolicy))
+            }),
+        )
+        .unwrap();
+    let policy = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        policy.path(),
+        "kv_hint_policy:\n  type: hint-policy\n  parameters: {}\n",
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(policy.path().display().to_string()),
+        ..Default::default()
+    };
+
+    let plugins = registry.resolve_plugins(&config).unwrap();
+    let _: Box<dyn kv_hint::KvHintPolicy> = plugins
+        .construct_kv_hint_policy(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        )
+        .unwrap()
+        .unwrap();
 }
 
 #[cfg(feature = "standalone-selection")]
