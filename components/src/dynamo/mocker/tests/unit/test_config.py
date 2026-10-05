@@ -389,7 +389,9 @@ def test_mocker_cli_maps_native_host_offload_flags():
 
     engine_args = CONFIG.build_mocker_engine_args(args)
 
-    assert engine_args.kv_cache_bytes_per_token == 1024
+    # Host blocks fall back to kv_bytes_per_token when the engine is built.
+    assert engine_args.kv_bytes_per_token == 1024
+    assert engine_args.kv_cache_bytes_per_token is None
     assert engine_args.native_host_offload["num_host_blocks"] == 128
     assert engine_args.native_host_offload["d2h_bandwidth_gbps"] == 12.5
     assert engine_args.native_host_offload["h2d_bandwidth_gbps"] == 0.0
