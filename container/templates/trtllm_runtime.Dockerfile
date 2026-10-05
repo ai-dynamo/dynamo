@@ -200,6 +200,18 @@ RUN --mount=type=bind,source=./container/deps/trtllm/trtllm-pr-19303-draft-kv-po
     pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("tensorrt_llm").origin).parent.parent)')"; \
     patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/trtllm-pr-19303.patch
 
+# Backport TRT-LLM PR #19558 (Nemotron-H quantized MTP head loading). Not in v1.3.0rc29. Drop once an rc ships it.
+RUN --mount=type=bind,source=./container/deps/trtllm/trtllm-pr-19558-quantized-mtp-head.patch,target=/tmp/trtllm-pr-19558.patch \
+    set -eu; \
+    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("tensorrt_llm").origin).parent.parent)')"; \
+    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/trtllm-pr-19558.patch
+
+# Backport TRT-LLM PR #19597 (quantized Nemotron-H MTP replacements). Not in v1.3.0rc29. Drop once an rc ships it.
+RUN --mount=type=bind,source=./container/deps/trtllm/trtllm-pr-19597-quantized-mtp-replacements.patch,target=/tmp/trtllm-pr-19597.patch \
+    set -eu; \
+    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("tensorrt_llm").origin).parent.parent)')"; \
+    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/trtllm-pr-19597.patch
+
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
 # for shells, not K8s python3 launches), swap upstream's standalone etcd
