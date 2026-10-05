@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::{BoxedStatusResult, DP_RANK, MockerServerConfig, ServerMode};
 
-const DEFAULT_MAX_NEW_TOKENS: i32 = 20;
+const DEFAULT_MAX_NEW_TOKENS: i32 = 128;
 const MAX_NEW_TOKENS: i32 = 1_000_000;
 
 #[derive(Debug)]

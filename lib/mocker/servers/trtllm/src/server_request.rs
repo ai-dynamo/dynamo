@@ -105,14 +105,15 @@ impl PreparedRequest {
 
         let stopping = request.stopping.unwrap_or_default();
         let max_output_tokens = max_output_tokens(&stopping, config.mode)?;
-        if prompt_tokens.len().saturating_add(max_output_tokens) > config.context_length as usize {
+        let remaining_tokens = (config.context_length as usize).saturating_sub(prompt_tokens.len());
+        if remaining_tokens == 0 {
             return Err(Box::new(Status::invalid_argument(format!(
-                "prompt ({}) plus max_tokens ({}) exceeds the context length of {}",
+                "prompt ({}) leaves no output tokens within the context length of {}",
                 prompt_tokens.len(),
-                max_output_tokens,
                 config.context_length
             ))));
         }
+        let max_output_tokens = max_output_tokens.min(remaining_tokens);
 
         let request_id = request.request_id;
         let uuid = stable_request_uuid(config.seed, &request_id);

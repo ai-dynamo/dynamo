@@ -251,6 +251,7 @@ impl VllmMockerService {
             request.into_inner(),
             &self.config,
             self.server_info.kv_block_size as usize,
+            (self.server_info.max_model_len > 0).then_some(self.server_info.max_model_len),
         )
         .map_err(|status| *status)?;
         let direct = prepared.direct_request();
@@ -281,7 +282,7 @@ impl pb::inference_server::Inference for VllmMockerService {
             if signal.completed {
                 return Ok(Response::new(pb::GenerateResponse {
                     prompt_info: Some(prepared.prompt_info()),
-                    outputs: Some(prepared.sequence_output(&output_ids, true)),
+                    outputs: Some(prepared.sequence_output(&output_ids, output_ids.len(), true)),
                 }));
             }
         }
@@ -353,8 +354,7 @@ impl pb::inference_server::Inference for VllmMockerService {
                 generated += 1;
                 yield pb::GenerateResponse {
                     prompt_info: None,
-                    outputs: Some(prepared.sequence_output(&[token_id], signal.completed)
-                        .with_total_output_tokens(generated)),
+                    outputs: Some(prepared.sequence_output(&[token_id], generated, signal.completed)),
                 };
                 if signal.completed {
                     return;

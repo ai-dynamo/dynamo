@@ -70,20 +70,50 @@ async fn oversized_generation_is_rejected_before_token_planning() {
 }
 
 #[tokio::test]
-async fn prompt_plus_output_must_fit_the_context_window() {
-    let service = TrtllmMockerService::new(
-        MockerServerConfig {
-            context_length: 8,
-            ..config()
-        },
-        admitting_args(),
-    )
-    .unwrap();
-    let error = generate_error(&service, request("req-ctx", 8)).await;
-    assert_eq!(error.code(), Code::InvalidArgument);
-    assert!(error.message().contains("context length"), "{error}");
+async fn output_budget_is_clamped_to_the_remaining_context_window() {
+    for mode in [ServerMode::Aggregated, ServerMode::Decode] {
+        let service = TrtllmMockerService::new(
+            MockerServerConfig {
+                mode,
+                context_length: 8,
+                ..config()
+            },
+            admitting_args(),
+        )
+        .unwrap();
+        let mut clamped = request("req-ctx", 8);
+        if mode == ServerMode::Decode {
+            clamped.kv = Some(pb::KvOptions {
+                session: Some(prefill_session("pf-ctx").await),
+                ..Default::default()
+            });
+        }
+        let responses = drain(&service, clamped.clone()).await.unwrap();
+        let token_count: usize = events(&responses)
+            .iter()
+            .filter_map(|event| match event {
+                pb::generate_response::Event::Token(token) => Some(token.tokens.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(token_count, 4);
+        let terminal = responses.last().unwrap();
+        assert!(matches!(
+            terminal.event.as_ref(),
+            Some(pb::generate_response::Event::Finished(finished))
+                if finished.reason == pb::FinishReason::Length as i32
+        ));
+        assert_eq!(terminal.usage.as_ref().unwrap().completion_tokens, 4);
 
-    assert!(drain(&service, request("req-ctx-ok", 2)).await.is_ok());
+        for prompt_len in [8, 9] {
+            clamped.input = Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+                ids: vec![1; prompt_len],
+            }));
+            let error = generate_error(&service, clamped.clone()).await;
+            assert_eq!(error.code(), Code::InvalidArgument);
+            assert!(error.message().contains("context length"), "{error}");
+        }
+    }
 }
 
 /// The sidecar fails the whole request if a single `TokenInfo` is missing its

@@ -75,6 +75,7 @@ impl PreparedRequest {
         mut request: pb::GenerateRequest,
         config: &MockerServerConfig,
         block_size: usize,
+        max_model_len: Option<u32>,
     ) -> BoxedStatusResult<Self> {
         if !request.lora_name.is_empty() {
             return Err(Status::unimplemented("LoRA is not supported by the mock server").into());
@@ -170,6 +171,19 @@ impl PreparedRequest {
             ))
             .into());
         }
+        let max_new_tokens = if let Some(max_model_len) = max_model_len {
+            let remaining = (max_model_len as usize)
+                .checked_sub(prompt_tokens.len())
+                .filter(|remaining| *remaining > 0)
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "prompt must leave room for generation in max_model_len",
+                    )
+                })?;
+            max_new_tokens.min(remaining as u32)
+        } else {
+            max_new_tokens
+        };
         let min_new_tokens = stopping
             .map(|stopping| stopping.min_new_tokens)
             .unwrap_or_default();
@@ -272,7 +286,15 @@ impl PreparedRequest {
         }
     }
 
-    pub(super) fn sequence_output(&self, token_ids: &[u32], terminal: bool) -> pb::SequenceOutput {
+    pub(super) fn sequence_output(
+        &self,
+        token_ids: &[u32],
+        total_output_tokens: usize,
+        terminal: bool,
+    ) -> pb::SequenceOutput {
+        let stop_token = self
+            .stop_token
+            .filter(|_| total_output_tokens == self.max_output_tokens);
         let wants_logprobs = self.response.output_logprobs;
         let output_ids = if self.response.output_token_ids {
             token_ids.to_vec()
@@ -312,15 +334,13 @@ impl PreparedRequest {
             ranks,
             candidate_tokens,
             finish_info: terminal.then(|| pb::FinishInfo {
-                num_output_tokens: token_ids.len() as u32,
-                finish_reason: if self.stop_token.is_some() {
+                num_output_tokens: total_output_tokens as u32,
+                finish_reason: if stop_token.is_some() {
                     pb::finish_info::FinishReason::Stop
                 } else {
                     pb::finish_info::FinishReason::Length
                 } as i32,
-                stop_reason: self
-                    .stop_token
-                    .map(pb::finish_info::StopReason::StopTokenId),
+                stop_reason: stop_token.map(pb::finish_info::StopReason::StopTokenId),
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
                 ec_transfer_params: None,
             }),
@@ -328,7 +348,7 @@ impl PreparedRequest {
     }
 
     pub(super) fn aborted_output(&self, token_ids: &[u32]) -> pb::SequenceOutput {
-        let mut output = self.sequence_output(token_ids, false);
+        let mut output = self.sequence_output(token_ids, token_ids.len(), false);
         output.finish_info = Some(pb::FinishInfo {
             num_output_tokens: token_ids.len() as u32,
             finish_reason: pb::finish_info::FinishReason::Aborted as i32,
