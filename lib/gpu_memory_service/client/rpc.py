@@ -13,6 +13,7 @@ import logging
 import os
 import socket
 import time
+import weakref
 from typing import Optional, Tuple, Type, TypeVar
 
 from gpu_memory_service.common.locks import RequestedLockType
@@ -27,14 +28,57 @@ T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
+# Server error codes (see gpu_memory_service.server.gms). Preserved on the
+# client so callers can distinguish transient from fatal failures instead of
+# treating every ErrorResponse identically.
+GMS_ERR_CLAIM_CONFLICT = 1
+# A release named an allocation_id that no longer matches the key's backing.
+GMS_ERR_IDENTITY_MISMATCH = 6
+
+
+class GmsRemoteError(RuntimeError):
+    """A typed server-side error response, carrying the server's error code."""
+
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# Session state (persistent claims, locks) lives as long as the server-side
+# socket. A child that inherited the socket through fork would keep the
+# parent's claims alive after the parent exits, so a session belongs to the
+# process that connected: forked children drop their copy and must connect.
+_connected_transports: "weakref.WeakSet[_GMSRPCTransport]" = weakref.WeakSet()
+
+
+def _drop_inherited_transports() -> None:
+    # Runs in the child right after fork: no logging, no locks.
+    for transport in list(_connected_transports):
+        transport._drop_inherited_socket()
+
+
+os.register_at_fork(after_in_child=_drop_inherited_transports)
+
 
 class _GMSRPCTransport:
-    """Raw GMS Unix socket transport."""
+    """Raw GMS Unix socket transport, owned by the process that connected."""
 
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
         self._socket: Optional[socket.socket] = None
         self._recv_buffer = bytearray()
+        self._inherited = False
+
+    def _drop_inherited_socket(self) -> None:
+        if self._socket is None:
+            return
+        try:
+            self._socket.close()
+        except OSError:
+            pass
+        self._socket = None
+        self._recv_buffer = bytearray()
+        self._inherited = True
 
     @property
     def is_connected(self) -> bool:
@@ -53,6 +97,8 @@ class _GMSRPCTransport:
             self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 self._socket.connect(self.socket_path)
+                self._inherited = False
+                _connected_transports.add(self)
                 if logged_wait:
                     logger.info("Connected to GMS server at %s", self.socket_path)
                 return
@@ -114,6 +160,11 @@ class _GMSRPCTransport:
         self, request, *, error_prefix: Optional[str] = None
     ) -> Tuple[object, int]:
         if self._socket is None:
+            if self._inherited:
+                raise RuntimeError(
+                    "GMS session was inherited through fork; connect a new "
+                    "session in this process"
+                )
             raise RuntimeError("Attempted GMS request on disconnected transport")
 
         prefix = error_prefix or f"GMS request {type(request).__name__}"
@@ -133,7 +184,11 @@ class _GMSRPCTransport:
         if isinstance(response, ErrorResponse):
             if fd >= 0:
                 os.close(fd)
-            raise RuntimeError(f"{prefix} error: {response.error}")
+            # Preserve the server error code so callers can distinguish a
+            # transient claim conflict (retryable) from a fatal error.
+            raise GmsRemoteError(
+                f"{prefix} error: {response.error}", int(response.code)
+            )
         return response, fd
 
     def close(self) -> None:
