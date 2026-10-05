@@ -11,10 +11,6 @@ pub(crate) fn format_accept_rates(rates: &[f64]) -> String {
         .join(",")
 }
 
-pub(crate) fn undiscounted_aic_accept_rates(nextn: Option<usize>) -> Option<String> {
-    nextn.map(|nextn| vec!["0"; nextn].join(","))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

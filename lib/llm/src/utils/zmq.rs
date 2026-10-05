@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use dynamo_runtime::transports::zmq::ipv6_option_for;
 use futures::SinkExt;
 use tmq::{
     Context, Multipart, SocketBuilder,
@@ -56,6 +57,7 @@ where
 pub(crate) async fn connect_sub_socket(endpoint: &str, topic: Option<&str>) -> Result<SubSocket> {
     let ctx = Context::new();
     let socket = configure_receive_builder(subscribe(&ctx))
+        .set_ipv6(ipv6_option_for(endpoint)?)
         .connect(endpoint)?
         .subscribe(topic.unwrap_or("").as_bytes())?;
     Ok(socket)
@@ -64,20 +66,26 @@ pub(crate) async fn connect_sub_socket(endpoint: &str, topic: Option<&str>) -> R
 #[cfg_attr(not(feature = "block-manager"), allow(dead_code))]
 pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedPubSocket> {
     let ctx = Context::new();
-    let socket = configure_send_builder(publish(&ctx)).bind(endpoint)?;
+    let socket = configure_send_builder(publish(&ctx))
+        .set_ipv6(ipv6_option_for(endpoint)?)
+        .bind(endpoint)?;
     Ok(Arc::new(Mutex::new(socket)))
 }
 
 pub(crate) async fn bind_pull_socket(endpoint: &str) -> Result<PullSocket> {
     let ctx = Context::new();
-    let socket = configure_receive_builder(pull(&ctx)).bind(endpoint)?;
+    let socket = configure_receive_builder(pull(&ctx))
+        .set_ipv6(ipv6_option_for(endpoint)?)
+        .bind(endpoint)?;
     Ok(socket)
 }
 
 #[cfg(test)]
 pub(crate) async fn connect_push_socket(endpoint: &str) -> Result<tmq::push::Push> {
     let ctx = Context::new();
-    let socket = configure_send_builder(tmq::push::push(&ctx)).connect(endpoint)?;
+    let socket = configure_send_builder(tmq::push::push(&ctx))
+        .set_ipv6(ipv6_option_for(endpoint)?)
+        .connect(endpoint)?;
     Ok(socket)
 }
 
@@ -104,4 +112,46 @@ where
 {
     socket.send(Multipart::from(frames)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use tmq::AsZmqSocket;
+
+    #[tokio::test]
+    async fn bracketed_ipv6_endpoints_connect() {
+        if let Err(error) = std::net::TcpListener::bind("[::1]:0") {
+            eprintln!("Skipping IPv6 ZMQ test: {error}");
+            return;
+        }
+        let mut pull = bind_pull_socket("tcp://[::1]:*").await.unwrap();
+        let endpoint = pull.get_socket().get_last_endpoint().unwrap().unwrap();
+        let mut push = connect_push_socket(&endpoint).await.unwrap();
+
+        send_multipart_direct(&mut push, vec![b"ipv6".to_vec()])
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), pull.next())
+            .await
+            .expect("IPv6 PULL socket should receive the message")
+            .unwrap()
+            .unwrap();
+        assert_eq!(multipart_message(received), vec![b"ipv6".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn unbracketed_ipv6_endpoints_are_rejected() {
+        let error = connect_sub_socket("tcp://::1:5555", None)
+            .await
+            .err()
+            .expect("unbracketed IPv6 endpoint should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("IPv6 addresses must be bracketed"),
+            "{error}"
+        );
+    }
 }
