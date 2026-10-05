@@ -174,8 +174,18 @@ class ReleasePersistentAllocationRequest(
     msgspec.Struct,
     tag="release_persistent_allocation_request",
 ):
+    """Destroy retained backing. Not the normal disconnect path.
+
+    ``(engine_id, tag)`` names a key, not an incarnation: a key can be released
+    and recreated with a new ``allocation_id``. A caller acting on an earlier
+    observation (for example, orphan cleanup that listed, then releases) must
+    pass the ``allocation_id`` it observed. The daemon then refuses to destroy
+    a different incarnation of the key.
+    """
+
     engine_id: str
     tag: str
+    allocation_id: Optional[str] = None
 
 
 class ReleasePersistentAllocationResponse(

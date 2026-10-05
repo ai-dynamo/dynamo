@@ -55,6 +55,11 @@ pytestmark = [
         UnclaimPersistentAllocationRequest(engine_id="engine-0", tag="kv"),
         UnclaimPersistentAllocationResponse(unclaimed=True),
         ReleasePersistentAllocationRequest(engine_id="engine-0", tag="kv"),
+        ReleasePersistentAllocationRequest(
+            engine_id="engine-0",
+            tag="kv",
+            allocation_id="allocation-0",
+        ),
         ReleasePersistentAllocationResponse(released=True),
         ExportPersistentAllocationRequest(engine_id="engine-0", tag="kv"),
         ExportPersistentAllocationResponse(
