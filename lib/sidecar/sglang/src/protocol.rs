@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    StopConditions, StopReason, TopLogprob, usage,
+    PromptTokensDetails, StopConditions, StopReason, TopLogprob, usage,
 };
 use serde_json::{Map, Value};
 
@@ -372,6 +372,8 @@ pub(crate) fn terminal_from_meta(
         .and_then(Value::as_str)
         .or_else(|| finish.as_str())
         .ok_or_else(|| client::protocol_error("SGLang finish_reason is missing a type"))?;
+    let mut completion_usage = usage(prompt_tokens, generated);
+    completion_usage.prompt_tokens_details = cached_prompt_tokens(meta, prompt_tokens);
     let mut output = match finish_type {
         "stop" => LLMEngineOutput::stop(),
         "length" => LLMEngineOutput::length(),
@@ -383,7 +385,7 @@ pub(crate) fn terminal_from_meta(
             )));
         }
     }
-    .with_usage(usage(prompt_tokens, generated));
+    .with_usage(completion_usage);
     output.stop_reason = finish.get("matched").and_then(|matched| match matched {
         Value::String(value) => Some(StopReason::String(value.clone())),
         Value::Number(value) => value
@@ -399,6 +401,17 @@ pub(crate) fn terminal_from_meta(
         _ => None,
     });
     Ok(output)
+}
+
+/// SGLang reports the prompt tokens served from its prefix cache as `cached_tokens`.
+fn cached_prompt_tokens(
+    meta: &HashMap<String, String>,
+    prompt_tokens: u32,
+) -> Option<PromptTokensDetails> {
+    meta_u32(meta, "cached_tokens").map(|cached_tokens| PromptTokensDetails {
+        audio_tokens: None,
+        cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+    })
 }
 
 pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {
