@@ -36,6 +36,7 @@ outages are treated as unverified-but-present so that an upstream outage never
 fails anyone's PR (fail open).
 """
 
+import html
 import json
 import os
 import re
@@ -100,6 +101,22 @@ DEP_LABEL_PREFIX = "dep:"
 # PR text is untrusted input; bound the number of authenticated lookups it
 # can trigger.
 MAX_CANDIDATES = 10
+# A GitHub issue title is public already, so the summary names it next to the
+# reference. It is still third-party text headed for a Markdown summary, so
+# it is bounded, flattened to one line and HTML-escaped first. Linear titles
+# are not carried: the Actions summary on this repository is world-readable
+# and Linear content is internal, so Linear references stay identifier-only.
+MAX_TITLE_LEN = 120
+
+
+def summary_title(title: object) -> str:
+    """Flatten and escape an issue title for the step summary; empty if unusable."""
+    if not isinstance(title, str):
+        return ""
+    flat = " ".join(title.split())
+    if len(flat) > MAX_TITLE_LEN:
+        flat = flat[: MAX_TITLE_LEN - 3].rstrip() + "..."
+    return html.escape(flat, quote=False)
 
 
 def http_json(
@@ -121,12 +138,14 @@ def http_json(
         return 0, {}
 
 
-def verify_github_issue(repo: str, number: str, token: str) -> tuple[bool, bool, bool]:
-    """Return (exists_as_issue, api_ok, is_dep).
+def verify_github_issue(
+    repo: str, number: str, token: str
+) -> tuple[bool, bool, bool, str]:
+    """Return (exists_as_issue, api_ok, is_dep, title).
 
-    The labels ride along on the response the check already makes, so knowing
-    a reference is a proposal umbrella rather than a unit of work costs no
-    extra call.
+    The labels and the title ride along on the response the check already
+    makes, so knowing a reference is a proposal umbrella rather than a unit of
+    work, and naming it in the summary, costs no extra call.
     """
     status, body = http_json(
         f"https://api.github.com/repos/{repo}/issues/{number}",
@@ -138,10 +157,15 @@ def verify_github_issue(repo: str, number: str, token: str) -> tuple[bool, bool,
     if status == 200:
         names = [(label or {}).get("name") or "" for label in body.get("labels") or []]
         is_dep = any(name.startswith(DEP_LABEL_PREFIX) for name in names)
-        return "pull_request" not in body, True, is_dep
+        return (
+            "pull_request" not in body,
+            True,
+            is_dep,
+            summary_title(body.get("title")),
+        )
     if status in (404, 410):
-        return False, True, False
-    return False, False, False
+        return False, True, False, ""
+    return False, False, False, ""
 
 
 def repo_visible(repo: str, token: str) -> tuple[bool, bool]:
@@ -275,13 +299,13 @@ def main() -> int:
     # fail-open pass on the candidates past the bound.
     decided_github = False
     for ref_repo, number in ordered_refs:
-        exists, api_ok, is_dep = verify_github_issue(ref_repo, number, gh_token)
+        exists, api_ok, is_dep, title = verify_github_issue(ref_repo, number, gh_token)
         label = f"#{number}" if ref_repo == repo else f"{ref_repo}#{number}"
         if exists and is_dep:
             dep_refs.append(label)
             decided_github = True
         elif exists:
-            verified.append(f"GitHub issue {label}")
+            verified.append(f"GitHub issue {label}" + (f" - {title}" if title else ""))
         elif not api_ok:
             unverified.append(f"GitHub reference {label} (API unavailable)")
         elif ref_repo != repo:

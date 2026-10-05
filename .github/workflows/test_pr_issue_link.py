@@ -72,11 +72,13 @@ class FakeApi:
         repos: dict[str, tuple[bool, bool]] | None = None,
         linear: dict[str, tuple[bool, bool]] | None = None,
         deps: set[str] | None = None,
+        titles: dict[str, str] | None = None,
         default_github: tuple[bool, bool] = (False, True),
         default_linear: tuple[bool, bool] = (False, True),
     ) -> None:
         self.github = github or {}
         self.deps = set(deps or ())
+        self.titles = titles or {}
         self.repos = repos or {}
         self.linear = linear or {}
         self.default_github = default_github
@@ -87,11 +89,11 @@ class FakeApi:
 
     def verify_github_issue(
         self, repo: str, number: str, token: str
-    ) -> tuple[bool, bool, bool]:
+    ) -> tuple[bool, bool, bool, str]:
         key = f"{repo}#{number}"
         self.github_calls.append(key)
         exists, api_ok = self.github.get(key, self.default_github)
-        return exists, api_ok, key in self.deps
+        return exists, api_ok, key in self.deps, self.titles.get(key, "")
 
     def repo_visible(self, repo: str, token: str) -> tuple[bool, bool]:
         self.repo_calls.append(repo)
@@ -380,6 +382,54 @@ def test_linear_overflow_spends_the_budget_on_the_branch_identifier_first(
     code, api = run(monkeypatch, api, PR_BODY=body, PR_HEAD_REF="user/dyn-4242-thing")
     assert code == 0
     assert api.linear_calls == ["DYN-4242"]
+
+
+# ------------------------------------------------------------------
+# What the summary says about a verified reference
+# ------------------------------------------------------------------
+
+
+def test_a_verified_github_issue_is_named_with_its_title(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(
+        github={f"{REPO}#123": (True, True)},
+        titles={f"{REPO}#123": "Fix router timeout"},
+    )
+    code, api = run(monkeypatch, api, PR_BODY="Fixes #123")
+    assert code == 0
+    assert "- GitHub issue #123 - Fix router timeout" in capsys.readouterr().out
+
+
+def test_a_verified_github_issue_without_a_title_stays_bare(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(github={f"{REPO}#123": (True, True)})
+    code, api = run(monkeypatch, api, PR_BODY="Fixes #123")
+    assert code == 0
+    assert "- GitHub issue #123\n" in capsys.readouterr().out
+
+
+def test_a_verified_linear_issue_stays_identifier_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Linear content is internal and the summary is public, so no title."""
+    api = FakeApi(linear={"DYN-1234": (True, True)})
+    code, api = run(monkeypatch, api, PR_BODY="Closes DYN-1234")
+    assert code == 0
+    assert "- Linear issue DYN-1234\n" in capsys.readouterr().out
+
+
+def test_summary_title_is_flattened_bounded_and_escaped() -> None:
+    """Third-party text headed for a Markdown summary is treated as untrusted."""
+    assert pr_issue_link.summary_title("a <b>bold</b>\nline & more") == (
+        "a &lt;b&gt;bold&lt;/b&gt; line &amp; more"
+    )
+    long = pr_issue_link.summary_title("x" * 500)
+    assert len(long) == pr_issue_link.MAX_TITLE_LEN
+    assert long.endswith("...")
+    assert pr_issue_link.summary_title(None) == ""
+    assert pr_issue_link.summary_title(["not", "a", "string"]) == ""
 
 
 # ------------------------------------------------------------------
