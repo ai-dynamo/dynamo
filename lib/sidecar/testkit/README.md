@@ -212,12 +212,12 @@ scheduler cleanup after client disconnection, recovery on the same deployment,
 and completed KV transfers.
 GPU assertions share each deployment's existing startup and teardown.
 
-GPU post-validation also uses the existing Dynamo client to check native logprob
-metadata, explicit cancellation, consumer drop, and handoff responses on the same
-deployment. Cancellation must release scheduler work and allow subsequent
-generation. The SGLang handoff repeats after cancelling an unmatched transfer wait.
-Exact cancelled-terminal delivery remains a CPU adapter assertion because the
-network transport can close first; GPU checks validate it when delivered.
+GPU post-validation also uses the existing Dynamo client to check explicit
+cancellation and consumer drop on the same deployment. Cancellation must release
+scheduler work and allow subsequent generation. The SGLang handoff repeats after
+cancelling an unmatched transfer wait. Exact cancelled-terminal delivery remains a
+CPU adapter assertion because the network transport can close first; GPU checks
+validate it when delivered.
 
 The legacy Python backend suite is also distributed by behavior, including
 `tests/serve/test_vllm.py`, `tests/fault_tolerance/cancellation/test_vllm.py` and

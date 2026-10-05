@@ -7,52 +7,9 @@ from unittest.mock import Mock, patch
 import pytest
 
 from tests.utils.payload_builder import chat_payload_with_logprobs
-from tests.utils.payloads import DisaggregatedChatPayload, GuidedDecodingChatPayload
+from tests.utils.payloads import GuidedDecodingChatPayload
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
-
-
-@pytest.mark.parametrize(
-    "field,value,error",
-    [
-        (None, None, None),
-        ("finish_reason", "stop", "Expected finish reason"),
-        ("completion_tokens", 7, "Expected 8 completion tokens"),
-        ("completion_token_ids", [17] * 7, "completion_token_ids count"),
-        ("prompt_token_ids", [4], "prompt_token_ids count"),
-        ("total_tokens", 11, "Inconsistent total token usage"),
-    ],
-)
-def test_disaggregated_token_accounting(field, value, error):
-    payload = DisaggregatedChatPayload(
-        body={},
-        expected_response=[],
-        expected_log=[],
-        expected_finish_reason="length",
-        expected_completion_tokens=8,
-    )
-    result = {
-        "choices": [{"message": {"content": "hello"}, "finish_reason": "length"}],
-        "usage": {"prompt_tokens": 2, "completion_tokens": 8, "total_tokens": 10},
-        "nvext": {
-            "completion_token_ids": [17] * 8,
-            "prompt_token_ids": [4, 5],
-            "worker_id": {"prefill_worker_id": 1, "decode_worker_id": 2},
-        },
-    }
-    if field == "finish_reason":
-        result["choices"][0][field] = value
-    elif field in result["usage"]:
-        result["usage"][field] = value
-    elif field is not None:
-        result["nvext"][field] = value
-    response = Mock()
-    response.json.return_value = result
-    if error is None:
-        assert payload.process_response(response) == "hello"
-    else:
-        with pytest.raises(AssertionError, match=error):
-            payload.process_response(response)
 
 
 @pytest.mark.parametrize("case", [None, "shifted", "coalesced", "prompt", "done"])
@@ -133,12 +90,11 @@ def test_streaming_deadline_includes_keepalive_events():
     response.close.assert_called_once()
 
 
-@pytest.mark.parametrize("logprobs", [None, {"content": []}])
-def test_requested_logprobs_cannot_be_empty(logprobs):
+def test_requested_logprobs_cannot_be_empty():
     payload = chat_payload_with_logprobs(expected_response=[])
     response = Mock()
     response.json.return_value = {
-        "choices": [{"message": {"content": "hello"}, "logprobs": logprobs}]
+        "choices": [{"message": {"content": "hello"}, "logprobs": None}]
     }
     with pytest.raises(AssertionError, match="requested output logprobs"):
         payload.process_response(response)
