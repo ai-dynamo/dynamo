@@ -264,7 +264,7 @@ def test_a_point_is_immutable_once_observed(tmp_path: Path, renders: list[str]) 
     assert load(tmp_path)["progress"]["evaluated"] == 2
 
 
-def test_a_materialization_failure_is_reported_and_not_retried_every_write(
+def test_a_persistent_materialization_failure_is_reported_and_retried_a_bounded_number_of_times(
     tmp_path: Path, renders: list[str]
 ) -> None:
     adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
@@ -280,7 +280,7 @@ def test_a_materialization_failure_is_reported_and_not_retried_every_write(
     assert candidate["outcome"] == "materialization_failed"
     assert "cannot render bad1" in candidate["error"]
     assert "manifest" not in candidate
-    assert renders == ["bad1"]
+    assert renders == ["bad1"] * adapter_module._MAX_RENDER_ATTEMPTS
 
 
 # -- rate limiting and coalescing ---------------------------------------------
@@ -595,3 +595,159 @@ def test_plugin_write_refuses_pareto_and_empty_results(tmp_path: Path) -> None:
     )
     with pytest.raises(CandidateMaterializationError):
         create_adapter().write(config, result=empty, output_dir=tmp_path)  # type: ignore[arg-type]
+
+
+PLUGIN_CONFIG = {
+    "name": "sweep",
+    "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
+    "num_gpus_per_node": 8,
+    "snapshot_interval_seconds": 0,
+}
+
+
+def test_plugin_subscribe_with_a_context_publishes_live(
+    tmp_path: Path, renders: list[str]
+) -> None:
+    config = {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)}
+    callbacks = create_adapter().subscribe(
+        config, context=SimpleNamespace(workload="workload")
+    )
+
+    assert callbacks is not None
+    assert callbacks.on_candidate is not None
+    assert callbacks.on_round is not None
+    # The initial snapshot exists before the first candidate is evaluated.
+    assert load(tmp_path)["run"] == {"phase": "Running", "terminal": False}
+
+    callbacks.on_candidate(record("a", 9.0))
+    wait_for(lambda: tags(load(tmp_path)) == ["a"])
+
+
+def test_plugin_subscribe_without_context_or_snapshot_dir_only_validates(
+    tmp_path: Path,
+) -> None:
+    plugin = create_adapter()
+    with_dir = {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)}
+    assert plugin.subscribe(with_dir) is None
+    assert plugin.subscribe(with_dir, context=SimpleNamespace(workload=None)) is None
+    assert (
+        plugin.subscribe(PLUGIN_CONFIG, context=SimpleNamespace(workload="workload"))
+        is None
+    )
+    assert not (tmp_path / SNAPSHOT_FILE_NAME).exists()
+
+
+def _final_result(evaluated: int = 42) -> Any:
+    return SimpleNamespace(
+        views=SimpleNamespace(pareto_front=[]),
+        provenance=SimpleNamespace(config={}),
+        selected_candidates=[record("a", 9.0)],
+        counts=SimpleNamespace(evaluated=evaluated),
+    )
+
+
+@pytest.fixture
+def fake_search_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSearchConfig:
+        @staticmethod
+        def model_validate(_: Any) -> Any:
+            return SimpleNamespace(workload="workload")
+
+    monkeypatch.setattr(adapter_module, "SmartSearchConfig", FakeSearchConfig)
+
+
+def test_plugin_write_records_progress_from_the_result_counts(
+    tmp_path: Path, renders: list[str], fake_search_config: None
+) -> None:
+    create_adapter().write(PLUGIN_CONFIG, result=_final_result(42), output_dir=tmp_path)
+    assert load(tmp_path)["progress"]["evaluated"] == 42
+
+
+def test_plugin_write_reports_no_artifact_for_a_snapshot_outside_output_dir(
+    tmp_path: Path, renders: list[str], fake_search_config: None
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+
+    written = create_adapter().write(
+        {**PLUGIN_CONFIG, "snapshot_dir": str(shared)},
+        result=_final_result(),
+        output_dir=out,
+    )
+
+    assert written == []
+    assert load(shared)["run"]["terminal"] is True
+    assert not (out / SNAPSHOT_FILE_NAME).exists()
+
+
+def test_a_transient_materialization_failure_is_retried_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[int] = []
+
+    def flaky_render(candidate: Any, workload: Any, options: Any, **kwargs: Any) -> str:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise CandidateMaterializationError("cold start")
+        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
+
+    monkeypatch.setattr(adapter_module, "render_dgd", flaky_render)
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    adapter.start()
+    adapter.on_candidate(record("a", 5.0))
+    wait_for(lambda: len(load(tmp_path)["candidates"]) == 1)
+    assert load(tmp_path)["candidates"][0]["outcome"] == "materialization_failed"
+
+    adapter.on_round(1, [])  # any later write retries the failed render
+    wait_for(lambda: load(tmp_path)["candidates"][0]["outcome"] == "materialized")
+    adapter.close()
+
+    (candidate,) = load(tmp_path)["candidates"]
+    assert candidate["outcome"] == "materialized"
+    assert "error" not in candidate
+    assert len(attempts) == 2
+
+
+def test_a_materialized_candidate_is_never_rendered_again(
+    tmp_path: Path, renders: list[str]
+) -> None:
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    adapter.start()
+    adapter.on_candidate(record("a", 5.0))
+    wait_for(lambda: len(load(tmp_path)["candidates"]) == 1)
+    for round_no in range(1, 6):
+        adapter.on_round(round_no, [])
+    wait_for(lambda: load(tmp_path)["progress"]["round"] == 5)
+    adapter.close()
+    assert renders == ["a"]
+
+
+def test_plugin_write_keeps_the_round_recorded_by_the_live_snapshot(
+    tmp_path: Path, renders: list[str], fake_search_config: None
+) -> None:
+    live = create_adapter().subscribe(
+        {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)},
+        context=SimpleNamespace(workload="workload"),
+    )
+    assert live is not None and live.on_round is not None
+    live.on_round(3, [])
+    wait_for(lambda: load(tmp_path)["progress"]["round"] == 3)
+
+    create_adapter().write(
+        {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)},
+        result=_final_result(4),
+        output_dir=tmp_path,
+    )
+
+    snapshot = load(tmp_path)
+    assert snapshot["run"]["terminal"] is True
+    assert snapshot["progress"] == {"round": 3, "evaluated": 4}
+
+
+def test_plugin_write_without_a_live_snapshot_starts_at_round_zero(
+    tmp_path: Path, renders: list[str], fake_search_config: None
+) -> None:
+    create_adapter().write(PLUGIN_CONFIG, result=_final_result(2), output_dir=tmp_path)
+    assert load(tmp_path)["progress"] == {"round": 0, "evaluated": 2}

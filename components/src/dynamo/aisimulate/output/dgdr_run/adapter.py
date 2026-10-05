@@ -49,7 +49,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from aisimulate.output_adapter import OUTPUT_ADAPTER_API_VERSION
+import yaml
+from aisimulate.output_adapter import (
+    OUTPUT_ADAPTER_API_VERSION,
+    RecommendationOutputCallbacks,
+)
 from aisimulate.sweeper.config import SmartSearchConfig
 from aisimulate.sweeper.result import SweepResult
 from pydantic import BaseModel, ConfigDict, Field
@@ -71,6 +75,7 @@ from dynamo.aisimulate.output.dgdr_run.snapshot import (
 logger = logging.getLogger(__name__)
 
 _ID_PREFIX = "evaluated-point-"
+_MAX_RENDER_ATTEMPTS = 3
 _ID_HEX_LENGTH = 12
 
 
@@ -207,9 +212,12 @@ class DGDRRunOutputAdapter:
         self._next_allowed = float("-inf")
 
         # Materialization cache, keyed by stable id. Touched only while
-        # holding _publish_lock.
+        # holding _publish_lock. A failure is retried on later writes up to
+        # _MAX_RENDER_ATTEMPTS in total, because a first render can fail
+        # transiently (cold start); after that it is final.
         self._publish_lock = threading.Lock()
         self._materialized: dict[str, SnapshotCandidate] = {}
+        self._render_attempts: dict[str, int] = {}
         self._writes = 0
 
     # -- observability ---------------------------------------------------
@@ -250,6 +258,15 @@ class DGDRRunOutputAdapter:
             if not self._accepting:
                 return
             self._round_no = max(self._round_no, round_number)
+            self._wake.set()
+
+    def report_progress(self, *, evaluated: int, round_no: int = 0) -> None:
+        """Raise the evaluated count and round to authoritative values (never lowers them)."""
+        with self._lock:
+            if not self._accepting:
+                return
+            self._evaluated = max(self._evaluated, evaluated)
+            self._round_no = max(self._round_no, round_no)
             self._wake.set()
 
     @staticmethod
@@ -360,6 +377,7 @@ class DGDRRunOutputAdapter:
             live_ids = {item.id for item in ordered}
             for stale in set(self._materialized) - live_ids:
                 del self._materialized[stale]
+                self._render_attempts.pop(stale, None)
             write_snapshot(
                 self._directory,
                 DGDRRunSnapshot(
@@ -375,8 +393,12 @@ class DGDRRunOutputAdapter:
 
     def _materialize(self, item: _Retained) -> SnapshotCandidate:
         cached = self._materialized.get(item.id)
-        if cached is not None:
+        if cached is not None and (
+            cached.outcome is CandidateOutcome.MATERIALIZED
+            or self._render_attempts.get(item.id, 0) >= _MAX_RENDER_ATTEMPTS
+        ):
             return cached
+        self._render_attempts[item.id] = self._render_attempts.get(item.id, 0) + 1
         try:
             manifest = render_dgd(
                 _RenderInput(config=item.parameters),
@@ -393,7 +415,7 @@ class DGDRRunOutputAdapter:
                 manifest=manifest,
             )
         except CandidateMaterializationError as exc:
-            # Cached too: a deterministic failure is not retried on every write.
+            # Retried on later writes until _MAX_RENDER_ATTEMPTS, then final.
             entry = SnapshotCandidate(
                 id=item.id,
                 outcome=CandidateOutcome.MATERIALIZATION_FAILED,
@@ -415,22 +437,39 @@ class _RenderInput:
 class DGDRRunOutputPlugin:
     """The object AISimulate discovers for ``--output dgdr_run``.
 
-    ``live()`` is the primary entry point: it returns the adapter whose
-    ``on_round``/``on_candidate`` the host subscribes to the Sweeper. ``write()``
-    is the plugin protocol's end-of-run hook and only writes a terminal
-    snapshot of the final selection, for hosts that cannot subscribe live.
+    AISimulate calls ``subscribe(config, context=...)`` once, in the process that
+    runs the search, and wires the returned callbacks into the Sweeper: that is
+    the live path (initial snapshot immediately, then coalesced snapshots).
+    ``write()`` runs afterwards in the CLI process, only when the search
+    succeeded with a selection, and publishes the authoritative terminal
+    snapshot from the final result. A search that fails or finds nothing never
+    reaches ``write()``, so it leaves no terminal snapshot; the publisher
+    detects that from the Sweeper container's exit.
     """
 
     name = "dgdr_run"
     api_version = OUTPUT_ADAPTER_API_VERSION
 
-    def subscribe(self, config: Mapping[str, Any]) -> None:
-        """Validate result-independent output configuration before search starts.
+    def subscribe(
+        self, config: Mapping[str, Any], context: Any = None
+    ) -> RecommendationOutputCallbacks | None:
+        """Validate the configuration and, when possible, start live publishing.
 
-        Mirrors ``DGDOutputAdapter.subscribe`` so both adapters satisfy the same
-        AISimulate plugin contract.
+        ``context`` (``RecommendationOutputContext``) carries the Sweeper workload,
+        which rendering needs. Without a context or without ``snapshot_dir`` there
+        is nothing to publish live, so only the config is validated and the final
+        snapshot is still produced by ``write()``.
         """
-        DGDRRunOutputConfig.model_validate(dict(config)).generation_options()
+        resolved = DGDRRunOutputConfig.model_validate(dict(config))
+        resolved.generation_options()
+        workload = getattr(context, "workload", None)
+        if workload is None or resolved.snapshot_dir is None:
+            return None
+        adapter = DGDRRunOutputAdapter(resolved, workload)
+        adapter.start()
+        return RecommendationOutputCallbacks(
+            on_candidate=adapter.on_candidate, on_round=adapter.on_round
+        )
 
     def live(
         self,
@@ -456,15 +495,34 @@ class DGDRRunOutputPlugin:
         if not selected:
             raise CandidateMaterializationError("no feasible candidate found")
         workload = SmartSearchConfig.model_validate(result.provenance.config).workload
-        adapter = DGDRRunOutputAdapter(
-            resolved,
-            workload,
-            snapshot_dir=Path(resolved.snapshot_dir or output_dir),
-        )
+        directory = Path(resolved.snapshot_dir or output_dir)
+        adapter = DGDRRunOutputAdapter(resolved, workload, snapshot_dir=directory)
         for candidate in selected:
             adapter.on_candidate(_as_feasible(candidate))
+        counts = getattr(result, "counts", None)
+        evaluated = getattr(counts, "evaluated", None)
+        adapter.report_progress(
+            evaluated=evaluated if isinstance(evaluated, int) else 0,
+            # The final result does not carry the round, but the live snapshot
+            # written by the search process does; progress never goes backwards.
+            round_no=_last_published_round(directory),
+        )
         adapter.close(phase=RunPhase.SUCCEEDED)
-        return [Path(SNAPSHOT_FILE_NAME)]
+        # AISimulate requires reported artifacts to live under output_dir; a snapshot
+        # on the shared volume does not, and is consumed by the publisher instead.
+        if directory.resolve() == Path(output_dir).resolve():
+            return [Path(SNAPSHOT_FILE_NAME)]
+        return []
+
+
+def _last_published_round(directory: Path) -> int:
+    """The round recorded by the live snapshot already in ``directory``, else 0."""
+    try:
+        loaded = yaml.safe_load((directory / SNAPSHOT_FILE_NAME).read_text())
+        round_no = loaded["progress"]["round"]
+    except (OSError, yaml.YAMLError, KeyError, TypeError):
+        return 0
+    return round_no if isinstance(round_no, int) and round_no > 0 else 0
 
 
 @dataclass(frozen=True)
