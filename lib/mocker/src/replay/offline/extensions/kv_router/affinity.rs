@@ -86,6 +86,7 @@ impl ReplayAffinityConfig {
 pub(in crate::replay) struct RoutingEvidence(pub Arc<Mutex<serde_json::Map<String, Value>>>);
 
 impl RoutingEvidence {
+    #[cfg(any(test, feature = "python-replay"))]
     pub fn snapshot(&self) -> Result<Value> {
         Ok(
             json!({"api_version": 1, "roles": &*self.0.lock().map_err(|_| anyhow!("routing evidence lock poisoned"))?}),

@@ -109,6 +109,7 @@ pub(in crate::replay) struct KvReplayComposition {
 }
 
 impl KvReplayComposition {
+    #[cfg(feature = "python-replay")]
     pub(in crate::replay) fn with_affinity(
         mut self,
         config: Option<ReplayAffinityConfig>,

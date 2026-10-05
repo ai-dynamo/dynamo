@@ -17,9 +17,10 @@ use anyhow::Result;
 
 use super::extensions::kv_events;
 use super::extensions::kv_router::{
-    KvReplayComposition, ReplayAffinityConfig, ReplayKvRouterConfig, RoundRobinReplayComposition,
-    RoutingEvidence, provider_spec,
+    KvReplayComposition, ReplayKvRouterConfig, RoundRobinReplayComposition, provider_spec,
 };
+#[cfg(feature = "python-replay")]
+use super::extensions::kv_router::{ReplayAffinityConfig, RoutingEvidence};
 use super::normalize_trace_requests;
 use crate::common::handoff::NormalizedHandoffConformance;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
