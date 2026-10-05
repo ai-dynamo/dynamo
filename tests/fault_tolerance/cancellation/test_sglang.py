@@ -359,17 +359,22 @@ def test_request_cancellation_sglang_decode_cancel(
                     frontend.frontend_port, "chat_completion_stream"
                 )
 
+                # Each poll below waits on another process's log line reaching the
+                # file through stderr; 500 ms, the helper's default, is too short.
+
                 # Poll for "New Request ID" pattern in decode worker (Dynamo context ID)
                 request_id, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern="New Request ID: ",
                     match_type="contains",
+                    max_wait_ms=10000,
                 )
 
                 # Verify same request ID reached prefill worker
                 _, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"New Request ID: {request_id}",
+                    max_wait_ms=10000,
                 )
 
                 # Read one response first to trigger SGLang ID logging in decode worker
@@ -381,23 +386,27 @@ def test_request_cancellation_sglang_decode_cancel(
                     pattern="New SGLang Request ID: ",
                     log_offset=decode_log_offset,
                     match_type="contains",
+                    max_wait_ms=10000,
                 )
 
                 # Now we know SGLang has the request in decode worker, cancel it
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
-                # Poll for "Aborted Request ID" in decode worker
+                # The budget covers the whole cancellation chain: socket close,
+                # frontend Kill, request plane, monitor wake-up.
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=decode_log_offset,
+                    max_wait_ms=5000,
                 )
 
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
                     pattern="issued control message control_msg=Kill",
+                    max_wait_ms=5000,
                 )
 
                 logger.info(
