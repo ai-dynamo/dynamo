@@ -69,6 +69,264 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
 }
 
 
+def _sampling_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
+    """Map OpenAI chat logprobs onto vLLM ``SamplingParams.logprobs``.
+
+    ``SamplingParams.logprobs`` is an integer count of extra alternatives.
+    vLLM's chat API sets it from ``top_logprobs`` when ``logprobs`` is true.
+    An omitted ``top_logprobs`` is ``0``: the sampled token, with an empty
+    alternative list. ``0`` is a real count, so callers must distinguish it
+    from ``None``.
+    """
+    if logprobs is not True:
+        return None
+    if top_logprobs is None:
+        return 0
+    if (
+        isinstance(top_logprobs, int)
+        and not isinstance(top_logprobs, bool)
+        and top_logprobs >= 0
+    ):
+        return top_logprobs
+    return None
+
+
+def _reject_unsupported_chat_logprobs(logprobs: Any, top_logprobs: Any) -> None:
+    """Reject chat logprob values the worker would silently drop.
+
+    ``parse_logprob_options`` ignores every negative count, so forwarding one
+    returns HTTP 200 with the logprobs omitted. Chat ``logprobs`` is a
+    boolean; an integer belongs on ``/v1/completions``, which stays on the
+    Rust preprocessor.
+    """
+    if isinstance(logprobs, int) and not isinstance(logprobs, bool):
+        raise HttpError(
+            400,
+            "Validation: `logprobs` on /v1/chat/completions must be a boolean.",
+        )
+    if isinstance(top_logprobs, int) and not isinstance(top_logprobs, bool):
+        if top_logprobs < 0:
+            raise HttpError(
+                400,
+                "Validation: `top_logprobs` must be an integer >= 0, got "
+                f"{top_logprobs}. A negative count is dropped by the worker "
+                "and the logprobs would be omitted from the response.",
+            )
+        return
+    if logprobs is True and top_logprobs is not None:
+        raise HttpError(
+            400,
+            "Validation: `top_logprobs` must be an integer >= 0.",
+        )
+
+
+def _utf8_bytes(token: str | None) -> list[int] | None:
+    if not token:
+        return None
+    return list(token.encode("utf-8"))
+
+
+def _chat_choice_logprobs(
+    token_ids: list[int],
+    log_probs: Any,
+    top_logprobs: Any,
+    top_count: int | None,
+) -> dict[str, Any] | None:
+    """Build OpenAI ``choices[].logprobs`` from worker token records.
+
+    ``log_probs`` is one float per emitted token. ``top_logprobs`` is a list
+    of ``{rank, token_id, token, logprob, bytes}`` per position, and that
+    list includes the sampled token. The content entry keeps the sampled
+    token. ``top_logprobs`` on the entry is the rank-sorted prefix of length
+    ``top_count``. ``0`` is an empty list. ``token_id`` is omitted.
+    """
+    if (
+        not isinstance(log_probs, list)
+        or not token_ids
+        or len(log_probs) != len(token_ids)
+    ):
+        return None
+    positions = top_logprobs if isinstance(top_logprobs, list) else []
+    content: list[dict[str, Any]] = []
+    for index, token_id in enumerate(token_ids):
+        try:
+            selected_logprob = float(log_probs[index])
+        except (TypeError, ValueError):
+            return None
+        raw_position = (
+            positions[index]
+            if index < len(positions) and isinstance(positions[index], list)
+            else []
+        )
+        ranked_position = sorted(
+            (entry for entry in raw_position if isinstance(entry, dict)),
+            key=lambda entry: (
+                entry.get("rank")
+                if isinstance(entry.get("rank"), int)
+                and not isinstance(entry.get("rank"), bool)
+                else 10**9
+            ),
+        )
+        top_entries: list[dict[str, Any]] = []
+        selected_token = None
+        selected_bytes = None
+        for raw_entry in ranked_position:
+            if "logprob" not in raw_entry:
+                continue
+            token = raw_entry.get("token") or ""
+            if not isinstance(token, str):
+                token = str(token)
+            try:
+                entry_logprob = float(raw_entry["logprob"])
+            except (TypeError, ValueError):
+                continue
+            entry_bytes = raw_entry.get("bytes")
+            if not isinstance(entry_bytes, list):
+                entry_bytes = _utf8_bytes(token)
+            if (
+                isinstance(top_count, int)
+                and not isinstance(top_count, bool)
+                and top_count > 0
+                and len(top_entries) < top_count
+            ):
+                top_entries.append(
+                    {
+                        "token": token,
+                        "logprob": entry_logprob,
+                        "bytes": entry_bytes,
+                    }
+                )
+            raw_token_id = raw_entry.get("token_id")
+            try:
+                matches_selected = int(raw_token_id) == int(token_id)
+            except (TypeError, ValueError):
+                matches_selected = False
+            if matches_selected and selected_token is None:
+                selected_token = token
+                selected_bytes = entry_bytes
+        if selected_token is None:
+            selected_token = ""
+            selected_bytes = None
+        content.append(
+            {
+                "token": selected_token,
+                "logprob": selected_logprob,
+                "bytes": selected_bytes,
+                "top_logprobs": top_entries,
+            }
+        )
+    return {"content": content}
+
+
+def _append_worker_logprobs(
+    pending: list[dict[str, Any]],
+    token_ids: list[int],
+    log_probs: Any,
+    top_logprobs: Any,
+) -> None:
+    """Append one worker chunk. A misaligned chunk is left out entirely."""
+    if (
+        not isinstance(log_probs, list)
+        or not token_ids
+        or len(log_probs) != len(token_ids)
+    ):
+        return
+    positions = top_logprobs if isinstance(top_logprobs, list) else []
+    records: list[dict[str, Any]] = []
+    for index, token_id in enumerate(token_ids):
+        try:
+            selected = float(log_probs[index])
+            token_id_int = int(token_id)
+        except (TypeError, ValueError):
+            return
+        raw_position = (
+            positions[index]
+            if index < len(positions) and isinstance(positions[index], list)
+            else []
+        )
+        records.append(
+            {"token_id": token_id_int, "logprob": selected, "top": raw_position}
+        )
+    pending.extend(records)
+
+
+def _take_emitted_logprobs(
+    pending: list[dict[str, Any]],
+    emitted_ids: list[int],
+) -> list[dict[str, Any]] | None:
+    """Consume the pending prefix that matches ids the output processor emitted.
+
+    Returns None without consuming when the prefix does not match. The caller
+    drops the remainder so a leftover record cannot sit at the front of the
+    next chunk.
+    """
+    if len(pending) < len(emitted_ids):
+        return None
+    for index, token_id in enumerate(emitted_ids):
+        if pending[index]["token_id"] != token_id:
+            return None
+    taken = pending[: len(emitted_ids)]
+    del pending[: len(emitted_ids)]
+    return taken
+
+
+def _apply_choice_logprobs(
+    choice: dict[str, Any] | None,
+    post: Any,
+    output: Any,
+    pending: list[dict[str, Any]],
+    emitted_ids: list[int],
+    top_count: int | None,
+) -> None:
+    """Attach logprobs for the token ids this output processor yield exposed.
+
+    Worker chunks land in ``pending`` before the processor emits. A missing
+    choice (tool parsing, JSON fallback, empty plain-text deltas) keeps both
+    buffers. ``emitted_ids`` is the processor's own token ids since the
+    previous emitted choice. ``previous_token_ids`` is parser history and is
+    not this cursor.
+
+    Once a choice is emitted, anything left in ``pending`` is dropped. That
+    covers a trimmed stop token and a prefix that does not match, so the next
+    chunk can align again. Hidden reasoning drops both buffers. An emitted
+    choice with nothing to attach sets ``logprobs`` to None.
+    """
+    if top_count is None or getattr(post, "_suppress_reasoning_output", False):
+        pending.clear()
+        emitted_ids.clear()
+        if choice is not None:
+            choice["logprobs"] = None
+        return
+
+    for token_id in getattr(output, "token_ids", None) or []:
+        try:
+            emitted_ids.append(int(token_id))
+        except (TypeError, ValueError):
+            if choice is not None:
+                choice["logprobs"] = None
+            pending.clear()
+            emitted_ids.clear()
+            return
+    if choice is None:
+        return
+
+    taken = _take_emitted_logprobs(pending, emitted_ids)
+    emitted_ids.clear()
+    # Drop the unmatched tail (trimmed stop token) and a mismatched prefix
+    # so the next chunk is not stuck comparing against a leftover record.
+    pending.clear()
+    if taken is None or not taken:
+        choice["logprobs"] = None
+        return
+    built = _chat_choice_logprobs(
+        [record["token_id"] for record in taken],
+        [record["logprob"] for record in taken],
+        [record["top"] for record in taken],
+        top_count,
+    )
+    choice["logprobs"] = built if built is not None else None
+
+
 class _ReasoningUsageAnnotator:
     """Report reasoning-token usage on the PYTHON chat-processor path.
 
@@ -639,18 +897,10 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
-        logprobs = request.get("logprobs")
-        top_logprobs = request.get("top_logprobs")
-        if (
-            logprobs is True
-            or (isinstance(logprobs, int) and not isinstance(logprobs, bool))
-            or top_logprobs not in (None, 0)
-        ):
-            raise HttpError(
-                400,
-                "Validation: `logprobs` and `top_logprobs` are not supported by the "
-                "vLLM chat processor (--dyn-chat-processor vllm).",
-            )
+        _reject_unsupported_chat_logprobs(
+            request.get("logprobs"),
+            request.get("top_logprobs"),
+        )
 
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
@@ -716,6 +966,14 @@ class VllmProcessor:
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
+        # Chat logprobs is a boolean. SamplingParams.logprobs is the integer
+        # alternative count, so it stays out of the field copy above.
+        sampling_logprobs = _sampling_logprobs_count(
+            request_for_sampling.logprobs,
+            getattr(request_for_sampling, "top_logprobs", None),
+        )
+        if sampling_logprobs is not None:
+            sampling_params.logprobs = sampling_logprobs
         # nvext.max_thinking_tokens is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
@@ -961,6 +1219,12 @@ class VllmProcessor:
         image_count = len(_mm_counts.get("image_url", []))
         video_count = len(_mm_counts.get("video_url", []))
         audio_count = len(_mm_counts.get("audio_url", []))
+        pending_choice_logprobs: dict[int, list[dict[str, Any]]] = {}
+        emitted_choice_tokens: dict[int, list[int]] = {}
+        choice_top_logprobs = _sampling_logprobs_count(
+            request.get("logprobs"),
+            request.get("top_logprobs"),
+        )
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -1022,6 +1286,13 @@ class VllmProcessor:
                     )
                     break
 
+                _append_worker_logprobs(
+                    pending_choice_logprobs.setdefault(output_idx, []),
+                    list(engine_response.get("token_ids") or []),
+                    engine_response.get("log_probs"),
+                    engine_response.get("top_logprobs"),
+                )
+
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
@@ -1070,6 +1341,15 @@ class VllmProcessor:
                             postprocess_error = True
                             break
                         choice = post.process_output(output)
+                        if output.index == output_idx:
+                            _apply_choice_logprobs(
+                                choice,
+                                post,
+                                output,
+                                pending_choice_logprobs.setdefault(output.index, []),
+                                emitted_choice_tokens.setdefault(output.index, []),
+                                choice_top_logprobs,
+                            )
                         if choice:
                             choices.append(choice)
 
