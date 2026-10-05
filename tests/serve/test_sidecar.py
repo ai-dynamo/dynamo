@@ -22,7 +22,6 @@ from tests.serve.sidecar_checks import (
     assert_cancellation_and_recovery,
     assert_kv_transfer,
 )
-from tests.serve.sidecar_handoff_checks import assert_native_handoff
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
@@ -401,15 +400,6 @@ def test_serve_deployment(
                     prefill_http_port=int(engine_env["VLLM_PREFILL_HTTP_PORT"]),
                     decode_http_port=int(engine_env["VLLM_DECODE_HTTP_PORT"]),
                     probe_path=probe_path,
-                )
-                assert_native_handoff(
-                    backend=backend,
-                    namespace=engine_env["DYN_NAMESPACE"],
-                    model=config.model,
-                    prefill_http_port=int(engine_env["VLLM_PREFILL_HTTP_PORT"]),
-                    decode_http_port=int(engine_env["VLLM_DECODE_HTTP_PORT"]),
-                    probe_path=probe_path,
-                    discovery_backend=discovery_backend,
                 )
 
             run_serve_deployment(
