@@ -15,14 +15,12 @@ type LPXConfig struct {
 	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
 
 	// experimental groups opt-in LPX options whose API shape may change in
-	// breaking ways between v1beta1 releases. See ExperimentalSpec for the
-	// stability caveat.
+	// breaking ways between v1beta1 releases.
 	// +optional
 	Experimental *LPXExperimentalSpec `json:"experimental,omitempty"`
 }
 
-// LPXExperimentalSpec groups experimental LPX options. See ExperimentalSpec for
-// the stability caveat.
+// LPXExperimentalSpec groups experimental LPX options.
 type LPXExperimentalSpec struct {
 	// localPartitions selects partitions of a hybrid build that the Cyborg
 	// conductor runs on its own GPU. The operator schedules LPU Agents only for

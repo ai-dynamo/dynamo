@@ -2505,15 +2505,14 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
 | `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
-| `experimental` _[LPXExperimentalSpec](#lpxexperimentalspec)_ | experimental groups opt-in LPX options whose API shape may change in<br />breaking ways between v1beta1 releases. See ExperimentalSpec for the<br />stability caveat. |  | Optional: \{\} <br /> |
+| `experimental` _[LPXExperimentalSpec](#lpxexperimentalspec)_ | experimental groups opt-in LPX options whose API shape may change in<br />breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
 
 #### LPXExperimentalSpec
 
 
 
-LPXExperimentalSpec groups experimental LPX options. See ExperimentalSpec for
-the stability caveat.
+LPXExperimentalSpec groups experimental LPX options.
 
 
 

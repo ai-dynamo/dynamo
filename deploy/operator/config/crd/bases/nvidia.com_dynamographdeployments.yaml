@@ -11526,8 +11526,7 @@ spec:
                           experimental:
                             description: |-
                               experimental groups opt-in LPX options whose API shape may change in
-                              breaking ways between v1beta1 releases. See ExperimentalSpec for the
-                              stability caveat.
+                              breaking ways between v1beta1 releases.
                             properties:
                               localPartitions:
                                 description: |-
@@ -21098,8 +21097,7 @@ spec:
                           experimental:
                             description: |-
                               experimental groups opt-in LPX options whose API shape may change in
-                              breaking ways between v1beta1 releases. See ExperimentalSpec for the
-                              stability caveat.
+                              breaking ways between v1beta1 releases.
                             properties:
                               localPartitions:
                                 description: |-
