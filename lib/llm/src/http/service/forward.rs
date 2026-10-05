@@ -66,17 +66,18 @@ impl ForwardRoutes {
 
     fn parse(spec: &str) -> anyhow::Result<Option<Self>> {
         let mut routes: Vec<ForwardRoute> = Vec::new();
-        for entry in spec.split_whitespace() {
+        // Errors name the entry or its prefix, never the URL: a URL may hold
+        // credentials, and startup errors reach the logs.
+        for (n, entry) in spec.split_whitespace().enumerate().map(|(i, e)| (i + 1, e)) {
             let Some((prefix, url)) = entry.split_once('=') else {
-                anyhow::bail!("forward route must be PREFIX=URL: {entry:?}");
+                anyhow::bail!("forward route {n} must be PREFIX=URL");
             };
             if !prefix.starts_with('/') {
-                anyhow::bail!("forward route prefix must start with '/': {entry:?}");
+                anyhow::bail!("forward route {n}: prefix must start with '/'");
             }
             let prefix = prefix.trim_end_matches('/').to_string();
             let upstream = reqwest::Url::parse(url)
-                .map_err(|e| anyhow::anyhow!("invalid forward route URL {url:?}: {e}"))?;
-            // Never echo a URL with credentials: they would reach the logs.
+                .map_err(|e| anyhow::anyhow!("forward route URL for {prefix:?} is invalid: {e}"))?;
             if !upstream.username().is_empty() || upstream.password().is_some() {
                 anyhow::bail!("forward route URL for {prefix:?} must not contain credentials");
             }
@@ -85,11 +86,11 @@ impl ForwardRoutes {
                 || upstream.fragment().is_some()
             {
                 anyhow::bail!(
-                    "forward route URL must be http(s) without query or fragment: {url:?}"
+                    "forward route URL for {prefix:?} must be http(s) without query or fragment"
                 );
             }
             if routes.iter().any(|r| r.prefix == prefix) {
-                anyhow::bail!("duplicate forward route prefix: {entry:?}");
+                anyhow::bail!("duplicate forward route prefix {prefix:?}");
             }
             routes.push(ForwardRoute { prefix, upstream });
         }
@@ -367,7 +368,15 @@ mod tests {
             );
         }
         assert!(ForwardRoutes::parse("  ").unwrap().is_none());
-        for secret in ["/a=http://user:hunter2@h:1", "/a=http://user@h:1"] {
+        for secret in [
+            "/a=http://user:hunter2@h:1",
+            "/a=http://user@h:1",
+            "/a=http://user:hunter2@%",
+            "http://user:hunter2@h:1",
+            "a=http://user:hunter2@h:1",
+            "/a=ftp://user:hunter2@h:1",
+            "/a=http://user:hunter2@h:1/?q=1",
+        ] {
             let err = ForwardRoutes::parse(secret).err().unwrap().to_string();
             assert!(!err.contains("hunter2") && !err.contains("user"), "{err}");
         }
