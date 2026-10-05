@@ -2053,6 +2053,19 @@ impl OpenAIPreprocessor {
             )
     }
 
+    fn request_requires_reasoning<R: OAIChatLikeRequest>(
+        request: &R,
+        reasoning_parser: Option<&str>,
+        has_thinking_budget: bool,
+    ) -> bool {
+        Self::guided_output_requires_reasoning(request, reasoning_parser)
+            || (has_thinking_budget
+                && Self::sglang_effective_reasoning_enabled(
+                    reasoning_parser,
+                    request.chat_template_args(),
+                ))
+    }
+
     fn structured_response_supports_sglang_reasoning_gate(reasoning_parser: Option<&str>) -> bool {
         // GPT-OSS/Harmony must skip SGLang's `require_reasoning + json_schema`
         // path for structured output until upstream fixes malformed Harmony:
@@ -3006,6 +3019,7 @@ impl OpenAIPreprocessor {
             builder.eos_token_ids(eos_token_ids);
         }
 
+        let has_thinking_budget = stop_conditions.max_thinking_tokens.is_some();
         builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
 
@@ -3092,11 +3106,11 @@ impl OpenAIPreprocessor {
             builder.extra_args(Some(extra_args));
         }
 
-        // SGLang needs this request-scoped signal in addition to its native
-        // reasoning parser so guided JSON starts after the reasoning boundary.
-        builder.require_reasoning(Self::guided_output_requires_reasoning(
+        // SGLang needs this signal for guided output and per-request budgets.
+        builder.require_reasoning(Self::request_requires_reasoning(
             request,
             self.runtime_config.reasoning_parser.as_deref(),
+            has_thinking_budget,
         ));
 
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
@@ -10311,6 +10325,84 @@ mod tests {
         .unwrap();
 
         assert!(OpenAIPreprocessor::backend_extra_args(&request, true, None).is_none());
+    }
+
+    #[test]
+    fn test_request_requires_reasoning_with_thinking_budget() {
+        let cases = [
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 0}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"nvext": {"max_thinking_tokens": 16}}),
+                Some("qwen3"),
+                true,
+            ),
+            (serde_json::json!({}), Some("qwen3"), false),
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                None,
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                Some("gemma4"),
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "chat_template_kwargs": {"enable_thinking": true}}),
+                Some("gemma4"),
+                true,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "chat_template_kwargs": {"enable_thinking": false}}),
+                Some("qwen3"),
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "response_format": {"type": "json_object"}}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"response_format": {"type": "json_object"}}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"response_format": {"type": "json_object"}}),
+                Some("gpt_oss"),
+                false,
+            ),
+        ];
+        for (fields, parser, expected) in cases {
+            let mut value = serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+            let has_budget = request
+                .extract_stop_conditions()
+                .unwrap()
+                .max_thinking_tokens
+                .is_some();
+            assert_eq!(
+                OpenAIPreprocessor::request_requires_reasoning(&request, parser, has_budget),
+                expected,
+                "parser={parser:?}, fields={fields}",
+            );
+        }
     }
 
     /// Verifies the SGLang reasoning gate covers forced tool JSON and
