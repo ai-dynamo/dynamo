@@ -75,6 +75,20 @@ TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+# `--extra_llm_api_options` (alias `--config`) is last-wins, not additive, so a
+# forwarded copy would drop the guided-decoding backend and a required or named
+# tool_choice would fail again. Refuse it rather than silently losing the setting.
+for arg in "${EXTRA_ARGS[@]}"; do
+    case "$arg" in
+        --extra_llm_api_options|--extra_llm_api_options=*|--config|--config=*)
+            echo "Cannot forward ${arg%%=*}: this launcher needs it for" >&2
+            echo "guided_decoding_backend. Add 'guided_decoding_backend: xgrammar'" >&2
+            echo "to your file and run the engine yourself." >&2
+            exit 1
+            ;;
+    esac
+done
+
 trtllm_resolve_context_length "${EXTRA_ARGS[@]}"
 
 trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"

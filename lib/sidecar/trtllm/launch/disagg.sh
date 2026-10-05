@@ -87,14 +87,15 @@ TRTLLM_PREFILL_GPU="${TRTLLM_PREFILL_GPU:-0}"
 TRTLLM_DECODE_GPU="${TRTLLM_DECODE_GPU:-1}"
 TRTLLM_CACHE_TRANSCEIVER_BACKEND="${TRTLLM_CACHE_TRANSCEIVER_BACKEND:-NIXL}"
 
-# `--extra_llm_api_options` is last-wins, not additive, so a forwarded copy
-# would drop the transceiver and leave the prefill worker producing a handoff
-# no decode worker can consume -- as an opaque engine-side transfer error, not
-# a launcher one. Refuse it rather than silently losing the setting.
+# `--extra_llm_api_options` (alias `--config`) is last-wins, not additive, so a
+# forwarded copy would drop the transceiver and leave the prefill worker
+# producing a handoff no decode worker can consume -- as an opaque engine-side
+# transfer error, not a launcher one. Refuse it rather than silently losing the
+# setting.
 for arg in "${EXTRA_ARGS[@]}"; do
     case "$arg" in
-        --extra_llm_api_options|--extra_llm_api_options=*)
-            echo "Cannot forward --extra_llm_api_options: this launcher needs it for" >&2
+        --extra_llm_api_options|--extra_llm_api_options=*|--config|--config=*)
+            echo "Cannot forward ${arg%%=*}: this launcher needs it for" >&2
             echo "cache_transceiver_config. Merge your settings into that file, or set" >&2
             echo "TRTLLM_CACHE_TRANSCEIVER_BACKEND and run the engines yourself." >&2
             exit 1
