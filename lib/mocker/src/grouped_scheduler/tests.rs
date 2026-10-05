@@ -740,3 +740,118 @@ async fn closed_output_receiver_cancels_request_and_releases_native_kv() {
     cancel.cancel();
     actor.await.unwrap().unwrap();
 }
+
+/// Records the keys an ownership delegate reports as gaining their first owner.
+#[derive(Default)]
+struct FirstOwners(StdMutex<Vec<u64>>);
+
+impl dynamo_kv_router::indexer::KvIndexerDelegate for FirstOwners {
+    fn on_create(&self, hash: dynamo_kv_router::protocols::ExternalSequenceBlockHash) {
+        self.0.lock().unwrap().push(hash.0);
+    }
+
+    fn on_remove(&self, _hash: dynamo_kv_router::protocols::ExternalSequenceBlockHash) {}
+}
+
+/// The KV events of one single-rank Mocker engine that served `tokens`.
+async fn stored_events_of_one_worker(tokens: &[u32], id: u128) -> Vec<KvCacheEvent> {
+    let effects = Arc::new(CapturedEffects::default());
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(
+        args(1),
+        vec![GroupedSchedulerRankSinks {
+            output_tx: Some(output_tx),
+            kv_event_publishers: KvEventPublishers::new(
+                Some(Arc::clone(&effects) as Arc<dyn KvCacheEventSink>),
+                None,
+            ),
+            ..GroupedSchedulerRankSinks::default()
+        }],
+        Some(cancel.clone()),
+    )
+    .unwrap();
+    schedulers[0]
+        .request_sender()
+        .send(DirectRequest {
+            tokens: tokens.to_vec(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![9]),
+            uuid: Some(Uuid::from_u128(id)),
+            dp_rank: 0,
+            ..DirectRequest::default()
+        })
+        .unwrap();
+    loop {
+        let outputs = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if outputs.iter().any(|output| output.completed) {
+            break;
+        }
+    }
+    cancel.cancel();
+    actor.await.unwrap().unwrap();
+    effects.kv.lock().unwrap().clone()
+}
+
+fn stored_hashes(events: &[KvCacheEvent]) -> Vec<u64> {
+    events
+        .iter()
+        .filter_map(|event| match &event.data {
+            KvCacheEventData::Stored(stored) => Some(stored),
+            _ => None,
+        })
+        .flat_map(|stored| stored.blocks.iter().map(|block| block.block_hash.0))
+        .collect()
+}
+
+/// Two Mocker workers that serve the same request store one content under one key per block,
+/// and the key is the sequence hash the frontend computes for the request. A KV history ledger
+/// built on the ownership delegate depends on both (wcep plan steps K0a and K0b).
+#[tokio::test]
+async fn two_mocker_workers_store_one_content_under_the_frontend_hash() {
+    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use dynamo_kv_router::protocols::{
+        BlockHashOptions, RouterEvent, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    };
+
+    let block_size = args(1).block_size as u32;
+    let tokens: Vec<u32> = (1..=4 * block_size).collect();
+    let frontend = compute_seq_hash_for_block(&compute_block_hash_for_seq(
+        &tokens,
+        block_size,
+        BlockHashOptions::default(),
+    ));
+
+    let first = stored_events_of_one_worker(&tokens, 1).await;
+    let second = stored_events_of_one_worker(&tokens, 2).await;
+    assert_eq!(stored_hashes(&first), frontend, "worker 1 keys");
+    assert_eq!(stored_hashes(&second), frontend, "worker 2 keys");
+
+    let delegate = Arc::new(FirstOwners::default());
+    let indexer = KvIndexer::builder(
+        CancellationToken::new(),
+        block_size,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+    )
+    .delegate(delegate.clone())
+    .build();
+    for (worker_id, events) in [(1, first), (2, second)] {
+        for event in events {
+            indexer
+                .apply_event(RouterEvent::new(worker_id, event))
+                .await;
+        }
+    }
+    indexer.flush().await;
+    indexer.shutdown();
+    assert_eq!(
+        *delegate.0.lock().unwrap(),
+        frontend,
+        "one first owner per block"
+    );
+}
