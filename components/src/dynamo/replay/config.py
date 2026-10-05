@@ -9,7 +9,7 @@ import json
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 from aisimulate.capacity import materialize_aic_num_gpu_blocks
@@ -24,100 +24,45 @@ class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
 
 
-def speculation_api(*, required: bool = True) -> ModuleType | None:
-    """Load the paired SD contract without breaking older non-SD installs."""
-    try:
-        api = import_module("aisimulate.speculation")
-        if not all(
-            callable(getattr(api, name, None))
-            for name in (
-                "normalize_speculation_engine_args",
-                "speculation_report_metadata",
-            )
-        ):
-            raise ImportError("incomplete AISimulate speculation API")
-        return api
-    except ImportError as error:
-        if not required:
-            return None
-        raise RuntimeError(
-            "Dynamo speculative replay requires the matching AISimulate source "
-            "and native bindings. Install container/deps/requirements.aisimulate.txt "
-            "and rebuild ai-dynamo-runtime with --features ais-forward-pass; "
-            "the version label aisimulate==0.13.0 alone does not identify this API."
-        ) from error
-
-
-def _speculation_configs(rank: Mapping[str, Any]) -> tuple[Any, ...]:
-    timing = rank.get("timing_model")
-    timing_config = timing.get("config") if isinstance(timing, Mapping) else None
-    canonical = rank.get("ais_perf_config")
-    return (
-        rank.get("speculation"),
-        timing_config.get("speculation")
-        if isinstance(timing_config, Mapping)
-        else None,
-        canonical.get("speculation") if isinstance(canonical, Mapping) else None,
+def mtp_config_type(*, required: bool = True):
+    """Keep non-speculative replay importable with older AIS installations."""
+    config = getattr(
+        import_module("aisimulate.config.engine"), "MtpSpeculationConfig", None
     )
+    if config is not None and hasattr(config, "acceptance_rates"):
+        return config
+    if required:
+        raise RuntimeError(
+            "MTP replay requires the matching AISimulate source; install "
+            "container/deps/requirements.aisimulate.txt and rebuild with ais-forward-pass"
+        )
+    return None
+
+
+def _speculation_inputs(payload):
+    rank = payload.get("rank", payload)
+    timing = rank.get("timing_model") or {}
+    return rank, rank.get("ais_perf_config") or timing.get("config") or {}
 
 
 def has_speculative_decoding(payload: Mapping[str, Any]) -> bool:
-    rank = payload.get("rank", payload)
-    if not isinstance(rank, Mapping):
-        return False
-    if any(chosen is not None for chosen in _speculation_configs(rank)):
-        return True
-    timing = rank.get("timing_model")
-    config = timing.get("config") if isinstance(timing, Mapping) else None
-    return any(
-        item.get(name) not in (None, 0)
-        for item in (rank, config, rank.get("ais_perf_config"))
-        if isinstance(item, Mapping)
-        for name in ("nextn", "aic_nextn", "ais_nextn")
+    rank, cost = _speculation_inputs(payload)
+    return bool(rank.get("speculation") or cost.get("speculation")) or any(
+        args.get(key) not in (None, 0)
+        for args in (rank, cost)
+        for key in ("nextn", "aic_nextn", "ais_nextn")
     )
 
 
 def validate_speculation_payload(payload: Mapping[str, Any]) -> None:
-    """Apply Dynamo's method boundary before either replay path executes."""
-    rank = payload.get("rank", payload)
-    if not isinstance(rank, Mapping):
-        return
-    for field in ("nextn", "nextn_accept_rates", "mtp_seed"):
-        native, upstream = "ais_" + field, "aic_" + field
-        if native in rank and upstream in rank and rank[native] != rank[upstream]:
-            raise ValueError(f"{native} conflicts with {upstream}")
+    rank, cost = _speculation_inputs(payload)
+    for chosen in (rank.get("speculation"), cost.get("speculation")):
+        if chosen is not None and chosen.get("kind") != "mtp":
+            raise ValueError(
+                "Dynamo replay supports only MTP, not ngram draft scheduling"
+            )
     if rank.get("speculation") is not None and rank.get("ais_perf_config") is not None:
-        raise ValueError(
-            "speculation cannot be combined with ais_perf_config; use one canonical "
-            "timing_model configuration with the public speculation controls"
-        )
-    choices = _speculation_configs(rank)
-    for chosen in choices:
-        if isinstance(chosen, Mapping) and chosen.get("kind") != "mtp":
-            raise ValueError(
-                "Dynamo replay supports only MTP; it does not support ngram draft scheduling"
-            )
-    if rank.get("speculation") is None and any(
-        isinstance(chosen, Mapping) and chosen.get("kind") == "mtp"
-        for chosen in choices[1:]
-    ):
-        has_mean = any(
-            rank.get(name) is not None
-            for name in ("aic_nextn_accepted", "nextn_accepted")
-        )
-        has_rates = any(
-            isinstance(rank.get(name), str) and rank[name].strip()
-            for name in (
-                "aic_nextn_accept_rates",
-                "nextn_accept_rates",
-                "ais_nextn_accept_rates",
-            )
-        )
-        if not (has_mean or has_rates):
-            raise ValueError(
-                "canonical MTP requires explicit acceptance; configure an expected "
-                "accepted-token count or conditional acceptance rates"
-            )
+        raise ValueError("speculation cannot be combined with ais_perf_config")
 
 
 def canonical_upstream_config(
@@ -208,49 +153,26 @@ def resolve_ais_num_gpu_blocks(raw: dict[str, Any]) -> None:
     raw.update(lowered)
 
 
-def reconcile_mtp_timing(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Align legacy scheduler depth with AIC cost identity before construction."""
-    raw = dict(payload)
-    timing = raw.get("timing_model")
-    depth = raw.get("aic_nextn", raw.get("nextn"))
-    if (
-        raw.get("speculation") is None
-        and (depth is None or type(depth) is int and depth == 0)
-        and isinstance(timing, Mapping)
-        and timing.get("provider") == "aic"
-    ):
-        config = timing.get("config", {})
-        chosen = config.get("speculation")
-        configured_depth = (
-            chosen.get("params", {}).get("num_speculative_tokens")
-            if isinstance(chosen, Mapping)
-            else config.get("nextn")
-        )
-        if type(configured_depth) is int and configured_depth > 0:
-            depth = configured_depth
-            raw.pop("nextn", None)
-            raw["aic_nextn"] = depth
-    if (
-        type(depth) is int
-        and depth > 0
-        and isinstance(timing, Mapping)
-        and timing.get("provider") == "aic"
-    ):
-        config = dict(timing.get("config", {}))
-        chosen = config.get("speculation")
-        if isinstance(chosen, Mapping):
-            if chosen.get("params", {}).get("num_speculative_tokens") != depth:
-                raise ValueError(
-                    "speculative depth conflicts with timing_model.config.speculation"
-                )
-        else:
-            if config.get("nextn") not in (None, 0, depth):
-                raise ValueError(
-                    "speculative depth conflicts with timing_model.config.nextn"
-                )
-            config["nextn"] = depth
-        raw["timing_model"] = {**timing, "config": config}
-    return raw
+def reconcile_mtp_timing(raw: dict[str, Any]) -> None:
+    timing = raw.get("timing_model") or {}
+    if timing.get("provider") != "aic":
+        return
+    config = dict(timing.get("config", {}))
+    chosen = config.get("speculation")
+    cost_depth = (
+        chosen.get("params", {}).get("num_speculative_tokens")
+        if chosen
+        else config.get("nextn")
+    )
+    depth = raw.get("aic_nextn") or cost_depth
+    if not depth:
+        return
+    if cost_depth not in (None, 0, depth):
+        raise ValueError("speculative depth conflicts with timing_model configuration")
+    raw["aic_nextn"] = depth
+    if not chosen:
+        config["nextn"] = depth
+    raw["timing_model"] = {**timing, "config": config}
 
 
 def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -273,13 +195,14 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
             "provider": "aic",
             "config": canonical,
         }
-    for field in ("nextn", "nextn_accept_rates", "mtp_seed"):
-        native, upstream = "ais_" + field, "aic_" + field
-        if native in raw:
-            raw.setdefault(upstream, raw.pop(native))
-    for name in ("aic_nextn", "nextn"):
-        if name in raw and raw[name] is not None and type(raw[name]) is not int:
-            raise ValueError(f"{name} must be an integer in 0..=5")
+    for field in ("nextn", "nextn_accept_rates", "nextn_accepted", "mtp_seed"):
+        names = [
+            name for name in ("aic_" + field, "ais_" + field, field) if name in raw
+        ]
+        if len(names) > 1:
+            raise ValueError(f"conflicting speculative fields: {', '.join(names)}")
+        if names:
+            raw["aic_" + field] = raw.pop(names[0])
     timing = raw.get("timing_model")
     has_custom_timing = isinstance(timing, dict) and timing.get("type") in {
         "fixed",
@@ -302,24 +225,57 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
             "provider": "aic",
             "config": canonical_upstream_config(identity, worker_type=role),
         }
-    raw = reconcile_mtp_timing(raw)
-    if has_speculative_decoding(raw) or any(
-        raw.get(name) is not None
-        for name in (
-            "aic_nextn_accepted",
-            "nextn_accepted",
-            "aic_nextn_accept_rates",
-            "nextn_accept_rates",
+    chosen = raw.pop("speculation", None)
+    if chosen is not None:
+        if raw.get("aic_nextn") not in (None, 0) or any(
+            raw.get("aic_" + name) is not None
+            for name in ("nextn_accepted", "nextn_accept_rates", "mtp_seed")
+        ):
+            raise ValueError(
+                "speculation cannot be combined with legacy speculative fields"
+            )
+        config = mtp_config_type()(**chosen)
+        timing = raw.get("timing_model") or {}
+        if timing.get("type") != "external" or timing.get("provider") != "aic":
+            raise ValueError("MTP requires AIC op_level timing")
+        cost = dict(timing.get("config", {}))
+        if cost.get("nextn") not in (None, 0) or cost.get("speculation") not in (
+            None,
+            config.cost_config(),
+        ):
+            raise ValueError("speculation conflicts with timing_model configuration")
+        raw["timing_model"] = {
+            **timing,
+            "config": {**cost, "speculation": config.cost_config()},
+        }
+        raw.update(
+            aic_nextn=config.num_speculative_tokens,
+            aic_nextn_accept_rates=",".join(
+                format(rate, ".17g") for rate in config.acceptance_rates
+            ),
+            aic_mtp_seed=config.seed,
         )
-    ):
-        raw = speculation_api().normalize_speculation_engine_args(raw, role=role)
-    else:
-        # Explicit zero is the supported SD-off spelling, including when an
-        # older AISimulate installation has no public speculation helper.
-        for name in ("speculation", "aic_nextn", "nextn"):
-            if raw.get(name) in (None, 0):
-                raw.pop(name, None)
-    raw = reconcile_mtp_timing(raw)
+    reconcile_mtp_timing(raw)
+    depth = raw.get("aic_nextn")
+    if depth is not None and (type(depth) is not int or not 0 <= depth <= 5):
+        raise ValueError("aic_nextn must be an integer in 0..=5")
+    expected = raw.pop("aic_nextn_accepted", None)
+    if expected is not None:
+        if raw.get("aic_nextn_accept_rates") is not None:
+            raise ValueError("cannot set both expected acceptance and acceptance rates")
+        config = mtp_config_type()(
+            kind="mtp", num_speculative_tokens=depth, expected_accepted_tokens=expected
+        )
+        raw["aic_nextn_accept_rates"] = ",".join(
+            format(rate, ".17g") for rate in config.acceptance_rates
+        )
+    if not depth:
+        raw.pop("aic_nextn", None)
+        if raw.get("aic_nextn_accept_rates") is not None or raw.get(
+            "aic_mtp_seed"
+        ) not in (None, 42):
+            raise ValueError("speculative acceptance and seed require aic_nextn")
+        raw.pop("aic_mtp_seed", None)
     raw = _materialize_capacity(raw)
     raw.pop("cuda_graph_reserved_bytes", None)
     if identity.get("attention_dp_size") is not None:
