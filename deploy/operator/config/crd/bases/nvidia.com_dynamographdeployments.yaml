@@ -11523,6 +11523,45 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
+                          experimental:
+                            description: |-
+                              experimental groups opt-in LPX options whose API shape may change in
+                              breaking ways between v1beta1 releases.
+                            properties:
+                              localPartitions:
+                                description: |-
+                                  localPartitions selects partitions of a hybrid build that the Cyborg
+                                  conductor runs on its own GPU. The operator schedules LPU Agents only for
+                                  the remaining partitions, and schedules none when every partition is
+                                  local. Omission runs every partition on LPUs.
+                                properties:
+                                  ids:
+                                    description: |-
+                                      ids lists the compiler partition IDs that run on the Cyborg GPU.
+                                      Required when mode is `IDs` and forbidden otherwise.
+                                    items:
+                                      format: int64
+                                      maximum: 4294967295
+                                      minimum: 0
+                                      type: integer
+                                    minItems: 1
+                                    type: array
+                                    x-kubernetes-list-type: set
+                                  mode:
+                                    description: |-
+                                      mode selects the partitions that run on the Cyborg GPU. `All` runs every
+                                      partition; `IDs` runs the partitions listed in ids.
+                                    enum:
+                                      - All
+                                      - IDs
+                                    type: string
+                                required:
+                                  - mode
+                                type: object
+                                x-kubernetes-validations:
+                                  - message: ids is required when mode is IDs and forbidden otherwise
+                                    rule: 'self.mode == ''IDs'' ? has(self.ids) : !has(self.ids)'
+                            type: object
                           scheduling:
                             description: |-
                               scheduling configures this component's LPX scheduling attempts.
@@ -21055,6 +21094,45 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
+                          experimental:
+                            description: |-
+                              experimental groups opt-in LPX options whose API shape may change in
+                              breaking ways between v1beta1 releases.
+                            properties:
+                              localPartitions:
+                                description: |-
+                                  localPartitions selects partitions of a hybrid build that the Cyborg
+                                  conductor runs on its own GPU. The operator schedules LPU Agents only for
+                                  the remaining partitions, and schedules none when every partition is
+                                  local. Omission runs every partition on LPUs.
+                                properties:
+                                  ids:
+                                    description: |-
+                                      ids lists the compiler partition IDs that run on the Cyborg GPU.
+                                      Required when mode is `IDs` and forbidden otherwise.
+                                    items:
+                                      format: int64
+                                      maximum: 4294967295
+                                      minimum: 0
+                                      type: integer
+                                    minItems: 1
+                                    type: array
+                                    x-kubernetes-list-type: set
+                                  mode:
+                                    description: |-
+                                      mode selects the partitions that run on the Cyborg GPU. `All` runs every
+                                      partition; `IDs` runs the partitions listed in ids.
+                                    enum:
+                                      - All
+                                      - IDs
+                                    type: string
+                                required:
+                                  - mode
+                                type: object
+                                x-kubernetes-validations:
+                                  - message: ids is required when mode is IDs and forbidden otherwise
+                                    rule: 'self.mode == ''IDs'' ? has(self.ids) : !has(self.ids)'
+                            type: object
                           scheduling:
                             description: |-
                               scheduling configures this component's LPX scheduling attempts.
