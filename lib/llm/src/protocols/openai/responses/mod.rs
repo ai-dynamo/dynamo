@@ -4147,6 +4147,8 @@ mod tests {
         assert_eq!(resp.inner.safety_identifier.as_deref(), Some("user-abc"));
     }
 
+    /// Verify serialized unary usage defaults missing cache token counts to zero
+    /// and preserves supplied cached and cache-write token counts.
     #[test]
     fn test_response_usage_defaults_and_preserves_cache_write_tokens() {
         use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};

@@ -2777,6 +2777,8 @@ mod tests {
         );
     }
 
+    /// Verify optimized response.completed serialization defaults missing cache
+    /// token counts to zero and preserves supplied cached and cache-write counts.
     #[test]
     fn test_stream_usage_defaults_and_preserves_cache_write_tokens() {
         use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
