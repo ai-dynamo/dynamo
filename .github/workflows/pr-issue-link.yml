@@ -47,15 +47,15 @@ env:
   # has to reach contributors rather than rely on them meeting the check by
   # accident.
   #
-  # It falls after the v1.6.0 code freeze, so the check stays advisory for
-  # all of 1.6 and first governs what lands for 1.7. Nothing a frozen branch
-  # takes is in scope either way: the base-branch filter above keeps the
-  # check to pull requests into `main`.
+  # It is the v1.6.0 GA date, two weeks past the code freeze, so the check
+  # stays advisory for all of 1.6 and first governs what lands for 1.7.
+  # Nothing a frozen branch takes is in scope either way: the base-branch
+  # filter above keeps the check to pull requests into `main`.
   #
   # The pull request template and the script default name this date too, so
   # that a contributor reads it before the check fails rather than after. Bump
   # all three together; the unit tests below fail when they disagree.
-  BLOCKING_DATE: "2026-10-15"
+  BLOCKING_DATE: "2026-10-21"
 
 jobs:
   check-issue-link:

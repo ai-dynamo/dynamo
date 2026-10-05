@@ -342,9 +342,9 @@ def test_invisible_cross_repo_reference_is_reported_not_passed(
 def test_missing_message_names_the_blocking_date(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, _ = run(monkeypatch, BLOCKING_DATE="2026-10-15")
+    code, _ = run(monkeypatch, BLOCKING_DATE="2026-10-21")
     assert code == 1
-    assert "becomes required on 2026-10-15" in capsys.readouterr().out
+    assert "becomes required on 2026-10-21" in capsys.readouterr().out
 
 
 def test_summary_is_appended_to_the_step_summary_file(
