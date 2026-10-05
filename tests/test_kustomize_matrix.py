@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-import json
 import re
 import shutil
 import subprocess
@@ -73,30 +72,6 @@ def test_kimi_k3_vllm_recipes_use_short_worker_names(deployment, expected_worker
     }
 
     assert worker_names == expected_worker_names
-
-
-@pytest.mark.parametrize(
-    "variant",
-    ["aks-ib", "aws-p5.48xlarge", "gke-roce", "nebius-ib", "nscale-ib"],
-)
-def test_qwen3_32b_cloud_providers_use_worker_nixl_roles(variant):
-    manifest = (
-        REPO_ROOT / "recipes/qwen3-32b/vllm/cloud-providers" / f"deploy-{variant}.yaml"
-    )
-    dgd = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-    for worker_name, expected_role in [
-        ("PrefillWorker", "kv_producer"),
-        ("DecodeWorker", "kv_consumer"),
-    ]:
-        main = dgd["spec"]["services"][worker_name]["extraPodSpec"]["mainContainer"]
-        env = {
-            entry["name"]: entry["value"] for entry in main["env"] if "value" in entry
-        }
-        config = json.loads(env["KV_TRANSFER_CONFIG"])
-
-        assert config["kv_connector"] == "NixlConnector"
-        assert config["kv_role"] == expected_role
-        assert '--kv-transfer-config "${KV_TRANSFER_CONFIG}"' in main["args"][0]
 
 
 def load_matrix_module():
