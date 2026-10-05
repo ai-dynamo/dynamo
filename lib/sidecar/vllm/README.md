@@ -44,7 +44,7 @@ It is a standalone Rust executable and is also compiled into
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
-The sidecar does not support beam search or `n > 1`. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. The Dynamo frontend accepts inline media through OpenAI-compatible `data:` URLs; it does not expose a separate raw-byte media variant.
+The sidecar does not support beam search or `n > 1`. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. The Dynamo frontend accepts inline media through OpenAI-compatible `data:` URLs; it does not expose a separate raw-byte media variant.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
 
@@ -254,6 +254,8 @@ Aggregated serving is the default. The sidecar role is configured explicitly bec
 ### Encoder disaggregation
 
 Encoder disaggregation uses Dynamo's Encode worker discovery and routing contract. All media items in one request are sent together to one Encode worker; per-item fan-out is not supported. Text-only requests bypass Encode workers. If the encoder hop fails, the downstream request retains its original media and vLLM encodes it inline.
+
+Encode workers accept image and video media, also together in one request. The Encode worker runs the vision encoder, but each engine that receives the request still fetches and preprocesses all of its media, and decodes each video.
 
 The encoder vLLM instance must use an EC producer connector and the aggregated or prefill instance must use the matching EC consumer connector. The sidecar treats the connector metadata as an opaque JSON object and carries it over the existing gRPC `KVCacheParameters.ec_transfer_params` and `FinishInfo.ec_transfer_params` fields. In E+P+D, decode's vLLM gRPC frontend uses that metadata with the original media description to reconstruct model-specific positions such as Qwen-VL mRoPE, then removes the EC parameters before EngineCore consumes the prefill KV handoff. Decode therefore uses NIXL without an EC connector and does not load the encoder embedding again. This path requires vLLM Rust frontend support for metadata-only remote-prefill decode from [vLLM #54814](https://github.com/vllm-project/vllm/pull/54814) or a later release containing it.
 
