@@ -1628,6 +1628,75 @@ def real_policy_rules() -> tuple[list[tuple[str, list[str]]], dict[str, str]]:
 
 class TestRealPolicyRoutingContracts:
     @pytest.mark.parametrize(
+        "path",
+        [
+            "deploy/operator/api/v1alpha1/dynamographdeployment_types.go",
+            "deploy/operator/api/v1beta1/dynamographdeployment_types.go",
+            "deploy/operator/api/v1beta1/lpx_types.go",
+            "deploy/operator/api/v1alpha1/lpxgraphdeployment_types.go",
+            "deploy/operator/api/v1alpha1/dynamographdeployment_lpx_conversion_test.go",
+            "deploy/operator/api/config/v1alpha1/lpx.go",
+            "deploy/operator/config/crd/bases/nvidia.com_dynamographdeployments.yaml",
+            "deploy/operator/config/crd/bases/nvidia.com_lpxgraphdeployments.yaml",
+        ],
+    )
+    def test_deployment_apis_require_operator_approval(
+        self, real_policy_rules, path: str
+    ) -> None:
+        rules, teams = real_policy_rules
+        assert resolve_owners(rules, path) == [teams["operator"]]
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "deploy/operator/internal/dynamo/lpx/workload_projection.go",
+            "deploy/operator/internal/controller/lpx/pipeline_request.go",
+            "deploy/helm/charts/platform/tests/lpx_config_test.yaml",
+            "deploy/helm/charts/platform/components/operator/tests/lpx_config_test.yaml",
+        ],
+    )
+    def test_lpx_implementation_keeps_shared_ownership(
+        self, real_policy_rules, path: str
+    ) -> None:
+        rules, teams = real_policy_rules
+        assert resolve_owners(rules, path) == [teams["operator"], teams["lpx"]]
+
+    def test_operator_lpx_ownership_is_limited_to_lpx_directories(
+        self, real_policy_rules
+    ) -> None:
+        rules, teams = real_policy_rules
+        repo = Path(__file__).resolve().parents[2]
+        paths = subprocess.check_output(
+            ["git", "ls-files", "deploy/operator/"], cwd=repo, text=True
+        ).splitlines()
+        for path in paths:
+            if teams["lpx"] in resolve_owners(rules, path):
+                assert path.startswith(
+                    (
+                        "deploy/operator/internal/controller/lpx/",
+                        "deploy/operator/internal/dynamo/lpx/",
+                    )
+                ), path
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "deploy/operator/internal/controller/dgd_grove_lpx_restart.go",
+            "deploy/operator/internal/controller/dgd_grove_lpx_status.go",
+            "deploy/operator/internal/controller/dgd_lpx_handoff.go",
+            "deploy/operator/internal/dynamo/graph_lpx.go",
+            "deploy/operator/internal/dynamo/grove_lpx.go",
+            "deploy/operator/internal/features/lpx.go",
+            "deploy/operator/internal/webhook/validation/dynamographdeployment_lpx_validation_envtest_test.go",
+        ],
+    )
+    def test_lpx_integration_requires_operator_approval(
+        self, real_policy_rules, path: str
+    ) -> None:
+        rules, teams = real_policy_rules
+        assert resolve_owners(rules, path) == [teams["operator"]]
+
+    @pytest.mark.parametrize(
         ("path", "labels"),
         [
             (
