@@ -21,7 +21,7 @@ use super::extensions::kv_router::{
 };
 use super::normalize_trace_requests;
 use crate::common::handoff::NormalizedHandoffConformance;
-use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
+use crate::common::protocols::{DirectRequest, EngineType, MockerConfig, SglangArgs, WorkerType};
 use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
@@ -31,13 +31,13 @@ use crate::replay::{
 };
 use crate::scheduler::RouterEventVisibility;
 
-fn startup_delay_ms(args: &MockEngineArgs) -> f64 {
+fn startup_delay_ms(args: &MockerConfig) -> f64 {
     args.startup_time
         .filter(|seconds| *seconds > 0.0)
         .map_or(0.0, |seconds| seconds * 1_000.0)
 }
 
-fn worker_pool(initial_workers: usize, args: &MockEngineArgs) -> WorkerPoolSpec {
+fn worker_pool(initial_workers: usize, args: &MockerConfig) -> WorkerPoolSpec {
     WorkerPoolSpec {
         initial_workers,
         startup_delay_ms: startup_delay_ms(args),
@@ -95,7 +95,7 @@ fn replay_spec(
 
 #[allow(clippy::too_many_arguments)]
 fn run_aggregated(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     input: ReplayRuntimeInput,
@@ -133,7 +133,7 @@ fn run_aggregated(
 
 #[allow(clippy::too_many_arguments)]
 fn run_aggregated_with_capture_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     input: ReplayRuntimeInput,
@@ -342,7 +342,7 @@ pub fn run_offline_handoff_conformance(
     transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
 ) -> Result<NormalizedHandoffConformance> {
     let build_args = |worker_type| {
-        let mut builder = MockEngineArgs::builder()
+        let mut builder = MockerConfig::builder()
             .engine_type(engine_type)
             .block_size(4)
             .num_gpu_blocks(64)
@@ -377,14 +377,14 @@ pub fn run_offline_handoff_conformance(
 }
 
 pub(crate) fn generate_trace_worker_artifacts(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
 ) -> Result<ReplayWorkerArtifacts> {
     generate_trace_worker_artifacts_with_visibility(args, trace, None)
 }
 
 pub(crate) fn generate_trace_worker_artifacts_with_visibility(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     visibility: Option<RouterEventVisibility>,
 ) -> Result<ReplayWorkerArtifacts> {
@@ -393,7 +393,7 @@ pub(crate) fn generate_trace_worker_artifacts_with_visibility(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -425,7 +425,7 @@ pub(crate) fn simulate_trace_with_scaling_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -456,7 +456,7 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -498,7 +498,7 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_with_capture_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -532,7 +532,7 @@ pub(crate) fn simulate_trace_workload_with_capture_options(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -572,7 +572,7 @@ pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_agentic_trace_workload(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,

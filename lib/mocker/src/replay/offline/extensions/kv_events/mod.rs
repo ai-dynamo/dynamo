@@ -5,7 +5,7 @@ use aisimulate_core::engine::KvEvent;
 use anyhow::Context;
 use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
 
-use crate::common::protocols::{MockEngineArgs, OutputSignal};
+use crate::common::protocols::{MockerConfig, OutputSignal};
 use crate::engine_observations::dynamo_kv_event;
 use crate::loadgen::Trace;
 use crate::replay::{
@@ -64,8 +64,9 @@ impl ReplayEngineObservation for RouterEventObservation {
             events
                 .into_iter()
                 .map(|event| {
+                    let tier = crate::engine_observations::dynamo_storage_tier(event.tier);
                     let (event, _) = dynamo_kv_event(event);
-                    RouterEvent::with_storage_tier(worker_id, event, StorageTier::Device)
+                    RouterEvent::with_storage_tier(worker_id, event, tier)
                 })
                 .collect(),
         )
@@ -75,6 +76,7 @@ impl ReplayEngineObservation for RouterEventObservation {
         batch
             .0
             .iter()
+            .filter(|event| event.storage_tier == StorageTier::Device)
             .flat_map(|event| match &event.event.data {
                 dynamo_kv_router::protocols::KvCacheEventData::Stored(store) => {
                     store.blocks.as_slice()
@@ -172,7 +174,7 @@ fn timestamp_us_from_ms(timestamp_ms: f64) -> u64 {
 }
 
 pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     router_event_visibility_override: Option<RouterEventVisibility>,
 ) -> anyhow::Result<ReplayWorkerArtifacts> {
@@ -241,7 +243,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
             .kv_events
             .into_iter()
             .map(|event| ReplayTimedKvEvent {
-                storage_tier: StorageTier::Device,
+                storage_tier: crate::engine_observations::dynamo_storage_tier(event.event.tier),
                 event: dynamo_kv_event(event.event).0,
                 timestamp_us: timestamp_us_from_ms(event.observed_at_ms),
             })

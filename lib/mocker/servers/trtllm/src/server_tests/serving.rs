@@ -8,14 +8,14 @@ use dynamo_mocker::live::deterministic_token_id;
 
 #[tokio::test]
 async fn service_requires_a_trtllm_single_rank_aggregated_engine() {
-    let vllm = MockEngineArgsBuilder::default()
+    let vllm = MockerConfigBuilder::default()
         .engine_type(EngineType::Vllm)
         .build()
         .unwrap();
     let error = construction_error(config(), vllm);
     assert!(error.contains("engine_type"), "{error}");
 
-    let multi_rank = MockEngineArgsBuilder::default()
+    let multi_rank = MockerConfigBuilder::default()
         .engine_type(EngineType::Trtllm)
         .dp_size(2u32)
         .build()
@@ -233,7 +233,7 @@ async fn capacity_rejection_is_an_in_band_internal_error() {
     // the request after it was admitted.
     let service = TrtllmMockerService::new(
         config(),
-        MockEngineArgsBuilder::default()
+        MockerConfigBuilder::default()
             .engine_type(EngineType::Trtllm)
             .num_gpu_blocks(1usize)
             .block_size(4usize)

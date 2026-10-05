@@ -12,7 +12,7 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
 use std::collections::HashSet;
 
 use super::{KvReplayMetadata, KvRouterPlacement};
-use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::MockerConfig;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
 
@@ -76,12 +76,12 @@ impl ReplayComposition for RoundRobinReplayComposition {
 
 enum KvTopologyConfig {
     Aggregated {
-        args: Box<MockEngineArgs>,
+        args: Box<MockerConfig>,
         num_workers: usize,
     },
     Disaggregated {
-        prefill_args: Box<MockEngineArgs>,
-        decode_args: Box<MockEngineArgs>,
+        prefill_args: Box<MockerConfig>,
+        decode_args: Box<MockerConfig>,
         num_prefill_workers: usize,
         num_decode_workers: usize,
     },
@@ -99,7 +99,7 @@ pub(in crate::replay) struct KvReplayComposition {
 
 impl KvReplayComposition {
     pub(in crate::replay) fn aggregated(
-        args: MockEngineArgs,
+        args: MockerConfig,
         num_workers: usize,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -120,8 +120,8 @@ impl KvReplayComposition {
     }
 
     pub(in crate::replay) fn disaggregated(
-        prefill_args: MockEngineArgs,
-        decode_args: MockEngineArgs,
+        prefill_args: MockerConfig,
+        decode_args: MockerConfig,
         num_prefill_workers: usize,
         num_decode_workers: usize,
         router_config: Option<KvRouterConfig>,
@@ -290,7 +290,7 @@ fn validate_adapter_descriptors(
 
 fn validate_runtime_topology(
     stage: &str,
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     expected_workers: usize,
     dp_size: u32,
     topology: &[WorkerTopology],
@@ -334,18 +334,18 @@ fn validate_runtime_topology(
 }
 
 fn base_router_config(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = router_config.unwrap_or_default();
-    if let Some(policy) = args.router_queue_policy {
+    if let Some(policy) = args.runtime.router_queue_policy {
         config.router_queue_policy = policy;
     }
     config
 }
 
 pub(in crate::replay) fn derive_prefill_router_config(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = base_router_config(args, router_config);
@@ -354,7 +354,7 @@ pub(in crate::replay) fn derive_prefill_router_config(
 }
 
 pub(in crate::replay) fn derive_decode_router_config(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = base_router_config(args, router_config);
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn runtime_topology_must_match_dynamo_dp_and_worker_shape() {
-        let args = MockEngineArgs::builder().dp_size(2).build().unwrap();
+        let args = MockerConfig::builder().dp_size(2).build().unwrap();
         let error = validate_runtime_topology(
             "aggregated",
             &args,
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn native_vllm_kv_router_does_not_observe_blocks_before_pass_completion() {
-        let args = MockEngineArgs::builder()
+        let args = MockerConfig::builder()
             .block_size(64)
             .num_gpu_blocks(64)
             .max_num_seqs(Some(4))
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn kv_composition_uses_only_explicit_canonical_determinism() {
         let mut composition =
-            KvReplayComposition::aggregated(MockEngineArgs::default(), 1, None, None, None);
+            KvReplayComposition::aggregated(MockerConfig::default(), 1, None, None, None);
         assert_eq!(composition.determinism.selector_seed(), None);
 
         composition

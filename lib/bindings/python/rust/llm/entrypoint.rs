@@ -810,7 +810,7 @@ async fn select_engine(
                 RsMockEngineArgs::default()
             };
 
-            if let Some(config) = mocker_args.ais_perf_config.as_ref() {
+            if let Some(config) = mocker_args.ais_perf_config() {
                 let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
                 mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
             }

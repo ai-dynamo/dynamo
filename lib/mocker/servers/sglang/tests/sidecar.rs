@@ -7,7 +7,7 @@ use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, FinishReason, GenerateContext, LLMEngine,
     OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use dynamo_sglang_sidecar::{
     SglangSidecarEngine, proto::sglang_service_server::SglangServiceServer,
@@ -24,7 +24,7 @@ struct RunningServer {
 }
 
 impl RunningServer {
-    async fn start(mode: ServerMode, engine_args: MockEngineArgs) -> Self {
+    async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
         let service = SglangMockerService::new(
             MockerServerConfig {
                 mode,
@@ -62,8 +62,8 @@ impl Drop for RunningServer {
     }
 }
 
-fn fast_engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn fast_engine_args() -> MockerConfig {
+    MockerConfig::builder()
         .engine_type(EngineType::Sglang)
         .block_size(4)
         .num_gpu_blocks(4_096)

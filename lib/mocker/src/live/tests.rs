@@ -39,8 +39,8 @@ impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
     }
 }
 
-fn args(engine_type: EngineType) -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn args(engine_type: EngineType) -> MockerConfig {
+    MockerConfig::builder()
         .engine_type(engine_type)
         .block_size(4)
         .num_gpu_blocks(128)
@@ -52,8 +52,8 @@ fn args(engine_type: EngineType) -> MockEngineArgs {
         .unwrap()
 }
 
-fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockerConfig {
+    MockerConfig::builder()
         .engine_type(engine_type)
         .worker_type(worker_type)
         .block_size(4)
@@ -161,8 +161,8 @@ async fn sglang_live_metrics_retain_the_last_prefill_cache_observation() {
 
 async fn assert_mtp_lifecycle_drains_through_live_boundary(engine_type: EngineType) {
     let mut mtp_args = args(engine_type);
-    mtp_args.ais_nextn = Some(2);
-    mtp_args.ais_nextn_accept_rates = Some("1,1".to_string());
+    mtp_args.aic_nextn = Some(2);
+    mtp_args.aic_nextn_accept_rates = Some("1,1".to_string());
     let fpm = Arc::new(CountingFpmSink::default());
     let engine = LiveEngine::start_with_options(
         mtp_args,

@@ -12,14 +12,7 @@ from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 from dynamo.mocker import MockEngineArgs, ReasoningConfig, SglangArgs, TrtllmArgs
 
-_DEFAULT_NUM_GPU_BLOCKS = 16384
-_DEFAULT_MAX_NUM_SEQS = 256
-_DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 _DEFAULT_AIS_SYSTEM = "h200_sxm"
-_DEFAULT_VLLM_BLOCK_SIZE = 64
-_DEFAULT_SGLANG_BLOCK_SIZE = 1
-# Recent TRT-LLM PyTorch backend default tokens_per_block (older builds use 64).
-_DEFAULT_TRTLLM_BLOCK_SIZE = 32
 
 
 def _parse_reasoning_config(reasoning_json: str | None) -> ReasoningConfig | None:
@@ -61,46 +54,28 @@ def _build_trtllm_args(args: argparse.Namespace) -> TrtllmArgs | None:
     return TrtllmArgs(**trtllm_args)
 
 
-def _resolve_block_size_for_capacity(
-    engine_type: str,
-    block_size: int | None,
-    sglang_page_size: int | None,
-) -> int:
-    if block_size is not None:
-        return block_size
-    if engine_type == "sglang":
-        if sglang_page_size is not None:
-            return sglang_page_size
-        return _DEFAULT_SGLANG_BLOCK_SIZE
-    if engine_type == "trtllm":
-        return _DEFAULT_TRTLLM_BLOCK_SIZE
-    return _DEFAULT_VLLM_BLOCK_SIZE
-
-
-def _resolve_raw_engine_args(raw: dict) -> dict:
-    canonical = raw.get("ais_perf_config")
-    if canonical is not None and raw.get("num_gpu_blocks") is None:
-        sglang = raw.get("sglang") or {}
-        raw["num_gpu_blocks"] = estimate_canonical_num_gpu_blocks(
+def _resolve_capacity(engine_args: MockEngineArgs, *, explicit: bool) -> MockEngineArgs:
+    canonical = engine_args.ais_perf_config
+    if canonical is not None and not explicit:
+        defaults = MockEngineArgs()
+        engine_args.num_gpu_blocks = estimate_canonical_num_gpu_blocks(
             canonical,
-            block_size=_resolve_block_size_for_capacity(
-                raw.get("engine_type", "vllm"),
-                raw.get("block_size"),
-                sglang.get("page_size"),
+            block_size=engine_args.block_size,
+            max_num_batched_tokens=(
+                engine_args.max_num_batched_tokens or defaults.max_num_batched_tokens
             ),
+            max_num_seqs=engine_args.max_num_seqs or defaults.max_num_seqs,
             **{
-                key: raw[key]
+                key: getattr(engine_args, key)
                 for key in (
-                    "max_num_batched_tokens",
-                    "max_num_seqs",
                     "gpu_memory_utilization",
                     "mem_fraction_static",
                     "free_gpu_memory_fraction",
                 )
-                if raw.get(key) is not None
+                if getattr(engine_args, key) is not None
             },
         )
-    return raw
+    return engine_args
 
 
 def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
@@ -111,7 +86,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         if getattr(args, "is_decode_worker", False)
         else "aggregated"
     )
-    engine_type = args.engine_type or "vllm"
+    engine_type = args.engine_type or MockEngineArgs().engine_type
     canonical = getattr(args, "ais_perf_config", None)
     flat = {
         key: getattr(args, "ais_" + name, None)
@@ -133,9 +108,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
                 "--ais-perf-config cannot be combined with flat AIS/AIC identity flags"
             )
         canonical = parse_ais_perf_config(canonical)
-        if canonical.get("worker_type", worker_type) != worker_type:
-            raise ValueError("AIS worker_type must match the mocker worker role")
-        canonical["worker_type"] = worker_type
+        canonical.setdefault("worker_type", worker_type)
     elif args.ais_perf_model:
         canonical = {
             "model": args.model_path,
@@ -150,56 +123,47 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
         canonical = ForwardPassPerfModelConfig(**canonical).to_dict()
-    raw = _resolve_raw_engine_args(
-        {
-            "ais_perf_config": canonical,
-            "num_gpu_blocks": args.num_gpu_blocks,
-            "engine_type": engine_type,
-            "block_size": args.block_size,
-            "sglang": {"page_size": args.sglang_page_size},
-            "max_num_batched_tokens": args.max_num_batched_tokens,
-            "max_num_seqs": args.max_num_seqs,
-            "gpu_memory_utilization": args.gpu_memory_utilization,
-            "mem_fraction_static": args.mem_fraction_static,
-            "free_gpu_memory_fraction": args.free_gpu_memory_fraction,
-        }
-    )
-    num_gpu_blocks = raw["num_gpu_blocks"]
-    if num_gpu_blocks is None:
-        num_gpu_blocks = _DEFAULT_NUM_GPU_BLOCKS
-    return MockEngineArgs(
+    # Forward supplied CLI values. AISimulate materializes engine defaults.
+    raw = {
+        key: getattr(args, key)
+        for key in (
+            "num_gpu_blocks",
+            "block_size",
+            "max_model_len",
+            "max_num_seqs",
+            "max_num_batched_tokens",
+            "enable_prefix_caching",
+            "enable_chunked_prefill",
+            "speedup_ratio",
+            "decode_speedup_ratio",
+            "dp_size",
+            "startup_time",
+            "planner_profile_data",
+            "ais_nextn",
+            "ais_nextn_accept_rates",
+            "ais_mtp_seed",
+            "gpu_memory_utilization",
+            "mem_fraction_static",
+            "free_gpu_memory_fraction",
+            "kv_bytes_per_token",
+            "kv_transfer_bandwidth",
+            "kv_transfer_timing_mode",
+            "response_replay_trace_path",
+            "preemption_mode",
+        )
+        if getattr(args, key, None) is not None
+    }
+    raw.update(
         ais_perf_config=canonical,
         engine_type=engine_type,
-        num_gpu_blocks=num_gpu_blocks,
-        block_size=getattr(args, "block_size", 0) or 0,
-        max_model_len=args.max_model_len,
-        max_num_seqs=getattr(args, "max_num_seqs", _DEFAULT_MAX_NUM_SEQS),
-        max_num_batched_tokens=getattr(
-            args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
-        ),
-        enable_prefix_caching=getattr(args, "enable_prefix_caching", True),
-        enable_chunked_prefill=getattr(args, "enable_chunked_prefill", True),
-        speedup_ratio=getattr(args, "speedup_ratio", 1.0),
-        decode_speedup_ratio=getattr(args, "decode_speedup_ratio", 1.0),
-        dp_size=getattr(args, "dp_size", 1),
-        startup_time=getattr(args, "startup_time", None),
         worker_type=worker_type,
-        planner_profile_data=getattr(args, "planner_profile_data", None),
-        ais_nextn=None if canonical is not None else args.ais_nextn,
-        ais_nextn_accept_rates=args.ais_nextn_accept_rates,
-        ais_mtp_seed=args.ais_mtp_seed,
-        gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
-        mem_fraction_static=getattr(args, "mem_fraction_static", None),
-        free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
         enable_local_indexer=True,
-        kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
-        kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
-        kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
-        response_replay_trace_path=args.response_replay_trace_path,
         sglang=_build_sglang_args(args),
         trtllm=_build_trtllm_args(args),
-        preemption_mode=getattr(args, "preemption_mode", "lifo"),
+    )
+    return _resolve_capacity(
+        MockEngineArgs(**raw), explicit=args.num_gpu_blocks is not None
     )
 
 
@@ -208,8 +172,13 @@ def load_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         raw = json.loads(args.extra_engine_args.read_text())
         if not isinstance(raw, dict):
             raise ValueError("extra engine args must be a JSON object")
-        raw = _resolve_raw_engine_args(raw)
-        return MockEngineArgs.from_json(json.dumps(raw))
+        explicit = raw.get("num_gpu_blocks") is not None or (
+            isinstance(raw.get("engine"), dict)
+            and raw["engine"].get("num_gpu_blocks") is not None
+        )
+        return _resolve_capacity(
+            MockEngineArgs.from_json(json.dumps(raw)), explicit=explicit
+        )
     return build_mocker_engine_args(args)
 
 
@@ -240,10 +209,10 @@ def build_runtime_config(
     rc.total_kv_blocks = engine_args.num_gpu_blocks
     rc.max_num_seqs = engine_args.max_num_seqs
     if rc.max_num_seqs is None:
-        rc.max_num_seqs = _DEFAULT_MAX_NUM_SEQS
+        rc.max_num_seqs = MockEngineArgs().max_num_seqs
     rc.max_num_batched_tokens = engine_args.max_num_batched_tokens
     if rc.max_num_batched_tokens is None:
-        rc.max_num_batched_tokens = _DEFAULT_MAX_NUM_BATCHED_TOKENS
+        rc.max_num_batched_tokens = MockEngineArgs().max_num_batched_tokens
     rc.enable_local_indexer = (
         engine_args.enable_local_indexer and not engine_args.is_decode()
     )

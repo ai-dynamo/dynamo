@@ -68,8 +68,8 @@ impl AisCallback for SlowDecode {
     }
 }
 
-fn args(dp_size: u32) -> MockEngineArgs {
-    let mut args = MockEngineArgs::builder().build().unwrap();
+fn args(dp_size: u32) -> MockerConfig {
+    let mut args = MockerConfig::builder().build().unwrap();
     args.dp_size = dp_size;
     args.block_size = 4;
     args.num_gpu_blocks = 128;
@@ -115,7 +115,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
         let mut engine_args = args(1);
         engine_args.worker_type = WorkerType::Prefill;
         engine_args.kv_transfer_bandwidth = Some(1.0);
-        engine_args.kv_bytes_per_token = Some(1_000_000);
+        engine_args.kv_transfer_bytes_per_token = Some(1_000_000);
         let compatibility = CompatibilityState::new(engine_args);
         let request_id = Uuid::from_u128(10 + u128::from(suppressed_pending_output));
         compatibility.native_request(request(request_id.as_u128(), 0));
@@ -324,7 +324,7 @@ async fn command_ack_and_handoff_lifecycle_round_trip_dynamo_uuid() {
 async fn cancellation_lane_bypasses_an_ordinary_command_deferred_mid_pass() {
     let mut slow_args = args(1);
     slow_args.num_gpu_blocks = 2_048;
-    slow_args.max_num_batched_tokens = Some(2_048);
+    slow_args.max_num_batched_tokens = 2_048;
     slow_args.speedup_ratio = 0.001;
     let (admission_tx, mut admission_rx) = mpsc::unbounded_channel();
     let engine = LiveEngine::start_with_options(
@@ -587,6 +587,7 @@ async fn synthetic_midpass_kv_is_deferred_until_completion_before_fpm() {
                 result: CommandResult::Applied,
                 lifecycle_events: Vec::new(),
                 kv_events: vec![KvEvent {
+                    tier: aisimulate_core::engine::KvEventTier::Device,
                     event_id: 1,
                     dp_rank: 0,
                     data: KvEventData::Removed {

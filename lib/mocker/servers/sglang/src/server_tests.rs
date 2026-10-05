@@ -5,8 +5,8 @@ use super::*;
 use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
 use futures::StreamExt;
 
-fn engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn engine_args() -> MockerConfig {
+    MockerConfig::builder()
         .engine_type(EngineType::Sglang)
         .block_size(4)
         .num_gpu_blocks(128)
@@ -36,15 +36,15 @@ fn request(request_id: &str) -> pb::GenerateRequest {
 
 #[tokio::test]
 async fn service_rejects_normalized_multi_rank_ais_args() {
-    let mut args = engine_args();
-    args.ais_perf_config = Some(json!({
-        "model": "model",
-        "system": "h200_sxm",
-        "backend": "sglang",
-        "worker_type": "aggregated",
-        "attention_dp": 2,
-    }));
-    assert_eq!(args.dp_size, 1);
+    let args = MockerConfig::from_value(json!({
+        "engine_type": "sglang",
+        "ais_perf_config": {
+            "model": "model", "system": "h200_sxm", "backend": "sglang",
+            "worker_type": "aggregated", "attention_dp": 2
+        }
+    }))
+    .unwrap();
+    assert_eq!(args.dp_size, 2);
 
     let error = SglangMockerService::new(MockerServerConfig::default(), args)
         .err()
@@ -237,7 +237,7 @@ async fn failed_kv_publisher_is_not_advertised() {
     let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let mut args = engine_args();
     args.enable_prefix_caching = true;
-    args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
+    args.runtime.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
     let service = SglangMockerService::new(MockerServerConfig::default(), args).unwrap();
     let info: serde_json::Value = serde_json::from_str(
         &service

@@ -9,7 +9,7 @@ use dynamo_backend_common::{
     DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
     PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_trtllm_mocker::{MockerServerConfig, ServerMode, TrtllmMockerService};
 use dynamo_trtllm_sidecar::TrtllmSidecarEngine;
 use dynamo_trtllm_sidecar::proto::control_server::ControlServer;
@@ -28,7 +28,7 @@ struct RunningServer {
 }
 
 impl RunningServer {
-    async fn start(mode: ServerMode, engine_args: MockEngineArgs) -> Self {
+    async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
         Self::start_with(
             MockerServerConfig {
                 mode,
@@ -41,7 +41,7 @@ impl RunningServer {
         .await
     }
 
-    async fn start_with(config: MockerServerConfig, engine_args: MockEngineArgs) -> Self {
+    async fn start_with(config: MockerServerConfig, engine_args: MockerConfig) -> Self {
         let service = TrtllmMockerService::new(config, engine_args).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -82,8 +82,8 @@ impl Drop for RunningServer {
     }
 }
 
-fn fast_engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn fast_engine_args() -> MockerConfig {
+    MockerConfig::builder()
         .engine_type(EngineType::Trtllm)
         .block_size(4)
         .num_gpu_blocks(4096)
@@ -378,7 +378,7 @@ async fn decode_rejects_a_handoff_with_a_dropped_opaque_field() {
 async fn dropping_the_sidecar_stream_cancels_mocker_work() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockEngineArgs::builder()
+        MockerConfig::builder()
             .engine_type(EngineType::Trtllm)
             .block_size(4)
             .num_gpu_blocks(4096)
@@ -418,7 +418,7 @@ async fn dropping_the_sidecar_stream_cancels_mocker_work() {
 async fn capacity_rejection_surfaces_as_a_sidecar_error() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockEngineArgs::builder()
+        MockerConfig::builder()
             .engine_type(EngineType::Trtllm)
             .block_size(4)
             .num_gpu_blocks(1)
@@ -472,7 +472,7 @@ async fn capacity_rejection_surfaces_as_a_sidecar_error() {
 async fn sidecar_abort_cancels_the_mocker_request() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockEngineArgs::builder()
+        MockerConfig::builder()
             .engine_type(EngineType::Trtllm)
             .block_size(4)
             .num_gpu_blocks(4096)

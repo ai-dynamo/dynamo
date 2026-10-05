@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::common::protocols::{
-    DirectRequest, EngineType, MockEngineArgs, PreemptionMode, SglangArgs,
+    DirectRequest, EngineType, MockerConfig, PreemptionMode, SglangArgs,
 };
 use crate::live::ObservedAdmission;
 use crate::loadgen::{
@@ -38,8 +38,8 @@ use super::state::{LiveReplayMode, WorkloadDispatchState, arrival_event};
 use super::task::wait_for_workload_progress;
 use super::{ReplayPlacement, ReplayRouter};
 
-fn replay_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn replay_args() -> MockerConfig {
+    MockerConfig::builder()
         .speedup_ratio(1000.0)
         .block_size(64)
         .build()
@@ -47,7 +47,7 @@ fn replay_args() -> MockEngineArgs {
 }
 
 fn replay_config(
-    args: MockEngineArgs,
+    args: MockerConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
     options: OnlineReplayOptions,
@@ -55,8 +55,8 @@ fn replay_config(
     OnlineReplayConfig::new(args, None, None, num_workers, router_mode, options)
 }
 
-fn sglang_replay_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn sglang_replay_args() -> MockerConfig {
+    MockerConfig::builder()
         .engine_type(EngineType::Sglang)
         .num_gpu_blocks(512)
         .speedup_ratio(1000.0)
@@ -126,9 +126,9 @@ async fn admission_timestamp_is_preserved_when_forwarding_is_delayed() {
     assert!(record.first_admit_ms.unwrap() <= record.terminal_time_ms);
 }
 
-fn trtllm_reject_args() -> MockEngineArgs {
+fn trtllm_reject_args() -> MockerConfig {
     // 4 GPU blocks * block_size 4 = 16-token to-completion budget per request.
-    MockEngineArgs::builder()
+    MockerConfig::builder()
         .engine_type(EngineType::Trtllm)
         .block_size(4)
         .num_gpu_blocks(4)
@@ -246,10 +246,10 @@ fn test_online_trace_workload_completes_multiturn_sessions() {
 
 #[test]
 fn online_report_options_populate_request_goodput_and_capacity_metrics() {
-    let args = MockEngineArgs::builder()
+    let args = MockerConfig::builder()
         .speedup_ratio(1000.0)
         .block_size(64)
-        .ais_tp_size(Some(2))
+        .tensor_parallel_size(2)
         .build()
         .unwrap();
     let report = simulate_trace_workload(
@@ -821,7 +821,7 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
 
 #[test]
 fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
-    let args = MockEngineArgs::builder()
+    let args = MockerConfig::builder()
         .block_size(4)
         .num_gpu_blocks(6)
         .max_num_batched_tokens(Some(16))

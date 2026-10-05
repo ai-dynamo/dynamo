@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Published AISimulate wheel staged into planner and framework runtime wheelhouses.
-aisimulate==0.13.0.dev202609300000000061
+# Draft source pin: replace with the matching published Python/Rust nightly pair.
+aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@a0132af8bc29bbb3f9ea2a64da779133ead08f5d#subdirectory=python/aisimulate

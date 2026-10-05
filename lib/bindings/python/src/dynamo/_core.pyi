@@ -2022,11 +2022,16 @@ class MockEngineArgs:
         trtllm: Optional[TrtllmArgs] = None,
         max_model_len: Optional[int] = None,
         ais_perf_config: Optional[Mapping[str, Any]] = None,
+        **canonical_fields: Any,
     ) -> None:
         ...
 
     @staticmethod
     def from_json(config_json: str) -> "MockEngineArgs":
+        ...
+
+    def to_json(self) -> str:
+        """Serialize the canonical AISimulate engine and Dynamo runtime options."""
         ...
 
     def copy(self) -> "MockEngineArgs": ...

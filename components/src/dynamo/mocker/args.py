@@ -2,6 +2,7 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import logging
 import os
 import tempfile
@@ -20,16 +21,6 @@ DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
-
-
-def positive_int(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
-    return parsed
 
 
 class ProfileDataResult:
@@ -162,6 +153,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     Returns:
         argparse.Namespace: Parsed command-line arguments.
     """
+    from dynamo.mocker import MockEngineArgs
+
+    engine_defaults = json.loads(MockEngineArgs().to_json())["engine"]
     parser = argparse.ArgumentParser(
         description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -208,28 +202,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-model-len",
-        type=positive_int,
+        type=int,
         default=None,
-        help="Maximum vLLM sequence length, including prompt and generated tokens. "
+        help="Maximum sequence length, including prompt and generated tokens. "
         "When omitted, no model-length limit is enforced.",
     )
     parser.add_argument(
         "--max-num-seqs",
         type=int,
-        default=256,
+        default=engine_defaults["max_num_seqs"],
         help="Maximum number of sequences per iteration (default: 256)",
     )
     parser.add_argument(
         "--max-num-batched-tokens",
         type=int,
-        default=8192,
+        default=engine_defaults["max_num_batched_tokens"],
         help="Maximum number of batched tokens per iteration (default: 8192)",
     )
     parser.add_argument(
         "--enable-prefix-caching",
         action="store_true",
         dest="enable_prefix_caching",
-        default=True,
+        default=engine_defaults["enable_prefix_caching"],
         help="Enable automatic prefix caching (default: True)",
     )
     parser.add_argument(
@@ -243,7 +237,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--enable-chunked-prefill",
         action="store_true",
         dest="enable_chunked_prefill",
-        default=True,
+        default=engine_defaults["enable_chunked_prefill"],
         help="Enable chunked prefill (default: True)",
     )
     parser.add_argument(
@@ -256,8 +250,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--preemption-mode",
         type=str,
-        default="lifo",
-        choices=["lifo", "fifo"],
+        default=engine_defaults["preemption_mode"],
         help="Preemption mode for decode eviction under memory pressure. "
         "'lifo' (default) evicts the newest request (matches vLLM v1), "
         "'fifo' evicts the oldest request.",
@@ -265,13 +258,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--speedup-ratio",
         type=float,
-        default=1.0,
+        default=engine_defaults["speedup_ratio"],
         help="Speedup ratio for mock execution (default: 1.0). Use 0 for infinite speedup (no simulation delays).",
     )
     parser.add_argument(
         "--decode-speedup-ratio",
         type=float,
-        default=1.0,
+        default=engine_defaults["decode_speedup_ratio"],
         help="Additional speedup multiplier applied only to decode steps (default: 1.0). "
         "Models speculative decoding (e.g. Eagle) where decode throughput improves "
         "without affecting prefill latency. Effective decode speedup is speedup_ratio * decode_speedup_ratio.",
@@ -280,7 +273,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-parallel-size",
         type=int,
         dest="dp_size",
-        default=1,
+        default=None,
         help="Number of data parallel replicas (default: 1)",
     )
     parser.add_argument(
@@ -340,7 +333,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_backend",
         type=str,
         default=None,
-        choices=["vllm", "sglang", "trtllm"],
         help="AIS backend name used for perf database lookups. When unset, "
         "falls back to --engine-type. Set this to decouple the AIS perf model "
         "from the simulated engine type (e.g. simulate with vllm while using "
@@ -416,7 +408,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-mtp-seed",
         dest="ais_mtp_seed",
         type=int,
-        default=42,
+        default=engine_defaults["aic_mtp_seed"],
         help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
     )
     parser.add_argument(
@@ -459,8 +451,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--engine-type",
         type=str,
-        default="vllm",
-        choices=["vllm", "sglang", "trtllm"],
+        default=engine_defaults["backend"],
         help="Engine simulation type: 'vllm' (default), 'sglang', or 'trtllm'.",
     )
 
@@ -469,7 +460,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sglang-schedule-policy",
         type=str,
         default=None,
-        choices=["fifo", "fcfs", "lpm"],
         help="SGLang scheduling policy: 'fifo'/'fcfs' (default) or 'lpm' (longest prefix match).",
     )
     parser.add_argument(
@@ -514,7 +504,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--trtllm-capacity-scheduler-policy",
         type=str,
         default=None,
-        choices=["guaranteed_no_evict"],
         help="TRT-LLM capacity scheduler policy. v1 supports only "
         "'guaranteed_no_evict' (default).",
     )
@@ -582,15 +571,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--kv-transfer-bandwidth",
         type=float,
-        default=_default_kv_transfer_bandwidth_gbps(),
+        default=engine_defaults["kv_transfer_bandwidth"],
         help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
-        "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
+        "When unset, uses the AISimulate engine default. Set to 0 to disable KV transfer delay. "
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
         "--kv-transfer-timing-mode",
-        choices=("full_prompt", "destination_missing"),
-        default="full_prompt",
+        default=engine_defaults["kv_transfer_timing_mode"],
         help="Physical KV footprint used for coordinated disaggregated transfer timing.",
     )
     parser.add_argument(
@@ -722,9 +710,3 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.endpoint = DEFAULT_ENDPOINT
             logger.debug(f"Using default endpoint: {args.endpoint}")
     return args
-
-
-def _default_kv_transfer_bandwidth_gbps() -> float:
-    from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
-
-    return DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS

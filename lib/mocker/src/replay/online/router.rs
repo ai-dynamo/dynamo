@@ -23,9 +23,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
-};
+use crate::common::protocols::{DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig};
 use crate::replay::router_shared::{
     ReplayScheduler, replay_router_config, replay_selector, replay_slots,
     replay_workers_with_configs,
@@ -187,7 +185,7 @@ pub(crate) struct KvReplayRouter {
 
 impl KvReplayRouter {
     fn new(
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -400,7 +398,7 @@ pub(crate) enum ReplayRouter {
 impl ReplayRouter {
     pub(crate) fn new(
         mode: ReplayRouterMode,
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -594,7 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_router_preserves_selected_attention_dp_rank() {
-        let mut args = MockEngineArgs::builder()
+        let mut args = MockerConfig::builder()
             .block_size(64)
             .max_num_batched_tokens(Some(64))
             .build()
@@ -627,7 +625,7 @@ mod tests {
 
     #[tokio::test]
     async fn online_replay_forwards_priorities_to_scheduler_queue() {
-        let args = MockEngineArgs::builder()
+        let args = MockerConfig::builder()
             .block_size(64)
             .max_num_batched_tokens(Some(64))
             .build()
@@ -687,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn free_clears_prefill_load_without_first_token() {
-        let args = MockEngineArgs::builder()
+        let args = MockerConfig::builder()
             .block_size(64)
             .max_num_batched_tokens(Some(64))
             .build()
@@ -725,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn online_replay_forwards_policy_class_and_returns_config_errors() {
-        let args = MockEngineArgs::builder()
+        let args = MockerConfig::builder()
             .block_size(64)
             .max_num_batched_tokens(Some(64))
             .build()

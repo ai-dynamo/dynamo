@@ -310,9 +310,10 @@ enum StartupState {
 impl MockerExecutionContext {
     fn new(engine_args: MockEngineArgs) -> Self {
         let (startup_state, _) = watch::channel(StartupState::Starting);
-        let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
+        let native_metrics = NativeMockerMetrics::new(engine_args.backend, engine_args.dp_size)
             .expect("mocker native metrics collectors should be valid");
         let response_replay_table = engine_args
+            .runtime
             .response_replay_trace_path
             .as_deref()
             .map(|path| {
@@ -360,7 +361,7 @@ impl MockerExecutionContext {
         if !self.engine_args.is_prefill() {
             return Ok(None);
         }
-        let Some(port) = self.engine_args.bootstrap_port else {
+        let Some(port) = self.engine_args.runtime.bootstrap_port else {
             return Ok(None);
         };
         let max_sessions = self
@@ -396,7 +397,7 @@ impl MockerExecutionContext {
         let manager = SourceHandoffManager::start(
             incoming_rx,
             max_sessions,
-            Duration::from_millis(self.engine_args.handoff_session_timeout_ms),
+            Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms),
             self.handoff_shutdown.clone(),
         );
         assert!(
@@ -450,7 +451,7 @@ impl MockerExecutionContext {
             tracing::info!(
                 "Initializing KV event publisher with block_size {}, enable_local_indexer={}",
                 self.engine_args.block_size,
-                self.engine_args.enable_local_indexer
+                self.engine_args.runtime.enable_local_indexer
             );
             Some(&endpoint)
         } else {
@@ -630,9 +631,9 @@ impl MockerExecutionContext {
                 KvEventPublishers,
                 Option<KvEventPublisher>,
             ) = match endpoint {
-                Some(endpoint) if args.zmq_kv_events_port.is_some() => {
-                    let zmq_port = args.zmq_kv_events_port.unwrap() + dp_rank as u16;
-                    let replay_port = args.zmq_replay_port.map(|p| p + dp_rank as u16);
+                Some(endpoint) if args.runtime.zmq_kv_events_port.is_some() => {
+                    let zmq_port = args.runtime.zmq_kv_events_port.unwrap() + dp_rank as u16;
+                    let replay_port = args.runtime.zmq_replay_port.map(|p| p + dp_rank as u16);
                     match ZmqKvEventSink::new(
                         zmq_port,
                         replay_port,
@@ -652,7 +653,7 @@ impl MockerExecutionContext {
                                 endpoint.clone(),
                                 args.block_size as u32,
                                 source_config,
-                                args.enable_local_indexer,
+                                args.runtime.enable_local_indexer,
                                 dp_rank,
                                 None,
                             ) {
@@ -684,7 +685,7 @@ impl MockerExecutionContext {
                         endpoint.clone(),
                         args.block_size as u32,
                         None,
-                        args.enable_local_indexer,
+                        args.runtime.enable_local_indexer,
                         dp_rank,
                         None,
                     ) {
@@ -913,7 +914,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 bootstrap_room: bootstrap_info.bootstrap_room,
                 request_id: request_uuid,
             };
-            let order = match order_for_engine(self.engine_args.engine_type) {
+            let order = match order_for_engine(self.engine_args.backend) {
                 Ok(order) => order,
                 Err(error) => {
                     return Err(Error::msg(error.to_string()));
@@ -952,7 +953,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 if let Err(error) = manager.try_register(SourceRegistration {
                     identity,
                     order,
-                    engine_type: self.engine_args.engine_type,
+                    engine_type: self.engine_args.backend,
                     control,
                     lifecycle,
                     completion_tx,
@@ -968,7 +969,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     role: BootstrapParticipantRole::Destination,
                     dp_rank,
                     order,
-                    engine_type: self.engine_args.engine_type,
+                    engine_type: self.engine_args.backend,
                 };
                 let connection = match connect_to_prefill(
                     &bootstrap_info.bootstrap_host,
@@ -987,7 +988,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let session_control = control.clone();
                 let session_cancel = handoff_cancel.clone();
                 let session_timeout =
-                    Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
+                    Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms);
                 let global_shutdown = self.handoff_shutdown.clone();
                 self.handoff_tasks.spawn(async move {
                     let _session_permit = session_permit;
@@ -1019,9 +1020,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let async_context = ctx.context();
-        let reasoning = self.engine_args.reasoning.clone();
+        let reasoning = self.engine_args.runtime.reasoning.clone();
         let handoff_session_timeout =
-            Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
+            Duration::from_millis(self.engine_args.runtime.handoff_session_timeout_ms);
         let mut native_timing = native_timing;
         let response_task_tracker = (source_completion_rx.is_some()
             || destination_cleanup.is_some())

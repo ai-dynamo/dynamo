@@ -8,7 +8,7 @@ use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
     PreprocessedRequest, SamplingOptions, StopConditions,
 };
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
@@ -24,7 +24,7 @@ struct RunningServer {
 }
 
 impl RunningServer {
-    async fn start(mode: ServerMode, engine_args: MockEngineArgs) -> Self {
+    async fn start(mode: ServerMode, engine_args: MockerConfig) -> Self {
         let service = VllmMockerService::new(
             MockerServerConfig {
                 mode,
@@ -71,8 +71,8 @@ impl Drop for RunningServer {
     }
 }
 
-fn fast_engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn fast_engine_args() -> MockerConfig {
+    MockerConfig::builder()
         .block_size(4)
         .num_gpu_blocks(4096)
         .max_num_seqs(Some(64))
@@ -186,7 +186,7 @@ mod common;
 async fn sidecar_relays_stored_and_evicted_blocks() {
     let mut args = fast_engine_args();
     args.num_gpu_blocks = 8;
-    args.max_num_seqs = Some(1);
+    args.max_num_seqs = 1;
     let block_size = u32::try_from(args.block_size).unwrap();
     let server = RunningServer::start(ServerMode::Aggregated, args).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;

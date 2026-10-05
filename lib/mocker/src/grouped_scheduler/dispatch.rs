@@ -452,11 +452,12 @@ impl RankDispatch {
                 );
                 continue;
             }
+            let storage_tier = crate::engine_observations::dynamo_storage_tier(event.tier);
             let (event, block_token_ids) = dynamo_kv_event(event);
             raw_events.push(RawKvEvent {
                 event,
                 block_token_ids,
-                storage_tier: StorageTier::Device,
+                storage_tier,
             });
         }
         let normal_events = raw_events

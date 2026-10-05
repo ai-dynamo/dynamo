@@ -46,7 +46,7 @@ def make_args(**overrides):
         "preemption_mode": "lifo",
         "speedup_ratio": 1.0,
         "decode_speedup_ratio": 1.0,
-        "dp_size": 1,
+        "dp_size": None,
         "startup_time": None,
         "kv_transfer_bandwidth": 64.0,
         "kv_transfer_timing_mode": "full_prompt",
@@ -113,7 +113,7 @@ def test_sglang_generate_capability_is_opt_in():
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
-    with pytest.raises(Exception, match="block_size and sglang.page_size to match"):
+    with pytest.raises(Exception, match="conflicting.*block_size"):
         CONFIG.build_mocker_engine_args(
             make_args(engine_type="sglang", block_size=8, sglang_page_size=4)
         )
@@ -253,7 +253,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         max_num_seqs=64,
         max_num_batched_tokens=4096,
         enable_prefix_caching=False,
-        enable_chunked_prefill=False,
+        enable_chunked_prefill=True,
         preemption_mode="fifo",
         speedup_ratio=2.0,
         decode_speedup_ratio=3.0,
@@ -385,8 +385,8 @@ def test_mocker_cli_accepts_max_model_len():
 
 @pytest.mark.parametrize("value", ["0", "-1"])
 def test_mocker_cli_rejects_non_positive_max_model_len(value):
-    with pytest.raises(SystemExit):
-        parse_args(["--max-model-len", value])
+    with pytest.raises(ValueError):
+        CONFIG.build_mocker_engine_args(parse_args(["--max-model-len", value]))
 
 
 def test_build_mocker_engine_args_keeps_max_model_len_explicit_only():
@@ -681,7 +681,7 @@ def test_load_mocker_engine_args_estimates_canonical_json_capacity(
     }
 
     def estimate(config, **kwargs):
-        assert config == canonical
+        assert canonical.items() <= config.items()
         assert kwargs["block_size"] == 64
         return 47000
 
@@ -757,7 +757,7 @@ def test_canonical_ais_config_rejects_role_and_legacy_conflicts():
         "backend": "vllm",
         "worker_type": "decode",
     }
-    with pytest.raises(ValueError, match="worker role"):
+    with pytest.raises(ValueError, match="engine role"):
         CONFIG.build_mocker_engine_args(make_args(ais_perf_config=canonical))
     with pytest.raises(ValueError, match="cannot be combined"):
         CONFIG.build_mocker_engine_args(
@@ -785,7 +785,62 @@ def test_ais_sdk_accepts_only_canonical_identity():
     args = MockEngineArgs(ais_perf_config=payload, ais_mtp_seed=17)
     assert args.ais_perf_config["model"] == payload["model"]
     assert args.ais_mtp_seed == 17
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="unknown field"):
         MockEngineArgs(aic_backend="vllm")
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="unknown field"):
         MockEngineArgs(ais_backend="vllm")
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_canonical_engine_config_survives_python_and_runtime_boundaries(backend):
+    engine_args = MockEngineArgs(
+        engine={
+            "backend": backend,
+            "num_gpu_blocks": 64,
+            "max_model_len": 8,
+            "kv_cache_bytes_per_token": 128,
+            "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+        },
+        dynamo={"enable_local_indexer": True},
+    )
+    saved = engine_args.to_json()
+    restored = MockEngineArgs.from_json(saved)
+    assert restored.to_json() == saved
+    assert json.loads(saved)["engine"]["kv_cache_bytes_per_token"] == 128
+    _, runtime = CONFIG.build_runtime_config(restored)
+    assert runtime.context_length == 8
+    assert runtime.total_kv_blocks == 64
+    assert runtime.enable_local_indexer is True
+
+    # Legacy constructor omission and explicit null retain distinct semantics.
+    assert MockEngineArgs(backend).max_num_seqs == restored.max_num_seqs
+    assert MockEngineArgs(backend, max_num_seqs=None).max_num_seqs is None
+
+    from dynamo._core import run_mocker_synthetic_trace_replay
+
+    for input_tokens, expected_output, status in [
+        (3, 5, "completed"),
+        (8, 0, "rejected"),
+    ]:
+        report = run_mocker_synthetic_trace_replay(
+            input_tokens=input_tokens,
+            output_tokens=10,
+            request_count=1,
+            extra_engine_args=restored,
+            replay_concurrency=1,
+            capture_per_request=True,
+        )
+        assert report.per_request[0]["output_length"] == expected_output
+        assert report.per_request[0]["terminal_status"] == status
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_python_numbers_cannot_silently_become_omitted_engine_hints(value):
+    from dynamo.mocker import SglangArgs
+
+    with pytest.raises(ValueError):
+        MockEngineArgs(gpu_memory_utilization=value)
+    with pytest.raises(ValueError):
+        MockEngineArgs(
+            engine_type="sglang", sglang=SglangArgs(schedule_conservativeness=value)
+        )

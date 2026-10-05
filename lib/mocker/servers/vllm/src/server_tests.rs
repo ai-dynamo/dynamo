@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 /// Engine arguments with ample capacity and instant simulated timing, for
 /// tests that need requests to be admitted and run to completion quickly.
-fn admitting_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
+fn admitting_args() -> MockerConfig {
+    MockerConfig::builder()
         .block_size(4)
         .enable_prefix_caching(false)
         .num_gpu_blocks(4096)
@@ -169,7 +169,7 @@ fn text_prompts_fail_with_an_actionable_status() {
 
 #[tokio::test]
 async fn service_rejects_non_vllm_or_multi_rank_engines() {
-    let mut sglang = MockEngineArgs::builder()
+    let mut sglang = MockerConfig::builder()
         .engine_type(EngineType::Sglang)
         .build()
         .unwrap();
@@ -183,7 +183,7 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("engine_type")
     );
 
-    let mut multi_rank = MockEngineArgs::builder().dp_size(2).build().unwrap();
+    let mut multi_rank = MockerConfig::builder().dp_size(2).build().unwrap();
     multi_rank.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), multi_rank)
@@ -193,7 +193,7 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("dp_size")
     );
 
-    let mut disaggregated = MockEngineArgs::builder()
+    let mut disaggregated = MockerConfig::builder()
         .worker_type(WorkerType::Prefill)
         .build()
         .unwrap();
@@ -211,7 +211,7 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
         ..Default::default()
     };
     assert!(
-        VllmMockerService::new(disabled, MockEngineArgs::default())
+        VllmMockerService::new(disabled, MockerConfig::default())
             .err()
             .unwrap()
             .to_string()
@@ -258,7 +258,7 @@ async fn unsupported_rl_control_reports_unimplemented() {
 
 #[tokio::test]
 async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
-    let args = MockEngineArgs::builder()
+    let args = MockerConfig::builder()
         .block_size(4)
         .enable_prefix_caching(false)
         .num_gpu_blocks(1)
@@ -281,7 +281,7 @@ async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
 
 #[tokio::test]
 async fn concurrent_request_limit_rejects_a_stalled_stream() {
-    let args = MockEngineArgs::builder()
+    let args = MockerConfig::builder()
         .block_size(4)
         .enable_prefix_caching(false)
         .num_gpu_blocks(128)
@@ -409,7 +409,7 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
     // Same undersized KV cache as the unary case, but exercised through the
     // streaming RPC the production sidecar uses: the call opens successfully and
     // the rejection arrives as a later stream item after prompt info.
-    let args = MockEngineArgs::builder()
+    let args = MockerConfig::builder()
         .block_size(4)
         .enable_prefix_caching(false)
         .num_gpu_blocks(1)
@@ -526,7 +526,7 @@ async fn failed_kv_publisher_is_not_advertised() {
     let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let mut args = admitting_args();
     args.enable_prefix_caching = true;
-    args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
+    args.runtime.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
     let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     assert_eq!(
         pb::control_server::Control::get_kv_event_sources(
