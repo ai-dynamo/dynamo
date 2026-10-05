@@ -2556,6 +2556,9 @@ def run_mocker_trace_replay(
     telemetry_callback: Optional[ReplayTelemetryCallback] = None,
     telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
     kv_event_lag_ms: Optional[float] = None,
+    agentic_snapshot: Optional[Dict[str, Any]] = None,
+    agentic_warmup: bool = False,
+    agentic_profile: Optional[Dict[str, Any]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 

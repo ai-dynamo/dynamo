@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod agentic;
 mod artifacts;
 mod entrypoints;
 pub(crate) mod offline;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
 
+pub use agentic::AgenticReplayOptions;
 /// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
 pub use aisimulate_core::ReplayReport as TraceSimulationReport;
 pub(crate) use aisimulate_core::replay::TraceCollector;
@@ -92,10 +94,11 @@ pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
     simulate_agentic_trace_live_workload_with_router_mode_and_options,
+    simulate_agentic_trace_workload_disagg_with_options,
     simulate_agentic_trace_workload_disagg_with_router_mode,
     simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_observers,
     simulate_agentic_trace_workload_disagg_with_router_mode_and_telemetry,
-    simulate_agentic_trace_workload_with_router_mode,
+    simulate_agentic_trace_workload_with_options, simulate_agentic_trace_workload_with_router_mode,
     simulate_agentic_trace_workload_with_router_mode_and_runtime_observers,
     simulate_agentic_trace_workload_with_router_mode_and_telemetry, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,

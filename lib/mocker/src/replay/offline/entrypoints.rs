@@ -44,6 +44,58 @@ fn worker_pool(initial_workers: usize, args: &MockEngineArgs) -> WorkerPoolSpec 
     }
 }
 
+fn validate_agentic_host_offload(
+    input: &ReplayRuntimeInput,
+    roles: &[(usize, &MockEngineArgs)],
+    scaling_enabled: bool,
+) -> Result<()> {
+    let ReplayRuntimeInput::Workload(driver) = input else {
+        return Ok(());
+    };
+    if !driver.is_agentic()
+        || !roles
+            .iter()
+            .any(|(_, args)| args.native_host_offload.is_some())
+    {
+        return Ok(());
+    }
+
+    // These entrypoints are offline. Apply the AgentX G2 deployment contract
+    // to every active role, including a P/D role whose own G2 is disabled.
+    anyhow::ensure!(
+        roles.iter().all(|(workers, _)| *workers == 1),
+        "agentic host offload requires one aggregated worker or one prefill and one decode worker"
+    );
+    anyhow::ensure!(
+        !scaling_enabled,
+        "agentic host offload requires static worker pools without a scaling policy"
+    );
+    for (_, args) in roles {
+        anyhow::ensure!(
+            args.engine_type == EngineType::Vllm
+                && args
+                    .ais_backend
+                    .as_deref()
+                    .is_none_or(|backend| backend == "vllm"),
+            "agentic host offload requires backend=vllm on every role"
+        );
+        anyhow::ensure!(
+            args.dp_size == 1 && args.ais_attention_dp_size.is_none_or(|dp| dp == 1),
+            "agentic host offload requires attention DP=1 on every role"
+        );
+        anyhow::ensure!(
+            args.ais_nextn.is_none()
+                && args.ais_perf_config.as_ref().is_none_or(|config| {
+                    config
+                        .get("speculation")
+                        .is_none_or(serde_json::Value::is_null)
+                }),
+            "agentic replay requires speculative decoding disabled"
+        );
+    }
+    Ok(())
+}
+
 fn with_telemetry<C: ReplayComposition>(
     replayer: Replayer<C>,
     telemetry: Option<ReplayTelemetryOptions>,
@@ -147,6 +199,7 @@ fn run_aggregated_with_capture_options(
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
+    validate_agentic_host_offload(&input, &[(num_workers, &args)], scaling_policy.is_some())?;
     let (engine, factory) = aggregated_replay_setup(&args)?;
     let spec = replay_spec(
         ReplayTopology::Aggregated {
@@ -242,6 +295,14 @@ fn run_disaggregated_with_capture_options(
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
+    validate_agentic_host_offload(
+        &input,
+        &[
+            (config.num_prefill_workers, &config.prefill_args),
+            (config.num_decode_workers, &config.decode_args),
+        ],
+        scaling_policy.is_some(),
+    )?;
     let (engine, factory) = disaggregated_replay_setup(&config.prefill_args, &config.decode_args)?;
     let spec = replay_spec(
         ReplayTopology::Disaggregated {
@@ -581,16 +642,23 @@ pub(crate) fn simulate_agentic_trace_workload(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     agentic_lanes: Option<usize>,
+    agentic_options: crate::replay::AgenticReplayOptions,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
-    let driver = trace.into_trace_driver_with_options(
+    let agentic_lanes = if agentic_options.snapshot.is_some() {
+        agentic_lanes
+    } else {
+        effective_agentic_lanes(agentic_lanes, trace.play_count())
+    };
+    let driver = agentic_options.into_driver(
+        trace,
         args.block_size,
         router_mode == ReplayRouterMode::KvRouter,
         agentic_lanes,
+        max_sim_time_ms,
     )?;
     run_aggregated(
         args,
@@ -618,16 +686,23 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     agentic_lanes: Option<usize>,
+    agentic_options: crate::replay::AgenticReplayOptions,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
-    let driver = trace.into_trace_driver_with_options(
+    let agentic_lanes = if agentic_options.snapshot.is_some() {
+        agentic_lanes
+    } else {
+        effective_agentic_lanes(agentic_lanes, trace.play_count())
+    };
+    let driver = agentic_options.into_driver(
+        trace,
         config.prefill_args.block_size,
         router_mode == ReplayRouterMode::KvRouter,
         agentic_lanes,
+        max_sim_time_ms,
     )?;
     run_disaggregated(
         config,
@@ -812,4 +887,208 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
         scaling_policy,
         telemetry,
     )
+}
+
+#[cfg(test)]
+mod agentic_host_offload_tests {
+    use super::*;
+    use crate::loadgen::{
+        AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticHashIdScope,
+        AgenticMooncakeHeader, AgenticMooncakeRow, AgenticSourceProvenance,
+    };
+
+    fn agentic_input() -> ReplayRuntimeInput {
+        let trace = AgenticTrace::from_agentic_mooncake_rows(
+            AgenticMooncakeHeader {
+                schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+                version: AGENTIC_MOONCAKE_VERSION,
+                block_size: 4,
+                hash_id_scope: AgenticHashIdScope::Local,
+                source: AgenticSourceProvenance {
+                    format: "test".to_string(),
+                    digest: "agentic-g2-deployment-guard".to_string(),
+                },
+            },
+            vec![AgenticMooncakeRow {
+                request_id: "request".to_string(),
+                play_id: "play".to_string(),
+                session_id: "session".to_string(),
+                model: "model".to_string(),
+                input_length: Some(4),
+                output_length: Some(1),
+                hash_ids: Some(vec![1]),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        ReplayRuntimeInput::Workload(trace.into_trace_driver_with_options(4, true, None).unwrap())
+    }
+
+    fn args(scope: Option<&str>) -> MockEngineArgs {
+        let mut args = MockEngineArgs::builder().build().unwrap();
+        args.native_host_offload = scope.map(|scope| {
+            serde_json::from_value(serde_json::json!({
+                "scope": scope,
+                "num_host_blocks": 16,
+                "kv_layout_id": "agentic-g2-test",
+            }))
+            .unwrap()
+        });
+        args.normalized().unwrap()
+    }
+
+    #[test]
+    fn accepts_single_worker_and_independent_pd_g2_scopes() {
+        let input = agentic_input();
+        let scopes = [None, Some("dp_rank_local"), Some("cluster_shared")];
+        for prefill_scope in scopes {
+            let mut prefill = args(prefill_scope);
+            prefill.ais_tp_size = Some(4);
+            validate_agentic_host_offload(&input, &[(1, &prefill)], false).unwrap();
+            for decode_scope in scopes {
+                let decode = args(decode_scope);
+                validate_agentic_host_offload(&input, &[(1, &prefill), (1, &decode)], false)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_deployment_on_every_active_role() {
+        let input = agentic_input();
+        let offloaded = args(Some("dp_rank_local"));
+        // A role without G2 is still part of the restricted AgentX deployment.
+        let mut invalid_roles = Vec::new();
+        let mut invalid = args(None);
+        invalid.dp_size = 2;
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires attention DP=1 on every role",
+        ));
+        let mut invalid = args(None);
+        invalid.ais_attention_dp_size = Some(2);
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires attention DP=1 on every role",
+        ));
+        for backend in [EngineType::Sglang, EngineType::Trtllm] {
+            let mut invalid = args(None);
+            invalid.engine_type = backend;
+            invalid_roles.push((
+                invalid,
+                "agentic host offload requires backend=vllm on every role",
+            ));
+        }
+        let mut invalid = args(None);
+        invalid.ais_nextn = Some(1);
+        invalid_roles.push((
+            invalid,
+            "agentic replay requires speculative decoding disabled",
+        ));
+        for (invalid, expected) in invalid_roles {
+            for roles in [
+                vec![(1, &offloaded), (1, &invalid)],
+                vec![(1, &invalid), (1, &offloaded)],
+            ] {
+                let error = validate_agentic_host_offload(&input, &roles, false).unwrap_err();
+                assert_eq!(error.to_string(), expected);
+            }
+        }
+        for roles in [
+            vec![(2, &offloaded)],
+            vec![(2, &offloaded), (1, &offloaded)],
+            vec![(1, &offloaded), (2, &offloaded)],
+        ] {
+            let error = validate_agentic_host_offload(&input, &roles, false).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "agentic host offload requires one aggregated worker or one prefill and one decode worker"
+            );
+        }
+        let error = validate_agentic_host_offload(&input, &[(1, &offloaded)], true).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "agentic host offload requires static worker pools without a scaling policy"
+        );
+    }
+
+    #[test]
+    fn native_execution_entrypoints_apply_the_agentic_g2_guard() {
+        let error = run_aggregated(
+            args(Some("cluster_shared")),
+            None,
+            None,
+            agentic_input(),
+            2,
+            None,
+            ReplayRouterMode::RoundRobin,
+            false,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "agentic host offload requires one aggregated worker or one prefill and one decode worker"
+        );
+
+        let mut decode = args(None);
+        decode.dp_size = 2;
+        let error = run_disaggregated(
+            OfflineDisaggReplayConfig {
+                prefill_args: args(Some("dp_rank_local")),
+                decode_args: decode,
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            None,
+            None,
+            agentic_input(),
+            None,
+            ReplayRouterMode::RoundRobin,
+            false,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "agentic host offload requires attention DP=1 on every role"
+        );
+    }
+
+    #[test]
+    fn leaves_hbm_and_non_agentic_g2_deployments_unchanged() {
+        let mut hbm = args(None);
+        hbm.engine_type = EngineType::Sglang;
+        hbm.dp_size = 2;
+        validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
+
+        let mut offloaded = args(Some("cluster_shared"));
+        offloaded.dp_size = 2;
+        validate_agentic_host_offload(
+            &ReplayRuntimeInput::Requests(VecDeque::new()),
+            &[(2, &offloaded)],
+            true,
+        )
+        .unwrap();
+        let trace = Trace::from_mooncake_rows(
+            vec![crate::loadgen::MooncakeRow {
+                input_length: Some(4),
+                output_length: Some(1),
+                hash_ids: Some(vec![1]),
+                timestamp: Some(0.0),
+                ..Default::default()
+            }],
+            4,
+        )
+        .unwrap();
+        let input =
+            ReplayRuntimeInput::Workload(trace.into_trace_driver_with_block_size(4).unwrap());
+        validate_agentic_host_offload(&input, &[(2, &offloaded)], true).unwrap();
+    }
 }

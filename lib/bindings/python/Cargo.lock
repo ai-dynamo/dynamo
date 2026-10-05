@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610040000000065"
+version = "0.13.0-dev.202610050000000066"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b1ee30a0c0a8f270064ae7ac276391527da224ee870a3680d7426c9a749ab33"
+checksum = "c9a5aa5cb79fb04ad0c8361efcc707afeef4a08680ef3d457b5a5d63eaf00ac8"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",

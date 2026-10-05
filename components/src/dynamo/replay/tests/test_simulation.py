@@ -273,6 +273,30 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
             {"ais_perf_config": {"model": " target-model "}},
             id="engine-ais-perf-config",
         ),
+        pytest.param(
+            {},
+            {
+                "timing_model": {
+                    "type": "external",
+                    "provider": "aic",
+                    "config": {"model": " target-model "},
+                }
+            },
+            id="engine-timing-model",
+        ),
+        pytest.param(
+            {},
+            {
+                "rank": {
+                    "timing_model": {
+                        "type": "external",
+                        "provider": "aic",
+                        "config": {"model": " target-model "},
+                    }
+                }
+            },
+            id="nested-rank-timing-model",
+        ),
     ],
 )
 def test_weka_runner_resolves_each_execution_target_model_source(
@@ -824,3 +848,56 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     assert args.ais_perf_config is None
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
     assert report.metrics["completed_requests"] == raw["traffic"]["stop"]["requests"]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_shared_g2_lowering_preserves_layout_and_link_controls(nested):
+    from aisimulate.runner import _materialize_engine_role
+
+    from dynamo.replay.config import lower_upstream_engine_args
+
+    host = {
+        "scope": "cluster_shared",
+        "num_host_blocks": 12,
+        "d2h_bandwidth_gbps": 7.0,
+        "h2d_bandwidth_gbps": 5.0,
+        "latency_to_first_byte_ms": 0.3,
+        "shared_d2h_bandwidth_gbps": 9.0,
+        "shared_h2d_bandwidth_gbps": 11.0,
+    }
+    raw = {
+        "engine_type": "vllm",
+        "aic_model_path": "original-model",
+        "block_size": 4,
+        "num_gpu_blocks": 3,
+        "tensor_parallel_size": 2,
+        "kv_cache_bytes_per_token": 250_000,
+        "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+        "native_host_offload": host,
+    }
+    materialized = _materialize_engine_role("vllm", "", {}, raw, "aggregated")
+    if nested:
+        raw = {
+            name: materialized[name]
+            for name in ("dp_size", "tensor_parallel_size", "rank")
+        }
+    lowered = lower_upstream_engine_args(raw)
+    assert lowered["native_host_offload"] == materialized["rank"]["native_host_offload"]
+    assert lowered["native_host_offload"].items() >= host.items()
+    assert lowered["tensor_parallel_size"] == 2
+    assert lowered["kv_cache_bytes_per_token"] == 250_000
+    assert "rank" not in lowered
+
+
+@pytest.mark.parametrize(
+    "rank",
+    [
+        {"backend": "vllm", "engine_type": "sglang"},
+        {"kv_transfer_bytes_per_token": 16, "kv_bytes_per_token": 32},
+    ],
+)
+def test_nested_engine_arguments_reject_conflicting_aliases(rank):
+    from dynamo.replay.config import lower_upstream_engine_args
+
+    with pytest.raises(ValueError, match="cannot combine"):
+        lower_upstream_engine_args({"rank": rank})

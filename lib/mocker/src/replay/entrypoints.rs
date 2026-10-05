@@ -568,6 +568,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
             record_per_request,
             max_sim_time_ms,
             agentic_lanes,
+            super::AgenticReplayOptions::default(),
             sla,
             scaling_policy,
             telemetry,
@@ -724,6 +725,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observ
             record_per_request,
             max_sim_time_ms,
             agentic_lanes,
+            super::AgenticReplayOptions::default(),
             sla,
             scaling_policy,
             telemetry,
@@ -873,6 +875,10 @@ pub fn simulate_trace_live_file_with_router_mode_and_format_and_options(
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
     if is_agentic_trace_format(trace_format) {
+        anyhow::ensure!(
+            args.native_host_offload.is_none(),
+            "agentic host offload requires offline backend=vllm"
+        );
         let trace = load_agentic_trace_from_file(
             trace_path,
             trace_block_size,
@@ -2243,6 +2249,37 @@ pub fn simulate_agentic_trace_workload_with_router_mode_and_runtime_observers(
     sla: SlaThresholds,
     observers: super::ReplayRuntimeObservers,
 ) -> Result<TraceSimulationReport> {
+    simulate_agentic_trace_workload_with_options(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        num_workers,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+        observers,
+        super::AgenticReplayOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_with_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    num_workers: usize,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+    agentic_options: super::AgenticReplayOptions,
+) -> Result<TraceSimulationReport> {
     let super::ReplayRuntimeObservers {
         scaling_policy,
         telemetry,
@@ -2259,6 +2296,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode_and_runtime_observers(
         record_per_request,
         max_sim_time_ms,
         agentic_lanes,
+        agentic_options,
         sla,
         scaling_policy,
         telemetry,
@@ -2336,6 +2374,35 @@ pub fn simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_obser
     sla: SlaThresholds,
     observers: super::ReplayRuntimeObservers,
 ) -> Result<TraceSimulationReport> {
+    simulate_agentic_trace_workload_disagg_with_options(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+        observers,
+        super::AgenticReplayOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_disagg_with_options(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+    observers: super::ReplayRuntimeObservers,
+    agentic_options: super::AgenticReplayOptions,
+) -> Result<TraceSimulationReport> {
     let super::ReplayRuntimeObservers {
         scaling_policy,
         telemetry,
@@ -2351,6 +2418,7 @@ pub fn simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_obser
         record_per_request,
         max_sim_time_ms,
         agentic_lanes,
+        agentic_options,
         sla,
         scaling_policy,
         telemetry,
@@ -2369,6 +2437,10 @@ pub fn simulate_agentic_trace_live_workload_with_router_mode_and_options(
     agentic_lanes: Option<usize>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
+    anyhow::ensure!(
+        args.native_host_offload.is_none(),
+        "agentic host offload requires offline backend=vllm"
+    );
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
     online::simulate_agentic_trace_workload(

@@ -114,6 +114,26 @@ def resolve_ais_num_gpu_blocks(raw: dict[str, Any]) -> None:
 def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Consume AISimulate's runner wire protocol at the Dynamo boundary."""
     raw = dict(payload)
+    nested = raw.pop("rank", None)
+    if nested is not None:
+        if not isinstance(nested, Mapping):
+            raise TypeError("engine rank must be a mapping")
+        if set(raw) - {"dp_size", "tensor_parallel_size"}:
+            raise ValueError("engine arguments cannot mix nested rank with rank fields")
+        duplicates = set(raw) & set(nested)
+        if duplicates:
+            raise ValueError(f"duplicate nested engine arguments: {sorted(duplicates)}")
+        raw.update(nested)
+        for source, target in (
+            ("backend", "engine_type"),
+            ("kv_transfer_bytes_per_token", "kv_bytes_per_token"),
+        ):
+            if source in raw:
+                if target in raw:
+                    raise ValueError(
+                        f"engine arguments cannot combine {source} and {target}"
+                    )
+                raw[target] = raw.pop(source)
     timing = raw.get("timing_model")
     has_custom_timing = isinstance(timing, dict) and timing.get("type") in {
         "fixed",
@@ -144,6 +164,36 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
         raw.setdefault("dp_size", identity["attention_dp_size"])
     if identity.get("tp_size") is not None:
         raw.setdefault("tensor_parallel_size", identity["tp_size"])
+    host = raw.get("native_host_offload")
+    if (
+        nested is None
+        and isinstance(host, Mapping)
+        and host.get("scope") == "cluster_shared"
+        and host.get("kv_layout_id") is None
+    ):
+        # Reuse AISimulate's resolved KV identity rather than inventing a
+        # connector-specific layout ID. Native nested ranks require an explicit ID.
+        from aisimulate.runner import _kv_layout_id
+
+        backend = raw.get("engine_type", identity.get("backend", "vllm"))
+        if not isinstance(backend, str) or backend not in {"vllm", "sglang", "trtllm"}:
+            raise ValueError(f"unsupported engine_type for host offload: {backend!r}")
+        rank = {
+            "backend": backend,
+            "block_size": raw.get(
+                "block_size", {"vllm": 64, "sglang": 1, "trtllm": 32}[backend]
+            ),
+            "kv_cache_bytes_per_token": raw.get(
+                "kv_cache_bytes_per_token", raw.get("kv_bytes_per_token")
+            ),
+            "timing_model": {"config": raw.get("ais_perf_config", {})},
+        }
+        raw["native_host_offload"] = {
+            **host,
+            "kv_layout_id": _kv_layout_id(
+                rank, identity.get("model_path"), raw.get("tensor_parallel_size", 1)
+            ),
+        }
     for name in tuple(raw):
         if name.startswith("aic_"):
             value = raw.pop(name)
