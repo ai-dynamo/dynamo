@@ -76,6 +76,9 @@ func resolvePipelineRequests(
 		replicaPlan := plan.ForReplica(replica)
 
 		for index, projection := range projections {
+			if projection.AgentReplicas() == 0 {
+				continue
+			}
 			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{

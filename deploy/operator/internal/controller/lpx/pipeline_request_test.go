@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -365,4 +366,34 @@ func requirePipelineRequestNotFound(
 	request := &lpxv1alpha1.LPUPipelineRequest{}
 	err := kubeClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, request)
 	require.True(t, apierrors.IsNotFound(err), "expected LPX request %s/%s to be absent, got %v", namespace, name, err)
+}
+
+func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		localPartitions *v1beta1.LPXLocalPartitions
+		wantPartitions  [][]int64
+	}{
+		{name: "all-local selection requests no LPU placement", localPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll}, wantPartitions: [][]int64{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Resolve a hybrid workload with the selected local partitions")
+			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+			dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{LocalPartitions: tc.localPartitions}
+			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
+
+			t.Log("Publish one request per remote workload replica, listing only remote compiler partitions")
+			_, missing, changed := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
+			require.False(t, changed)
+			partitions := make([][]int64, 0, len(missing))
+			for _, request := range missing {
+				compilerIDs := make([]int64, 0, len(request.Spec.Partitions))
+				for _, partition := range request.Spec.Partitions {
+					compilerIDs = append(compilerIDs, partition.CompilerPartitionID)
+				}
+				partitions = append(partitions, compilerIDs)
+			}
+			require.Equal(t, tc.wantPartitions, partitions)
+		})
+	}
 }
