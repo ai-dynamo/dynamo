@@ -3140,6 +3140,7 @@ dependencies = [
  "futures",
  "libc",
  "prost-types 0.14.3",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-stream",
