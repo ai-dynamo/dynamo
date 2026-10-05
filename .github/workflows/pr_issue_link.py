@@ -55,10 +55,19 @@ REPO_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
 REPO_PAT = rf"{REPO_SEGMENT}/{REPO_SEGMENT}"
 LINEAR_ID = r"[A-Z][A-Z0-9]{1,9}-\d{1,6}"
 LINEAR_TEXT_RE = re.compile(rf"\b({LINEAR_ID})\b")
-LINEAR_BRANCH_RE = re.compile(r"(?:^|[/_-])([a-z][a-z0-9]{1,9}-\d{1,6})(?:$|[/_-])")
+# ASCII keeps case folding to the Latin letters the character classes name.
+# Under Unicode folding `[a-z]` with IGNORECASE also matches the long s (U+017F)
+# and the Kelvin sign (U+212A), which would reopen the URL-construction hole the
+# segment bound above closes.
+LINEAR_BRANCH_RE = re.compile(
+    r"(?:^|[/_-])([a-z][a-z0-9]{1,9}-\d{1,6})(?:$|[/_-])",
+    re.IGNORECASE | re.ASCII,
+)
 GITHUB_REF_RE = re.compile(r"(?:^|[^\w&])#(\d{1,7})\b")
 CROSS_REPO_RE = re.compile(rf"\b({REPO_PAT})#(\d{{1,7}})\b")
-ISSUE_URL_RE = re.compile(rf"github\.com/({REPO_PAT})/issues/(\d{{1,7}})\b")
+ISSUE_URL_RE = re.compile(
+    rf"github\.com/({REPO_PAT})/issues/(\d{{1,7}})\b", re.IGNORECASE | re.ASCII
+)
 # A magic word marks the reference the author meant as the link. Both forms
 # order the lookup budget, so a release pull request carrying dozens of
 # references still spends its lookups on the one that matters.
@@ -187,7 +196,10 @@ def main() -> int:
     body = os.environ.get("PR_BODY", "") or ""
     branch = os.environ.get("PR_HEAD_REF", "")
     author = os.environ.get("PR_AUTHOR", "")
-    repo = os.environ.get("REPO", "")
+    # GitHub owner and repository names are case-insensitive, so every
+    # reference is keyed on the lowercase form: `Ai-Dynamo/Dynamo#7` and
+    # `ai-dynamo/dynamo#7` are one candidate and spend one lookup.
+    repo = os.environ.get("REPO", "").lower()
     head_repo = os.environ.get("PR_HEAD_REPO", repo)
     association = os.environ.get("PR_AUTHOR_ASSOCIATION", "").upper()
     # Org authors keep Linear verification from forks; the fork gating
@@ -216,21 +228,27 @@ def main() -> int:
         # sibling repositories. A DEP filed today is an issue in this
         # repository, from `.github/ISSUE_TEMPLATE/dep.yml`, so it needs no
         # cross-repo form at all.
-        if other_repo.split("/")[0].lower() == org.lower():
-            github_refs.add((other_repo, number))
+        if other_repo.split("/")[0].lower() == org:
+            github_refs.add((other_repo.lower(), number))
 
     # A reference behind a magic word, or the identifier in the branch name
     # the author chose, is the one they meant. Ordering the candidates by that
     # spends the lookup budget on it first.
     intent_github = {
-        (url_repo or inline_repo or repo, number)
+        ((url_repo or inline_repo or repo).lower(), number)
         for url_repo, inline_repo, number in INTENT_GITHUB_RE.findall(text)
     }
     closing_github = {
-        (url_repo or inline_repo or repo, number)
+        ((url_repo or inline_repo or repo).lower(), number)
         for url_repo, inline_repo, number in CLOSING_GITHUB_RE.findall(text)
     }
     intent_linear = {m.upper() for m in INTENT_LINEAR_RE.findall(text)} | branch_ids
+    # A lowercase identifier counts behind a magic word (`closes dyn-321`) or
+    # in the branch name, which is where the Linear integration itself reads
+    # it. A bare lowercase token in prose does not: `cuda-13` and `utf-8`
+    # have the same shape, and each one would spend a lookup and, once the
+    # API called it missing, make the bound decisive against the real link.
+    linear_ids.update(intent_linear)
 
     verified: list[str] = []
     # Proposal umbrellas found along the way. They are real tracked issues, so
@@ -377,18 +395,20 @@ def main() -> int:
             "reference and link the work as well.",
             "",
         ]
-        + (
-            [
-                f"{(over := len(all_refs) - MAX_CANDIDATES)} further "
-                f"reference{'' if over == 1 else 's'} went unchecked: the "
-                f"{MAX_CANDIDATES}-lookup bound was spent before reaching "
-                "the rest. A closing form (`Closes #123`) is checked first.",
-                "",
-            ]
-            if len(all_refs) > MAX_CANDIDATES
-            else []
-        )
         if dep_refs
+        else []
+    ) + (
+        # Reaching here past the bound means every checked candidate was
+        # decided, so the cap held. The author still needs to know the rest
+        # went unlooked-at, and that a closing form is what gets checked first.
+        [
+            f"{(over := len(all_refs) - MAX_CANDIDATES)} further "
+            f"reference{'' if over == 1 else 's'} went unchecked: the "
+            f"{MAX_CANDIDATES}-lookup bound was spent before reaching "
+            "the rest. A closing form (`Closes #123`) is checked first.",
+            "",
+        ]
+        if len(all_refs) > MAX_CANDIDATES
         else []
     )
 

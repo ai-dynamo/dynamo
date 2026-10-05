@@ -201,6 +201,76 @@ def test_linear_identifier_in_the_branch_name_passes(
     assert api.linear_calls == ["DYN-1234"]
 
 
+def test_uppercase_branch_identifier_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = FakeApi(linear={"DYN-1234": (True, True)})
+    code, api = run(monkeypatch, api, PR_HEAD_REF="user/DYN-1234-short-description")
+    assert code == 0
+    assert api.linear_calls == ["DYN-1234"]
+
+
+def test_lowercase_identifier_behind_a_magic_word_is_a_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(linear={"DYN-321": (True, True)})
+    code, api = run(monkeypatch, api, PR_BODY="closes dyn-321")
+    assert code == 0
+    assert api.linear_calls == ["DYN-321"]
+
+
+def test_bare_lowercase_token_in_prose_is_not_a_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`cuda-13` has the shape of a lowercase identifier and must not spend a lookup."""
+    code, api = run(monkeypatch, PR_BODY="Built against cuda-13 and dyn-321.")
+    assert code == 1
+    assert api.linear_calls == []
+
+
+def test_issue_url_host_and_path_are_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(github={"ai-dynamo/dynamo#123": (True, True)})
+    code, api = run(
+        monkeypatch,
+        api,
+        PR_BODY="See HTTPS://GITHUB.COM/ai-dynamo/dynamo/ISSUES/123",
+    )
+    assert code == 0
+    assert api.github_calls == ["ai-dynamo/dynamo#123"]
+
+
+def test_repository_case_variants_are_one_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(github={"ai-dynamo/enhancements#7": (True, True)})
+    code, api = run(
+        monkeypatch,
+        api,
+        PR_BODY="Part of Ai-Dynamo/Enhancements#7 and ai-dynamo/enhancements#7",
+    )
+    assert code == 0
+    assert api.github_calls == ["ai-dynamo/enhancements#7"]
+
+
+def test_case_folding_does_not_admit_unicode_lookalikes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Case-insensitive matching must stay ASCII.
+
+    Unicode folding reads the long s (U+017F) and the Kelvin sign (U+212A)
+    as `s` and `k`, which would let a segment urllib cannot encode back into
+    the candidate set, where the failed lookup reads as an outage and passes.
+    """
+    code, api = run(
+        monkeypatch,
+        PR_BODY="See https://github.com/ai-dynamo/\u017fglang#1",
+        PR_HEAD_REF="user/\u212ad-1234-thing",
+    )
+    assert code == 1
+    assert api.github_calls == []
+    assert api.linear_calls == []
+
+
 def test_bot_author_skips_the_check(monkeypatch: pytest.MonkeyPatch) -> None:
     code, api = run(monkeypatch, PR_AUTHOR="dependabot[bot]")
     assert code == 0
@@ -239,6 +309,24 @@ def test_overflow_with_definitive_answers_fails(
     code, api = run(monkeypatch, PR_BODY=body)
     assert code == 1
     assert len(api.github_calls) == pr_issue_link.MAX_CANDIDATES
+
+
+def test_the_missing_failure_says_when_candidates_went_unchecked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The bound holds, and the author is told the rest went unlooked-at.
+
+    Eleven plain references with no proposal among them used to fail with a
+    bare "missing", so an author whose work issue sat eleventh had no way to
+    read why. The note names the count and the form that is checked first.
+    """
+    body = " ".join(f"#{n}" for n in range(101, 112))
+    code, api = run(monkeypatch, PR_BODY=body)
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "### PR issue link: missing" in out
+    assert "1 further reference went unchecked" in out
+    assert "A closing form (`Closes #123`) is checked first." in out
 
 
 def test_overflow_with_an_api_outage_still_fails_open(
