@@ -37,7 +37,7 @@ The left panel plots achieved against offered block ops/s on log-log axes; the d
 |---|---|---|---|
 | Concurrent Radix Tree Compressed | Dynamo, Oct 2026 ([#15611](https://github.com/ai-dynamo/dynamo/pull/15611) @ `e234880162`) | 64 | mimalloc; top of the stack that starts at [#15606](https://github.com/ai-dynamo/dynamo/pull/15606) |
 | Concurrent Radix Tree | Dynamo, Feb 2026 (Flash Indexer blog, `222c2e85c8`) | 64 | Tree and thread pool from that commit, ported unchanged into the current harness |
-| SMG PositionalIndexer | SGLang Model Gateway `kv_index` @ `0f9f219` | 64 | Event-driven, sticky per-worker pool mirroring `KvEventMonitor`; built at opt-level 3 (SMG ships opt-level `z`) |
+| SMG PositionalIndexer | SMG ([`smg-project/smg`](https://github.com/smg-project/smg)) `kv_index` @ `0f9f219` | 64 | Event-driven, sticky per-worker pool mirroring `KvEventMonitor`; built at opt-level 3 (SMG ships opt-level `z`) |
 | llm-d precise prefix index | llm-d-router v0.11.0 `InMemoryIndex` | 4 shards (default) | Go driver replaying the same corpus with sequence-hash keys |
 
 - **Event workers:** each line uses its best count from a scan of 16–80 workers. In `yoy_glibc`, `main`'s CRTC runs at 16, its best count on glibc; the other Rust lines stay at 64.
