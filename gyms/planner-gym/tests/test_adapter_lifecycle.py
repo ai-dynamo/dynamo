@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from functools import partial
 
 import pytest
 
@@ -56,13 +57,11 @@ def test_current_target_prefers_non_draining_expected_count() -> None:
 
 
 @pytest.mark.parametrize(
-    "autoscaler",
-    [
-        ReactiveAutoscaler(mode="disagg"),
-        KedaAutoscaler(mode="disagg"),
-    ],
+    "autoscaler_factory",
+    [ReactiveAutoscaler, KedaAutoscaler],
 )
-def test_hold_tick_does_not_cancel_starting_decode_workers(autoscaler) -> None:
+def test_hold_tick_does_not_cancel_starting_decode_workers(autoscaler_factory) -> None:
+    autoscaler = autoscaler_factory(mode="disagg")
     tick, tick_input = _cold_start_tick()
 
     effects = asyncio.run(autoscaler.tick(tick, tick_input))
@@ -72,14 +71,15 @@ def test_hold_tick_does_not_cancel_starting_decode_workers(autoscaler) -> None:
 
 
 @pytest.mark.parametrize(
-    "autoscaler",
+    "autoscaler_factory",
     [
-        StaticAutoscaler(num_prefill=1, num_decode=1),
-        ReactiveAutoscaler(),
-        KedaAutoscaler(),
+        partial(StaticAutoscaler, num_prefill=1, num_decode=1),
+        ReactiveAutoscaler,
+        KedaAutoscaler,
     ],
 )
-def test_rivals_expose_noop_regression_bootstrap(autoscaler) -> None:
+def test_rivals_expose_noop_regression_bootstrap(autoscaler_factory) -> None:
+    autoscaler = autoscaler_factory()
     assert autoscaler.supports_ais_bootstrap is False
     assert (
         autoscaler.install_regressions_from_fpms(

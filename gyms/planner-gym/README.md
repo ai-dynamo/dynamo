@@ -43,7 +43,7 @@ telemetry are under `runs/quickstart/artifacts/`.
 > [!NOTE]
 > The simulation setup requires Linux because Dynamo's pinned AISimulate wheel
 > is Linux-only. Trace generation, config validation, scoring, saved reports,
-> and endpoint benchmarking also work on macOS. Python 3.10–3.12 is supported
+> and endpoint benchmarking also work on macOS. Python 3.11–3.12 is supported
 > for the standalone package; use 3.11 or 3.12 for simulation.
 
 ## Choose a Workflow
@@ -114,10 +114,13 @@ python -m pip install -e '.[test,jev]'
 python -m pytest -q
 ```
 
-The standalone suite exercises config validation, trace processing, scoring,
-report rendering, and mocked backend contracts. Native adapter tests require
-Dynamo and are skipped when its imports are unavailable. Use the quickstart to
-verify the actual native replay in addition to these tests.
+The standalone CI job runs on Python 3.11 and 3.12 and exercises config
+validation, trace processing, scoring, report rendering, and mocked backend
+contracts. It does not build Dynamo or run the native adapter tests in
+`test_adapter_lifecycle.py`, `test_adapter_observations.py`, or `test_jev.py`;
+these modules are skipped when Dynamo imports are unavailable. After the
+[full setup](#start-here), run the same test command to include them, then run
+the quickstart to verify actual native replay.
 
 ## Limitations
 

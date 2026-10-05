@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -29,6 +30,8 @@ sys.path.insert(0, str(_REPO / "src"))
 
 
 def main() -> int:
+    from autoscaling_arena.scorecard import DEFAULT_PROFILES
+
     p = argparse.ArgumentParser(
         description="Benchmark live endpoints with the Arena suite."
     )
@@ -40,11 +43,17 @@ def main() -> int:
         help="registry workload names, or 'all'",
     )
     p.add_argument(
-        "--profiles", nargs="+", default=["interactive", "agentic", "relaxed"]
+        "--profiles",
+        nargs="+",
+        choices=[profile.name for profile in DEFAULT_PROFILES],
+        default=[profile.name for profile in DEFAULT_PROFILES],
     )
     p.add_argument("--artifact-root", default=str(_REPO / "runs" / "online"))
     p.add_argument("--aiperf-bin", default="aiperf")
     p.add_argument("--tokenizer", default=None, help="tokenizer for AIPerf (e.g. gpt2)")
+    p.add_argument(
+        "--timeout-s", type=float, default=None, help="timeout per AIPerf run"
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
         "--max-requests",
@@ -60,13 +69,16 @@ def main() -> int:
     )
     p.add_argument("--out", default=None, help="path to save results JSON")
     args = p.parse_args()
+    if args.timeout_s is not None and (
+        not math.isfinite(args.timeout_s) or args.timeout_s <= 0
+    ):
+        p.error("--timeout-s must be positive and finite")
 
     from autoscaling_arena.runners.real import (
         format_endpoint_leaderboard,
         load_endpoints,
         run_endpoint_leaderboard,
     )
-    from autoscaling_arena.scorecard import DEFAULT_PROFILES
     from autoscaling_arena.workloads import get_workload, list_workloads
 
     endpoints = load_endpoints(args.endpoints)
@@ -75,16 +87,17 @@ def main() -> int:
 
     # Materialize workloads to AIPerf-replayable Mooncake traces.
     trace_dir = _REPO / "runs" / "traces"
+    workloads = {name: get_workload(name) for name in wl_names}
     workload_traces = {
         n: str(
-            get_workload(n).materialize(
+            workload.materialize(
                 trace_dir,
                 seed=args.seed,
                 max_requests=args.max_requests,
                 arrival_speedup=args.arrival_speedup,
             )
         )
-        for n in wl_names
+        for n, workload in workloads.items()
     }
 
     print(
@@ -98,10 +111,14 @@ def main() -> int:
     results = run_endpoint_leaderboard(
         endpoints=endpoints,
         workload_traces=workload_traces,
+        workload_block_sizes={
+            name: workload.block_size for name, workload in workloads.items()
+        },
         profiles=profiles,
         artifact_root=args.artifact_root,
         aiperf_bin=args.aiperf_bin,
         tokenizer=args.tokenizer,
+        timeout_s=args.timeout_s,
         on_progress=progress,
     )
 
@@ -114,7 +131,7 @@ def main() -> int:
         json.dumps([r.__dict__ for r in results], indent=2, default=str)
     )
     print(f"\nFull results JSON: {out}")
-    return 0
+    return 1 if any(result.returncode != 0 for result in results) else 0
 
 
 if __name__ == "__main__":

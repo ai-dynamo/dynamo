@@ -274,7 +274,7 @@ def test_report_data_groups_configuration_and_workload_and_keeps_failures(
     ]
     assert burst_scope["results"][0]["rank"] == 1
     assert burst_scope["results"][0]["replay_command"] == (
-        "python gym/scripts/run_match_config.py configs/fixture.match.yaml "
+        "python scripts/run_match_config.py configs/fixture.match.yaml "
         f"--expect-config-sha256 {'c' * 64} "
         "--run-id planner-burst-interactive-0 --no-publish"
     )

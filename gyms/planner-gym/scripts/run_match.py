@@ -9,7 +9,7 @@ the package. Requires a built Dynamo simulation environment for
 gpt-oss. Example:
 
     export DYNAMO_DIR=/absolute/path/to/dynamo
-    source "$DYNAMO_DIR/.venv/bin/activate"
+    source .venv/bin/activate
     python scripts/run_match.py \\
         --trace /path/to/trace.jsonl \\
         --autoscaler static --num-prefill 4 --num-decode 1

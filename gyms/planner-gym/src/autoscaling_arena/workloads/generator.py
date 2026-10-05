@@ -156,7 +156,20 @@ class Workload:
             raise ValueError(
                 f"workload '{self.name}' wraps a static trace; nothing to generate"
             )
-        assert self.arrival and self.shape and self.prefix_factory and self.duration_s
+        missing = [
+            name
+            for name in ("arrival", "shape", "prefix_factory", "duration_s")
+            if getattr(self, name) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"synthetic workload '{self.name}' is missing required axes: "
+                + ", ".join(missing)
+            )
+        if not math.isfinite(self.duration_s) or self.duration_s <= 0:
+            raise ValueError(
+                f"workload '{self.name}' duration_s must be positive and finite"
+            )
         rng = random.Random(seed)
         arrivals = poisson_arrivals(self.arrival, self.duration_s, rng)
         prefix = self.prefix_factory()

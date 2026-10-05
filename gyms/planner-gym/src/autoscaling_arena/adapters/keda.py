@@ -242,7 +242,7 @@ class KedaAutoscaler(_NoopRegressionBootstrap):
                 role="prefill",
                 minimum=self._prefill_hpa.min_replicas,
             )
-            queue = float(aggregate_queue_depth(fpm, pool="prefill"))
+            queue = aggregate_queue_depth(fpm, pool="prefill")
             target_prefill = self._prefill_hpa.recommend(t_s, cur_p, queue)
 
             cur_d = current_replica_target(
@@ -258,7 +258,7 @@ class KedaAutoscaler(_NoopRegressionBootstrap):
                 role="decode",
                 minimum=self._agg_hpa.min_replicas,
             )
-            queue = float(aggregate_queue_depth(fpm, pool="all"))
+            queue = aggregate_queue_depth(fpm, pool="all")
             target_decode = self._agg_hpa.recommend(t_s, cur, queue)
 
         return PlannerEffects(

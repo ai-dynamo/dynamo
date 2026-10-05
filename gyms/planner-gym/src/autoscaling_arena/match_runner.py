@@ -288,11 +288,6 @@ def publish_match_results(
             from autoscaling_arena.html_report import render_match_report
 
             payloads["html"] = render_match_report(report)
-        except ImportError as exc:
-            raise MatchPublishError(
-                "standalone HTML reporting requires Plotly; install "
-                "autoscaling-arena with its declared dependencies"
-            ) from exc
         except (TypeError, ValueError, OSError) as exc:
             raise MatchPublishError(
                 f"cannot render standalone HTML report: {exc}"
@@ -762,6 +757,7 @@ def _run_real_item(
         trace_path,
         profile,
         artifact_root=run_dir,
+        block_size=workload.block_size,
         streaming=backend.aiperf.streaming,
         tokenizer=backend.aiperf.tokenizer,
         aiperf_bin=backend.aiperf.executable,
@@ -1437,7 +1433,7 @@ def match_replay_sha256(config: MatchConfig) -> str:
 def _safe_replay_config_path(config: MatchConfig) -> Optional[str]:
     """Return a portable replay reference without exposing local paths."""
 
-    repository = Path(__file__).resolve().parents[3]
+    repository = Path(__file__).resolve().parents[2]
     source = config.source_path.resolve(strict=False)
     if not source.is_file():
         return None

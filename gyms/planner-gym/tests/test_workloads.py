@@ -11,6 +11,7 @@ claims.
 from __future__ import annotations
 
 import json
+import random
 import statistics
 
 import pytest
@@ -331,3 +332,48 @@ def test_mooncake_discovery_uses_ancestor_repository_regardless_of_name(
 def test_mooncake_discovery_respects_explicit_checkout(tmp_path, monkeypatch):
     monkeypatch.setenv("DYNAMO_DIR", str(tmp_path))
     assert registry._dynamo_dir() == tmp_path
+
+
+@pytest.mark.parametrize("block_size", [16, 512])
+def test_shared_prefix_partial_terminal_blocks_have_unique_hashes(block_size):
+    from autoscaling_arena.workloads.axes import SharedPrefix
+
+    policy = SharedPrefix(8)
+    rng = random.Random(0)
+    first = policy.assign(rng, block_size - 4, block_size)
+    second = policy.assign(rng, block_size + 7, block_size)
+    full = policy.assign(rng, block_size * 2, block_size)
+    another_partial = policy.assign(rng, block_size + 7, block_size)
+    assert second[0] == full[0] == another_partial[0] == 0
+    assert full == [0, 1]
+    assert len({first[-1], second[-1], another_partial[-1]}) == 3
+    assert not ({first[-1], second[-1], another_partial[-1]} & set(range(8)))
+
+
+def test_shared_prefix_hashes_keep_one_token_length_across_generated_trace():
+    workload = get_workload("shared_prefix")
+    lengths = {}
+    for record in workload.generate_records(seed=0):
+        for index, hash_id in enumerate(record["hash_ids"]):
+            size = min(
+                workload.block_size,
+                record["input_length"] - index * workload.block_size,
+            )
+            assert size > 0
+            assert lengths.setdefault(hash_id, size) == size
+
+
+@pytest.mark.parametrize(
+    "missing", ["arrival", "shape", "prefix_factory", "duration_s"]
+)
+def test_synthetic_workload_missing_axis_names_the_configuration_error(missing):
+    from dataclasses import replace
+
+    workload = replace(get_workload("flat"), **{missing: None})
+    with pytest.raises(ValueError, match=f"missing required axes: {missing}"):
+        workload.generate_records(seed=0)
+
+
+def test_synthetic_workload_lists_all_missing_axes():
+    with pytest.raises(ValueError, match="arrival, shape, prefix_factory, duration_s"):
+        Workload(name="incomplete", description="test").generate_records(seed=0)

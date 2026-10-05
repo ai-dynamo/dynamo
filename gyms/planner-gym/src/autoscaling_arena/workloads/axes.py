@@ -147,7 +147,9 @@ class SharedPrefix:
 
     def assign(self, rng, isl: int, block_size: int) -> List[int]:
         total = _n_blocks(isl, block_size)
-        shared = self._shared[: min(len(self._shared), total)]
+        # A hash denotes an exact token block. A partial terminal block cannot
+        # reuse a full block (or a differently sized partial block) in AIPerf.
+        shared = self._shared[: min(len(self._shared), isl // block_size)]
         tail_n = total - len(shared)
         tail = list(range(self._next, self._next + tail_n))
         self._next += tail_n

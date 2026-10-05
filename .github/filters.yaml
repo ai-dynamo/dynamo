@@ -338,7 +338,7 @@ dgdr:
 planner_gym:
   - 'gyms/planner-gym/**'
   - '.github/workflows/pre-merge.yml'
-  - '.github/actions/changed-files/action.yml'
+  - '.github/actions/changed-files/**'
   - '.github/filters.yaml'
 
 planner:

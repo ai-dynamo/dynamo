@@ -1035,6 +1035,7 @@ def test_run_real_item_materializes_speedup_resolves_endpoint_and_projects_alias
     assert profile.itl_ms == 40.0
     assert aiperf_kwargs == {
         "artifact_root": tmp_path / "real-session" / "runs" / item.run_id,
+        "block_size": 128,
         "streaming": False,
         "tokenizer": "custom-tokenizer",
         "aiperf_bin": "custom-aiperf",
@@ -1069,3 +1070,73 @@ def test_run_real_item_materializes_speedup_resolves_endpoint_and_projects_alias
         "duration_s": 12.5,
         "mean_ttft_ms": 91.0,
     }
+
+
+def test_real_match_config_preserves_mixed_trace_block_sizes(tmp_path, monkeypatch):
+    import subprocess
+
+    from autoscaling_arena.runners import real
+    from autoscaling_arena.workloads import validate_mooncake_trace
+
+    traces = []
+    for block_size in (16, 512):
+        trace = tmp_path / f"trace-{block_size}.jsonl"
+        trace.write_text(
+            json.dumps(
+                {
+                    "timestamp": 0,
+                    "input_length": block_size * 2,
+                    "output_length": 2,
+                    "hash_ids": [1, 2],
+                }
+            )
+            + "\n"
+        )
+        traces.append(
+            {
+                "name": f"blocks-{block_size}",
+                "path": str(trace),
+                "block_size": block_size,
+                "presorted": True,
+            }
+        )
+    config = parse_match_config(
+        {
+            "schema_version": 1,
+            "name": "mixed-block-sizes",
+            "backend": {
+                "type": "real",
+                "endpoints": [
+                    {"name": "serving", "url": "http://unused", "model": "example"}
+                ],
+                "autoscalers": [{"name": "static", "endpoint": "serving"}],
+            },
+            "evaluations": {"traces": traces},
+            "slo_profiles": [{"name": "test", "ttft_ms": 1000}],
+            "metrics": {"rank_by": "goodput_rps", "include": ["goodput_rps"]},
+            "publish": {
+                "artifact_root": str(tmp_path / "artifacts"),
+                "destinations": [{"type": "console"}],
+            },
+        },
+        source_path=tmp_path / "match.yaml",
+    )
+    observed_sizes = []
+
+    def run(command, **kwargs):
+        block_size = int(command[command.index("--isl-block-size") + 1])
+        trace = Path(command[command.index("--input-file") + 1])
+        assert validate_mooncake_trace(trace, block_size=block_size) == 1
+        observed_sizes.append(block_size)
+        output = Path(command[command.index("--artifact-dir") + 1])
+        (output / "profile_export_aiperf.json").write_text('{"goodput": {"avg": 2}}')
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(real.subprocess, "run", run)
+    monkeypatch.setattr(match_runner, "_git_commit", lambda: "test-commit")
+    report = match_runner.execute_match_config(config)
+    assert report["summary"]["succeeded_runs"] == 2
+    assert observed_sizes == [16, 512]
+    assert [
+        result["evaluation"]["trace_block_size"] for result in report["results"]
+    ] == observed_sizes

@@ -118,8 +118,8 @@ class ReactiveAutoscaler(_NoopRegressionBootstrap):
             qd = aggregate_queue_depth(fpm, pool="prefill")
             target_prefill = self._step_toward(
                 cur_p,
-                up=qd > self._prefill_queue_up,
-                down=qd < self._prefill_queue_down,
+                up=qd is not None and qd > self._prefill_queue_up,
+                down=qd is not None and qd < self._prefill_queue_down,
                 lo=self._min_prefill,
                 hi=self._max_prefill,
             )
@@ -138,8 +138,8 @@ class ReactiveAutoscaler(_NoopRegressionBootstrap):
             qd = aggregate_queue_depth(fpm, pool="all")
             target_decode = self._step_toward(
                 cur,
-                up=qd > self._agg_queue_up,
-                down=qd < self._agg_queue_down,
+                up=qd is not None and qd > self._agg_queue_up,
+                down=qd is not None and qd < self._agg_queue_down,
                 lo=self._min_decode,
                 hi=self._max_decode,
             )

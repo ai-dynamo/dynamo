@@ -11,7 +11,7 @@ dynamo *types* are referenced (under ``TYPE_CHECKING``).
 Rival autoscaler adapters (KEDA queue-depth, Ray Serve, llm-d, reactive
 thresholds) scale on *fleet-level* scalar signals — total requests waiting,
 mean KV-cache utilization. The simulation (and the planner's observation
-contract) expose those only *per worker*, inside
+contract) expose those per (worker, data-parallel rank), inside
 :class:`~dynamo.planner.core.types.FpmObservations`. These helpers collapse the
 per-worker FPM view into the scalar signals rival autoscalers consume, so every
 adapter derives them the same way rather than each re-implementing the reduction
@@ -75,34 +75,40 @@ def current_replica_target(
 
 def _iter_pool(
     fpm: Optional["FpmObservations"], pool: Pool
-) -> Iterable["ForwardPassMetrics"]:
-    """Yield the per-worker FPMs for the requested pool(s)."""
+) -> Iterable[tuple[Role, str, "ForwardPassMetrics"]]:
+    """Yield each rank's pool, worker ID, and FPM for the requested pool(s)."""
     if fpm is None:
         return
     pools = []
     if pool in ("prefill", "all"):
-        pools.append(fpm.prefill)
+        pools.append(("prefill", fpm.prefill))
     if pool in ("decode", "all"):
-        pools.append(fpm.decode)
-    for by_worker in pools:
+        pools.append(("decode", fpm.decode))
+    for role, by_worker in pools:
         if by_worker:
-            yield from by_worker.values()
+            for (worker_id, _rank), metric in by_worker.items():
+                yield role, worker_id, metric
 
 
-def aggregate_queue_depth(fpm: Optional["FpmObservations"], pool: Pool = "all") -> int:
+def aggregate_queue_depth(
+    fpm: Optional["FpmObservations"], pool: Pool = "all"
+) -> Optional[int]:
     """Total *waiting* (queued, not-yet-scheduled) requests across ``pool``.
 
     Sums each worker's queued request counts. For the prefill pool this is the
     backlog of admitted-but-unstarted prefills; for the decode pool it is
     preempted (evicted-to-waiting) decode requests. This is the simulator
     analogue of vLLM's ``num_requests_waiting``, the signal a KEDA-style
-    queue-depth trigger scales on.
+    queue-depth trigger scales on. Returns ``None`` when no rank in the
+    selected pool reported; an observed idle heartbeat instead returns zero.
     """
     total = 0
-    for m in _iter_pool(fpm, pool):
-        q = m.queued_requests
-        total += q.num_prefill_requests + q.num_decode_requests
-    return total
+    reported = False
+    for _, _, metric in _iter_pool(fpm, pool):
+        reported = True
+        queued = metric.queued_requests
+        total += queued.num_prefill_requests + queued.num_decode_requests
+    return total if reported else None
 
 
 def aggregate_queued_prefill_tokens(
@@ -115,19 +121,15 @@ def aggregate_queued_prefill_tokens(
     request count under-states the load.
     """
     total = 0
-    for m in _iter_pool(fpm, pool):
-        total += m.queued_requests.sum_prefill_tokens
+    for _, _, metric in _iter_pool(fpm, pool):
+        total += metric.queued_requests.sum_prefill_tokens
     return total
 
 
 def _pool_capacity(
-    capabilities: Optional["WorkerCapabilities"], pool: Pool
+    capabilities: Optional["WorkerCapabilities"], pool: Role
 ) -> Optional[int]:
-    """Per-worker ``max_kv_tokens`` for the pool, if known.
-
-    For ``"all"`` the decode pool's capacity is used (aggregated topology has a
-    single engine whose capabilities live under ``decode``).
-    """
+    """Per-worker ``max_kv_tokens`` for one engine pool, if known."""
     if capabilities is None:
         return None
     eng = capabilities.prefill if pool == "prefill" else capabilities.decode
@@ -143,29 +145,36 @@ def aggregate_kv_util(
 ) -> Optional[float]:
     """Mean KV-cache utilization (fraction in ``[0, 1]``) across ``pool``.
 
-    Per worker: ``kv_tokens_in_use / max_kv_tokens``, then averaged over the
-    workers that reported. Decode KV residency (``sum_decode_kv_tokens``) is the
-    memory-pressure signal; prefill workers are scored on their in-flight
+    Sum each worker's rank-level KV token usage, divide by that pool's
+    per-worker ``max_kv_tokens`` (which already includes every DP rank), then
+    average over the workers that reported. Decode KV residency
+    (``sum_decode_kv_tokens``) is the memory-pressure signal; prefill workers are scored on their in-flight
     prefill KV (``sum_prefill_kv_tokens``). This is the simulator analogue of
     vLLM's ``gpu_cache_usage_perc``.
 
     Returns ``None`` when capacity is unknown or no worker reported, so callers
     can distinguish "no datapoint" from a genuine ``0.0``.
     """
-    capacity = _pool_capacity(capabilities, pool)
-    if capacity is None:
-        return None
+    used_by_worker: dict[tuple[Role, str], int] = {}
+    for role, worker_id, metric in _iter_pool(fpm, pool):
+        scheduled = metric.scheduled_requests
+        # Worker IDs belong to a pool: do not combine prefill and decode rows
+        # merely because their IDs match when both pools are requested.
+        key = (role, worker_id)
+        used_by_worker[key] = (
+            used_by_worker.get(key, 0)
+            + scheduled.sum_decode_kv_tokens
+            + scheduled.sum_prefill_kv_tokens
+        )
 
+    if not used_by_worker:
+        return None
     fractions: list[float] = []
-    for m in _iter_pool(fpm, pool):
-        sched = m.scheduled_requests
-        # Decode KV dominates residency; include prefill KV so a prefill-only
-        # pool isn't reported as perpetually empty.
-        in_use = sched.sum_decode_kv_tokens + sched.sum_prefill_kv_tokens
+    for (role, _worker_id), in_use in used_by_worker.items():
+        capacity = _pool_capacity(capabilities, role)
+        if capacity is None:
+            return None
         fractions.append(in_use / capacity)
-
-    if not fractions:
-        return None
     return sum(fractions) / len(fractions)
 
 

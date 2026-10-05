@@ -91,7 +91,7 @@ jobs:
       timeout-minutes: 3
 
   planner-gym:
-    name: Planner Gym (Python ${{ matrix.python }})
+    name: Planner Gym CPU, adapters excluded (Python ${{ matrix.python }})
     needs: changed-files
     if: needs.changed-files.outputs.planner_gym == 'true'
     runs-on: ubuntu-latest
@@ -101,7 +101,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.10', '3.12']
+        python: ['3.11', '3.12']
     defaults:
       run:
         working-directory: gyms/planner-gym
@@ -112,6 +112,8 @@ jobs:
         python-version: ${{ matrix.python }}
     - name: Install CPU test and packaging dependencies
       run: python -m pip install '.[test,jev]' build
+    - name: Test changed-file reporting with hostile filenames
+      run: python ../../.github/actions/changed-files/test_report.py
     - name: Test trace generation, configs, runners, and reports
       run: python -m pytest -q
     - name: Build source and wheel distributions

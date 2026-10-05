@@ -11,7 +11,7 @@ scores each against the SLO profiles, and prints a ranking by Efficiency
 gpt-oss.
 
     export DYNAMO_DIR=/absolute/path/to/dynamo
-    source "$DYNAMO_DIR/.venv/bin/activate"
+    source .venv/bin/activate
     python scripts/run_leaderboard.py \\
         --workloads staircase flash_crowd mooncake --profile interactive
 """

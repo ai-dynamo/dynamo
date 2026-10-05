@@ -17,6 +17,7 @@ from itertools import product
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
+import yaml
 from autoscaling_arena.substrates import SUBSTRATES
 from autoscaling_arena.workloads import WORKLOADS, validate_mooncake_trace
 
@@ -1076,9 +1077,6 @@ def _parse_sim_autoscaler(
             "jev": frozenset(_JEV_DEFAULTS),
         }[autoscaler_type]
         _only_keys(adapter_config, allowed, f"{path}.config")
-        _validate_adapter_values(
-            adapter_config, path=f"{path}.config", autoscaler_type=autoscaler_type
-        )
         if topology == "agg":
             unused = {
                 "min_prefill",
@@ -1099,6 +1097,9 @@ def _parse_sim_autoscaler(
         effective_config = _sim_autoscaler_defaults(autoscaler_type, topology=topology)
         effective_config.update(adapter_config)
         adapter_config = effective_config
+        _validate_adapter_values(
+            adapter_config, path=f"{path}.config", autoscaler_type=autoscaler_type
+        )
 
     if autoscaler_type == "static":
         if "start" in data:
@@ -1414,6 +1415,9 @@ def _parse_real_backend(
         "--url",
         "--endpoint-type",
         "--input-file",
+        "--isl-block-size",
+        "--prompt-input-tokens-block-size",
+        "--synthetic-input-tokens-block-size",
         "--custom-dataset-type",
         "--artifact-dir",
         "--streaming",
@@ -1972,14 +1976,6 @@ def _parse_publish(value: Any, *, base_dir: Path) -> PublishConfig:
 
 
 def _load_yaml(text: str, *, source: str) -> Any:
-    try:
-        import yaml
-    except ImportError as exc:
-        raise MatchConfigError(
-            "YAML support requires PyYAML>=6.0; install autoscaling-arena "
-            "with its declared dependencies"
-        ) from exc
-
     class UniqueKeyLoader(yaml.SafeLoader):
         pass
 

@@ -1228,7 +1228,7 @@ def _replay_command(
     return " ".join(
         (
             "python",
-            "gym/scripts/run_match_config.py",
+            "scripts/run_match_config.py",
             config_argument,
             shlex.join(suffix),
         )
@@ -1730,7 +1730,7 @@ _REPORT_JS = r"""
             " No source-trace digest was available for this saved run.";
           const configHint = result.replay_uses_config_env ?
             " Set MATCH_CONFIG to the original Match Config path before running it." : "";
-          replayHelp.textContent = "Runs only this matrix cell, refuses a changed resolved Match Config, and keeps artifacts without replacing the published leaderboard." + traceGuard + configHint;
+          replayHelp.textContent = "Run from gyms/planner-gym with its environment active. Runs only this matrix cell, refuses a changed resolved Match Config, and keeps artifacts without replacing the published leaderboard." + traceGuard + configHint;
           replayCopyStatus.textContent = "";
           if (typeof replayDialog.showModal === "function") replayDialog.showModal();
           else replayDialog.setAttribute("open", "");

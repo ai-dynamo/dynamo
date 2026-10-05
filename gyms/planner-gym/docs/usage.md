@@ -7,11 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 Run these commands from `dynamo/gyms/planner-gym` after following the
 [getting started guide](getting-started.md). For scoring definitions and
-limitations, see the [Planner Gym README](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/README.md).
+limitations, see the [Planner Gym README](../README.md).
 
 ## Build a Golden Set from an external base trace
 
-[`configs/golden-set.example.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/configs/golden-set.example.yaml) is a
+[`configs/golden-set.example.yaml`](../configs/golden-set.example.yaml) is a
 portable recipe for schedule and request-composition experiments. It defines
 steady load, step/recovery, ramps, repeated cycles, composition shifts, and
 seeded random bursts without naming or locating a source dataset. The source
@@ -92,7 +92,7 @@ external artifact location, not in source control.
 
 `match-config.fragment.yaml` is not a runnable config by itself. For a complete
 two-policy example, start from
-[`configs/match.golden-set.quickstart.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/configs/match.golden-set.quickstart.yaml)
+[`configs/match.golden-set.quickstart.yaml`](../configs/match.golden-set.quickstart.yaml)
 and replace its `evaluations` section with the generated fragment. Save the
 complete config beside the generated traces, or link the traces into the
 config's directory, so the fragment's relative paths continue to resolve.
@@ -160,8 +160,8 @@ matrix. It selects either the `sim` or `real` backend, the autoscalers or
 endpoint names, model and engine configuration, recorded and synthetic
 workloads, SLO targets, metrics, execution safeguards, and publication
 destinations. Start from
-[`configs/match.sim.example.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/configs/match.sim.example.yaml) or
-[`configs/match.real.example.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/configs/match.real.example.yaml).
+[`configs/match.sim.example.yaml`](../configs/match.sim.example.yaml) or
+[`configs/match.real.example.yaml`](../configs/match.real.example.yaml).
 The simulation example intentionally expands to a broad matrix; use the
 [two-policy quickstart](getting-started.md) for a small first run.
 
@@ -255,9 +255,8 @@ python scripts/run_match_config.py configs/match.real.example.yaml
 ```
 
 The nested real deployment metadata is easiest to read in
-[`configs/endpoints.example.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/configs/endpoints.example.yaml); JSON
-and YAML endpoint catalogs are both accepted by Match Configs. The legacy
-endpoint CLI remains JSON-only.
+[`configs/endpoints.example.yaml`](../configs/endpoints.example.yaml); JSON
+and YAML endpoint catalogs are accepted by both Match Configs and the endpoint CLI.
 
 All relative paths—including `backend.planner_config`, `endpoint_catalog`,
 `publish.artifact_root`, and JSON/HTML destination paths—resolve from the Match
@@ -282,7 +281,7 @@ apply, discover, or verify that deployment configuration.
 Simulation configs can also pin `gpu_budget`, `router.mode`, Planner-specific
 settings as an inline `planner_config` mapping or a reusable YAML/JSON path,
 and replay controls (`ais_bootstrap` and `concurrency`). See
-[`configs/planner.sim.example.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/configs/planner.sim.example.yaml) for a
+[`configs/planner.sim.example.yaml`](../configs/planner.sim.example.yaml) for a
 reusable Planner policy that deliberately omits runner-owned topology, budget,
 engine-cost, and report fields. Preset-based legacy configs may still use
 `replay.model_name`; explicit configs must use `model.name`. Real configs can
@@ -435,7 +434,7 @@ and fixed `static-4P4D`—over the requested workloads:
 
 ```bash
 export DYNAMO_DIR=/absolute/path/to/dynamo
-source "$DYNAMO_DIR/.venv/bin/activate"
+source .venv/bin/activate
 
 python scripts/run_leaderboard.py \
   --workloads staircase flash_crowd mooncake \
@@ -517,6 +516,7 @@ python scripts/run_endpoint_bench.py \
   --workloads flat staircase \
   --profiles interactive relaxed \
   --tokenizer gpt2 \
+  --timeout-s 900 \
   --artifact-root runs/online \
   --out runs/online-leaderboard.json
 ```
@@ -525,8 +525,8 @@ Replace `gpt2` with the tokenizer appropriate for the served model, or omit
 `--tokenizer` when AIPerf can resolve it.
 
 The runner executes one AIPerf process for every endpoint x workload x profile
-combination. It is serial, and AIPerf follows each trace's timestamps in real
-time. A synthetic trace lasts 180 seconds, so the example above is four
+combination, passing each workload's block size to preserve its prefix hashes.
+It is serial, and AIPerf follows each trace's timestamps in real time. A synthetic trace lasts 180 seconds, so the example above is four
 three-minute runs per endpoint, plus startup and completion overhead.
 
 Use exact profile names: `interactive`, `agentic`, or `relaxed`. Use
@@ -537,7 +537,10 @@ Use exact profile names: `interactive`, `agentic`, or `relaxed`. Use
 The console leaderboard ranks endpoints by AIPerf goodput for each workload.
 The result JSON retains the subprocess return code, the last stderr lines, and
 the raw artifact directory for every run. A failed run is marked `[FAILED
-rc=N]`; inspect those fields before comparing scores.
+rc=N]`; inspect those fields before comparing scores. A timeout is recorded as
+return code 124 and a missing AIPerf executable as 127. The sweep continues
+and saves all results before exiting with code 1 if any run failed.
+`--timeout-s` bounds each AIPerf process; omit it to wait without a time limit.
 
 The live leaderboard does **not** calculate goodput/GPU or scaling
 oscillations because the endpoint runner does not collect deployment cost or

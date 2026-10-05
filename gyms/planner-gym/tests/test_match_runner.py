@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import subprocess
 import sys
 import textwrap
@@ -17,6 +18,7 @@ from typing import Any
 
 import pytest
 from autoscaling_arena import match_runner
+from autoscaling_arena.html_report import _replay_command
 from autoscaling_arena.match_config import (
     EngineConfig,
     EvaluationConfig,
@@ -36,6 +38,8 @@ from autoscaling_arena.match_config import (
     SLAProfileConfig,
     load_match_config,
 )
+
+pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
 ARENA_ROOT = Path(__file__).resolve().parents[1]
 RUN_MATCH_CONFIG = ARENA_ROOT / "scripts" / "run_match_config.py"
@@ -392,9 +396,11 @@ def _run_guarded_cli(
         capture_output=True,
         text=True,
         check=False,
+        timeout=15,
     )
 
 
+@pytest.mark.timeout(30)
 def test_validate_only_does_not_import_runtime_backends_or_create_artifacts(
     tmp_path: Path,
 ):
@@ -418,6 +424,7 @@ def test_validate_only_does_not_import_runtime_backends_or_create_artifacts(
     assert not (tmp_path / "artifacts").exists()
 
 
+@pytest.mark.timeout(30)
 def test_cli_rejects_unknown_exact_replay_run_before_runtime_import(
     tmp_path: Path,
 ):
@@ -443,6 +450,7 @@ def test_cli_rejects_unknown_exact_replay_run_before_runtime_import(
     assert not (tmp_path / "artifacts").exists()
 
 
+@pytest.mark.timeout(30)
 def test_cli_validates_expected_config_digest_before_runtime_import(
     tmp_path: Path,
 ):
@@ -477,6 +485,7 @@ def test_cli_validates_expected_config_digest_before_runtime_import(
     assert not (tmp_path / "artifacts").exists()
 
 
+@pytest.mark.timeout(30)
 def test_cli_validates_selected_source_trace_digest_before_runtime_import(
     tmp_path: Path,
 ):
@@ -531,6 +540,7 @@ def test_replay_config_digest_is_portable_across_workspace_roots(
     ) == match_runner.match_replay_sha256(right_match)
 
 
+@pytest.mark.timeout(30)
 def test_cli_preflights_json_collision_before_importing_sim_runtime(
     tmp_path: Path,
 ):
@@ -1303,3 +1313,31 @@ def test_publisher_refuses_existing_html_without_overwrite(tmp_path: Path):
 
     assert html_path.read_text() == "original report\n"
     assert list(html_path.parent.glob(f".{html_path.name}.*.tmp")) == []
+
+
+@pytest.mark.timeout(30)
+def test_generated_replay_command_validates_from_documented_gym_directory():
+    config = load_match_config(ARENA_ROOT / "configs/match.quickstart.yaml")
+    run = next(config.iter_runs())
+    config_reference = match_runner._safe_replay_config_path(config)
+    assert config_reference == "configs/match.quickstart.yaml"
+    report = {
+        "provenance": {
+            "replay_config_sha256": match_runner.match_replay_sha256(config),
+            "replay": {"kind": "match_config", "config_path": config_reference},
+        }
+    }
+    command = _replay_command(report, {"run_id": run.run_id}, replay_config_path=None)
+    assert command is not None
+    arguments = shlex.split(command)
+    arguments[0] = sys.executable
+    result = subprocess.run(
+        [*arguments, "--validate-only"],
+        cwd=ARENA_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Valid Match Config" in result.stdout

@@ -96,12 +96,27 @@ def build_aiperf_command(
     artifact_dir: str | Path,
     *,
     profile: Optional[SLOProfile] = None,
+    block_size: int = 512,
     streaming: bool = True,
     tokenizer: Optional[str] = None,
     aiperf_bin: str = "aiperf",
     extra_args: tuple[str, ...] = (),
 ) -> list[str]:
-    """Build an ``aiperf profile`` command replaying ``trace_file`` against ``endpoint``."""
+    """Build an AIPerf replay with the trace's exact token-block layout."""
+    if (
+        isinstance(block_size, bool)
+        or not isinstance(block_size, int)
+        or block_size <= 0
+    ):
+        raise ValueError("trace block_size must be a positive integer")
+    block_size_flags = {
+        "--isl-block-size",
+        "--prompt-input-tokens-block-size",
+        "--synthetic-input-tokens-block-size",
+    }
+    for argument in extra_args:
+        if argument.split("=", 1)[0] in block_size_flags:
+            raise ValueError("extra_args cannot override the trace block_size")
     cmd = [
         aiperf_bin,
         "profile",
@@ -115,6 +130,8 @@ def build_aiperf_command(
         str(trace_file),
         "--custom-dataset-type",
         "mooncake_trace",
+        "--isl-block-size",
+        str(block_size),
         "--artifact-dir",
         str(artifact_dir),
     ]
@@ -191,6 +208,7 @@ def run_endpoint_match(
     profile: SLOProfile,
     *,
     artifact_root: str | Path,
+    block_size: int = 512,
     streaming: bool = True,
     tokenizer: Optional[str] = None,
     aiperf_bin: str = "aiperf",
@@ -207,12 +225,44 @@ def run_endpoint_match(
         trace_file,
         artifact_dir,
         profile=profile,
+        block_size=block_size,
         streaming=streaming,
         tokenizer=tokenizer,
         aiperf_bin=aiperf_bin,
         extra_args=extra_args,
     )
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_s, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr = exc.stderr or ""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        return EndpointMatchResult(
+            endpoint=endpoint.name,
+            workload=workload,
+            profile=profile.name,
+            metrics={"_timeout_s": timeout_s},
+            returncode=124,
+            artifact_dir=str(artifact_dir),
+            stderr_tail="\n".join(
+                [
+                    f"AIPerf timed out after {timeout_s} seconds",
+                    *stderr.splitlines()[-8:],
+                ]
+            ),
+        )
+    except FileNotFoundError:
+        return EndpointMatchResult(
+            endpoint=endpoint.name,
+            workload=workload,
+            profile=profile.name,
+            metrics={},
+            returncode=127,
+            artifact_dir=str(artifact_dir),
+            stderr_tail=f"AIPerf executable not found: {aiperf_bin}",
+        )
     metrics: dict[str, Any] = {}
     summary = _find_summary_json(artifact_dir)
     if summary is not None:
@@ -235,6 +285,7 @@ def run_endpoint_leaderboard(
     *,
     endpoints: list[Endpoint],
     workload_traces: dict[str, str],
+    workload_block_sizes: Optional[dict[str, int]] = None,
     profiles: tuple[SLOProfile, ...] = DEFAULT_PROFILES,
     artifact_root: str | Path,
     aiperf_bin: str = "aiperf",
@@ -244,8 +295,16 @@ def run_endpoint_leaderboard(
 ) -> list[EndpointMatchResult]:
     """Sweep endpoints × workloads × SLO profiles; return one result per match.
 
-    ``workload_traces`` maps a workload name → a materialized Mooncake trace path.
+    ``workload_traces`` maps a workload name to a materialized Mooncake trace.
+    ``workload_block_sizes`` supplies the token span per hash for every workload;
+    omission preserves the Mooncake default of 512 tokens.
     """
+    if workload_block_sizes is not None:
+        missing = workload_traces.keys() - workload_block_sizes.keys()
+        if missing:
+            raise ValueError(
+                "missing workload block sizes: " + ", ".join(sorted(missing))
+            )
     results: list[EndpointMatchResult] = []
     for ep in endpoints:
         for wl_name, trace in workload_traces.items():
@@ -258,6 +317,11 @@ def run_endpoint_leaderboard(
                         trace,
                         profile,
                         artifact_root=artifact_root,
+                        block_size=(
+                            workload_block_sizes[wl_name]
+                            if workload_block_sizes is not None
+                            else 512
+                        ),
                         aiperf_bin=aiperf_bin,
                         tokenizer=tokenizer,
                         timeout_s=timeout_s,

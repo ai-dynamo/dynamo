@@ -1765,3 +1765,55 @@ def test_publish_destinations_reject_duplicate_path_across_json_and_html(
         "published/results",
         "json",
     )
+
+
+@pytest.mark.parametrize(
+    "topology, override, expected_error",
+    [
+        ("disagg", "decode_kv_up: 0.2", "decode_kv_down must be <= decode_kv_up"),
+        ("disagg", "decode_kv_down: 0.9", "decode_kv_down must be <= decode_kv_up"),
+        (
+            "disagg",
+            "prefill_queue_up: 0",
+            "prefill_queue_down must be <= prefill_queue_up",
+        ),
+        (
+            "disagg",
+            "prefill_queue_down: 5",
+            "prefill_queue_down must be <= prefill_queue_up",
+        ),
+        ("agg", "agg_queue_up: 0", "agg_queue_down must be <= agg_queue_up"),
+        ("agg", "agg_queue_down: 5", "agg_queue_down must be <= agg_queue_up"),
+    ],
+)
+def test_reactive_threshold_order_includes_defaults(
+    tmp_path, topology, override, expected_error
+):
+    body = _sim_yaml(
+        autoscalers=f"- name: reactive\n  type: reactive\n  config: {{{override}}}"
+    )
+    body = body.replace("topology: disagg", f"topology: {topology}")
+    path = _write_yaml(tmp_path, body)
+    with pytest.raises(MatchConfigError, match=expected_error):
+        load_match_config(path)
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--isl-block-size",
+        "--prompt-input-tokens-block-size",
+        "--synthetic-input-tokens-block-size",
+    ],
+)
+@pytest.mark.parametrize("equals", [False, True])
+def test_real_config_rejects_block_size_overrides(tmp_path, flag, equals):
+    body = (ARENA_ROOT / "configs/match.real.example.yaml").read_text()
+    body = body.replace(
+        "endpoint_catalog: endpoints.example.yaml",
+        f"endpoint_catalog: {ARENA_ROOT / 'configs/endpoints.example.yaml'}",
+    )
+    arguments = [f"{flag}=16"] if equals else [flag, "16"]
+    body = body.replace("extra_args: []", f"extra_args: {json.dumps(arguments)}")
+    with pytest.raises(MatchConfigError, match="managed by the Match Config runner"):
+        load_match_config(_write_yaml(tmp_path, body))

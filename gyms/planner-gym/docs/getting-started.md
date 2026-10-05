@@ -92,7 +92,7 @@ Each replay still gets a new artifact session directory.
   [Match Config guide](usage.md#user-guide-run-a-match-config).
 - Build a [Golden Set](usage.md#build-a-golden-set-from-an-external-base-trace)
   from your own trace, then copy
-  [the complete Golden Set config](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/configs/match.golden-set.quickstart.yaml)
+  [the complete Golden Set config](../configs/match.golden-set.quickstart.yaml)
   beside `step-and-recovery.jsonl` and match `block_size` to the manifest.
 - Use the [endpoint guide](usage.md#user-guide-benchmark-live-endpoints) to
   compare live deployments.
