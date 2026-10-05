@@ -39,6 +39,7 @@ from collections import Counter
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from gpu_memory_service.client.rpc import GMS_ERR_IDENTITY_MISMATCH
 from gpu_memory_service.integrations.common.utils import (
     env_enabled_by_default,
     get_gms_persistent_kv_socket,
@@ -351,8 +352,21 @@ def _release_stale_kv_allocations(
             remaining.add(tag)
             continue
         try:
-            released = manager.release_persistent(engine_id, tag)
-        except Exception:
+            # Name the incarnation we listed: the key may have been released
+            # and recreated since, and that backing is not ours to destroy.
+            released = manager.release_persistent(
+                engine_id, tag, allocation_id=getattr(allocation, "allocation_id", None)
+            )
+        except Exception as exc:
+            if getattr(exc, "code", None) == GMS_ERR_IDENTITY_MISMATCH:
+                logger.info(
+                    "[GMS-VMM-IPC] preserving stale KV allocation recreated "
+                    "during cleanup: engine_id=%s tag=%s",
+                    engine_id,
+                    tag,
+                )
+                remaining.add(tag)
+                continue
             current = {
                 str(getattr(item, "tag", "")): item
                 for item in manager.list_persistent(

@@ -6,6 +6,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from gpu_memory_service.client.rpc import GMS_ERR_IDENTITY_MISMATCH, GmsRemoteError
 from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv, kv_identity
 
 pytestmark = [
@@ -274,9 +275,9 @@ def test_persistent_tag_plan_recognizes_complete_reattach():
 
 def test_persistent_tag_plan_releases_only_stale_unclaimed_kv():
     allocations = [
-        SimpleNamespace(tag="kv_pool:v4:planned", claimed=False),
-        SimpleNamespace(tag="kv_pool:v3:stale", claimed=False),
-        SimpleNamespace(tag="weights:v1:unrelated", claimed=False),
+        SimpleNamespace(tag="kv_pool:v4:planned", claimed=False, allocation_id="a"),
+        SimpleNamespace(tag="kv_pool:v3:stale", claimed=False, allocation_id="b"),
+        SimpleNamespace(tag="weights:v1:unrelated", claimed=False, allocation_id="c"),
     ]
 
     class Manager:
@@ -285,16 +286,17 @@ def test_persistent_tag_plan_releases_only_stale_unclaimed_kv():
             assert include_unclaimed is True
             return allocations
 
-        def release_persistent(self, engine_id, tag):
+        def release_persistent(self, engine_id, tag, allocation_id=None):
             assert engine_id == "engine"
-            released.append(tag)
+            released.append((tag, allocation_id))
             return True
 
     released = []
     assert install_vmm_ipc_kv._persistent_tag_plan_reattaches(
         Manager(), "engine", ["kv_pool:v4:planned"]
     )
-    assert released == ["kv_pool:v3:stale"]
+    # Cleanup names the incarnation it listed.
+    assert released == [("kv_pool:v3:stale", "b")]
 
 
 def test_stale_cleanup_preserves_allocation_claimed_during_release():
@@ -306,8 +308,27 @@ def test_stale_cleanup_preserves_allocation_claimed_during_release():
         def list_persistent(self, engine_id=None, *, include_unclaimed=False):
             return listings.pop(0)
 
-        def release_persistent(self, engine_id, tag):
+        def release_persistent(self, engine_id, tag, allocation_id=None):
             raise RuntimeError("persistent allocation claimed by another session")
+
+    with pytest.raises(RuntimeError, match="incompatible layout are still claimed"):
+        install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+            Manager(), "engine", ["kv_pool:v4:new"]
+        )
+
+
+def test_stale_cleanup_preserves_allocation_recreated_during_release():
+    stale = SimpleNamespace(tag="kv_pool:v3:old", claimed=False, allocation_id="old")
+
+    class Manager:
+        def list_persistent(self, engine_id=None, *, include_unclaimed=False):
+            return [stale]
+
+        def release_persistent(self, engine_id, tag, allocation_id=None):
+            assert allocation_id == "old"
+            raise GmsRemoteError(
+                "persistent allocation identity mismatch", GMS_ERR_IDENTITY_MISMATCH
+            )
 
     with pytest.raises(RuntimeError, match="incompatible layout are still claimed"):
         install_vmm_ipc_kv._persistent_tag_plan_reattaches(
@@ -336,7 +357,7 @@ def test_fresh_layout_reclaims_obsolete_unclaimed_kv():
         def list_persistent(self, engine_id=None, *, include_unclaimed=False):
             return allocations
 
-        def release_persistent(self, engine_id, tag):
+        def release_persistent(self, engine_id, tag, allocation_id=None):
             released.append((engine_id, tag))
             return True
 
