@@ -11489,9 +11489,10 @@ spec:
                         type: string
                       podTemplate:
                         description: |-
-                          PodTemplate defines the Pod configuration for this role. Admission permits
-                          it only when the enclosing component type explicitly supports role-specific
-                          Pod templates.
+                          PodTemplate defines the complete Pod configuration for this role. Admission
+                          permits it only when the enclosing component type supports role-specific Pod
+                          templates. For multinode components, every required role must supply one and
+                          the role templates own backend-specific leader and worker launch commands.
                         properties:
                           metadata:
                             description: |-
@@ -19617,6 +19618,7 @@ spec:
                     required:
                       - name
                     type: object
+                  maxItems: 2
                   type: array
                   x-kubernetes-list-map-keys:
                     - name
@@ -19624,11 +19626,12 @@ spec:
                 runtimeVersionOverride:
                   description: |-
                     RuntimeVersionOverride declares the Dynamo runtime version in this component's
-                    main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
-                    semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
-                    not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
-                    It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
-                    later may trigger a rollout. Keep it consistent with the image's runtime version.
+                    main image. DGD admission requires it when the main image in extraPodSpec or the selected role
+                    PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set
+                    it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH
+                    value, for example "1.4.0". It does not change the image. Setting or changing an override that
+                    resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected
+                    template's runtime version.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 scalingAdapter:
@@ -19834,6 +19837,13 @@ spec:
                       items:
                         type: string
                       type: array
+                    gpuPowerLimitWatts:
+                      description: |-
+                        GPUPowerLimitWatts is the effective per-GPU power limit propagated to the
+                        component's Pods. Omission means no power limit is configured.
+                      format: int64
+                      minimum: 1
+                      type: integer
                     gpusPerEngine:
                       description: |-
                         GPUsPerEngine is the number of GPUs assigned to one inference engine in a
@@ -19870,6 +19880,13 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    runtimeComponentName:
+                      description: |-
+                        RuntimeComponentName is an explicit Dynamo runtime component identity
+                        resolved from the serving role's endpoint override. Omission means the
+                        backend default applies. During rolling updates, worker status keeps the
+                        old active revision value until cutover completes.
+                      type: string
                     runtimeNamespace:
                       description: |-
                         RuntimeNamespace is the effective Dynamo runtime namespace for this
@@ -19886,6 +19903,12 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    servedModelName:
+                      description: |-
+                        ServedModelName is the effective primary model identity exposed by this
+                        component's serving role. During rolling updates, worker status keeps the
+                        old active revision value until cutover completes.
+                      type: string
                     updatedReplicas:
                       description: |-
                         UpdatedReplicas is the number of replicas at the current/desired revision.
@@ -20143,10 +20166,10 @@ spec:
                     experimental groups opt-in preview features whose API shape and
                     behavior may change in breaking ways between v1beta1 releases,
                     including disappearing without a name-preserving graduation path.
-                    In v1beta1 this block holds `gpuMemoryService` and `failover` (which
-                    remain tightly coupled -- failover requires GMS -- and are expected to
-                    evolve together as the DRA-based GPU sharing story matures), and
-                    `checkpoint` (whose API shape is still settling). Fields here are
+                    In v1beta1 this block holds `gpuMemoryService` and `failover` (which remain
+                    tightly coupled -- failover requires GMS -- and
+                    are expected to evolve together as the DRA-based GPU sharing story
+                    matures); and `checkpoint` (whose API shape is still settling). Fields here are
                     explicitly NOT covered by the normal v1beta1 deprecation policy; do not
                     depend on them for production workloads.
                   properties:
@@ -20351,7 +20374,7 @@ spec:
                             extraClientContainers lists additional user-declared containers that should
                             be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
                             declared under checkpoint.job.gmsClientContainers. Every name must match a container
-                            in the enclosing component's podTemplate.spec.containers.
+                            in the enclosing component's podTemplate, or in every role podTemplate when those are used.
                           items:
                             maxLength: 63
                             minLength: 1
@@ -20421,16 +20444,16 @@ spec:
                   type: object
                 frontendSidecar:
                   description: |-
-                    frontendSidecar optionally designates a container in
-                    `podTemplate.spec.containers` as the frontend sidecar. The value must
-                    match the `name` of a container in that list; the operator merges its
+                    frontendSidecar optionally designates a container in each selected PodTemplate
+                    as the frontend sidecar. The value must match the `name` of a container in the
+                    component-level podTemplate, or in every role podTemplate when those are used.
+                    The operator merges its
                     frontend-sidecar defaults (auto-generated Dynamo env vars, ports,
                     health probes) into that container the same way it merges into `"main"`.
                     The full container definition (image, args, envFrom, env) lives in
                     `podTemplate` -- this eliminates the redundant `image`, `args`,
                     `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
-                    The validation webhook rejects values that do not match any container
-                    name in `podTemplate.spec.containers`.
+                    The validation webhook rejects values that do not match the selected templates.
                   type: string
                 globalDynamoNamespace:
                   description: |-
@@ -20509,10 +20532,11 @@ spec:
                   type: string
                 podTemplate:
                   description: |-
-                    podTemplate defines the component's Pod configuration. New components must
-                    include a container named "main" with a non-empty image. Existing components
-                    created without a podTemplate may remain unchanged. The operator merges
-                    defaults into the main container.
+                    podTemplate defines the complete Pod configuration shared by every role. It
+                    is mutually exclusive with roles[].podTemplate. New components must include
+                    a container named "main" with a non-empty image. Existing components created
+                    without a podTemplate may remain unchanged. The operator merges defaults into
+                    the main container.
                     For DGD components whose main image tag is not a Dynamo semantic version,
                     set runtimeVersionOverride explicitly.
 
@@ -28676,9 +28700,10 @@ spec:
                         type: string
                       podTemplate:
                         description: |-
-                          podTemplate defines the Pod configuration for this role. Admission permits
-                          it only when the enclosing component type explicitly supports role-specific
-                          Pod templates.
+                          podTemplate defines the complete Pod configuration for this role. Admission
+                          permits it only when the enclosing component type supports role-specific Pod
+                          templates. For multinode components, every required role must supply one and
+                          the role templates own backend-specific leader and worker launch commands.
                         properties:
                           metadata:
                             description: |-
@@ -28688,7 +28713,11 @@ spec:
                               annotations:
                                 additionalProperties:
                                   type: string
+                                  maxLength: 262144
                                 type: object
+                                x-kubernetes-validations:
+                                  - rule: '!("nvidia.com/vllm-distributed-executor-backend" in self) || self["nvidia.com/vllm-distributed-executor-backend"].lowerAscii() in ["mp", "ray"]'
+                                    message: podTemplate backend annotation must be mp or ray, case-insensitively
                               finalizers:
                                 items:
                                   type: string
@@ -31056,6 +31085,9 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: self.name == "main" || (has(self.image) && self.image != "")
+                                      message: sidecar containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -34128,6 +34160,9 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: has(self.image) && self.image != ""
+                                      message: init containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -36804,6 +36839,7 @@ spec:
                     required:
                       - name
                     type: object
+                  maxItems: 2
                   type: array
                   x-kubernetes-list-map-keys:
                     - name
@@ -36811,11 +36847,12 @@ spec:
                 runtimeVersionOverride:
                   description: |-
                     RuntimeVersionOverride declares the Dynamo runtime version in this component's
-                    main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
-                    no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
-                    parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
-                    example "1.4.0". It does not change the image. Setting or changing an override that resolves to
-                    version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+                    main image. DGD admission requires it when the main image in the selected component or role
+                    PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set
+                    it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH
+                    value, for example "1.4.0". It does not change the image. Setting or changing an override that
+                    resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected
+                    template's runtime version.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 scalingAdapter:
@@ -36890,6 +36927,8 @@ spec:
                   rule: '!(has(self.type) && self.type == ''lpx'' && has(self.replicas) && self.replicas < 1)'
                 - message: scalingAdapter is not supported when type is lpx
                   rule: '!(has(self.type) && self.type == ''lpx'' && has(self.scalingAdapter))'
+                - message: use either component podTemplate or complete role podTemplates
+                  rule: (has(self.type) && self.type == 'lpx') || !has(self.roles) || !self.roles.exists(r, has(r.podTemplate)) || (!has(self.podTemplate) && self.roles.all(r, has(r.podTemplate)))
             status:
               description: status reflects the current observed state of the component deployment.
               properties:
@@ -36922,6 +36961,13 @@ spec:
                       items:
                         type: string
                       type: array
+                    gpuPowerLimitWatts:
+                      description: |-
+                        gpuPowerLimitWatts is the effective per-GPU power limit propagated to the
+                        component's Pods. Omission means no power limit is configured.
+                      format: int64
+                      minimum: 1
+                      type: integer
                     gpusPerEngine:
                       description: |-
                         gpusPerEngine is the number of GPUs assigned to one inference engine in a
@@ -36955,6 +37001,13 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    runtimeComponentName:
+                      description: |-
+                        runtimeComponentName is an explicit Dynamo runtime component identity
+                        resolved from the serving role's endpoint override. Omission means the
+                        backend default applies. During rolling updates, worker status keeps the
+                        old active revision value until cutover completes.
+                      type: string
                     runtimeNamespace:
                       description: |-
                         runtimeNamespace is the effective Dynamo runtime namespace for this
@@ -36978,6 +37031,12 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    servedModelName:
+                      description: |-
+                        servedModelName is the effective primary model identity exposed by this
+                        component's serving role. During rolling updates, worker status keeps the
+                        old active revision value until cutover completes.
+                      type: string
                     updatedReplicas:
                       description: updatedReplicas is the number of replicas at the current/desired revision.
                       format: int32

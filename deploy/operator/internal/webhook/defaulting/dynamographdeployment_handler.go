@@ -60,7 +60,7 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
 // On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
 // does not rewrite MinAvailable; it remains the component's configured minimum viable unit.
-// On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
+// On CREATE: overwrites nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
@@ -129,14 +129,12 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	// Stamp creation provenance independently from level-based provider defaulting.
 	if req.Operation == admissionv1.Create {
-		// Stamp operator version on creation (don't overwrite if already set)
-		if _, exists := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; !exists {
-			dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
-			logger.Info("stamped operator origin version on DGD",
-				"name", dgd.Name,
-				"namespace", dgd.Namespace,
-				"version", d.OperatorVersion)
-		}
+		// Replace any user-supplied value with the authoritative creating operator version.
+		dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
+		logger.Info("stamped operator origin version on DGD",
+			"name", dgd.Name,
+			"namespace", dgd.Namespace,
+			"version", d.OperatorVersion)
 	}
 
 	return nil

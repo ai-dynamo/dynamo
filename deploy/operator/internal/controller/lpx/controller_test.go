@@ -238,7 +238,7 @@ func TestLPXExternalCyborgCapacityValidation(t *testing.T) {
 	root := t.TempDir()
 	const buildID = "split-io"
 	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, testV2GraphManifestFixture{
-		topology:       "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
+		topology:       "test-topology",
 		partitionCount: 1, numChips: 8, devicesPerNode: 8,
 		compilationMode:   manifestcapnpv2.CompilationMode_lpx,
 		nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},

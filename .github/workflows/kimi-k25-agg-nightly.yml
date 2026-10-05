@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Kimi K2.5 Aggregated Smoke
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Published ACR TensorRT-LLM nightly tag (<version>-ci-<sha>-trtllm-runtime-nightly)'
+        type: string
+        required: true
+      preflight_only:
+        description: 'Render and server-side dry-run without deploying'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kimi-k25-nightly
+  cancel-in-progress: false
+
+jobs:
+  perf:
+    name: Kimi K2.5 aggregated
+    uses: ./.github/workflows/shared-recipe-perf.yml
+    with:
+      recipe: kimi-k25-agg
+      source_ref: ${{ inputs.source_ref || github.sha }}
+      image_tag: ${{ inputs.image_tag }}
+      preflight_only: ${{ inputs.preflight_only || false }}
+    secrets: inherit

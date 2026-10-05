@@ -164,7 +164,7 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 	})
 
 	annotations := lpxSchedulingMetadata(dgd.Annotations)
-	for _, key := range append(slices.Clone(dgdPropagatedAnnotationKeys), commonconsts.KubeAnnotationWorkloadProvider,
+	for _, key := range append(slices.Clone(dgdPropagatedAnnotationKeys), commonconsts.KubeAnnotationDynamoOperatorOriginVersion, commonconsts.KubeAnnotationWorkloadProvider,
 		commonconsts.KubeAnnotationGroveUpdateStrategy, commonconsts.KubeAnnotationKaiSchedulerQueue, commonconsts.KubeAnnotationVolcanoQueue) {
 		if value, exists := dgd.Annotations[key]; exists {
 			annotations[key] = value
