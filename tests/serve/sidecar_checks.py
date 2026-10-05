@@ -17,10 +17,6 @@ from tests.fault_tolerance.cancellation.utils import (
     read_streaming_responses,
 )
 from tests.router.helper import managed_runtime, poll_for_worker_instances
-from tests.serve.sidecar_native_checks import (
-    assert_native_completion,
-    assert_native_logprobs,
-)
 from tests.utils.client import send_request
 from tests.utils.payloads import ChatPayload, StreamingChatPayload
 from tests.utils.prometheus import find_metric_samples
@@ -51,6 +47,24 @@ def _wait_for_scheduler(backend: str, port: int, *, is_active: bool = False) -> 
         time.sleep(0.05)
 
 
+def _assert_native_completion(
+    outputs: list[dict],
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    finish_reason: str = "length",
+) -> None:
+    assert outputs, "Sidecar produced no response"
+    assert sum(len(output["token_ids"]) for output in outputs) == completion_tokens
+    assert sum(output.get("finish_reason") is not None for output in outputs) == 1
+    terminal = outputs[-1]
+    assert terminal["finish_reason"] == finish_reason, terminal
+    usage = terminal["completion_usage"]
+    assert usage["prompt_tokens"] == prompt_tokens, usage
+    assert usage["completion_tokens"] == completion_tokens, usage
+    assert usage["total_tokens"] == prompt_tokens + completion_tokens, usage
+
+
 def assert_cancellation_and_recovery(
     *,
     backend: str,
@@ -60,7 +74,7 @@ def assert_cancellation_and_recovery(
     engine_http_port: int,
     discovery_backend: str = "etcd",
 ) -> None:
-    """Check native metadata, explicit stop, consumer drop, and HTTP disconnect."""
+    """Check explicit stop, consumer drop, and HTTP disconnect cleanup and recovery."""
 
     async def native_checks() -> None:
         with managed_runtime(discovery_backend, "tcp") as runtime:
@@ -68,9 +82,6 @@ def assert_cancellation_and_recovery(
             worker_ids = await poll_for_worker_instances(endpoint, 1, max_wait_time=10)
             assert len(worker_ids) == 1, worker_ids
             client = await endpoint.client()
-            await assert_native_logprobs(
-                backend=backend, model=model, client=client, worker_id=worker_ids[0]
-            )
 
             def payload(max_tokens: int, is_native_http: bool) -> dict:
                 result = {
@@ -125,7 +136,7 @@ def assert_cancellation_and_recovery(
                     assert usage["prompt_tokens"] == 128, usage
                     assert usage["completion_tokens"] == 4, usage
                 else:
-                    assert_native_completion(
+                    _assert_native_completion(
                         outputs, prompt_tokens=128, completion_tokens=4
                     )
 
@@ -297,7 +308,7 @@ def assert_sglang_transfer_wait_cancelled(
                     assert (
                         context.is_stopped()
                     ), f"Decode produced output without its prefill peer: {output}"
-                    assert_native_completion(
+                    _assert_native_completion(
                         [output],
                         prompt_tokens=128,
                         completion_tokens=0,

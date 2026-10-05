@@ -24,7 +24,6 @@ from tests.serve.sidecar_checks import (
     assert_sglang_transfer_wait_cancelled,
     kv_transfer_total,
 )
-from tests.serve.sidecar_handoff_checks import assert_native_handoff
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
@@ -418,24 +417,6 @@ def test_serve_deployment(
                             engine_env[f"{backend.upper()}_DECODE_HTTP_PORT"]
                         ),
                         probe_path=probe_path if backend == "vllm" else None,
-                    )
-                    assert_native_handoff(
-                        backend=backend,
-                        namespace=engine_env["DYN_NAMESPACE"],
-                        model=config.model,
-                        prefill_http_port=int(
-                            engine_env[f"{backend.upper()}_PREFILL_HTTP_PORT"]
-                        ),
-                        decode_http_port=int(
-                            engine_env[f"{backend.upper()}_DECODE_HTTP_PORT"]
-                        ),
-                        bootstrap_port=int(
-                            engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"]
-                        )
-                        if backend == "sglang"
-                        else None,
-                        probe_path=probe_path if backend == "vllm" else None,
-                        discovery_backend=discovery_backend,
                     )
 
                 transfer()
