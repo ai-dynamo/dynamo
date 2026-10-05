@@ -39,6 +39,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -1472,6 +1473,7 @@ type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
 	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
+	GetPodRank() string          // returns the current pod's absolute rank in Kubernetes env-var syntax
 	NeedsDNSWait() bool          // returns true if DNS wait is needed to launch multinode components
 }
 
@@ -1623,6 +1625,34 @@ func AddTransportTLSEnvVars(container *corev1.Container, operatorConfig *configv
 		})
 	}
 	container.Env = MergeEnvs(tlsEnvVars, container.Env)
+}
+
+// usesMultinodeTopologyAliases keeps environment and command-line injection on
+// the same per-DGD compatibility boundary.
+func usesMultinodeTopologyAliases(annotations map[string]string) bool {
+	return compatibility.MultinodeTopologyAliases.Enabled(annotations)
+}
+
+// addMultinodeTopologyEnvVars injects backend-independent aliases for the
+// current pod's rank and leader address into newly created multinode DGDs.
+func addMultinodeTopologyEnvVars(
+	container *corev1.Container,
+	numberOfNodes int32,
+	serviceName string,
+	multinodeDeployer MultinodeDeployer,
+	annotations map[string]string,
+) {
+	if numberOfNodes <= 1 || !usesMultinodeTopologyAliases(annotations) {
+		return
+	}
+
+	// The aliases are operator-owned so their topology-derived values override
+	// any same-named entries supplied by the component pod template.
+	topologyEnvVars := []corev1.EnvVar{
+		{Name: commonconsts.DynamoLeaderAddressEnvVar, Value: multinodeDeployer.GetLeaderHostname(serviceName)},
+		{Name: commonconsts.DynamoRankEnvVar, Value: multinodeDeployer.GetPodRank()},
+	}
+	container.Env = MergeEnvs(container.Env, topologyEnvVars)
 }
 
 // applyDefaultSecurityContext sets secure defaults for pod security context.
@@ -1827,6 +1857,8 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 		}
 	}
+	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
+
 	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
@@ -2414,22 +2446,25 @@ func appendTopologyLabelVolume(volumes []corev1.Volume, vol corev1.Volume) []cor
 	return append(filtered, vol)
 }
 
-// dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated
-// to component-level annotations (for both the DCD/controller and Grove paths).
-// Service-level annotations take precedence (are never overwritten).
+// dgdPropagatedAnnotationKeys lists DGD metadata annotations that supply
+// component defaults for both the DCD/controller and Grove paths.
 var dgdPropagatedAnnotationKeys = []string{
 	commonconsts.KubeAnnotationEnableMetrics,
 	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
 	commonconsts.KubeAnnotationDynamoKubeDiscoveryMode,
-	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
 	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
 }
 
-// propagateDGDAnnotations copies DGD-level annotations into the component
-// annotations so that downstream logic can read them uniformly.
-// Service-level annotations take precedence (are never overwritten).
+// propagateDGDAnnotations copies DGD-level annotations into the component so
+// downstream logic can read them uniformly. Component annotations override
+// defaults, while the immutable DGD origin remains controller-authoritative.
 func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	for _, podTemplate := range EnsureComponentPodTemplates(component) {
+		// Replace any component value with the authoritative DGD origin, including absence.
+		delete(podTemplate.Annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+		if origin, exists := dgdAnnotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+			podTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
+		}
 		for _, key := range dgdPropagatedAnnotationKeys {
 			if val, exists := dgdAnnotations[key]; exists {
 				if _, serviceHas := podTemplate.Annotations[key]; !serviceHas {
