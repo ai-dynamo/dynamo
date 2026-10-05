@@ -13,19 +13,24 @@ from typing import Optional
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
+    ClaimPersistentAllocationRequest,
     CommitLayoutRequest,
     CommitRequest,
     ExportAllocationRequest,
+    ExportPersistentAllocationRequest,
     FreeAllocationRequest,
     GetAllocationRequest,
     GetAllocationStateRequest,
     GetLockStateRequest,
     GetStateHashRequest,
     ListAllocationsRequest,
+    ListPersistentAllocationsRequest,
     MetadataDeleteRequest,
     MetadataGetRequest,
     MetadataListRequest,
     MetadataPutRequest,
+    ReleasePersistentAllocationRequest,
+    UnclaimPersistentAllocationRequest,
 )
 
 from .fsm import GMSFSM, Connection, ServerState, StateEvent
@@ -78,8 +83,18 @@ RW_DATA_ALLOWED: frozenset[type] = RO_ALLOWED
 
 RW_ALLOWED: frozenset[type] = RW_REQUIRED | RO_ALLOWED
 
-# Permission is a pure function of the granted mode. State reaches it only by deciding
-# which mode is granted; see resolve_writer_mode.
+# Persistent-allocation RPCs are independent from regular layout lock state.
+PERSISTENT_ALLOWED: frozenset[type] = frozenset(
+    {
+        ClaimPersistentAllocationRequest,
+        UnclaimPersistentAllocationRequest,
+        ReleasePersistentAllocationRequest,
+        ExportPersistentAllocationRequest,
+        ListPersistentAllocationsRequest,
+    }
+)
+
+# Permission is a pure function of the granted regular-layout mode.
 _ALLOWED_BY_MODE: dict[GrantedLockType, frozenset[type]] = {
     GrantedLockType.RO: RO_ALLOWED,
     GrantedLockType.RW_DATA: RW_DATA_ALLOWED,
@@ -169,7 +184,10 @@ class GMSSessionManager:
     ) -> Optional[GrantedLockType]:
         timeout = timeout_ms / 1000 if timeout_ms is not None else None
 
-        # All writer requests are exclusive, whichever mode they resolve to.
+        if mode == RequestedLockType.RW_PERSISTENT:
+            return GrantedLockType.RW_PERSISTENT
+
+        # Regular-layout writers are exclusive, whether replacing or adopting.
         if mode in (RequestedLockType.RW, RequestedLockType.RW_DATA_OR_RW):
             try:
                 async with self._condition:
@@ -198,11 +216,6 @@ class GMSSessionManager:
                 except asyncio.TimeoutError:
                     return None
             return GrantedLockType.RO
-
-        if mode == RequestedLockType.RW_PERSISTENT:
-            raise OperationNotAllowed(
-                "persistent allocation sessions are not implemented"
-            )
         if mode != RequestedLockType.RW_OR_RO:
             raise OperationNotAllowed(f"unsupported lock type: {mode}")
 
@@ -235,6 +248,8 @@ class GMSSessionManager:
                 self._condition.notify_all()
 
     def on_connect(self, conn: Connection) -> None:
+        if conn.mode == GrantedLockType.RW_PERSISTENT:
+            return
         is_writer = conn.mode in (GrantedLockType.RW, GrantedLockType.RW_DATA)
         if is_writer:
             if self._reserved_rw_session_id != conn.session_id:
@@ -274,12 +289,19 @@ class GMSSessionManager:
         conn.mode = mode
 
     def check_operation(self, msg_type: type, conn: Connection) -> None:
+        # Persistent-allocation and KV-lease RPCs are namespace-independent.
+        if msg_type in PERSISTENT_ALLOWED:
+            return
+        if conn.mode == GrantedLockType.RW_PERSISTENT:
+            raise OperationNotAllowed(
+                f"{msg_type.__name__} not allowed for RW_PERSISTENT session"
+            )
         allowed = _ALLOWED_BY_MODE.get(conn.mode, frozenset())
         if msg_type not in allowed:
             if conn.mode == GrantedLockType.RW_DATA and msg_type in LAYOUT_MUTATING:
                 raise OperationNotAllowed(
                     f"{msg_type.__name__} not allowed: the layout is committed. "
-                    f"Reconnect with RW to replace it."
+                    "Reconnect with RW to replace it."
                 )
             raise OperationNotAllowed(
                 f"{msg_type.__name__} not allowed for {conn.mode.name} session "
