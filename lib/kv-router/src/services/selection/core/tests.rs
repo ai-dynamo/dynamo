@@ -2859,6 +2859,56 @@ async fn hard_mode_rejects_dispatch_away_from_a_live_binding() {
     assert_eq!(bound_worker(&core, "s"), Some(other));
 }
 
+/// Picks any candidate other than the session's bound worker.
+struct AvoidAffinityPicker;
+
+impl crate::scheduling::selector::WorkerPicker for AvoidAffinityPicker {
+    fn pick(
+        &mut self,
+        context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
+        input: crate::scheduling::selector::WorkerInputView<'_>,
+    ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
+        let bound = context.affinity_target().map(|target| target.worker_id);
+        Ok(input
+            .candidates()
+            .iter()
+            .position(|candidate| Some(candidate.worker().worker_id) != bound)
+            .unwrap_or(0))
+    }
+}
+
+#[tokio::test]
+async fn hard_mode_keeps_custom_policies_on_the_binding() {
+    let factory: WorkerSelectionPolicyFactory = Arc::new(|config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type.as_str(),
+            Vec::new(),
+            Box::new(AvoidAffinityPicker),
+        )
+    });
+    let core = core_with(
+        test_config(false),
+        SelectionHost::default(),
+        Some(factory),
+        WorkerType::Aggregated,
+        Some(SessionAffinityConfig::new(Duration::from_secs(10))),
+    );
+    core.upsert_worker(worker(1)).await.expect("worker upsert");
+    core.upsert_worker(worker(2)).await.expect("worker upsert");
+    let first = core
+        .select_and_reserve(session_reservation("r1", "s"))
+        .await
+        .expect("first booking");
+    core.free_reservation("r1").await.expect("free");
+
+    let second = core
+        .select_and_reserve(session_reservation("r2", "s"))
+        .await
+        .expect("the policy is limited to the bound worker");
+    assert_eq!(second.worker_id, first.worker_id);
+}
+
 #[tokio::test]
 async fn soft_mode_follows_the_dispatch() {
     let (core, first) = bound_session(SessionAffinityMode::Soft).await;
