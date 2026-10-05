@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -167,13 +168,13 @@ func TestResolvePipelineRequestsPreservesImmutableIntent(t *testing.T) {
 			current := desired.requests[0].DeepCopy()
 			current.Annotations[test.annotation] = test.value
 			require.Equal(t, !test.changed, pipelineRequestMatches(current, &desired.requests[0]))
-			requests, missing, changed := resolvePipelineRequests(deployment, map[string]*lpxv1alpha1.LPUPipelineRequest{current.Name: current}, desired.workload, desired.plan)
-			require.Equal(t, test.changed, changed)
-			require.Empty(t, missing)
-			if !changed {
+			requests, missing := resolvePipelineRequests(deployment, map[string]*lpxv1alpha1.LPUPipelineRequest{current.Name: current}, desired.workload, desired.plan)
+			if !test.changed {
+				require.Empty(t, missing)
 				require.Equal(t, current, requests[current.Name])
 			} else {
-				require.Nil(t, requests)
+				require.Equal(t, &desired.requests[0], requests[current.Name])
+				require.Equal(t, []*lpxv1alpha1.LPUPipelineRequest{requests[current.Name]}, missing)
 			}
 		})
 	}
@@ -240,15 +241,14 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 		{name: "all published", replicas: 2, published: []int{5, 4, 3, 2, 1, 0}},
 		{name: "scaled down", replicas: 1, published: []int{5, 4, 3, 2, 1, 0}},
 		{name: "zero replicas", published: []int{5, 4, 3, 2, 1, 0}},
-		{name: "mismatch discards earlier missing requests", replicas: 2, published: []int{5}, intentChanged: true},
+		{name: "mismatch retains ordered pending requests", replicas: 2, published: []int{5}, wantMissing: []int{0, 1, 2, 3, 4, 5}, intentChanged: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Resolve two workload replicas with draft0, draft1 and target models")
 			deployment, dgd, registry := newLPXSpecDecodeTestDGD(t)
 			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 			desired.plan.Replicas = 2
-			_, rendered, changed := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
-			require.False(t, changed)
+			_, rendered := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
 			require.Len(t, rendered, 6)
 			for index, request := range rendered {
 				require.Equal(t, int64(index/3), request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex)
@@ -267,13 +267,7 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 				observed[request.Name] = request
 			}
 			desired.plan.Replicas = tc.replicas
-			requests, missing, changed := resolvePipelineRequests(deployment, observed, desired.workload, desired.plan)
-			require.Equal(t, tc.intentChanged, changed)
-			if changed {
-				require.Nil(t, requests)
-				require.Nil(t, missing)
-				return
-			}
+			requests, missing := resolvePipelineRequests(deployment, observed, desired.workload, desired.plan)
 			require.Len(t, requests, int(tc.replicas)*3)
 			require.Len(t, missing, len(tc.wantMissing))
 			for index, renderedIndex := range tc.wantMissing {
@@ -281,7 +275,7 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 				require.Same(t, requests[missing[index].Name], missing[index])
 			}
 			for _, request := range observed {
-				if request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex < int64(tc.replicas) {
+				if !tc.intentChanged && request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex < int64(tc.replicas) {
 					require.Same(t, request, requests[request.Name])
 				}
 			}
@@ -334,7 +328,7 @@ func getTestPipelineRequest(t *testing.T, ctx context.Context, kubeClient client
 	return request
 }
 
-// publishSelectedLPXForTest seeds requests through the production publication helper.
+// publishSelectedLPXForTest seeds PCS-owned requests for controller scenarios.
 // It does not simulate reconciliation, readiness or deletion decisions.
 func publishSelectedLPXForTest(
 	t *testing.T,
@@ -346,11 +340,12 @@ func publishSelectedLPXForTest(
 	t.Helper()
 	pcs := observedLPXTestPodCliqueSet(t, ctx, reconciler, deployment, desired)
 	require.NotNil(t, pcs)
-	requests := make([]*lpxv1alpha1.LPUPipelineRequest, len(desired.requests))
 	for index := range desired.requests {
-		requests[index] = desired.requests[index].DeepCopy()
+		request := desired.requests[index].DeepCopy()
+		request.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}
+		require.NoError(t, reconciler.Create(ctx, request))
 	}
-	require.NoError(t, reconciler.reconcilePipelineRequests(ctx, deployment, pcs, requests))
+	setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for seeded LPX requests")
 	return meta.FindStatusCondition(deployment.Status.Conditions, v1alpha1.LPXReadyCondition)
 }
 
@@ -365,4 +360,34 @@ func requirePipelineRequestNotFound(
 	request := &lpxv1alpha1.LPUPipelineRequest{}
 	err := kubeClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, request)
 	require.True(t, apierrors.IsNotFound(err), "expected LPX request %s/%s to be absent, got %v", namespace, name, err)
+}
+
+func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		localPartitions *v1beta1.LPXLocalPartitions
+		wantPartitions  [][]int64
+	}{
+		{name: "all-local selection requests no LPU placement", localPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll}, wantPartitions: [][]int64{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Resolve a hybrid workload with the selected local partitions")
+			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+			dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{LocalPartitions: tc.localPartitions}
+			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
+
+			t.Log("Publish one request per remote workload replica, listing only remote compiler partitions")
+			_, missing, changed := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
+			require.False(t, changed)
+			partitions := make([][]int64, 0, len(missing))
+			for _, request := range missing {
+				compilerIDs := make([]int64, 0, len(request.Spec.Partitions))
+				for _, partition := range request.Spec.Partitions {
+					compilerIDs = append(compilerIDs, partition.CompilerPartitionID)
+				}
+				partitions = append(partitions, compilerIDs)
+			}
+			require.Equal(t, tc.wantPartitions, partitions)
+		})
+	}
 }

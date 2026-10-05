@@ -27,12 +27,8 @@ import logging
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as distribution_version
 from types import ModuleType
 from typing import Any
-
-from packaging.version import InvalidVersion, Version
 
 try:
     from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
@@ -331,29 +327,49 @@ def filter_supported_async_generate_kwargs(
 
 
 def supports_external_mm_hashes(engine: Any) -> bool:
-    """Return whether caller-provided MM hashes are safe for this SGLang.
+    """Enable safe caller-provided MM hashes when this SGLang accepts them.
 
-    SGLang 0.5.21 applies ``mm_hashes`` after processors such as Qwen-VL have
-    already built ``padded_input_ids``. Replacing each item's pad value without
-    rebuilding those IDs leaves the two representations inconsistent and can
-    crash the model's image-embedding replacement kernel. Keep routing
-    functional by letting SGLang derive its own feature hash for this release.
+    Supported SGLang releases apply caller hashes after some processors have
+    already built ``padded_input_ids``. Rebuild that derived field after
+    tokenization so the external hash, item pad value, and padded IDs remain
+    consistent. The repair is idempotent if upstream already rebuilt them.
     """
     if "mm_hashes" not in filter_supported_async_generate_kwargs(
         engine, {"mm_hashes": None}
     ):
         return False
 
-    try:
-        release = Version(distribution_version("sglang")).release
-    except (PackageNotFoundError, InvalidVersion):
-        logger.warning(
-            "Could not resolve the installed SGLang version; disabling external "
-            "multimodal hashes"
-        )
-        return False
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
+    if tokenize_one is None or getattr(
+        tokenize_one, "_dynamo_rebuilds_external_mm_padding", False
+    ):
+        return True
 
-    return release[:3] != (0, 5, 21)
+    # Deferred: schedule_batch imports torch and other SGLang runtime modules.
+    from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
+
+    async def tokenize_with_consistent_mm_padding(obj):
+        tokenized = await tokenize_one(obj)
+        mm_inputs = getattr(tokenized, "mm_inputs", None)
+        if getattr(obj, "mm_hashes", None) and mm_inputs is not None:
+            padded_input_ids = MultimodalProcessorOutput.build_padded_input_ids(
+                tokenized.input_ids,
+                mm_inputs.mm_items,
+            )
+            if padded_input_ids is not None:
+                mm_inputs.padded_input_ids = padded_input_ids
+        return tokenized
+
+    setattr(
+        tokenize_with_consistent_mm_padding,
+        "_dynamo_rebuilds_external_mm_padding",
+        True,
+    )
+    assert tokenizer_manager is not None
+    tokenizer_manager._tokenize_one_request = tokenize_with_consistent_mm_padding
+
+    return True
 
 
 def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:

@@ -66,6 +66,7 @@ async def test_encoder_health_follows_registration_and_shutdown(monkeypatch, fai
     registration_started = asyncio.Event()
     allow_registration = asyncio.Event()
     stop_serving = asyncio.Event()
+    serving_stopped = asyncio.Event()
     healthy = asyncio.Event()
     health = []
 
@@ -80,10 +81,17 @@ async def test_encoder_health_follows_registration_and_shutdown(monkeypatch, fai
         if failure == "registration":
             raise RuntimeError("registration failed")
 
-    async def serve(*args, **kwargs):
-        await stop_serving.wait()
-        if failure == "endpoint":
-            raise RuntimeError("endpoint failed")
+    async def serve_loop():
+        try:
+            await stop_serving.wait()
+            if failure == "endpoint":
+                raise RuntimeError("endpoint failed")
+        finally:
+            serving_stopped.set()
+
+    def serve(*args, **kwargs):
+        # DistributedRuntime returns a Future rather than a bare coroutine.
+        return asyncio.ensure_future(serve_loop())
 
     client = SimpleNamespace(wait_for_instances=AsyncMock())
     endpoint = SimpleNamespace(
@@ -144,6 +152,7 @@ async def test_encoder_health_follows_registration_and_shutdown(monkeypatch, fai
         else:
             await task
             assert health == [True, False]
+        assert serving_stopped.is_set()
         handler.cleanup.assert_called_once()
     finally:
         allow_registration.set()

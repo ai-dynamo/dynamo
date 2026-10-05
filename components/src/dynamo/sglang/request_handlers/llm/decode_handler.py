@@ -451,13 +451,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
-        """Probe whether engine.async_generate accepts ``mm_hashes``.
+        """Prepare caller hashes when engine.async_generate accepts them.
 
         Older builds (and forks lacking the interop patch) raise TypeError if
-        we pass it, while SGLang 0.5.21 accepts it but applies the hash after
-        constructing padded multimodal IDs. Resolve both API availability and
-        release-specific safety once at init; when disabled, requests still
-        complete and routing falls back to the text-prefix overlap signal.
+        we pass it. Supported releases accept it but may apply the hash after
+        constructing padded multimodal IDs; the compatibility helper repairs
+        that derived data once per tokenized request.
         """
         return supports_external_mm_hashes(engine)
 

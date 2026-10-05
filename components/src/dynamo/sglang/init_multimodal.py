@@ -107,24 +107,31 @@ async def init_multimodal_encode_worker(
 
     register_model_taint_route(runtime, generate_endpoint)
     registration_task = asyncio.create_task(register_encoder())
-    try:
-        _ = await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[
-                    (prometheus_names.labels.MODEL, server_args.served_model_name),
-                    (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
-                ],
-            ),
-            registration_task,
+    # Runtime endpoints return a Future today, while test and alternate runtime
+    # implementations may return a coroutine. ensure_future supports both.
+    serving_task = asyncio.ensure_future(
+        generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[
+                (prometheus_names.labels.MODEL, server_args.served_model_name),
+                (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
+            ],
         )
+    )
+    try:
+        _ = await asyncio.gather(serving_task, registration_task)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        serving_task.cancel()
         registration_task.cancel()
-        await asyncio.gather(registration_task, return_exceptions=True)
+        await asyncio.gather(
+            serving_task,
+            registration_task,
+            return_exceptions=True,
+        )
         runtime.set_health_status(False)
         handler.cleanup()
         if run_deferred_handlers is not None:

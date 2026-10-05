@@ -33,6 +33,7 @@ import (
 	"gotest.tools/v3/golden"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -64,6 +65,8 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 		"from_dgd_yaml/lpx_v2_vllm",
 		"from_dgd_yaml/node-local-v2-lpu-only",
 		"from_dgd_yaml/node-local-v2-hybrid",
+		"from_dgd_yaml/node-local-v2-hybrid-all-local",
+		"from_dgd_yaml/lpx-v2-local-partitions",
 		"from_dgd_yaml/node-local-v2-specdecode",
 		"from_dgd_yaml/node-local-v3-hx-lpu-only",
 		"from_dgd_yaml/node-local-v3-hx-specdecode",
@@ -94,23 +97,34 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			require.NoError(t, err)
 			got, extraResources, err := r.renderPodCliqueSet(t.Context(), child, &dynamoDeployment, workloads, plans)
 			require.NoError(t, err)
+			servingHash, err := dynamo.ComputeDGDWorkersSpecHash(&dynamoDeployment)
+			require.NoError(t, err)
 			for _, clique := range got.Spec.Template.Cliques {
 				require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 				component := dynamoDeployment.GetComponentByName(clique.Labels[consts.KubeLabelDynamoComponent])
 				require.NotNil(t, component)
 				require.True(t, component.IsLPX())
+				require.Equal(t, servingHash, clique.Labels[consts.KubeLabelDynamoWorkerHash])
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar})
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: dynamoDeployment.GetDynamoNamespaceForComponent(component) + "-" + servingHash})
 			}
 
 			t.Log("Render ordinary components independently from their explicit selection")
 			normal, err := dynamo.GenerateGrovePodCliqueSet(
 				t.Context(), &dynamoDeployment, (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController, controllerConfig, runtimeConfig,
-				kubeClient, nil, nil, nil, false, nil,
+				kubeClient, nil, nil, nil, true, nil,
 			)
 			require.NoError(t, err)
 			require.NotEqual(t, normal.Name, got.Name)
 			for _, clique := range normal.Spec.Template.Cliques {
 				require.NotEqual(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
-				require.False(t, dynamoDeployment.GetComponentByName(clique.Labels[consts.KubeLabelDynamoComponent]).IsLPX())
+				component := dynamoDeployment.GetComponentByName(clique.Labels[consts.KubeLabelDynamoComponent])
+				require.False(t, component.IsLPX())
+				if dynamo.IsWorkerComponent(string(component.ComponentType)) {
+					require.Equal(t, servingHash, clique.Labels[consts.KubeLabelDynamoWorkerHash])
+					require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: servingHash})
+					require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: dynamoDeployment.GetDynamoNamespaceForComponent(component)})
+				}
 			}
 			podCliqueSets := []*grovev1alpha1.PodCliqueSet{got}
 			if len(normal.Spec.Template.Cliques) > 0 {
@@ -118,6 +132,17 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			}
 
 			for _, pcs := range podCliqueSets {
+				// Assert revision bindings above; keep compiler-layout goldens independent of serving hashes.
+				for _, clique := range pcs.Spec.Template.Cliques {
+					if clique.Labels[consts.KubeLabelDynamoWorkerHash] == "" {
+						continue
+					}
+					delete(clique.Labels, consts.KubeLabelDynamoWorkerHash)
+					container := &clique.Spec.PodSpec.Containers[0]
+					container.Env = slices.DeleteFunc(container.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceWorkerSuffixEnvVar })
+					index := slices.IndexFunc(container.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceEnvVar })
+					container.Env[index].Value = clique.Labels[consts.KubeLabelDynamoNamespace]
+				}
 				sort.Slice(pcs.Spec.Template.Cliques, func(i, j int) bool {
 					return pcs.Spec.Template.Cliques[i].Name < pcs.Spec.Template.Cliques[j].Name
 				})
@@ -162,6 +187,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 			second := dgd.Spec.Components[0].DeepCopy()
 			second.ComponentName = "second"
 			dgd.Spec.Components = append(dgd.Spec.Components, *second)
+			dgd.Spec.Env = []corev1.EnvVar{{Name: consts.DynamoNamespaceEnvVar, Value: "authored"}, {Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: "custom"}}
 			dgd.Spec.Labels = map[string]string{"example.com/team": "inference"}
 			dgd.Spec.Annotations = map[string]string{"example.com/description": "serving"}
 			if tc.override != "" {
@@ -193,11 +219,22 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 			}
 			require.Equal(t, len(plans), serviceCount)
 
+			t.Log("An image update retains discovery selectors for both serving revisions")
+			dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers[0].Image += "-next"
+			nextPCS, nextResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+			require.NoError(t, err)
+
 			t.Log("Only serving roles advertise model discovery")
-			for _, clique := range pcs.Spec.Template.Cliques {
+			for index, clique := range pcs.Spec.Template.Cliques {
+				require.Subset(t, clique.Spec.PodSpec.Containers[0].Env, dgd.Spec.Env)
 				if clique.Labels[dynamo.LPXServingLabel] == consts.KubeLabelValueTrue {
 					require.NotEqual(t, lpxv1alpha1.PodRoleAgent, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
 					require.Equal(t, dynamo.HashModelName("test/model"), clique.Labels[consts.KubeLabelDynamoBaseModelHash])
+					service := getResource[*corev1.Service](t, resources, plans[clique.Labels[consts.KubeLabelDynamoComponent]].ResourcePrefix+"-serve")
+					require.NotEqual(t, clique.Labels[consts.KubeLabelDynamoWorkerHash], nextPCS.Spec.Template.Cliques[index].Labels[consts.KubeLabelDynamoWorkerHash])
+					for _, revision := range []*grovev1alpha1.PodCliqueTemplateSpec{clique, nextPCS.Spec.Template.Cliques[index]} {
+						require.True(t, labels.SelectorFromSet(service.Spec.Selector).Matches(labels.Merge(revision.Labels, map[string]string{grovecommon.LabelPartOfKey: pcs.Name})))
+					}
 				} else {
 					require.NotContains(t, clique.Labels, consts.KubeLabelDynamoDiscoveryEnabled)
 					require.NotContains(t, clique.Labels, consts.KubeLabelDynamoBaseModelHash)
@@ -208,6 +245,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 			for groupName, plan := range plans {
 				service := getResource[*corev1.Service](t, resources, plan.ResourcePrefix+"-serve")
 				component := dgd.GetComponentByName(groupName)
+				require.Equal(t, service.Spec.Selector, getResource[*corev1.Service](t, nextResources, service.Name).Spec.Selector)
 				require.Equal(t, child.Namespace, service.Namespace)
 				require.Equal(t, "inference", service.Labels["example.com/team"])
 				require.Equal(t, map[string]string{
@@ -469,7 +507,7 @@ func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	root := t.TempDir()
 	const buildID = "split-io"
 	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, testV2GraphManifestFixture{
-		topology:       "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
+		topology:       "test-topology",
 		partitionCount: 1, numChips: 8, devicesPerNode: 8,
 		compilationMode:   manifestcapnpv2.CompilationMode_lpx,
 		nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
@@ -660,14 +698,14 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 
 	v2Builds := map[string]testV2GraphManifestFixture{
 		"node-local-v2-connected": {
-			topology:              "URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA",
+			topology:              "test-topology",
 			partitionCount:        2,
 			numChips:              16,
 			devicesPerNode:        8,
 			selectedPropSyncChain: []uint32{0, 1},
 		},
 		"node-local-v2-connected-lpx": {
-			topology:              "URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA",
+			topology:              "test-topology",
 			partitionCount:        2,
 			numChips:              16,
 			devicesPerNode:        8,
@@ -676,7 +714,7 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 			nonLPUDeviceTypes:     []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
 		},
 		"llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c": {
-			topology:          "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
+			topology:          "test-topology",
 			partitionCount:    17,
 			numChips:          8,
 			devicesPerNode:    8,
@@ -684,7 +722,7 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 			nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
 		},
 		"llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c": {
-			topology:       "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
+			topology:       "test-topology",
 			partitionCount: 17,
 			numChips:       8,
 			devicesPerNode: 8,
@@ -763,7 +801,7 @@ func newTestGraphProgram(
 func testGbuildManifestCapnp(t *testing.T) []byte {
 	t.Helper()
 
-	const topology = "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106"
+	const topology = "test-topology"
 
 	msg, seg := capnp.NewSingleSegmentMessage(nil)
 	manifest, err := manifestcapnpv2.NewRootManifest(seg)
@@ -820,10 +858,23 @@ func testGbuildManifestCapnp(t *testing.T) []byte {
 	require.NoError(t, lpuDetail.SetTopology(topology))
 	lpuDetail.SetNumChips(8)
 	lpuDetail.SetDevicesPerNode(8)
+	setTestChipArchitecture(t, lpuDetail, "polaris")
 
 	data, err := msg.Marshal()
 	require.NoError(t, err)
 	return data
+}
+
+func setTestChipArchitecture(t *testing.T, detail manifestcapnpv2.LpuPartitionArtifact, architecture string) {
+	t.Helper()
+
+	programs, err := capnp.NewCompositeList(detail.Segment(), capnp.ObjectSize{PointerCount: 2}, 1)
+	require.NoError(t, err)
+	require.NoError(t, detail.SetReserved4(programs.ToPtr()))
+	chips, err := capnp.NewCompositeList(programs.Struct(0).Segment(), capnp.ObjectSize{DataSize: 8, PointerCount: 2}, 1)
+	require.NoError(t, err)
+	require.NoError(t, programs.Struct(0).SetPtr(1, chips.ToPtr()))
+	require.NoError(t, chips.Struct(0).SetText(1, architecture))
 }
 
 func testV2GraphManifestCapnp(t *testing.T, fixture testV2GraphManifestFixture) []byte {
@@ -873,6 +924,7 @@ func testV2GraphManifestCapnp(t *testing.T, fixture testV2GraphManifestFixture) 
 		require.NoError(t, detail.SetTopology(fixture.topology))
 		detail.SetNumChips(fixture.numChips)
 		detail.SetDevicesPerNode(fixture.devicesPerNode)
+		setTestChipArchitecture(t, detail, "polaris")
 	}
 	for index, deviceType := range fixture.nonLPUDeviceTypes {
 		partition := partitions.At(fixture.partitionCount + index)
@@ -931,6 +983,7 @@ func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) 
 	require.NoError(t, detail.SetTopology("opaque-v3-topology"))
 	detail.SetNumChips(16)
 	detail.SetDevicesPerNode(16)
+	setTestChipArchitecture(t, detail, "polarisB0")
 	for offset, deviceType := range fixture.nonLPUDeviceTypes {
 		partition := partitions.At(1 + offset)
 		ref, err := partition.NewPartition()
@@ -1037,9 +1090,10 @@ func writeLPXTestBuild(
 		detail, err := partition.Detail().NewLpu()
 		require.NoError(t, err)
 		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partitionID)))
-		require.NoError(t, detail.SetTopology("URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA"))
+		require.NoError(t, detail.SetTopology("test-topology"))
 		detail.SetNumChips(16)
 		detail.SetDevicesPerNode(8)
+		setTestChipArchitecture(t, detail, "polaris")
 	}
 	if compilationMode == manifestcapnpv2.CompilationMode_lpx {
 		partition := partitions.At(len(partitionIDs))

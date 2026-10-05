@@ -786,8 +786,6 @@ async def test_multimodal_prefill_rejects_parallel_sampling_before_generation():
 @pytest.mark.asyncio
 async def test_multimodal_decode_preserves_position_metadata_without_embeddings():
     """Decode needs M-RoPE grids/timing even though only prefill receives features."""
-    from unittest.mock import AsyncMock
-
     handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
     handler.enable_trace = False
     handler._get_bootstrap_from_prefill = AsyncMock(

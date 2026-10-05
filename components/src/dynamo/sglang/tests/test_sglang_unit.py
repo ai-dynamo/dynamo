@@ -784,20 +784,38 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
 
 
-@pytest.mark.parametrize(
-    ("version", "expected"),
-    [("0.5.21", False), ("0.5.22", True)],
-)
-def test_external_mm_hashes_avoid_sglang_0521_padding_bug(
-    monkeypatch, version, expected
-):
+@pytest.mark.asyncio
+async def test_external_mm_hashes_rebuild_padding_after_hash_override():
+    item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
+    mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
+    tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
+
+    class TokenizerManager:
+        async def _tokenize_one_request(self, obj):
+            return tokenized
+
     class MmHashEngine:
+        tokenizer_manager = TokenizerManager()
+
         async def async_generate(self, mm_hashes=None):
             return None
 
-    monkeypatch.setattr(sglang_compat, "distribution_version", lambda _: version)
+    engine = MmHashEngine()
+    assert supports_external_mm_hashes(engine)
+    patched = engine.tokenizer_manager._tokenize_one_request
+    result = await patched(SimpleNamespace(mm_hashes=["abc"]))
 
-    assert supports_external_mm_hashes(MmHashEngine()) is expected
+    assert result.mm_inputs.padded_input_ids == [1, 91, 91, 4]
+    assert supports_external_mm_hashes(engine)
+    assert engine.tokenizer_manager._tokenize_one_request is patched
+
+
+def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
+    class LegacyEngine:
+        async def async_generate(self):
+            return None
+
+    assert not supports_external_mm_hashes(LegacyEngine())
 
 
 @pytest.mark.parametrize(

@@ -4,8 +4,8 @@
 use super::*;
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
-    BackendError, BootstrapInfo, ErrorType, GuidedDecodingOptions, OutputOptions, PrefillResult,
-    SamplingOptions, StopConditions,
+    BackendError, BootstrapInfo, ErrorType, GuidedDecodingOptions, KvHint, KvHintAction,
+    OutputOptions, PrefillResult, SamplingOptions, StopConditions,
 };
 use serde_json::json;
 
@@ -406,13 +406,6 @@ fn unsupported_sampling_controls_are_rejected() {
         ),
         (
             SamplingOptions {
-                seed: Some(0),
-                ..Default::default()
-            },
-            "seed",
-        ),
-        (
-            SamplingOptions {
                 include_stop_str_in_output: Some(true),
                 ..Default::default()
             },
@@ -435,9 +428,7 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
         "prompt_embeds",
         "multimodal",
         "mm_processor_kwargs",
-        "max_thinking_tokens",
         "visible",
-        "priority",
     ] {
         let mut request = request();
         let message = match field {
@@ -457,20 +448,9 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
                 request.mm_processor_kwargs = Some(json!({}));
                 "multimodal"
             }
-            "max_thinking_tokens" => {
-                request.stop_conditions.max_thinking_tokens = Some(0);
-                "max_thinking_tokens"
-            }
             "visible" => {
                 request.stop_conditions.stop_token_ids_visible = Some(vec![42]);
                 "visible stop-token"
-            }
-            "priority" => {
-                request.routing = Some(RoutingHints {
-                    priority: Some(-1),
-                    ..Default::default()
-                });
-                "engine priority"
             }
             _ => unreachable!(),
         };
@@ -541,31 +521,68 @@ fn json_and_regex_guides_use_typed_constraints() {
             None,
         )
         .unwrap_err(),
-        "only one of JSON-schema or regex",
+        "only one guided-decoding constraint",
     );
 }
 
 #[test]
-fn unsupported_guides_and_modifiers_are_rejected() {
+fn additional_guides_use_typed_constraints() {
+    for (guided, expected) in [
+        (
+            GuidedDecodingOptions {
+                choice: Some(vec!["a".to_string(), "b".to_string()]),
+                ..Default::default()
+            },
+            pb::guided_decoding::Constraint::Choice(pb::ChoiceConstraint {
+                values: vec!["a".to_string(), "b".to_string()],
+            }),
+        ),
+        (
+            GuidedDecodingOptions {
+                grammar: Some("root ::= 'a'".to_string()),
+                ..Default::default()
+            },
+            pb::guided_decoding::Constraint::Ebnf("root ::= 'a'".to_string()),
+        ),
+        (
+            GuidedDecodingOptions {
+                structural_tag: Some(json!({"type": "object"})),
+                ..Default::default()
+            },
+            pb::guided_decoding::Constraint::StructuralTag(r#"{"type":"object"}"#.to_string()),
+        ),
+    ] {
+        let mut request = request();
+        request.sampling_options.guided_decoding = Some(guided);
+        let mapped = build_generate_request(
+            &request,
+            "guide",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            mapped
+                .sampling_params
+                .unwrap()
+                .guided_decoding
+                .unwrap()
+                .constraint,
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn unsupported_guide_modifiers_are_rejected() {
     for guided in [
-        GuidedDecodingOptions {
-            choice: Some(vec!["a".to_string()]),
-            ..Default::default()
-        },
-        GuidedDecodingOptions {
-            grammar: Some("root ::= 'a'".to_string()),
-            ..Default::default()
-        },
         GuidedDecodingOptions {
             backend: Some("xgrammar".to_string()),
             ..Default::default()
         },
         GuidedDecodingOptions {
             whitespace_pattern: Some(" *".to_string()),
-            ..Default::default()
-        },
-        GuidedDecodingOptions {
-            structural_tag: Some(json!({})),
             ..Default::default()
         },
     ] {
@@ -580,9 +597,60 @@ fn unsupported_guides_and_modifiers_are_rejected() {
                 None,
             )
             .unwrap_err(),
-            "only one of JSON-schema or regex",
+            "backend and whitespace modifiers",
         );
     }
+}
+
+#[test]
+fn sglang_0521_request_controls_are_forwarded() {
+    let mut request = request();
+    request.sampling_options.seed = Some(42);
+    request.stop_conditions.max_thinking_tokens = Some(17);
+    request.require_reasoning = true;
+    request.routing = Some(RoutingHints {
+        priority: Some(-3),
+        ..Default::default()
+    });
+    request.kv_hint = Some(KvHint::new(
+        "message-1",
+        vec![KvHintAction::new(
+            "action-1",
+            "kv.fetch",
+            "1.0",
+            std::collections::BTreeMap::from([("source".to_string(), json!("worker-7"))]),
+        )],
+    ));
+
+    let mapped = build_generate_request(
+        &request,
+        "controls",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(mapped.sampling_params.unwrap().seed, Some(42));
+    assert_eq!(mapped.priority, Some(-3));
+    assert_eq!(mapped.require_reasoning, Some(true));
+    assert_eq!(mapped.max_thinking_tokens, Some(17));
+    let hints = mapped.kv_hints.unwrap();
+    assert_eq!(hints.protocol_version, "0.1");
+    assert_eq!(hints.message_id, "message-1");
+    assert_eq!(hints.actions.len(), 1);
+    let action = &hints.actions[0];
+    assert_eq!(action.action_id, "action-1");
+    assert_eq!(action.action_type, "kv.fetch");
+    assert_eq!(action.action_version, "1.0");
+    assert_eq!(
+        dynamo_sidecar_common::struct_to_json(
+            action.payload.clone().unwrap(),
+            "SGLang",
+            "kv hint action payload",
+        )
+        .unwrap(),
+        json!({"source": "worker-7"})
+    );
 }
 
 #[test]
