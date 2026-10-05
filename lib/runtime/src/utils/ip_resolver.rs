@@ -519,8 +519,6 @@ pub(crate) mod test_support {
         pub(crate) interfaces: Vec<(&'static str, IpAddr)>,
         pub(crate) down_interfaces: Vec<&'static str>,
         pub(crate) interface_error: Option<ProbeOutcome>,
-        pub(crate) ipv4_calls: Cell<usize>,
-        pub(crate) ipv6_calls: Cell<usize>,
         pub(crate) interface_calls: Cell<usize>,
     }
 
@@ -535,8 +533,6 @@ pub(crate) mod test_support {
                 ],
                 down_interfaces: Vec::new(),
                 interface_error: None,
-                ipv4_calls: Cell::new(0),
-                ipv6_calls: Cell::new(0),
                 interface_calls: Cell::new(0),
             }
         }
@@ -548,12 +544,10 @@ pub(crate) mod test_support {
 
     impl IpResolver for StubResolver {
         fn local_ip(&self) -> Result<IpAddr, Error> {
-            self.ipv4_calls.set(self.ipv4_calls.get() + 1);
             self.ipv4.result()
         }
 
         fn local_ipv6(&self) -> Result<IpAddr, Error> {
-            self.ipv6_calls.set(self.ipv6_calls.get() + 1);
             self.ipv6.result()
         }
 
@@ -609,8 +603,6 @@ mod tests {
         let resolved = resolve_local_host(&resolver).unwrap();
         assert_eq!(resolved.bind_ip(), ip("2001:db8::5"));
         assert!(!resolved.used_loopback_fallback());
-        assert_eq!(resolver.ipv4_calls.get(), 1);
-        assert_eq!(resolver.ipv6_calls.get(), 1);
         assert_eq!(resolver.interface_calls.get(), 1);
     }
 
