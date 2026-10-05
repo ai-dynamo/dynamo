@@ -86,6 +86,20 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
       Expiry records `LPXSchedulingDeadlineExceeded` before cleanup. Cleanup removes complete engine replicas only from a trailing suffix: an expired interior replica blocks deadline cleanup to preserve healthy higher ordinals. Explicit `replicas` authorizes lowering the Grove replica count to the surviving prefix; externally managed capacity remains unchanged. Grove scaling and owner garbage collection handle pod cleanup; the LPX graph controller does not delete pods directly. A later LPX input revision authorizes republication after cleanup. An existing failure remains cleanup authority for cycles that started before it, so retiring those cycles does not consume the retry edit.
     </ParamField>
   </Indent>
+
+  <ParamField path="experimental" type="LPXExperimentalSpec">
+    Groups opt-in LPX options whose shape may change incompatibly between v1beta1 releases. These fields are not covered by the v1beta1 deprecation policy.
+  </ParamField>
+
+  <Indent>
+    <ParamField path="localPartitions" type="LPXLocalPartitions">
+      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. LPU-only, speculative, and HX builds reject this field.
+
+      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the conductor's `lpu_servers` and the Agents' partition configuration. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
+
+      `ids` lists compiler partition IDs of the build's runtime partitions. A selected prop-sync chain is one runtime partition: select its first partition, which keeps the whole chain on the GPU. Unknown IDs and non-first chain members are rejected during reconciliation. Changing the selection changes the workload digest and rolls the workload.
+    </ParamField>
+  </Indent>
 </Indent>
 
 <ParamField path="runtimeVersionOverride" type="string">
@@ -135,7 +149,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Semantic role name: `leader` or `worker` for ordinary multinode components, `conductor` or `agent` for LPX components. Names must be unique within the component.
   </ParamField>
   <ParamField path="replicas" type="integer">
-    Logical cardinality of this role in one complete component instance; minimum `1`. For ordinary multinode components, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape. For LPX, omitted conductor replicas use `1`, subject to runtime-specific limits. Agent replicas are derived from the model build; an explicit count must match the build.
+    Logical cardinality of this role in one complete component instance; minimum `1`. For ordinary multinode components, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape. For LPX, omitted conductor replicas use `1`, subject to runtime-specific limits. Agent replicas are derived from the model build and `lpx.experimental.localPartitions`; an explicit count must match that derived count.
   </ParamField>
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.

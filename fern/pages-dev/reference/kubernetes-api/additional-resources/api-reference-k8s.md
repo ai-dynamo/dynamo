@@ -2505,6 +2505,60 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
 | `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
+| `experimental` _[LPXExperimentalSpec](#lpxexperimentalspec)_ | experimental groups opt-in LPX options whose API shape may change in<br />breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
+
+
+#### LPXExperimentalSpec
+
+
+
+LPXExperimentalSpec groups experimental LPX options.
+
+
+
+_Appears in:_
+- [LPXConfig](#lpxconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `localPartitions` _[LPXLocalPartitions](#lpxlocalpartitions)_ | localPartitions selects partitions of a hybrid build that the Cyborg<br />conductor runs on its own GPU. The operator schedules LPU Agents only for<br />the remaining partitions, and schedules none when every partition is<br />local. Omission runs every partition on LPUs. |  | Optional: \{\} <br /> |
+
+
+#### LPXLocalPartitions
+
+
+
+LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
+Partition IDs are the compiler partition IDs of the build's runtime
+partitions. A selected prop-sync chain is identified by its first partition.
+
+
+
+_Appears in:_
+- [LPXExperimentalSpec](#lpxexperimentalspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `mode` _[LPXLocalPartitionsMode](#lpxlocalpartitionsmode)_ | mode selects the partitions that run on the Cyborg GPU. `All` runs every<br />partition; `IDs` runs the partitions listed in ids. |  | Enum: [All IDs] <br />Required: \{\} <br /> |
+| `ids` _integer array_ | ids lists the compiler partition IDs that run on the Cyborg GPU.<br />Required when mode is `IDs` and forbidden otherwise. |  | MinItems: 1 <br />items:Maximum: 4.294967295e+09 <br />items:Minimum: 0 <br />Optional: \{\} <br /> |
+
+
+#### LPXLocalPartitionsMode
+
+_Underlying type:_ _string_
+
+LPXLocalPartitionsMode selects how LPXLocalPartitions chooses partitions.
+
+_Validation:_
+- Enum: [All IDs]
+
+_Appears in:_
+- [LPXLocalPartitions](#lpxlocalpartitions)
+
+| Field | Description |
+| --- | --- |
+| `All` | LPXLocalPartitionsModeAll runs every partition on the Cyborg GPU.<br /> |
+| `IDs` | LPXLocalPartitionsModeIDs runs the partitions listed in ids on the Cyborg GPU.<br /> |
 
 
 #### MockerSpec
