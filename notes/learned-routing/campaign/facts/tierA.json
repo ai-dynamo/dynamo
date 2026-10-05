@@ -1,0 +1,4847 @@
+{
+ "a12_m1_default_init": {
+  "init": "s1: theta0 = -e0 (default router), as m1-s1",
+  "rule": "CONTRACT A12: argmax val k = 0..2 over m1c-s1's validated checkpoints only",
+  "selected": {
+   "generation": 20,
+   "policy_sha": "9a44cb58e904b29985b971092da790e2b8fde78829cad7d0a600d41ec1aa2e57",
+   "run": "m1c-s1",
+   "spec": {
+    "name": "m1-default-init@p2-m1c-s1-g20-mean",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      16.541278180717825,
+      -2.2737938976724337,
+      0.0,
+      0.0,
+      -39.22625809552176,
+      0.20618988014460626,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "val_objective": 0.16599470141735354,
+   "values": {
+    "parameters.theta": [
+     -1.0,
+     16.541278180717825,
+     -2.2737938976724337,
+     0.0,
+     0.0,
+     -39.22625809552176,
+     0.20618988014460626,
+     0.0
+    ]
+   },
+   "which": "mean"
+  },
+  "val_candidates_counted": 10
+ },
+ "a12_m1_default_init_unconstrained": {
+  "gaming_flag": {
+   "evidence": [
+    "audits/phase2-mid/gaming-concentration.md F1, F2",
+    "audits/phase2-mid/sim-exploitation.md F1"
+   ],
+   "flag": "GAMING (CONTRACT A11.2 triggered): hot-prefix segregation plus load attraction (theta7 > 0) stacks ISL >= 60K requests on one prefill-busy worker; a 0%-good worker in every replicate at mooncake-w1-base-n8-open-L3; ISL >= 60K good 0.425 vs 1.000 for default/ramjet/M0",
+   "use": "disclosed row only; never the headline M1, never a warm start (tier B uses policy key m1)"
+  },
+  "init": "s1: theta0 = -e0 (default router)",
+  "rule": "CONTRACT A12: argmax val k = 0..2 over m1-s1's validated checkpoints only",
+  "selected": {
+   "generation": 25,
+   "policy_sha": "a9f0c250a5db25c31e36af10ed3b8db33db7d089e7eaf811c6c916a9e1d8d3d1",
+   "run": "m1-s1",
+   "spec": {
+    "name": "m1u-default-init@p2-m1-s1-g25-mean",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      11.103840644937762,
+      -6.833127800170352,
+      -0.8528104032974184,
+      -3.545900807874773,
+      -61.865439437468524,
+      1.8744621792909157,
+      0.07069921418750624
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "val_objective": 0.16147822534591058,
+   "values": {
+    "parameters.theta": [
+     -1.0,
+     11.103840644937762,
+     -6.833127800170352,
+     -0.8528104032974184,
+     -3.545900807874773,
+     -61.865439437468524,
+     1.8744621792909157,
+     0.07069921418750624
+    ]
+   },
+   "which": "mean"
+  },
+  "val_candidates_counted": 10
+ },
+ "binding": "facts/gate.json full_plan tier A as amended by CONTRACT A11; selection rule LR-10 (argmax lr-train val objective, val k = 0..2, over restarts x validated checkpoints)",
+ "budget_check": true,
+ "budget_signatures_(fevals,val_checkpoints)": [
+  [
+   400,
+   5
+  ]
+ ],
+ "counts": {
+  "drift_done": 4,
+  "drift_runs": 4,
+  "statuses": {
+   "done": 40
+  },
+  "tier_A_train_done": 36,
+  "tier_A_train_runs": 36
+ },
+ "drift": {
+  "cross_play_losses": {
+   "l1-tuned on l3": 0.08650493790941416,
+   "l3-tuned on l1": -0.006724477620608141,
+   "n4-tuned on n8": -0.0042808205845452085,
+   "n8-tuned on n4": 0.002138999189906482
+  },
+  "interpretation": {
+   "evidence_of_drift": false,
+   "optional": "a full-budget drift rerun (specialists at B = 400 on their subsets) is optional and not required for the headline",
+   "report_wording": "describe the LR-15 check as underpowered at B/4 with no evidence of coefficient drift; do not cite the 0.087 cross-play loss as drift",
+   "source": "audits/phase2-mid/overfit-selection.md F1; runs/audits/phase2-mid-overfit-selection/out/drift_audit.json, drift_vs_pooled_k0_2.json; fixer verification runs/phase2-fix/checks/drift_verify.json",
+   "use_for_m2_context_sources": false,
+   "verdict": "INCONCLUSIVE: no evidence of drift",
+   "why": [
+    "the only loss above the MDE (l1-tuned on l3, 0.0865) rests on 3 cells with SE 0.0645 over cells (1.3 SE), driven by one cell (per-cell {'agentx-V2-base-n4-lanes-L3': 0.0342, 'mooncake-w1-base-n8-open-L3': 0.2148, 'sessions-s5-base-n8-open-L3': 0.0105})",
+    "the MDE 0.038 is for the full 6-segment val set; the matrix columns have 2-5 cells (underpowered at B/4 = 96 evaluations)",
+    "the regime-specific thetas are undertrained: distance moved from theta0 in feature-scale units {'drift-l1': 0.08, 'drift-l3': 0.25, 'drift-n4': 0.28, 'drift-n8': 0.26} vs 0.83 for m1-s1 after 400 evaluations",
+    "a single pooled theta beats every specialist on the specialist's own val cells (k0-2): pooled minus specialist {'l1': 0.0125, 'l3': 0.0216, 'n4': 0.007, 'n8': 0.0137}; the pooled thetas are the unconstrained tier-A M1 rows (m1u), which also had 4x the budget and all cells"
+   ]
+  },
+  "matrix_rows_trained_cols_evaluated": {
+   "l1": {
+    "l1": 0.07822572039983142,
+    "l3": 0.20026851225275144,
+    "n4": 0.05979233823908634,
+    "n8": 0.1890896896777286
+   },
+   "l3": {
+    "l1": 0.08495019802043956,
+    "l3": 0.2867734501621656,
+    "n4": 0.08545427710817229,
+    "n8": 0.2584283719724617
+   },
+   "n4": {
+    "l1": 0.08107133595808041,
+    "l3": 0.30371667023242904,
+    "n4": 0.08872172126443456,
+    "n8": 0.2699579460081012
+   },
+   "n8": {
+    "l1": 0.07793367338293905,
+    "l3": 0.3014310640944689,
+    "n4": 0.08658272207452808,
+    "n8": 0.265677125423556
+   }
+  },
+  "mde": 0.038,
+  "replicates": "val k = 3..10 (fresh)",
+  "rule": "LR-15: if every cross-play loss is within the MDE, deprioritize M2 (gate cut 5)",
+  "within_mde": false,
+  "within_mde_is_raw_rule_output": true
+ },
+ "note": null,
+ "per_policy": {
+  "chwbl": {
+   "policy": "chwbl tuned",
+   "restart_best_val_k0_2": {
+    "chwbl-s1": 0.028959891209280025,
+    "chwbl-s2": 0.022931404505000145,
+    "chwbl-s3": 0.02798765174945578
+   },
+   "restart_sd": 0.0032366015537902263,
+   "restart_spread_max_minus_min": 0.0060284867042798805,
+   "restarts": [
+    "chwbl-s1",
+    "chwbl-s2",
+    "chwbl-s3"
+   ],
+   "restarts_done": [
+    "chwbl-s1",
+    "chwbl-s2",
+    "chwbl-s3"
+   ],
+   "selected": {
+    "generation": 5,
+    "policy_sha": "aac07ce173ad1f82c449c4a84b433e6e649333c23043fbc1195af28af75d17c6",
+    "run": "chwbl-s1",
+    "spec": {
+     "name": "chwbl@p2-chwbl-s1-g5-mean",
+     "parameters": {
+      "load_factor": 1.0931189686789615,
+      "prefix_tokens": 2754
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": false,
+     "type": "chwbl"
+    },
+    "val_objective": 0.028959891209280025,
+    "values": {
+     "parameters.load_factor": 1.0931189686789615,
+     "parameters.prefix_tokens": 2754
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "chwbl",
+   "val_candidates_counted": 30
+  },
+  "dualmap": {
+   "policy": "dualmap tuned",
+   "restart_best_val_k0_2": {
+    "dualmap-s1": 0.03836183786500774,
+    "dualmap-s2": 0.031933564814210655,
+    "dualmap-s3": 0.040167736135162925
+   },
+   "restart_sd": 0.004327923680791718,
+   "restart_spread_max_minus_min": 0.00823417132095227,
+   "restarts": [
+    "dualmap-s1",
+    "dualmap-s2",
+    "dualmap-s3"
+   ],
+   "restarts_done": [
+    "dualmap-s1",
+    "dualmap-s2",
+    "dualmap-s3"
+   ],
+   "selected": {
+    "generation": 10,
+    "policy_sha": "022ea1ab8fb3a1a33fb06227371165d442acc2d411286ac07431c40275c238c8",
+    "run": "dualmap-s3",
+    "spec": {
+     "name": "dualmap@p2-dualmap-s3-g10-mean",
+     "parameters": {
+      "hash_prefix_blocks": 63,
+      "pending_prefill_token_budget": 3101,
+      "window_requests": 545
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": false,
+     "type": "dualmap"
+    },
+    "val_objective": 0.040167736135162925,
+    "values": {
+     "parameters.hash_prefix_blocks": 63,
+     "parameters.pending_prefill_token_budget": 3101,
+     "parameters.window_requests": 545
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "dualmap",
+   "val_candidates_counted": 30
+  },
+  "llmdob": {
+   "policy": "llm-d-optimized-baseline (ttft_source throughput) tuned",
+   "restart_best_val_k0_2": {
+    "llmdob-s1": 0.10466492990660352,
+    "llmdob-s2": 0.1029026953640043,
+    "llmdob-s3": 0.10355736374258794
+   },
+   "restart_sd": 0.0008907640986553239,
+   "restart_spread_max_minus_min": 0.001762234542599217,
+   "restarts": [
+    "llmdob-s1",
+    "llmdob-s2",
+    "llmdob-s3"
+   ],
+   "restarts_done": [
+    "llmdob-s1",
+    "llmdob-s2",
+    "llmdob-s3"
+   ],
+   "selected": {
+    "generation": 5,
+    "policy_sha": "1068b0ac11c23a48eb7b9e40a0734df39e2fe1c69087a69a05a63fb66f535a8a",
+    "run": "llmdob-s1",
+    "spec": {
+     "name": "llmdob@p2-llmdob-s1-g5-mean",
+     "parameters": {
+      "affinity_threshold": 0.8832666398044271,
+      "max_ttft_penalty_ms": 4012.9495817430607,
+      "peak_prefill_tokens_per_second": 15928.0,
+      "queue_threshold_tokens": 78710,
+      "ttft_source": "throughput"
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": false,
+     "type": "llm-d-optimized-baseline"
+    },
+    "val_objective": 0.10466492990660352,
+    "values": {
+     "parameters.affinity_threshold": 0.8832666398044271,
+     "parameters.max_ttft_penalty_ms": 4012.9495817430607,
+     "parameters.queue_threshold_tokens": 78710
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "llm-d-optimized-baseline",
+   "val_candidates_counted": 30
+  },
+  "llmdpp": {
+   "policy": "llm-d-precise-prefix tuned",
+   "restart_best_val_k0_2": {
+    "llmdpp-s1": 0.13844963085559006,
+    "llmdpp-s2": 0.14144503820442356,
+    "llmdpp-s3": 0.13941769215492775
+   },
+   "restart_sd": 0.0015286017504638754,
+   "restart_spread_max_minus_min": 0.0029954073488334954,
+   "restarts": [
+    "llmdpp-s1",
+    "llmdpp-s2",
+    "llmdpp-s3"
+   ],
+   "restarts_done": [
+    "llmdpp-s1",
+    "llmdpp-s2",
+    "llmdpp-s3"
+   ],
+   "selected": {
+    "generation": 25,
+    "policy_sha": "2d7129bfae63d67f39017b0d846db2716f4925f0b66ba2703b9f91d7b0127711",
+    "run": "llmdpp-s2",
+    "spec": {
+     "name": "llmdpp@p2-llmdpp-s2-g25-mean",
+     "parameters": {
+      "prefix_match_length_scale_tokens": 12191,
+      "prefix_match_length_weight": 0.3457432464867829,
+      "weights": {
+       "kv_cache_utilization": 1.7659798019934383,
+       "prefix": 2.0,
+       "queue": 0.8827526711588871
+      }
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": false,
+     "type": "llm-d-precise-prefix"
+    },
+    "val_objective": 0.14144503820442356,
+    "values": {
+     "parameters.prefix_match_length_scale_tokens": 12191,
+     "parameters.prefix_match_length_weight": 0.3457432464867829,
+     "parameters.weights.kv_cache_utilization": 1.7659798019934383,
+     "parameters.weights.queue": 0.8827526711588871
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "llm-d-precise-prefix",
+   "val_candidates_counted": 30
+  },
+  "lmetric": {
+   "policy": "lmetric tuned",
+   "restart_best_val_k0_2": {
+    "lmetric-s1": 0.1329687173815975,
+    "lmetric-s2": 0.1334104775240062,
+    "lmetric-s3": 0.13290427182965242
+   },
+   "restart_sd": 0.0002755447506252111,
+   "restart_spread_max_minus_min": 0.0005062056943537785,
+   "restarts": [
+    "lmetric-s1",
+    "lmetric-s2",
+    "lmetric-s3"
+   ],
+   "restarts_done": [
+    "lmetric-s1",
+    "lmetric-s2",
+    "lmetric-s3"
+   ],
+   "selected": {
+    "generation": 10,
+    "policy_sha": "c22c3cfe693c38e9c1c0fa619dca57d5b8e81d811c9b548c4bb497f4cd940307",
+    "run": "lmetric-s2",
+    "spec": {
+     "name": "lmetric@p2-lmetric-s2-g10-mean",
+     "parameters": {
+      "class_prefix_blocks": 4,
+      "hotspot_detection": true,
+      "window_requests": 140
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": false,
+     "type": "lmetric"
+    },
+    "val_objective": 0.1334104775240062,
+    "values": {
+     "parameters.class_prefix_blocks": 4,
+     "parameters.window_requests": 140
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "lmetric",
+   "val_candidates_counted": 30
+  },
+  "m0": {
+   "policy": "M0: dynamo-default-cost-fn tuned",
+   "restart_best_val_k0_2": {
+    "m0-s1": 0.13204141234843694,
+    "m0-s2": 0.13184793677651283,
+    "m0-s3": 0.13342890354099643
+   },
+   "restart_sd": 0.000862363082539606,
+   "restart_spread_max_minus_min": 0.0015809667644836045,
+   "restarts": [
+    "m0-s1",
+    "m0-s2",
+    "m0-s3"
+   ],
+   "restarts_done": [
+    "m0-s1",
+    "m0-s2",
+    "m0-s3"
+   ],
+   "selected": {
+    "generation": 20,
+    "policy_sha": "ce02946715cb69f83343dc760c09f17d6da0eeae46392f442fe8c3be4ff5137b",
+    "run": "m0-s3",
+    "spec": {
+     "name": "m0@p2-m0-s3-g20-mean",
+     "parameters": {
+      "decode_active_request_weight": 3288.855529743769,
+      "overlap_score_credit": 1.2365898565276212,
+      "overlap_score_credit_decay": 2.1526561532556725,
+      "prefill_load_scale": 78.01424273995057,
+      "router_temperature": 0.0013629625021912967
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": true,
+     "type": "dynamo-default-cost-fn"
+    },
+    "val_objective": 0.13342890354099643,
+    "values": {
+     "parameters.decode_active_request_weight": 3288.855529743769,
+     "parameters.overlap_score_credit": 1.2365898565276212,
+     "parameters.overlap_score_credit_decay": 2.1526561532556725,
+     "parameters.prefill_load_scale": 78.01424273995057,
+     "parameters.router_temperature": 0.0013629625021912967
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "dynamo-default-cost-fn",
+   "val_candidates_counted": 30
+  },
+  "m1": {
+   "policy": "M1 (sign-constrained, CONTRACT A11.2): learned-choice v1 rank 0, theta[0] pinned -1, temperature 0, theta3/theta4/theta5/theta7 clamped <= 0",
+   "restart_best_val_k0_2": {
+    "m1c-s1": 0.16599470141735354,
+    "m1c-s2": 0.16238116753863213,
+    "m1c-s3": 0.13750262824524545
+   },
+   "restart_sd": 0.015512347652273729,
+   "restart_spread_max_minus_min": 0.028492073172108084,
+   "restarts": [
+    "m1c-s1",
+    "m1c-s2",
+    "m1c-s3"
+   ],
+   "restarts_done": [
+    "m1c-s1",
+    "m1c-s2",
+    "m1c-s3"
+   ],
+   "selected": {
+    "generation": 20,
+    "policy_sha": "9a44cb58e904b29985b971092da790e2b8fde78829cad7d0a600d41ec1aa2e57",
+    "run": "m1c-s1",
+    "spec": {
+     "name": "m1@p2-m1c-s1-g20-mean",
+     "parameters": {
+      "feature_set": "v1",
+      "temperature": 0.0,
+      "theta": [
+       -1.0,
+       16.541278180717825,
+       -2.2737938976724337,
+       0.0,
+       0.0,
+       -39.22625809552176,
+       0.20618988014460626,
+       0.0
+      ],
+      "tie_break": "one_draw"
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": true,
+     "type": "learned-choice"
+    },
+    "val_objective": 0.16599470141735354,
+    "values": {
+     "parameters.theta": [
+      -1.0,
+      16.541278180717825,
+      -2.2737938976724337,
+      0.0,
+      0.0,
+      -39.22625809552176,
+      0.20618988014460626,
+      0.0
+     ]
+    },
+    "which": "mean"
+   },
+   "selected_init": "s1: theta0 = -e0 (default router), as m1-s1",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "learned-choice",
+   "val_candidates_counted": 30
+  },
+  "m1u": {
+   "gaming_flag": {
+    "evidence": [
+     "audits/phase2-mid/gaming-concentration.md F1, F2",
+     "audits/phase2-mid/sim-exploitation.md F1"
+    ],
+    "flag": "GAMING (CONTRACT A11.2 triggered): hot-prefix segregation plus load attraction (theta7 > 0) stacks ISL >= 60K requests on one prefill-busy worker; a 0%-good worker in every replicate at mooncake-w1-base-n8-open-L3; ISL >= 60K good 0.425 vs 1.000 for default/ramjet/M0",
+    "use": "disclosed row only; never the headline M1, never a warm start (tier B uses policy key m1)"
+   },
+   "policy": "M1 UNCONSTRAINED (gaming-flagged, phase2-mid audit; disclosed row only): learned-choice v1 rank 0 (conditional logit, theta[0] pinned -1, temperature 0)",
+   "restart_best_val_k0_2": {
+    "m1-s1": 0.16147822534591058,
+    "m1-s2": 0.1636281690587089,
+    "m1-s3": 0.15781992485685725
+   },
+   "restart_sd": 0.002936583080859793,
+   "restart_spread_max_minus_min": 0.005808244201851637,
+   "restarts": [
+    "m1-s1",
+    "m1-s2",
+    "m1-s3"
+   ],
+   "restarts_done": [
+    "m1-s1",
+    "m1-s2",
+    "m1-s3"
+   ],
+   "selected": {
+    "generation": 15,
+    "policy_sha": "3295f611ccac048950fdb84f750c530e56959f9cf49a60ecff8a13c5f057ec99",
+    "run": "m1-s2",
+    "spec": {
+     "name": "m1u@p2-m1-s2-g15-mean",
+     "parameters": {
+      "feature_set": "v1",
+      "temperature": 0.0,
+      "theta": [
+       -1.0,
+       61.32105646681694,
+       1.9775165625757438,
+       -0.7241222850828777,
+       -0.22225654543876772,
+       -145.73331619983247,
+       -2.8513065427604687,
+       0.08777670734929899
+      ],
+      "tie_break": "one_draw"
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": true,
+     "type": "learned-choice"
+    },
+    "val_objective": 0.1636281690587089,
+    "values": {
+     "parameters.theta": [
+      -1.0,
+      61.32105646681694,
+      1.9775165625757438,
+      -0.7241222850828777,
+      -0.22225654543876772,
+      -145.73331619983247,
+      -2.8513065427604687,
+      0.08777670734929899
+     ]
+    },
+    "which": "mean"
+   },
+   "selected_init": "s2: behavior clone of llm-d-precise-prefix@defaults (inits/m1_s2.json)",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "learned-choice",
+   "val_candidates_counted": 30
+  },
+  "ramjet": {
+   "policy": "ramjet tuned",
+   "restart_best_val_k0_2": {
+    "ramjet-s1": 0.14188990323535286,
+    "ramjet-s2": 0.14180329853042514,
+    "ramjet-s3": 0.14201773497049403
+   },
+   "restart_sd": 0.00010787671532373844,
+   "restart_spread_max_minus_min": 0.00021443644006888252,
+   "restarts": [
+    "ramjet-s1",
+    "ramjet-s2",
+    "ramjet-s3"
+   ],
+   "restarts_done": [
+    "ramjet-s1",
+    "ramjet-s2",
+    "ramjet-s3"
+   ],
+   "selected": {
+    "generation": 25,
+    "policy_sha": "8c99a422e8e6909f1d46dfac48e50420c6f6d5fade8e31c28794a64a9963f2c0",
+    "run": "ramjet-s3",
+    "spec": {
+     "name": "ramjet@p2-ramjet-s3-g25-best_so_far",
+     "parameters": {
+      "affinity_block_tokens": 512,
+      "alpha": 0.8828774076622825,
+      "basis": "relative",
+      "load_unit_tokens": 4552,
+      "max_affinity_blocks": 68
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": false,
+     "type": "ramjet"
+    },
+    "val_objective": 0.14201773497049403,
+    "values": {
+     "parameters.alpha": 0.8828774076622825,
+     "parameters.load_unit_tokens": 4552,
+     "parameters.max_affinity_blocks": 68
+    },
+    "which": "best_so_far"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "ramjet",
+   "val_candidates_counted": 30
+  },
+  "stickybounded": {
+   "policy": "sticky-session bounded tuned (+ default-cost router_config knobs)",
+   "restart_best_val_k0_2": {
+    "stickybounded-s1": 0.13634297122548528,
+    "stickybounded-s2": 0.1375757771207101,
+    "stickybounded-s3": 0.134130226288058
+   },
+   "restart_sd": 0.0017458460734841655,
+   "restart_spread_max_minus_min": 0.003445550832652078,
+   "restarts": [
+    "stickybounded-s1",
+    "stickybounded-s2",
+    "stickybounded-s3"
+   ],
+   "restarts_done": [
+    "stickybounded-s1",
+    "stickybounded-s2",
+    "stickybounded-s3"
+   ],
+   "selected": {
+    "generation": 25,
+    "policy_sha": "5d8fdad082fd592e261c696c7d7c6b42820c0cbd99c207a4a208cc6af3f518f4",
+    "run": "stickybounded-s2",
+    "spec": {
+     "name": "stickybounded@p2-stickybounded-s2-g25-mean",
+     "parameters": {
+      "load_factor": 1.1765304772985494,
+      "mode": "bounded"
+     },
+     "router_config": {
+      "decode_active_request_weight": 2613.4247764375345,
+      "overlap_score_credit": 1.3006246682441034,
+      "overlap_score_credit_decay": 0.31000613320625037,
+      "prefill_load_scale": 181.71903982807672,
+      "router_temperature": 0.00238177656025839
+     },
+     "router_mode": "kv_router",
+     "seeded": true,
+     "type": "sticky-session"
+    },
+    "val_objective": 0.1375757771207101,
+    "values": {
+     "parameters.load_factor": 1.1765304772985494,
+     "router_config.decode_active_request_weight": 2613.4247764375345,
+     "router_config.overlap_score_credit": 1.3006246682441034,
+     "router_config.overlap_score_credit_decay": 0.31000613320625037,
+     "router_config.prefill_load_scale": 181.71903982807672,
+     "router_config.router_temperature": 0.00238177656025839
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "sticky-session",
+   "val_candidates_counted": 30
+  },
+  "stickyhard": {
+   "policy": "sticky-session hard tuned (+ default-cost router_config knobs)",
+   "restart_best_val_k0_2": {
+    "stickyhard-s1": 0.11603745714199308,
+    "stickyhard-s2": 0.1140182401637873,
+    "stickyhard-s3": 0.11381055976940979
+   },
+   "restart_sd": 0.0012301382211836775,
+   "restart_spread_max_minus_min": 0.002226897372583289,
+   "restarts": [
+    "stickyhard-s1",
+    "stickyhard-s2",
+    "stickyhard-s3"
+   ],
+   "restarts_done": [
+    "stickyhard-s1",
+    "stickyhard-s2",
+    "stickyhard-s3"
+   ],
+   "selected": {
+    "generation": 25,
+    "policy_sha": "c63b9c3ff24b0dd2a685b434485d0143e05c8b4bbcbdaafa19056df54c549b0a",
+    "run": "stickyhard-s1",
+    "spec": {
+     "name": "stickyhard@p2-stickyhard-s1-g25-mean",
+     "parameters": {
+      "mode": "hard"
+     },
+     "router_config": {
+      "decode_active_request_weight": 3983.1134890847825,
+      "overlap_score_credit": 3.731197750324059,
+      "overlap_score_credit_decay": 0.30208517678684,
+      "prefill_load_scale": 11.477481469622699,
+      "router_temperature": 0.012897323874532058
+     },
+     "router_mode": "kv_router",
+     "seeded": true,
+     "type": "sticky-session"
+    },
+    "val_objective": 0.11603745714199308,
+    "values": {
+     "router_config.decode_active_request_weight": 3983.1134890847825,
+     "router_config.overlap_score_credit": 3.731197750324059,
+     "router_config.overlap_score_credit_decay": 0.30208517678684,
+     "router_config.prefill_load_scale": 11.477481469622699,
+     "router_config.router_temperature": 0.012897323874532058
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "sticky-session",
+   "val_candidates_counted": 30
+  },
+  "twotier": {
+   "policy": "dynamo-two-tier-cost-fn tuned",
+   "restart_best_val_k0_2": {
+    "twotier-s1": 0.1362797254582579,
+    "twotier-s2": 0.13461192182490728,
+    "twotier-s3": 0.13487277879054577
+   },
+   "restart_sd": 0.0008971356495095842,
+   "restart_spread_max_minus_min": 0.0016678036333506174,
+   "restarts": [
+    "twotier-s1",
+    "twotier-s2",
+    "twotier-s3"
+   ],
+   "restarts_done": [
+    "twotier-s1",
+    "twotier-s2",
+    "twotier-s3"
+   ],
+   "selected": {
+    "generation": 15,
+    "policy_sha": "f38f7e15b76a8885235b73e60921b0e74e7a3ac5d174ef3a385f3850b0a3dab6",
+    "run": "twotier-s1",
+    "spec": {
+     "name": "twotier@p2-twotier-s1-g15-mean",
+     "parameters": {
+      "balance_abs_threshold": 8,
+      "balance_rel_threshold": 2.0910872076776217,
+      "cache_threshold": 0.6543559649342875
+     },
+     "router_config": {},
+     "router_mode": "kv_router",
+     "seeded": false,
+     "type": "dynamo-two-tier-cost-fn"
+    },
+    "val_objective": 0.1362797254582579,
+    "values": {
+     "parameters.balance_abs_threshold": 8,
+     "parameters.balance_rel_threshold": 2.0910872076776217,
+     "parameters.cache_threshold": 0.6543559649342875
+    },
+    "which": "mean"
+   },
+   "selected_init": "shipped defaults",
+   "selection_final": true,
+   "selection_recomputed_matches": true,
+   "type": "dynamo-two-tier-cost-fn",
+   "val_candidates_counted": 30
+  }
+ },
+ "per_run": {
+  "chwbl-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:16:32 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30732,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:16 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 5,
+    "policy_sha": "aac07ce173ad1f82c449c4a84b433e6e649333c23043fbc1195af28af75d17c6",
+    "val_objective": 0.028959891209280025,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.006614520849391377,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.028959891209280025,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T10:11:17-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14958.81
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     -0.015233636112239952
+    ],
+    [
+     5,
+     "mean",
+     0.028959891209280025
+    ],
+    [
+     10,
+     "best_so_far",
+     0.0051259248902167055
+    ],
+    [
+     10,
+     "mean",
+     0.02461121248508773
+    ],
+    [
+     15,
+     "best_so_far",
+     0.01726236466713939
+    ],
+    [
+     15,
+     "mean",
+     0.011481522785200458
+    ],
+    [
+     20,
+     "best_so_far",
+     0.013784784074261527
+    ],
+    [
+     20,
+     "mean",
+     0.015007807914247889
+    ],
+    [
+     25,
+     "best_so_far",
+     0.012860599891050166
+    ],
+    [
+     25,
+     "mean",
+     0.017239797261131957
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "chwbl-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 15:21:47 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30156,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:24:49 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "315f1243f90612df943df274ecceab36db2b2f50e4aec9ce3812c87439dd51d3",
+    "val_objective": 0.022931404505000145,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.003274703786662675,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 13,
+    "replays_fresh": 20534,
+    "selected_val_objective": 0.022931404505000145,
+    "tasks_requested": 32182,
+    "time": "2026-10-03T15:20:30-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 17001.47
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     -0.1349673346474001
+    ],
+    [
+     5,
+     "mean",
+     -0.14171959667475206
+    ],
+    [
+     10,
+     "best_so_far",
+     -0.16113632402059833
+    ],
+    [
+     10,
+     "mean",
+     -0.10633088472659942
+    ],
+    [
+     15,
+     "best_so_far",
+     -0.15854074881177144
+    ],
+    [
+     15,
+     "mean",
+     -0.09808222766972972
+    ],
+    [
+     20,
+     "best_so_far",
+     0.01939589000240793
+    ],
+    [
+     20,
+     "mean",
+     0.010121270991881518
+    ],
+    [
+     25,
+     "best_so_far",
+     0.022931404505000145
+    ],
+    [
+     25,
+     "mean",
+     0.02037832282520879
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "chwbl-s3": {
+   "attempts": [
+    {
+     "end_phase": "paused",
+     "ingest": null,
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "CANCELLED",
+     "submitted": "2026-10-03 14:50:42 PDT",
+     "target": "slurm:<node>"
+    },
+    {
+     "end_phase": "paused",
+     "ingest": null,
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 15:15:38 PDT",
+     "target": "slurm:<node>"
+    },
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 18:26:57 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30860,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 18:10:57 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 20,
+    "policy_sha": "96a22f1d31871f46c27364a4b2dc040c84e669572cf70ae70f371947bce1b078",
+    "val_objective": 0.02798765174945578,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.00466779315065034,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 26706,
+    "selected_val_objective": 0.02798765174945578,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T18:21:31-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 8134.88
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     -0.08463178668785819
+    ],
+    [
+     5,
+     "mean",
+     -0.10593939347122237
+    ],
+    [
+     10,
+     "best_so_far",
+     0.025177174636148665
+    ],
+    [
+     10,
+     "mean",
+     -0.01806167817740544
+    ],
+    [
+     15,
+     "best_so_far",
+     0.02125652698344968
+    ],
+    [
+     15,
+     "mean",
+     0.023530479886078325
+    ],
+    [
+     20,
+     "best_so_far",
+     0.02798765174945578
+    ],
+    [
+     20,
+     "mean",
+     0.02613128704970674
+    ],
+    [
+     25,
+     "best_so_far",
+     0.02420821814248943
+    ],
+    [
+     25,
+     "mean",
+     0.022688638889880684
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "drift-l1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 252,
+      "at": "2026-10-03 06:57:56 PDT",
+      "e0_values_merged": 0,
+      "ingested": 1122,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 06:23:35 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 3,
+    "policy_sha": "dbb05ea427b911eeb44b2d496e9b8ad4bf369eb339171f7e7884951ed5a7fa9e",
+    "val_objective": 0.08053880316480891,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.04292713825395871,
+    "budget_evals": 96,
+    "fevals": 96,
+    "gen_lines": 6,
+    "generation": 6,
+    "phase": "done",
+    "reeval_generations": 6,
+    "replays_fresh": 1194,
+    "selected_val_objective": 0.08053880316480891,
+    "tasks_requested": 1476,
+    "time": "2026-10-03T06:56:39-0700",
+    "val_candidates": 4,
+    "val_checkpoints": 2,
+    "wall_s": 1924.61
+   },
+   "status": "done",
+   "val_candidates": 4,
+   "val_trajectory": [
+    [
+     3,
+     "best_so_far",
+     0.0764276897921034
+    ],
+    [
+     3,
+     "mean",
+     0.08053880316480891
+    ],
+    [
+     6,
+     "best_so_far",
+     0.07555886280873475
+    ],
+    [
+     6,
+     "mean",
+     0.07845761102226735
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "drift-l3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 345,
+      "at": "2026-10-03 07:32:58 PDT",
+      "e0_values_merged": 0,
+      "ingested": 1492,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 06:59:01 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 6,
+    "policy_sha": "4f2d122bd47fa844e30ba63e4bd29985d93cd37016d0644dea7ca06719bb616b",
+    "val_objective": 0.2821247777054616,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.31780290642734565,
+    "budget_evals": 96,
+    "fevals": 96,
+    "gen_lines": 6,
+    "generation": 6,
+    "phase": "done",
+    "reeval_generations": 6,
+    "replays_fresh": 1421,
+    "selected_val_objective": 0.2821247777054616,
+    "tasks_requested": 1974,
+    "time": "2026-10-03T07:27:43-0700",
+    "val_candidates": 4,
+    "val_checkpoints": 2,
+    "wall_s": 1658.47
+   },
+   "status": "done",
+   "val_candidates": 4,
+   "val_trajectory": [
+    [
+     3,
+     "best_so_far",
+     0.23757188502112916
+    ],
+    [
+     3,
+     "mean",
+     0.22273566431313715
+    ],
+    [
+     6,
+     "best_so_far",
+     0.27954157391762374
+    ],
+    [
+     6,
+     "mean",
+     0.2821247777054616
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "drift-n4": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 761,
+      "at": "2026-10-03 08:08:26 PDT",
+      "e0_values_merged": 0,
+      "ingested": 3338,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 07:33:45 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 6,
+    "policy_sha": "b373a7e82064fec1a76923ab378e48e1c8579c39f18f0c2a457dabbcf95f398e",
+    "val_objective": 0.09204841643311604,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.15664931171456445,
+    "budget_evals": 96,
+    "fevals": 96,
+    "gen_lines": 6,
+    "generation": 6,
+    "phase": "done",
+    "reeval_generations": 5,
+    "replays_fresh": 3567,
+    "selected_val_objective": 0.09204841643311604,
+    "tasks_requested": 4302,
+    "time": "2026-10-03T08:04:33-0700",
+    "val_candidates": 4,
+    "val_checkpoints": 2,
+    "wall_s": 1781.18
+   },
+   "status": "done",
+   "val_candidates": 4,
+   "val_trajectory": [
+    [
+     3,
+     "best_so_far",
+     0.07255445087136694
+    ],
+    [
+     3,
+     "mean",
+     0.07221504471257982
+    ],
+    [
+     6,
+     "best_so_far",
+     0.09204841643311604
+    ],
+    [
+     6,
+     "mean",
+     0.08994037152480916
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "drift-n8": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 719,
+      "at": "2026-10-03 08:40:53 PDT",
+      "e0_values_merged": 0,
+      "ingested": 2940,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 08:09:21 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 6,
+    "policy_sha": "7eb2895b407ba7a7055459950d60d30c92b4b785b5f92c1edada7940f02f89b9",
+    "val_objective": 0.2675343923435059,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.16193373296161523,
+    "budget_evals": 96,
+    "fevals": 96,
+    "gen_lines": 6,
+    "generation": 6,
+    "phase": "done",
+    "reeval_generations": 6,
+    "replays_fresh": 2699,
+    "selected_val_objective": 0.2675343923435059,
+    "tasks_requested": 3930,
+    "time": "2026-10-03T08:37:14-0700",
+    "val_candidates": 4,
+    "val_checkpoints": 2,
+    "wall_s": 1614.9
+   },
+   "status": "done",
+   "val_candidates": 4,
+   "val_trajectory": [
+    [
+     3,
+     "best_so_far",
+     0.24411364703261418
+    ],
+    [
+     3,
+     "mean",
+     0.23440858714399387
+    ],
+    [
+     6,
+     "best_so_far",
+     0.2675343923435059
+    ],
+    [
+     6,
+     "mean",
+     0.2627090509202811
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "dualmap-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:16:49 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30762,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:15 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 15,
+    "policy_sha": "3b74b544c9d03241c5a236f9ba1f642ef60278ccd0af2e11d633a50688a719fc",
+    "val_objective": 0.03836183786500774,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.02796340586668371,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.03836183786500774,
+    "tasks_requested": 34018,
+    "time": "2026-10-03T10:11:17-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14988.9
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.0340299390622497
+    ],
+    [
+     5,
+     "mean",
+     -0.04798297708809412
+    ],
+    [
+     10,
+     "best_so_far",
+     0.035778157139100895
+    ],
+    [
+     10,
+     "mean",
+     0.012208054475322661
+    ],
+    [
+     15,
+     "best_so_far",
+     0.03433995943570048
+    ],
+    [
+     15,
+     "mean",
+     0.03836183786500774
+    ],
+    [
+     20,
+     "best_so_far",
+     0.03433995943570048
+    ],
+    [
+     20,
+     "mean",
+     0.03591237379647448
+    ],
+    [
+     25,
+     "best_so_far",
+     0.035380831794156874
+    ],
+    [
+     25,
+     "mean",
+     0.03625337262106298
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "dualmap-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 14:56:07 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30760,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:24:48 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 15,
+    "policy_sha": "27b71f192d3e7fc96ac618ac8494b93f2fd6e3521e04d98d5873a9dacbbf127f",
+    "val_objective": 0.031933564814210655,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.02386897880066171,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.031933564814210655,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T14:52:19-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15333.19
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.012580524174788518
+    ],
+    [
+     5,
+     "mean",
+     -0.0017836633495532039
+    ],
+    [
+     10,
+     "best_so_far",
+     0.02516356776241662
+    ],
+    [
+     10,
+     "mean",
+     0.01015514671822741
+    ],
+    [
+     15,
+     "best_so_far",
+     0.031933564814210655
+    ],
+    [
+     15,
+     "mean",
+     0.028281739784634892
+    ],
+    [
+     20,
+     "best_so_far",
+     0.031933564814210655
+    ],
+    [
+     20,
+     "mean",
+     0.01621627516926388
+    ],
+    [
+     25,
+     "best_so_far",
+     0.029074137061722932
+    ],
+    [
+     25,
+     "mean",
+     0.003495389729625628
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "dualmap-s3": {
+   "attempts": [
+    {
+     "end_phase": "paused",
+     "ingest": null,
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 14:44:09 PDT",
+     "target": "slurm:<node>"
+    },
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 19:10:45 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30752,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 18:10:49 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 10,
+    "policy_sha": "022ea1ab8fb3a1a33fb06227371165d442acc2d411286ac07431c40275c238c8",
+    "val_objective": 0.040167736135162925,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.02581032435853982,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 26746,
+    "selected_val_objective": 0.040167736135162925,
+    "tasks_requested": 34018,
+    "time": "2026-10-03T19:06:15-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 11989.22
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.025759344622721937
+    ],
+    [
+     5,
+     "mean",
+     0.01912757314003785
+    ],
+    [
+     10,
+     "best_so_far",
+     0.035952923365173216
+    ],
+    [
+     10,
+     "mean",
+     0.040167736135162925
+    ],
+    [
+     15,
+     "best_so_far",
+     0.035952923365173216
+    ],
+    [
+     15,
+     "mean",
+     0.034462107875353205
+    ],
+    [
+     20,
+     "best_so_far",
+     0.035952923365173216
+    ],
+    [
+     20,
+     "mean",
+     0.03825978891572633
+    ],
+    [
+     25,
+     "best_so_far",
+     0.03546950497997021
+    ],
+    [
+     25,
+     "mean",
+     0.034426803131925025
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "llmdob-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:23:32 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30633,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:09 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 5,
+    "policy_sha": "1068b0ac11c23a48eb7b9e40a0734df39e2fe1c69087a69a05a63fb66f535a8a",
+    "val_objective": 0.10466492990660352,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.10224091558227864,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 19,
+    "replays_fresh": 27458,
+    "selected_val_objective": 0.10466492990660352,
+    "tasks_requested": 33406,
+    "time": "2026-10-03T10:19:43-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15358.11
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.10129261991486982
+    ],
+    [
+     5,
+     "mean",
+     0.10466492990660352
+    ],
+    [
+     10,
+     "best_so_far",
+     0.10179486528141528
+    ],
+    [
+     10,
+     "mean",
+     0.09859921855401713
+    ],
+    [
+     15,
+     "best_so_far",
+     0.09969446545876139
+    ],
+    [
+     15,
+     "mean",
+     0.10321954288585299
+    ],
+    [
+     20,
+     "best_so_far",
+     0.10355925131112344
+    ],
+    [
+     20,
+     "mean",
+     0.10015005598385678
+    ],
+    [
+     25,
+     "best_so_far",
+     0.10074094639094577
+    ],
+    [
+     25,
+     "mean",
+     0.10272022132231946
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "llmdob-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 15:08:50 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30300,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:18:14 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 15,
+    "policy_sha": "8366092bc9066fbbda61a8b229a509c899f0e6393595efe5cd3afc01d7ae9105",
+    "val_objective": 0.1029026953640043,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.10053464330609617,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 15,
+    "replays_fresh": 24702,
+    "selected_val_objective": 0.1029026953640043,
+    "tasks_requested": 32590,
+    "time": "2026-10-03T15:05:08-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 16529.13
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.09486645901570785
+    ],
+    [
+     5,
+     "mean",
+     0.09962954047383958
+    ],
+    [
+     10,
+     "best_so_far",
+     0.09608328087584725
+    ],
+    [
+     10,
+     "mean",
+     0.09755563365428044
+    ],
+    [
+     15,
+     "best_so_far",
+     0.10169481800090845
+    ],
+    [
+     15,
+     "mean",
+     0.1029026953640043
+    ],
+    [
+     20,
+     "best_so_far",
+     0.10258739392235272
+    ],
+    [
+     20,
+     "mean",
+     0.10170677386846098
+    ],
+    [
+     25,
+     "best_so_far",
+     0.09985115220032408
+    ],
+    [
+     25,
+     "mean",
+     0.09957531829747078
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "llmdob-s3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 15:39:14 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30856,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 13:20:57 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 5,
+    "policy_sha": "11cd822a7eff392b6f5b7a7fb21fef8b2ad634962eb9d6c04d7abaaa82546cd0",
+    "val_objective": 0.10355736374258794,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.1010638998574166,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27646,
+    "selected_val_objective": 0.10355736374258794,
+    "tasks_requested": 34222,
+    "time": "2026-10-03T15:33:49-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 7667.43
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.10103520496059112
+    ],
+    [
+     5,
+     "mean",
+     0.10355736374258794
+    ],
+    [
+     10,
+     "best_so_far",
+     0.10109814874164079
+    ],
+    [
+     10,
+     "mean",
+     0.10134125048524643
+    ],
+    [
+     15,
+     "best_so_far",
+     0.10109814874164079
+    ],
+    [
+     15,
+     "mean",
+     0.10166327085130951
+    ],
+    [
+     20,
+     "best_so_far",
+     0.10109814874164079
+    ],
+    [
+     20,
+     "mean",
+     0.09951693946125291
+    ],
+    [
+     25,
+     "best_so_far",
+     0.09753344491438018
+    ],
+    [
+     25,
+     "mean",
+     0.0986315846990466
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "llmdpp-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "local": "results are in the campaign cache already"
+     },
+     "job": null,
+     "pid": 992034,
+     "slurm_state": null,
+     "submitted": "2026-10-03 05:51:06 PDT",
+     "target": "ws:0"
+    }
+   ],
+   "best_val": {
+    "generation": 5,
+    "policy_sha": "4843717b696ad28703590e87258377d52b074c938c256e99ac32bcc47a77ead9",
+    "val_objective": 0.13844963085559006,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.13711283924180534,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 6122,
+    "selected_val_objective": 0.13844963085559006,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T10:43:33-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 17457.92
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.13640552058870595
+    ],
+    [
+     5,
+     "mean",
+     0.13844963085559006
+    ],
+    [
+     10,
+     "best_so_far",
+     0.13750840264357486
+    ],
+    [
+     10,
+     "mean",
+     0.13410371890962705
+    ],
+    [
+     15,
+     "best_so_far",
+     0.13750840264357486
+    ],
+    [
+     15,
+     "mean",
+     0.13417103439304762
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13750840264357486
+    ],
+    [
+     20,
+     "mean",
+     0.13547325887202283
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13750840264357486
+    ],
+    [
+     25,
+     "mean",
+     0.13632333209533593
+    ]
+   ],
+   "where": "ws:0"
+  },
+  "llmdpp-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:59:31 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30786,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 08:41:36 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "2d7129bfae63d67f39017b0d846db2716f4925f0b66ba2703b9f91d7b0127711",
+    "val_objective": 0.14144503820442356,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.13882245728922102,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27724,
+    "selected_val_objective": 0.14144503820442356,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T10:56:13-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 7748.31
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.13102995591260597
+    ],
+    [
+     5,
+     "mean",
+     0.13520318765722095
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1353184319451385
+    ],
+    [
+     10,
+     "mean",
+     0.1349625561433975
+    ],
+    [
+     15,
+     "best_so_far",
+     0.13770678397227623
+    ],
+    [
+     15,
+     "mean",
+     0.13749911444615748
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13744814621119575
+    ],
+    [
+     20,
+     "mean",
+     0.13742540725867122
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13744814621119575
+    ],
+    [
+     25,
+     "mean",
+     0.14144503820442356
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "llmdpp-s3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "local": "results are in the campaign cache already"
+     },
+     "job": null,
+     "pid": 1198534,
+     "slurm_state": null,
+     "submitted": "2026-10-03 10:48:08 PDT",
+     "target": "ws:0"
+    }
+   ],
+   "best_val": {
+    "generation": 5,
+    "policy_sha": "9fe3691c6f93da48b362ebbd4d73e5e1b5484a34decb099d2dfbfd252f7aaa41",
+    "val_objective": 0.13941769215492775,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.1371706517153925,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 5452,
+    "selected_val_objective": 0.13941769215492775,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T15:44:49-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 17707.74
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.13941769215492775
+    ],
+    [
+     5,
+     "mean",
+     0.13170787610057338
+    ],
+    [
+     10,
+     "best_so_far",
+     0.13052263170657455
+    ],
+    [
+     10,
+     "mean",
+     0.13652274655738278
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1375607551547518
+    ],
+    [
+     15,
+     "mean",
+     0.13705125851228636
+    ],
+    [
+     20,
+     "best_so_far",
+     0.1375755528920536
+    ],
+    [
+     20,
+     "mean",
+     0.13785703230533572
+    ],
+    [
+     25,
+     "best_so_far",
+     0.1379861448383401
+    ],
+    [
+     25,
+     "mean",
+     0.13826697887303002
+    ]
+   ],
+   "where": "ws:0"
+  },
+  "lmetric-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:17:16 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30044,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:07 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "1644c8d3277900cd68ae1d5809a85a441790fcbdc3390a2d286e7fb6a0cf941f",
+    "val_objective": 0.1329687173815975,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.1251613943821906,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 26774,
+    "selected_val_objective": 0.1329687173815975,
+    "tasks_requested": 34222,
+    "time": "2026-10-03T10:11:05-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14921.48
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.131563904530445
+    ],
+    [
+     5,
+     "mean",
+     0.13241850661174412
+    ],
+    [
+     10,
+     "best_so_far",
+     0.131563904530445
+    ],
+    [
+     10,
+     "mean",
+     0.13206452466425672
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1318028681576416
+    ],
+    [
+     15,
+     "mean",
+     0.1316941813398635
+    ],
+    [
+     20,
+     "best_so_far",
+     0.1318028681576416
+    ],
+    [
+     20,
+     "mean",
+     0.12990014967460964
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13223030622901585
+    ],
+    [
+     25,
+     "mean",
+     0.1329687173815975
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "lmetric-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 482,
+      "at": "2026-10-03 14:42:31 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30212,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:18:12 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 10,
+    "policy_sha": "c22c3cfe693c38e9c1c0fa619dca57d5b8e81d811c9b548c4bb497f4cd940307",
+    "val_objective": 0.1334104775240062,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.12542019096305432,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 26568,
+    "selected_val_objective": 0.1334104775240062,
+    "tasks_requested": 34018,
+    "time": "2026-10-03T14:35:34-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14787.48
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1312507785502212
+    ],
+    [
+     5,
+     "mean",
+     0.1318028681576416
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1297410666562403
+    ],
+    [
+     10,
+     "mean",
+     0.1334104775240062
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1297410666562403
+    ],
+    [
+     15,
+     "mean",
+     0.1315513024320351
+    ],
+    [
+     20,
+     "best_so_far",
+     0.12957850557581535
+    ],
+    [
+     20,
+     "mean",
+     0.1316716581551611
+    ],
+    [
+     25,
+     "best_so_far",
+     0.12957850557581535
+    ],
+    [
+     25,
+     "mean",
+     0.1319293365638271
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "lmetric-s3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 858,
+      "at": "2026-10-03 15:09:14 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30176,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 12:49:19 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "e4e79861ea06a07186a0b2741154e64f4b835489a68a9029c4fe2e4c7fa3c987",
+    "val_objective": 0.13290427182965242,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.12529303931173436,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27578,
+    "selected_val_objective": 0.13290427182965242,
+    "tasks_requested": 34222,
+    "time": "2026-10-03T15:03:06-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 7735.4
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1316716581551611
+    ],
+    [
+     5,
+     "mean",
+     0.13278017309381843
+    ],
+    [
+     10,
+     "best_so_far",
+     0.13272739312525364
+    ],
+    [
+     10,
+     "mean",
+     0.13232740111449484
+    ],
+    [
+     15,
+     "best_so_far",
+     0.13199056356644442
+    ],
+    [
+     15,
+     "mean",
+     0.13205713748663564
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13199056356644442
+    ],
+    [
+     20,
+     "mean",
+     0.13226325296930233
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13199056356644442
+    ],
+    [
+     25,
+     "mean",
+     0.13290427182965242
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m0-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 08:08:49 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30744,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:06 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 20,
+    "policy_sha": "e0e0587bf91106f05296d373541c3f7cb8410a4bf597e237ca9cf543fc27cfe4",
+    "val_objective": 0.13204141234843694,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.1278666925521914,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27682,
+    "selected_val_objective": 0.13204141234843694,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T08:05:54-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 7767.8
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1245217205152688
+    ],
+    [
+     5,
+     "mean",
+     0.1170315890029305
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1279625712235551
+    ],
+    [
+     10,
+     "mean",
+     0.1288282477103759
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1279625712235551
+    ],
+    [
+     15,
+     "mean",
+     0.13130146778161783
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13204141234843694
+    ],
+    [
+     20,
+     "mean",
+     0.1262477281281793
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13204141234843694
+    ],
+    [
+     25,
+     "mean",
+     0.11943477126211696
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m0-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 12:48:09 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30719,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 08:10:28 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 20,
+    "policy_sha": "8a2103ff9d19f180c8b619d322846cfa0401a7f56a22e5e6da74a80f5aaf4cbe",
+    "val_objective": 0.13184793677651283,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.12834720433940056,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 20,
+    "replays_fresh": 27416,
+    "selected_val_objective": 0.13184793677651283,
+    "tasks_requested": 33610,
+    "time": "2026-10-03T12:41:24-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15590.02
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1205248612828896
+    ],
+    [
+     5,
+     "mean",
+     0.12488208965963261
+    ],
+    [
+     10,
+     "best_so_far",
+     0.12631674200240667
+    ],
+    [
+     10,
+     "mean",
+     0.10249364771898752
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1299293732105055
+    ],
+    [
+     15,
+     "mean",
+     0.12847132503915662
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13184793677651283
+    ],
+    [
+     20,
+     "mean",
+     0.13054316669385577
+    ],
+    [
+     25,
+     "best_so_far",
+     0.12906788850352333
+    ],
+    [
+     25,
+     "mean",
+     0.13183908012964277
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m0-s3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 12:48:27 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30744,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:30:43 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 20,
+    "policy_sha": "ce02946715cb69f83343dc760c09f17d6da0eeae46392f442fe8c3be4ff5137b",
+    "val_objective": 0.13342890354099643,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.12952045698157408,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27682,
+    "selected_val_objective": 0.13342890354099643,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T12:45:41-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 7791.2
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1195062860323911
+    ],
+    [
+     5,
+     "mean",
+     0.11194979775132156
+    ],
+    [
+     10,
+     "best_so_far",
+     0.13006759430674844
+    ],
+    [
+     10,
+     "mean",
+     0.13248965529337076
+    ],
+    [
+     15,
+     "best_so_far",
+     0.13006759430674844
+    ],
+    [
+     15,
+     "mean",
+     0.12940236239032135
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13006759430674844
+    ],
+    [
+     20,
+     "mean",
+     0.13342890354099643
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13297889790836792
+    ],
+    [
+     25,
+     "mean",
+     0.13217247639888902
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m1-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 1474,
+      "at": "2026-10-03 08:09:00 PDT",
+      "e0_values_merged": 0,
+      "ingested": 29668,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:02 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "a9f0c250a5db25c31e36af10ed3b8db33db7d089e7eaf811c6c916a9e1d8d3d1",
+    "val_objective": 0.16147822534591058,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.17179635598099405,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27766,
+    "selected_val_objective": 0.16147822534591058,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T08:05:42-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 7742.53
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1464362608841959
+    ],
+    [
+     5,
+     "mean",
+     0.14178271250351518
+    ],
+    [
+     10,
+     "best_so_far",
+     0.15230220486259685
+    ],
+    [
+     10,
+     "mean",
+     0.15036397960555672
+    ],
+    [
+     15,
+     "best_so_far",
+     0.15429367910093958
+    ],
+    [
+     15,
+     "mean",
+     0.1545615708263178
+    ],
+    [
+     20,
+     "best_so_far",
+     0.1601731675435265
+    ],
+    [
+     20,
+     "mean",
+     0.15876711038973745
+    ],
+    [
+     25,
+     "best_so_far",
+     0.15909675041599605
+    ],
+    [
+     25,
+     "mean",
+     0.16147822534591058
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m1-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:30:24 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30940,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 08:10:28 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 15,
+    "policy_sha": "3295f611ccac048950fdb84f750c530e56959f9cf49a60ecff8a13c5f057ec99",
+    "val_objective": 0.1636281690587089,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.1706110749676213,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27730,
+    "selected_val_objective": 0.1636281690587089,
+    "tasks_requested": 34222,
+    "time": "2026-10-03T10:24:25-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 7738.63
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.15035435336804218
+    ],
+    [
+     5,
+     "mean",
+     0.14759758391063507
+    ],
+    [
+     10,
+     "best_so_far",
+     0.15644020610813356
+    ],
+    [
+     10,
+     "mean",
+     0.15326058271254137
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1621956541753315
+    ],
+    [
+     15,
+     "mean",
+     0.1636281690587089
+    ],
+    [
+     20,
+     "best_so_far",
+     0.1617068137531312
+    ],
+    [
+     20,
+     "mean",
+     0.16259975057124748
+    ],
+    [
+     25,
+     "best_so_far",
+     0.16253199459608308
+    ],
+    [
+     25,
+     "mean",
+     0.16044408408208996
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m1-s3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 15:02:51 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30730,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:24:50 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "cc005caac0f1d9fa9b7ee56fdc5ed67a45647022884e8142e5c010efce21f1e7",
+    "val_objective": 0.15781992485685725,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.1634378469958601,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 20,
+    "replays_fresh": 27411,
+    "selected_val_objective": 0.15781992485685725,
+    "tasks_requested": 33610,
+    "time": "2026-10-03T15:00:32-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15906.91
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.13682112799631413
+    ],
+    [
+     5,
+     "mean",
+     0.13391547274984344
+    ],
+    [
+     10,
+     "best_so_far",
+     0.13693961543724903
+    ],
+    [
+     10,
+     "mean",
+     0.13636727100569448
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1463374017335071
+    ],
+    [
+     15,
+     "mean",
+     0.14344272489323298
+    ],
+    [
+     20,
+     "best_so_far",
+     0.154990190776059
+    ],
+    [
+     20,
+     "mean",
+     0.15618336362420998
+    ],
+    [
+     25,
+     "best_so_far",
+     0.1574074841336284
+    ],
+    [
+     25,
+     "mean",
+     0.15781992485685725
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m1c-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 382,
+      "at": "2026-10-04 02:19:31 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30664,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 21:52:15 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 20,
+    "policy_sha": "9a44cb58e904b29985b971092da790e2b8fde78829cad7d0a600d41ec1aa2e57",
+    "val_objective": 0.16599470141735354,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.17759821285976457,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.16599470141735354,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T02:15:39-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15170.94
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1507208040288994
+    ],
+    [
+     5,
+     "mean",
+     0.14874230047312434
+    ],
+    [
+     10,
+     "best_so_far",
+     0.15923872817438572
+    ],
+    [
+     10,
+     "mean",
+     0.1597391415509545
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1638652083257206
+    ],
+    [
+     15,
+     "mean",
+     0.16464586664755748
+    ],
+    [
+     20,
+     "best_so_far",
+     0.16482228359525888
+    ],
+    [
+     20,
+     "mean",
+     0.16599470141735354
+    ],
+    [
+     25,
+     "best_so_far",
+     0.16398640963155744
+    ],
+    [
+     25,
+     "mean",
+     0.16583749806729436
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m1c-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-04 02:25:01 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30264,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 21:52:20 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 15,
+    "policy_sha": "6c40117680f24a6ebc91dc42b3a70457e70538f67e4b8e7c642619f73cf9283a",
+    "val_objective": 0.16238116753863213,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.1698104819835135,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 16,
+    "replays_fresh": 27570,
+    "selected_val_objective": 0.16238116753863213,
+    "tasks_requested": 32794,
+    "time": "2026-10-04T02:18:44-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15268.56
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1610574890089549
+    ],
+    [
+     5,
+     "mean",
+     0.1622898269458193
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1610574890089549
+    ],
+    [
+     10,
+     "mean",
+     0.16170878433288696
+    ],
+    [
+     15,
+     "best_so_far",
+     0.16180061970072623
+    ],
+    [
+     15,
+     "mean",
+     0.16238116753863213
+    ],
+    [
+     20,
+     "best_so_far",
+     0.1597670243954718
+    ],
+    [
+     20,
+     "mean",
+     0.1573891657526158
+    ],
+    [
+     25,
+     "best_so_far",
+     0.1594642371651796
+    ],
+    [
+     25,
+     "mean",
+     0.1598702448464339
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "m1c-s3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 517,
+      "at": "2026-10-04 02:25:13 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30199,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 21:52:25 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "fc5c051a1b90cc1ef4f58dbcd0035c59e0e52e4c7dcb3e06615aad74aef3ad88",
+    "val_objective": 0.13750262824524545,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.1423940900280933,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 17,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.13750262824524545,
+    "tasks_requested": 32998,
+    "time": "2026-10-04T02:23:05-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15512.6
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1301758378221429
+    ],
+    [
+     5,
+     "mean",
+     0.13030299462320674
+    ],
+    [
+     10,
+     "best_so_far",
+     0.13419468863658748
+    ],
+    [
+     10,
+     "mean",
+     0.13311796951077226
+    ],
+    [
+     15,
+     "best_so_far",
+     0.13419468863658748
+    ],
+    [
+     15,
+     "mean",
+     0.13264833467905007
+    ],
+    [
+     20,
+     "best_so_far",
+     0.12973458909616753
+    ],
+    [
+     20,
+     "mean",
+     0.13397145947508998
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13750262824524545
+    ],
+    [
+     25,
+     "mean",
+     0.1338417875525026
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "ramjet-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:17:41 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30690,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:07 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 5,
+    "policy_sha": "fae2c8465f0a69c105269bfbc2b55a0f3d0f76e5b6e407eefd1af9d64d760722",
+    "val_objective": 0.14188990323535286,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.14336870368784574,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.14188990323535286,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T10:13:36-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15122.56
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.13735943519582886
+    ],
+    [
+     5,
+     "mean",
+     0.14188990323535286
+    ],
+    [
+     10,
+     "best_so_far",
+     0.13932308852989483
+    ],
+    [
+     10,
+     "mean",
+     0.14089105324776066
+    ],
+    [
+     15,
+     "best_so_far",
+     0.14125984234530894
+    ],
+    [
+     15,
+     "mean",
+     0.13908611018239064
+    ],
+    [
+     20,
+     "best_so_far",
+     0.1412059299272292
+    ],
+    [
+     20,
+     "mean",
+     0.14057291840253014
+    ],
+    [
+     25,
+     "best_so_far",
+     0.1412059299272292
+    ],
+    [
+     25,
+     "mean",
+     0.14045353225374443
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "ramjet-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 14:17:28 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30732,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 09:46:41 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "c21442fa2962796db42c65b6ff98f15b4f058e23edb949f9fc2372076c8808e5",
+    "val_objective": 0.14180329853042514,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.14365942554142433,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.14180329853042514,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T14:14:37-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15450.85
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.13866840430217922
+    ],
+    [
+     5,
+     "mean",
+     0.14115949129681546
+    ],
+    [
+     10,
+     "best_so_far",
+     0.14074404153290218
+    ],
+    [
+     10,
+     "mean",
+     0.1409306481965253
+    ],
+    [
+     15,
+     "best_so_far",
+     0.14026907338110384
+    ],
+    [
+     15,
+     "mean",
+     0.13938682915601622
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13985385034492762
+    ],
+    [
+     20,
+     "mean",
+     0.1390832156305595
+    ],
+    [
+     25,
+     "best_so_far",
+     0.14180329853042514
+    ],
+    [
+     25,
+     "mean",
+     0.14092213075613974
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "ramjet-s3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 13:20:23 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30744,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 11:00:13 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "8c99a422e8e6909f1d46dfac48e50420c6f6d5fade8e31c28794a64a9963f2c0",
+    "val_objective": 0.14201773497049403,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.14346810324158693,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27682,
+    "selected_val_objective": 0.14201773497049403,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T13:13:17-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 7710.97
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.14112311667397753
+    ],
+    [
+     5,
+     "mean",
+     0.13986407762160044
+    ],
+    [
+     10,
+     "best_so_far",
+     0.14034702404189806
+    ],
+    [
+     10,
+     "mean",
+     0.14120370320223888
+    ],
+    [
+     15,
+     "best_so_far",
+     0.14034702404189806
+    ],
+    [
+     15,
+     "mean",
+     0.13937494120933092
+    ],
+    [
+     20,
+     "best_so_far",
+     0.14034702404189806
+    ],
+    [
+     20,
+     "mean",
+     0.13985981525699404
+    ],
+    [
+     25,
+     "best_so_far",
+     0.14201773497049403
+    ],
+    [
+     25,
+     "mean",
+     0.14170285108398248
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "stickybounded-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:17:57 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30732,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:14 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "7f9d845aff2811ff454e033c69e1df59fe61e2eb41a1d72eb43794059c008f42",
+    "val_objective": 0.13634297122548528,
+    "which": "best_so_far"
+   },
+   "evals": {
+    "best_train_objective": 0.132556927893902,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.13634297122548528,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T10:13:55-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15110.84
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.12313038828132364
+    ],
+    [
+     5,
+     "mean",
+     0.11927965844107288
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1238052852190938
+    ],
+    [
+     10,
+     "mean",
+     0.12350790584428785
+    ],
+    [
+     15,
+     "best_so_far",
+     0.12272255089690977
+    ],
+    [
+     15,
+     "mean",
+     0.12349272555210353
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13199599625915706
+    ],
+    [
+     20,
+     "mean",
+     0.13379995396023994
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13634297122548528
+    ],
+    [
+     25,
+     "mean",
+     0.1349715645790087
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "stickybounded-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 14:43:02 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30720,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:18:15 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "5d8fdad082fd592e261c696c7d7c6b42820c0cbd99c207a4a208cc6af3f518f4",
+    "val_objective": 0.1375757771207101,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.13078705791766662,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27454,
+    "selected_val_objective": 0.1375757771207101,
+    "tasks_requested": 34018,
+    "time": "2026-10-03T14:39:11-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15104.93
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.12234583248514985
+    ],
+    [
+     5,
+     "mean",
+     0.12052778777615145
+    ],
+    [
+     10,
+     "best_so_far",
+     0.12234583248514985
+    ],
+    [
+     10,
+     "mean",
+     0.12359012259155946
+    ],
+    [
+     15,
+     "best_so_far",
+     0.13220530052016224
+    ],
+    [
+     15,
+     "mean",
+     0.1331080043511336
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13461096464381272
+    ],
+    [
+     20,
+     "mean",
+     0.13362521828873583
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13461096464381272
+    ],
+    [
+     25,
+     "mean",
+     0.1375757771207101
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "stickybounded-s3": {
+   "attempts": [
+    {
+     "end_phase": "paused",
+     "ingest": null,
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 14:44:01 PDT",
+     "target": "slurm:<node>"
+    },
+    {
+     "end_phase": "done",
+     "ingest": {
+      "local": "results are in the campaign cache already"
+     },
+     "job": null,
+     "pid": 1506563,
+     "slurm_state": null,
+     "submitted": "2026-10-03 17:55:31 PDT",
+     "target": "ws:0"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "c2c1968cd7ebfd5f1eb7e2559081040976a524ed6f7164109911b0e4b2169e0b",
+    "val_objective": 0.134130226288058,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.13039315555808226,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 18756,
+    "selected_val_objective": 0.134130226288058,
+    "tasks_requested": 34018,
+    "time": "2026-10-03T19:50:26-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15978.89
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1168999537742081
+    ],
+    [
+     5,
+     "mean",
+     0.11973622272831662
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1280513052284485
+    ],
+    [
+     10,
+     "mean",
+     0.1255615031012076
+    ],
+    [
+     15,
+     "best_so_far",
+     0.13267906049501302
+    ],
+    [
+     15,
+     "mean",
+     0.13298082217114401
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13267906049501302
+    ],
+    [
+     20,
+     "mean",
+     0.13185475070887473
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13238223081015218
+    ],
+    [
+     25,
+     "mean",
+     0.134130226288058
+    ]
+   ],
+   "where": "ws:0"
+  },
+  "stickyhard-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:24:17 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30690,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:13 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "c63b9c3ff24b0dd2a685b434485d0143e05c8b4bbcbdaafa19056df54c549b0a",
+    "val_objective": 0.11603745714199308,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.11581758385118851,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.11603745714199308,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T10:16:09-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15195.11
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.09303232691426537
+    ],
+    [
+     5,
+     "mean",
+     0.09420476968882666
+    ],
+    [
+     10,
+     "best_so_far",
+     0.11160302360059897
+    ],
+    [
+     10,
+     "mean",
+     0.10482398913748063
+    ],
+    [
+     15,
+     "best_so_far",
+     0.11054933196455888
+    ],
+    [
+     15,
+     "mean",
+     0.11330061668401026
+    ],
+    [
+     20,
+     "best_so_far",
+     0.11194563755869545
+    ],
+    [
+     20,
+     "mean",
+     0.11236991813998667
+    ],
+    [
+     25,
+     "best_so_far",
+     0.11194563755869545
+    ],
+    [
+     25,
+     "mean",
+     0.11603745714199308
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "stickyhard-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 14:43:21 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30720,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:18:15 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 25,
+    "policy_sha": "623d1e1ad50da8be20ce82e360546e947737e74f983bd9986e627020f4cc2ea4",
+    "val_objective": 0.1140182401637873,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.11414539188232156,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27454,
+    "selected_val_objective": 0.1140182401637873,
+    "tasks_requested": 34018,
+    "time": "2026-10-03T14:40:13-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15182.69
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.09991809878821953
+    ],
+    [
+     5,
+     "mean",
+     0.097140476253373
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1075981108660576
+    ],
+    [
+     10,
+     "mean",
+     0.11144863149575882
+    ],
+    [
+     15,
+     "best_so_far",
+     0.11230630184713356
+    ],
+    [
+     15,
+     "mean",
+     0.10928172086895278
+    ],
+    [
+     20,
+     "best_so_far",
+     0.11230630184713356
+    ],
+    [
+     20,
+     "mean",
+     0.10861801681822791
+    ],
+    [
+     25,
+     "best_so_far",
+     0.11230630184713356
+    ],
+    [
+     25,
+     "mean",
+     0.1140182401637873
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "stickyhard-s3": {
+   "attempts": [
+    {
+     "end_phase": "paused",
+     "ingest": null,
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "CANCELLED",
+     "submitted": "2026-10-03 14:43:52 PDT",
+     "target": "slurm:<node>"
+    },
+    {
+     "end_phase": "paused",
+     "ingest": null,
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 15:45:37 PDT",
+     "target": "slurm:<node>"
+    },
+    {
+     "end_phase": "done",
+     "ingest": {
+      "local": "results are in the campaign cache already"
+     },
+     "job": null,
+     "pid": 1494365,
+     "slurm_state": null,
+     "submitted": "2026-10-03 17:21:15 PDT",
+     "target": "ws:0"
+    }
+   ],
+   "best_val": {
+    "generation": 15,
+    "policy_sha": "ec3c0f74c10c87de75decdcaba2859be92d9ec9ed8b46eba58ea427e1870bc72",
+    "val_objective": 0.11381055976940979,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.11374017312323309,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 25243,
+    "selected_val_objective": 0.11381055976940979,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T17:54:34-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 10363.95
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.09419524995863407
+    ],
+    [
+     5,
+     "mean",
+     0.09469101589110263
+    ],
+    [
+     10,
+     "best_so_far",
+     0.10743405004596066
+    ],
+    [
+     10,
+     "mean",
+     0.1011670830642286
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1051358386249877
+    ],
+    [
+     15,
+     "mean",
+     0.11381055976940979
+    ],
+    [
+     20,
+     "best_so_far",
+     0.11053501400089602
+    ],
+    [
+     20,
+     "mean",
+     0.10839097711632982
+    ],
+    [
+     25,
+     "best_so_far",
+     0.11361474061470726
+    ],
+    [
+     25,
+     "mean",
+     0.11089527619311199
+    ]
+   ],
+   "where": "ws:0"
+  },
+  "twotier-s1": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 10:24:38 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30718,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 05:51:08 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 15,
+    "policy_sha": "f38f7e15b76a8885235b73e60921b0e74e7a3ac5d174ef3a385f3850b0a3dab6",
+    "val_objective": 0.1362797254582579,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.13003203590254775,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27454,
+    "selected_val_objective": 0.1362797254582579,
+    "tasks_requested": 33814,
+    "time": "2026-10-03T10:17:53-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15263.89
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1317417657108469
+    ],
+    [
+     5,
+     "mean",
+     0.13546701826944296
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1344100619908268
+    ],
+    [
+     10,
+     "mean",
+     0.13432004859866045
+    ],
+    [
+     15,
+     "best_so_far",
+     0.134835782905995
+    ],
+    [
+     15,
+     "mean",
+     0.1362797254582579
+    ],
+    [
+     20,
+     "best_so_far",
+     0.134835782905995
+    ],
+    [
+     20,
+     "mean",
+     0.13544001991420526
+    ],
+    [
+     25,
+     "best_so_far",
+     0.134835782905995
+    ],
+    [
+     25,
+     "mean",
+     0.1353600579826009
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "twotier-s2": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 14:50:26 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30750,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 10:18:13 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 10,
+    "policy_sha": "1241bd9cb5ea2ee38d2b7f64e9af1964be4318b79362f376a06bdf573cc0105a",
+    "val_objective": 0.13461192182490728,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.1286681012380694,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27476,
+    "selected_val_objective": 0.13461192182490728,
+    "tasks_requested": 34222,
+    "time": "2026-10-03T14:43:16-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15230.46
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.13209756123130248
+    ],
+    [
+     5,
+     "mean",
+     0.1341086605139221
+    ],
+    [
+     10,
+     "best_so_far",
+     0.13209358671930874
+    ],
+    [
+     10,
+     "mean",
+     0.13461192182490728
+    ],
+    [
+     15,
+     "best_so_far",
+     0.13209358671930874
+    ],
+    [
+     15,
+     "mean",
+     0.13394415121174896
+    ],
+    [
+     20,
+     "best_so_far",
+     0.13209358671930874
+    ],
+    [
+     20,
+     "mean",
+     0.13314473402498975
+    ],
+    [
+     25,
+     "best_so_far",
+     0.13209358671930874
+    ],
+    [
+     25,
+     "mean",
+     0.13429888575109963
+    ]
+   ],
+   "where": "slurm:<node>"
+  },
+  "twotier-s3": {
+   "attempts": [
+    {
+     "end_phase": "done",
+     "ingest": {
+      "already_cached": 314,
+      "at": "2026-10-03 17:15:33 PDT",
+      "e0_values_merged": 0,
+      "ingested": 30758,
+      "node_image": [
+       "Ubuntu 24.04.5 LTS",
+       "2.39"
+      ],
+      "rejected": 0,
+      "results_appended": 0
+     },
+     "job": "<job>",
+     "pid": null,
+     "slurm_state": "COMPLETED",
+     "submitted": "2026-10-03 12:49:23 PDT",
+     "target": "slurm:<node>"
+    }
+   ],
+   "best_val": {
+    "generation": 10,
+    "policy_sha": "642c64b197c8f4c5d74eb1891645cb392369b2b6daa6932959f0dae04c7a9078",
+    "val_objective": 0.13487277879054577,
+    "which": "mean"
+   },
+   "evals": {
+    "best_train_objective": 0.12853655863388624,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27508,
+    "selected_val_objective": 0.13487277879054577,
+    "tasks_requested": 34222,
+    "time": "2026-10-03T17:14:01-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15240.07
+   },
+   "status": "done",
+   "val_candidates": 10,
+   "val_trajectory": [
+    [
+     5,
+     "best_so_far",
+     0.1330408598092387
+    ],
+    [
+     5,
+     "mean",
+     0.13302445985309633
+    ],
+    [
+     10,
+     "best_so_far",
+     0.1330408598092387
+    ],
+    [
+     10,
+     "mean",
+     0.13487277879054577
+    ],
+    [
+     15,
+     "best_so_far",
+     0.1330408598092387
+    ],
+    [
+     15,
+     "mean",
+     0.13444956455470183
+    ],
+    [
+     20,
+     "best_so_far",
+     0.1330408598092387
+    ],
+    [
+     20,
+     "mean",
+     0.13418070381241212
+    ],
+    [
+     25,
+     "best_so_far",
+     0.1330408598092387
+    ],
+    [
+     25,
+     "mean",
+     0.13363989991876812
+    ]
+   ],
+   "where": "slurm:<node>"
+  }
+ },
+ "phase2_mid_fix": {
+  "a12": "a12_m1_default_init = m1c-s1; the unconstrained m1-s1 row is a12_m1_default_init_unconstrained",
+  "doc": "audits/phase2-mid/fix.md",
+  "facts": "facts/phase2_mid_fix.json",
+  "m1": "policy key m1 = sign-constrained M1 (m1c-s1/s2/s3; theta3, theta4, theta5, theta7 clamped <= 0; same seeds, B, popsize, K, UH re-evaluation and validation schedule; s2 init projected, runs/phase2/inits/m1c_s2.json)",
+  "m1u": "policy key m1u = the original unconstrained restarts m1-s1/s2/s3, gaming-flagged, disclosed row only"
+ },
+ "policies_selection_final": [
+  "chwbl",
+  "dualmap",
+  "llmdob",
+  "llmdpp",
+  "lmetric",
+  "m0",
+  "m1",
+  "m1u",
+  "ramjet",
+  "stickybounded",
+  "stickyhard",
+  "twotier"
+ ],
+ "relays": [
+  {
+   "at": "2026-10-03 08:10:49 PDT",
+   "note": "Added CPU cluster node <node> (partition <partition>, EPYC 7702P, Ubuntu 24.04.5/glibc 2.39) after parity smoke job <job> (28/28 records identical, 186,548 per-request rows; remote.json parity.node_<node>_<partition>) via new p2orch 'targets --add' (WT <commit-24>); drift-l1/l3/n4 ran there (jobs <job>), all done+ingested. m0-s1 and m1-s1 done+ingested at 08:08-08:09 (400 evals, 5 val checkpoints each; equal-budget check true on 2/2). Wave 2 started: m1-s2 (<job>, <node>), m0-s2 (<job>, <node>); drift-n8 (<job>, <node>). No cancels. Loop pid <job> alive. <node> still held by another user (AllocMem <job> MB).",
+   "relay": "tier-A relay i0 (06:16-08:12 PDT)"
+  },
+  {
+   "at": "2026-10-03 10:25:24 PDT",
+   "note": "Loop restarted as pid 1043131 on WT <commit-25>, which lets p2orch open the next wave in the same placement pass; the fix took effect at 10:24 when m1-s3 was placed in the same pass as dualmap-s2 and chwbl-s2. LR-15 drift: drift-n8 finished 08:41, and drift-matrix ran as local pid 1047313 from 08:41 to 08:48: 560 records, 0 errors. Cross-play losses on val k3-10: l1-tuned on l3 +0.0865 (3 L3 cells, per-cell +0.2148/+0.0105/+0.0342, SE 0.0645); l3-tuned on l1 -0.0067; n4-tuned on n8 -0.0043; n8-tuned on n4 +0.0021. So within_mde is false: one loss exceeds MDE 0.038. HYPOTHESIS, untested: the L1-only theta is undertrained rather than drifted. It trails all three other thetas on 11 of 14 val cells; the exceptions are agentx-V2-base-n6-lanes-L2, agentx-V3-base-n8-lanes-L1 and sessions-s4-base-n8-closed-L2. On the two L1 cells, l3-tuned beats it on average (loss -0.0067). The M2 decision belongs to tier B. Wave 1: 10 of 11 runs done and ingested; llmdpp-s1 on the workstation is at gen 23. Equal-budget check true for 10 of 10 tier-A runs (400 evals, 5 val checkpoints). <node> freed at 09:46 and took ramjet-s2; same image as the validated epyc7702p nodes (Ubuntu 24.04.5 / glibc 2.39).",
+   "relay": "phase2 tier-A relay i1 (08:11-10:30 PDT)"
+  },
+  {
+   "at": "2026-10-03 12:17:32 PDT",
+   "note": "10:26-12:20 PDT. 13/33 tier-A train runs done+ingested (m1-s2 10:30, llmdpp-s1 10:47 local, llmdpp-s2 10:59 this relay), equal-budget check true 13/13 (400 evals, 5 val ckpts); 4/4 drift done. Placed by the loop: m0-s3 job <job> (<node>), llmdpp-s3 local pid <job> (ws), ramjet-s3 job <job> (<node>); 13 running, 7 wave-3 queued. Ingest spot-check 200/200 sampled returned records identical in the campaign cache (runs/phase2/checks/ingest_spotcheck_i2.json). Added p2orch rebalance (WT <commit-30> + <commit-32>; config rebalance=true): when nothing is queued and a epyc9654p node is idle, a cutoff-bound run on a slower node is cancelled by exact job ID and resumed there. Loop restarted twice between ticks; now pid <job>. No selection yet: per-run values remain provisional.",
+   "relay": "phase2 tier-A relay i2"
+  },
+  {
+   "at": "2026-10-03 14:51:38 PDT",
+   "note": "Loop PID <job> untouched (no restart, no code change). Done+ingested this relay: m0-s2 (12:48, job <job>), m0-s3 (12:48, job <job>), ramjet-s3 (13:20, job <job>), ramjet-s2 (14:17, job <job>), lmetric-s2 (14:42, job <job>), stickybounded-s2 (14:43, job <job>), stickyhard-s2 (14:43, job <job>), twotier-s2 (14:50, job <job>). Equal-budget check true 21/21. Ingest spot-check 280/280 sampled returned records identical in the campaign cache (runs/phase2/checks/ingest_spotcheck_i3.json; 7 runs x 40, before twotier-s2 finished). All 33 tier-A training runs placed at 14:50: lmetric-s3 <job> (<node>), twotier-s3 <job> (<node>), llmdob-s3 <job> (<node>), stickyhard-s3 <job> (<node>), stickybounded-s3 <job> (<node>), dualmap-s3 <job> (<node>), chwbl-s3 <job> (<node>). <node> lost to another user's job (<job>, all memory, from 14:15:44 to 2026-10-04 14:15). No cancels. Per-run values remain provisional.",
+   "relay": "tier-A relay i3 (12:18-14:55 PDT)"
+  },
+  {
+   "at": "2026-10-03 16:36:15 PDT",
+   "note": "28/33 tier-A train runs done+ingested (new this relay: dualmap-s2 14:56, m1-s3 15:02, llmdob-s2 15:08, lmetric-s3 15:09, chwbl-s2 15:21, llmdob-s3 15:39, llmdpp-s3 local 15:45), drift 4/4, equal-budget check true 28/28. Per-policy selection final for llmdob, llmdpp, lmetric, m0, m1, ramjet (all 3 restarts done; p2orch select --tier A, recomputed from cache records exactly: runs/phase2/checks/selection_recheck_i4.json); M1 = m1-s2 (A11.1 s2 BC init) g15 mean, val k0-2 0.16363; A12 M1-default-init = m1-s1 g25 mean 0.16148. Rebalance moved chwbl-s3 (15:09, job <job> -> <job>) and stickyhard-s3 (15:39, job <job> -> <job>) to epyc9654p. Remaining 5 runs (chwbl-s3, stickyhard-s3, dualmap-s3, stickybounded-s3, twotier-s3) run until the 17:18 pause; selection for chwbl, dualmap, stickybounded, stickyhard, twotier pending.",
+   "relay": "phase-2 tier-A relay i4 (14:52-16:45 PDT)"
+  },
+  {
+   "at": "2026-10-03 18:37:18 PDT",
+   "note": "31/33 tier-A train runs done+ingested (new this relay: twotier-s3 CPU cluster job <job> 17:14; stickyhard-s3 migrated to the workstation 17:21 after pausing at gen 22, done locally 17:54; chwbl-s3 post-reboot job <job> on <node> 18:21), drift 4/4, equal-budget check true 31/31 (400 evals, 5 val ckpts; the three-host stickyhard-s3 and two-host chwbl-s3 have 25 contiguous generation lines). Per-policy selection final for 9 policies (+ twotier = twotier-s1 g15 mean 0.13628, stickyhard = stickyhard-s1 g25 mean 0.11604, chwbl = chwbl-s1 g5 mean 0.02896); checks/selection_recheck_i5.json 10/10 rows exact from cache records. Cutoff: all campaign CPU cluster jobs ended by 17:21:18 (COMPLETED, no cancels). The reboot is rolling (nodes reboot when idle); both epyc9654p nodes rebooted by 18:01 with an unchanged image (libc6 2.39-0ubuntu8.9, libm.so.6 identical to the workstation's: checks/post_reboot_image_i5.json), so cluster_reopen was moved 20:00 -> 18:07:24. New WT <commit-41>: node_train.sh refuses an unvalidated node image before staging, and p2orch disables that node. Remaining at 18:37: dualmap-s3 (job <job>, <node>, gen 18; projected about 19:05) and stickybounded-s3 (workstation PID <job>, gen 18; projected about 19:50). Selection for dualmap and stickybounded pending.",
+   "relay": "phase-2 tier-A relay i5 (16:42-18:40 PDT)"
+  },
+  {
+   "at": "2026-10-03 19:51:53 PDT",
+   "note": "18:38-19:53 PDT. dualmap-s3 done on the CPU cluster 19:06:46 (job <job> COMPLETED, ingest 19:10:45: 30,752 records, 0 rejected; ingest spot-check 40/40 identical, checks/ingest_spotcheck_i6.json); stickybounded-s3 done on the workstation 19:50:26 (launch.sh PID <job>, local run, writes the campaign cache directly). Tier A 33/33 train + 4/4 drift done; equal-budget check true 33/33 (400 evals, 5 val checkpoints, 25 contiguous generation lines). Loop PID <job> exited by itself at 19:51:05 (nothing up to max_wave queued or running). Final selection: p2orch select --tier A at 19:51:43, all 11 policies complete (30 validated candidates each); dualmap = dualmap-s3 g10 mean 0.04017, stickybounded = stickybounded-s2 g25 mean 0.13758. No cancels this relay.",
+   "relay": "tier-A relay i6"
+  },
+  {
+   "at": "2026-10-03 21:56:58 PDT",
+   "note": "A11.2 sign-constrained M1 re-run m1c-s1/s2/s3 started 21:52 PDT (jobs <job>); policy key m1 = constrained, m1u = original unconstrained restarts (gaming-flagged); drift marked inconclusive (overfit audit F1); audits/phase2-mid/fix.md",
+   "relay": "phase2-mid fixer"
+  },
+  {
+   "at": "2026-10-04 02:25:28 PDT",
+   "note": "m1c-s1/s2/s3 done and ingested 02:19-02:25 PDT (400 evals, 5 val ckpts each; equal-budget check true 36/36); LR-10 re-selection over the constrained restarts; A12 row = m1c-s1",
+   "relay": "phase2-mid fixer (final)"
+  }
+ ],
+ "schema": "learned-routing.tierA.v1",
+ "sources": {
+  "budget": "runs/phase2/budget.json",
+  "drift_matrix": "runs/phase2/drift/matrix.json",
+  "histories": "per-run history.jsonl (runs/remote/returned/p2a/<run>/runs/train/<run>/ or runs/phase2/local/<run>/)",
+  "selection": "runs/phase2/selection/tierA.json",
+  "state": "runs/phase2/state.json"
+ },
+ "status": "complete",
+ "written": "2026-10-04 02:25:28 PDT"
+}

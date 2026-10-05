@@ -3,7 +3,7 @@
 - Fixer: build fixer r2, 2026-10-02 (about 17:24–17:50 PDT).
 - Input: `audits/build/goodput-normalization-r2.md`, finding F1 (major). It was the only finding
   assigned to this round. Minors F2–F7 of that audit are still open (see the end).
-- WT `rupei/learned-routing-public`: base `<commit-13>` (another stage's AgentX transform commit, which
+- WT `rupei/learned-routing`: base `<commit-13>` (another stage's AgentX transform commit, which
   landed while this round ran), head **`<commit-14>`** (+1 signed commit). Bindings were not rebuilt:
   build_id `6955b0ee…` is unchanged and the fix is Python only.
 - `HARNESS_VERSION` `lrh-3` → **`lrh-4`**. E0 method `ais-chunked-estimator-v1` →

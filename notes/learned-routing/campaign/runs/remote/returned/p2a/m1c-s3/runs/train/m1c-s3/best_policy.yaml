@@ -1,0 +1,10 @@
+name: "m1-learned-v1@m1c-s3"
+parameters:
+  feature_set: "v1"
+  temperature: 0.0
+  theta: [-1.0, 64.74318590731761, 4.3640025109483105, 0.0, 0.0, -56.034062485929155, 44.6212981528291, 0.0]
+  tie_break: "one_draw"
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

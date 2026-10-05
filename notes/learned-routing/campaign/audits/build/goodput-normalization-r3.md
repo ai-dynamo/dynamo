@@ -1,7 +1,7 @@
 # Audit: build checkpoint, lens "goodput-normalization", round 3 (dynamic)
 
 - Auditor: independent dynamic auditor, 2026-10-02 (about 17:38–17:55 PDT).
-- Audited state: WT `rupei/learned-routing-public` at `<commit-14>` (build fixer r2 head), bindings build_id
+- Audited state: WT `rupei/learned-routing` at `<commit-14>` (build fixer r2 head), bindings build_id
   `6955b0ee…` (unchanged), `HARNESS_VERSION` `lrh-4`, E0 method `ais-chunked-estimator-v2`, cells
   `lr-cells-v3`.
 - Evidence directory: `CR/runs/audits/build-goodput-normalization-r3/` (`scripts/`, `out/`, `logs/`,

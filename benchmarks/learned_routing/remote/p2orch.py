@@ -17,16 +17,23 @@ Reads ``CR/runs/phase2/MANIFEST.json`` (every run: space, args, tier, wave) and 
    chunked ``lr-train`` loop over the shared CR/slots pool;
 4. write per-run evaluation counts (budget equality) and the state file.
 
-Slurm jobs are sized to end by a weekly cutoff (default Saturday 17:30 in ``LR_TZ``, for clusters
-that reboot or drain weekly): ``--time`` = cutoff - now. With ``--cluster-reopen`` (or
-``LR_CLUSTER_REOPEN``) set, no Slurm submission happens inside the maintenance window (cutoff ..
-reopen time). Nothing is deleted; jobs are cancelled only by their exact IDs.
+Slurm jobs run for at most ``--max-time-s``. A cluster whose jobs must end by a recurring weekly
+time sets that job-end cutoff with ``init --cutoff "<weekday> HH:MM"`` (or ``LR_CUTOFF``; there is no
+built-in default): ``--time`` = cutoff - now, capped at ``--max-time-s``. With ``--cluster-reopen``
+(or ``LR_CLUSTER_REOPEN``) also set, no Slurm submission happens inside the maintenance window
+(cutoff .. reopen time). Nothing is deleted; jobs are cancelled only by their exact IDs.
 
 Site settings (no defaults; set them in ``site.env`` next to this file or in the environment):
 ``LR_CR`` (campaign root), ``LR_SSH_ALIAS``, ``LR_REMOTE_ROOT`` and ``LR_P2ORCH_TARGETS`` (a JSON
 list of placement targets, see ``p2orch_targets.example.json``). ``LR_TZ`` sets the cutoff's time
-zone (default UTC); ``LR_CLUSTER_REOPEN`` is the default of ``init --cluster-reopen`` (unset: no
-maintenance window).
+zone (default UTC); ``LR_CUTOFF`` and ``LR_CLUSTER_REOPEN`` are the defaults of ``init --cutoff``
+and ``init --cluster-reopen`` (unset: no cutoff, no maintenance window).
+
+Several instances can share the nodes: ``LR_P2_DIR`` moves the manifest, state, logs and local runs
+to another phase directory (run that instance's copy of this file from its own worktree, so its
+bundle carries its own bindings build), and ``init --yield-to OTHER/state.json[:MAX_WAVE]`` makes
+it skip the other instance's running targets and place nothing while the other has eligible
+queued runs up to MAX_WAVE.
 
 Commands: ``init``, ``status``, ``tick [--dry-run]``, ``loop``, ``budget``, ``select``,
 ``drift-matrix``, ``migrate RUN``, ``cancel RUN``, ``rebalance``, ``targets``. See
@@ -58,7 +65,9 @@ siteenv.load()
 LANE = Path(__file__).resolve().parent
 WT = LANE.parents[2]
 CR = Path(siteenv.require("LR_CR"))
-P2 = CR / "runs" / "phase2"
+# A second orchestrator instance (e.g. the AIS league, run from its own worktree and bundle) keeps
+# its manifest, state, logs and local runs in its own phase directory.
+P2 = Path(os.environ.get("LR_P2_DIR", CR / "runs" / "phase2"))
 MANIFEST = P2 / "MANIFEST.json"
 STATE = P2 / "state.json"
 PY = WT / ".venv" / "bin" / "python"
@@ -218,12 +227,31 @@ def hms(seconds: float) -> str:
     return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
-# -- the weekly cluster cutoff --------------------------------------------------------------------
-def cutoff_after(t: dt.datetime, cfg: dict) -> dt.datetime:
-    """The next weekly job-end cutoff (Saturday HH:MM local) at or after t."""
-    hh, mm = (int(x) for x in cfg["cutoff_hhmm"].split(":"))
+# -- the optional weekly job-end cutoff ----------------------------------------------------------
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def parse_cutoff(text: str | None) -> str | None:
+    """Normalize ``"<weekday> HH:MM"`` (weekday as mon..sun, or its full name) to ``"ddd HH:MM"``."""
+    if not text:
+        return None
+    m = re.fullmatch(r"\s*([A-Za-z]+)\s+(\d{1,2}):(\d{2})\s*", text)
+    day = m.group(1).lower()[:3] if m else ""
+    if not m or day not in WEEKDAYS or int(m.group(2)) > 23 or int(m.group(3)) > 59:
+        raise SystemExit(
+            f"--cutoff {text!r}: expected '<weekday> HH:MM', e.g. 'mon 06:00'"
+        )
+    return f"{day} {int(m.group(2)):02d}:{m.group(3)}"
+
+
+def cutoff_after(t: dt.datetime, cfg: dict) -> dt.datetime | None:
+    """The next weekly job-end cutoff (LR_TZ local) at or after t; None without a cutoff."""
+    if not cfg.get("cutoff"):
+        return None
+    day_name, hhmm = cfg["cutoff"].split()
+    hh, mm = (int(x) for x in hhmm.split(":"))
     day = t.replace(hour=hh, minute=mm, second=0, microsecond=0)
-    day += dt.timedelta(days=(5 - t.weekday()) % 7)
+    day += dt.timedelta(days=(WEEKDAYS.index(day_name) - t.weekday()) % 7)
     if day < t:
         day += dt.timedelta(days=7)
     return day
@@ -238,6 +266,8 @@ def cluster_window(cfg: dict, t: dt.datetime | None = None) -> tuple[bool, float
         else None
     )
     cutoff = cutoff_after(t, cfg)
+    if cutoff is None:
+        return True, math.inf, "no job-end cutoff"
     if reopen:
         # The maintenance window runs from the cutoff that precedes the reopen time to the reopen time.
         window_start = cutoff_after(reopen - dt.timedelta(days=7), cfg)
@@ -260,26 +290,76 @@ def init_state(args) -> dict:
             f"{STATE} exists (use --force to rebuild targets/config, runs are kept)"
         )
     old = read_json(STATE, {}) or {}
+    cutoff = parse_cutoff(args.cutoff)
+    if args.cluster_reopen and not cutoff:
+        raise SystemExit(
+            "--cluster-reopen needs --cutoff (the window starts at the cutoff)"
+        )
+    targets = old.get("targets")
+    if not targets and args.targets_from:
+        targets = (read_json(Path(args.targets_from), {}) or {}).get("targets")
+        if not targets:
+            raise SystemExit(f"{args.targets_from}: no targets to copy")
     state = {
         "schema": SCHEMA,
         "created": old.get("created", stamp()),
         "config": {
             "bundle": args.bundle,
             "max_wave": args.max_wave,
-            "cutoff_hhmm": args.cutoff,
+            "cutoff": cutoff,
             "cluster_reopen": args.cluster_reopen,
             "min_job_s": args.min_job_s,
             "max_time_s": args.max_time_s,
             "local_chunk_s": 540,
             "loop_interval_s": 300,
+            "yield_to": [parse_yield(text) for text in args.yield_to or []],
+            "yield_own_from_wave": args.yield_own_from_wave,
         },
-        "targets": old.get("targets") or default_targets(),
+        "targets": targets or default_targets(),
         "runs": old.get("runs", {}),
         "notes": old.get("notes", []),
     }
     sync_runs(state)
     write_json(STATE, state)
     return state
+
+
+def parse_yield(text: str) -> dict:
+    """``PATH[:MAX_WAVE]``: another orchestrator's state.json and the waves this one yields to."""
+    path, _, wave = (
+        text.rpartition(":") if re.fullmatch(r".*:\d+", text) else (text, "", "")
+    )
+    if not Path(path).is_file():
+        raise SystemExit(f"--yield-to {text}: no state file {path}")
+    return {"state": str(Path(path).resolve()), "max_wave": int(wave) if wave else None}
+
+
+def foreign_view(state: dict) -> tuple[set[str], list[str]]:
+    """(targets held by the other orchestrators' running runs, why this instance yields).
+
+    Read-only: another instance's state.json is replaced atomically, so no lock is needed. It
+    yields while that instance has an eligible queued run at or below the configured wave.
+    """
+    held: set[str] = set()
+    reasons: list[str] = []
+    for entry in state["config"].get("yield_to") or []:
+        other = read_json(Path(entry["state"]), None)
+        if not other:
+            reasons.append(f"{entry['state']} unreadable")
+            continue
+        held |= busy_targets(other)
+        cap = entry.get("max_wave")
+        waiting = [
+            rid
+            for rid in eligible(other)
+            if cap is None or other["runs"][rid]["wave"] <= cap
+        ]
+        if waiting:
+            reasons.append(
+                f"{Path(entry['state']).parent.name} has {len(waiting)} eligible run(s) "
+                f"up to wave {cap if cap is not None else 'max'} (e.g. {waiting[0]})"
+            )
+    return held, reasons
 
 
 def sync_runs(state: dict) -> None:
@@ -693,29 +773,31 @@ def counts(path: Path | None) -> dict | None:
 def budget_report(state: dict) -> dict:
     rows = {rid: e.get("evals") for rid, e in state["runs"].items() if e.get("evals")}
     done = {rid: c for rid, c in rows.items() if state["runs"][rid]["status"] == "done"}
-    tier_a = {
-        rid: c
-        for rid, c in done.items()
-        if state["runs"][rid]["tier"] == "A" and state["runs"][rid]["kind"] == "train"
+    trained = {
+        rid: c for rid, c in done.items() if state["runs"][rid]["kind"] == "train"
     }
-    # The UH re-evaluation is a diagnostic outside B: lr-train skips it in a generation whose
-    # chunk deadline falls during it, so its count is reported but not part of the equality check.
-    sig = {rid: (c["fevals"], c["val_checkpoints"]) for rid, c in tier_a.items()}
-    distinct = sorted({v for v in sig.values()})
-    return {
-        "runs": rows,
-        "tier_A_done": len(tier_a),
-        "tier_A_signatures_(fevals,val_checkpoints)": distinct,
-        "tier_A_equal_budget": len(distinct) <= 1
-        and all(v == (400, 5) for v in distinct),
-        "tier_A_reeval_generations": {
-            rid: c["reeval_generations"] for rid, c in tier_a.items()
-        },
-        "per_policy_restarts_done": {
-            k: sum(1 for rid in tier_a if state["runs"][rid]["policy_key"] == k)
-            for k in sorted({state["runs"][rid]["policy_key"] for rid in tier_a})
-        },
+    report: dict = {"runs": rows}
+    # Every tier is checked on its own (tier A, and e.g. the AIS league's tier in its own instance).
+    for tier in sorted({state["runs"][rid]["tier"] for rid in trained}):
+        runs = {
+            rid: c for rid, c in trained.items() if state["runs"][rid]["tier"] == tier
+        }
+        # The UH re-evaluation is a diagnostic outside B: lr-train skips it in a generation whose
+        # chunk deadline falls during it, so its count is reported but not part of the check.
+        distinct = sorted({(c["fevals"], c["val_checkpoints"]) for c in runs.values()})
+        report[f"tier_{tier}_done"] = len(runs)
+        report[f"tier_{tier}_signatures_(fevals,val_checkpoints)"] = distinct
+        report[f"tier_{tier}_equal_budget"] = len(distinct) <= 1 and all(
+            v == (400, 5) for v in distinct
+        )
+        report[f"tier_{tier}_reeval_generations"] = {
+            rid: c["reeval_generations"] for rid, c in runs.items()
+        }
+    report["per_policy_restarts_done"] = {
+        k: sum(1 for rid in trained if state["runs"][rid]["policy_key"] == k)
+        for k in sorted({state["runs"][rid]["policy_key"] for rid in trained})
     }
+    return report
 
 
 # -- tick -----------------------------------------------------------------------------------------
@@ -774,6 +856,34 @@ def collect(state: dict, dry_run: bool) -> None:
                     log(f"warning: scancel {att['job']} failed: {exc}")
                 continue
             if st in LIVE:
+                continue
+            refused = (
+                read_json(remote_run_dir(state, rid) / "image_refused.json", {}) or {}
+            )
+            if str(refused.get("job")) == str(att["job"]):
+                # node_train.sh refused the node's OS/glibc image before staging (A9 addendum):
+                # nothing ran and the checkpoint is untouched. Take the node out of rotation (a
+                # parity smoke must validate the image first; `targets --enable` restores it).
+                att["image_refused"] = refused
+                for t in state["targets"]:
+                    if t["id"] == att["target"]:
+                        t["enabled"] = False
+                        t["disabled_reason"] = (
+                            f"image {refused.get('image')!r} not parity-validated "
+                            f"(job {att['job']}, {stamp()})"
+                        )
+                e["status"] = "queued"
+                e["resume"] = (
+                    remote_run_dir(state, rid)
+                    / "runs"
+                    / "train"
+                    / rid
+                    / "checkpoint.pkl"
+                ).exists()
+                log(
+                    f"{rid}: job {att['job']} refused node image {refused.get('image')!r} "
+                    f"(not parity-validated); {att['target']} disabled, run requeued"
+                )
                 continue
             timing = read_json(remote_run_dir(state, rid) / "timing.json", {}) or {}
             phase = (e.get("evals") or {}).get("phase")
@@ -860,7 +970,25 @@ def assign(state: dict, dry_run: bool) -> list:
     todo = eligible(state)
     if not todo:
         return []
-    busy = busy_targets(state)
+    held, reasons = foreign_view(state)
+    # config "yield_own_from_wave" W: while another instance has eligible runs within its yield cap,
+    # hold back only this instance's runs of wave >= W (instead of everything), so two instances can
+    # interleave priorities without both waiting on each other.
+    own_from = cfg.get("yield_own_from_wave")
+
+    def allowed(rid: str) -> bool:
+        return not reasons or (
+            own_from is not None and state["runs"][rid]["wave"] < own_from
+        )
+
+    if reasons:
+        todo = [r for r in todo if allowed(r)]
+        log(
+            f"yielding to other orchestrators{f' (waves >= {own_from})' if own_from is not None else ''}: {'; '.join(reasons)}"
+        )
+        if not todo:
+            return []
+    busy = busy_targets(state) | held
     free = [
         t
         for t in sorted(state["targets"], key=lambda t: (t["rank"], t["id"]))
@@ -920,7 +1048,7 @@ def assign(state: dict, dry_run: bool) -> list:
             e.pop("rebalance_to", None)
             # Starting the last unstarted run of a wave unlocks the next wave in this same pass.
             placed_ids = {p[0] for p in placed}
-            todo = [r for r in eligible(state) if r not in placed_ids]
+            todo = [r for r in eligible(state) if r not in placed_ids and allowed(r)]
     if not ok:
         log(f"Slurm submissions held: {why}")
     return placed
@@ -992,7 +1120,8 @@ def rebalance(state: dict, dry_run: bool) -> list:
     reserved = {
         e["rebalance_to"] for e in state["runs"].values() if e.get("rebalance_to")
     }
-    busy = busy_targets(state) | reserved
+    # Never move onto a node another orchestrator instance holds.
+    busy = busy_targets(state) | reserved | foreign_view(state)[0]
     free = [
         t
         for t in sorted(state["targets"], key=lambda t: (t["rank"], t["id"]))
@@ -1116,11 +1245,9 @@ def tick(dry_run: bool = False) -> dict:
         if not dry_run:
             write_json(STATE, state)
             write_json(P2 / "budget.json", state["budget"])
+        drift = [state["runs"].get(f"drift-{r}") for r in ("l1", "l3", "n4", "n8")]
         if (
-            all(
-                state["runs"][f"drift-{r}"]["status"] == "done"
-                for r in ("l1", "l3", "n4", "n8")
-            )
+            all(e is not None and e["status"] == "done" for e in drift)
             and not (P2 / "drift" / "matrix.json").exists()
         ):
             log(
@@ -1409,6 +1536,7 @@ def cmd_targets(args) -> int:
         for t in state["targets"]:
             if args.enable and t["id"] in args.enable:
                 t["enabled"] = True
+                t.pop("disabled_reason", None)
             if args.disable and t["id"] in args.disable:
                 t["enabled"] = False
         write_json(STATE, state)
@@ -1425,8 +1553,10 @@ def main(argv=None) -> int:
     i.add_argument("--max-wave", type=int, default=3)
     i.add_argument(
         "--cutoff",
-        default="17:30",
-        help="weekly Saturday job-end cutoff, LR_TZ local time",
+        default=os.environ.get("LR_CUTOFF") or None,
+        metavar="'<weekday> HH:MM'",
+        help="optional weekly job-end cutoff in LR_TZ local time (default LR_CUTOFF; unset: none, "
+        "jobs are bounded by --max-time-s only)",
     )
     i.add_argument(
         "--cluster-reopen",
@@ -1435,6 +1565,25 @@ def main(argv=None) -> int:
     )
     i.add_argument("--min-job-s", type=int, default=1800)
     i.add_argument("--max-time-s", type=int, default=12 * 3600)
+    i.add_argument(
+        "--yield-to",
+        action="append",
+        metavar="STATE[:MAX_WAVE]",
+        help="another orchestrator's state.json: never place on its running targets, and place "
+        "nothing while it has an eligible queued run up to MAX_WAVE (default: any wave)",
+    )
+    i.add_argument(
+        "--targets-from",
+        metavar="STATE",
+        help="copy the target list of another orchestrator's state.json (new state only)",
+    )
+    i.add_argument(
+        "--yield-own-from-wave",
+        type=int,
+        default=None,
+        metavar="W",
+        help="while yielding (--yield-to), hold back only this instance's runs of wave >= W",
+    )
     i.add_argument("--force", action="store_true")
     s = sub.add_parser("status")
     s.add_argument("--all", action="store_true")

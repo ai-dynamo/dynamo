@@ -1,0 +1,935 @@
+{
+ "schema": "learned-routing.finalists.v1",
+ "frozen": "2026-10-04 21:24:35 PDT",
+ "status": "frozen before any test evaluation (0 test records; cells/test.jsonl verified against facts/test_freeze.json: runs/select_test/analysis/verify_freeze.json, 149/149 hashes)",
+ "test_jsonl_sha256": "7b998b8e7bd2c870da8e3701e468c3738655045b1a76a1f19110282ddfb3aa6f",
+ "registration": {
+  "path": "runs/select_test/REGISTRATION.json",
+  "sha256": "702630e2a059836908e1c469d5ddb3a6fc2ce2a12ebdd12860d8cfa12aeed342"
+ },
+ "selection": {
+  "path": "runs/select_test/selection_final.json",
+  "sha256": "ea05c6c48719e1c443b196a79032158e28402d52b08c355da410d4957a1e2c30",
+  "script": "runs/select_test/scripts/select_final.py",
+  "split": "val k3-10 (fresh for all 8 learned arms and the tier-C baseline arm: 784 + 448 new records, 0 cached; tier-A baselines' 1,232 records from runs/phase2/valcheck)"
+ },
+ "headline": {
+  "learned": {
+   "key": "m1v2",
+   "spec": {
+    "name": "m1v2@p2-m1v2-s1-g20-best_so_far",
+    "parameters": {
+     "feature_set": "v2",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      5.033515242371209,
+      1.2746683673882302,
+      -0.28108067880740606,
+      0.0,
+      -2.145681844785088,
+      1.3914915415496267,
+      0.0,
+      0.0,
+      -0.9275568752723515,
+      0.0,
+      -1.5816107829913904,
+      0.0,
+      0.0,
+      -0.34803343409089393,
+      0.0,
+      -1.3256644662987185,
+      -2.616992357050634,
+      0.0,
+      0.0,
+      -5.844876720699858,
+      -16.79238255993883,
+      -0.29672985742953983
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "val_k3_10": 0.17830748263632787,
+   "policy_sha": "07f95e14b195c7c2bc5662987f1b2c32cd5bf68253cdb53e3e079de50746d365"
+  },
+  "val_best_baseline": {
+   "key": "ramjet",
+   "spec": {
+    "name": "ramjet@p2-ramjet-s3-g25-best_so_far",
+    "parameters": {
+     "affinity_block_tokens": 512,
+     "alpha": 0.8828774076622825,
+     "basis": "relative",
+     "load_unit_tokens": 4552,
+     "max_affinity_blocks": 68
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "ramjet"
+   },
+   "val_k3_10": 0.1411348331803814,
+   "policy_sha": "8c99a422e8e6909f1d46dfac48e50420c6f6d5fade8e31c28794a64a9963f2c0"
+  },
+  "val_k3_10_margin": {
+   "cell_mean": 0.037172649455946484,
+   "cell_se": 0.011579208466904087,
+   "cells_ahead": 10,
+   "segment_mean": 0.02896159279959519,
+   "segment_se": 0.01254189994321612,
+   "segments_ahead": 5,
+   "segments": 6
+  },
+  "test": "facts/HEADLINE_TEST.json primary test, unchanged"
+ },
+ "secondary_comparisons": {
+  "runner_up_baseline_registered": "ablabase",
+  "best_baseline_of_another_type": "llmdpp",
+  "every_tuned_baseline_IUT": [
+   "ramjet",
+   "ablabase",
+   "llmdpp",
+   "twotier",
+   "stickybounded",
+   "m0",
+   "lmetric",
+   "stickyhard",
+   "llmdob",
+   "dualmap",
+   "chwbl"
+  ],
+  "a12_m1_default_init": "m1 (identical policy: m1c-s1 g20 mean, policy_sha 9a44cb58)",
+  "m1_noaff_vs_m1": [
+   "m1noaff",
+   "m1"
+  ],
+  "ais_league": {
+   "learned": "m2ais",
+   "ais_baseline": "m0ais",
+   "best_overall_baseline": "ramjet"
+  }
+ },
+ "rankings_val_k3_10": {
+  "learned_pool": [
+   [
+    "m1v2",
+    0.17830748263632787
+   ],
+   [
+    "m1noaff",
+    0.1692366009703472
+   ],
+   [
+    "ablam1",
+    0.16836845964916694
+   ],
+   [
+    "m2r2",
+    0.16774290438003298
+   ],
+   [
+    "m1",
+    0.16556456087816657
+   ]
+  ],
+  "baseline_pool": [
+   [
+    "ramjet",
+    0.1411348331803814
+   ],
+   [
+    "ablabase",
+    0.1405424581894374
+   ],
+   [
+    "llmdpp",
+    0.13933790761239287
+   ],
+   [
+    "twotier",
+    0.13451775465167037
+   ],
+   [
+    "stickybounded",
+    0.13380951224916446
+   ],
+   [
+    "m0",
+    0.13262963505096179
+   ],
+   [
+    "lmetric",
+    0.1320527687218506
+   ],
+   [
+    "stickyhard",
+    0.1125374192869206
+   ],
+   [
+    "llmdob",
+    0.10349998934991964
+   ],
+   [
+    "dualmap",
+    0.026285052719892177
+   ],
+   [
+    "chwbl",
+    0.02175477178467915
+   ]
+  ],
+  "ais_learned": [
+   [
+    "m2ais",
+    0.17350843809790512
+   ],
+   [
+    "m1ais",
+    0.17180490670878812
+   ]
+  ],
+  "ais_baselines": [
+   [
+    "m0ais",
+    0.13970245464408904
+   ],
+   [
+    "llmdobm",
+    0.09732607832444609
+   ]
+  ],
+  "secondary": {
+   "m1cont": 0.167237480661827
+  }
+ },
+ "finalists": {
+  "learned_headline_pool": {
+   "m1v2": {
+    "name": "m1v2@p2-m1v2-s1-g20-best_so_far",
+    "parameters": {
+     "feature_set": "v2",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      5.033515242371209,
+      1.2746683673882302,
+      -0.28108067880740606,
+      0.0,
+      -2.145681844785088,
+      1.3914915415496267,
+      0.0,
+      0.0,
+      -0.9275568752723515,
+      0.0,
+      -1.5816107829913904,
+      0.0,
+      0.0,
+      -0.34803343409089393,
+      0.0,
+      -1.3256644662987185,
+      -2.616992357050634,
+      0.0,
+      0.0,
+      -5.844876720699858,
+      -16.79238255993883,
+      -0.29672985742953983
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "m1noaff": {
+    "name": "m1noaff@p2-m1noaff-s1-g25-best_so_far",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      18.91164250921608,
+      0.9959237400533851,
+      0.0,
+      0.0,
+      -44.170587956393376,
+      0.0,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "ablam1": {
+    "name": "ablam1@p2-ablam1-s1-g25-mean",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      19.061321567784574,
+      1.0358174105037676,
+      0.0,
+      0.0,
+      -38.29838904547279,
+      0.009052869138770347,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {
+     "router_queue_threshold": 17.57880318326318
+    },
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "m2r2": {
+    "name": "m2r2@p2-m2r2-s3-g25-mean",
+    "parameters": {
+     "context": {
+      "p": [
+       [
+        0.0,
+        0.09376013916904924,
+        -0.024400833459285565,
+        0.0,
+        0.0,
+        -1.3711288508821724,
+        0.008876201709089315,
+        0.0
+       ],
+       [
+        0.0,
+        0.43346830763411504,
+        0.1901793712839961,
+        0.0,
+        0.0,
+        -0.704954408094352,
+        -0.21934099343793179,
+        0.0
+       ]
+      ],
+      "sources": [
+       "isl_k",
+       "mean_active_prefill_tokens_k"
+      ]
+     },
+     "feature_set": "v1",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      16.245975680333075,
+      -0.9543825669997403,
+      0.0,
+      0.0,
+      -34.554343502964116,
+      -0.493354661998751,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "m1": {
+    "name": "m1@p2-m1c-s1-g20-mean",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      16.541278180717825,
+      -2.2737938976724337,
+      0.0,
+      0.0,
+      -39.22625809552176,
+      0.20618988014460626,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   }
+  },
+  "learned_secondary": {
+   "m1cont": {
+    "name": "m1cont@p2-m1cont-s3-g25-best_so_far",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      17.89989037198403,
+      0.7475344696688921,
+      0.0,
+      0.0,
+      -47.5074472005673,
+      -0.7944938417130061,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "m1u": {
+    "name": "m1u@p2-m1-s2-g15-mean",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      61.32105646681694,
+      1.9775165625757438,
+      -0.7241222850828777,
+      -0.22225654543876772,
+      -145.73331619983247,
+      -2.8513065427604687,
+      0.08777670734929899
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   }
+  },
+  "tuned_baselines": {
+   "ramjet": {
+    "name": "ramjet@p2-ramjet-s3-g25-best_so_far",
+    "parameters": {
+     "affinity_block_tokens": 512,
+     "alpha": 0.8828774076622825,
+     "basis": "relative",
+     "load_unit_tokens": 4552,
+     "max_affinity_blocks": 68
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "ramjet"
+   },
+   "ablabase": {
+    "name": "ablabase@p2-ablabase-s3-g5-best_so_far",
+    "parameters": {
+     "affinity_block_tokens": 512,
+     "alpha": 1.066655130800898,
+     "basis": "relative",
+     "load_unit_tokens": 5939,
+     "max_affinity_blocks": 140
+    },
+    "router_config": {
+     "router_queue_threshold": 17.5557920244583
+    },
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "ramjet"
+   },
+   "llmdpp": {
+    "name": "llmdpp@p2-llmdpp-s2-g25-mean",
+    "parameters": {
+     "prefix_match_length_scale_tokens": 12191,
+     "prefix_match_length_weight": 0.3457432464867829,
+     "weights": {
+      "kv_cache_utilization": 1.7659798019934383,
+      "prefix": 2.0,
+      "queue": 0.8827526711588871
+     }
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "llm-d-precise-prefix"
+   },
+   "twotier": {
+    "name": "twotier@p2-twotier-s1-g15-mean",
+    "parameters": {
+     "balance_abs_threshold": 8,
+     "balance_rel_threshold": 2.0910872076776217,
+     "cache_threshold": 0.6543559649342875
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "dynamo-two-tier-cost-fn"
+   },
+   "stickybounded": {
+    "name": "stickybounded@p2-stickybounded-s2-g25-mean",
+    "parameters": {
+     "load_factor": 1.1765304772985494,
+     "mode": "bounded"
+    },
+    "router_config": {
+     "decode_active_request_weight": 2613.4247764375345,
+     "overlap_score_credit": 1.3006246682441034,
+     "overlap_score_credit_decay": 0.31000613320625037,
+     "prefill_load_scale": 181.71903982807672,
+     "router_temperature": 0.00238177656025839
+    },
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "sticky-session"
+   },
+   "m0": {
+    "name": "m0@p2-m0-s3-g20-mean",
+    "parameters": {
+     "decode_active_request_weight": 3288.855529743769,
+     "overlap_score_credit": 1.2365898565276212,
+     "overlap_score_credit_decay": 2.1526561532556725,
+     "prefill_load_scale": 78.01424273995057,
+     "router_temperature": 0.0013629625021912967
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "dynamo-default-cost-fn"
+   },
+   "lmetric": {
+    "name": "lmetric@p2-lmetric-s2-g10-mean",
+    "parameters": {
+     "class_prefix_blocks": 4,
+     "hotspot_detection": true,
+     "window_requests": 140
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "lmetric"
+   },
+   "stickyhard": {
+    "name": "stickyhard@p2-stickyhard-s1-g25-mean",
+    "parameters": {
+     "mode": "hard"
+    },
+    "router_config": {
+     "decode_active_request_weight": 3983.1134890847825,
+     "overlap_score_credit": 3.731197750324059,
+     "overlap_score_credit_decay": 0.30208517678684,
+     "prefill_load_scale": 11.477481469622699,
+     "router_temperature": 0.012897323874532058
+    },
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "sticky-session"
+   },
+   "llmdob": {
+    "name": "llmdob@p2-llmdob-s1-g5-mean",
+    "parameters": {
+     "affinity_threshold": 0.8832666398044271,
+     "max_ttft_penalty_ms": 4012.9495817430607,
+     "peak_prefill_tokens_per_second": 15928.0,
+     "queue_threshold_tokens": 78710,
+     "ttft_source": "throughput"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "llm-d-optimized-baseline"
+   },
+   "dualmap": {
+    "name": "dualmap@p2-dualmap-s3-g10-mean",
+    "parameters": {
+     "hash_prefix_blocks": 63,
+     "pending_prefill_token_budget": 3101,
+     "window_requests": 545
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "dualmap"
+   },
+   "chwbl": {
+    "name": "chwbl@p2-chwbl-s1-g5-mean",
+    "parameters": {
+     "load_factor": 1.0931189686789615,
+     "prefix_tokens": 2754
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "chwbl"
+   }
+  },
+  "ais_league": {
+   "m1ais": {
+    "name": "m1ais@p2-m1ais-s1-g25-best_so_far",
+    "parameters": {
+     "ais_closed_form": {
+      "decode_step": {
+       "alpha_ms": 15.150484762339268,
+       "beta_ms_per_request": 0.032211397437967804,
+       "gamma_ms_per_token": 4.310341316381139e-05
+      }
+     },
+     "feature_set": "v3",
+     "prefill_source": "host",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      28.89972924994882,
+      0.820432308418674,
+      -0.7037884689296092,
+      0.0,
+      0.0,
+      4.117992258238509,
+      0.0,
+      -1.7553185369841344,
+      -1.9781446304182673,
+      0.0,
+      -291.80236571043133,
+      -2548.9546301096907
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {
+     "router_prefill_load_model": "ais"
+    },
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "m2ais": {
+    "name": "m2ais@p2-m2ais-s3-g10-mean",
+    "parameters": {
+     "ais_closed_form": {
+      "decode_step": {
+       "alpha_ms": 15.150484762339268,
+       "beta_ms_per_request": 0.032211397437967804,
+       "gamma_ms_per_token": 4.310341316381139e-05
+      }
+     },
+     "context": {
+      "p": [
+       [
+        0.0,
+        0.04680972011954054,
+        0.10759164717915581,
+        -0.00976543103915617,
+        0.0,
+        -0.17482296354336313,
+        -0.00982776348164549,
+        0.0,
+        -0.04657559302253844,
+        0.0,
+        0.0,
+        -8.187700632215638,
+        -25.57460262670793
+       ],
+       [
+        0.0,
+        -21.23750959740937,
+        4.013125237566783,
+        -2.324483129254304,
+        0.0,
+        -36.07379115816366,
+        4.879073358957157,
+        0.0,
+        -69.28526566780602,
+        -4.550344533168754,
+        0.0,
+        -2625.8017920282437,
+        0.0
+       ]
+      ],
+      "sources": [
+       "min_est_ttft_ms_s",
+       "mean_est_decode_step_ms_s"
+      ]
+     },
+     "feature_set": "v3",
+     "prefill_source": "host",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      26.41315995925953,
+      3.146040533836029,
+      -0.7374487944869621,
+      -2.564220491884612,
+      -0.4449580571929346,
+      4.885100757498371,
+      0.0,
+      -3.544736848542783,
+      -1.6548494416394135,
+      0.0,
+      -169.7794601947353,
+      -2502.7693046925233
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {
+     "router_prefill_load_model": "ais"
+    },
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "m0ais": {
+    "name": "m0ais@p2-m0ais-s2-g20-best_so_far",
+    "parameters": {
+     "decode_active_request_weight": 2531.730039954035,
+     "overlap_score_credit": 1.2356781555703658,
+     "overlap_score_credit_decay": 0.28812143315136984,
+     "prefill_load_scale": 53.034606238296384,
+     "router_temperature": 0.0010910204553340479
+    },
+    "router_config": {
+     "router_prefill_load_model": "ais"
+    },
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "dynamo-default-cost-fn"
+   },
+   "llmdobm": {
+    "name": "llmdobm@p2-llmdobm-s2-g15-mean",
+    "parameters": {
+     "affinity_threshold": 0.35805439981026393,
+     "max_ttft_penalty_ms": 139.20132257223653,
+     "queue_threshold_tokens": 26222,
+     "ttft_source": "modeled"
+    },
+    "router_config": {
+     "router_prefill_load_model": "ais"
+    },
+    "router_mode": "kv_router",
+    "seeded": false,
+    "type": "llm-d-optimized-baseline"
+   }
+  }
+ },
+ "also_on_test_not_finalists": {
+  "default@defaults": {
+   "builtin": "default"
+  },
+  "round_robin": {
+   "builtin": "round_robin"
+  },
+  "heuristics_at_defaults": [
+   {
+    "name": "two-tier@defaults",
+    "type": "dynamo-two-tier-cost-fn",
+    "parameters": {}
+   },
+   {
+    "name": "lmetric@defaults",
+    "type": "lmetric",
+    "parameters": {}
+   },
+   {
+    "name": "ramjet@defaults",
+    "type": "ramjet",
+    "parameters": {}
+   },
+   {
+    "name": "dualmap@defaults",
+    "type": "dualmap",
+    "parameters": {}
+   },
+   {
+    "name": "chwbl@defaults",
+    "type": "chwbl",
+    "parameters": {}
+   },
+   {
+    "name": "llm-d-precise-prefix@defaults",
+    "type": "llm-d-precise-prefix",
+    "parameters": {}
+   },
+   {
+    "name": "llm-d-optimized-baseline@throughput",
+    "type": "llm-d-optimized-baseline",
+    "parameters": {
+     "ttft_source": "throughput"
+    }
+   },
+   {
+    "name": "sticky-hard@defaults",
+    "type": "sticky-session",
+    "parameters": {
+     "mode": "hard"
+    }
+   },
+   {
+    "name": "sticky-bounded@defaults",
+    "type": "sticky-session",
+    "parameters": {
+     "mode": "bounded"
+    }
+   }
+  ]
+ },
+ "robustness": {
+  "set": [
+   "default@defaults",
+   "ramjet",
+   "ablabase",
+   "llmdpp",
+   "twotier",
+   "stickybounded",
+   "m0",
+   "lmetric",
+   "stickyhard",
+   "llmdob",
+   "dualmap",
+   "chwbl",
+   "m1v2",
+   "m1noaff",
+   "ablam1",
+   "m2r2",
+   "m1"
+  ],
+  "lag_ms": [
+   10,
+   50,
+   200
+  ],
+  "lag0": "headline test records (tuning build) for the 17; lag build re-runs default@defaults and m1 at lag 0 on every cell as the identity check",
+  "m1_variants_lag_0_10_50_200": {
+   "tau_lo": {
+    "name": "m1-tau0.747@p2-m1c-s1-g20-mean",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 0.747,
+     "theta": [
+      -1.0,
+      16.541278180717825,
+      -2.2737938976724337,
+      0.0,
+      0.0,
+      -39.22625809552176,
+      0.20618988014460626,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "tau_hi": {
+    "name": "m1-tau2.75@p2-m1c-s1-g20-mean",
+    "parameters": {
+     "feature_set": "v1",
+     "temperature": 2.75,
+     "theta": [
+      -1.0,
+      16.541278180717825,
+      -2.2737938976724337,
+      0.0,
+      0.0,
+      -39.22625809552176,
+      0.20618988014460626,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   },
+   "hashhome": {
+    "name": "m1-hashhome@p2-m1c-s1-g20-mean",
+    "parameters": {
+     "feature_set": "v2",
+     "temperature": 0.0,
+     "theta": [
+      -1.0,
+      16.541278180717825,
+      -2.2737938976724337,
+      0.0,
+      0.0,
+      -39.22625809552176,
+      0.20618988014460626,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1000000.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     "tie_break": "one_draw"
+    },
+    "router_config": {},
+    "router_mode": "kv_router",
+    "seeded": true,
+    "type": "learned-choice"
+   }
+  },
+  "timing": [
+   {
+    "speedup_ratio": 0.8
+   },
+   {
+    "speedup_ratio": 1.2
+   },
+   {
+    "decode_speedup_ratio": 0.8
+   },
+   {
+    "decode_speedup_ratio": 1.2
+   }
+  ],
+  "tau_calibration": "runs/select_test/analysis/tau_calib.json",
+  "not_lag_tested": "AIS league (lag build predates feature_set v3)"
+ },
+ "lr11_count": {
+  "by_source": {
+   "A:m1": 30,
+   "A:m1u": 30,
+   "B:m1cont": 30,
+   "B:m1noaff": 30,
+   "B:m1v2": 30,
+   "B:m2r2": 30,
+   "C:ablam1": 30,
+   "AIS:m1ais": 30,
+   "AIS:m2ais": 30,
+   "drift:drift-l1": 4,
+   "drift:drift-l3": 4,
+   "drift:drift-n4": 4,
+   "drift:drift-n8": 4,
+   "pilot:m1 (m1-s1, m1-s2)": 24,
+   "posthoc:A15 m1 theta6=0 (val k0-2)": 1,
+   "posthoc:phase2-mid sim audit m1u theta7 variants (val k0-2)": 2,
+   "posthoc:ablation-a q removed from ablam1 (val k0-2)": 1,
+   "val_k3_10_reevaluations (not new variants)": 8
+  },
+  "learned_variants_validated_total": 314,
+  "learned_arms_compared_for_the_headline_A17_2": 5,
+  "learned_arms_compared_router_observable_incl_secondary": 7,
+  "note": "learned arms compared for the headline (A17.2): m1, m2r2, m1noaff, m1v2, ablam1 (5); m1cont and the gaming-flagged m1u are secondary rows (7 router-observable learned rows overall); AIS league: m1ais, m2ais. Validated candidates = every val k0-2 checkpoint line (best_so_far and mean at every 5th generation) of every learned run, plus the pilot's M1 runs and the listed post-hoc variants."
+ },
+ "spec_files": {
+  "runs/select_test/specs/test_tuning.jsonl": "50056df3d05b5fb06bccbfb3ef2fd6be696b7d0b0d3cbded0b19f4051af3e52f",
+  "runs/select_test/specs/test_ais.jsonl": "c7b1d543e78008b0e96d58fba97662c8c1970f644d8ee148a8a4ef65833d2a43",
+  "runs/select_test/specs/robust_lag.jsonl": "15ceb38d5cc29aa81e7673603a6be5b9bb402211d4537948ae02b348c8c51313",
+  "runs/select_test/specs/robust_lag0.jsonl": "1537ddfac5791a6f74d2a2998393dd5eb71d54094559b64239299a8b7630c698",
+  "runs/select_test/specs/robust_timing.jsonl": "7bb800f23737c9b851f45156feaf08c71ee9e1d55554e0bd7697f267f8b9db3f"
+ }
+}

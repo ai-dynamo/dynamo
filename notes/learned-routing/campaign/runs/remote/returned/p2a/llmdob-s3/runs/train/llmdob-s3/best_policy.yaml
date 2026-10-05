@@ -1,0 +1,11 @@
+name: "llm-d-optimized-baseline-throughput-tuned@llmdob-s3"
+parameters:
+  affinity_threshold: 0.9642784137127751
+  max_ttft_penalty_ms: 9876.522098573236
+  peak_prefill_tokens_per_second: 15928.0
+  queue_threshold_tokens: 287586
+  ttft_source: "throughput"
+router_config: {}
+router_mode: "kv_router"
+seeded: false
+type: "llm-d-optimized-baseline"

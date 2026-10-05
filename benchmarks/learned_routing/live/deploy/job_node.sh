@@ -10,10 +10,14 @@
 #   2. in parallel: weights to node-local disk on every node | wheel build on the head node host
 #   3. venv + verify_env.py inside the container (head node; the venv is on the shared filesystem)
 #   4. [two-node] etcd on the head node; vLLM workers on every node (one step per node)
-#   5. per policy in LR_POLICIES: frontend -> wait -> smoke -> cold reset -> stop; then, when
-#      LR_PAYLOAD is set, a fresh frontend -> wait -> metrics snapshot -> payload -> snapshot -> stop
+#   5. per measured unit: frontend -> wait -> smoke -> cold reset -> stop; then, when LR_PAYLOAD is
+#      set, a fresh frontend -> wait -> metrics snapshot -> payload -> snapshot -> stop. A unit is
+#      a policy in LR_POLICIES (the payload runs every input in LR_SMOKE_RUNS), or, when LR_PAIRS
+#      names a pairs file (pairs.py), one (label, policy, input) pair: the payload runs exactly
+#      that input. The workers stay up across units; only the frontend (and its embedded router)
+#      is restarted, and the engines' prefix caches are flushed and proven cold before each unit.
 #   6. teardown (workers, etcd) and runtime-manifest.json
-# The job exits when the last policy is done, so the allocation is never held idle.
+# The job exits when the last unit is done, so the allocation is never held idle.
 set -euo pipefail
 # Export every job setting: srun steps (build, workers, frontend, payload) re-source common.sh and
 # need LR_COMMIT and the --env extras in their environment, not just in this shell.
@@ -124,6 +128,8 @@ manifest = {
     "weights": {os.path.basename(p): load(p) for p in sorted(glob.glob(f"{run_dir}/weights/*.json"))},
     "policies": {os.path.basename(os.path.dirname(p)): load(p)
                  for p in sorted(glob.glob(f"{run_dir}/policies/*/status.json"))},
+    "pairs": {os.path.basename(os.path.dirname(p)): load(p)
+              for p in sorted(glob.glob(f"{run_dir}/pairs/*/status.json"))},
     "failures": failures.split() if failures else [],
 }
 json.dump(manifest, open(f"{run_dir}/runtime-manifest.json", "w"), indent=1, sort_keys=True)
@@ -131,6 +137,21 @@ PY
   log "done failures=${failures[*]:-none} run_dir=$run_dir"
 }
 trap teardown EXIT TERM INT
+
+# Pairs mode: validate the batch before any setup cost (plan slugs, inputs, replicate, worker
+# count, distinct salts) and keep the normalized table the loop below reads.
+if [[ -n "${LR_PAIRS:-}" ]]; then
+  [[ -n "${LR_PAYLOAD:-}" ]] || die "LR_PAIRS needs LR_PAYLOAD"
+  python3 "$LR_DEPLOY_DIR/pairs.py" check --pairs "$LR_PAIRS" --plan-dir "$LR_PLAN_DIR" \
+    --inputs-root "${LR_SMOKE_INPUTS:?LR_PAIRS needs LR_SMOKE_INPUTS}" \
+    --num-workers "$num_workers" --table-out "$run_dir/pairs.tsv" || die "pairs check failed"
+  cp "$LR_PAIRS" "$run_dir/pairs.input"
+fi
+# The scheduler's end of this job, for the per-pair time guard (empty if unknown).
+job_end_epoch="$(scontrol show job "$SLURM_JOB_ID" 2> /dev/null \
+  | grep -oE 'EndTime=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+' | head -1 | cut -d= -f2 || true)"
+[[ -n "$job_end_epoch" ]] && job_end_epoch="$(date -d "$job_end_epoch" +%s 2> /dev/null || true)"
+log "job end epoch: ${job_end_epoch:-unknown}"
 
 # 1. Node prep and container creation.
 step "$all_nodes" "$nnodes" bash "$LR_DEPLOY_DIR/node_prep.sh" "$run_dir"
@@ -233,15 +254,21 @@ stop_frontend() {
   die "port $LR_HTTP_PORT is still open after stopping the frontend"
 }
 
-# 5. Policies. The first wait also covers model load and CUDA graph capture.
-if [[ -n "${LR_POLICIES:-}" ]]; then
-  read -r -a policies <<< "$LR_POLICIES"
-else
-  mapfile -t policies < <(ls "$LR_PLAN_DIR/policies")
-fi
+# 5. Measured units. The first wait also covers model load and CUDA graph capture.
 wait_timeout="${LR_READY_TIMEOUT_S:-2400}"
-for slug in "${policies[@]}"; do
-  pdir="$run_dir/policies/$slug"
+workers_alive() {
+  local pid
+  for pid in "${worker_pids[@]}"; do
+    kill -0 "$pid" 2> /dev/null || return 1
+  done
+}
+# One unit for policy $1 under directory $2: check frontend -> wait -> smoke -> cold reset -> stop,
+# then (with a payload) a fresh serve frontend -> wait -> snapshot -> payload -> snapshot -> stop.
+# $3 (optional) is the payload environment as NAME=VALUE words, $4 the payload timeout. Sets status.
+run_unit() {
+  local slug=$1 pdir=$2 payload_timeout=$4
+  local -a payload_env=()
+  [[ -n "${3:-}" ]] && read -r -a payload_env <<< "$3"
   status="ok"
   start_frontend "$slug" "$pdir/check"
   if wait_ready "$wait_timeout" "$pdir/check/wait.json" \
@@ -253,34 +280,72 @@ for slug in "${policies[@]}"; do
     status="check_failed"
   fi
   stop_frontend
-  if [[ "$status" == ok && -n "${LR_PAYLOAD:-}" ]]; then
-    start_frontend "$slug" "$pdir/serve"
-    if wait_ready 300 "$pdir/serve/wait.json"; then
-      hc snapshot --snapshot-dir "$pdir/metrics" --tag before --out "$pdir/metrics/before.json" || true
-      started=$(date -u +%FT%TZ)
-      set +e
-      cstep "$head" 1 env LR_ENDPOINT="http://$head:$LR_HTTP_PORT" LR_MODEL="$model" \
-        LR_POLICY_SLUG="$slug" LR_POLICY_DIR="$LR_PLAN_DIR/policies/$slug" \
-        LR_PAYLOAD_DIR="$pdir/payload" LR_NUM_WORKERS="$num_workers" \
-        timeout "${LR_PAYLOAD_TIMEOUT_S:-5400}" taskset -c "$LR_CLIENT_CPUS" bash "$LR_PAYLOAD" \
-        > "$pdir/payload.log" 2>&1
-      payload_status=$?
-      set -e
-      hc snapshot --snapshot-dir "$pdir/metrics" --tag after --out "$pdir/metrics/after.json" || true
-      [[ $payload_status -eq 0 ]] || status="payload_exit_$payload_status"
-      printf '{"payload_started_utc": "%s", "payload_ended_utc": "%s", "payload_exit": %d}\n' \
-        "$started" "$(date -u +%FT%TZ)" "$payload_status" > "$pdir/payload-status.json"
+  [[ "$status" == ok && -n "${LR_PAYLOAD:-}" ]] || return 0
+  start_frontend "$slug" "$pdir/serve"
+  if wait_ready 300 "$pdir/serve/wait.json"; then
+    hc snapshot --snapshot-dir "$pdir/metrics" --tag before --out "$pdir/metrics/before.json" || true
+    local started payload_status
+    started=$(date -u +%FT%TZ)
+    set +e
+    cstep "$head" 1 env LR_ENDPOINT="http://$head:$LR_HTTP_PORT" LR_MODEL="$model" \
+      LR_POLICY_SLUG="$slug" LR_POLICY_DIR="$LR_PLAN_DIR/policies/$slug" \
+      LR_PAYLOAD_DIR="$pdir/payload" LR_NUM_WORKERS="$num_workers" "${payload_env[@]}" \
+      timeout "$payload_timeout" taskset -c "$LR_CLIENT_CPUS" bash "$LR_PAYLOAD" \
+      > "$pdir/payload.log" 2>&1
+    payload_status=$?
+    set -e
+    hc snapshot --snapshot-dir "$pdir/metrics" --tag after --out "$pdir/metrics/after.json" || true
+    [[ $payload_status -eq 0 ]] || status="payload_exit_$payload_status"
+    printf '{"payload_started_utc": "%s", "payload_ended_utc": "%s", "payload_exit": %d}\n' \
+      "$started" "$(date -u +%FT%TZ)" "$payload_status" > "$pdir/payload-status.json"
+  else
+    status="serve_wait_failed"
+  fi
+  stop_frontend
+}
+
+if [[ -n "${LR_PAIRS:-}" ]]; then
+  # One unit per pair, in file order. A pair runs only if its expected AIPerf wall time (est_s)
+  # plus LR_PAIR_MARGIN_S (frontend switches, checks, AIPerf startup and export) still fits before
+  # the scheduler ends the job; otherwise it is recorded as skipped_time, never cut short. The
+  # AIPerf run timeout is 1.5 x est_s + 300 s.
+  mapfile -t pair_rows < "$run_dir/pairs.tsv"
+  margin="${LR_PAIR_MARGIN_S:-300}"
+  for row in "${pair_rows[@]}"; do
+    IFS=$'\t' read -r idx label slug run est <<< "$row"
+    pdir="$run_dir/pairs/$idx-$label"
+    mkdir -p "$pdir"
+    started_utc=$(date -u +%FT%TZ)
+    if ! workers_alive; then
+      status="not_run_workers_down"
+    elif [[ -n "$job_end_epoch" ]] && (( $(date +%s) + est + margin > job_end_epoch )); then
+      status="skipped_time"
     else
-      status="serve_wait_failed"
+      run_timeout=$(( est * 3 / 2 + 300 ))
+      run_unit "$slug" "$pdir" "LR_SMOKE_RUNS=$run LR_RUN_TIMEOUT_S=$run_timeout LR_PAIR_LABEL=$label" \
+        "$(( run_timeout + 600 ))"
     fi
-    stop_frontend
+    printf '{"index": "%s", "label": "%s", "policy": "%s", "run": "%s", "est_s": %d, "status": "%s", "started_utc": "%s", "ended_utc": "%s"}\n' \
+      "$idx" "$label" "$slug" "$run" "$est" "$status" "$started_utc" "$(date -u +%FT%TZ)" > "$pdir/status.json"
+    log "pair $idx $label ($slug, $run): $status"
+    [[ "$status" == ok ]] || failures+=("$idx-$label:$status")
+  done
+else
+  if [[ -n "${LR_POLICIES:-}" ]]; then
+    read -r -a policies <<< "$LR_POLICIES"
+  else
+    mapfile -t policies < <(ls "$LR_PLAN_DIR/policies")
   fi
-  printf '{"policy": "%s", "status": "%s"}\n' "$slug" "$status" > "$pdir/status.json"
-  log "policy $slug: $status"
-  [[ "$status" == ok ]] || failures+=("$slug:$status")
-  if [[ "$status" == check_failed && "${LR_STOP_ON_FAILURE:-1}" == 1 ]]; then
-    log "stopping after a failed check (LR_STOP_ON_FAILURE=1)"
-    break
-  fi
-done
+  for slug in "${policies[@]}"; do
+    pdir="$run_dir/policies/$slug"
+    run_unit "$slug" "$pdir" "" "${LR_PAYLOAD_TIMEOUT_S:-5400}"
+    printf '{"policy": "%s", "status": "%s"}\n' "$slug" "$status" > "$pdir/status.json"
+    log "policy $slug: $status"
+    [[ "$status" == ok ]] || failures+=("$slug:$status")
+    if [[ "$status" == check_failed && "${LR_STOP_ON_FAILURE:-1}" == 1 ]]; then
+      log "stopping after a failed check (LR_STOP_ON_FAILURE=1)"
+      break
+    fi
+  done
+fi
 [[ ${#failures[@]} -eq 0 ]]

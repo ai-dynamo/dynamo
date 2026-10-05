@@ -1,0 +1,1092 @@
+{
+ "schema": "learned-routing.ais-features.v1",
+ "stage": "ais-features: feature set v3 for learned-choice (CONTRACT A16.1)",
+ "written": "2026-10-03 10:40:09 PDT",
+ "status": "ok",
+ "summary": "learned-choice feature_set v3 = v1 (indices 0-7 unchanged) + est_prefill_ms_s, prefill_backlog_ms_s, est_ttft_ms_s, est_decode_step_ms_s, itl_externality_ms_s; new context sources min_est_ttft_ms_s, mean_est_decode_step_ms_s. Backlog = host PREFILL_TIME (router_prefill_load_model: ais); this request's prefill = host AIS prediction per worker through a new research input REQUEST_PREFILL_TIME (prefill_source: host) or an AIS closed form (closed_form); decode features = AIS-calibrated closed form (policy parameters). Isolated build 555ca082 (commit <commit-ais-01>). Existing policies (default@defaults, lmetric@defaults, v1 learned-choice m1-s2@sel-g30) are identical to the tier-A build on 6 train cells x k0,1: 36/36 records, every non-environment field (76) and 254,562 per-request rows; only build_id/cache_key and run-environment fields differ. CPU cluster bundle parity IDENTICAL on 3 node images (84/84 records each). The AIS host load model changes default@defaults' routing from the 7th-230th request on in 12/12 pairs but not its goodput beyond noise (windowed goodput ratio 1.0006 \u00b1 0.0168, range 0.976-1.031).",
+ "worktree": {
+  "path": "<other-worktree>",
+  "branch": "rupei/learned-routing-ais (local only, not pushed)",
+  "base": "rupei/learned-routing @ <commit-25> (tier-A tuning build sources)",
+  "commit": "<commit-ais-02> (HEAD; docs-only FEATURES.md example fix) on <commit-ais-01> feat(learned-routing): add AIS-informed feature set v3 to learned-choice (the build's sources)",
+  "venv": "<other-worktree>/.venv (uv venv on /usr/bin/python3.12 3.12.3; packages = campaign venv's uv pip freeze, editable installs of this worktree)",
+  "python": "<other-worktree>/.venv/bin/python",
+  "lr_eval": "<other-worktree>/.venv/bin/lr-eval",
+  "lr_train": "<other-worktree>/.venv/bin/lr-train",
+  "remote_scripts": "<other-worktree>/benchmarks/learned_routing/remote/ (bundles built from here carry this build)"
+ },
+ "build": {
+  "command": "cd lib/bindings/python && VIRTUAL_ENV=<ais WT>/.venv CARGO_BUILD_JOBS=8 nice -n 10 maturin develop --uv --release --features ais-forward-pass; uv pip install --no-deps -e . -e lib/gpu_memory_service -e benchmarks/learned_routing",
+  "bindings_target": "started as a cp -a copy of the tuning WT's lib/bindings/python/target",
+  "core_so": "<other-worktree>/lib/bindings/python/src/dynamo/_core.abi3.so",
+  "core_so_sha256": "42df974944d6efee3fdcdef4d8a0af7abcd60cd17b17bb96d300ba900cbb2106",
+  "aisimulate": "0.13.0.dev202609300000000061",
+  "build_id": "555ca082a888ef477abce20bc68e35e432399c78a14570fe436a2c861dedfcfb",
+  "source_state": "Build 2 (logs/maturin_release_ais_build2.log, 6m44s) compiled every non-test source of commit <commit-ais-01>; only cfg(test) code (learned_choice/tests.rs, the mocker test module formatting) changed after it started. Build 1 (closed-form-only draft) was superseded before any record was produced.",
+  "harness_version": "lrh-4 (unchanged: the router AIS config enters replay only for specs that set router_prefill_load_model, which is part of policy_sha)",
+  "tuning_build_untouched": {
+   "core_so_sha256": "1d67c131deca024373a2eb4b96f70156e04eb32e1046c2cf7235ac50ddeb288b (re-checked after this stage)",
+   "build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+   "campaign_cache": "not written: every replay of this stage ran in private roots (runs/ais_features/root_ais, root_tuning), CPU cluster results fetched with --no-ingest; CR/runs/cache/build_ids.json still lists only the tuning-WT .so (mtime 2026-10-02 15:59)"
+  }
+ },
+ "bundle": {
+  "local": "<campaign-root>/runs/remote/bundles/ais-parity-r0",
+  "remote": "<cpu-cluster>:<scratch>/bundles/ais-parity-r0 (also -epyc9654p, -7702p-alt hard-linked copies)",
+  "manifest_build_id": "555ca082a888ef477abce20bc68e35e432399c78a14570fe436a2c861dedfcfb",
+  "tasks": 84,
+  "contents": "6 train cells x 7 policies (default@defaults, lmetric@defaults, m1-s2@sel-g30, default@defaults+ais-load, lc-v3-host@theta0-reservoir, lc-v3-host@min-est-ttft, lc-v3-cf@min-est-ttft) x k0,1; site check also builds AisPerfConfig(engine ais_perf_config)",
+  "lane_index": "lane.py note-bundle recorded it for build 555ca082, so later bundles of this build rsync --link-dest against it",
+  "how_relays_use_this_build": [
+   "CPU cluster train: <other-worktree>/benchmarks/learned_routing/remote/submit_train.sh --name <name> --jobs <jobs.jsonl> --cells CR/cells/train.jsonl --val CR/cells/val.jsonl --time HH:MM:SS (the scripts resolve WT, venv and lr-eval from their own location, so the bundle carries build 555ca082); fetch_ingest.sh from the same directory.",
+   "CPU cluster eval: <ais WT>/benchmarks/learned_routing/remote/submit_eval.sh ... ; local: <ais WT>/.venv/bin/lr-eval / lr-train --root CR (records carry build 555ca082 and never share cache keys with the tier-A build).",
+   "Building with --root CR adds this .so to CR/runs/cache/build_ids.json (a memo); that is expected for the AIS league and does not affect tier-A keys."
+  ]
+ },
+ "feature_set_v3": {
+  "dim": 13,
+  "scale": "every *_ms_s feature is milliseconds / 1000 (seconds)",
+  "spec": "lib/router-plugins/builtin/src/learned_choice/FEATURES.md (section 'Feature set v3'); implementation features.rs",
+  "notation": "n_i = prompt tokens - accounting-estimate cached tokens on worker i (feature 2 numerator); L = prompt tokens; b_i = active requests; C_i = decode_cost_blocks x block_size",
+  "features": [
+   {
+    "index": 0,
+    "name": "default_logit_scaled",
+    "definition": "v1 unchanged",
+    "source": "router-observable"
+   },
+   {
+    "index": 1,
+    "name": "overlap_frac",
+    "definition": "v1 unchanged",
+    "source": "router-observable"
+   },
+   {
+    "index": 2,
+    "name": "new_prefill_tokens_k",
+    "definition": "v1 unchanged",
+    "source": "router-observable"
+   },
+   {
+    "index": 3,
+    "name": "active_prefill_tokens_k",
+    "definition": "v1 unchanged (under router_prefill_load_model: ais the host decays active prefill tokens over each prefill's AIS-predicted duration)",
+    "source": "router-observable, host decay model"
+   },
+   {
+    "index": 4,
+    "name": "kv_load_frac",
+    "definition": "v1 unchanged",
+    "source": "router-observable"
+   },
+   {
+    "index": 5,
+    "name": "active_requests_s",
+    "definition": "v1 unchanged",
+    "source": "router-observable"
+   },
+   {
+    "index": 6,
+    "name": "session_affinity",
+    "definition": "v1 unchanged",
+    "source": "policy state"
+   },
+   {
+    "index": 7,
+    "name": "isl_x_prefill_load",
+    "definition": "v1 unchanged",
+    "source": "router-observable"
+   },
+   {
+    "index": 8,
+    "name": "est_prefill_ms_s",
+    "definition": "P_i/1000: modeled prefill time of this request's n_i uncached tokens after its cached prefix on worker i; 0 when n_i = 0",
+    "source": "prefill_source host: host AIS prediction per worker (WorkerInputs::REQUEST_PREFILL_TIME, WorkerInputView::modeled_request_prefill_ms; the single-pass query predict_prefill_duration(1, n_i, L - n_i) that the backlog sums); prefill_source closed_form: a*n + b*n*(L - n/2) + c",
+    "live_router": "host: AIS in-process (same PrefillLoadEstimator); the live queue does not fill REQUEST_PREFILL_TIME yet (UPSTREAM_FOLLOWUPS #15), so live uses closed_form until then"
+   },
+   {
+    "index": 9,
+    "name": "prefill_backlog_ms_s",
+    "definition": "B_i/1000: host modeled prefill backlog (sum of active prefills' AIS predictions minus time elapsed since the oldest became active, so in-progress prefills count their remaining fraction; excludes this request)",
+    "source": "host AIS (WorkerInputs::PREFILL_TIME, modeled_prefill_backlog_ms; needs router_prefill_load_model: ais)",
+    "live_router": "AIS in-process (router_prefill_load_model: ais + ais_perf_config, lib/kv-router/src/scheduling/queue.rs, lib/llm/src/kv_router.rs); live completions arrive late and replica-synced values are anchored at receive time"
+   },
+   {
+    "index": 10,
+    "name": "est_ttft_ms_s",
+    "definition": "(B_i + P_i)/1000",
+    "source": "host AIS (+ closed form with prefill_source closed_form)",
+    "live_router": "as 8 and 9"
+   },
+   {
+    "index": 11,
+    "name": "est_decode_step_ms_s",
+    "definition": "(alpha + beta*(b_i + 1) + gamma*C_i)/1000: decode-step time once this request joins",
+    "source": "AIS-calibrated closed form (ais_closed_form.decode_step)",
+    "live_router": "same closed form over router-observable load"
+   },
+   {
+    "index": 12,
+    "name": "itl_externality_ms_s",
+    "definition": "b_i*(beta + gamma*L)/1000: per-step increase this request imposes, summed over the b_i requests already on worker i (= 32 x feature 5 x (beta + gamma L)/1000)",
+    "source": "AIS-calibrated closed form",
+    "live_router": "same closed form",
+    "why_times_b": "beta + gamma*L alone is equal on every worker under the linear closed form and would cancel out of the choice"
+   }
+  ],
+  "context_sources_added": [
+   {
+    "name": "min_est_ttft_ms_s",
+    "value": "min over candidates of feature 10",
+    "feature_sets": [
+     "v3"
+    ]
+   },
+   {
+    "name": "mean_est_decode_step_ms_s",
+    "value": "mean over candidates of feature 11",
+    "feature_sets": [
+     "v3"
+    ]
+   }
+  ],
+  "declared_inputs": {
+   "v1_v2": "CACHE | LOAD (unchanged)",
+   "v3_closed_form": "CACHE | LOAD | PREFILL_TIME",
+   "v3_host": "CACHE | LOAD | PREFILL_TIME | REQUEST_PREFILL_TIME"
+  },
+  "excluded": "expected_output_tokens and the true OSL (unit test v3_ignores_expected_output_tokens)",
+  "duplication_invariance": "all 13 features and all 8 sources are invariant under N -> 2N duplication (no v3 exception; unit test v3_duplication_keeps_features_sources_and_choice)",
+  "missing_inputs": "a candidate without a host backlog (or without a host prefill prediction under prefill_source host) fails the decision with a message naming router_prefill_load_model: ais",
+  "parameters_yaml": {
+   "feature_set": "v3",
+   "theta": "[13 floats]",
+   "prefill_source": "host",
+   "ais_closed_form": {
+    "decode_step": {
+     "alpha_ms": 15.150484762339268,
+     "beta_ms_per_request": 0.032211397437967804,
+     "gamma_ms_per_token": 4.310341316381139e-05
+    }
+   },
+   "router_config": {
+    "router_prefill_load_model": "ais"
+   },
+   "closed_form_prefill_variant": {
+    "prefill_source": "closed_form",
+    "ais_closed_form.prefill": {
+     "a_ms_per_token": 0.0405503328883938,
+     "b_ms_per_token_ctx": 1.7140221734954108e-06,
+     "c_ms": 14.48538206273272
+    }
+   },
+   "validation": "prefill_source and ais_closed_form required for v3 and rejected for v1/v2; prefill block required iff closed_form; every constant finite and >= 0; unknown keys rejected; v3-only sources rejected for v1/v2"
+  },
+  "known_limits": [
+   "C_i counts the router's unique active blocks (shared prefixes once, no output tokens), so est_decode_step under-counts AIS's summed context on prefix-heavy workers (UPSTREAM_FOLLOWUPS #16)",
+   "The decode closed form smooths AIS: finite-difference AIS marginal steps are non-smooth (e.g. -0.007 ms at B=32, ctx 8192, L 8192 vs closed form 0.385 ms)"
+  ]
+ },
+ "fit": {
+  "interface": "aisimulate_core.sdk.RustForwardPassPerfModel.best_available(engine.json ais_perf_config).estimate_forward_pass_time_ms({'scheduled_requests': ...})",
+  "ais_perf_config": {
+   "backend": "vllm",
+   "backend_version": "0.24.0",
+   "model": "Qwen/Qwen3-32B",
+   "system": "h100_sxm",
+   "tp": 2,
+   "worker_type": "aggregated"
+  },
+  "ais_readiness": "ready",
+  "ais_selected_estimation_mode": "op_level",
+  "weighting": "least squares on relative error (weights 1/y), coefficients >= 0 (scipy bvls)",
+  "script": "runs/ais_features/scripts/fit_ais_closed_form.py (grid), scripts/fit_empirical.py (train-workload sample); outputs runs/ais_features/fit/ais_fit.json, fit_compare.json",
+  "decode_step": {
+   "form": "decode_step_ms(B, S) = alpha + beta*B + gamma*S, B decode requests, S sum of their KV contexts",
+   "constants": {
+    "alpha_ms": 15.150484762339268,
+    "beta_ms_per_request": 0.032211397437967804,
+    "gamma_ms_per_token": 4.310341316381139e-05
+   },
+   "grid": {
+    "B": [
+     1,
+     2,
+     4,
+     8,
+     16,
+     32,
+     64,
+     128,
+     256,
+     512,
+     1024
+    ],
+    "ctx_per_request": [
+     128,
+     256,
+     512,
+     1024,
+     2048,
+     4096,
+     8192,
+     16384,
+     32768,
+     65536,
+     131072
+    ],
+    "constraint": "B*ctx <= 301808 (one worker's KV capacity)",
+    "points": 76
+   },
+   "error": {
+    "points": 76,
+    "mean_abs_rel": 0.022589374734029177,
+    "rms_rel": 0.03368966937921106,
+    "max_abs_rel": 0.1372538843902733,
+    "p90_abs_rel": 0.052021959821743735
+   },
+   "error_by_batch": {
+    "B_1_8": {
+     "points": 41,
+     "mean_abs_rel": 0.010935865262786627,
+     "rms_rel": 0.013633805978623868,
+     "max_abs_rel": 0.03382014778460818,
+     "p90_abs_rel": 0.023045002096839573
+    },
+    "B_16_64": {
+     "points": 21,
+     "mean_abs_rel": 0.022616534004897566,
+     "rms_rel": 0.028621415100724412,
+     "max_abs_rel": 0.05285093643379146,
+     "p90_abs_rel": 0.04802736094588167
+    },
+    "B_128_1024": {
+     "points": 14,
+     "mean_abs_rel": 0.05667677070779407,
+     "rms_rel": 0.06624388370970088,
+     "max_abs_rel": 0.1372538843902733,
+     "p90_abs_rel": 0.10078659448832898
+    }
+   },
+   "marginal_step_checks": [
+    {
+     "B": 8,
+     "ctx": 4096,
+     "own_L": 1024,
+     "ais_delta_ms": 0.3261039164537003,
+     "closed_form_delta_ms": 0.07634929251771067
+    },
+    {
+     "B": 8,
+     "ctx": 4096,
+     "own_L": 32768,
+     "ais_delta_ms": 1.7744226499313918,
+     "closed_form_delta_ms": 1.4446240399897394
+    },
+    {
+     "B": 32,
+     "ctx": 8192,
+     "own_L": 8192,
+     "ais_delta_ms": -0.006835243382514733,
+     "closed_form_delta_ms": 0.3853145580759107
+    },
+    {
+     "B": 64,
+     "ctx": 2048,
+     "own_L": 2048,
+     "ais_delta_ms": 0.0007733307657460387,
+     "closed_form_delta_ms": 0.12048718759745353
+    },
+    {
+     "B": 128,
+     "ctx": 2048,
+     "own_L": 16384,
+     "ais_delta_ms": 0.9076395322078525,
+     "closed_form_delta_ms": 0.7384177187138536
+    }
+   ]
+  },
+  "prefill": {
+   "form": "prefill_ms(n, L) = a*n + b*n*(L - n/2) + c, n >= 1 new tokens, L prompt tokens",
+   "target": "AIS single forward pass (num_prefill_requests 1, sum_prefill_tokens n, sum_prefill_kv_tokens L - n): the router prefill-load model's per-request query",
+   "constants": {
+    "a_ms_per_token": 0.0405503328883938,
+    "b_ms_per_token_ctx": 1.7140221734954108e-06,
+    "c_ms": 14.48538206273272
+   },
+   "grid": {
+    "L": [
+     64,
+     128,
+     256,
+     512,
+     1024,
+     2048,
+     3072,
+     4096,
+     6144,
+     8192,
+     12288,
+     16384,
+     24576,
+     32768,
+     49152,
+     65536,
+     98304,
+     131071
+    ],
+    "n_fractions_of_L": [
+     1.0,
+     0.75,
+     0.5,
+     0.25,
+     0.1,
+     0.05
+    ],
+    "n_absolute": [
+     1,
+     16,
+     64,
+     256,
+     1024,
+     2048,
+     4096,
+     8192
+    ],
+    "points": 206
+   },
+   "error_vs_ais_single_pass": {
+    "points": 206,
+    "mean_abs_rel": 0.06633325608526064,
+    "rms_rel": 0.084325829430628,
+    "max_abs_rel": 0.2024208897801536,
+    "p90_abs_rel": 0.15119939591971943
+   },
+   "error_vs_ais_chunked_8192": {
+    "points": 206,
+    "mean_abs_rel": 0.06749236097819124,
+    "rms_rel": 0.08521843021120167,
+    "max_abs_rel": 0.2024208897801536,
+    "p90_abs_rel": 0.15119939591971943
+   },
+   "ais_single_vs_chunked": {
+    "points": 206,
+    "mean_abs_rel": 0.0013370210676459026,
+    "rms_rel": 0.004269448777723529,
+    "max_abs_rel": 0.02185135557043283,
+    "p90_abs_rel": 0.0048252458753713645
+   },
+   "error_by_prompt_length": {
+    "L_1_1024": {
+     "vs_single": {
+      "points": 41,
+      "mean_abs_rel": 0.07311516471987674,
+      "rms_rel": 0.08715891178209736,
+      "max_abs_rel": 0.1902855969190571,
+      "p90_abs_rel": 0.15584472292401164
+     },
+     "vs_chunked": {
+      "points": 41,
+      "mean_abs_rel": 0.07311516471987674,
+      "rms_rel": 0.08715891178209736,
+      "max_abs_rel": 0.1902855969190571,
+      "p90_abs_rel": 0.15584472292401164
+     }
+    },
+    "L_1025_8192": {
+     "vs_single": {
+      "points": 56,
+      "mean_abs_rel": 0.09119495749727861,
+      "rms_rel": 0.10890392633422404,
+      "max_abs_rel": 0.2024208897801536,
+      "p90_abs_rel": 0.1770025745014142
+     },
+     "vs_chunked": {
+      "points": 56,
+      "mean_abs_rel": 0.09119495749727861,
+      "rms_rel": 0.10890392633422404,
+      "max_abs_rel": 0.2024208897801536,
+      "p90_abs_rel": 0.1770025745014142
+     }
+    },
+    "L_8193_32768": {
+     "vs_single": {
+      "points": 53,
+      "mean_abs_rel": 0.06897334158049093,
+      "rms_rel": 0.08368983420028397,
+      "max_abs_rel": 0.1734301915777805,
+      "p90_abs_rel": 0.13332556417493033
+     },
+     "vs_chunked": {
+      "points": 53,
+      "mean_abs_rel": 0.07039850430691182,
+      "rms_rel": 0.0855712593066168,
+      "max_abs_rel": 0.1734301915777805,
+      "p90_abs_rel": 0.14065031994096885
+     }
+    },
+    "L_32769_65536": {
+     "vs_single": {
+      "points": 28,
+      "mean_abs_rel": 0.04037287236441219,
+      "rms_rel": 0.05155149620566209,
+      "max_abs_rel": 0.13222167730126455,
+      "p90_abs_rel": 0.07420870795593615
+     },
+     "vs_chunked": {
+      "points": 28,
+      "mean_abs_rel": 0.043767626069056986,
+      "rms_rel": 0.05530094912606912,
+      "max_abs_rel": 0.13222167730126455,
+      "p90_abs_rel": 0.08019059325480636
+     }
+    },
+    "L_65537_131072": {
+     "vs_single": {
+      "points": 28,
+      "mean_abs_rel": 0.0276422803654136,
+      "rms_rel": 0.039453336590893194,
+      "max_abs_rel": 0.10732359996529883,
+      "p90_abs_rel": 0.0637539089468066
+     },
+     "vs_chunked": {
+      "points": 28,
+      "mean_abs_rel": 0.030077597498032967,
+      "rms_rel": 0.040823265213018795,
+      "max_abs_rel": 0.10732359996529883,
+      "p90_abs_rel": 0.0637539089468066
+     }
+    }
+   },
+   "error_by_new_tokens": {
+    "n_1_255": {
+     "vs_single": {
+      "points": 76,
+      "mean_abs_rel": 0.05336898836582239,
+      "rms_rel": 0.06240596012648081,
+      "max_abs_rel": 0.15280977034777243,
+      "p90_abs_rel": 0.08964683230193843
+     },
+     "vs_chunked": {
+      "points": 76,
+      "mean_abs_rel": 0.05336898836582239,
+      "rms_rel": 0.06240596012648081,
+      "max_abs_rel": 0.15280977034777243,
+      "p90_abs_rel": 0.08964683230193843
+     }
+    },
+    "n_256_2047": {
+     "vs_single": {
+      "points": 51,
+      "mean_abs_rel": 0.10062829576927104,
+      "rms_rel": 0.12097443119741698,
+      "max_abs_rel": 0.2024208897801536,
+      "p90_abs_rel": 0.18662999152719806
+     },
+     "vs_chunked": {
+      "points": 51,
+      "mean_abs_rel": 0.10062829576927104,
+      "rms_rel": 0.12097443119741698,
+      "max_abs_rel": 0.2024208897801536,
+      "p90_abs_rel": 0.18662999152719806
+     }
+    },
+    "n_2048_8192": {
+     "vs_single": {
+      "points": 51,
+      "mean_abs_rel": 0.05705820340951748,
+      "rms_rel": 0.07385259740386621,
+      "max_abs_rel": 0.1587080823047522,
+      "p90_abs_rel": 0.12823030078573494
+     },
+     "vs_chunked": {
+      "points": 51,
+      "mean_abs_rel": 0.05705820340951748,
+      "rms_rel": 0.07385259740386621,
+      "max_abs_rel": 0.1587080823047522,
+      "p90_abs_rel": 0.12823030078573494
+     }
+    },
+    "n_8193_131072": {
+     "vs_single": {
+      "points": 28,
+      "mean_abs_rel": 0.05594986355867767,
+      "rms_rel": 0.07179134077599225,
+      "max_abs_rel": 0.14191593846391215,
+      "p90_abs_rel": 0.12456999172812629
+     },
+     "vs_chunked": {
+      "points": 28,
+      "mean_abs_rel": 0.06447756384238135,
+      "rms_rel": 0.07916686374411398,
+      "max_abs_rel": 0.14619389741893318,
+      "p90_abs_rel": 0.12955033604039243
+     }
+    }
+   },
+   "long_context_points_L_ge_98304": [
+    {
+     "n": 1024,
+     "L": 98304,
+     "single_ms": 215.62057841404987,
+     "chunked_ms": 215.62057841404987,
+     "closed_form_ms": 227.6494030842823,
+     "rel_err_vs_single": 0.05578699750602589
+    },
+    {
+     "n": 8192,
+     "L": 98304,
+     "single_ms": 1670.3189406718977,
+     "chunked_ms": 1670.3189406718977,
+     "closed_form_ms": 1669.4736398264658,
+     "rel_err_vs_single": -0.0005060715201444799
+    },
+    {
+     "n": 49152,
+     "L": 98304,
+     "single_ms": 8295.619903498457,
+     "chunked_ms": 8390.029812134868,
+     "closed_form_ms": 8219.023714633813,
+     "rel_err_vs_single": -0.009233329124968881
+    },
+    {
+     "n": 98304,
+     "L": 98304,
+     "single_ms": 12648.214753236452,
+     "chunked_ms": 12866.852261894623,
+     "closed_form_ms": 12282.623133577727,
+     "rel_err_vs_single": -0.028904602490654074
+    },
+    {
+     "n": 1024,
+     "L": 131071,
+     "single_ms": 270.01577030917025,
+     "chunked_ms": 270.01577030917025,
+     "closed_form_ms": 285.1606883926206,
+     "rel_err_vs_single": 0.05608901311989789
+    },
+    {
+     "n": 8192,
+     "L": 131071,
+     "single_ms": 2105.481221404727,
+     "chunked_ms": 2105.481221404727,
+     "closed_form_ms": 2129.5639222931723,
+     "rel_err_vs_single": 0.011438098161890897
+    },
+    {
+     "n": 131071,
+     "L": 131071,
+     "single_ms": 20342.21817701275,
+     "chunked_ms": 20635.803384370636,
+     "closed_form_ms": 20052.571764183336,
+     "rel_err_vs_single": -0.01423868382046567
+    }
+   ],
+   "train_workload_sample": {
+    "cells": "cells/train.jsonl (34)",
+    "policy": "default@defaults",
+    "repeat": 0,
+    "requests_with_new_tokens": 268412,
+    "requests_fully_cached": 4,
+    "distinct_nl": 118195,
+    "max_L": 130682,
+    "n_quantiles": {
+     "0.1": 320.0,
+     "0.5": 1343.0,
+     "0.9": 11517.0,
+     "0.99": 94080.0
+    },
+    "L_quantiles": {
+     "0.1": 2629.0,
+     "0.5": 6977.0,
+     "0.9": 65984.0,
+     "0.99": 113920.0
+    }
+   },
+   "weighting_alternatives": {
+    "grid_relative": {
+     "constants": {
+      "a_ms_per_token": 0.0405503328883938,
+      "b_ms_per_token_ctx": 1.7140221734954108e-06,
+      "c_ms": 14.48538206273272
+     },
+     "train_sample_request_weighted": {
+      "mean_abs_rel": 0.0928308572671855,
+      "rms_rel": 0.10839514066759183,
+      "p50_abs_rel": 0.09098176419363802,
+      "p90_abs_rel": 0.1821481670459797,
+      "p99_abs_rel": 0.2097336936836125,
+      "max_abs_rel": 0.22097336357022956,
+      "mean_abs_err_ms": 35.45945956054175
+     },
+     "grid": {
+      "mean_abs_rel": 0.06633325608526064,
+      "rms_rel": 0.084325829430628,
+      "p50_abs_rel": 0.05194437408275132,
+      "p90_abs_rel": 0.15157591021760686,
+      "p99_abs_rel": 0.2001848426240489,
+      "max_abs_rel": 0.2024208897801536,
+      "mean_abs_err_ms": 26.24398487042028
+     },
+     "grid_L_ge_65536": {
+      "mean_abs_rel": 0.030598679182833072,
+      "rms_rel": 0.04242485318523747,
+      "p50_abs_rel": 0.02087258477630849,
+      "p90_abs_rel": 0.06747070818295631,
+      "p99_abs_rel": 0.12156523349699055,
+      "max_abs_rel": 0.12156523349699055,
+      "mean_abs_err_ms": 51.95500722856349
+     }
+    },
+    "grid_relative_floor100ms": {
+     "constants": {
+      "a_ms_per_token": 0.04654438590171395,
+      "b_ms_per_token_ctx": 1.6311127103491763e-06,
+      "c_ms": 12.036229252046963
+     },
+     "train_sample_request_weighted": {
+      "mean_abs_rel": 0.07114805371849711,
+      "rms_rel": 0.09163804589645846,
+      "p50_abs_rel": 0.05091619644500145,
+      "p90_abs_rel": 0.17957507915206983,
+      "p99_abs_rel": 0.19906285241454968,
+      "max_abs_rel": 0.22937043129684942,
+      "mean_abs_err_ms": 15.850769350038949
+     },
+     "grid": {
+      "mean_abs_rel": 0.0963077351770132,
+      "rms_rel": 0.12303328541141027,
+      "p50_abs_rel": 0.07233131030853457,
+      "p90_abs_rel": 0.20399299639522106,
+      "p99_abs_rel": 0.234587575733325,
+      "max_abs_rel": 0.247435350627075,
+      "mean_abs_err_ms": 15.307106544478508
+     },
+     "grid_L_ge_65536": {
+      "mean_abs_rel": 0.048421532988195605,
+      "rms_rel": 0.08090874390686005,
+      "p50_abs_rel": 0.01688567633453031,
+      "p90_abs_rel": 0.19499536680441665,
+      "p99_abs_rel": 0.20683729056252675,
+      "max_abs_rel": 0.20683729056252675,
+      "mean_abs_err_ms": 37.01002411175043
+     }
+    },
+    "train_sample_relative": {
+     "constants": {
+      "a_ms_per_token": 0.04598871237751431,
+      "b_ms_per_token_ctx": 1.6220783832812028e-06,
+      "c_ms": 10.046045218978554
+     },
+     "train_sample_request_weighted": {
+      "mean_abs_rel": 0.05697251187789017,
+      "rms_rel": 0.07752485565388263,
+      "p50_abs_rel": 0.0503203654703015,
+      "p90_abs_rel": 0.10591097532299565,
+      "p99_abs_rel": 0.31326719388921687,
+      "max_abs_rel": 0.34955126359372934,
+      "mean_abs_err_ms": 20.155150698672458
+     },
+     "grid": {
+      "mean_abs_rel": 0.12526447136358937,
+      "rms_rel": 0.18010080557255584,
+      "p50_abs_rel": 0.04949211089221017,
+      "p90_abs_rel": 0.3301833404212725,
+      "p99_abs_rel": 0.35424776756477483,
+      "max_abs_rel": 0.3651314811301202,
+      "mean_abs_err_ms": 21.94616743384375
+     },
+     "grid_L_ge_65536": {
+      "mean_abs_rel": 0.07031844177990805,
+      "rms_rel": 0.1280056090671471,
+      "p50_abs_rel": 0.019346478730901673,
+      "p90_abs_rel": 0.30266648774762017,
+      "p99_abs_rel": 0.32768140591688144,
+      "max_abs_rel": 0.32768140591688144,
+      "mean_abs_err_ms": 60.66692917906397
+     }
+    },
+    "train_sample_plus_grid_relative": {
+     "constants": {
+      "a_ms_per_token": 0.04213951756103739,
+      "b_ms_per_token_ctx": 1.6745372107152324e-06,
+      "c_ms": 13.6743770617622
+     },
+     "train_sample_request_weighted": {
+      "mean_abs_rel": 0.08381637706865604,
+      "rms_rel": 0.09873330161358705,
+      "p50_abs_rel": 0.08522265517060645,
+      "p90_abs_rel": 0.175227548319713,
+      "p99_abs_rel": 0.19445652817817227,
+      "max_abs_rel": 0.2010679071627195,
+      "mean_abs_err_ms": 32.864214885370345
+     },
+     "grid": {
+      "mean_abs_rel": 0.07464437150712919,
+      "rms_rel": 0.08929901388295731,
+      "p50_abs_rel": 0.07456579642007988,
+      "p90_abs_rel": 0.1370049790957497,
+      "p99_abs_rel": 0.18647808253097486,
+      "max_abs_rel": 0.1929669198125341,
+      "mean_abs_err_ms": 27.118811115829924
+     },
+     "grid_L_ge_65536": {
+      "mean_abs_rel": 0.03638078378610512,
+      "rms_rel": 0.04966086682998893,
+      "p50_abs_rel": 0.023362402581238895,
+      "p90_abs_rel": 0.08851316727295788,
+      "p99_abs_rel": 0.11853959154352933,
+      "max_abs_rel": 0.11853959154352933,
+      "mean_abs_err_ms": 63.519737219589906
+     }
+    }
+   },
+   "use": "fallback only (prefill_source closed_form); the campaign default is prefill_source host (exact AIS) because of these errors"
+  }
+ },
+ "tests": {
+  "rust_new": [
+   "learned_choice: closed_forms_follow_their_formulas, v3_features_follow_their_definitions, v3_keeps_the_v1_features_unchanged (300 random tables x 4 host shapes; v1 names and values bit-identical, same decisions), v3_duplication_keeps_features_sources_and_choice, v3_decisions_are_deterministic (temperature 0 and 0.05, reversed host order), v3_ignores_expected_output_tokens, v3_fails_without_the_hosts_modeled_backlog, v3_host_prefill_source_reads_the_hosts_prediction, only_v3_declares_the_ais_inputs, v3_theta0_reproduces_the_seeded_default, v3_parameter_validation_is_strict; theta0_picks_the_default_argmin now also covers v3",
+   "mocker: replay_projects_request_prefill_time_only_for_selectors_that_declare_it (v3 host: queries (128,0),(64,64) once per distinct prefix + admission hint; v1: admission hint only)"
+  ],
+  "results": "cargo test -p dynamo-custom-policy-builtin: lib 112 passed (2 ignored) + integration tests passed; learned_choice 26 passed; cargo test -p dynamo-mocker --lib replay::offline::extensions::kv_router: 28 passed; cargo clippy -D warnings clean for dynamo-custom-policy-builtin and dynamo-mocker (--all-targets) and dynamo-kv-router (--all-targets --features bench,standalone-selection); cargo fmt --all --check clean; harness pytest tests/ (except e2e): 101 passed incl. tests/test_router_ais_load_model.py; pre-commit hooks passed",
+  "pre_existing_not_fixed": "cargo clippy -p dynamo-kv-router --all-targets without features fails on dead code scheduling/local.rs:327 (schedule_request_with_booking), unrelated to this change"
+ },
+ "parity": {
+  "cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "agentx-A3-base-n8-lanes-L2",
+   "mooncake-w0-base-n8-open-L2",
+   "mooncake-w4-base-n4-closed-L2",
+   "sessions-s0-base-n4-open-L2",
+   "sessions-s2-think2.0-n4-closed-L2"
+  ],
+  "cells_file": "runs/ais_features/cells/parity_train6.jsonl (lines copied from cells/train.jsonl; no val or test cell touched)",
+  "repeats": [
+   0,
+   1
+  ],
+  "policies": [
+   [
+    "default@defaults",
+    "dynamo-default-cost-fn"
+   ],
+   [
+    "lmetric@defaults",
+    "lmetric"
+   ],
+   [
+    "m1-s2@sel-g30",
+    "learned-choice (feature_set v1, pilot-selected theta)"
+   ]
+  ],
+  "tuning_side": {
+   "campaign_cache_hits": 20,
+   "private_tuning_run": "runs/ais_features/root_tuning (tuning WT venv, build 6955b0ee; all 36 tasks)",
+   "private_run_reproduces_campaign_cache": "20/20 records identical (every field + per-request bytes)"
+  },
+  "ais_build_vs_tuning_build": {
+   "pairs": 36,
+   "identical": 36,
+   "fields_compared_min": 76,
+   "per_request_rows_compared": 254562,
+   "non_environment_fields_differing": [],
+   "fields_that_differ": "build_id and cache_key (36/36), plus run environment: run_id, slot, wall_s, eval_wall_s, native_wall_time_ms, worker_pid, worker_peak_rss_mib, per_request_path, policy_spec_path/policy_yaml (root-dependent paths; content-addressed basenames equal 36/36)",
+   "errors": 0
+  },
+  "verdict": "IDENTICAL apart from build_id",
+  "slurm": {
+   "ais-parity-r0": {
+    "verdict": "IDENTICAL",
+    "records_identical": "84/84",
+    "per_request_rows_compared": 593978
+   },
+   "ais-parity-r0-epyc9654p": {
+    "verdict": "IDENTICAL",
+    "records_identical": "84/84",
+    "per_request_rows_compared": 593978
+   },
+   "ais-parity-r0-7702p-alt": {
+    "verdict": "IDENTICAL",
+    "records_identical": "84/84",
+    "per_request_rows_compared": 593978
+   }
+  },
+  "slurm_images": {
+   "ais-parity-r0": "<node>, EPYC 7702P (server-512)",
+   "ais-parity-r0-epyc9654p": "<node>, EPYC 9654P (server-768)",
+   "ais-parity-r0-7702p-alt": "<node>, EPYC 7702P (<partition>-1024)"
+  },
+  "slurm_reference": "runs/ais_features/root_ais/runs/cache/results (same build, workstation); remote/parity_check.py",
+  "evidence": [
+   "runs/ais_features/parity/tuning/results.jsonl",
+   "runs/ais_features/parity/ais/results.jsonl",
+   "runs/ais_features/parity/compare_r0.json",
+   "runs/ais_features/scripts/compare_ais.py (stdlib)",
+   "runs/ais_features/parity/slurm_parity_ais-parity-r0*.json",
+   "facts/remote.json parity.ais_build_555ca082"
+  ]
+ },
+ "ais_load_model_effect_on_default": {
+  "question": "Does router_prefill_load_model: ais (host prefill-token decay over AIS-predicted durations) change default@defaults' own decisions or goodput in replay?",
+  "setup": "default@defaults with router_config {router_prefill_load_model: ais} (+ engine ais_perf_config as the router estimator) vs default@defaults, same build, same 6 train cells x k0,1",
+  "decisions": {
+   "pairs_routing_changed": "12/12",
+   "pairs_per_request_identical": 0,
+   "first_divergence_arrival_rank": {
+    "agentx-A1-base-n4-lanes-L1 k0": 43,
+    "agentx-A1-base-n4-lanes-L1 k1": 137,
+    "agentx-A3-base-n8-lanes-L2 k0": 32,
+    "agentx-A3-base-n8-lanes-L2 k1": 40,
+    "mooncake-w0-base-n8-open-L2 k0": 7,
+    "mooncake-w0-base-n8-open-L2 k1": 19,
+    "mooncake-w4-base-n4-closed-L2 k0": 39,
+    "mooncake-w4-base-n4-closed-L2 k1": 44,
+    "sessions-s0-base-n4-open-L2 k0": 25,
+    "sessions-s0-base-n4-open-L2 k1": 7,
+    "sessions-s2-think2.0-n4-closed-L2 k0": 230,
+    "sessions-s2-think2.0-n4-closed-L2 k1": 191
+   },
+   "routing_changed_frac_mean": 0.7704987670583282,
+   "note": "first divergence at request rank 7-25 in open loop (arrivals exogenous, so the load model alone causes it) and 32-230 in closed loop; after that trajectories differ, so routing_changed_frac is not a per-decision rate"
+  },
+  "goodput": {
+   "pairs": 12,
+   "goodput_window_ratio_mean": 1.000612007471578,
+   "goodput_window_ratio_sd": 0.01681612221683667,
+   "goodput_window_ratio_min": 0.976044226044226,
+   "goodput_window_ratio_max": 1.031104716074229,
+   "cell_mean_ratio": {
+    "agentx-A1-base-n4-lanes-L1": 1.0044114604900425,
+    "agentx-A3-base-n8-lanes-L2": 0.9977381721808294,
+    "mooncake-w0-base-n8-open-L2": 0.9877140415495314,
+    "mooncake-w4-base-n4-closed-L2": 0.9904860022435638,
+    "sessions-s0-base-n4-open-L2": 0.9965126041223152,
+    "sessions-s2-think2.0-n4-closed-L2": 1.0268097642431864
+   },
+   "mean_delta_over_cells": 0.0006120074715780984,
+   "se_over_cells": 0.0057582284515471675,
+   "pooled_within_cell_replicate_sd": 0.013669735040805963,
+   "pairs_better": 5,
+   "pairs_worse": 7
+  },
+  "other_metrics_mean_relative_change": {
+   "ttft_p50": 0.0700646960407194,
+   "ttft_p90": 0.025583034857307757,
+   "itl_p50": -0.0007851520135889097,
+   "itl_p90": 0.01859846471800976,
+   "slowdown_p90": 0.011060551211692008,
+   "prefix_reuse": 0.006291383074052276
+  },
+  "verdict": "decisions change in every pair; windowed goodput does not change beyond noise (mean delta +0.06%, SE over cells 0.58%, pooled within-cell replicate sd 1.37%, cell means 0.988-1.027; 5 better, 7 worse pairs). Informal application of the contract's noise rule on 6 train cells x 2 replicates.",
+  "implication": "M0-ais (default with the AIS load model) starts at default's goodput level; A16.3's single reference default@defaults without AIS stays appropriate, and M0-ais makes any tuned difference explicit.",
+  "evidence": [
+   "runs/ais_features/parity/compare_r0.json (ais_load_model_effect_on_default)",
+   "runs/ais_features/parity/ais_load_first_divergence.json",
+   "runs/ais_features/scripts/first_divergence.py"
+  ]
+ },
+ "v3_smoke": {
+  "theta0_reservoir_vs_default_ais_load": {
+   "pairs": 12,
+   "per_request_identical": 12,
+   "records_identical_except_policy_identity": 12,
+   "meaning": "v3 with theta = -e0, tie_break reservoir and prefill_source host reproduces default@defaults+ais-load request for request: the host fills PREFILL_TIME and REQUEST_PREFILL_TIME for every candidate and feature 0 is the default logit under the same load model"
+  },
+  "informational_rules_vs_default_at_defaults": {
+   "note": "fixed hand-written rules on 6 TRAIN cells x 2 replicates; not tuned, not validation evidence",
+   "lc-v3-host@min-est-ttft (theta = -0.001 e0 - e10)": {
+    "pairs": 12,
+    "goodput_window_ratio_mean": 1.1074594146429444,
+    "goodput_window_ratio_sd": 0.1263337257269696,
+    "goodput_window_ratio_min": 1.023077406762717,
+    "goodput_window_ratio_max": 1.3711163525643455,
+    "cell_mean_ratio": {
+     "agentx-A1-base-n4-lanes-L1": 1.031851223770483,
+     "agentx-A3-base-n8-lanes-L2": 1.0470344480903657,
+     "mooncake-w0-base-n8-open-L2": 1.1098112059295053,
+     "mooncake-w4-base-n4-closed-L2": 1.0455589445955886,
+     "sessions-s0-base-n4-open-L2": 1.0399090528014379,
+     "sessions-s2-think2.0-n4-closed-L2": 1.3705916126702857
+    },
+    "mean_delta_over_cells": 0.1074594146429444,
+    "se_over_cells": 0.053853684258938855,
+    "pooled_within_cell_replicate_sd": 0.016068366028423545,
+    "pairs_better": 12,
+    "pairs_worse": 0,
+    "metric_change": {
+     "ttft_p50": -0.30554012210137776,
+     "ttft_p90": -0.4068244302381905,
+     "itl_p50": -0.08397184220500786,
+     "itl_p90": -0.16348330994931146,
+     "slowdown_p90": -0.13696468279808025,
+     "prefix_reuse": 0.1281340990044514
+    }
+   },
+   "lc-v3-cf@min-est-ttft (same rule, closed-form prefill)": {
+    "pairs": 12,
+    "goodput_window_ratio_mean": 1.1087939438493597,
+    "goodput_window_ratio_sd": 0.1246202797856572,
+    "goodput_window_ratio_min": 1.023879469972114,
+    "goodput_window_ratio_max": 1.3667080243910759,
+    "cell_mean_ratio": {
+     "agentx-A1-base-n4-lanes-L1": 1.031851223770483,
+     "agentx-A3-base-n8-lanes-L2": 1.0569514189761529,
+     "mooncake-w0-base-n8-open-L2": 1.1211918732713557,
+     "mooncake-w4-base-n4-closed-L2": 1.0381450537289585,
+     "sessions-s0-base-n4-open-L2": 1.0380883612487406,
+     "sessions-s2-think2.0-n4-closed-L2": 1.3665357321004676
+    },
+    "mean_delta_over_cells": 0.10879394384935974,
+    "se_over_cells": 0.05328630615500093,
+    "pooled_within_cell_replicate_sd": 0.00881788007158399,
+    "pairs_better": 12,
+    "pairs_worse": 0
+   },
+   "llm-d-optimized-baseline@modeled+ais-load": {
+    "pairs": 12,
+    "goodput_window_ratio_mean": 1.0745783298152565,
+    "goodput_window_ratio_sd": 0.15710609927668467,
+    "goodput_window_ratio_min": 0.8962245941843487,
+    "goodput_window_ratio_max": 1.3654988073839966,
+    "cell_mean_ratio": {
+     "agentx-A1-base-n4-lanes-L1": 0.9437607354470403,
+     "agentx-A3-base-n8-lanes-L2": 0.9051564953275684,
+     "mooncake-w0-base-n8-open-L2": 1.1488908670054696,
+     "mooncake-w4-base-n4-closed-L2": 1.0487490487113207,
+     "sessions-s0-base-n4-open-L2": 1.0399112887642399,
+     "sessions-s2-think2.0-n4-closed-L2": 1.3610015436359004
+    },
+    "mean_delta_over_cells": 0.07457832981525654,
+    "se_over_cells": 0.06714327146583215,
+    "pooled_within_cell_replicate_sd": 0.012990102265601794,
+    "pairs_better": 8,
+    "pairs_worse": 4
+   },
+   "llm-d-optimized-baseline@throughput": {
+    "pairs": 12,
+    "goodput_window_ratio_mean": 1.0769726400428654,
+    "goodput_window_ratio_sd": 0.15057194764156887,
+    "goodput_window_ratio_min": 0.9100512678534667,
+    "goodput_window_ratio_max": 1.3624551240035032,
+    "cell_mean_ratio": {
+     "agentx-A1-base-n4-lanes-L1": 0.9541660433229946,
+     "agentx-A3-base-n8-lanes-L2": 0.9173665292075432,
+     "mooncake-w0-base-n8-open-L2": 1.1285780192896644,
+     "mooncake-w4-base-n4-closed-L2": 1.0631094271684487,
+     "sessions-s0-base-n4-open-L2": 1.0393040189195406,
+     "sessions-s2-think2.0-n4-closed-L2": 1.359311802349001
+    },
+    "mean_delta_over_cells": 0.07697264004286541,
+    "se_over_cells": 0.06443218715346247,
+    "pooled_within_cell_replicate_sd": 0.007078383756199066,
+    "pairs_better": 8,
+    "pairs_worse": 4
+   }
+  },
+  "closed_form_vs_host_same_rule": {
+   "goodput_window_delta_mean": 0.0013804249052491075,
+   "goodput_window_ratio_max": 1.02244923239537,
+   "goodput_window_ratio_mean": 1.0013804249052491,
+   "goodput_window_ratio_mean_by_cell": {
+    "agentx-A1-base-n4-lanes-L1": 1.0,
+    "agentx-A3-base-n8-lanes-L2": 1.0096615686693733,
+    "mooncake-w0-base-n8-open-L2": 1.010254424778761,
+    "mooncake-w4-base-n4-closed-L2": 0.9930749198083737,
+    "sessions-s0-base-n4-open-L2": 0.9982506607768438,
+    "sessions-s2-think2.0-n4-closed-L2": 0.9970409753981426
+   },
+   "goodput_window_ratio_min": 0.9853658684293325,
+   "goodput_window_ratio_sd": 0.009248627231100596,
+   "pairs": 12,
+   "pairs_goodput_changed": 10,
+   "pairs_per_request_identical": 2,
+   "pairs_routing_changed": 10,
+   "routing_changed_frac_mean": 0.49196311330970693
+  },
+  "evidence": [
+   "runs/ais_features/parity/ais/results_all.jsonl",
+   "runs/ais_features/specs/*.jsonl"
+  ]
+ },
+ "spaces": {
+  "m1_ais_draft": "runs/ais_features/spaces/m1_ais_v3.yaml (DRAFT: theta[0] pinned -1, v1 bounds copied from phase-2 M1, AIS bounds from analytically derived scales (hypothesis); recalibrate sigma0 with runs/phase2/scripts/flipcal.py)",
+  "m0_ais": "runs/phase2/spaces/m0_default_tuned.yaml with base.router_config {router_prefill_load_model: ais} (default@defaults+ais-load is its init)",
+  "llmd_modeled": "runs/phase2/spaces/llmd_optimized_baseline.yaml with base.parameters.ttft_source modeled and base.router_config {router_prefill_load_model: ais} (smoke ran: 12/12 without error)",
+  "inits": "theta0 = -e0 reproduces default under the AIS load model; the min-est-TTFT rule (-e0 - 1000 e10 with theta0 pinned) is a representable modeled-TTFT init; llm-d's sticky filter is not linear in v3"
+ },
+ "allocations": [
+  {
+   "job": "<job>",
+   "name": "lr-eval-ais-parity-r0-0",
+   "node": "<node>",
+   "state": "COMPLETED",
+   "elapsed": "00:03:39",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "job": "<job>",
+   "name": "lr-eval-ais-parity-r0-epyc9654p-0",
+   "node": "<node>",
+   "state": "COMPLETED",
+   "elapsed": "00:01:51",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "job": "<job>",
+   "name": "lr-eval-ais-parity-r0-7702p-alt-0",
+   "node": "<node>",
+   "state": "COMPLETED",
+   "elapsed": "00:03:44",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  }
+ ],
+ "upstream_followups": [
+  "facts/UPSTREAM_FOLLOWUPS.md #15 (REQUEST_PREFILL_TIME accessor; straight-main candidate: n)",
+  "#16 (no per-worker summed decode context; straight-main candidate: n)"
+ ],
+ "deviations": "facts/DEVIATIONS.md, section 'ais-features stage (A16.1)'",
+ "lessons": {
+  "applied": [
+   "LR-14 (information parity documented per feature)",
+   "LR-06 (duplication-invariant features and sources)",
+   "LR-03 (one_draw/reservoir tie-break semantics kept)"
+  ],
+  "rejected": []
+ },
+ "verification": {
+  "verdict": "pass",
+  "status_rule": "status stays \"ok\" because the independent verification passed (phase-2 AIS prep stage, 2026-10-03 ~11:58 PDT)",
+  "by": "workflow verifier r0 (independent recomputation; summary relayed to the phase-2 AIS prep stage)",
+  "evidence": "runs/verify_ais_features_r0/ (scripts/, ais_direct_check.json, parity/compare_tuning_vs_ais.json, det/compare_builder_vs_rerun.json, instr/exp1_check/, instr/leak_*_check.json)",
+  "findings": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 6
+  },
+  "checks": [
+   "all 13 v3 features match an independent recomputation on 65,805 decisions / 398,220 candidate rows (9 instrumented replays, 3 cells x 3 policies): features 0-7, 9, 11, 12 bit-exact, 8 and 10 within 5e-10 (host ns rounding); backlog bit-exact against an independent prefill tracker with AIS re-predicted durations; long context covered (4,574 decisions with L >= 64K, n up to 123,904); 0 argmax and 0 host-to-policy plumbing mismatches",
+   "no OSL leakage: 40 single-request OSL perturbations left that request's feature table and decision byte-identical",
+   "deterministic: 36/36 records identical on rerun (incl. cache keys), 2 cross-process instrumented reruns identical",
+   "tier-A parity: 2 unused train cells x 11 policies x k0,1 = 44/44 records and 391,490 per-request rows identical; builder aggregates recompute exactly",
+   "tests rerun (learned_choice 26, mocker kv_router 28), cargo fmt clean, commits signed off without co-author trailer, not pushed",
+   "tier-A build and cache untouched at verification time (.so 1d67c131, build_ids.json unchanged since Oct 2, no 555ca082 records)",
+   "information parity met in principle; the host prefill value is not wired live (UPSTREAM_FOLLOWUPS #15)"
+  ],
+  "scratch": "instrumented source/venv/targets under the session scratchpad (src/, 14 GB), listed in CLEANUP.md; reused read-only by the phase-2 AIS prep stage to dump exact v3 tables"
+ },
+ "spaces_final": {
+  "supersedes": "the draft runs/ais_features/spaces/m1_ais_v3.yaml and the space notes above",
+  "facts": "facts/phase2_ais_prep.json",
+  "manifest": "runs/phase2-ais/MANIFEST.json",
+  "readme": "runs/phase2-ais/README.md",
+  "m1_ais": [
+   "runs/phase2-ais/spaces/m1_ais_s1.yaml",
+   "runs/phase2-ais/spaces/m1_ais_s2bc.yaml",
+   "runs/phase2-ais/spaces/m1_ais_s3rule.yaml"
+  ],
+  "m0_ais": "runs/phase2-ais/spaces/m0_ais.yaml",
+  "llmd_modeled": "runs/phase2-ais/spaces/llmd_optimized_baseline_modeled.yaml",
+  "m2_ais": "runs/phase2-ais/scripts/make_m2_ais_space.py (writes runs/phase2-ais/spaces/m2_ais_rank2.yaml after the M1-ais selection)"
+ }
+}

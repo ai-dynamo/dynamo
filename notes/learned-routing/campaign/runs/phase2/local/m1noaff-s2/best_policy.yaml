@@ -1,0 +1,10 @@
+name: "m1-noaff-v1@m1noaff-s2"
+parameters:
+  feature_set: "v1"
+  temperature: 0.0
+  theta: [-1.0, 26.732503782709998, -1.6307984104287527, 0.0, 0.0, -52.432315230558686, 0.0, 0.0]
+  tie_break: "one_draw"
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

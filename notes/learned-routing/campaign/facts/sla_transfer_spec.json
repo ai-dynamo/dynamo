@@ -1,0 +1,115 @@
+{
+ "schema": "learned-routing.sla-transfer-spec.v1",
+ "amendment": "CONTRACT A14",
+ "doc": "CONTRACT A14 constants for the SLA-transfer secondary analysis, from TRAIN records only.\n\nWritten before any test record is scored. Inputs: default@defaults on every TRAIN cell at load\nlevel L2, CRN replicates k = 0..7 (the training references already in the campaign cache;\nanalysis/train_default_L2.jsonl, 160 records, all cache hits), and their per-request rows.\n\nPer family f (train families mooncake, synthetic_sessions, agentx; the test-only families\nfast25_conversation and fast25_synthetic inherit mooncake's constants, as their SLA does,\nfacts/calibration.json sla.<family>.inherited_from):\n\n- (4) length-scaled TTFT, LR-08 form T_f(L) = b_f + a_f * L, with\n  b_f = median TTFT (ms) of default@defaults' completed requests on f's TRAIN L2 cells, and\n  a_f = 3 x the AIS uncontended per-token prefill time, taken token-weighted over the same\n  requests: sum E0_prefill(ISL) / sum ISL (E0_prefill = learned_routing.e0 chunked no-reuse\n  prefill, the A2 E0's prefill part).  Good iff completed, TTFT <= T_f(ISL) and mean ITL <= I.\n- (5) absolute E2E: E_f = p90 e2e latency (ms, linear interpolation) of the same requests.\n  Good iff completed, e2e <= E_f and mean ITL <= I.\n- (2) ITL-only: completed and mean ITL <= I.  (3) E2E-slowdown-only: completed and\n  e2e <= S x E0 (A2 tolerance).  (1) the scale sweep is the records' own rescore field.\n\nusage: sla_transfer_spec.py RECORDS.jsonl OUT.json\n",
+ "records": 160,
+ "replicates": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7
+ ],
+ "families": {
+  "agentx": {
+   "train_cells": [
+    "agentx-A2-base-n4-lanes-L2",
+    "agentx-A2-think0.5-n4-lanes-L2",
+    "agentx-A3-base-n8-lanes-L2",
+    "agentx-A3-osl1.5-n4-lanes-L2"
+   ],
+   "requests": 176152,
+   "b_ttft_ms": 330.32622852083296,
+   "uncontended_prefill_ms_per_token": 0.11686541984701893,
+   "a_ttft_ms_per_token": 0.3505962595410568,
+   "abs_e2e_ms": 40394.878546998974
+  },
+  "mooncake": {
+   "train_cells": [
+    "mooncake-w0-base-n8-closed-L2",
+    "mooncake-w0-base-n8-open-L2",
+    "mooncake-w0-islp1.5-n4-closed-L2",
+    "mooncake-w0-islu1.5-n4-open-L2",
+    "mooncake-w0-osl0.5-n8-open-L2",
+    "mooncake-w2-base-n4-open-L2",
+    "mooncake-w2-islu1.5-n8-closed-L2",
+    "mooncake-w2-root2-n4-open-L2",
+    "mooncake-w4-base-n4-closed-L2",
+    "mooncake-w4-islp1.5-n8-open-L2",
+    "mooncake-w4-osl2.0-n4-open-L2"
+   ],
+   "requests": 332432,
+   "b_ttft_ms": 146.7434495563066,
+   "uncontended_prefill_ms_per_token": 0.07201058472186703,
+   "a_ttft_ms_per_token": 0.21603175416560108,
+   "abs_e2e_ms": 22593.067409000327
+  },
+  "synthetic_sessions": {
+   "train_cells": [
+    "sessions-s0-base-n4-open-L2",
+    "sessions-s0-base-n8-closed-L2",
+    "sessions-s2-think0.5-n8-open-L2",
+    "sessions-s2-think2.0-n4-closed-L2",
+    "sessions-s3-root2-n4-open-L2"
+   ],
+   "requests": 634824,
+   "b_ttft_ms": 132.73331149999922,
+   "uncontended_prefill_ms_per_token": 0.059514170320792606,
+   "a_ttft_ms_per_token": 0.17854251096237783,
+   "abs_e2e_ms": 20495.50407107398
+  },
+  "fast25_conversation": {
+   "train_cells": [
+    "mooncake-w0-base-n8-closed-L2",
+    "mooncake-w0-base-n8-open-L2",
+    "mooncake-w0-islp1.5-n4-closed-L2",
+    "mooncake-w0-islu1.5-n4-open-L2",
+    "mooncake-w0-osl0.5-n8-open-L2",
+    "mooncake-w2-base-n4-open-L2",
+    "mooncake-w2-islu1.5-n8-closed-L2",
+    "mooncake-w2-root2-n4-open-L2",
+    "mooncake-w4-base-n4-closed-L2",
+    "mooncake-w4-islp1.5-n8-open-L2",
+    "mooncake-w4-osl2.0-n4-open-L2"
+   ],
+   "requests": 332432,
+   "b_ttft_ms": 146.7434495563066,
+   "uncontended_prefill_ms_per_token": 0.07201058472186703,
+   "a_ttft_ms_per_token": 0.21603175416560108,
+   "abs_e2e_ms": 22593.067409000327,
+   "inherited_from": "mooncake"
+  },
+  "fast25_synthetic": {
+   "train_cells": [
+    "mooncake-w0-base-n8-closed-L2",
+    "mooncake-w0-base-n8-open-L2",
+    "mooncake-w0-islp1.5-n4-closed-L2",
+    "mooncake-w0-islu1.5-n4-open-L2",
+    "mooncake-w0-osl0.5-n8-open-L2",
+    "mooncake-w2-base-n4-open-L2",
+    "mooncake-w2-islu1.5-n8-closed-L2",
+    "mooncake-w2-root2-n4-open-L2",
+    "mooncake-w4-base-n4-closed-L2",
+    "mooncake-w4-islp1.5-n8-open-L2",
+    "mooncake-w4-osl2.0-n4-open-L2"
+   ],
+   "requests": 332432,
+   "b_ttft_ms": 146.7434495563066,
+   "uncontended_prefill_ms_per_token": 0.07201058472186703,
+   "a_ttft_ms_per_token": 0.21603175416560108,
+   "abs_e2e_ms": 22593.067409000327,
+   "inherited_from": "mooncake"
+  }
+ },
+ "variants": {
+  "scale_sweep": "records' rescore field at (I, S) x {0.5, 0.75, 1, 1.5, 2, 3}",
+  "itl_only": "completed and mean ITL <= I (ITL skipped when output_length <= 1)",
+  "e2e_only": "completed and e2e <= S x E0 x (1 + 1e-6)",
+  "ttft_len_itl": "completed and ttft <= b_f + a_f x ISL and mean ITL <= I",
+  "abs_e2e_itl": "completed and e2e <= abs_e2e_ms_f and mean ITL <= I"
+ },
+ "window": "every variant counts good requests over exactly the record's in-window set (learned_routing.window_guards.in_window_flags rule) divided by the record's window length, like goodput_rps_window"
+}

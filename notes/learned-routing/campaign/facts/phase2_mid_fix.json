@@ -1,0 +1,262 @@
+{
+ "schema": "learned-routing.phase2-mid-fix.v1",
+ "written": "2026-10-04 02:33:08 PDT",
+ "stage": "phase2-mid fixer",
+ "status": "complete",
+ "doc": "audits/phase2-mid/fix.md",
+ "findings": [
+  {
+   "lens": "overfit-selection",
+   "id": "F1",
+   "severity": "major",
+   "verdict": "VALID",
+   "action": "FIXED (record): facts/tierA.json drift.interpretation = INCONCLUSIVE, no evidence of drift, not used for M2 context sources; numbers re-derived from records (runs/phase2-fix/checks/drift_verify.json: pooled-minus-specialist 4/4 and A12-minus-specialist 4/4 identical to the audit, l1-on-l3 loss 0.0865 = 1.34 SE over 3 cells); writer runs/phase2/scripts/tier_a_facts.py emits it on every rewrite"
+  },
+  {
+   "lens": "gaming-concentration",
+   "id": "F1",
+   "severity": "major",
+   "verdict": "VALID",
+   "action": "FIXED (re-run): A11.2 sign-constrained M1 restarts m1c-s1/s2/s3 (theta3, theta4, theta5, theta7 clamped <= 0; same seeds 1/2/3, B = 400, popsize 16, K = 2, reeval-frac 0.125, val every 5 on val k0-2; s1/s3 internal starts identical, s2 BC init projected theta3 = theta4 = 0); policy key m1 = constrained, m1u = unconstrained (gaming-flagged, disclosed row only); A12 row = m1c-s1"
+  },
+  {
+   "lens": "gaming-concentration",
+   "id": "F2",
+   "severity": "major",
+   "verdict": "VALID",
+   "action": "PRE-REGISTERED (preregistration.gaming_reaudit) and run by the fixer on the constrained selection; window-basis guard tool learned_routing.window_guards (WT <commit-42>) reproduces the audit's guards 882/882 records"
+  },
+  {
+   "lens": "sim-exploitation",
+   "id": "F1",
+   "severity": "major",
+   "verdict": "VALID",
+   "action": "FIXED with gaming F1 (theta3 <= 0 and theta7 <= 0 imply theta3 + 16 theta7 <= 0 at max_model_len 131072); REPORT requirements pre-registered (preregistration.report_flags)"
+  },
+  {
+   "lens": "sim-exploitation",
+   "id": "F2",
+   "severity": "major",
+   "verdict": "VALID",
+   "action": "FIXED (tooling + pre-registration): learned_routing.rescore_timing (WT <commit-42>) scores every timing-perturbed record against nominal E0 and E0' = prefill/s + decode/(s d); replay test shows idle requests on a perturbed engine run exactly E0' (rel 1e-7); checked against the audit's reference rescoring (runs/phase2-fix/checks/rescore_timing_compare.json); LR-14 spread pre-registered on E0'"
+  }
+ ],
+ "m1_constrained_rerun": {
+  "runs": {
+   "m1c-s1": {
+    "replaces": "m1-s1",
+    "init": "theta0 = -e0",
+    "space": "runs/phase2/spaces/m1c_learned_v1.yaml"
+   },
+   "m1c-s2": {
+    "replaces": "m1-s2",
+    "init": "BC init projected (runs/phase2/inits/m1c_s2.json)",
+    "space": "runs/phase2/spaces/m1c_learned_v1_s2bc.yaml"
+   },
+   "m1c-s3": {
+    "replaces": "m1-s3",
+    "init": "cache-heavy (already feasible)",
+    "space": "runs/phase2/spaces/m1c_learned_v1_s3cache.yaml"
+   }
+  },
+  "constraint": "space.py clamp [null, 0.0] on theta3 (active_prefill_tokens_k), theta4 (kv_load_frac), theta5 (active_requests_s), theta7 (isl_x_prefill_load); theta0 pinned -1",
+  "why_clamp_not_box": "runs/phase2-fix/checks/bound_transform.json: a box bound of 0 puts the s1/s3 starts on pycma's BoundTransform edge, generation-0 physical steps 8e-5..3.5e-4 s-units vs 0.0099..0.017 with the clamp (= the unconstrained runs')",
+  "orchestration": "p2orch (MANIFEST amended; runs/phase2-fix/checks/MANIFEST.pre-fix.json), bundle p2a with site/learned_routing/space.py updated to WT <commit-42> (pre-fix copy runs/phase2-fix/checks/bundle_p2a_space.pre-fix.py; only space.py differed from WT HEAD)",
+  "jobs": {
+   "m1c-s1": "<job> (<node>)",
+   "m1c-s2": "<job> (<node>)",
+   "m1c-s3": "<job> (<node>)"
+  },
+  "cancel": "ssh <cpu-cluster> scancel <job> (exact IDs above; recorded in facts/remote.json)",
+  "loop_pid": 2000173,
+  "outcome": {
+   "jobs_completed": "all 3 COMPLETED 02:16-02:24 PDT 2026-10-04 (04:24-04:31 each), ingested 30,664 / 30,264 / 30,199 records, 0 rejected, image Ubuntu 24.04.5 LTS / glibc 2.39",
+   "equal_budget": "p2orch budget: tier_A_equal_budget true over 36 tier-A train runs, signature (400 evals, 5 val checkpoints); m1c reeval generations 21 / 16 / 17 of 25",
+   "gen0_identity": "runs/phase2-fix/checks/gen0_identity.json: m1c-s1 and m1c-s3 asked exactly m1-s1's and m1-s3's 16 generation-0 internal points",
+   "restart_best_val_k0_2": {
+    "m1c-s1": 0.16599470141735354,
+    "m1c-s2": 0.16238116753863213,
+    "m1c-s3": 0.13750262824524545
+   },
+   "restart_spread": 0.028492073172108084,
+   "selected": {
+    "run": "m1c-s1",
+    "generation": 20,
+    "which": "mean",
+    "val_objective_k0_2": 0.16599470141735354,
+    "policy_sha": "9a44cb58e904b29985b971092da790e2b8fde78829cad7d0a600d41ec1aa2e57",
+    "theta": [
+     -1.0,
+     16.541278180717825,
+     -2.2737938976724337,
+     0.0,
+     0.0,
+     -39.22625809552176,
+     0.20618988014460626,
+     0.0
+    ],
+    "name": "m1@p2-m1c-s1-g20-mean"
+   },
+   "a12_row": "identical to the selected headline M1 (m1c-s1 g20 mean): the headline M1 now comes from the s1 restart (theta0 = -e0 init)",
+   "selection_recheck": "runs/phase2/checks/selection_recheck_fix.json: 13 rows (11 policies + m1u + A12) recomputed from cache records, all exact",
+   "unconstrained_for_reference": {
+    "m1u_selected": "m1-s2 g15 mean 0.16363",
+    "m1u_a12": "m1-s1 g25 mean 0.16148"
+   },
+   "val_k0_2_selection_exposed": {
+    "values": {
+     "llmdpp@p2-llmdpp-s2-g25-mean": 0.14145,
+     "lmetric@p2-lmetric-s2-g10-mean": 0.13341,
+     "m0@p2-m0-s3-g20-mean": 0.13343,
+     "m1@p2-m1c-s1-g20-mean": 0.16599,
+     "m1u-default-init@p2-m1-s1-g25-mean": 0.16148,
+     "m1u@p2-m1-s2-g15-mean": 0.16363,
+     "ramjet@p2-ramjet-s3-g25-best_so_far": 0.14202,
+     "stickybounded@p2-stickybounded-s2-g25-mean": 0.13758,
+     "twotier@p2-twotier-s1-g15-mean": 0.13628
+    },
+    "m1c_minus": {
+     "llmdpp@p2-llmdpp-s2-g25-mean": {
+      "cell_mean": 0.0245,
+      "segment_mean": 0.0068,
+      "segment_se": 0.0148,
+      "segments_ahead": "3/6",
+      "by_family": {
+       "agentx": -0.0165,
+       "mooncake": 0.0764,
+       "synthetic_sessions": 0.0056
+      }
+     },
+     "lmetric@p2-lmetric-s2-g10-mean": {
+      "cell_mean": 0.0326,
+      "segment_mean": 0.015,
+      "segment_se": 0.0175,
+      "segments_ahead": "3/6",
+      "by_family": {
+       "agentx": -0.0057,
+       "mooncake": 0.0993,
+       "synthetic_sessions": -0.0035
+      }
+     },
+     "m0@p2-m0-s3-g20-mean": {
+      "cell_mean": 0.0326,
+      "segment_mean": 0.0167,
+      "segment_se": 0.0137,
+      "segments_ahead": "5/6",
+      "by_family": {
+       "agentx": -0.0008,
+       "mooncake": 0.0845,
+       "synthetic_sessions": 0.0073
+      }
+     },
+     "m1u-default-init@p2-m1-s1-g25-mean": {
+      "cell_mean": 0.0045,
+      "segment_mean": 0.0055,
+      "segment_se": 0.0017,
+      "segments_ahead": "6/6",
+      "by_family": {
+       "agentx": 0.008,
+       "mooncake": 0.0047,
+       "synthetic_sessions": 0.0015
+      }
+     },
+     "m1u@p2-m1-s2-g15-mean": {
+      "cell_mean": 0.0024,
+      "segment_mean": -0.0017,
+      "segment_se": 0.0038,
+      "segments_ahead": "2/6",
+      "by_family": {
+       "agentx": -0.0073,
+       "mooncake": 0.0133,
+       "synthetic_sessions": -0.0008
+      }
+     },
+     "ramjet@p2-ramjet-s3-g25-best_so_far": {
+      "cell_mean": 0.024,
+      "segment_mean": 0.0152,
+      "segment_se": 0.0101,
+      "segments_ahead": "3/6",
+      "by_family": {
+       "agentx": 0.0079,
+       "mooncake": 0.062,
+       "synthetic_sessions": -0.0012
+      }
+     },
+     "stickybounded@p2-stickybounded-s2-g25-mean": {
+      "cell_mean": 0.0284,
+      "segment_mean": 0.0166,
+      "segment_se": 0.0123,
+      "segments_ahead": "4/6",
+      "by_family": {
+       "agentx": 0.0097,
+       "mooncake": 0.0751,
+       "synthetic_sessions": -0.0033
+      }
+     },
+     "twotier@p2-twotier-s1-g15-mean": {
+      "cell_mean": 0.0297,
+      "segment_mean": 0.0105,
+      "segment_se": 0.0173,
+      "segments_ahead": "1/6",
+      "by_family": {
+       "agentx": -0.0132,
+       "mooncake": 0.0952,
+       "synthetic_sessions": -0.0015
+      }
+     }
+    },
+    "source": "runs/phase2-fix/checks/val_compare.json (cache records, val k0-2; MDE 0.038; fresh val k3-10 decides the headline arm in Select+Test)"
+   }
+  }
+ },
+ "preregistration": {
+  "registered_before": "any test evaluation and before the constrained M1 selection was known (2026-10-03 ~22:10 PDT); facts/test_freeze.json test.jsonl 7b998b8e unchanged",
+  "m1_identity": "The headline and every M1-derived arm use policy key m1 = the A11.2 sign-constrained restarts m1c-s1/s2/s3, selected by LR-10 (argmax val k0-2 over 3 restarts x validated checkpoints). The A12 row M1-default-init = m1c-s1 selected over its own checkpoints. The unconstrained m1u selection (m1-s2 g15) and m1u A12 row (m1-s1 g25) are disclosed, gaming-flagged rows only: never headline, never a warm start, never a test finalist unless the Select+Test stage reports them as flagged secondary rows.",
+  "gaming_reaudit": {
+   "what": "the constrained selected M1 and the constrained A12 row on val k0-2 (14 cells x k0-2), before Select+Test",
+   "tools": "runs/audits/phase2-mid-gaming/scripts (analyze.py, giant.py, attraction.py, rules.py) run unchanged on a private root, with the PRESET.md thresholds (S1-S4, cap min(2/N, 1/N + 0.25)), plus learned_routing.window_guards",
+   "outcome_rule": "A11.2 prescribes one remedy (sign-constrained re-run at the same B), which is applied. The constrained M1 stays the M1 arm whatever the re-audit finds; any remaining cap violation, S1-S4 flag, dump worker or long-request deficit is reported as a flag on every M1 row and is not a reason to retune again (a different objective, e.g. request-size weighting, is a design decision for the operator)."
+  },
+  "report_flags": {
+   "rows": "every M1 row (m1 constrained, A12 constrained, m1u and m1u-A12 flagged) and every test finalist, in the test pass and in every robustness condition (A5 lag 0/50/200 ms, timing perturbations)",
+   "metrics": "learned_routing.window_guards per record, means over k: share_max_window vs cap (concentration flag: share > cap), nmi_worker_islq (segregation flag: > 0.10, the contender ceiling in the gaming audit), good_isl_ge_32k and good_isl_ge_64k and good_top_isl_decile (long-request sacrifice flag: more than 0.05 below default@defaults on the same cell), dump_workers (flag: > 0), worker_good_frac_min",
+   "isl_strata": "the record's isl_buckets (32768-65536 and >= 65536) and window_guards' >= 32K / >= 64K fractions are reported next to the headline"
+  },
+  "timing_robustness": {
+   "rule": "every timing-perturbed test record (PLAN stage 5 speedup_ratio / decode_speedup_ratio 0.8 and 1.2, and any other timing override) is scored twice with learned_routing.rescore_timing: nominal E0 (fixed absolute SLO, lr-eval's goodput_rps_window) and consistent E0' = prefill/s + decode/(s d) (SLO re-anchored to the perturbed engine). Both are reported.",
+   "lr14_spread": "the LR-14 perturbation spread and the ranking's Kendall tau are defined on E0' (consistent); the nominal-E0 numbers are reported alongside",
+   "degenerate_flag": "AgentX at speedup 0.8 is flagged degenerate under nominal E0 (no zero-reuse request can be good: min e2e/E0 1.2136 > S = 1.16134; sim-exploitation audit agentx_zero_reuse.json)"
+  },
+  "lr15_drift": "INCONCLUSIVE, no evidence of drift (facts/tierA.json drift.interpretation). M2 context sources are not chosen on the strength of load-level drift; REPORT describes the check as underpowered at B/4.",
+  "derived_arms_sign_rule": {
+   "m1cont_and_m2": "binding for tier B: m1cont (LR-15 comparator) and M2's theta block use the same clamp (theta3, theta4, theta5, theta7 <= 0) and warm-start from the constrained M1 selection (policy key m1); M2's context term is not sign-constrained, and its selected config gets the same window-guard/rules re-audit before test, with any flag reported",
+   "m1_noaff": "A15 M1-noaff: the m1c spaces with theta6 pinned 0 (same clamps, same 3 inits)",
+   "m1_v2": "A17.1 M1-v2: clamp <= 0 on the v2 load-increasing features 3, 4, 5, 7, 8 (log_ptok), 10 (log_bs), 12-14 (ratios), 15-17 (below_frac), 18-20 (excess), 21 (new_prefill_x_requests); not on 1, 2, 6, 9, 11, 22 (FEATURES.md v2 table); the s2/s3 inits projected the same way and disclosed",
+   "ais_league_recommendation": "A16 M1-ais/M2-ais (not started at 22:10 PDT; no runs/phase2-ais/state.json): apply the same rule to v3 load-increasing features (prefill_backlog_ms_s, est_ttft_ms_s, est_decode_step_ms_s, itl_externality_ms_s, besides the v1 ones); est_prefill_ms_s (own uncached prefill) is request-own like feature 2 and stays free. The AIS-league stage records its decision."
+  }
+ },
+ "lessons": {
+  "applied": [
+   "LR-13 (sign constraint, guards, cap rule)",
+   "LR-10 (re-selection over the constrained restarts)",
+   "LR-11 (counting: m1u and m1c variants both counted)",
+   "LR-14 (consistent-E0 timing robustness, spread on E0')",
+   "LR-15 (drift check recorded as inconclusive)",
+   "LR-07 (multi-start kept)"
+  ],
+  "rejected": []
+ },
+ "gaming_reaudit_result": {
+  "run": "runs/phase2-fix/gaming_reaudit (own 42 val k0-2 replays of the constrained M1 in a private root, 0 errors; merged with the gaming audit's 882 records; audit scripts unchanged; analyze.py scorer check 924/924)",
+  "policy": "m1@p2-m1c-s1-g20-mean",
+  "removed": "the dump worker and the load attraction: 0 dump workers on every Mooncake val cell (m1u: 1.0 per replicate at n8-open-L3 and n8-closed-L2); ISL >= 60K good 0.920-1.000 (m1u 0.425-0.966); giants sent to the max-outstanding-prefill worker 0.071-0.203 (m1u 0.370-0.580; chance 0.125-0.25); worker_good_frac_min 0.546-0.905 (m1u 0.000-0.900)",
+  "remaining_flags": {
+   "concentration": "window share above the cap on 4 of 5 Mooncake val cells, larger than m1u's at N8: n8-open-L3 0.558 (m1u 0.402, cap 0.250), n8-closed-L2 0.567 (0.364), n6-open-L2 0.399 (0.369, cap 0.333), islu1.25-n6-closed-L2 0.450 (0.454); the hot worker's prefill-token share stays near 1/N (0.263, 0.177, 0.145, 0.140, 0.176 at N = 4, 6, 8, 8, 6), so the concentration is in requests, not work",
+   "segregation": "NMI(worker; ISL quartile) 0.211 / 0.228 at n8-closed-L2 / n8-open-L3 and 0.120 at islu1.25-n6 (contender baselines <= 0.095)",
+   "long_request_deficit": "n8-open-L3: ISL >= 32K good 0.826 vs default 0.995, ramjet 0.963, llmdpp 0.922; ISL >= 64K 0.910 vs 1.000 / 1.000 / 0.846; top ISL decile 0.821 vs 0.880 / 0.882 / 0.920",
+   "preset_rules": "S1-S4 still declare gaming on 3 cells (n8-closed-L2 S4; n8-open-L3 S1+S4; islu1.25-n6-closed-L2 S1+S4): good-to-bad transitions vs default fall 65-69% in the top ISL quartile (share 0.25)"
+  },
+  "decision": "per the pre-registered outcome rule the constrained M1 stays the M1 arm (A11.2's one remedy is applied); every flag above goes on every M1 row in REPORT; whether to retune under a size-aware objective or constraint is an operator decision (escalated in the stage's issues)",
+  "summary_file": "runs/phase2-fix/checks/reaudit_summary.json"
+ }
+}

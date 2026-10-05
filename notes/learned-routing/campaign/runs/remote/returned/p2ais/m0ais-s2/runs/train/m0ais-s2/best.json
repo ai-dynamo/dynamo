@@ -1,0 +1,193 @@
+{
+ "best_ever_train": {
+  "generation": 24,
+  "objective": 0.13749448831456235,
+  "per_cell": {
+   "agentx-A1-base-n4-lanes-L1": 0.024292515451334113,
+   "agentx-A1-base-n4-lanes-L3": 0.19104640505383416,
+   "agentx-A1_A2-base-n8-lanes-L3": 0.2307000816626193,
+   "agentx-A2-base-n4-lanes-L2": 0.05081573336216317,
+   "agentx-A2-think0.5-n4-lanes-L2": 0.030492013875760907,
+   "agentx-A3-base-n8-lanes-L2": 0.07633353439680433,
+   "agentx-A3-osl1.5-n4-lanes-L2": 0.05357697488337965,
+   "agentx-A3-think2.0-n8-lanes-L1": 0.03677147813612067,
+   "mooncake-w0-base-n4-open-L1": 0.0329131787728416,
+   "mooncake-w0-base-n4-open-L3": 0.15606600141333,
+   "mooncake-w0-base-n8-closed-L2": 0.17283958186240855,
+   "mooncake-w0-base-n8-open-L2": 0.13873845923869293,
+   "mooncake-w0-islp1.5-n4-closed-L2": 0.09161123704336346,
+   "mooncake-w0-islu1.5-n4-open-L2": 0.08484247017121613,
+   "mooncake-w0-osl0.5-n8-open-L2": 0.12819422864518373,
+   "mooncake-w2-base-n4-closed-L3": 0.17596248113543667,
+   "mooncake-w2-base-n4-open-L2": 0.04700784519971635,
+   "mooncake-w2-base-n8-closed-L1": 0.0748572046639416,
+   "mooncake-w2-base-n8-open-L3": 0.22923676830111278,
+   "mooncake-w2-islu1.5-n8-closed-L2": 0.1337296323129762,
+   "mooncake-w2-root2-n4-open-L2": 0.050894255120889284,
+   "mooncake-w4-base-n4-closed-L2": 0.08119043663929967,
+   "mooncake-w4-base-n8-open-L1": 0.02684034183194115,
+   "mooncake-w4-islp1.5-n8-open-L2": 0.07655422488998341,
+   "mooncake-w4-osl2.0-n4-open-L2": 0.05588243472816348,
+   "mooncake-w4-root2-n8-open-L3": 0.15012262770382903,
+   "sessions-s0-base-n4-open-L2": 0.03760786306210898,
+   "sessions-s0-base-n8-closed-L2": 0.2113715625761441,
+   "sessions-s1-base-n4-open-L3": 0.8766550839268418,
+   "sessions-s1-base-n8-open-L1": 0.05944775321913147,
+   "sessions-s2-think0.5-n8-open-L2": 0.34748190525221984,
+   "sessions-s2-think2.0-n4-closed-L2": 0.2923183808523395,
+   "sessions-s3-islu1.5-n8-open-L3": 0.21223305489234218,
+   "sessions-s3-root2-n4-open-L2": 0.03618485241764921
+  },
+  "policy_sha": "784bc8a5e419ad26c9f0ee5f69f275b7d877b9e9ab154d022fc4c43f25f27970",
+  "spec": {
+   "name": "m0-ais-default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 1699.3897335377392,
+    "overlap_score_credit": 1.1686373037697433,
+    "overlap_score_credit_decay": 0.4870532197083119,
+    "prefill_load_scale": 32.3466246184405,
+    "router_temperature": 0.00033024957250022064
+   },
+   "router_config": {
+    "router_prefill_load_model": "ais"
+   },
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 1699.3897335377392,
+   "parameters.overlap_score_credit": 1.1686373037697433,
+   "parameters.overlap_score_credit_decay": 0.4870532197083119,
+   "parameters.prefill_load_scale": 32.3466246184405,
+   "parameters.router_temperature": 0.00033024957250022064
+  },
+  "z": [
+   0.2921593259424358,
+   0.12176330492707797,
+   0.7027147410631023,
+   0.9023693106913051,
+   0.00033024957250022064
+  ]
+ },
+ "fevals": 400,
+ "generation": 25,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "clipped_log_ratio",
+  "popsize": 16,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 2,
+  "space_sha": "b5fb33aac4b5f10d1edcb3817e8659d4eb7eedaad0a00c51e0a0dbf1a7c513e3",
+  "train_cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "agentx-A1-base-n4-lanes-L3",
+   "agentx-A1_A2-base-n8-lanes-L3",
+   "agentx-A2-base-n4-lanes-L2",
+   "agentx-A2-think0.5-n4-lanes-L2",
+   "agentx-A3-base-n8-lanes-L2",
+   "agentx-A3-osl1.5-n4-lanes-L2",
+   "agentx-A3-think2.0-n8-lanes-L1",
+   "mooncake-w0-base-n4-open-L1",
+   "mooncake-w0-base-n4-open-L3",
+   "mooncake-w0-base-n8-closed-L2",
+   "mooncake-w0-base-n8-open-L2",
+   "mooncake-w0-islp1.5-n4-closed-L2",
+   "mooncake-w0-islu1.5-n4-open-L2",
+   "mooncake-w0-osl0.5-n8-open-L2",
+   "mooncake-w2-base-n4-closed-L3",
+   "mooncake-w2-base-n4-open-L2",
+   "mooncake-w2-base-n8-closed-L1",
+   "mooncake-w2-base-n8-open-L3",
+   "mooncake-w2-islu1.5-n8-closed-L2",
+   "mooncake-w2-root2-n4-open-L2",
+   "mooncake-w4-base-n4-closed-L2",
+   "mooncake-w4-base-n8-open-L1",
+   "mooncake-w4-islp1.5-n8-open-L2",
+   "mooncake-w4-osl2.0-n4-open-L2",
+   "mooncake-w4-root2-n8-open-L3",
+   "sessions-s0-base-n4-open-L2",
+   "sessions-s0-base-n8-closed-L2",
+   "sessions-s1-base-n4-open-L3",
+   "sessions-s1-base-n8-open-L1",
+   "sessions-s2-think0.5-n8-open-L2",
+   "sessions-s2-think2.0-n4-closed-L2",
+   "sessions-s3-islu1.5-n8-open-L3",
+   "sessions-s3-root2-n4-open-L2"
+  ],
+  "val_cells": [
+   "agentx-V1-base-n4-lanes-L2",
+   "agentx-V2-base-n4-lanes-L3",
+   "agentx-V2-base-n6-lanes-L2",
+   "agentx-V3-base-n8-lanes-L1",
+   "mooncake-w1-base-n4-open-L2",
+   "mooncake-w1-base-n6-open-L2",
+   "mooncake-w1-base-n8-closed-L2",
+   "mooncake-w1-base-n8-open-L3",
+   "mooncake-w1-islu1.25-n6-closed-L2",
+   "sessions-s4-base-n4-open-L2",
+   "sessions-s4-base-n8-closed-L2",
+   "sessions-s5-base-n4-closed-L1",
+   "sessions-s5-base-n8-open-L3",
+   "sessions-s5-think1.5-n6-open-L2"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": {
+  "generation": 20,
+  "policy_sha": "62c958809331e2631d9ff6c37caebb265aae7e73a2474bdba3b0adb64803bb02",
+  "spec": {
+   "name": "m0-ais-default-tuned",
+   "parameters": {
+    "decode_active_request_weight": 2531.730039954035,
+    "overlap_score_credit": 1.2356781555703658,
+    "overlap_score_credit_decay": 0.28812143315136984,
+    "prefill_load_scale": 53.034606238296384,
+    "router_temperature": 0.0010910204553340479
+   },
+   "router_config": {
+    "router_prefill_load_model": "ais"
+   },
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "dynamo-default-cost-fn"
+  },
+  "val_objective": 0.14102164778955317,
+  "val_per_cell": {
+   "agentx-V1-base-n4-lanes-L2": 0.07422364765998939,
+   "agentx-V2-base-n4-lanes-L3": 0.08377157662803401,
+   "agentx-V2-base-n6-lanes-L2": 0.0050072186412784,
+   "agentx-V3-base-n8-lanes-L1": 0.05330004051301177,
+   "mooncake-w1-base-n4-open-L2": 0.05396509635322975,
+   "mooncake-w1-base-n6-open-L2": 0.0959247664813574,
+   "mooncake-w1-base-n8-closed-L2": 0.18221005086277028,
+   "mooncake-w1-base-n8-open-L3": 0.28760531569978554,
+   "mooncake-w1-islu1.25-n6-closed-L2": 0.1442018477330355,
+   "sessions-s4-base-n4-open-L2": 0.10914110045269261,
+   "sessions-s4-base-n8-closed-L2": 0.26184570027697945,
+   "sessions-s5-base-n4-closed-L1": 0.12458838986572605,
+   "sessions-s5-base-n8-open-L3": 0.4276127846298405,
+   "sessions-s5-think1.5-n6-open-L2": 0.0709055332560138
+  },
+  "values": {
+   "parameters.decode_active_request_weight": 2531.730039954035,
+   "parameters.overlap_score_credit": 1.2356781555703658,
+   "parameters.overlap_score_credit_decay": 0.28812143315136984,
+   "parameters.prefill_load_scale": 53.034606238296384,
+   "parameters.router_temperature": 0.0010910204553340479
+  },
+  "which": "best_so_far",
+  "z": [
+   0.30891953889259144,
+   0.07203035828784246,
+   0.7563973360982306,
+   0.9466082970849746,
+   0.0010910204553340479
+  ]
+ },
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

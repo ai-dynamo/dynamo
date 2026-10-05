@@ -1,7 +1,7 @@
 # Audit: build checkpoint, lens "harness-robustness-splits", round 0 (dynamic)
 
 - **Auditor:** independent dynamic auditor (adversarial), 2026-10-02 15:18–15:48 PDT.
-- **Audited state:** WT `rupei/learned-routing-public` at `<commit-07>` (clean), bindings `.so` sha
+- **Audited state:** WT `rupei/learned-routing` at `<commit-07>` (clean), bindings `.so` sha
   `ecdd2202…`, build_id `4b4525a9…`. Cells: `CR/cells/{train,val,test}.candidates.jsonl`
   (SPLIT_MANIFEST sha `791d6787…`).
 - **Evidence root:** `CR/runs/audit-build/harness-robustness-splits-r0/` (scripts in `scripts/`,

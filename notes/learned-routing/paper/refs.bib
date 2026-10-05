@@ -1,0 +1,805 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% Bibliography for the learned-routing draft.
+%
+% Scope rule: the literature entries are the sources listed in CR/literature/BIBLIOGRAPHY.md or present
+% in CR/literature/pdfs/ (CR = the campaign root named in notes/learned-routing/README.md). The last
+% section adds the software, data and documentation the study runs on; each entry there says where its
+% metadata comes from.
+%
+% Metadata rule: title, authors and arXiv identifier come from the first page of the local PDF
+% (pdftotext -l 1). When the first page does not show the venue, the venue and year come from
+% BIBLIOGRAPHY.md; each entry says which in its "% meta:" line. Entries without a local PDF are
+% marked "no PDF" and carry only what BIBLIOGRAPHY.md records (often "First author and others").
+% Excluded on purpose: Berger 1982 (BIBLIOGRAPHY.md: "from memory; not read") and
+% Heidrich-Meisner & Igel 2009 (download failed, not read).
+% `eprint` is kept for a later switch to biblatex; plainnat prints `note` and `url`.
+
+% =========================================================================================
+% Discrete choice and context effects (CR/literature/pdfs/dcm-context/)
+% =========================================================================================
+
+% meta: title, authors, arXiv:2009.03417v2 from PDF p.1 (tomlinson2021-lcl-dlcl.pdf); venue from BIBLIOGRAPHY.md.
+@inproceedings{tomlinson2021lcl,
+  title         = {Learning Interpretable Feature Context Effects in Discrete Choice},
+  author        = {Tomlinson, Kiran and Benson, Austin R.},
+  booktitle     = {Proceedings of the ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD)},
+  year          = {2021},
+  eprint        = {2009.03417},
+  archiveprefix = {arXiv},
+  note          = {arXiv:2009.03417},
+  url           = {https://arxiv.org/abs/2009.03417}
+}
+
+% meta: title, authors, venue (ICML 2019, PMLR 97), arXiv:1902.03266v2 from PDF p.1 (seshadri2019-cdm.pdf).
+@inproceedings{seshadri2019cdm,
+  title         = {Discovering Context Effects from Raw Choice Data},
+  author        = {Seshadri, Arjun and Peysakhovich, Alexander and Ugander, Johan},
+  booktitle     = {Proceedings of the 36th International Conference on Machine Learning (ICML)},
+  series        = {PMLR},
+  volume        = {97},
+  year          = {2019},
+  eprint        = {1902.03266},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1902.03266}
+}
+
+% meta: title, authors, arXiv:1906.06365v2 from PDF p.1; venue ICML 2020 from BIBLIOGRAPHY.md.
+@inproceedings{rosenfeld2020setdependent,
+  title         = {Predicting Choice with Set-Dependent Aggregation},
+  author        = {Rosenfeld, Nir and Oshiba, Kojin and Singer, Yaron},
+  booktitle     = {Proceedings of the 37th International Conference on Machine Learning (ICML)},
+  year          = {2020},
+  eprint        = {1906.06365},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1906.06365}
+}
+
+% meta: title, authors, arXiv:1901.10860v4 from PDF p.1 (preprint compiled 2021-10-22); journal IJAR 2022 from BIBLIOGRAPHY.md.
+@article{pfannschmidt2022context,
+  title         = {Learning Context-Dependent Choice Functions},
+  author        = {Pfannschmidt, Karlson and Gupta, Pritha and Haddenhorst, Bj{\"o}rn and H{\"u}llermeier, Eyke},
+  journal       = {International Journal of Approximate Reasoning},
+  year          = {2022},
+  eprint        = {1901.10860},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1901.10860}
+}
+
+% meta: title, authors, arXiv:2207.12877v3 from PDF p.1; journal from BIBLIOGRAPHY.md.
+@article{aouad2023rumnet,
+  title         = {Representing Random Utility Choice Models with Neural Networks},
+  author        = {Aouad, Ali and D{\'e}sir, Antoine},
+  journal       = {Management Science},
+  year          = {2023},
+  eprint        = {2207.12877},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2207.12877}
+}
+
+% meta: title, authors, arXiv:1805.01603v1 from PDF p.1.
+@misc{maragheh2018halo,
+  title         = {A Customer Choice Model with {HALO} Effect},
+  author        = {Yousefi Maragheh, Reza and Chronopoulou, Alexandra and Davis, James Mario},
+  year          = {2018},
+  howpublished  = {arXiv:1805.01603},
+  eprint        = {1805.01603},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1805.01603}
+}
+
+% meta: title, authors, arXiv:2311.07607v2 from PDF p.1.
+@misc{ko2024attention,
+  title         = {Modeling Choice via Self-Attention},
+  author        = {Ko, Joohwan and Li, Andrew A.},
+  year          = {2024},
+  howpublished  = {arXiv:2311.07607},
+  eprint        = {2311.07607},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2311.07607}
+}
+
+% meta: title, authors, arXiv:2601.04616v1 from PDF p.1.
+@misc{zhang2026deephalo,
+  title         = {{DeepHalo}: A Neural Choice Model with Controllable Context Effects},
+  author        = {Zhang, Shuhan and Wang, Zhi and Gao, Rui and Li, Shuang},
+  year          = {2026},
+  howpublished  = {arXiv:2601.04616},
+  eprint        = {2601.04616},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2601.04616}
+}
+
+% meta: chapter title "GEV" and running head "Train" from PDF p.1 (train2009-gev-ch4.clean.pdf; dated
+% May 25, 2009); book title, edition, publisher and URL from BIBLIOGRAPHY.md. The PDF does not print the
+% author's given name, so only the surname is given.
+@incollection{train2009gev,
+  title         = {{GEV}},
+  author        = {Train},
+  booktitle     = {Discrete Choice Methods with Simulation},
+  edition       = {2nd},
+  chapter       = {4},
+  publisher     = {Cambridge University Press},
+  year          = {2009},
+  url           = {https://eml.berkeley.edu/books/choice2nd/Ch04_p76-96.pdf}
+}
+
+% meta: title, authors, arXiv:2001.07042v1 from PDF p.1; venue note from BIBLIOGRAPHY.md (read: abstract only).
+@misc{seshadri2020iia,
+  title         = {Fundamental Limits of Testing the Independence of Irrelevant Alternatives in Discrete Choice},
+  author        = {Seshadri, Arjun and Ugander, Johan},
+  year          = {2020},
+  howpublished  = {arXiv:2001.07042},
+  note          = {Extended version of an EC 2019 paper},
+  eprint        = {2001.07042},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2001.07042}
+}
+
+% meta: title, authors, journal name from PDF p.1 (INFORMS template, volume not printed); year from BIBLIOGRAPHY.md.
+@article{webb2021normalization,
+  title         = {The Normalization of Consumer Valuations: Context-Dependent Preferences from Neurobiological Constraints},
+  author        = {Webb, Ryan and Glimcher, Paul W. and Louie, Kenway},
+  journal       = {Management Science},
+  year          = {2021},
+  url           = {https://www.neuroeconomicslab.org/s/Normalization-of-Consumer-Valuations.pdf}
+}
+
+% meta: title, authors, venue (ICML 2020, PMLR 119), arXiv:2011.01928v1 from PDF p.1.
+@inproceedings{jain2020newactions,
+  title         = {Generalization to New Actions in Reinforcement Learning},
+  author        = {Jain, Ayush and Szot, Andrew and Lim, Joseph J.},
+  booktitle     = {Proceedings of the 37th International Conference on Machine Learning (ICML)},
+  series        = {PMLR},
+  volume        = {119},
+  year          = {2020},
+  eprint        = {2011.01928},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2011.01928}
+}
+
+% meta: title and authors from slide 1 of jain2022-agile-action-relations.pdf (a slide deck, not the paper);
+% venue from BIBLIOGRAPHY.md (read: abstract only).
+@inproceedings{jain2022agile,
+  title         = {Know Your Action Set: Learning Action Relations for Reinforcement Learning},
+  author        = {Jain, Ayush and Kosaka, Norio and Kim, Kyung-Min and Lim, Joseph J.},
+  booktitle     = {International Conference on Learning Representations (ICLR)},
+  year          = {2022},
+  url           = {https://openreview.net/forum?id=MljXVdp4A3N}
+}
+
+% meta: the local PDF is DEC SRC Technical Note 1998-002 (title, author, number, date from p.1). BIBLIOGRAPHY.md
+% lists the journal version, IEEE TPDS 2000, which was not checked against a PDF.
+@techreport{mitzenmacher1998old,
+  title         = {How Useful Is Old Information?},
+  author        = {Mitzenmacher, Michael},
+  institution   = {Digital Equipment Corporation Systems Research Center},
+  type          = {SRC Technical Note},
+  number        = {1998-002},
+  year          = {1998},
+  note          = {Journal version in IEEE Transactions on Parallel and Distributed Systems, 2000},
+  url           = {https://www.eecs.harvard.edu/~michaelm/abstracts/tpds2000.html}
+}
+
+% =========================================================================================
+% LLM request routing (CR/literature/pdfs/llm-routing/)
+% =========================================================================================
+
+% meta: title, authors, arXiv:2609.16206v1 from PDF p.1.
+@misc{tumkur2026calibrate,
+  title         = {Calibrate, Then Route: A Measured Study of Learned Request Routing for Disaggregated {LLM} Serving},
+  author        = {Tumkur, Srikanta Datta and Iyer, Jay and Simhadri, Mehar and Kumar, Sai Pavan and Kumar, Sai Kapil and Nampelly, Ramesh},
+  year          = {2026},
+  howpublished  = {arXiv:2609.16206},
+  eprint        = {2609.16206},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2609.16206}
+}
+
+% meta: title, authors, arXiv:2606.00946v1 from PDF p.1.
+@misc{lim2026lodestar,
+  title         = {Lodestar: An Online-Learning {LLM} Inference Router},
+  author        = {Lim, Gangmuk and Zhao, Wanyu and Godfrey, Brighten and Shan, Jiaxin and Xu, Le and Xie, Liguang},
+  year          = {2026},
+  howpublished  = {arXiv:2606.00946},
+  eprint        = {2606.00946},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2606.00946}
+}
+
+% meta: title, authors, arXiv:2408.13510v2 from PDF p.1.
+@misc{jain2024intelligent,
+  title         = {Intelligent Router for {LLM} Workloads: Improving Performance Through Workload-Aware Load Balancing},
+  author        = {Jain, Kunal and Parayil, Anjaly and Mallick, Ankur and Choukse, Esha and Qin, Xiaoting and Zhang, Jue and Goiri, {\'I}{\~n}igo and Wang, Rujia and Bansal, Chetan and R{\"u}hle, Victor and Kulkarni, Anoop and Kofsky, Steve and Rajmohan, Saravan},
+  year          = {2024},
+  howpublished  = {arXiv:2408.13510},
+  eprint        = {2408.13510},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2408.13510}
+}
+
+% meta: title, authors, arXiv:2603.15202v3 from PDF p.1; venue OSDI from BIBLIOGRAPHY.md.
+@inproceedings{zhang2026lmetric,
+  title         = {Simple is Better: Multiplication May Be All You Need for {LLM} Request Scheduling},
+  author        = {Zhang, Dingyan and Han, Jinbo and Zhang, Kaixi and Wei, Xingda and Shen, Sijie and Fang, Chenguang and Yu, Wenyuan and Zhou, Jingren and Chen, Rong},
+  booktitle     = {USENIX Symposium on Operating Systems Design and Implementation (OSDI)},
+  year          = {2026},
+  eprint        = {2603.15202},
+  archiveprefix = {arXiv},
+  note          = {arXiv:2603.15202},
+  url           = {https://arxiv.org/abs/2603.15202}
+}
+
+% meta: title, authors, arXiv:2607.08565v2 from PDF p.1.
+@misc{wang2026smetric,
+  title         = {{SMetric}: Rethink {LLM} Scheduling for Serving Agents with Balanced Session-centric Scheduling},
+  author        = {Wang, Jiahao and Lin, Kaizhan and Zhang, Kaixi and Han, Jinbo and Wei, Xingda and Shen, Sijie and Fang, Chenguang and Yu, Wenyuan and Chen, Rong and Chen, Haibo},
+  year          = {2026},
+  howpublished  = {arXiv:2607.08565},
+  eprint        = {2607.08565},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2607.08565}
+}
+
+% meta: title, authors, arXiv:2602.11688v3 from PDF p.1.
+@misc{toniolo2026gorgo,
+  title         = {{GORGO}: Online Tuning for Cross-Region Network-Aware {LLM} Serving},
+  author        = {Ricci Toniolo, Alessio and Thorstenson, Rome and Dinesh, Abinaya},
+  year          = {2026},
+  howpublished  = {arXiv:2602.11688},
+  eprint        = {2602.11688},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2602.11688}
+}
+
+% meta: title, authors, venue (ICLR 2026), arXiv:2601.18999v1 from PDF p.1.
+@inproceedings{wu2026randomization,
+  title         = {Randomization Boosts {KV} Caching, Learning Balances Query Load: A Joint Perspective},
+  author        = {Wu, Fangzhou and Silwal, Sandeep and Zhang, Qiuyi},
+  booktitle     = {International Conference on Learning Representations (ICLR)},
+  year          = {2026},
+  eprint        = {2601.18999},
+  archiveprefix = {arXiv},
+  note          = {arXiv:2601.18999},
+  url           = {https://arxiv.org/abs/2601.18999}
+}
+
+% meta: title, author, arXiv:2608.19677v1 from PDF p.1.
+@misc{cheng2026cacheroute,
+  title         = {{CacheRoute}: Planned Prefix-Affinity Routing for Large-Scale {LLM} Serving},
+  author        = {Cheng, Huang},
+  year          = {2026},
+  howpublished  = {arXiv:2608.19677},
+  eprint        = {2608.19677},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2608.19677}
+}
+
+% meta: title, authors, venue (ICLR 2026), arXiv:2602.06502v1 from PDF p.1.
+@inproceedings{yuan2026dualmap,
+  title         = {{DualMap}: Enabling Both Cache Affinity and Load Balancing for Distributed {LLM} Serving},
+  author        = {Yuan, Ying and Zuo, Pengfei and Wang, Bo and Chen, Zhangyu and Tan, Zhipeng and Yu, Zhou},
+  booktitle     = {International Conference on Learning Representations (ICLR)},
+  year          = {2026},
+  eprint        = {2602.06502},
+  archiveprefix = {arXiv},
+  note          = {arXiv:2602.06502},
+  url           = {https://arxiv.org/abs/2602.06502}
+}
+
+% meta: title, authors, arXiv:2407.00023v2 from PDF p.1; venue ICLR 2025 from BIBLIOGRAPHY.md.
+@inproceedings{srivatsa2025preble,
+  title         = {Preble: Efficient Distributed Prompt Scheduling for {LLM} Serving},
+  author        = {Srivatsa, Vikranth and He, Zijian and Abhyankar, Reyna and Li, Dongming and Zhang, Yiying},
+  booktitle     = {International Conference on Learning Representations (ICLR)},
+  year          = {2025},
+  eprint        = {2407.00023},
+  archiveprefix = {arXiv},
+  note          = {arXiv:2407.00023},
+  url           = {https://arxiv.org/abs/2407.00023}
+}
+
+% meta: title, authors, arXiv:2602.13692v3 from PDF p.1; venue ICML from BIBLIOGRAPHY.md.
+@inproceedings{kang2026thunderagent,
+  title         = {{ThunderAgent}: A Simple, Fast and Program-Aware Agentic Inference System},
+  author        = {Kang, Hao and Li, Ziyang and Xu, Weili and Yang, Xinyu and Chen, Yinfang and Wang, Junxiong and Chen, Beidi and Krishna, Tushar and Xu, Chenfeng and Arora, Simran},
+  booktitle     = {International Conference on Machine Learning (ICML)},
+  year          = {2026},
+  eprint        = {2602.13692},
+  archiveprefix = {arXiv},
+  note          = {arXiv:2602.13692},
+  url           = {https://arxiv.org/abs/2602.13692}
+}
+
+% meta: title, authors, arXiv:2606.09613v3 from PDF p.1.
+@misc{rajib2026agentservesim,
+  title         = {{AgentServeSim}: Serving-System Simulation and Policy Search for {LLM} Agent Programs},
+  author        = {Rajib, Rakibul Hasan and Zheng, Mengxin and Lou, Qian},
+  year          = {2026},
+  howpublished  = {arXiv:2606.09613},
+  eprint        = {2606.09613},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2606.09613}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: web, section 4.3).
+@misc{luo2025autellix,
+  title         = {Autellix: An Efficient Serving Engine for {LLM} Agents as General Programs},
+  author        = {Luo and others},
+  year          = {2025},
+  howpublished  = {arXiv:2502.13965},
+  url           = {https://arxiv.org/abs/2502.13965}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: web, section 7.2).
+@misc{nixon2026year,
+  title         = {A Year in {LLM} Serving: Workload Evolution, Caching and Load-Balancing},
+  author        = {Nixon and others},
+  year          = {2026},
+  howpublished  = {arXiv:2608.13573},
+  url           = {https://arxiv.org/abs/2608.13573}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: web). Provenance of the llm-d-precise-prefix baseline.
+@misc{llmd2025kvcache,
+  title         = {{KV}-cache wins you can see},
+  author        = {{llm-d project}},
+  year          = {2025},
+  howpublished  = {Blog post, precise prefix-cache-aware scheduling},
+  url           = {https://llm-d.ai/blog/kvcache-wins-you-can-see}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: abstract).
+@misc{jha2024learned,
+  title         = {Learned Best-Effort {LLM} Serving},
+  author        = {Jha and others},
+  year          = {2024},
+  howpublished  = {arXiv:2401.07886},
+  url           = {https://arxiv.org/abs/2401.07886}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: abstract).
+@misc{da2026routebalance,
+  title         = {{RouteBalance}: Fused Model Routing and Load Balancing for Heterogeneous {LLM} Serving},
+  author        = {Da and Kalyvianaki},
+  year          = {2026},
+  howpublished  = {arXiv:2606.17949},
+  url           = {https://arxiv.org/abs/2606.17949}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: abstract).
+@misc{cao2025locality,
+  title         = {Locality-aware Fair Scheduling in {LLM} Serving},
+  author        = {Cao and others},
+  year          = {2025},
+  howpublished  = {arXiv:2501.14312},
+  url           = {https://arxiv.org/abs/2501.14312}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: abstract).
+@misc{li2025continuum,
+  title         = {Continuum: Multi-Turn {LLM} Agent Scheduling with {KV} Cache Time-to-Live},
+  author        = {Li and others},
+  year          = {2025},
+  howpublished  = {arXiv:2511.02230},
+  url           = {https://arxiv.org/abs/2511.02230}
+}
+
+% no PDF; BIBLIOGRAPHY.md: "Not a paper; it is the basis of the campaign's ramjet port".
+@misc{ramjet,
+  title         = {Ramjet (Helix load balancer)},
+  author        = {{Helix}},
+  howpublished  = {Source repository},
+  url           = {https://github.com/helixml/ramjet}
+}
+
+% =========================================================================================
+% Learned systems policies, black-box search, sim-to-real (CR/literature/pdfs/learned-systems-policies/)
+% =========================================================================================
+
+% meta: title, authors, venue (SIGCOMM '19), arXiv:1810.01963v4 from PDF p.1.
+@inproceedings{mao2019decima,
+  title         = {Learning Scheduling Algorithms for Data Processing Clusters},
+  author        = {Mao, Hongzi and Schwarzkopf, Malte and Venkatakrishnan, Shaileshh Bojja and Meng, Zili and Alizadeh, Mohammad},
+  booktitle     = {Proceedings of ACM SIGCOMM},
+  year          = {2019},
+  eprint        = {1810.01963},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1810.01963}
+}
+
+% meta: title, authors, venue (ICLR 2019), arXiv:1807.02264v3 from PDF p.1.
+@inproceedings{mao2019inputdriven,
+  title         = {Variance Reduction for Reinforcement Learning in Input-Driven Environments},
+  author        = {Mao, Hongzi and Venkatakrishnan, Shaileshh Bojja and Schwarzkopf, Malte and Alizadeh, Mohammad},
+  booktitle     = {International Conference on Learning Representations (ICLR)},
+  year          = {2019},
+  eprint        = {1807.02264},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1807.02264}
+}
+
+% meta: title, authors, venue (NeurIPS 2019) from PDF p.1.
+@inproceedings{mao2019park,
+  title         = {Park: An Open Platform for Learning-Augmented Computer Systems},
+  author        = {Mao, Hongzi and Negi, Parimarjan and Narayan, Akshay and Wang, Hanrui and Yang, Jiacheng and Wang, Haonan and Marcus, Ryan and Addanki, Ravichandra and Khani, Mehrdad and He, Songtao and Nathan, Vikram and Cangialosi, Frank and Venkatakrishnan, Shaileshh Bojja and Weng, Wei-Hung and Han, Song and Kraska, Tim and Alizadeh, Mohammad},
+  booktitle     = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year          = {2019},
+  url           = {https://proceedings.neurips.cc/paper/2019/hash/f69e505b08403ad2298b9f262659929a-Abstract.html}
+}
+
+% meta: title, authors, venue (SIGCOMM '17) from PDF p.1.
+@inproceedings{mao2017pensieve,
+  title         = {Neural Adaptive Video Streaming with Pensieve},
+  author        = {Mao, Hongzi and Netravali, Ravi and Alizadeh, Mohammad},
+  booktitle     = {Proceedings of ACM SIGCOMM},
+  year          = {2017},
+  url           = {https://web.mit.edu/pensieve/}
+}
+
+% meta: title, authors, arXiv:1906.01113v2 from PDF p.1 (marked "under anonymous submission"); venue NSDI 2020
+% from BIBLIOGRAPHY.md. The same paper is also eval-methodology/yan2020-puffer-learning-in-situ.pdf.
+@inproceedings{yan2020puffer,
+  title         = {Learning in situ: a randomized experiment in video streaming},
+  author        = {Yan, Francis Y. and Ayers, Hudson and Zhu, Chenzhi and Fouladi, Sadjad and Hong, James and Zhang, Keyi and Levis, Philip and Winstein, Keith},
+  booktitle     = {USENIX Symposium on Networked Systems Design and Implementation (NSDI)},
+  year          = {2020},
+  eprint        = {1906.01113},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1906.01113}
+}
+
+% meta: title, authors, venue ("accepted by SIGCOMM'22"), arXiv:2202.05940v2 from PDF p.1.
+@inproceedings{xia2022genet,
+  title         = {Genet: Automatic Curriculum Generation for Learning Adaptation in Networking},
+  author        = {Xia, Zhengxu and Zhou, Yajie and Yan, Francis Y. and Jiang, Junchen},
+  booktitle     = {Proceedings of ACM SIGCOMM},
+  year          = {2022},
+  eprint        = {2202.05940},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2202.05940}
+}
+
+% meta: title, authors, arXiv:2201.01811v4 from PDF p.1; venue NSDI 2023 from BIBLIOGRAPHY.md.
+@inproceedings{alomar2023causalsim,
+  title         = {{CausalSim}: A Causal Framework for Unbiased Trace-Driven Simulation},
+  author        = {Alomar, Abdullah and Hamadanian, Pouya and Nasr-Esfahany, Arash and Agarwal, Anish and Alizadeh, Mohammad and Shah, Devavrat},
+  booktitle     = {USENIX Symposium on Networked Systems Design and Implementation (NSDI)},
+  year          = {2023},
+  eprint        = {2201.01811},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2201.01811}
+}
+
+% meta: title, authors, arXiv:1710.06537v3 from PDF p.1; venue ICRA 2018 from BIBLIOGRAPHY.md.
+@inproceedings{peng2018sim2real,
+  title         = {Sim-to-Real Transfer of Robotic Control with Dynamics Randomization},
+  author        = {Peng, Xue Bin and Andrychowicz, Marcin and Zaremba, Wojciech and Abbeel, Pieter},
+  booktitle     = {IEEE International Conference on Robotics and Automation (ICRA)},
+  year          = {2018},
+  eprint        = {1710.06537},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1710.06537}
+}
+
+% meta: title, authors, arXiv:1803.07055v1 from PDF p.1; venue NeurIPS 2018 from BIBLIOGRAPHY.md.
+@inproceedings{mania2018ars,
+  title         = {Simple random search provides a competitive approach to reinforcement learning},
+  author        = {Mania, Horia and Guy, Aurelia and Recht, Benjamin},
+  booktitle     = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year          = {2018},
+  eprint        = {1803.07055},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1803.07055}
+}
+
+% meta: title, authors, arXiv:1703.03864v2 from PDF p.1.
+@misc{salimans2017es,
+  title         = {Evolution Strategies as a Scalable Alternative to Reinforcement Learning},
+  author        = {Salimans, Tim and Ho, Jonathan and Chen, Xi and Sidor, Szymon and Sutskever, Ilya},
+  year          = {2017},
+  howpublished  = {arXiv:1703.03864},
+  eprint        = {1703.03864},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1703.03864}
+}
+
+% meta: title, author, arXiv:1604.00772v2 (dated 10 Mar 2023) from PDF p.1.
+@misc{hansen2016tutorial,
+  title         = {The {CMA} Evolution Strategy: A Tutorial},
+  author        = {Hansen, Nikolaus},
+  year          = {2016},
+  howpublished  = {arXiv:1604.00772 (v2, 2023)},
+  eprint        = {1604.00772},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1604.00772}
+}
+
+% meta: title, authors, journal ("accepted for publication to IEEE Transactions on Evolutionary Computation")
+% from PDF p.1 (a paper draft); volume and issue 13(1) and year from BIBLIOGRAPHY.md.
+@article{hansen2009uh,
+  title         = {A Method for Handling Uncertainty in Evolutionary Optimization with an Application to Feedback Control of Combustion},
+  author        = {Hansen, Nikolaus and Niederberger, Andr{\'e} S. P. and Guzzella, Lino and Koumoutsakos, Petros},
+  journal       = {IEEE Transactions on Evolutionary Computation},
+  volume        = {13},
+  number        = {1},
+  year          = {2009},
+  url           = {http://www.cmap.polytechnique.fr/~nikolaus.hansen/TEC2009.pdf}
+}
+
+% meta: title, authors, venue (UAI 2000 proceedings; first page numbered 406) from PDF p.1; arXiv id from the
+% BIBLIOGRAPHY.md URL (the PDF carries no arXiv stamp).
+@inproceedings{ng2000pegasus,
+  title         = {{PEGASUS}: A policy search method for large {MDPs} and {POMDPs}},
+  author        = {Ng, Andrew Y. and Jordan, Michael},
+  booktitle     = {Proceedings of the Conference on Uncertainty in Artificial Intelligence (UAI)},
+  year          = {2000},
+  eprint        = {1301.3878},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1301.3878}
+}
+
+% meta: title, authors, venue (ICPP '22, 51st International Conference on Parallel Processing), arXiv:2208.04777v1 from PDF p.1.
+@inproceedings{tahir2022meanfield,
+  title         = {Learning Mean-Field Control for Delayed Information Load Balancing in Large Queuing Systems},
+  author        = {Tahir, Anam and Cui, Kai and Koeppl, Heinz},
+  booktitle     = {Proceedings of the 51st International Conference on Parallel Processing (ICPP)},
+  year          = {2022},
+  eprint        = {2208.04777},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2208.04777}
+}
+
+% meta: title, authors, arXiv:1806.05444v2 (4 Nov 2021) from PDF p.1; journal and year from BIBLIOGRAPHY.md.
+@article{vanderboor2022survey,
+  title         = {Scalable load balancing in networked systems: A survey of recent advances},
+  author        = {van der Boor, Mark and Borst, Sem C. and van Leeuwaarden, Johan S. H. and Mukherjee, Debankur},
+  journal       = {Statistical Science},
+  year          = {2022},
+  eprint        = {1806.05444},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1806.05444}
+}
+
+% meta: title, authors, venue (NIPS 2017), arXiv:1703.06114v3 from PDF p.1. Third author's surname is
+% spelled as printed on that page.
+@inproceedings{zaheer2017deepsets,
+  title         = {Deep Sets},
+  author        = {Zaheer, Manzil and Kottur, Satwik and Ravanbhakhsh, Siamak and P{\'o}czos, Barnab{\'a}s and Salakhutdinov, Ruslan and Smola, Alexander J.},
+  booktitle     = {Advances in Neural Information Processing Systems (NIPS)},
+  year          = {2017},
+  eprint        = {1703.06114},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1703.06114}
+}
+
+% meta: title and organizing lead authors from PDF p.1 (arXiv:1803.03453v4; the page lists about 50 authors);
+% journal, volume and issue from BIBLIOGRAPHY.md.
+@article{lehman2020creativity,
+  title         = {The Surprising Creativity of Digital Evolution: A Collection of Anecdotes from the Evolutionary Computation and Artificial Life Research Communities},
+  author        = {Lehman, Joel and Clune, Jeff and Misevic, Dusan and others},
+  journal       = {Artificial Life},
+  volume        = {26},
+  number        = {2},
+  year          = {2020},
+  eprint        = {1803.03453},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1803.03453}
+}
+
+% =========================================================================================
+% Evaluation methodology (CR/literature/pdfs/eval-methodology/)
+% =========================================================================================
+
+% meta: title, authors, arXiv:2401.09670v3 from PDF p.1; venue OSDI 2024 from BIBLIOGRAPHY.md.
+@inproceedings{zhong2024distserve,
+  title         = {{DistServe}: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving},
+  author        = {Zhong, Yinmin and Liu, Shengyu and Chen, Junda and Hu, Jianbo and Zhu, Yibo and Liu, Xuanzhe and Jin, Xin and Zhang, Hao},
+  booktitle     = {USENIX Symposium on Operating Systems Design and Implementation (OSDI)},
+  year          = {2024},
+  eprint        = {2401.09670},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2401.09670}
+}
+
+% meta: title, authors from PDF p.1; venue NSDI 2006 from BIBLIOGRAPHY.md.
+@inproceedings{schroeder2006open,
+  title         = {Open Versus Closed: A Cautionary Tale},
+  author        = {Schroeder, Bianca and Wierman, Adam and Harchol-Balter, Mor},
+  booktitle     = {USENIX Symposium on Networked Systems Design and Implementation (NSDI)},
+  year          = {2006},
+  url           = {https://www.cs.utoronto.ca/~bianca/papers/nsdi_camera.pdf}
+}
+
+% meta: title, authors, arXiv:2410.14257v2 (29 Oct 2025) from PDF p.1.
+@misc{wang2024slo,
+  title         = {Revisiting Service Level Objectives and System Level Metrics in Large Language Model Serving},
+  author        = {Wang, Zhibin and Li, Shipeng and Zhou, Yuhang and Li, Xue and Zhang, Zhonghui and Cam-Tu, Nguyen and Gu, Rong and Tian, Chen and Chen, Guihai and Zhong, Sheng},
+  year          = {2024},
+  howpublished  = {arXiv:2410.14257 (v2, 2025)},
+  eprint        = {2410.14257},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2410.14257}
+}
+
+% meta: title, authors, venue (Proceedings of the 7th MLSys Conference, 2024), arXiv:2405.05465v2 from PDF p.1.
+@inproceedings{agrawal2024vidur,
+  title         = {Vidur: A Large-Scale Simulation Framework for {LLM} Inference},
+  author        = {Agrawal, Amey and Kedia, Nitin and Mohan, Jayashree and Panwar, Ashish and Kwatra, Nipun and Gulavani, Bhargav S. and Ramjee, Ramachandran and Tumanov, Alexey},
+  booktitle     = {Proceedings of Machine Learning and Systems (MLSys)},
+  year          = {2024},
+  eprint        = {2405.05465},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2405.05465}
+}
+
+% meta: title, authors, venue (AAAI copyright 2018), arXiv:1709.06560v3 from PDF p.1.
+@inproceedings{henderson2018matters,
+  title         = {Deep Reinforcement Learning that Matters},
+  author        = {Henderson, Peter and Islam, Riashat and Bachman, Philip and Pineau, Joelle and Precup, Doina and Meger, David},
+  booktitle     = {AAAI Conference on Artificial Intelligence},
+  year          = {2018},
+  eprint        = {1709.06560},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1709.06560}
+}
+
+% meta: title, authors, venue (NeurIPS 2021), arXiv:2108.13264v4 from PDF p.1.
+@inproceedings{agarwal2021precipice,
+  title         = {Deep Reinforcement Learning at the Edge of the Statistical Precipice},
+  author        = {Agarwal, Rishabh and Schwarzer, Max and Castro, Pablo Samuel and Courville, Aaron and Bellemare, Marc G.},
+  booktitle     = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year          = {2021},
+  eprint        = {2108.13264},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2108.13264}
+}
+
+% meta: title, author, journal (JMLR 7 (2006) 1-30) from PDF p.1.
+@article{demsar2006,
+  title         = {Statistical Comparisons of Classifiers over Multiple Data Sets},
+  author        = {Dem{\v{s}}ar, Janez},
+  journal       = {Journal of Machine Learning Research},
+  volume        = {7},
+  pages         = {1--30},
+  year          = {2006},
+  url           = {https://www.jmlr.org/papers/v7/demsar06a.html}
+}
+
+% meta: title, authors, journal (JMLR 11 (2010) 2079-2107) from PDF p.1.
+@article{cawley2010overfitting,
+  title         = {On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation},
+  author        = {Cawley, Gavin C. and Talbot, Nicola L. C.},
+  journal       = {Journal of Machine Learning Research},
+  volume        = {11},
+  pages         = {2079--2107},
+  year          = {2010},
+  url           = {https://www.jmlr.org/papers/v11/cawley10a.html}
+}
+
+% meta: title, authors, arXiv:1909.03004v1 from PDF p.1; venue EMNLP 2019 from BIBLIOGRAPHY.md.
+@inproceedings{dodge2019show,
+  title         = {Show Your Work: Improved Reporting of Experimental Results},
+  author        = {Dodge, Jesse and Gururangan, Suchin and Card, D. and Schwartz, Roy and Smith, Noah A.},
+  booktitle     = {Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  year          = {2019},
+  eprint        = {1909.03004},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/1909.03004}
+}
+
+% meta: title, authors, arXiv:2103.03098v1 (1 Mar 2021) from PDF p.1; venue MLSys 2021 from BIBLIOGRAPHY.md
+% (the PDF's page-1 footer reads "Proceedings of the 3rd MLSys Conference ... 2020", a template line).
+@inproceedings{bouthillier2021variance,
+  title         = {Accounting for Variance in Machine Learning Benchmarks},
+  author        = {Bouthillier, Xavier and Delaunay, Pierre and Bronzi, Mirko and Trofimov, Assya and Nichyporuk, Brennan and Szeto, Justin and Sepah, Naz and Raff, Edward and Madan, Kanika and Voleti, Vikram and Kahou, Samira Ebrahimi and Michalski, Vincent and Serdyuk, Dmitriy and Arbel, Tal and Pal, Chris and Varoquaux, Ga{\"e}l and Vincent, Pascal},
+  booktitle     = {Proceedings of Machine Learning and Systems (MLSys)},
+  year          = {2021},
+  eprint        = {2103.03098},
+  archiveprefix = {arXiv},
+  url           = {https://arxiv.org/abs/2103.03098}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: abstract).
+@inproceedings{melis2018state,
+  title         = {On the State of the Art of Evaluation in Neural Language Models},
+  author        = {Melis and Dyer and Blunsom},
+  booktitle     = {International Conference on Learning Representations (ICLR)},
+  year          = {2018},
+  url           = {https://arxiv.org/abs/1707.05589}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: abstract).
+@misc{agrawal2024etalon,
+  title         = {Etalon: Holistic Performance Evaluation Framework for {LLM} Inference Systems},
+  author        = {Agrawal and others},
+  year          = {2024},
+  howpublished  = {arXiv:2407.07000},
+  url           = {https://arxiv.org/abs/2407.07000}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: web, sections 8, 11, 14, 17, 20).
+@misc{krishnamachari2026playbook,
+  title         = {How to Do Statistical Evaluations in {ECE/CS} Papers: A Practical Playbook},
+  author        = {Krishnamachari},
+  year          = {2026},
+  howpublished  = {arXiv:2605.00428},
+  url           = {https://arxiv.org/abs/2605.00428}
+}
+
+% no PDF; BIBLIOGRAPHY.md (read: abstract).
+@misc{abdelfattah2026loadtesting,
+  title         = {Load Testing for Machine Learning Model Serving Systems at Scale},
+  author        = {Abdelfattah and others},
+  year          = {2026},
+  howpublished  = {arXiv:2606.22013},
+  url           = {https://arxiv.org/abs/2606.22013}
+}
+
+% =========================================================================================
+% Software, data and documentation the study runs on (not part of the literature review)
+% =========================================================================================
+
+% meta: repository named in the Dynamo repository's AGENTS.md and README.
+@misc{dynamo,
+  title         = {{NVIDIA Dynamo}: a datacenter-scale distributed inference serving framework},
+  author        = {{NVIDIA}},
+  howpublished  = {Source repository},
+  url           = {https://github.com/ai-dynamo/dynamo}
+}
+
+% meta: package named in the Dynamo repository's AGENTS.md (Ecosystem table); version used:
+%       CR/facts/setup.json (aisimulate 0.13.0.dev202609300000000061).
+@misc{aisimulate,
+  title         = {{AISimulate}: predicting serving behavior and searching deployment configurations offline},
+  author        = {{NVIDIA}},
+  howpublished  = {Python package},
+  url           = {https://pypi.org/project/aisimulate/}
+}
+
+% meta: repository named in the Dynamo repository's AGENTS.md (Ecosystem table); version used:
+%       CR/facts/live.json loadgen.aiperf (0.13.0).
+@misc{aiperf,
+  title         = {{AIPerf}: benchmarking and load generation for generative {AI} serving},
+  author        = {{NVIDIA}},
+  howpublished  = {Source repository},
+  url           = {https://github.com/ai-dynamo/aiperf}
+}
+
+% meta: the Mooncake project's repository, source of the Mooncake and FAST'25 traces
+%       (CR/traces/MANIFEST.json; CR/facts/DEVIATIONS.md build B2 and setup r1: kvcache-ai/Mooncake,
+%       FAST25-release/traces).
+@misc{mooncake,
+  title         = {Mooncake: trace release, including the {FAST'25} traces},
+  author        = {{kvcache-ai}},
+  howpublished  = {Source repository, \texttt{FAST25-release/traces}},
+  url           = {https://github.com/kvcache-ai/Mooncake}
+}
+
+% meta: CR/facts/build_workloads.json agentx.source (dataset, revision 23f152f6, url).
+@misc{agentxtraces,
+  title         = {cc-traces-weka-062126: recorded agent sessions},
+  author        = {{semianalysisai}},
+  howpublished  = {Dataset on Hugging Face, revision 23f152f6},
+  url           = {https://huggingface.co/datasets/semianalysisai/cc-traces-weka-062126}
+}
+
+% meta: URL from the module documentation of WT/lib/router-plugins/builtin/src/llm_d/optimized_baseline.rs;
+%       provenance of the llm-d-optimized-baseline port.
+@misc{llmdsticky,
+  title         = {Sticky until saturated: token-aware routing},
+  author        = {{llm-d project}},
+  howpublished  = {Blog post, optimized-baseline profile},
+  url           = {https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing}
+}
+
+% meta: title and venue from the module documentation of WT/lib/router-plugins/builtin/src/chwbl.rs
+%       ("Consistent Hashing with Bounded Loads" (Mirrokni et al., SODA 2018)); authors added from the
+%       published paper; not part of the campaign's literature review.
+@inproceedings{mirrokni2018chwbl,
+  title         = {Consistent Hashing with Bounded Loads},
+  author        = {Mirrokni, Vahab and Thorup, Mikkel and Zadimoghaddam, Morteza},
+  booktitle     = {Proceedings of the ACM-SIAM Symposium on Discrete Algorithms (SODA)},
+  year          = {2018}
+}

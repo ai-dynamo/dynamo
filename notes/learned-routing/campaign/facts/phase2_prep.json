@@ -1,0 +1,1109 @@
+{
+ "schema": "learned-routing.phase2-prep.v1",
+ "stage": "phase-2 prep",
+ "written": "2026-10-03 06:06:57 PDT",
+ "status": "ok",
+ "binding": "facts/gate.json full_plan as amended by CONTRACT A11; A9/A10 CPU cluster rules",
+ "manifest": {
+  "file": "runs/phase2/MANIFEST.json",
+  "file_sha256": "33fbb14247c0cb1590913909221108c54d83ae0b3c55d1393b948b1d17009975",
+  "runs": 58,
+  "by_tier": {
+   "A": 37,
+   "B": 6,
+   "C": 15
+  },
+  "by_status": {
+   "planned": 37,
+   "pending": 18,
+   "blocked": 3
+  },
+  "waves": {
+   "1": "seed 1 of all 11 tier-A policies + LR-15 drift check (4 runs)",
+   "2": "seed 2 (M1 init s2)",
+   "3": "seed 3 (M1 init s3)",
+   "4": "tier B (pending tier-A M1 selection)",
+   "5": "tier C (conditional)"
+  },
+  "generator": "runs/phase2/scripts/make_manifest.py"
+ },
+ "spaces": {
+  "chwbl.yaml": {
+   "file": "runs/phase2/spaces/chwbl.yaml",
+   "file_sha256": "6d6e251b29bb84bd97f96651ef740e890ee89173301f0f77f4cd70e609dc975b",
+   "space_sha": "5666d65319ae87d1aa4b424f4f098ca35403e3153f2908af915b9a6acce40b1d",
+   "dimension": 2,
+   "sigma0": 0.16,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.prefix_tokens",
+    "parameters.load_factor"
+   ],
+   "fixed": {},
+   "base_parameters": {},
+   "flip_calibration": {
+    "curve_key": "chwbl_nohash",
+    "flip_at_sigma0_interpolated": 0.17259962249047392,
+    "curve": {
+     "0.03": 0.046027161687364454,
+     "0.05": 0.08445583962523252,
+     "0.08": 0.11499736359573631,
+     "0.12": 0.13678926256184265,
+     "0.18": 0.19050480245478954,
+     "0.25": 0.19229014852215787,
+     "0.3": 0.188127452416771,
+     "0.35": 0.19134991433257095
+    },
+    "target_reached_by_0.3": true,
+    "hash_depth_free_curve": {
+     "0.03": 0.6896497813400763,
+     "0.05": 0.7069918121744272,
+     "0.08": 0.71302703586528,
+     "0.12": 0.7573312356781505,
+     "0.18": 0.7648493836506033,
+     "0.25": 0.7622748201661155,
+     "0.3": 0.7842423801362424,
+     "0.35": 0.7581487421100288
+    }
+   }
+  },
+  "dualmap.yaml": {
+   "file": "runs/phase2/spaces/dualmap.yaml",
+   "file_sha256": "5d6eecd7cdf3d6005435abe5730e38514da3bda3d5333218d9d2e2a0c413d909",
+   "space_sha": "19c3e6587cf45c14742249e2c19c903ebff6c8fc94bbbde44e50532cf7b654c3",
+   "dimension": 3,
+   "sigma0": 0.3,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.hash_prefix_blocks",
+    "parameters.pending_prefill_token_budget",
+    "parameters.window_requests"
+   ],
+   "fixed": {},
+   "base_parameters": {},
+   "flip_calibration": {
+    "curve_key": "dualmap_nohash",
+    "flip_at_sigma0_interpolated": 0.01828040289479755,
+    "curve": {
+     "0.03": 0.0022400028905664583,
+     "0.05": 0.0024852741278507907,
+     "0.08": 0.004145512065440166,
+     "0.12": 0.006618401691538802,
+     "0.18": 0.012899286654234487,
+     "0.25": 0.01230794530539152,
+     "0.3": 0.01828040289479755,
+     "0.35": 0.021429285091816613
+    },
+    "target_reached_by_0.3": false,
+    "hash_depth_free_curve": {
+     "0.03": 0.17816338774077778,
+     "0.05": 0.3734902628772922,
+     "0.08": 0.4929279354048384,
+     "0.12": 0.4573515524844359,
+     "0.18": 0.5960063465424305,
+     "0.25": 0.5657888842023403,
+     "0.3": 0.5995254931758062,
+     "0.35": 0.59110591938356
+    }
+   }
+  },
+  "llmd_optimized_baseline.yaml": {
+   "file": "runs/phase2/spaces/llmd_optimized_baseline.yaml",
+   "file_sha256": "28674bde52feec70527a83aa4321c46b17169dc480f907ca39e5d9c9f33526ec",
+   "space_sha": "0121cb4ca80ff6e5188c3647fb6f4160127807048758f41abf3e929a39118d9a",
+   "dimension": 3,
+   "sigma0": 0.3,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.affinity_threshold",
+    "parameters.max_ttft_penalty_ms",
+    "parameters.queue_threshold_tokens"
+   ],
+   "fixed": {},
+   "base_parameters": {
+    "ttft_source": "throughput",
+    "peak_prefill_tokens_per_second": 15928.0
+   },
+   "flip_calibration": {
+    "curve_key": "llmd_optimized_baseline",
+    "flip_at_sigma0_interpolated": 0.03404192026051908,
+    "curve": {
+     "0.03": 0.005208201757317324,
+     "0.05": 0.009552847915988797,
+     "0.08": 0.013531105996134293,
+     "0.12": 0.020450977430734135,
+     "0.18": 0.022679161505609807,
+     "0.25": 0.03171267720676299,
+     "0.3": 0.03404192026051908,
+     "0.35": 0.03139104463121234
+    },
+    "target_reached_by_0.3": false
+   }
+  },
+  "llmd_precise_prefix.yaml": {
+   "file": "runs/phase2/spaces/llmd_precise_prefix.yaml",
+   "file_sha256": "0bcee59ca0c14f19e4a50234104c1ad21ff0cf1e171e9ebf384b22a7ceb871cd",
+   "space_sha": "1f35817ea4a15b38541ad749c1201bafe43c8a1c70cce9c92000fe295f70278b",
+   "dimension": 4,
+   "sigma0": 0.16,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.weights.queue",
+    "parameters.weights.kv_cache_utilization",
+    "parameters.prefix_match_length_weight",
+    "parameters.prefix_match_length_scale_tokens"
+   ],
+   "fixed": {
+    "parameters.weights.prefix": 2.0
+   },
+   "base_parameters": {},
+   "flip_calibration": {
+    "curve_key": "llmd_precise_prefix",
+    "flip_at_sigma0_interpolated": 0.17698406159855262,
+    "curve": {
+     "0.03": 0.03328372313486741,
+     "0.05": 0.054558453835133934,
+     "0.08": 0.07676614198764747,
+     "0.12": 0.11133587949562941,
+     "0.18": 0.2098081526500142,
+     "0.25": 0.2061343045128787,
+     "0.3": 0.22875336423806245,
+     "0.35": 0.21756960071180012
+    },
+    "target_reached_by_0.3": true
+   }
+  },
+  "lmetric.yaml": {
+   "file": "runs/phase2/spaces/lmetric.yaml",
+   "file_sha256": "b7c31e4fb4e4f44c15c564ede9abe8c778564576021d62848a5ea8a051a705f1",
+   "space_sha": "9d35cd092d8fb82ee39682ce41e23b7a6472b6669722b29bdef95309eeccd9ce",
+   "dimension": 2,
+   "sigma0": 0.3,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.class_prefix_blocks",
+    "parameters.window_requests"
+   ],
+   "fixed": {},
+   "base_parameters": {
+    "hotspot_detection": true
+   },
+   "flip_calibration": {
+    "curve_key": "lmetric",
+    "flip_at_sigma0_interpolated": 0.0005787067165534525,
+    "curve": {
+     "0.03": 0.0,
+     "0.05": 1.0645545903593938e-05,
+     "0.08": 0.00011443961846363482,
+     "0.12": 0.00015302972236416282,
+     "0.18": 0.00010512476579799012,
+     "0.25": 0.000247508942258559,
+     "0.3": 0.0005787067165534525,
+     "0.35": 0.0005442987421524081
+    },
+    "target_reached_by_0.3": false
+   }
+  },
+  "m0_default_tuned.yaml": {
+   "file": "runs/phase2/spaces/m0_default_tuned.yaml",
+   "file_sha256": "0b84909cf7aaf962076d084a41edd10a8068e4388bff2a8e4c51a64e1ccc710c",
+   "space_sha": "0f0bcc39ecb1079de0121c248d4c87c70c76c3a9b53f1c641b62b1f4e6e757a0",
+   "dimension": 5,
+   "sigma0": 0.11,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.overlap_score_credit",
+    "parameters.overlap_score_credit_decay",
+    "parameters.prefill_load_scale",
+    "parameters.decode_active_request_weight",
+    "parameters.router_temperature"
+   ],
+   "fixed": {},
+   "base_parameters": {},
+   "flip_calibration": {
+    "curve_key": "m0",
+    "flip_at_sigma0_interpolated": 0.16938337843524456,
+    "curve": {
+     "0.03": 0.05262254337891526,
+     "0.05": 0.08614008615945945,
+     "0.08": 0.12062068166573857,
+     "0.12": 0.18563761069174656,
+     "0.18": 0.26739738231774174,
+     "0.25": 0.2707802779685616,
+     "0.3": 0.27592918251442894,
+     "0.35": 0.3529958869341208
+    },
+    "target_reached_by_0.3": true
+   }
+  },
+  "m1_learned_v1.yaml": {
+   "file": "runs/phase2/spaces/m1_learned_v1.yaml",
+   "file_sha256": "d58351257bd589aff8950125e84e2899c6ed953872f3b64bc8c9217c7dbf3cb8",
+   "space_sha": "b9f1507701aa0159fc4a037adaee1bca367c4afaa1f82317d97682a9001524a3",
+   "dimension": 7,
+   "sigma0": 0.004,
+   "cma_options": {},
+   "free": [
+    "parameters.theta[1]",
+    "parameters.theta[2]",
+    "parameters.theta[3]",
+    "parameters.theta[4]",
+    "parameters.theta[5]",
+    "parameters.theta[6]",
+    "parameters.theta[7]"
+   ],
+   "fixed": {},
+   "base_parameters": {
+    "feature_set": "v1",
+    "temperature": 0.0,
+    "tie_break": "one_draw"
+   }
+  },
+  "m1_learned_v1_s2bc.yaml": {
+   "file": "runs/phase2/spaces/m1_learned_v1_s2bc.yaml",
+   "file_sha256": "0845f3651a5b9d9c7dcdd9ce2e6276a14d51f45dcfcd672df467e1c4437fe75d",
+   "space_sha": "f6d8e15b92032ca2078ce936818ca34d99c972142d2fced636240cdc2f837ad5",
+   "dimension": 7,
+   "sigma0": 0.004,
+   "cma_options": {},
+   "free": [
+    "parameters.theta[1]",
+    "parameters.theta[2]",
+    "parameters.theta[3]",
+    "parameters.theta[4]",
+    "parameters.theta[5]",
+    "parameters.theta[6]",
+    "parameters.theta[7]"
+   ],
+   "fixed": {},
+   "base_parameters": {
+    "feature_set": "v1",
+    "temperature": 0.0,
+    "tie_break": "one_draw"
+   }
+  },
+  "m1_learned_v1_s3cache.yaml": {
+   "file": "runs/phase2/spaces/m1_learned_v1_s3cache.yaml",
+   "file_sha256": "1cdd9653c59e30fb9fa31b1e8539601e5996e95b1be7aba245bb146c06108d32",
+   "space_sha": "ea6eb778b97864f0a332c6095623d46f3ee5180d46e6e838015d51f30f295801",
+   "dimension": 7,
+   "sigma0": 0.004,
+   "cma_options": {},
+   "free": [
+    "parameters.theta[1]",
+    "parameters.theta[2]",
+    "parameters.theta[3]",
+    "parameters.theta[4]",
+    "parameters.theta[5]",
+    "parameters.theta[6]",
+    "parameters.theta[7]"
+   ],
+   "fixed": {},
+   "base_parameters": {
+    "feature_set": "v1",
+    "temperature": 0.0,
+    "tie_break": "one_draw"
+   }
+  },
+  "ramjet.yaml": {
+   "file": "runs/phase2/spaces/ramjet.yaml",
+   "file_sha256": "777ae39e8ce2c1650040f21448c8a87f5973bdf3e7c73bff3f04b7aaa5a68fff",
+   "space_sha": "06af13241c21480f058b9713e5f0b7c26a5fb666fbb2f00732eb7007d8b85ad3",
+   "dimension": 3,
+   "sigma0": 0.3,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.alpha",
+    "parameters.max_affinity_blocks",
+    "parameters.load_unit_tokens"
+   ],
+   "fixed": {},
+   "base_parameters": {
+    "affinity_block_tokens": 512,
+    "basis": "relative"
+   },
+   "flip_calibration": {
+    "curve_key": "ramjet",
+    "flip_at_sigma0_interpolated": 0.13332350921352062,
+    "curve": {
+     "0.03": 0.021350968949026338,
+     "0.05": 0.03191668894676044,
+     "0.08": 0.04963286589776739,
+     "0.12": 0.06485266130875406,
+     "0.18": 0.09399001716938826,
+     "0.25": 0.12297945422340055,
+     "0.3": 0.13332350921352062,
+     "0.35": 0.13338620455126185
+    },
+    "target_reached_by_0.3": false
+   }
+  },
+  "sticky_bounded.yaml": {
+   "file": "runs/phase2/spaces/sticky_bounded.yaml",
+   "file_sha256": "cd4f181aa4f8b31593336156fb2ffe90f7191d31a9f30e515b05e794ccd7f5c9",
+   "space_sha": "d0541124b8d0e89b8f5c018f09379aaf7b0a5f631c845d54f5093b2dfbdff220",
+   "dimension": 6,
+   "sigma0": 0.067,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.load_factor",
+    "router_config.overlap_score_credit",
+    "router_config.overlap_score_credit_decay",
+    "router_config.prefill_load_scale",
+    "router_config.decode_active_request_weight",
+    "router_config.router_temperature"
+   ],
+   "fixed": {},
+   "base_parameters": {
+    "mode": "bounded"
+   },
+   "flip_calibration": {
+    "curve_key": "sticky_bounded",
+    "flip_at_sigma0_interpolated": 0.1745962292324825,
+    "curve": {
+     "0.03": 0.08626670259453155,
+     "0.05": 0.1358580577047766,
+     "0.08": 0.20421953687131641,
+     "0.12": 0.24159622900186442,
+     "0.18": 0.27187358964287606,
+     "0.25": 0.30020869182790483,
+     "0.3": 0.33005497563345704,
+     "0.35": 0.3553551131171134
+    },
+    "target_reached_by_0.3": true
+   }
+  },
+  "sticky_hard.yaml": {
+   "file": "runs/phase2/spaces/sticky_hard.yaml",
+   "file_sha256": "a44502255e67547b5272ab056bfe28127fe6e4cb14751995e736ec7c56e15c05",
+   "space_sha": "9cb6b810acafde9877d938390250763c7c9f5f0c0561fc9bc9e747a4893d3177",
+   "dimension": 5,
+   "sigma0": 0.17,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "router_config.overlap_score_credit",
+    "router_config.overlap_score_credit_decay",
+    "router_config.prefill_load_scale",
+    "router_config.decode_active_request_weight",
+    "router_config.router_temperature"
+   ],
+   "fixed": {},
+   "base_parameters": {
+    "mode": "hard"
+   },
+   "flip_calibration": {
+    "curve_key": "sticky_hard",
+    "flip_at_sigma0_interpolated": 0.17908182218143104,
+    "curve": {
+     "0.03": 0.044078955944526106,
+     "0.05": 0.07835808612199598,
+     "0.08": 0.1081128409949917,
+     "0.12": 0.12875760514834425,
+     "0.18": 0.18914666558804838,
+     "0.25": 0.16597588564631574,
+     "0.3": 0.2601747307616084,
+     "0.35": 0.2501866770777757
+    },
+    "target_reached_by_0.3": true
+   }
+  },
+  "two_tier.yaml": {
+   "file": "runs/phase2/spaces/two_tier.yaml",
+   "file_sha256": "eddb13944bf52dd3ba63a5a55625ac511c1bb86e4be5716eb787dccc496a056d",
+   "space_sha": "738332cc821f0e7caf7f3aca263a51d1a6192a742aae7153b45ed5896c46566a",
+   "dimension": 3,
+   "sigma0": 0.3,
+   "cma_options": {
+    "maxstd": 0.3
+   },
+   "free": [
+    "parameters.cache_threshold",
+    "parameters.balance_abs_threshold",
+    "parameters.balance_rel_threshold"
+   ],
+   "fixed": {},
+   "base_parameters": {},
+   "flip_calibration": {
+    "curve_key": "two_tier",
+    "flip_at_sigma0_interpolated": 0.08297233020657828,
+    "curve": {
+     "0.03": 0.0006363838722144081,
+     "0.05": 0.0011326069517172388,
+     "0.08": 0.006694787751174142,
+     "0.12": 0.016802186645131185,
+     "0.18": 0.03707851676342446,
+     "0.25": 0.031037692662165783,
+     "0.3": 0.08297233020657828,
+     "0.35": 0.0924594953796289
+    },
+    "target_reached_by_0.3": false
+   }
+  }
+ },
+ "space_smoke": {
+  "file": "runs/phase2/calib/space_corners.results.jsonl",
+  "specs": "runs/phase2/calib/space_corners.jsonl",
+  "what": "x0, all-low and all-high corners of every space (x0 only for the M1 s2/s3 spaces) on 2 train cells, k = 0",
+  "records": 70,
+  "errors": 0
+ },
+ "flip_calibration": {
+  "file": "runs/phase2/calib/flips.json",
+  "script": "runs/phase2/scripts/flipcal.py",
+  "reconstruction": "runs/phase2/scripts/recon.py (pilot loads; reproduces the pilot's v1 tables exactly: 0 mismatches on 4 cells checked)",
+  "cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "agentx-A1-base-n4-lanes-L3",
+   "agentx-A3-base-n8-lanes-L2",
+   "mooncake-w0-base-n4-open-L3",
+   "mooncake-w0-base-n8-closed-L2",
+   "mooncake-w2-base-n4-closed-L3",
+   "mooncake-w2-base-n4-open-L2",
+   "mooncake-w4-base-n8-open-L1",
+   "mooncake-w4-islp1.5-n8-open-L2",
+   "sessions-s0-base-n8-closed-L2",
+   "sessions-s1-base-n4-open-L3",
+   "sessions-s1-base-n8-open-L1"
+  ],
+  "joins": {
+   "agentx-A1-base-n4-lanes-L1": {
+    "joined": 1882,
+    "method": "session turn order",
+    "rows": 1882
+   },
+   "agentx-A1-base-n4-lanes-L3": {
+    "joined": 4577,
+    "method": "session turn order",
+    "rows": 4577
+   },
+   "agentx-A3-base-n8-lanes-L2": {
+    "joined": 7828,
+    "method": "session turn order",
+    "rows": 7828
+   },
+   "mooncake-w0-base-n4-open-L3": {
+    "joined": 3416,
+    "method": "arrival order",
+    "rows": 3422
+   },
+   "mooncake-w0-base-n8-closed-L2": {
+    "joined": 3422,
+    "method": "request_<line>",
+    "rows": 3422
+   },
+   "mooncake-w2-base-n4-closed-L3": {
+    "joined": 4002,
+    "method": "request_<line>",
+    "rows": 4002
+   },
+   "mooncake-w2-base-n4-open-L2": {
+    "joined": 3988,
+    "method": "arrival order",
+    "rows": 4002
+   },
+   "mooncake-w4-base-n8-open-L1": {
+    "joined": 4137,
+    "method": "arrival order",
+    "rows": 4159
+   },
+   "mooncake-w4-islp1.5-n8-open-L2": {
+    "joined": 4145,
+    "method": "arrival order",
+    "rows": 4155
+   },
+   "sessions-s0-base-n8-closed-L2": {
+    "joined": 15890,
+    "method": "session turn order",
+    "rows": 15890
+   },
+   "sessions-s1-base-n4-open-L3": {
+    "joined": 15338,
+    "method": "session turn order",
+    "rows": 15338
+   },
+   "sessions-s1-base-n8-open-L1": {
+    "joined": 24686,
+    "method": "session turn order",
+    "rows": 24686
+   }
+  },
+  "target": 0.175,
+  "sigmas": [
+   0.03,
+   0.05,
+   0.08,
+   0.12,
+   0.18,
+   0.25,
+   0.3,
+   0.35
+  ],
+  "samples_per_cell": 8,
+  "rule": "sigma0 = interpolated sigma at 17.5% mean one-step decision flips vs the policy's own defaults; hash key-depth coordinates (chwbl prefix_tokens, dualmap hash_prefix_blocks) held at x0 for the measurement because any change of the hashed prefix depth re-draws the prefix-to-worker map (flips 0.69 / 0.18 already at sigma 0.03); if the target is unreachable by sigma 0.3 (= cma maxstd), sigma0 = 0.3",
+  "m0_note": "M0 sigma0 0.15 -> 0.11: the widened prefill_load_scale range raises flips at 0.15 to about 0.22 (pilot 0.179 on the old range)"
+ },
+ "m1_inits": {
+  "dir": "runs/phase2/inits/",
+  "s1": {
+   "theta": [
+    -1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "why": "theta0 = -e0: the default router's argmin (pilot space init, LR-05 anchor)",
+   "agreement_with_precise_prefix": 0.5120779496811467,
+   "one_step_flips_vs_theta0": 0.0
+  },
+  "s2": {
+   "theta": [
+    -1.0,
+    63.88229942151209,
+    4.183297752532976,
+    1.2771156158326087,
+    12.529421039429696,
+    -138.25386843719798,
+    -0.3238692254086344,
+    -0.19574156959721908
+   ],
+   "why": "behavior clone of llm-d-precise-prefix@defaults (val-best default-arm heuristic at the pilot), conditional-logit ML on train-only reconstructed tables, theta[0] pinned at -1",
+   "agreement_with_precise_prefix": 0.8748251363023671,
+   "one_step_flips_vs_theta0": 0.4644521802727603
+  },
+  "s3": {
+   "theta": [
+    -1.0,
+    76.8,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    42.4,
+    0.0
+   ],
+   "why": "cache-heavy (LR-07 action 3; A11.1 s3 primary option): overlap spread 3x and session-affinity spread 2x the default logit's, load terms only through the anchor; targets the AgentX regime where pilot M1 trailed the cache-aware heuristic. Chosen over an ML fit to the second-best heuristic (ramjet/lmetric) because LMetric's product is not representable in v1 (needs v2 log features) and a ramjet fit would sit close to the s2 clone (both cache-minus-load linear scores)",
+   "agreement_with_precise_prefix": 0.8722080365180013,
+   "one_step_flips_vs_theta0": 0.4198291229902285
+  },
+  "s2_fit": {
+   "file": "runs/phase2/inits/s2_bc_fit.json",
+   "script": "runs/phase2/scripts/bc_fit.py",
+   "data": "llm-d-precise-prefix@defaults, all 34 TRAIN cells, k = 0, per-request rows (runs/phase2/bc/precise_prefix_train_k0.jsonl; 22 fresh replays + 12 cached, 0 errors)",
+   "reconstruction": "pilot method (ov_pilot)",
+   "decisions": 144048,
+   "cells": 34,
+   "theta": [
+    -1.0,
+    63.88229942151209,
+    4.183297752532976,
+    1.2771156158326087,
+    12.529421039429696,
+    -138.25386843719798,
+    -0.3238692254086344,
+    -0.19574156959721908
+   ],
+   "at_bound": [],
+   "nll_fit": 1.6902093120025656,
+   "nll_theta0": 5.078429645323468,
+   "agreement_in_sample": 0.8748251363023671,
+   "agreement_theta0_default_rule": 0.5120779496811467,
+   "agreement_pilot_m1": 0.8142221851524734,
+   "agreement_cv_2fold_by_cell": [
+    0.865927811707243,
+    0.8827150798553519
+   ],
+   "theta_free_fit": [
+    -0.005633554641795471,
+    11.428213241795891,
+    0.7294020667870033,
+    -0.02225524969100113,
+    -3.2317976189575655,
+    -32.636291079264325,
+    0.6583357824173373,
+    -0.002318323210823355
+   ],
+   "theta_free_rescaled": [
+    -1.0,
+    2028.5972123195036,
+    129.47457034951833,
+    -3.9504808431055096,
+    -573.6693481200634,
+    -5793.196863155446,
+    116.85974917738953,
+    -0.4115204978440543
+   ],
+   "optimizer": {
+    "success": true,
+    "message": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+    "nit": 30
+   },
+   "sensitivity_hash_aware_overlap": {
+    "theta": [
+     -1.0,
+     40.340183410205086,
+     2.4091431007275204,
+     1.2907785529729767,
+     20.313225782334946,
+     -148.41043112882542,
+     2.3195736596388397,
+     -0.24364345551286504
+    ],
+    "agreement_in_sample": 0.7847356911073,
+    "agreement_theta0": 0.4892372817849516,
+    "agreement_cv": [
+     0.7758784435060133,
+     0.7942458537005315
+    ]
+   },
+   "caveat": "agreement is measured on the reconstructed tables, whose pilot-method overlap is exact only for the chosen worker (other workers see only same-session history), which favors overlap-heavy rules; the hash-aware variant (every worker's served-prefix LRU) gives agreement 0.785 with overlap weight 40 instead of 64"
+  },
+  "s2_vs_s3_one_step_disagreement": 0.10956839816306678,
+  "s2_agreement_by_family": {
+   "agentx": 0.7966312046848776,
+   "mooncake": 0.9139500228328884,
+   "sessions": 0.8649880732261847
+  },
+  "fairness": "inits use only train-split heuristic decisions (an initialization choice, not objective evaluations); every M1 restart still gets B = 400 (A11.1)",
+  "restart_to_wave": "restart k (CMA seed k) uses init sk and runs in wave k, so a wave cut removes the same restart index from every policy"
+ },
+ "orchestrator": {
+  "code": "WT benchmarks/learned_routing/remote/p2orch.py",
+  "commit": "<commit-23> fix(learned-routing): keep the UH re-evaluation count out of the p2orch budget check",
+  "doc": "runs/phase2/ORCHESTRATOR.md",
+  "state": "runs/phase2/state.json",
+  "log": "runs/phase2/orchestrator.log",
+  "loop_pid_file": "runs/phase2/orchestrator.pid",
+  "loop_pid": 999330,
+  "loop": "tick every 300 s for up to 36 h; exits when nothing up to max_wave 3 is queued or running",
+  "bundle": "runs/remote/bundles/p2a (train 34 + val 14 cells, all tier-A spaces; spaces/train_jobs.jsonl re-synced from MANIFEST every tick)",
+  "dry_run": "tick --dry-run placed 10 runs (m1-s1, m0-s1 on epyc9654p; llmdpp-s1 on the workstation; 7 more on epyc7702p/512/7702p-alt) and found the bug-free CPU cluster window; a first dry run exposed a reboot-window bug (fixed before any submission)",
+  "cutoff": "<cutoff>",
+  "cluster_reopen": "2026-10-03T20:00:00-07:00"
+ },
+ "wave1": [
+  {
+   "run": "m1-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:02 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "m0-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:06 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "llmdpp-s1",
+   "status": "running",
+   "target": "ws:0",
+   "job": null,
+   "pid": 992034,
+   "time_limit": null,
+   "submitted": "2026-10-03 05:51:06 PDT",
+   "cancel": null
+  },
+  {
+   "run": "ramjet-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:07 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "lmetric-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:07 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "twotier-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:08 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "llmdob-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:09 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "stickyhard-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:13 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "stickybounded-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:14 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "dualmap-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:15 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "chwbl-s1",
+   "status": "running",
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "time_limit": "11:37:31",
+   "submitted": "2026-10-03 05:51:16 PDT",
+   "cancel": "ssh <cpu-cluster> scancel <job>"
+  },
+  {
+   "run": "drift-l1",
+   "status": "queued",
+   "target": null,
+   "job": null,
+   "pid": null,
+   "time_limit": null,
+   "submitted": null,
+   "cancel": null
+  },
+  {
+   "run": "drift-l3",
+   "status": "queued",
+   "target": null,
+   "job": null,
+   "pid": null,
+   "time_limit": null,
+   "submitted": null,
+   "cancel": null
+  },
+  {
+   "run": "drift-n4",
+   "status": "queued",
+   "target": null,
+   "job": null,
+   "pid": null,
+   "time_limit": null,
+   "submitted": null,
+   "cancel": null
+  },
+  {
+   "run": "drift-n8",
+   "status": "queued",
+   "target": null,
+   "job": null,
+   "pid": null,
+   "time_limit": null,
+   "submitted": null,
+   "cancel": null
+  }
+ ],
+ "targets_at_start": {
+  "slurm_nodes_used": 10,
+  "workstation_lanes": 1,
+  "unavailable": {
+   "<node-1>": "AllocMem 251691/257628 MB taken by another user at 05:50 PDT",
+   "<node-2>": "partition <partition> not parity-validated (A9 addendum)"
+  },
+  "cpu_types": "epyc9654p = EPYC 9654P (96 slots); epyc7702p-256g/512 and 7702p-alt-1024 = EPYC 7702P (64 slots, node.json of the verify-r0 runs)"
+ },
+ "projection": {
+  "status": "PROJECTION from gate.json cost_projection (not measured in this stage)",
+  "per_run_hours": {
+   "epyc9654p": 3.49,
+   "epyc7702p": 5.52,
+   "workstation": 4.76
+  },
+  "wave1_tier_A_expected_done": "epyc9654p ~09:20, workstation ~10:35, EPYC 7702P nodes ~11:20 PDT",
+  "drift_runs": "queued; start on the first freed targets (~09:20 on epyc9654p), then wave 2 (breadth-first)",
+  "1730_rule": "wave-2/3 runs that cannot finish pause near 17:20 and resume after the maintenance window (CPU cluster) or migrate to the workstation"
+ },
+ "decisions": [
+  "Restart k of every policy uses CMA seed k; M1 restart k uses init sk (s1 -e0, s2 BC, s3 cache-heavy); waves = restart index (breadth-first).",
+  "Gauge pins (LR-05): ramjet affinity_block_tokens 512, llm-d-precise-prefix weights.prefix 2.0, llm-d-optimized-baseline peak_prefill_tokens_per_second 15928 (its product with max_ttft_penalty_ms is the only identified quantity).",
+  "Non-searchable shipped parameters stay at their defaults: lmetric hotspot_detection true, ramjet basis relative, sticky max_sessions 65536, precise-prefix class_weights empty, optimized-baseline ttft_source throughput (PLAN).",
+  "router_config knobs: only sticky-session reads the KvRouterConfig default-cost knobs (its fallback is default::cost_scorer(config, config, role)), so sticky-hard/bounded also search the five default-cost knobs via router_config with M0's ranges (verified: sticky@x0 == M0@x0 and sticky@hi == M0@hi on a session-free Mooncake cell); no other baseline reads a tunable KvRouterConfig knob; router_queue_threshold stays for ablation a.",
+  "sigma0 calibration rule as in flip_calibration; five spaces cannot reach 15% flips by sigma 0.3 (two-tier 0.083, lmetric 0.0006, ramjet 0.133, dualmap without key depth 0.018, optimized-baseline 0.034) and use sigma0 0.3 = maxstd.",
+  "LR-15 drift runs: B/4 = 6 whole generations (96 evaluations), validation every 3 generations on the matching val subset; cross-play on fresh val k3-10 via p2orch drift-matrix.",
+  "One run per CPU cluster node pinned by --nodelist with explicit memory (epyc9654p 400G, epyc7702p-256g 160G, 512 GB / 1 TB nodes 300G); the workstation runs one lr-train at a time over the 20-slot pool.",
+  "M1 s3 = cache-heavy (A11.1 primary option) rather than an ML fit to the second-best heuristic: LMetric's product needs v2 log features and a ramjet fit would be another cache-minus-load linear score close to s2."
+ ],
+ "lessons": {
+  "applied": {
+   "LR-03": "popsize 16 + UH re-evaluation of the top 2 (reeval-frac 0.125), CRN per generation (lr-train)",
+   "LR-05": "gauge pins, maxstd 0.3, sigma0 by decision flips, theta[0] pinned for M1 and the BC fit",
+   "LR-07": "multi-start from the best heuristic (s2 BC) and a cache-heavy start (s3)",
+   "LR-10": "3 restarts per policy in breadth-first waves, selection by val over restarts x checkpoints (p2orch select)",
+   "LR-11": "selection counts every validated candidate per policy",
+   "LR-13": "guard metrics stay in every record; concentration audit deferred to the stage-4 mid audit (A11.2)",
+   "LR-15": "drift check in wave 1 with a cross-play command"
+  },
+  "rejected": {
+   "LR-04": "A2.5 no paper-faithful variants",
+   "LR-08 TTFT part": "A2",
+   "LR-13 sign constraints up front": "A11.2: only if the mid audit finds gaming",
+   "LR-14 action 3": "A5: training unchanged"
+  }
+ },
+ "early_progress": {
+  "measured_at": "2026-10-03 06:06:57 PDT",
+  "note": "status.json / history.jsonl as synced at write time (remote copies lag the node by up to ~5 min); gen_wall_s excludes validation and the chunk restarts",
+  "runs": {
+   "chwbl-s1": {
+    "status_json": {
+     "best_train_objective": -0.05166622044460758,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 1156,
+     "selected_val_objective": null,
+     "tasks_requested": 1360,
+     "time": "2026-10-03T06:02:28-0700",
+     "wall_s": 623.45
+    },
+    "gen_wall_s": [
+     623.4
+    ]
+   },
+   "dualmap-s1": {
+    "status_json": {
+     "best_train_objective": -0.00527137499469567,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 1156,
+     "selected_val_objective": null,
+     "tasks_requested": 1360,
+     "time": "2026-10-03T06:02:46-0700",
+     "wall_s": 646.74
+    },
+    "gen_wall_s": [
+     646.7
+    ]
+   },
+   "llmdob-s1": {
+    "status_json": {
+     "best_train_objective": 0.09464638646413372,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 1156,
+     "selected_val_objective": null,
+     "tasks_requested": 1156,
+     "time": "2026-10-03T06:03:02-0700",
+     "wall_s": 667.51
+    },
+    "gen_wall_s": [
+     667.5
+    ]
+   },
+   "llmdpp-s1": {
+    "status_json": {
+     "best_train_objective": 0.12780050585357502,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "running",
+     "replays_fresh": 24,
+     "selected_val_objective": null,
+     "tasks_requested": 1360,
+     "time": "2026-10-03T06:04:27-0700",
+     "wall_s": 796.06
+    },
+    "gen_wall_s": [
+     211.0
+    ]
+   },
+   "lmetric-s1": {
+    "status_json": {
+     "best_train_objective": 0.12491207285007816,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 1156,
+     "selected_val_objective": null,
+     "tasks_requested": 1360,
+     "time": "2026-10-03T06:02:27-0700",
+     "wall_s": 636.13
+    },
+    "gen_wall_s": [
+     636.1
+    ]
+   },
+   "m0-s1": {
+    "status_json": {
+     "best_train_objective": 0.1030454294849644,
+     "budget_evals": 400,
+     "fevals": 48,
+     "generation": 3,
+     "phase": "running",
+     "replays_fresh": 3368,
+     "selected_val_objective": null,
+     "tasks_requested": 3876,
+     "time": "2026-10-03T06:06:43-0700",
+     "wall_s": 885.62
+    },
+    "gen_wall_s": [
+     330.1,
+     225.0,
+     330.5
+    ]
+   },
+   "m1-s1": {
+    "status_json": {
+     "best_train_objective": 0.11003844374732413,
+     "budget_evals": 400,
+     "fevals": 32,
+     "generation": 2,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 2244,
+     "selected_val_objective": null,
+     "tasks_requested": 2516,
+     "time": "2026-10-03T06:01:01-0700",
+     "wall_s": 562.89
+    },
+    "gen_wall_s": [
+     333.2,
+     229.7
+    ]
+   },
+   "ramjet-s1": {
+    "status_json": {
+     "best_train_objective": 0.13887987469719598,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 1156,
+     "selected_val_objective": null,
+     "tasks_requested": 1360,
+     "time": "2026-10-03T06:02:38-0700",
+     "wall_s": 644.42
+    },
+    "gen_wall_s": [
+     644.4
+    ]
+   },
+   "stickybounded-s1": {
+    "status_json": {
+     "best_train_objective": 0.08742756625683269,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 1156,
+     "selected_val_objective": null,
+     "tasks_requested": 1360,
+     "time": "2026-10-03T06:02:37-0700",
+     "wall_s": 636.89
+    },
+    "gen_wall_s": [
+     636.9
+    ]
+   },
+   "stickyhard-s1": {
+    "status_json": {
+     "best_train_objective": 0.09194088172151008,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 1156,
+     "selected_val_objective": null,
+     "tasks_requested": 1360,
+     "time": "2026-10-03T06:02:47-0700",
+     "wall_s": 645.25
+    },
+    "gen_wall_s": [
+     645.2
+    ]
+   },
+   "twotier-s1": {
+    "status_json": {
+     "best_train_objective": 0.12758483617404814,
+     "budget_evals": 400,
+     "fevals": 16,
+     "generation": 1,
+     "phase": "paused",
+     "reason": "max_wall_seconds",
+     "replays_fresh": 1156,
+     "selected_val_objective": null,
+     "tasks_requested": 1156,
+     "time": "2026-10-03T06:03:00-0700",
+     "wall_s": 666.19
+    },
+    "gen_wall_s": [
+     666.2
+    ]
+   }
+  }
+ }
+}

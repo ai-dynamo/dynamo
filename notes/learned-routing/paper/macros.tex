@@ -1,0 +1,140 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% Shared macros. Every section uses these symbol macros instead of raw symbols, so a
+% notation change is a one-line edit here. sections/notation.tex prints the table that
+% explains each macro; keep the two in step.
+
+% ---------------------------------------------------------------------------------------
+% Draft markers
+% ---------------------------------------------------------------------------------------
+
+% \pending{what}: a result or decision that does not exist yet, so it cannot be mistaken
+% for a finding. Red, with a boxed PENDING tag; the description after the tag breaks across
+% lines like ordinary text (a fully boxed argument cannot break in pdflatex). Use the
+% pendingblock environment (fully boxed) for a paragraph or a figure placeholder.
+\newcommand{\pending}[1]{%
+  {\color{red}\sffamily\footnotesize
+   \fcolorbox{red}{red!6}{\textbf{PENDING}}\,[#1]}}
+
+% The block is a box (it does not break across pages); keep it to a few lines. The colour is
+% set inside the minipage, so it cannot leak into the following text.
+\newsavebox{\pendingbox}
+\newenvironment{pendingblock}{%
+  \par\noindent
+  \begin{lrbox}{\pendingbox}%
+  \begin{minipage}{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}%
+  \color{red}\sffamily\small\textbf{PENDING.}~\ignorespaces}{%
+  \end{minipage}%
+  \end{lrbox}%
+  \fcolorbox{red}{red!6}{\usebox{\pendingbox}}\par}
+
+% \citeneeded{what}: a source the campaign bibliography does not contain yet. refs.bib may
+% only hold sources from literature/BIBLIOGRAPHY.md or literature/pdfs/ (see refs.bib).
+\newcommand{\citeneeded}[1]{\textcolor{red}{\sffamily\footnotesize[cite needed: #1]}}
+
+% \prelim: the label every pilot number carries (operator instruction).
+\newcommand{\prelim}{\emph{preliminary (pilot, validation split)}}
+
+\newcommand{\draftbanner}{Draft: simulation results with a live GPU check of the ranking}
+
+% ---------------------------------------------------------------------------------------
+% Text names
+% ---------------------------------------------------------------------------------------
+% \code{...}: typewriter identifiers; each \_ inside allows a line break after it, so long feature
+% and parameter names do not overflow narrow columns.
+\newcommand{\codeus}{\textunderscore\allowbreak}
+\newcommand{\code}[1]{\texttt{\begingroup\let\_\codeus#1\endgroup}}
+% \file{path}: file paths; breaks lines anywhere (xurl) and needs no escaping of _ .
+\newcommand{\file}[1]{\nolinkurl{#1}}
+\newcommand{\policy}[1]{\texttt{#1}}            % router policy type strings
+\newcommand{\lc}{\policy{learned-choice}}
+\newcommand{\defaultcf}{\policy{dynamo-default-cost-fn}}
+\newcommand{\defaultref}{\policy{default@defaults}}
+\newcommand{\aisim}{AISim}                      % AISimulate offline replay
+\newcommand{\ais}{AIS}                          % AISimulate's forward-pass timing model
+
+% ---------------------------------------------------------------------------------------
+% Request-level quantities (index j)
+% ---------------------------------------------------------------------------------------
+\newcommand{\ISL}{\mathrm{ISL}}
+\newcommand{\OSL}{\mathrm{OSL}}
+\newcommand{\TTFT}{\mathrm{TTFT}}
+\newcommand{\EtoE}{\mathrm{E2E}}
+\newcommand{\ITLbar}{\overline{\mathrm{ITL}}}
+\newcommand{\Ezero}{E_0}                        % uncontended no-reuse latency
+\newcommand{\Imax}{I_{\max}}                    % contract's I: mean-ITL bound
+\newcommand{\Smax}{s_{\max}}                    % contract's S: E2E slowdown bound
+\newcommand{\good}{g}                           % good-request indicator g_j
+\newcommand{\reqblocks}{b}                      % b_j = max(ceil(ISL_j / block), 1)
+\newcommand{\Tch}{T_{\mathrm{ch}}}              % 8192-token feature normalizer
+
+% ---------------------------------------------------------------------------------------
+% Policy
+% ---------------------------------------------------------------------------------------
+\newcommand{\cand}{S}                           % eligible candidate set of one request
+\newcommand{\Nw}{N}                             % worker count
+\newcommand{\dfeat}{d}                          % feature dimension
+\newcommand{\fvec}{x}                           % per-candidate feature vector x_i
+\newcommand{\fbar}{\bar{x}_{\cand}}             % candidate mean of x
+\newcommand{\basis}[1]{\mathbf{e}_{#1}}         % standard basis vector (bold: E_0 is a latency)
+\newcommand{\util}{u}                           % utility u_i
+\newcommand{\rank}{r}                           % context rank
+\newcommand{\cidx}{\ell}                        % context-term index (FEATURES.md writes k)
+\newcommand{\ctxv}{z}                           % context value z_{S,l}
+\newcommand{\weff}{w_{\cand}}                   % effective weights theta + sum_l z p_l
+\newcommand{\temp}{\tau}                        % learned-choice temperature
+\newcommand{\pol}{\pi}                          % a policy
+\newcommand{\piref}{\pi_{0}}                    % default@defaults, the normalizer
+\newcommand{\pibase}{\pi^{\star}_{\mathrm{base}}} % validation-selected best baseline
+\newcommand{\pilearn}{\pi_{\theta}}             % the learned policy
+% Router signals of candidate i (what the plugin API exposes)
+\newcommand{\ovl}{o}                            % effective overlap blocks o_i
+\newcommand{\hit}{h}                            % estimated cached tokens h_i
+\newcommand{\Lpf}{L^{\mathrm{pf}}}              % active prefill tokens
+\newcommand{\Ldec}{L^{\mathrm{dec}}}            % decode cost blocks (incl. this request's)
+\newcommand{\Lreq}{L^{\mathrm{req}}}            % active requests
+\newcommand{\capb}{\mathrm{cap}}                % configured KV capacity in blocks
+% Default cost-function knobs (dynamo-default-cost-fn parameters)
+\newcommand{\bov}{\beta_{\mathrm{ov}}}          % overlap_score_credit
+\newcommand{\bdecay}{\beta_{\mathrm{decay}}}    % overlap_score_credit_decay
+\newcommand{\bpf}{\beta_{\mathrm{pf}}}          % prefill_load_scale
+\newcommand{\breq}{\beta_{\mathrm{req}}}        % decode_active_request_weight
+\newcommand{\cdef}{c^{\mathrm{def}}}            % default cost of a candidate
+
+% ---------------------------------------------------------------------------------------
+% Workloads, metric, objective
+% ---------------------------------------------------------------------------------------
+\newcommand{\cell}{c}
+\newcommand{\Cset}[1]{\mathcal{C}_{\mathrm{#1}}}      % cells of a split: \Cset{train}
+\newcommand{\seg}{\omega}                             % a workload segment
+\newcommand{\Segset}[1]{\Omega_{\mathrm{#1}}}         % segments of a split
+\newcommand{\win}{\mathcal{T}}                        % measurement window T_c
+\newcommand{\Gw}{G}                                   % windowed goodput G_{c,k}(pi)
+\newcommand{\ratio}{\rho}                             % goodput ratio
+\newcommand{\clr}{\Delta}                             % clipped log-ratio
+\newcommand{\clipb}{\log 3}                           % clip bound
+\newcommand{\Jobj}{J}                                 % training objective
+\newcommand{\segstat}{D}                              % per-segment headline statistic
+\newcommand{\lag}{\delta}                             % router-state lag (ms)
+\newcommand{\kendall}{\tau_{\mathrm{K}}}              % Kendall rank correlation (not \temp)
+
+% ---------------------------------------------------------------------------------------
+% Training
+% ---------------------------------------------------------------------------------------
+\newcommand{\krep}{k}                                 % CRN replicate index
+\newcommand{\Krep}{K}                                 % replicates per objective evaluation
+\newcommand{\Kpool}{K_{\mathrm{pool}}}                % replicate pool lr-train draws from
+\newcommand{\Kval}{K_{\mathrm{val}}}                  % replicates per validation/test score
+\newcommand{\budget}{B}                               % CMA-ES evaluations per run
+\newcommand{\popsize}{\lambda}
+\newcommand{\restarts}{R}
+\newcommand{\gen}{t}                                  % CMA-ES generation index
+\newcommand{\sigmazero}{\sigma_{0}}
+\newcommand{\searchvec}{\phi}                         % CMA-ES internal coordinates
+\newcommand{\Kset}[1]{\mathcal{K}_{#1}}               % replicate set of generation t
+
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\clip}{clip}
+\DeclareMathOperator{\softmax}{softmax}

@@ -1,0 +1,615 @@
+{
+ "schema": "learned-routing.phase2-ais-prep.v1",
+ "stage": "phase2 AIS-league arm preparation (CONTRACT A16.2-A16.5)",
+ "written": "2026-10-03 11:58 PDT",
+ "status": "ok",
+ "summary": "AIS league ready for the phase-2 orchestrator: runs/phase2-ais/MANIFEST.json (12 runs: M1-ais, M0-ais, llm-d-optimized-baseline-modeled x 3 restarts in waves 1-3; M2-ais x 3 pending the M1-ais selection), README.md (second p2orch instance from the AIS worktree, bundle p2ais, yielding to tier A). Spaces conditioned on EXACT v3 candidate tables (instrumented replay of the AIS build on all 34 train cells, k0; rebuild from raw host state reproduces all 13 logged features on 1,711,324 rows). M1-ais: bounds +-4 s_j, theta0=-1 and theta10=0 pinned (f10 = f8 + f9 exactly), sigma0 0.0027 (~20% flips). Inits s1 theta0; s2 behavior clone of llm-d-optimized-baseline (modeled) agreement 0.688 (theta0 0.342, ceiling 0.727 from its rotation ties, 2-fold 0.675/0.701); s3 its modeled-TTFT sticky-gate rule linearized at 90% of the bounds, agreement 0.689. M0-ais keeps M0's sigma0 0.11 (0.197 flips); llm-d modeled sigma0 0.3 cap (0.017 flips). References default@defaults (no AIS) under build 555ca082: 426 records (train k0-7, val k0-2, val k3-10), 0 errors, 426/426 identical to the tier-A cache. Smoke 78/78 replays, 0 errors; lr-train smokes on 3 spaces done. p2orch multi-instance support committed in the AIS WT (<commit-ais-03>).",
+ "worktree": {
+  "path": "<other-worktree>",
+  "branch": "rupei/learned-routing-ais (local, not pushed)",
+  "commit": "<commit-ais-03> feat(learned-routing): let a second p2orch instance share nodes with the first (p2orch.py + remote/README.md only; build 555ca082 unchanged)",
+  "build_id": "555ca082a888ef477abce20bc68e35e432399c78a14570fe436a2c861dedfcfb",
+  "core_so_sha256": "42df974944d6efee3fdcdef4d8a0af7abcd60cd17b17bb96d300ba900cbb2106"
+ },
+ "manifest": {
+  "path": "runs/phase2-ais/MANIFEST.json",
+  "file_sha256": "3c66b16fa1578fe5d13b26f925505052b63e20651650db24d2909a516782f3a2",
+  "runs": 12,
+  "planned": [
+   "m1ais-s1",
+   "m0ais-s1",
+   "llmdobm-s1",
+   "m1ais-s2",
+   "m0ais-s2",
+   "llmdobm-s2",
+   "m1ais-s3",
+   "m0ais-s3",
+   "llmdobm-s3"
+  ],
+  "pending": [
+   "m2ais-s1",
+   "m2ais-s2",
+   "m2ais-s3"
+  ],
+  "readme": "runs/phase2-ais/README.md",
+  "generator": "runs/phase2-ais/scripts/make_manifest_ais.py"
+ },
+ "spaces": {
+  "m1_ais_s1.yaml": {
+   "path": "runs/phase2-ais/spaces/m1_ais_s1.yaml",
+   "file_sha256": "7e8867be9d14ef2bd3db701d499e4b5c17cdfd54deeaacc9325d13b868342e37"
+  },
+  "m1_ais_s2bc.yaml": {
+   "path": "runs/phase2-ais/spaces/m1_ais_s2bc.yaml",
+   "file_sha256": "a05305baa105029da9555b552ed597261de9e870f07f8bf20e4a07ef930a6ebb"
+  },
+  "m1_ais_s3rule.yaml": {
+   "path": "runs/phase2-ais/spaces/m1_ais_s3rule.yaml",
+   "file_sha256": "ba3710c5cca2ae6702c295491605da119c453cd634a12b62c725e28faff7c318"
+  },
+  "m0_ais.yaml": {
+   "path": "runs/phase2-ais/spaces/m0_ais.yaml",
+   "file_sha256": "cc1267c9d3b268202960da5c75589238187406d2b78813634f6f297425eabdf6"
+  },
+  "llmd_optimized_baseline_modeled.yaml": {
+   "path": "runs/phase2-ais/spaces/llmd_optimized_baseline_modeled.yaml",
+   "file_sha256": "f9510df66702a6c01876ba5d504fabbb678ac715d65777ffd7bb639c54692a85"
+  }
+ },
+ "tables": {
+  "method": "verifier's instrumented copy of the AIS build (commit <commit-ais-01> + logging; runs/verify_ais_features_r0: byte-identical per-request output 6/6) run with LR_VERIFY_DUMP through the CR/slots pool in a private root (runs/phase2-ais/root_instr), scripts/instr_tables.py + extract_tables.py",
+  "trajectories": {
+   "m1ais@theta0": "learned-choice v3 theta0=-e0 (tie_break one_draw) = default@defaults+AIS-load routing; the M1-ais start",
+   "llmdob-modeled@defaults": "llm-d-optimized-baseline ttft_source modeled + AIS load, shipped defaults"
+  },
+  "cells": "all 34 train cells, k = 0 (no val or test cell)",
+  "decisions_per_trajectory": 268416,
+  "rebuild_validation": {
+   "rows": 1711324,
+   "feature_mismatches": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "max_abs_diff_f8_f10": 4.999995625865061e-10,
+   "session_unmatched": 0,
+   "choice_mismatch": 0,
+   "meaning": "rebuilding x from each admission's raw host state (default cost formula, AIS SDK prefill for (n, L-n), host backlog, session map via per-request rows) equals the features the policy logged, so the llm-d trajectory tables (rebuilt the same way) are exact"
+  },
+  "llmd_reimplementation": {
+   "agreement_mean": 0.7266889246925832,
+   "note": "the source re-implementation (baseline_flips.optimized_dist) picks llm-d's exact choice on every untied decision and a tie set containing it on every tied one; rotation among tied workers caps tie-uniform agreement at this value"
+  },
+  "files": "runs/phase2-ais/tables/npz/*.npz (165 MB), extract_summary.json"
+ },
+ "m1ais": {
+  "s_j": {
+   "overlap_frac": 46.820189526152184,
+   "new_prefill_tokens_k": 30.56246966195251,
+   "active_prefill_tokens_k": 6.315389349016595,
+   "kv_load_frac": 70.06402519992193,
+   "active_requests_s": 71.0119169289632,
+   "session_affinity": 13.315286145495373,
+   "isl_x_prefill_load": 3.775301496850188,
+   "est_prefill_ms_s": 52.968528329962346,
+   "prefill_backlog_ms_s": 7.682758682061315,
+   "est_ttft_ms_s": 4.567721173917481,
+   "est_decode_step_ms_s": 5197.526767265272,
+   "itl_externality_ms_s": 3543.105164117458
+  },
+  "bounds": [
+   [
+    -1.0,
+    -1.0
+   ],
+   [
+    -190.0,
+    190.0
+   ],
+   [
+    -120.0,
+    120.0
+   ],
+   [
+    -25.0,
+    25.0
+   ],
+   [
+    -280.0,
+    280.0
+   ],
+   [
+    -280.0,
+    280.0
+   ],
+   [
+    -53.0,
+    53.0
+   ],
+   [
+    -15.0,
+    15.0
+   ],
+   [
+    -210.0,
+    210.0
+   ],
+   [
+    -31.0,
+    31.0
+   ],
+   [
+    0.0,
+    0.0
+   ],
+   [
+    -21000.0,
+    21000.0
+   ],
+   [
+    -14000.0,
+    14000.0
+   ]
+  ],
+  "pinned": {
+   "0": -1.0,
+   "10": 0.0
+  },
+  "pinned_10_reason": "f10 = f8 + f9 exactly, so theta + c(e8 + e9 - e10) is the same policy: an exact flat direction, removed per LR-05; est_ttft weight = theta8 = theta9",
+  "s_j_v1_vs_pilot": "exact-table s_1..7 = [46.8, 30.6, 6.32, 70.1, 71.0, 13.3, 3.78] vs the pilot's reconstruction [25.6, 17.7, 5.33, 80.8, 109.6, 21.2, 3.22] (M1/v1 spaces unchanged)",
+  "flip_curve_tv": {
+   "0.001": 0.11773951268610269,
+   "0.002": 0.16641983073329586,
+   "0.003": 0.21632907145974944,
+   "0.004": 0.24601758020821773,
+   "0.005": 0.28951551793418706,
+   "0.006": 0.2735513967429543,
+   "0.008": 0.320991654354987,
+   "0.012": 0.37766111008022446
+  },
+  "sigma0": 0.0027,
+  "inits": {
+   "s1": {
+    "theta": [
+     -1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "why": "theta0 = -e0, the default router's argmin under the AIS load model.",
+    "agreement_with_llmd_modeled_on_its_train_trajectory": 0.34152685974089264,
+    "agreement_by_family": {
+     "agentx": 0.5871021040453259,
+     "mooncake": 0.29661762816176407,
+     "sessions": 0.19699738648949872
+    },
+    "one_step_change_vs_theta0_on_theta0_tables": 0.0,
+    "one_step_disagreement_with_s2_on_theta0_tables": 0.5372822305019626,
+    "space_sha": "4bbdebdf391337763c4a31c95ba40258387c489f0c28ba6d21a64f8cd3351bdc"
+   },
+   "s2": {
+    "theta": [
+     -1.0,
+     53.46385456454576,
+     7.380088121759527,
+     -18.77137658845524,
+     21.889345964720505,
+     30.251589293276997,
+     0.20188903902007535,
+     -4.85430222306815,
+     -96.72461829009282,
+     11.657264551713775,
+     0.0,
+     1664.9685735576527,
+     -2399.17881277251
+    ],
+    "why": "behavior clone of llm-d-optimized-baseline (ttft_source modeled, AIS load, shipped defaults): conditional-logit ML on its own TRAIN trajectory (34 cells, k = 0, exact v3 tables), theta[0] pinned -1, M1-ais bounds (inits/s2_bc_fit.json).",
+    "agreement_with_llmd_modeled_on_its_train_trajectory": 0.6876484340215157,
+    "agreement_by_family": {
+     "agentx": 0.8656122025568738,
+     "mooncake": 0.5200070304934148,
+     "sessions": 0.8868778234243844
+    },
+    "one_step_change_vs_theta0_on_theta0_tables": 0.5372822305019626,
+    "one_step_disagreement_with_s2_on_theta0_tables": 0.0,
+    "space_sha": "3965355dcbb57ad01f920c52db130e5e39a4a1c1e1f7edaef5fb72ac2cceb983"
+   },
+   "s3": {
+    "theta": [
+     -1.0,
+     171.0,
+     -22.5,
+     -22.5,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     -7.6,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "why": "llm-d-optimized-baseline's modeled-TTFT rule where representable: u = -f0 + A f1 - (0.8 A / 18 s) f9 - lam (f2 + f3) with A = 0.9 x 4 s1, lam = 0.9 x 4 s3 (sticky share 0.8, gate 18 s of modeled backlog, token-load choice; the 0/1 sticky step becomes linear in f1).",
+    "agreement_with_llmd_modeled_on_its_train_trajectory": 0.6886014076608657,
+    "agreement_by_family": {
+     "agentx": 0.8691422976232699,
+     "mooncake": 0.5204113739658601,
+     "sessions": 0.8864880935122248
+    },
+    "one_step_change_vs_theta0_on_theta0_tables": 0.28526832290504833,
+    "one_step_disagreement_with_s2_on_theta0_tables": 0.33272540452735144,
+    "space_sha": "1a298acb5bebe72aea6e7e81e2809d15d815c35fcdebd1a2c238e47d1a2c5128"
+   }
+  },
+  "bc_fit": {
+   "decisions": 144048,
+   "nll_pinned": 4.56293748907036,
+   "nll_theta0": 9.495290638551538,
+   "nll_free": 0.5984638166146182,
+   "agreement_in_sample": 0.6876484340215157,
+   "agreement_free": 0.7172643320319417,
+   "cv_2fold": [
+    0.6745767256571358,
+    0.7008276104838654
+   ],
+   "cv_2fold_theta0": [
+    0.33843768822467574,
+    0.34461603125710955
+   ],
+   "at_bound": []
+  },
+  "rule_alternatives": {
+   "theta0 (default rule)": {
+    "theta": [
+     -1.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "within_bounds": true,
+    "agreement": 0.34152685974089264,
+    "change_vs_theta0": 0.0
+   },
+   "s2 behavior clone (pinned, bounded)": {
+    "theta": [
+     -1.0,
+     53.46385456454576,
+     7.380088121759527,
+     -18.77137658845524,
+     21.889345964720505,
+     30.251589293276997,
+     0.20188903902007535,
+     -4.85430222306815,
+     -96.72461829009282,
+     11.657264551713775,
+     0.0,
+     1664.9685735576527,
+     -2399.17881277251
+    ],
+    "within_bounds": true,
+    "agreement": 0.6876484340215157,
+    "change_vs_theta0": 0.5372822305019626
+   },
+   "min est_ttft, pure (-0.001 e0 - e10)": {
+    "theta": [
+     -0.001,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -1.0,
+     -1.0,
+     0.0,
+     -0.0,
+     -0.0
+    ],
+    "within_bounds": false,
+    "agreement": 0.6933123299939118,
+    "change_vs_theta0": 0.31152329485779995
+   },
+   "min est_ttft, clipped (-e0 - b (e8 + e9), b = min bound of theta8, theta9)": {
+    "theta": [
+     -1.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -31.0,
+     -31.0,
+     0.0,
+     -0.0,
+     -0.0
+    ],
+    "within_bounds": true,
+    "agreement": 0.5665270596813686,
+    "change_vs_theta0": 0.24418227865804254
+   },
+   "min modeled backlog only, clipped (-e0 - 4 s9 e9)": {
+    "theta": [
+     -1.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -31.0,
+     0.0,
+     -0.0,
+     -0.0
+    ],
+    "within_bounds": true,
+    "agreement": 0.36773213566900276,
+    "change_vs_theta0": 0.17176216036588265
+   },
+   "min token load, pure (-(e2 + e3))": {
+    "theta": [
+     -0.0,
+     -0.0,
+     -1.0,
+     -1.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     -0.0,
+     0.0,
+     -0.0,
+     -0.0
+    ],
+    "within_bounds": false,
+    "agreement": 0.7083199661379341,
+    "change_vs_theta0": 0.5980817753695906
+   },
+   "sticky-gate surrogate, clipped": {
+    "theta": [
+     -1.0,
+     171.0,
+     -22.5,
+     -22.5,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     -7.6000000000000005,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "within_bounds": true,
+    "agreement": 0.6886014076608657,
+    "change_vs_theta0": 0.28526832290504833
+   },
+   "sticky-gate surrogate, pure (x1000, theta0 -1)": {
+    "theta": [
+     -1.0,
+     171000.0,
+     -22500.0,
+     -22500.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     -7600.000000000001,
+     0.0,
+     0.0,
+     0.0
+    ],
+    "within_bounds": false,
+    "agreement": 0.7211408000533784,
+    "change_vs_theta0": 0.3205412335527403
+   }
+  },
+  "s3_choice": "llm-d-optimized-baseline's modeled-TTFT rule = sticky to >=0.8-overlap workers unless their modeled backlog trails the best other by > 18 s, then least token load; linear in v3 except the 0/1 sticky step. Pure surrogate reaches 0.721 of the 0.727 ceiling; at 90% of the bounds (pycma's linear BoundTransform region) 0.689. The min-est-TTFT rule the ais-features stage tested is not llm-d's rule (0.693 pure, 0.567 within bounds) and is not an init"
+ },
+ "m0ais": {
+  "space": "runs/phase2-ais/spaces/m0_ais.yaml",
+  "flip_curve_tv": {
+   "0.03": 0.07193110463519392,
+   "0.05": 0.10270053761214602,
+   "0.08": 0.16360866559479637,
+   "0.11": 0.19730113011834305,
+   "0.12": 0.23252157640889784,
+   "0.18": 0.26272065867998684,
+   "0.25": 0.3041447310336607,
+   "0.3": 0.3401513391047029,
+   "0.35": 0.35761658692205844
+  },
+  "sigma0": 0.11,
+  "why": "kept from M0: 0.197 flips at 0.11 is inside the 15-20% band; identical space except the load model isolates its effect (A16.3)"
+ },
+ "llmd_modeled": {
+  "space": "runs/phase2-ais/spaces/llmd_optimized_baseline_modeled.yaml",
+  "flip_curve_tv": {
+   "0.03": 0.002847534357483627,
+   "0.05": 0.004885195875009015,
+   "0.08": 0.007323061197006518,
+   "0.11": 0.009091466809364254,
+   "0.12": 0.00879754026920453,
+   "0.18": 0.01157678613475101,
+   "0.25": 0.015697224153344645,
+   "0.3": 0.01661019550222612,
+   "0.35": 0.019510485747539604
+  },
+  "sigma0": 0.3,
+  "why": "target unreachable (0.017 at 0.3), maxstd cap as the throughput variant"
+ },
+ "m2ais": {
+  "generator": "runs/phase2-ais/scripts/make_m2_ais_space.py",
+  "sources_default": [
+   "min_est_ttft_ms_s",
+   "mean_est_decode_step_ms_s"
+  ],
+  "rank": 2,
+  "dimension": 33,
+  "p_bounds": "+-4 s_j / rms(source) on the train theta0 tables, p_k0 and p_k10 pinned 0",
+  "std": "0.3 x sigma0 (LR-15)",
+  "warm_start": "theta*_M1-ais, p = 0",
+  "source_scales": {
+   "mean_kv_load_frac": {
+    "mean": 0.38206851073714526,
+    "rms": 0.42352749458235706,
+    "within_cell_sd": 0.13721872763338508
+   },
+   "mean_active_prefill_tokens_k": {
+    "mean": 0.7984772121630845,
+    "rms": 1.487976806199685,
+    "within_cell_sd": 1.0976656851740743
+   },
+   "mean_active_requests_s": {
+    "mean": 0.28159190478450913,
+    "rms": 0.3627263424525408,
+    "within_cell_sd": 0.09365318825178442
+   },
+   "max_overlap_frac": {
+    "mean": 0.666862323537382,
+    "rms": 0.7617860706320656,
+    "within_cell_sd": 0.3454802684335215
+   },
+   "isl_k": {
+    "mean": 2.6969171362420816,
+    "rms": 4.563570182072113,
+    "within_cell_sd": 2.1428972567324913
+   },
+   "is_first_turn": {
+    "mean": 0.6030536207824212,
+    "rms": 0.7765652714243801,
+    "within_cell_sd": 0.24640054291300378
+   },
+   "min_est_ttft_ms_s": {
+    "mean": 0.6705165769433094,
+    "rms": 2.065548585927922,
+    "within_cell_sd": 1.848582142514781
+   },
+   "mean_est_decode_step_ms_s": {
+    "mean": 0.020443263192693656,
+    "rms": 0.020585998199043734,
+    "within_cell_sd": 0.0018487837297577827
+   }
+  },
+  "caveat": "mean_est_decode_step_ms_s varies little on train (within-cell sd 0.0018 vs mean 0.0204), so its p column mostly duplicates theta; --sources can align M2-ais with tier B's M2",
+  "tested": "generator run on the s2 theta: smoke/m2_ais_rank2_test_theta_s2.yaml (33 coords) replays without error"
+ },
+ "references": {
+  "spec": "default@defaults (builtin, no AIS)",
+  "records": {
+   "train_k0_7": 272,
+   "val_k0_2": 42,
+   "val_k3_10": 112
+  },
+  "errors": 0,
+  "build_id": "555ca082...",
+  "where": "CR/runs/cache (results keyed by build 555ca082; build_ids.json gained one memo entry for the AIS .so, tier-A entries unchanged)",
+  "parity_vs_tier_a_cache": {
+   "pairs": 426,
+   "identical": 426,
+   "per_request_rows": 3785305
+  },
+  "files": [
+   "runs/phase2-ais/refs/train.jsonl",
+   "runs/phase2-ais/refs/val_k0_2.jsonl",
+   "runs/phase2-ais/refs/val_k3_10.jsonl",
+   "runs/phase2-ais/refs/ref_parity.json"
+  ]
+ },
+ "smoke": {
+  "root": "runs/phase2-ais/smoke/root (private)",
+  "specs": "x0, 2 random (sigma 0.3 internal), lo/hi corners of each space incl. the M2-ais test space",
+  "cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "mooncake-w0-base-n8-open-L2",
+   "sessions-s2-think2.0-n4-closed-L2"
+  ],
+  "replays": 78,
+  "errors": 0,
+  "files": [
+   "runs/phase2-ais/smoke/results_r1.jsonl",
+   "runs/phase2-ais/smoke/results.jsonl (r0, superseded spaces)"
+  ],
+  "lr_train": {
+   "what": "lr-train end to end (CMA-ES, reference, CRN replicates, UH re-evaluation, validation every generation) in the private smoke root: B = 4, popsize 2, 2 train cells, val = 1 train cell (no val or test cell)",
+   "spaces": [
+    "m1_ais_s3rule.yaml",
+    "m2_ais_rank2_test_theta_s2.yaml (generator output on the s2 theta)",
+    "llmd_optimized_baseline_modeled.yaml"
+   ],
+   "result": "3/3 phase done, fevals 4, 4 validation lines each, exit 0",
+   "files": "runs/phase2-ais/smoke/train/"
+  }
+ },
+ "orchestrator": {
+  "how": "second p2orch instance: LR_P2_DIR=CR/runs/phase2-ais, run from the AIS worktree, init --bundle p2ais --max-wave 3 --yield-to CR/runs/phase2/state.json:3 --targets-from CR/runs/phase2/state.json; README.md",
+  "scratch_test": "copy of the tier-A state in a scratch LR_CR: yields while tier A has 7 eligible wave-3 runs; with tier-A queue emptied places nothing on its 13 held targets; with ws:0 released proposes m1ais-s1 there (dry runs only)",
+  "not_started": "this stage did not init or start the AIS instance; the phase-2 relays schedule it (A16.5)"
+ },
+ "cost_projection": "PROJECTION: ~2.3-2.5 h epyc9654p, ~4.4-4.9 h epyc7702p/7702p-alt, ~5.1-5.7 h workstation per run (tier-A measured 2.15/4.1-4.3/4.85 h x replay wall ratio 1.04-1.17 of these policies vs default in the ais-features parity records); 9 runs + 3 M2-ais",
+ "tier_a_untouched": {
+  "core_so_sha256": "1d67c131deca024373a2eb4b96f70156e04eb32e1046c2cf7235ac50ddeb288b (mtime 2026-10-02 15:58)",
+  "tier_a_worktree_files": "not modified (read only: state.json copied to scratch for the dry-run test)",
+  "campaign_cache": "only new keys of build 555ca082 (the 426 references)"
+ },
+ "lessons": {
+  "applied": [
+   "LR-05 (exact flat direction f10 = f8 + f9 removed; scale anchor; sigma0 by decision flips)",
+   "LR-07 (multi-start incl. a behavior clone of and a rule from the AIS-informed heuristic)",
+   "LR-03 (one_draw ties)",
+   "LR-06 (N-stable named sources; isl_k fold in the M2 generator)",
+   "LR-10 (selection on val k0-2, fresh k3-10 re-check)",
+   "LR-15 (warm start, context std 0.3x)",
+   "LR-01 (clipped_log_ratio objective, as tier A)"
+  ],
+  "rejected": [],
+  "not_applicable": [
+   "LR-14 lag check for v3 (the lag build predates v3)"
+  ]
+ },
+ "evidence": [
+  "runs/phase2-ais/calib/",
+  "runs/phase2-ais/inits/",
+  "runs/phase2-ais/tables/npz/extract_summary.json",
+  "runs/phase2-ais/refs/",
+  "runs/phase2-ais/smoke/",
+  "runs/phase2-ais/scripts/",
+  "runs/phase2-ais/logs/"
+ ]
+}

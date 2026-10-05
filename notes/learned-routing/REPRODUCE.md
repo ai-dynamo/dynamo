@@ -49,7 +49,7 @@ What that means for a reproduction from this copy:
 
 **Conventions:**
 
-- `WT` is your checkout of branch `rupei/learned-routing-public` at the mirror snapshot commit (step 1).
+- `WT` is your checkout of branch `rupei/learned-routing` at the mirror snapshot commit (step 1).
 - `NOTES` is `$WT/notes/learned-routing`.
 - `LR_ROOT` is the campaign root, called `CR` in the contract and facts. The original is
   `<campaign-root>`.
@@ -1185,12 +1185,11 @@ Pass `--build-id PREFIX`, or `--mixed-contents split`, deliberately.
 Calibration r0 and fix r0 ran entirely on the local host (`facts/calibration.json` `compute`,
 fix r0 report).
 
-**CPU-cluster lane (Amendment A9, in progress).** A9 (2026-10-03 ~01:40 PDT, plus an ~01:50
-addendum) is in the mirrored `CONTRACT.md`. It wraps the bundle flow above in scripts:
+**CPU-cluster lane (Amendment A9).** A9 (2026-10-03 ~01:40 PDT, plus an ~01:50 addendum) is in
+the mirrored `CONTRACT.md`. It wraps the bundle flow above in scripts:
 
-- **Where:** `benchmarks/learned_routing/remote/`. It was untracked in the WT when this page was
-  written, and workflow `wf_e37792bc-dd5` is still building it. Its `README.md` documents the
-  scripts.
+- **Where:** `benchmarks/learned_routing/remote/`, committed on this branch. Its `README.md`
+  documents the scripts.
   - `submit_eval.sh` shards an `lr-eval` batch over N nodes by (cell, k), so both sides of a CRN
     pair run on one node.
   - `submit_train.sh` runs one `lr-train` job per node and resumes from the checkpoint synced back
@@ -1202,11 +1201,11 @@ addendum) is in the mirrored `CONTRACT.md`. It wraps the bundle flow above in sc
   - Node-side scripts: `node_eval.sh`, `node_train.sh` and `node_common.sh`.
   - Helpers: `prematerialize.py`, `parity_check.py` and `lane.py`.
 - **State:** `CR/facts/remote.json` records every Slurm allocation with its exact `scancel`
-  command, plus the ingested batches. Per A9 it will also record the validated node images. It
+  command, plus the ingested batches. Per A9 it also records the validated node images. It
   isn't published, because it lists cluster, node and job identifiers; `facts/compute_summary.md`
-  summarizes a later refresh. When this page was written, the record (updated 01:53:09 PDT) had
-  `status: in_progress` and 15 allocations, each with its cancel command: 9 completed, 1 failed,
-  5 still submitted. Its batches:
+  summarizes a later refresh. When this page was written, the record (updated 2026-10-03 01:53:09
+  PDT) had `status: in_progress` and 15 allocations, each with its cancel command: 9 completed,
+  1 failed, 5 still submitted. Its batches:
   - `parity-r0`: 28 records appended, 16 ingested and 12 already cached; 0 rejected.
   - `step4-replica-epyc7702p` and `step4-replica-epyc9654p`: 1,008 records each, all already in the local
     cache; 0 ingested, 0 rejected.
@@ -1214,8 +1213,9 @@ addendum) is in the mirrored `CONTRACT.md`. It wraps the bundle flow above in sc
     already cached each); 0 rejected.
 
   The lane README says its parity evidence goes under `remote.json` `parity`. The record didn't
-  have that key yet at 01:53:09 PDT; `facts/compute_summary.md` ("Parity evidence") summarizes it
-  from the later refresh. The mirrored lane runs are in `campaign/runs/remote-lane/` and
+  have that key yet at 01:53:09 PDT; the lane reported `status: ok`, with its parity evidence, at
+  02:17:56 PDT (`facts/STATE.md`), and `facts/compute_summary.md` ("Parity evidence") summarizes it.
+  The mirrored lane runs are in `campaign/runs/remote-lane/` and
   `campaign/runs/remote/returned/`.
 - **Rule:** once `facts/remote.json` reports `"status": "ok"`, run on the CPU cluster any batch or tuning job
   projected to take more than about 1 hour of local wall-clock. Until then, run locally, and

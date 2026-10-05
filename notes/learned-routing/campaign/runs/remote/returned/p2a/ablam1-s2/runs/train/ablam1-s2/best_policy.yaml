@@ -1,0 +1,11 @@
+name: "abla-m1-queue@ablam1-s2"
+parameters:
+  feature_set: "v1"
+  temperature: 0.0
+  theta: [-1.0, 15.225069937331043, -2.8626530666160335, 0.0, 0.0, -47.362920241370375, -0.28268807510319505, 0.0]
+  tie_break: "one_draw"
+router_config:
+  router_queue_threshold: 3.602702483497039
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

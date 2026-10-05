@@ -1,0 +1,1325 @@
+{
+ "schema": "learned-routing.live-loadgen-parity.v1",
+ "written_local": "2026-10-03 11:37:32 PDT",
+ "task": "A13 offline loadgen semantic-equivalence audit (no GPU): AIPerf live inputs vs offline replay",
+ "status": "ok",
+ "verdict": "For every family and load mode the generator claims (mooncake, fast25_conversation, fast25_synthetic, synthetic_sessions x open_speedup, closed_concurrency), the AIPerf workload is semantically identical to replay's: request set and order, bit-identical open-loop arrivals, exact ISL and OSL targets, identical prefix-sharing structure, identical session membership and think delays, the same closed-loop C-slot admission rule, and the same warm-up/window scoring. The only non-equivalences are AgentX (no live path) and live-only client residuals measured at milliseconds, which moved windowed goodput by at most 0.06% when a stub replayed replay's own latencies.",
+ "audit_code": {
+  "worktree": "<worktree>",
+  "commit": "<commit-31>",
+  "files": [
+   "benchmarks/learned_routing/live/audit_parity.py",
+   "benchmarks/learned_routing/live/audit_aiperf_view.py",
+   "benchmarks/learned_routing/live/audit_stub_server.py"
+  ],
+  "audited_generator": "benchmarks/learned_routing/live/gen_aiperf_inputs.py at WT <commit-26> (unchanged since)",
+  "rerun": "runs/live/audit-parity/rerun_final.sh (all reports and checks regenerated with the committed code)"
+ },
+ "method": {
+  "aiperf_view": "AIPerf 0.13.0's own MooncakeTrace model + MooncakeTraceDatasetLoader._group_traces/convert_to_conversations on aiperf_input.jsonl (AIPerf env), projected as the timing strategies consume it (Turn.metadata timestamp_ms/delay_ms; FixedScheduleStrategy stable sort and auto offset; raw_payload as sent).",
+  "replay_reference": "written in audit_parity.py from the replay source, not from the generator: aisimulate-core 0.13.0-dev.202609300000000061 replay/loadgen/trace.rs MooncakeTraceBuilder::push (session keys, ISL default, delay/delay_ms/timestamp-difference), normalize_session_starts + speed_up_timing (trace.rs:892-923), HashIdInterner + synthesize_validated_trace_tokens (trace.rs:255-358); Dynamo lib/mocker/src/replay/entrypoints.rs:131-152 (all-single-turn open loop -> no SessionContext) and offline/entrypoints.rs:562-593 (closed loop -> SessionContext always).",
+  "replay_rows": "cached lr-eval per_request rows (CR/runs/cache/results, build 6955b0ee, matching cell content SHA and replicate trace SHA) for 2 policies per cell; arrivals of later turns and closed-loop starts are policy-dependent, so every check runs per policy.",
+  "stub_runtime": "AIPerf 0.13.0 run with the manifest's exact argv/env (run_aiperf.py) against audit_stub_server.py, which identifies each request by prompt digest and answers with replay's own TTFT/E2E for it; four full cells (45,462 requests). The AIPerf export is then scored with score_live (cell measure, AIS E0) and compared with replay's record.",
+  "prefix_pairs": "per cell 750 pairs in each stratum: same first hash block, same first 3 blocks, same session (multi-turn cells), uniform",
+  "block_structure": "blake2b-8 chained hash of every full 16-token block of every AIPerf prompt vs the same hash over replay's synthesized tokens; a bijection means the KV router and the vLLM prefix cache see the same reuse structure"
+ },
+ "aiperf_semantics_sources": {
+  "version": "aiperf 0.13.0 (wheel a20100fd...); env CR/runs/live/env/aiperf-0.13.0",
+  "timestamp_and_delay_float_ms": "dataset/loader/models.py:299-306",
+  "payload_verbatim": "dataset/loader/mooncake_trace.py _build_turn; workers/inference_client.py:122",
+  "session_grouping_insertion_order": "dataset/loader/mooncake_trace.py:72",
+  "fixed_schedule": "timing/strategies/fixed_schedule.py:98 (correlation id fixed-schedule-<id>), :110 stable sort, :113 auto offset, :171 later turns at credit return + delay",
+  "closed_loop": "timing/strategies/request_rate.py:286-300 (continuations before new sessions), :372 delay before queuing; credit/issuer.py:329 session slot on first turn; credit/callback_handler.py:670 slot released when the root session ends",
+  "no_inter_turn_delay_cap": "no --inter-turn-delay-cap-seconds in the argv; delays are bit-equal to the trace (dataset/loader/_delay_cap.py clamps only when set)",
+  "limits_not_binding": "connection limit 2500 (replay peak in-flight <= 160 in the audited open cells; closed <= C <= 265); request timeout 7200 s (max replay E2E 186 s across audited rows)"
+ },
+ "cells": [
+  {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "split": "test",
+   "family": "fast25_conversation",
+   "mode": "open_speedup",
+   "num_workers": 4,
+   "k": 0,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "replay-source reference only (test cell: not replayed, to avoid test exposure)",
+   "requests": 2083,
+   "sessions": 2083,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": true,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (2250 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": null
+   },
+   "open_loop_tie_groups": 1,
+   "open_loop_requests_in_ties": 2,
+   "full_16_token_blocks": 1449674,
+   "distinct_16_token_blocks": 1065639,
+   "replay_peak_in_flight": null,
+   "report": "<campaign-root>/runs/live/audit-parity/static/conv-w3-base-n4-open-L2-k0/report.json"
+  },
+  {
+   "cell_id": "conv-w3-base-n8-closed-L2",
+   "split": "test",
+   "family": "fast25_conversation",
+   "mode": "closed_concurrency",
+   "num_workers": 8,
+   "k": 0,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "replay-source reference only (test cell: not replayed, to avoid test exposure)",
+   "requests": 2083,
+   "sessions": 2083,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": null,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (2250 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": null
+   },
+   "open_loop_tie_groups": null,
+   "open_loop_requests_in_ties": null,
+   "full_16_token_blocks": 1449674,
+   "distinct_16_token_blocks": 1065639,
+   "replay_peak_in_flight": null,
+   "report": "<campaign-root>/runs/live/audit-parity/static/conv-w3-base-n8-closed-L2-k0/report.json"
+  },
+  {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "split": "test",
+   "family": "fast25_synthetic",
+   "mode": "open_speedup",
+   "num_workers": 4,
+   "k": 0,
+   "replicate_protocol": "crn-order-v1",
+   "compared_against": "replay-source reference only (test cell: not replayed, to avoid test exposure)",
+   "requests": 1919,
+   "sessions": 1919,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": true,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (1500 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": null
+   },
+   "open_loop_tie_groups": 7,
+   "open_loop_requests_in_ties": 14,
+   "full_16_token_blocks": 1454763,
+   "distinct_16_token_blocks": 984234,
+   "replay_peak_in_flight": null,
+   "report": "<campaign-root>/runs/live/audit-parity/static/fast25_synthetic-x0-base-n4-open-L2-k0/report.json"
+  },
+  {
+   "cell_id": "fast25_synthetic-x0-base-n8-closed-L2",
+   "split": "test",
+   "family": "fast25_synthetic",
+   "mode": "closed_concurrency",
+   "num_workers": 8,
+   "k": 0,
+   "replicate_protocol": "crn-order-v1",
+   "compared_against": "replay-source reference only (test cell: not replayed, to avoid test exposure)",
+   "requests": 1919,
+   "sessions": 1919,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": null,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (1501 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": null
+   },
+   "open_loop_tie_groups": null,
+   "open_loop_requests_in_ties": null,
+   "full_16_token_blocks": 1454763,
+   "distinct_16_token_blocks": 984234,
+   "replay_peak_in_flight": null,
+   "report": "<campaign-root>/runs/live/audit-parity/static/fast25_synthetic-x0-base-n8-closed-L2-k0/report.json"
+  },
+  {
+   "cell_id": "mooncake-w1-base-n6-open-L2",
+   "split": "val",
+   "family": "mooncake",
+   "mode": "open_speedup",
+   "num_workers": 6,
+   "k": 3,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, lmetric@defaults",
+   "requests": 3735,
+   "sessions": 3735,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": true,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (1796 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": 10,
+   "open_loop_requests_in_ties": 20,
+   "full_16_token_blocks": 2099176,
+   "distinct_16_token_blocks": 1059771,
+   "replay_peak_in_flight": [
+    99,
+    92
+   ],
+   "report": "<campaign-root>/runs/live/audit-parity/static/mooncake-w1-base-n6-open-L2-k3/report.json"
+  },
+  {
+   "cell_id": "mooncake-w1-islu1.25-n6-closed-L2",
+   "split": "val",
+   "family": "mooncake",
+   "mode": "closed_concurrency",
+   "num_workers": 6,
+   "k": 7,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, lmetric@defaults",
+   "requests": 3728,
+   "sessions": 3728,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": null,
+    "block_bijection": true,
+    "closed_loop_slot_rule": true,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (1800 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": null,
+   "open_loop_requests_in_ties": null,
+   "full_16_token_blocks": 2263717,
+   "distinct_16_token_blocks": 1226264,
+   "replay_peak_in_flight": null,
+   "report": "<campaign-root>/runs/live/audit-parity/static/mooncake-w1-islu1.25-n6-closed-L2-k7/report.json"
+  },
+  {
+   "cell_id": "mooncake-w2-base-n4-closed-L3",
+   "split": "train",
+   "family": "mooncake",
+   "mode": "closed_concurrency",
+   "num_workers": 4,
+   "k": 2,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, round_robin",
+   "requests": 4002,
+   "sessions": 4002,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": null,
+    "block_bijection": true,
+    "closed_loop_slot_rule": true,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (1809 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": null,
+   "open_loop_requests_in_ties": null,
+   "full_16_token_blocks": 2134221,
+   "distinct_16_token_blocks": 1057605,
+   "replay_peak_in_flight": null,
+   "report": "<campaign-root>/runs/live/audit-parity/static/mooncake-w2-base-n4-closed-L3-k2/report.json"
+  },
+  {
+   "cell_id": "mooncake-w2-root2-n4-open-L2",
+   "split": "train",
+   "family": "mooncake",
+   "mode": "open_speedup",
+   "num_workers": 4,
+   "k": 1,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, round_robin",
+   "requests": 4002,
+   "sessions": 4002,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": true,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (1633 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": 10,
+   "open_loop_requests_in_ties": 20,
+   "full_16_token_blocks": 2134221,
+   "distinct_16_token_blocks": 1058277,
+   "replay_peak_in_flight": [
+    84,
+    82
+   ],
+   "report": "<campaign-root>/runs/live/audit-parity/static/mooncake-w2-root2-n4-open-L2-k1/report.json"
+  },
+  {
+   "cell_id": "mooncake-w4-osl2.0-n4-open-L2",
+   "split": "train",
+   "family": "mooncake",
+   "mode": "open_speedup",
+   "num_workers": 4,
+   "k": 5,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, round_robin",
+   "requests": 4159,
+   "sessions": 4159,
+   "later_turns": 0,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": true,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "2250/2250 equal (1786 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 0.0,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": 10,
+   "open_loop_requests_in_ties": 20,
+   "full_16_token_blocks": 2134926,
+   "distinct_16_token_blocks": 1031971,
+   "replay_peak_in_flight": [
+    121,
+    113
+   ],
+   "report": "<campaign-root>/runs/live/audit-parity/static/mooncake-w4-osl2.0-n4-open-L2-k5/report.json"
+  },
+  {
+   "cell_id": "sessions-s2-think2.0-n4-closed-L2",
+   "split": "train",
+   "family": "synthetic_sessions",
+   "mode": "closed_concurrency",
+   "num_workers": 4,
+   "k": 6,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, round_robin",
+   "requests": 10685,
+   "sessions": 2125,
+   "later_turns": 8560,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": null,
+    "block_bijection": true,
+    "closed_loop_slot_rule": true,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "3000/3000 equal (2364 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 1.1641532182693481e-10,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": null,
+   "open_loop_requests_in_ties": null,
+   "full_16_token_blocks": 5196492,
+   "distinct_16_token_blocks": 544108,
+   "replay_peak_in_flight": null,
+   "report": "<campaign-root>/runs/live/audit-parity/static/sessions-s2-think2.0-n4-closed-L2-k6/report.json"
+  },
+  {
+   "cell_id": "sessions-s3-root2-n4-open-L2",
+   "split": "train",
+   "family": "synthetic_sessions",
+   "mode": "open_speedup",
+   "num_workers": 4,
+   "k": 6,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, round_robin",
+   "requests": 13889,
+   "sessions": 2878,
+   "later_turns": 11011,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": true,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "3000/3000 equal (2297 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 1.2005330063402653e-10,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": 2,
+   "open_loop_requests_in_ties": 4,
+   "full_16_token_blocks": 5519601,
+   "distinct_16_token_blocks": 715377,
+   "replay_peak_in_flight": [
+    113,
+    150
+   ],
+   "report": "<campaign-root>/runs/live/audit-parity/static/sessions-s3-root2-n4-open-L2-k6/report.json"
+  },
+  {
+   "cell_id": "sessions-s4-base-n8-closed-L2",
+   "split": "val",
+   "family": "synthetic_sessions",
+   "mode": "closed_concurrency",
+   "num_workers": 8,
+   "k": 9,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, m1-s1@sel-g25",
+   "requests": 15904,
+   "sessions": 3141,
+   "later_turns": 12763,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": null,
+    "block_bijection": true,
+    "closed_loop_slot_rule": true,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "3000/3000 equal (2371 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 1.1641532182693481e-10,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": null,
+   "open_loop_requests_in_ties": null,
+   "full_16_token_blocks": 6350979,
+   "distinct_16_token_blocks": 833139,
+   "replay_peak_in_flight": null,
+   "report": "<campaign-root>/runs/live/audit-parity/static/sessions-s4-base-n8-closed-L2-k9/report.json"
+  },
+  {
+   "cell_id": "sessions-s5-think1.5-n6-open-L2",
+   "split": "val",
+   "family": "synthetic_sessions",
+   "mode": "open_speedup",
+   "num_workers": 6,
+   "k": 4,
+   "replicate_protocol": "crn-spread-v1",
+   "compared_against": "cached lr-eval per_request rows: default@defaults, m1-s1@sel-g25",
+   "requests": 22095,
+   "sessions": 4322,
+   "later_turns": 17773,
+   "exact": true,
+   "checks": {
+    "arrivals_bitwise": true,
+    "block_bijection": true,
+    "closed_loop_slot_rule": null,
+    "isl_exact": true,
+    "osl_target_exact": true,
+    "prefix_pairs": "3000/3000 equal (2369 with LCP > 0)",
+    "request_set_and_order": true,
+    "session_header_rule": true,
+    "think_max_abs_err_ms": 2.346496330574155e-10,
+    "window_scorer_equal": true
+   },
+   "open_loop_tie_groups": 3,
+   "open_loop_requests_in_ties": 6,
+   "full_16_token_blocks": 7595318,
+   "distinct_16_token_blocks": 1124806,
+   "replay_peak_in_flight": [
+    160,
+    128
+   ],
+   "report": "<campaign-root>/runs/live/audit-parity/static/sessions-s5-think1.5-n6-open-L2-k4/report.json"
+  }
+ ],
+ "static_all_exact": true,
+ "coverage": {
+  "families_modes": "mooncake open/closed (5 cells: base, osl2.0, root2, islu1.25; L2-L3; N 4, 6), synthetic_sessions open/closed (4 cells: base, think1.5, think2.0, root2; N 4, 6, 8), fast25_conversation open/closed and fast25_synthetic open/closed (4 test cells, reference only)",
+  "replicates": "k in {0,1,2,3,4,5,6,7,9}",
+  "replay_policies": "default@defaults, round_robin, lmetric@defaults, m1-s1@sel-g25",
+  "pairs_min_per_cell": 2250,
+  "agentx": "refused by the generator (NE1)"
+ },
+ "stub_runs": [
+  {
+   "run": "S1",
+   "cell_id": "mooncake-w1-base-n6-open-L2",
+   "k": 3,
+   "mode": "open",
+   "replay_policy_played_back": "default@defaults",
+   "requests_received_exactly_once": "3735/3735",
+   "missing": 0,
+   "duplicates": 0,
+   "payload_mismatch": 0,
+   "session_header_presence_mismatch": 0,
+   "session_header_one_value_per_session_and_distinct": true,
+   "fidelity_ok": true,
+   "first_turn_server_lateness_ms": {
+    "max": 95.21826350397896,
+    "min": -4.2759347707033157e-07,
+    "n": 3735,
+    "p50": 2.0869965622841846,
+    "p99": 10.668897957528214
+   },
+   "aiperf_credit_lateness_ms": {
+    "max": 93.63585850398522,
+    "min": -4.2759347707033157e-07,
+    "n": 3735,
+    "p50": 1.445326068555005,
+    "p99": 4.571254639341495
+   },
+   "think_residual_server_ms": null,
+   "think_residual_aiperf_ms": null,
+   "arrival_minus_replay_arrival_ms": {
+    "max": 95.21826350397896,
+    "min": -4.2759347707033157e-07,
+    "n": 3735,
+    "p50": 2.0869965622841846,
+    "p99": 10.668897957528214
+   },
+   "stub_service_error_ms": {
+    "max": 133.83433941145086,
+    "min": 0.05332378347191025,
+    "n": 3735,
+    "p50": 0.9701372787521905,
+    "p99": 6.404888560817632
+   },
+   "closed_loop": null,
+   "dispatch_order_inversions": {
+    "credit_issued": {
+     "count": 0,
+     "max_ms": 0.0
+    },
+    "request_start": {
+     "count": 17,
+     "max_ms": 23.967799
+    },
+    "scheduled_tie_groups": 10,
+    "server_receive": {
+     "count": 16,
+     "max_ms": 24.100543
+    },
+    "starts": 3735
+   },
+   "scoring_live_vs_replay": {
+    "window_requests": {
+     "live": 2149,
+     "replay": 2149,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_good": {
+     "live": 1815,
+     "replay": 1815,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "good_frac_window": {
+     "live": 0.8445788738948348,
+     "replay": 0.8445788738948348,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "goodput_rps_window": {
+     "live": 4.877837712323675,
+     "replay": 4.877837712323675,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_start_ms": {
+     "live": 246482.447,
+     "replay": 246482.447,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_end_ms": {
+     "live": 618573.547,
+     "replay": 618573.547,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_below_cap_frac": {
+     "live": null,
+     "replay": null,
+     "diff": null,
+     "rel_diff": null
+    },
+    "ttft_p50": {
+     "live": 180.04288599999998,
+     "replay": 177.72109152341727,
+     "diff": 2.32179447658271,
+     "rel_diff": 0.013064259602956471
+    },
+    "itl_p50": {
+     "live": 32.68380742635659,
+     "replay": 32.68696264840397,
+     "diff": -0.003155222047382722,
+     "rel_diff": -9.652845635496157e-05
+    },
+    "slowdown_p50": {
+     "live": 1.7573313160167732,
+     "replay": 1.7554944820324019,
+     "diff": 0.0018368339843712889,
+     "rel_diff": 0.0010463342398232532
+    }
+   },
+   "latency_live_over_replay_p50": {
+    "ttft_live_over_replay": 1.009992664577941,
+    "e2e_live_over_replay": 1.000792410821673,
+    "itl_live_over_replay": 1.000013164174467
+   },
+   "check": "<campaign-root>/runs/live/audit-parity/stub/S1/check.json"
+  },
+  {
+   "run": "S2",
+   "cell_id": "mooncake-w1-islu1.25-n6-closed-L2",
+   "k": 7,
+   "mode": "closed",
+   "replay_policy_played_back": "lmetric@defaults",
+   "requests_received_exactly_once": "3728/3728",
+   "missing": 0,
+   "duplicates": 0,
+   "payload_mismatch": 0,
+   "session_header_presence_mismatch": 0,
+   "session_header_one_value_per_session_and_distinct": true,
+   "fidelity_ok": true,
+   "first_turn_server_lateness_ms": null,
+   "aiperf_credit_lateness_ms": null,
+   "think_residual_server_ms": null,
+   "think_residual_aiperf_ms": null,
+   "arrival_minus_replay_arrival_ms": {
+    "max": 555.4506540022558,
+    "min": 0.0,
+    "n": 3728,
+    "p50": 186.08127300054184,
+    "p99": 425.87800884276976
+   },
+   "stub_service_error_ms": {
+    "max": 84.41610800020499,
+    "min": 0.03784700000124985,
+    "n": 3728,
+    "p50": 1.0095539999907501,
+    "p99": 6.482777870039975
+   },
+   "closed_loop": {
+    "concurrency": 46,
+    "negative_handoffs": 0,
+    "peak_concurrent_sessions": 46,
+    "session_start_order_inversions": 37,
+    "slot_handoff_ms": {
+     "max": 193.089125,
+     "min": 0.971681,
+     "n": 3682,
+     "p50": 2.5894035000000004,
+     "p99": 11.340391510000014
+    }
+   },
+   "dispatch_order_inversions": {
+    "credit_issued": {
+     "count": 0,
+     "max_ms": 0.0
+    },
+    "request_start": {
+     "count": 36,
+     "max_ms": 8.487394
+    },
+    "server_receive": {
+     "count": 37,
+     "max_ms": 21.121728
+    },
+    "starts": 3728
+   },
+   "scoring_live_vs_replay": {
+    "window_requests": {
+     "live": 2111,
+     "replay": 2111,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_good": {
+     "live": 1893,
+     "replay": 1893,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "good_frac_window": {
+     "live": 0.8967314069161535,
+     "replay": 0.8967314069161535,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "goodput_rps_window": {
+     "live": 5.248642032037279,
+     "replay": 5.251902343332258,
+     "diff": -0.003260311294979168,
+     "rel_diff": -0.0006207867324719801
+    },
+    "window_start_ms": {
+     "live": 262009.425437,
+     "replay": 261863.38432999974,
+     "diff": 146.04110700025922,
+     "rel_diff": 0.0005576996088014295
+    },
+    "window_end_ms": {
+     "live": 622674.143748,
+     "replay": 622304.2067690016,
+     "diff": 369.93697899847757,
+     "rel_diff": 0.0005944632463906799
+    },
+    "window_below_cap_frac": {
+     "live": 0.00722601917150414,
+     "replay": 0.0,
+     "diff": 0.00722601917150414,
+     "rel_diff": null
+    },
+    "ttft_p50": {
+     "live": 123.51132999999999,
+     "replay": 120.89434650000112,
+     "diff": 2.6169834999988666,
+     "rel_diff": 0.021646864189789408
+    },
+    "itl_p50": {
+     "live": 26.005513393358328,
+     "replay": 25.959419105304818,
+     "diff": 0.04609428805351001,
+     "rel_diff": 0.0017756286404764206
+    },
+    "slowdown_p50": {
+     "live": 1.4655386166961595,
+     "replay": 1.465174173006669,
+     "diff": 0.0003644436894905123,
+     "rel_diff": 0.0002487374512906142
+    }
+   },
+   "latency_live_over_replay_p50": {
+    "ttft_live_over_replay": 1.0128614050156,
+    "e2e_live_over_replay": 1.0012708488730326,
+    "itl_live_over_replay": 1.000012577673272
+   },
+   "check": "<campaign-root>/runs/live/audit-parity/stub/S2/check.json"
+  },
+  {
+   "run": "S3",
+   "cell_id": "sessions-s4-base-n8-closed-L2",
+   "k": 9,
+   "mode": "closed",
+   "replay_policy_played_back": "m1-s1@sel-g25",
+   "requests_received_exactly_once": "15904/15904",
+   "missing": 0,
+   "duplicates": 0,
+   "payload_mismatch": 0,
+   "session_header_presence_mismatch": 0,
+   "session_header_one_value_per_session_and_distinct": true,
+   "fidelity_ok": true,
+   "first_turn_server_lateness_ms": null,
+   "aiperf_credit_lateness_ms": null,
+   "think_residual_server_ms": {
+    "max": 283.62047500003496,
+    "min": -0.17273000000022876,
+    "n": 12763,
+    "p50": 2.3938329999600683,
+    "p99": 12.018109159998948
+   },
+   "think_residual_aiperf_ms": {
+    "max": 281.46879099999455,
+    "min": -1.5539240000271093,
+    "n": 12763,
+    "p50": 0.3076190000228962,
+    "p99": 5.076492720001594
+   },
+   "arrival_minus_replay_arrival_ms": {
+    "max": 503.9424259994412,
+    "min": 0.0,
+    "n": 15904,
+    "p50": 176.06440100003965,
+    "p99": 373.4102989927469
+   },
+   "stub_service_error_ms": {
+    "max": 77.13375800006179,
+    "min": 0.040906994717261114,
+    "n": 15904,
+    "p50": 0.9347465000819284,
+    "p99": 5.379398669965853
+   },
+   "closed_loop": {
+    "concurrency": 265,
+    "negative_handoffs": 0,
+    "peak_concurrent_sessions": 265,
+    "session_start_order_inversions": 135,
+    "slot_handoff_ms": {
+     "max": 235.191053,
+     "min": 0.971981,
+     "n": 2876,
+     "p50": 2.538374,
+     "p99": 11.17640825
+    }
+   },
+   "dispatch_order_inversions": {
+    "credit_issued": {
+     "count": 0,
+     "max_ms": 0.0
+    },
+    "request_start": {
+     "count": 123,
+     "max_ms": 18.883721
+    },
+    "server_receive": {
+     "count": 135,
+     "max_ms": 59.077954
+    },
+    "starts": 3141
+   },
+   "scoring_live_vs_replay": {
+    "window_requests": {
+     "live": 11962,
+     "replay": 11962,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_good": {
+     "live": 11933,
+     "replay": 11933,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "good_frac_window": {
+     "live": 0.9975756562447751,
+     "replay": 0.9975756562447751,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "goodput_rps_window": {
+     "live": 15.39206317154897,
+     "replay": 15.397779390484741,
+     "diff": -0.005716218935770456,
+     "rel_diff": -0.0003712365783927823
+    },
+    "window_start_ms": {
+     "live": 72903.555623,
+     "replay": 72810.00748200004,
+     "diff": 93.54814099994837,
+     "rel_diff": 0.0012848253177707085
+    },
+    "window_end_ms": {
+     "live": 848173.242799,
+     "replay": 847791.8861920012,
+     "diff": 381.3566069988301,
+     "rel_diff": 0.0004498233743563612
+    },
+    "window_below_cap_frac": {
+     "live": 0.00352978310034344,
+     "replay": 0.0,
+     "diff": 0.00352978310034344,
+     "rel_diff": null
+    },
+    "ttft_p50": {
+     "live": 95.3293365,
+     "replay": 93.23803250008496,
+     "diff": 2.0913039999150413,
+     "rel_diff": 0.022429731128369056
+    },
+    "itl_p50": {
+     "live": 24.900403564641742,
+     "replay": 24.899501072330295,
+     "diff": 0.0009024923114466787,
+     "rel_diff": 3.62453974007366e-05
+    },
+    "slowdown_p50": {
+     "live": 1.5279054786254531,
+     "replay": 1.5272523669090907,
+     "diff": 0.0006531117163623978,
+     "rel_diff": 0.0004276383723563574
+    }
+   },
+   "latency_live_over_replay_p50": {
+    "ttft_live_over_replay": 1.0175240357273245,
+    "e2e_live_over_replay": 1.0002920708839507,
+    "itl_live_over_replay": 1.0000108485200843
+   },
+   "check": "<campaign-root>/runs/live/audit-parity/stub/S3/check.json"
+  },
+  {
+   "run": "S4",
+   "cell_id": "sessions-s5-think1.5-n6-open-L2",
+   "k": 4,
+   "mode": "open",
+   "replay_policy_played_back": "default@defaults",
+   "requests_received_exactly_once": "22095/22095",
+   "missing": 0,
+   "duplicates": 0,
+   "payload_mismatch": 0,
+   "session_header_presence_mismatch": 0,
+   "session_header_one_value_per_session_and_distinct": true,
+   "fidelity_ok": true,
+   "first_turn_server_lateness_ms": {
+    "max": 153.41452694043983,
+    "min": -9.906943887472153e-08,
+    "n": 4322,
+    "p50": 1.97650808646722,
+    "p99": 11.098846198397222
+   },
+   "aiperf_credit_lateness_ms": {
+    "max": 152.6239659404382,
+    "min": -3.816094249486923e-07,
+    "n": 4322,
+    "p50": 1.4218019962427206,
+    "p99": 4.534473507918009
+   },
+   "think_residual_server_ms": {
+    "max": 139.8697910000028,
+    "min": 0.46174799989421444,
+    "n": 17773,
+    "p50": 2.7153820000639826,
+    "p99": 14.137042239948059
+   },
+   "think_residual_aiperf_ms": {
+    "max": 129.97980700000062,
+    "min": -0.9268219999976282,
+    "n": 17773,
+    "p50": 1.0326100000879705,
+    "p99": 6.7858220799321805
+   },
+   "arrival_minus_replay_arrival_ms": {
+    "max": 254.89684598817257,
+    "min": -9.906943887472153e-08,
+    "n": 22095,
+    "p50": 13.744600022444502,
+    "p99": 103.46433879131455
+   },
+   "stub_service_error_ms": {
+    "max": 96.2656900566144,
+    "min": 0.04230660746225112,
+    "n": 22095,
+    "p50": 0.9129424098136951,
+    "p99": 5.065736089206796
+   },
+   "closed_loop": null,
+   "dispatch_order_inversions": {
+    "credit_issued": {
+     "count": 0,
+     "max_ms": 0.0
+    },
+    "request_start": {
+     "count": 4,
+     "max_ms": 1.42063
+    },
+    "scheduled_tie_groups": 3,
+    "server_receive": {
+     "count": 5,
+     "max_ms": 1.299835
+    },
+    "starts": 4322
+   },
+   "scoring_live_vs_replay": {
+    "window_requests": {
+     "live": 6240,
+     "replay": 6240,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_good": {
+     "live": 5805,
+     "replay": 5808,
+     "diff": -3.0,
+     "rel_diff": -0.0005165289256198347
+    },
+    "good_frac_window": {
+     "live": 0.9302884615384616,
+     "replay": 0.9307692307692308,
+     "diff": -0.00048076923076922906,
+     "rel_diff": -0.0005165289256198329
+    },
+    "goodput_rps_window": {
+     "live": 10.75,
+     "replay": 10.755555555555556,
+     "diff": -0.005555555555556424,
+     "rel_diff": -0.0005165289256199154
+    },
+    "window_start_ms": {
+     "live": 1320000.0,
+     "replay": 1320000.0,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_end_ms": {
+     "live": 1860000.0,
+     "replay": 1860000.0,
+     "diff": 0.0,
+     "rel_diff": 0.0
+    },
+    "window_below_cap_frac": {
+     "live": null,
+     "replay": null,
+     "diff": null,
+     "rel_diff": null
+    },
+    "ttft_p50": {
+     "live": 131.88852599999998,
+     "replay": 129.83790130051784,
+     "diff": 2.0506246994821424,
+     "rel_diff": 0.015793729557718628
+    },
+    "itl_p50": {
+     "live": 26.79861576567657,
+     "replay": 26.798160078575137,
+     "diff": 0.0004556871014322894,
+     "rel_diff": 1.7004417471056407e-05
+    },
+    "slowdown_p50": {
+     "live": 1.677653017297844,
+     "replay": 1.6772306082923254,
+     "diff": 0.0004224090055187091,
+     "rel_diff": 0.00025184909184836865
+    }
+   },
+   "latency_live_over_replay_p50": {
+    "ttft_live_over_replay": 1.0124367763685262,
+    "e2e_live_over_replay": 1.0002572986303246,
+    "itl_live_over_replay": 1.000006581362588
+   },
+   "check": "<campaign-root>/runs/live/audit-parity/stub/S4/check.json"
+  }
+ ],
+ "stub_all_exact_delivery": true,
+ "non_equivalences": [
+  {
+   "id": "NE1-agentx",
+   "what": "AgentX (agentic_lanes, Agentic Mooncake v2 lowered traces) has no live load-generator path; gen_aiperf_inputs refuses it (confirmed on agentx-V1-base-n4-lanes-L2).",
+   "why": "Replay's lanes need typed dispatch/completion edges with per-edge delays, join and replay_barrier relations, play-relative not_before_ms floors and lanes dealt ordinal % L that recycle on play quiescence; upstream AIPerf agentic_replay/dag_jsonl and the prior finite fork do not implement them.",
+   "impact": "Coverage gap, not a measurement error: the AgentX family (8 train, 4 val, 14 test cells; the family where the pilot's M1 trailed) cannot be validated live, so the A13 sim-vs-live check speaks only for mooncake, fast25 (conversation, synthetic) and synthetic_sessions.",
+   "severity": "major (scope)",
+   "mitigation": "a dedicated driver that executes the lowered graph with replay's lane rules, or fork work on lane recycling and replay_barrier; not attempted"
+  },
+  {
+   "id": "NE2-latency-base",
+   "what": "Live TTFT and E2E are measured client-side from the HTTP request start (client send, frontend, SSE framing and the final usage chunk included); replay measures from router arrival. The AIS E0 reference does not include this overhead.",
+   "evidence": {
+    "stub_ttft_p50_live_over_replay": [
+     1.01,
+     1.0129,
+     1.0175,
+     1.0124
+    ],
+    "stub_e2e_p50_live_over_replay": [
+     1.00079,
+     1.00127,
+     1.00029,
+     1.00026
+    ],
+    "stub_ttft_p50_diff_ms": [
+     2.322,
+     2.617,
+     2.091,
+     2.051
+    ],
+    "S4_window_good_live_vs_replay": [
+     5805,
+     5808
+    ],
+    "S4_flip_mechanism": "6 requests flipped from good (replay) to not good (live), 3 of them in the window; all are E2E-slowdown boundary cases: replay E2E 0.2-3.4 ms under the bound, live E2E 1.3-33 ms longer than replay; no ITL flip, no flip toward good (per-request diff over score_live rows vs replay rows)"
+   },
+   "impact": "With zero engine difference (stub), good counts matched replay in S1-S3 and lost 3 of 5,808 in S4 (goodput_rps_window -0.05%). On a real deployment the frontend adds more (preprocess, routing, detokenize; unmeasured offline), a systematic and mostly policy-independent bias toward 'not good' at the E2E-slowdown boundary. Hypothesis: relative policy comparisons are largely unaffected; the live-fitted E0 mode (score_live --e0 live) removes the idle part of it.",
+   "severity": "minor (systematic, measured)"
+  },
+  {
+   "id": "NE3-open-loop-dispatch-lateness",
+   "what": "AIPerf issues first turns at the scheduled instant plus client overhead (timer, ZMQ credit hop, HTTP send).",
+   "evidence": {
+    "S1_server_first_turn_lateness_ms": {
+     "max": 95.21826350397896,
+     "min": -4.2759347707033157e-07,
+     "n": 3735,
+     "p50": 2.0869965622841846,
+     "p99": 10.668897957528214
+    },
+    "S4_server_first_turn_lateness_ms": {
+     "max": 153.41452694043983,
+     "min": -9.906943887472153e-08,
+     "n": 4322,
+     "p50": 1.97650808646722,
+     "p99": 11.098846198397222
+    },
+    "S1_aiperf_credit_lateness_ms": {
+     "max": 93.63585850398522,
+     "min": -4.2759347707033157e-07,
+     "n": 3735,
+     "p50": 1.445326068555005,
+     "p99": 4.571254639341495
+    },
+    "host": "shared 24-core workstation, phase-2 replays running intermittently"
+   },
+   "impact": "Arrivals at the router are milliseconds late (rare hiccups to ~0.1 s). Window membership of first turns is unaffected (the scorer uses the generated arrival, bit-identical to replay), and the lateness is not inside measured latencies. Negligible next to the mean first-turn inter-arrival (166 ms in S1, 444 ms in S4).",
+   "severity": "negligible (measured)"
+  },
+  {
+   "id": "NE4-think-time-origin",
+   "what": "Replay starts a session's next-turn delay at the previous turn's final token; AIPerf starts it at credit return (after the full SSE response incl. usage chunk and [DONE] is consumed and the credit reaches the timing manager).",
+   "evidence": {
+    "S3_server_think_residual_ms": {
+     "max": 283.62047500003496,
+     "min": -0.17273000000022876,
+     "n": 12763,
+     "p50": 2.3938329999600683,
+     "p99": 12.018109159998948
+    },
+    "S4_server_think_residual_ms": {
+     "max": 139.8697910000028,
+     "min": 0.46174799989421444,
+     "n": 17773,
+     "p50": 2.7153820000639826,
+     "p99": 14.137042239948059
+    },
+    "S3_aiperf_think_residual_ms": {
+     "max": 281.46879099999455,
+     "min": -1.5539240000271093,
+     "n": 12763,
+     "p50": 0.3076190000228962,
+     "p99": 5.076492720001594
+    },
+    "S4_aiperf_think_residual_ms": {
+     "max": 129.97980700000062,
+     "min": -0.9268219999976282,
+     "n": 17773,
+     "p50": 1.0326100000879705,
+     "p99": 6.7858220799321805
+    }
+   },
+   "impact": "Later turns reach the router ~2-3 ms later per hop (server-side p50 2.4-2.7 ms, p99 12-14 ms). Small negative residuals (min -0.17 ms server-side, -1.6 ms AIPerf-side) are consistent with event-loop timer granularity (hypothesis).",
+   "severity": "negligible (measured)"
+  },
+  {
+   "id": "NE5-closed-loop-slot-handoff",
+   "what": "Replay starts the next session at the instant a session departs; AIPerf after the credit return of the session's final turn.",
+   "evidence": {
+    "S2_handoff_ms": {
+     "max": 193.089125,
+     "min": 0.971681,
+     "n": 3682,
+     "p50": 2.5894035000000004,
+     "p99": 11.340391510000014
+    },
+    "S3_handoff_ms": {
+     "max": 235.191053,
+     "min": 0.971981,
+     "n": 2876,
+     "p50": 2.538374,
+     "p99": 11.17640825
+    },
+    "peak_concurrent_sessions_vs_C": [
+     [
+      46,
+      46
+     ],
+     [
+      265,
+      265
+     ]
+    ],
+    "window_below_cap_frac_live": [
+     0.00722601917150414,
+     0.00352978310034344
+    ],
+    "window_below_cap_frac_replay": [
+     0.0,
+     0.0
+    ]
+   },
+   "impact": "Effective concurrency sits below C for 0.35-0.72% of the window; goodput_rps_window moved -0.06% (S2) and -0.04% (S3) with identical window request and good counts.",
+   "severity": "negligible (measured)"
+  },
+  {
+   "id": "NE6-accumulated-drift",
+   "what": "Every dependent dispatch (later turn, closed-loop session start) inherits the residuals of its predecessors, so live arrival times drift behind replay's even when service times equal replay's exactly.",
+   "evidence": {
+    "S2_closed_arrival_minus_replay_ms": {
+     "max": 555.4506540022558,
+     "min": 0.0,
+     "n": 3728,
+     "p50": 186.08127300054184,
+     "p99": 425.87800884276976
+    },
+    "S3_closed_arrival_minus_replay_ms": {
+     "max": 503.9424259994412,
+     "min": 0.0,
+     "n": 15904,
+     "p50": 176.06440100003965,
+     "p99": 373.4102989927469
+    },
+    "S4_open_sessions_arrival_minus_replay_ms": {
+     "max": 254.89684598817257,
+     "min": -9.906943887472153e-08,
+     "n": 22095,
+     "p50": 13.744600022444502,
+     "p99": 103.46433879131455
+    },
+    "S2_window_shift_ms": [
+     146.04110700025922,
+     369.93697899847757
+    ],
+    "S3_window_shift_ms": [
+     93.54814099994837,
+     381.3566069988301
+    ]
+   },
+   "impact": "Completion-basis window bounds shift by 0.1-0.4 s over 11-19 min runs; open-loop later-turn arrivals by p50 14 ms. Window request counts were identical in all 4 stub runs.",
+   "severity": "negligible (measured)"
+  },
+  {
+   "id": "NE7-simultaneous-order",
+   "what": "The order of requests due at the same instant cannot be enforced live. AIPerf issues credits in replay's order (stable schedule sort; closed-loop sequential sampler), but requests are sent by different worker processes and reach the server reordered.",
+   "evidence": {
+    "open_loop_tie_groups (groups, requests, total)": {
+     "conv-w3-base-n4-open-L2": [
+      1,
+      2,
+      2083
+     ],
+     "fast25_synthetic-x0-base-n4-open-L2": [
+      7,
+      14,
+      1919
+     ],
+     "mooncake-w1-base-n6-open-L2": [
+      10,
+      20,
+      3735
+     ],
+     "mooncake-w2-root2-n4-open-L2": [
+      10,
+      20,
+      4002
+     ],
+     "mooncake-w4-osl2.0-n4-open-L2": [
+      10,
+      20,
+      4159
+     ],
+     "sessions-s3-root2-n4-open-L2": [
+      2,
+      4,
+      13889
+     ],
+     "sessions-s5-think1.5-n6-open-L2": [
+      3,
+      6,
+      22095
+     ]
+    },
+    "credit_issued_inversions": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "request_start_inversions": [
+     {
+      "count": 17,
+      "max_ms": 23.967799
+     },
+     {
+      "count": 36,
+      "max_ms": 8.487394
+     },
+     {
+      "count": 123,
+      "max_ms": 18.883721
+     },
+     {
+      "count": 4,
+      "max_ms": 1.42063
+     }
+    ],
+    "server_receive_inversions": [
+     {
+      "count": 16,
+      "max_ms": 24.100543
+     },
+     {
+      "count": 37,
+      "max_ms": 21.121728
+     },
+     {
+      "count": 135,
+      "max_ms": 59.077954
+     },
+     {
+      "count": 5,
+      "max_ms": 1.299835
+     }
+    ],
+    "cause_of_ties": "crn-spread-v1 keeps integer Mooncake timestamps integer after the spread (replicates.spread_mooncake_arrivals), so sessions can collide within 1 ms; crn-order-v1 (fast25_synthetic) keeps logged ties"
+   },
+   "impact": "Near-simultaneous requests (within ~1-60 ms) may reach the router in a different order than replay processes them; affects 0.1-0.4% of open-loop first turns and 1.0-4.3% of closed-loop session starts, by at most 24 ms (open) and 59 ms (closed). Negligible for aggregate goodput (S1 window metrics identical).",
+   "severity": "negligible (measured)"
+  },
+  {
+   "id": "NE8-session-id-labels",
+   "what": "The X-Dynamo-Session-ID value is AIPerf's correlation ID ('fixed-schedule-<session>' in open loop, a per-session UUID in closed loop), not replay's session key.",
+   "evidence": "equivalence classes identical in every stub run (one value per session, all distinct); catalog policies that read SessionContext use the ID only as a map/equality key (sticky_session.rs:181, learned_choice/mod.rs:158, thunderagent request_classifier register)",
+   "impact": "None for the campaign's policies; would matter only for a policy that hashes the session ID.",
+   "severity": "none"
+  },
+  {
+   "id": "NE9-prompt-content",
+   "what": "Live prompts are salted pseudo-random regular-vocabulary tokens keyed by the hash path; replay synthesizes each trace block as its interned hash ID repeated. Content differs; structure is identical.",
+   "evidence": "token LCP == min(ISL_a, ISL_b, m*B) == replay token LCP on 2,250-3,000 sampled pairs per cell (0 mismatches in 13 cells, 67-100% of pairs with LCP > 0); 16-token chained block-hash bijection over every full block of every request (13/13 cells)",
+   "impact": "Prefix-cache and KV-router overlap structure is the same. Assumption (unverified): dense-model engine timing does not depend on token content. A fresh --salt per run is required to reproduce replay's cold start.",
+   "severity": "none (assumption noted)"
+  }
+ ],
+ "pending_gpu_confirmation": [
+  "vLLM 0.24 honoring min_tokens + ignore_eos so OSL is forced (scorer osl_mismatch / usage completion_tokens).",
+  "Token-ID prompts reaching vLLM unchanged (usage.prompt_tokens == ISL). Static evidence: Dynamo NvCreateCompletionRequest flattens CommonExt (top-level ignore_eos, min_tokens); preprocessor gather_tokens passes Prompt::IntegerArray through untouched (lib/llm/src/preprocessor.rs gather_tokens).",
+  "X-Dynamo-Session-ID reaching policies as SessionContext live (agents.rs agent_context_header_values -> routing_host/kv.rs to_worker_selection_session_context) with no session affinity configured.",
+  "Real frontend/transport overhead in the latency base (NE2) and live router-state lag (A5), both outside the load generator.",
+  "Client residuals on the GPU cluster client CPUs (the numbers here come from a shared, intermittently loaded workstation)."
+ ],
+ "evidence": {
+  "summary": "<campaign-root>/runs/live/audit-parity/SUMMARY.json",
+  "static_reports": "<campaign-root>/runs/live/audit-parity/static/<cell>-k<k>/report.json",
+  "stub_checks": "<campaign-root>/runs/live/audit-parity/stub/S{1..4}/check.json",
+  "stub_scores": "<campaign-root>/runs/live/audit-parity/stub/S{1..4}/check.score.json",
+  "s4_flips": "<campaign-root>/runs/live/audit-parity/stub/S4/flips.json",
+  "agentx_refusal": "gen_aiperf_inputs.py cell --cell-id agentx-V1-base-n4-lanes-L2 -> LiveInputError (agentic_mooncake/agentic_lanes is not supported by the live lane)"
+ },
+ "cluster_jobs": "none (no GPU, no GPU cluster or CPU cluster allocation, GPU cluster lock not taken)",
+ "side_effects": [
+  "runs/live/audit-parity/ (6.3G, listed in CLEANUP.md)",
+  "runs/replicates/: crn-spread-v1-mooncake-3cbc77c2399217cc-s3000-k0.jsonl (+ .rep.json, 405K) materialized for conv-w3 test cells; crn-order-v1-mooncake-317308c18a8f68b2-k0.jsonl.rep.json rewritten (deterministic, content-addressed, identical to what the test stage produces)",
+  "no E0 cache writes for test cells (--no-e0); train/val cells reused cached E0 values"
+ ]
+}

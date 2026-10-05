@@ -1,0 +1,95 @@
+[
+ {
+  "builtin": "default"
+ },
+ {
+  "builtin": "round_robin"
+ },
+ {
+  "name": "ramjet@p2-ramjet-s3-g25-best_so_far",
+  "parameters": {
+   "affinity_block_tokens": 512,
+   "alpha": 0.8828774076622825,
+   "basis": "relative",
+   "load_unit_tokens": 4552,
+   "max_affinity_blocks": 68
+  },
+  "router_config": {},
+  "router_mode": "kv_router",
+  "seeded": false,
+  "type": "ramjet"
+ },
+ {
+  "name": "m1v2@p2-m1v2-s1-g20-best_so_far",
+  "parameters": {
+   "feature_set": "v2",
+   "temperature": 0.0,
+   "theta": [
+    -1.0,
+    5.033515242371209,
+    1.2746683673882302,
+    -0.28108067880740606,
+    0.0,
+    -2.145681844785088,
+    1.3914915415496267,
+    0.0,
+    0.0,
+    -0.9275568752723515,
+    0.0,
+    -1.5816107829913904,
+    0.0,
+    0.0,
+    -0.34803343409089393,
+    0.0,
+    -1.3256644662987185,
+    -2.616992357050634,
+    0.0,
+    0.0,
+    -5.844876720699858,
+    -16.79238255993883,
+    -0.29672985742953983
+   ],
+   "tie_break": "one_draw"
+  },
+  "router_config": {},
+  "router_mode": "kv_router",
+  "seeded": true,
+  "type": "learned-choice"
+ },
+ {
+  "name": "m1@p2-m1c-s1-g20-mean",
+  "parameters": {
+   "feature_set": "v1",
+   "temperature": 0.0,
+   "theta": [
+    -1.0,
+    16.541278180717825,
+    -2.2737938976724337,
+    0.0,
+    0.0,
+    -39.22625809552176,
+    0.20618988014460626,
+    0.0
+   ],
+   "tie_break": "one_draw"
+  },
+  "router_config": {},
+  "router_mode": "kv_router",
+  "seeded": true,
+  "type": "learned-choice"
+ },
+ {
+  "name": "m0@p2-m0-s3-g20-mean",
+  "parameters": {
+   "decode_active_request_weight": 3288.855529743769,
+   "overlap_score_credit": 1.2365898565276212,
+   "overlap_score_credit_decay": 2.1526561532556725,
+   "prefill_load_scale": 78.01424273995057,
+   "router_temperature": 0.0013629625021912967
+  },
+  "router_config": {},
+  "router_mode": "kv_router",
+  "seeded": true,
+  "type": "dynamo-default-cost-fn"
+ }
+]

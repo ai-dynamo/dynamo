@@ -1,0 +1,321 @@
+{
+ "schema": "learned-routing.fairness-in-class-heuristic.v1",
+ "label": "AUDITOR DIAGNOSTIC, not pre-registered, never used for selection; validation/train only, the test split was not evaluated",
+ "finding": "audits/final/refute-headline-2.md F1 (major), fixed by scoping in audits/final/fix.md",
+ "method": "runs/final-fix/scripts/verify_fairness.py: values read from the campaign cache records (runs/cache/results) named by the auditor's lr-eval outputs (runs/audits/final-refute-headline-2/out/probe_*.jsonl); scored with the headline pipeline (clipped log-ratio vs default@defaults, eps 1e-3, mean over k per cell, mean over a segment's cells); reproduces the auditor's out/SUMMARY.json and *.paired.json",
+ "policies": {
+  "lmetric_faithful": "learned-choice v2, theta = -(e_log_ptok + e_log_bs): argmin (active_prefill + new_prefill) x (active_requests + 1) (FEATURES.md parity)",
+  "m1v2_s3_init": "learned-choice v2, theta = -e0 - 20.7 (e_log_ptok + e_log_bs): M1-v2 restart s3's x0 (facts/tierBC.json m1v2 inits)",
+  "default_plus_lmetric_c10": "theta = -e0 - 10 (e_log_ptok + e_log_bs); c swept over {2, 5, 10, 20.7, 40, 80, 160} on TRAIN k0-1 (8 evaluations incl. faithful alone), c = 10 picked on val k0-2",
+  "m1v2": "m1v2@p2-m1v2-s1-g20-best_so_far (headline learned arm, 3 x 400 evaluations)",
+  "ramjet": "ramjet@p2-ramjet-s3-g25-best_so_far (val-best tuned baseline, 3 x 400 evaluations)"
+ },
+ "mde": 0.038150067617275296,
+ "val_k3_10": {
+  "m1v2": {
+   "policy": "m1v2@p2-m1v2-s1-g20-best_so_far",
+   "records": 112,
+   "objective": 0.17830748263632787,
+   "segment_mean": 0.1441222106829235,
+   "vs_ramjet": {
+    "cell_mean": 0.037172649455946484,
+    "cell_se": 0.011579208466904087,
+    "cells_ahead": 10,
+    "cells": 14,
+    "segment_mean": 0.02896159279959519,
+    "segment_se": 0.01254189994321612,
+    "segments_ahead": 5,
+    "segments": 6,
+    "by_segment": {
+     "mooncake:w1": 0.07893682452221082,
+     "sessions:s5": -0.0009423542907893712,
+     "sessions:s4": 0.00014309518637686813,
+     "agentx:V1": 0.04683000858779873,
+     "agentx:V2": 0.032641850892038166,
+     "agentx:V3": 0.016160131899935926
+    }
+   }
+  },
+  "default_plus_lmetric_c10": {
+   "policy": "audit-lc-default-plus-lmetric-c10",
+   "records": 112,
+   "objective": 0.16088388837884968,
+   "segment_mean": 0.13310816625914973,
+   "vs_ramjet": {
+    "cell_mean": 0.019749055198468257,
+    "cell_se": 0.005596701250838951,
+    "cells_ahead": 10,
+    "cells": 14,
+    "segment_mean": 0.017947548375821427,
+    "segment_se": 0.006706672630934741,
+    "segments_ahead": 4,
+    "segments": 6,
+    "by_segment": {
+     "mooncake:w1": 0.03701476555777697,
+     "sessions:s5": -0.0006983034957039613,
+     "sessions:s4": -5.668107768846964e-05,
+     "agentx:V1": 0.03478964520105242,
+     "agentx:V2": 0.022195708361615413,
+     "agentx:V3": 0.014440155707876205
+    }
+   },
+   "m1v2_minus_this": {
+    "cell_mean": 0.017423594257478227,
+    "cell_se": 0.006912435683706082,
+    "cells_ahead": 11,
+    "cells": 14,
+    "segment_mean": 0.011014044423773761,
+    "segment_se": 0.006549183191061879,
+    "segments_ahead": 5,
+    "segments": 6,
+    "by_segment": {
+     "mooncake:w1": 0.04192205896443385,
+     "sessions:s5": -0.00024405079508540983,
+     "sessions:s4": 0.00019977626406533777,
+     "agentx:V1": 0.012040363386746314,
+     "agentx:V2": 0.010446142530422753,
+     "agentx:V3": 0.0017199761920597204
+    }
+   },
+   "share_of_m1v2_margin": {
+    "cell": 0.5312791928343169,
+    "segment": 0.6197017028729265
+   }
+  },
+  "m1v2_s3_init": {
+   "policy": "audit-lc-m1v2-s3-init",
+   "records": 112,
+   "objective": 0.16117623084468727,
+   "segment_mean": 0.1341330940052261,
+   "vs_ramjet": {
+    "cell_mean": 0.020041397664305845,
+    "cell_se": 0.005208477446322352,
+    "cells_ahead": 13,
+    "cells": 14,
+    "segment_mean": 0.018972476121897803,
+    "segment_se": 0.006748981003291229,
+    "segments_ahead": 6,
+    "segments": 6,
+    "by_segment": {
+     "mooncake:w1": 0.034944119260142265,
+     "sessions:s5": 0.00019128482758556942,
+     "sessions:s4": 0.0007661787495542027,
+     "agentx:V1": 0.03788708977617222,
+     "agentx:V2": 0.025819485123600577,
+     "agentx:V3": 0.01422669899433198
+    }
+   },
+   "m1v2_minus_this": {
+    "cell_mean": 0.01713125179164064,
+    "cell_se": 0.007087362760909602,
+    "cells_ahead": 9,
+    "cells": 14,
+    "segment_mean": 0.009989116677697387,
+    "segment_se": 0.0069966549374180665,
+    "segments_ahead": 4,
+    "segments": 6,
+    "by_segment": {
+     "mooncake:w1": 0.043992705262068554,
+     "sessions:s5": -0.0011336391183749406,
+     "sessions:s4": -0.0006230835631773346,
+     "agentx:V1": 0.00894291881162651,
+     "agentx:V2": 0.006822365768437588,
+     "agentx:V3": 0.0019334329056039448
+    }
+   },
+   "share_of_m1v2_margin": {
+    "cell": 0.5391436434483106,
+    "segment": 0.6550909079200572
+   }
+  },
+  "lmetric_faithful": {
+   "policy": "audit-lc-lmetric-faithful",
+   "records": 112,
+   "objective": 0.14900771008660857,
+   "segment_mean": 0.12618752202428019,
+   "vs_ramjet": {
+    "cell_mean": 0.007872876906227169,
+    "cell_se": 0.003148938926691152,
+    "cells_ahead": 11,
+    "cells": 14,
+    "segment_mean": 0.011026904140951884,
+    "segment_se": 0.004240814980855291,
+    "segments_ahead": 6,
+    "segments": 6,
+    "by_segment": {
+     "mooncake:w1": 0.005515263507315876,
+     "sessions:s5": 0.0001861670302821805,
+     "sessions:s4": 0.0009508050989004979,
+     "agentx:V1": 0.02471973302567841,
+     "agentx:V2": 0.02067465865274079,
+     "agentx:V3": 0.014114797530793553
+    }
+   },
+   "m1v2_minus_this": {
+    "cell_mean": 0.02929977254971931,
+    "cell_se": 0.0109429125445112,
+    "cells_ahead": 9,
+    "cells": 14,
+    "segment_mean": 0.017934688658643307,
+    "segment_se": 0.01168901849607973,
+    "segments_ahead": 4,
+    "segments": 6,
+    "by_segment": {
+     "mooncake:w1": 0.07342156101489494,
+     "sessions:s5": -0.0011285213210715517,
+     "sessions:s4": -0.0008077099125236298,
+     "agentx:V1": 0.02211027556212032,
+     "agentx:V2": 0.011967192239297375,
+     "agentx:V3": 0.0020453343691423723
+    }
+   },
+   "share_of_m1v2_margin": {
+    "cell": 0.2117921918790685,
+    "segment": 0.38074232371314926
+   }
+  },
+  "ramjet": {
+   "policy": "ramjet@p2-ramjet-s3-g25-best_so_far",
+   "records": 112,
+   "objective": 0.1411348331803814,
+   "segment_mean": 0.1151606178833283,
+   "m1v2_minus_this": {
+    "cell_mean": 0.037172649455946484,
+    "cell_se": 0.011579208466904087,
+    "cells_ahead": 10,
+    "cells": 14,
+    "segment_mean": 0.02896159279959519,
+    "segment_se": 0.01254189994321612,
+    "segments_ahead": 5,
+    "segments": 6,
+    "by_segment": {
+     "mooncake:w1": 0.07893682452221082,
+     "sessions:s5": -0.0009423542907893712,
+     "sessions:s4": 0.00014309518637686813,
+     "agentx:V1": 0.04683000858779873,
+     "agentx:V2": 0.032641850892038166,
+     "agentx:V3": 0.016160131899935926
+    }
+   }
+  }
+ },
+ "val_k0_2": {
+  "m1v2": 0.1767435156036474,
+  "default_plus_lmetric_c10": 0.16088051174936627,
+  "m1v2_s3_init": 0.15955235895623002,
+  "lmetric_faithful": 0.14934804479105773,
+  "ramjet": 0.14201773497049403
+ },
+ "val_k0_2_tuned_baseline_selections": {
+  "ramjet": 0.14201773497049403,
+  "ablabase": 0.1422864080073374,
+  "llmdpp": 0.14144503820442356,
+  "twotier": 0.1362797254582579,
+  "stickybounded": 0.1375757771207101,
+  "m0": 0.13342890354099643,
+  "lmetric": 0.1334104775240062,
+  "stickyhard": 0.11603745714199308,
+  "llmdob": 0.10466492990660352,
+  "dualmap": 0.040167736135162925,
+  "chwbl": 0.028959891209280025
+ },
+ "val_k0_2_best_tuned_baseline": {
+  "policy": "ablabase",
+  "value": 0.1422864080073374
+ },
+ "val_k3_10_tuned_baseline_ranking": [
+  [
+   "ramjet",
+   0.1411348331803814
+  ],
+  [
+   "ablabase",
+   0.1405424581894374
+  ],
+  [
+   "llmdpp",
+   0.13933790761239287
+  ],
+  [
+   "twotier",
+   0.13451775465167037
+  ],
+  [
+   "stickybounded",
+   0.13380951224916446
+  ],
+  [
+   "m0",
+   0.13262963505096179
+  ],
+  [
+   "lmetric",
+   0.1320527687218506
+  ],
+  [
+   "stickyhard",
+   0.1125374192869206
+  ],
+  [
+   "llmdob",
+   0.10349998934991964
+  ],
+  [
+   "dualmap",
+   0.026285052719892177
+  ],
+  [
+   "chwbl",
+   0.02175477178467915
+  ]
+ ],
+ "train_k0_1": {
+  "audit-lc-default-plus-lmetric-c2": 0.13498070496750306,
+  "audit-lc-default-plus-lmetric-c160": 0.1484356806944287,
+  "audit-lc-lmetric-faithful": 0.14659194541601095,
+  "audit-lc-default-plus-lmetric-c5": 0.15211102726949496,
+  "audit-lc-default-plus-lmetric-c10": 0.15663389024561508,
+  "audit-lc-default-plus-lmetric-c20.7": 0.15662518391408417,
+  "audit-lc-default-plus-lmetric-c40": 0.1547439478449046,
+  "audit-lc-default-plus-lmetric-c80": 0.15005761234551404,
+  "m1v2@p2-m1v2-s1-g20-best_so_far": 0.18513909867389777,
+  "ramjet@p2-ramjet-s3-g25-best_so_far": 0.14346810324158693
+ },
+ "train_records": {
+  "default@defaults": 68,
+  "audit-lc-default-plus-lmetric-c2": 68,
+  "audit-lc-default-plus-lmetric-c160": 68,
+  "audit-lc-lmetric-faithful": 68,
+  "audit-lc-default-plus-lmetric-c5": 68,
+  "audit-lc-default-plus-lmetric-c10": 68,
+  "audit-lc-default-plus-lmetric-c20.7": 68,
+  "audit-lc-default-plus-lmetric-c40": 68,
+  "audit-lc-default-plus-lmetric-c80": 68,
+  "m1v2@p2-m1v2-s1-g20-best_so_far": 68,
+  "ramjet@p2-ramjet-s3-g25-best_so_far": 68
+ },
+ "checks": {
+  "lmetric_faithful_beats_every_tuned_baseline_val_k0_2": true,
+  "lmetric_faithful_beats_every_tuned_baseline_val_k3_10": true,
+  "ramjet_val_k3_10_matches_finalists": true,
+  "m1v2_val_k3_10_matches_finalists": true
+ },
+ "val_k0_2_m1v2_minus_c10": {
+  "cell_mean": 0.01586300385428115,
+  "cell_se": 0.005909236092782406,
+  "cells_ahead": 11,
+  "cells": 14,
+  "segment_mean": 0.008922616297494879,
+  "segment_se": 0.006297742594675896,
+  "segments_ahead": 5,
+  "segments": 6,
+  "by_segment": {
+   "mooncake:w1": 0.03866783193255116,
+   "sessions:s5": 0.0005624104705343747,
+   "sessions:s4": 0.0006848689838437338,
+   "agentx:V1": -0.0027406834814893977,
+   "agentx:V2": 0.01206533851984977,
+   "agentx:V3": 0.004295931359679636
+  }
+ }
+}

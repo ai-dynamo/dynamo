@@ -11,7 +11,7 @@ Usage::
 Steps (idempotent; an existing file is reused only if its SHA-256 matches, never overwritten):
 
 1. ``mooncake`` and ``toolagent``: copy from a local trace corpus (``--skills-traces``) and check
-   the SHA-256 its index ``_shared/benchmark-traces.md`` lists (pinned in ``SHARED``).
+   the SHA-256 the corpus's own index lists (pinned in ``SHARED``).
 2. ``fast25``: Mooncake's FAST25 ``conversation_trace`` and ``synthetic_trace``. A local copy is used
    when one exists (pass ``--fast25-local``); otherwise they are fetched from GitHub at a pinned
    commit (``--download``). Both are checked against pinned SHA-256s.
@@ -44,7 +44,7 @@ from .synthetic import write as write_sessions
 from .transform import mooncake_stats, nested_timestamps_relative
 
 SHARED = {
-    # name: (family, sha256 from _shared/benchmark-traces.md, rows)
+    # name: (family, sha256 from the trace corpus's index, rows)
     "mooncake_trace.jsonl": (
         "mooncake",
         "b434f1816a707f4bac697235588184ebc374c9907cb981bb65fb0643471fe711",
@@ -155,7 +155,7 @@ def acquire_flat(
             family,
             {
                 "source": str(skills_traces / name),
-                "contract": "_shared/benchmark-traces.md",
+                "contract": "trace-corpus index",
                 "expected_sha256": sha,
                 "upstream": "kvcache-ai/Mooncake (toolagent: FAST25-release/traces/toolagent_trace.jsonl, identical SHA)",
             },

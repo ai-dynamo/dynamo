@@ -1,0 +1,12 @@
+name: "llm-d-precise-prefix-tuned@llmdpp-s2"
+parameters:
+  prefix_match_length_scale_tokens: 12191
+  prefix_match_length_weight: 0.3457432464867829
+  weights:
+    kv_cache_utilization: 1.7659798019934383
+    prefix: 2.0
+    queue: 0.8827526711588871
+router_config: {}
+router_mode: "kv_router"
+seeded: false
+type: "llm-d-precise-prefix"

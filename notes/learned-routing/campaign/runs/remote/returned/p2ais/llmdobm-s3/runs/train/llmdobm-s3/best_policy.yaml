@@ -1,0 +1,11 @@
+name: "llm-d-optimized-baseline-modeled-tuned@llmdobm-s3"
+parameters:
+  affinity_threshold: 0.5572497031148729
+  max_ttft_penalty_ms: 106.96069308728404
+  queue_threshold_tokens: 22630
+  ttft_source: "modeled"
+router_config:
+  router_prefill_load_model: "ais"
+router_mode: "kv_router"
+seeded: false
+type: "llm-d-optimized-baseline"

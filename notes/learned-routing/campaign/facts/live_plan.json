@@ -1,0 +1,1677 @@
+{
+ "schema": "learned-routing.live-plan.v1",
+ "registered_local": "2026-10-05 02:03:24 PDT",
+ "status": "pre-registered before any finalist live job (no finalist live job has been submitted)",
+ "contract": "CONTRACT A20 (phase 3), A13.2/A13.3 and addendum; validation only: live results never change a finalist, the headline, any pre-registered number or facts/finalists.json",
+ "frozen_inputs": {
+  "finalists_json_sha256": "e0bae29d7fb7e4bc88a93ba6f5fa4fd0498668a8559139230bb1472c838d0c87",
+  "test_jsonl_sha256": "7b998b8e7bd2c870da8e3701e468c3738655045b1a76a1f19110282ddfb3aa6f",
+  "engine_json_sha256": "7b5ff164ea9b214dde07e9b9a486862f981fadaa82419f694d44e19e94cef31b"
+ },
+ "deployment": {
+  "shape": "one whole 8xH100 SXM node per job, N = 4 vLLM 0.24.0 workers x TP2, Qwen3-32B, aggregated; frontend with the embedded KV router; recipe benchmarks/learned_routing/live/deploy (job_node.sh pairs mode)",
+  "worker_count_decision": "N = 4 only: every needed family/mode has frozen N = 4 test cells; the two-node N = 8 path is scripted but untested and would double node cost per run, so it is not worth the GPU time here",
+  "plan_dir": "<campaign-root>/runs/live/deploy/plans/finalists-k0",
+  "plan_id": "6c9a03162562a524",
+  "plan_sha256": "48d1d5b87f72f71ecdb98b7d9ea11d43a51c002918a68a6f1829a638f59105c6",
+  "plan_source_commit": "<commit-44>",
+  "serving_trees_equal_tuning_reference": true,
+  "replicate": 0,
+  "policy_seed": 1
+ },
+ "policies": [
+  {
+   "label": "default_a",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "name": "default@defaults",
+   "policy_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+   "policy_yaml_sha256": "3eb7e0104a4747731fee1acd7caba430795e3d9eb9b07e8dbf770de3dd788753"
+  },
+  {
+   "label": "default_b",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "name": "default@defaults",
+   "policy_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+   "policy_yaml_sha256": "3eb7e0104a4747731fee1acd7caba430795e3d9eb9b07e8dbf770de3dd788753"
+  },
+  {
+   "label": "ramjet",
+   "policy_key": "ramjet",
+   "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+   "name": "ramjet@p2-ramjet-s3-g25-best_so_far",
+   "policy_sha": "8c99a422e8e6909f1d46dfac48e50420c6f6d5fade8e31c28794a64a9963f2c0",
+   "policy_yaml_sha256": "a7bf4dfa1aa543a21e3ad136988e61f1f8dcdb0a7b29119f4685c561ffad06fa"
+  },
+  {
+   "label": "m1v2",
+   "policy_key": "m1v2",
+   "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+   "name": "m1v2@p2-m1v2-s1-g20-best_so_far",
+   "policy_sha": "07f95e14b195c7c2bc5662987f1b2c32cd5bf68253cdb53e3e079de50746d365",
+   "policy_yaml_sha256": "57e2d3de2cb13b1f510441d8a14f65c507729eae69091f7e94e887dac4ec4642"
+  },
+  {
+   "label": "m1",
+   "policy_key": "m1",
+   "slug": "m1_p2-m1c-s1-g20-mean",
+   "name": "m1@p2-m1c-s1-g20-mean",
+   "policy_sha": "9a44cb58e904b29985b971092da790e2b8fde78829cad7d0a600d41ec1aa2e57",
+   "policy_yaml_sha256": "1138d3cffae614fdb5343874abdf4ccd78dcc1d4f5dc7df6d53129d512787f50"
+  },
+  {
+   "label": "m0",
+   "policy_key": "m0",
+   "slug": "m0_p2-m0-s3-g20-mean",
+   "name": "m0@p2-m0-s3-g20-mean",
+   "policy_sha": "ce02946715cb69f83343dc760c09f17d6da0eeae46392f442fe8c3be4ff5137b",
+   "policy_yaml_sha256": "9eb05f3fccc70b218db087ec6e4c9314bcd16c2c03b30f65d522fdd3b4907703"
+  },
+  {
+   "label": "round_robin",
+   "policy_key": "round_robin",
+   "slug": "round_robin",
+   "name": "round_robin",
+   "policy_sha": "799c65a3cde3ec713488b18c02bdb6c9010dac0ea86d766b5962a756c8f77013",
+   "policy_yaml_sha256": null
+  }
+ ],
+ "policy_notes": [
+  "exactly the frozen specs: finalists.json learned_headline_pool.m1v2 (headline arm) and .m1, tuned_baselines.ramjet (val-best baseline) and .m0, plus builtins default@defaults and round_robin; spec file benchmarks/learned_routing/live/deploy/specs/finalists.json",
+  "every planned YAML is byte-identical to the YAML the frozen test pass replayed at k0 (file name = sha256; ramjet is unseeded)",
+  "default@defaults runs twice per cell (labels default_a, default_b) with distinct salts, to measure live run-to-run noise at fixed k"
+ ],
+ "cells": [
+  {
+   "cell_id": "mooncake-w3-base-n4-open-L2",
+   "family": "mooncake",
+   "load_mode": "open_speedup",
+   "label": "Mooncake open L2",
+   "num_workers": 4,
+   "split": "test",
+   "k": 0,
+   "order_seed": 1410812439462263292,
+   "run_order": [
+    "m1v2",
+    "round_robin",
+    "default_a",
+    "m0",
+    "default_b",
+    "m1",
+    "ramjet"
+   ],
+   "est_s_by_label": {
+    "default_a": 1139,
+    "default_b": 1139,
+    "ramjet": 1138,
+    "m1v2": 1140,
+    "m1": 1138,
+    "m0": 1139,
+    "round_robin": 1139
+   },
+   "sim_k0": {
+    "goodput_rps_window": {
+     "default": 3.5441694436737854,
+     "m0": 3.6488835408732383,
+     "m1": 3.8599227213829046,
+     "m1v2": 3.9388610408101843,
+     "ramjet": 3.677881290866933,
+     "round_robin": 3.1865305270848854
+    },
+    "delta_vs_default": {
+     "default": 0.0,
+     "m0": 0.029109303700128895,
+     "m1": 0.08532024512477722,
+     "m1v2": 0.1055594970828074,
+     "ramjet": 0.037022752142168665,
+     "round_robin": -0.10633946921181872
+    },
+    "m1v2_minus_ramjet": 0.06853674494063873,
+    "ranking": [
+     "m1v2",
+     "m1",
+     "ramjet",
+     "m0",
+     "default",
+     "round_robin"
+    ]
+   },
+   "informative_for_sign_test": true
+  },
+  {
+   "cell_id": "mooncake-w5-base-n4-open-L3",
+   "family": "mooncake",
+   "load_mode": "open_speedup",
+   "label": "Mooncake open L3",
+   "num_workers": 4,
+   "split": "test",
+   "k": 0,
+   "order_seed": 4850299968533496390,
+   "run_order": [
+    "default_b",
+    "m1",
+    "m1v2",
+    "default_a",
+    "round_robin",
+    "m0",
+    "ramjet"
+   ],
+   "est_s_by_label": {
+    "default_a": 924,
+    "default_b": 924,
+    "ramjet": 928,
+    "m1v2": 932,
+    "m1": 928,
+    "m0": 925,
+    "round_robin": 928
+   },
+   "sim_k0": {
+    "goodput_rps_window": {
+     "default": 3.732900081934709,
+     "m0": 3.9613617262935548,
+     "m1": 4.677344201025294,
+     "m1v2": 4.6712246926942536,
+     "ramjet": 4.134747795673036,
+     "round_robin": 2.7741771100716965
+    },
+    "delta_vs_default": {
+     "default": 0.0,
+     "m0": 0.059386957249524856,
+     "m1": 0.22549095835430838,
+     "m1v2": 0.22418205206758376,
+     "ramjet": 0.10221487173915977,
+     "round_robin": -0.2967387171613769
+    },
+    "m1v2_minus_ramjet": 0.12196718032842395,
+    "ranking": [
+     "m1",
+     "m1v2",
+     "ramjet",
+     "m0",
+     "default",
+     "round_robin"
+    ]
+   },
+   "informative_for_sign_test": true
+  },
+  {
+   "cell_id": "mooncake-w5-base-n4-closed-L3",
+   "family": "mooncake",
+   "load_mode": "closed_concurrency",
+   "label": "Mooncake closed L3",
+   "num_workers": 4,
+   "split": "test",
+   "k": 0,
+   "order_seed": 6003811132501850962,
+   "run_order": [
+    "m1",
+    "m0",
+    "m1v2",
+    "default_a",
+    "ramjet",
+    "default_b",
+    "round_robin"
+   ],
+   "est_s_by_label": {
+    "default_a": 833,
+    "default_b": 833,
+    "ramjet": 817,
+    "m1v2": 803,
+    "m1": 805,
+    "m0": 820,
+    "round_robin": 939
+   },
+   "sim_k0": {
+    "goodput_rps_window": {
+     "default": 4.0336453530424325,
+     "m0": 4.641346522544408,
+     "m1": 5.14819684485617,
+     "m1v2": 5.3179282289791905,
+     "ramjet": 4.617480467901752,
+     "round_robin": 3.326462364323983
+    },
+    "delta_vs_default": {
+     "default": 0.0,
+     "m0": 0.14030154929182642,
+     "m1": 0.24392234487801467,
+     "m1v2": 0.27635341715875045,
+     "ramjet": 0.13514734276093818,
+     "round_robin": -0.19270844445367707
+    },
+    "m1v2_minus_ramjet": 0.1412060743978123,
+    "ranking": [
+     "m1v2",
+     "m1",
+     "m0",
+     "ramjet",
+     "default",
+     "round_robin"
+    ]
+   },
+   "informative_for_sign_test": true
+  },
+  {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "family": "fast25_conversation",
+   "load_mode": "open_speedup",
+   "label": "FAST25 conversation open L2",
+   "num_workers": 4,
+   "split": "test",
+   "k": 0,
+   "order_seed": 16112064747113607480,
+   "run_order": [
+    "ramjet",
+    "default_b",
+    "round_robin",
+    "m1",
+    "m1v2",
+    "m0",
+    "default_a"
+   ],
+   "est_s_by_label": {
+    "default_a": 845,
+    "default_b": 845,
+    "ramjet": 851,
+    "m1v2": 843,
+    "m1": 842,
+    "m0": 852,
+    "round_robin": 874
+   },
+   "sim_k0": {
+    "goodput_rps_window": {
+     "default": 1.2488962992285542,
+     "m0": 1.3032946861278014,
+     "m1": 2.1374032852495946,
+     "m1v2": 2.1147372907082413,
+     "ramjet": 1.321427481760884,
+     "round_robin": 1.0947675363473532
+    },
+    "delta_vs_default": {
+     "default": 0.0,
+     "m0": 0.042601837012100484,
+     "m1": 0.5369988348977678,
+     "m1v2": 0.5263427653031454,
+     "ramjet": 0.05640846178396544,
+     "round_robin": -0.13160552309944315
+    },
+    "m1v2_minus_ramjet": 0.46993430351918003,
+    "ranking": [
+     "m1",
+     "m1v2",
+     "ramjet",
+     "m0",
+     "default",
+     "round_robin"
+    ]
+   },
+   "informative_for_sign_test": true
+  },
+  {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "family": "fast25_synthetic",
+   "load_mode": "open_speedup",
+   "label": "FAST25 synthetic open L2",
+   "num_workers": 4,
+   "split": "test",
+   "k": 0,
+   "order_seed": 17045595969531904369,
+   "run_order": [
+    "m0",
+    "m1",
+    "default_a",
+    "round_robin",
+    "m1v2",
+    "ramjet",
+    "default_b"
+   ],
+   "est_s_by_label": {
+    "default_a": 831,
+    "default_b": 831,
+    "ramjet": 830,
+    "m1v2": 832,
+    "m1": 830,
+    "m0": 831,
+    "round_robin": 846
+   },
+   "sim_k0": {
+    "goodput_rps_window": {
+     "default": 1.9615804020573053,
+     "m0": 2.037349602136772,
+     "m1": 2.2351914023442685,
+     "m1v2": 2.1573175022625946,
+     "ramjet": 2.134165802238313,
+     "round_robin": 1.6627130017438532
+    },
+    "delta_vs_default": {
+     "default": 0.0,
+     "m0": 0.03788032282720622,
+     "m1": 0.13051401292582415,
+     "m1v2": 0.09506884499517573,
+     "ramjet": 0.08428416375690302,
+     "round_robin": -0.1652082864264276
+    },
+    "m1v2_minus_ramjet": 0.01078468123827254,
+    "ranking": [
+     "m1",
+     "m1v2",
+     "ramjet",
+     "m0",
+     "default",
+     "round_robin"
+    ]
+   },
+   "informative_for_sign_test": true
+  },
+  {
+   "cell_id": "sessions-s6-base-n4-open-L2",
+   "family": "synthetic_sessions",
+   "load_mode": "open_speedup",
+   "label": "synthetic sessions open L2 (multi-turn)",
+   "num_workers": 4,
+   "split": "test",
+   "k": 0,
+   "order_seed": 10928860374667571259,
+   "run_order": [
+    "ramjet",
+    "m1v2",
+    "m1",
+    "default_a",
+    "round_robin",
+    "default_b",
+    "m0"
+   ],
+   "est_s_by_label": {
+    "default_a": 2299,
+    "default_b": 2299,
+    "ramjet": 2295,
+    "m1v2": 2294,
+    "m1": 2297,
+    "m0": 2293,
+    "round_robin": 2318
+   },
+   "sim_k0": {
+    "goodput_rps_window": {
+     "default": 7.690740740740741,
+     "m0": 8.366666666666667,
+     "m1": 8.37962962962963,
+     "m1v2": 8.381481481481481,
+     "ramjet": 8.385185185185184,
+     "round_robin": 1.7574074074074073
+    },
+    "delta_vs_default": {
+     "default": 0.0,
+     "m0": 0.08422795013320489,
+     "m1": 0.08577592436558609,
+     "m1v2": 0.08599686806119375,
+     "ramjet": 0.08643860905796502,
+     "round_robin": -1.0986122886681098
+    },
+    "m1v2_minus_ramjet": -0.00044174099677138926,
+    "ranking": [
+     "ramjet",
+     "m1v2",
+     "m1",
+     "m0",
+     "default",
+     "round_robin"
+    ]
+   },
+   "informative_for_sign_test": false
+  }
+ ],
+ "cell_choice": [
+  "frozen test cells at N = 4 (held-out by time window, family or workload draw), one or two per supported family and load mode: Mooncake open (L2, L3) and closed (L3), FAST25 conversation and synthetic (open; FAST25 closed exists only at N = 8), synthetic sessions (open, multi-turn; sessions closed exists only at N = 8); no AgentX (no live load generator)",
+  "loadgen parity: Mooncake open/closed and synthetic sessions open are exact in the CPU parity audit and the GPU smoke ran Mooncake open; conv-w3-base-n4-open-L2 and fast25_synthetic-x0-base-n4-open-L2 are among the 13 statically audited cells (exact; fast25_synthetic has 7 tie groups / 14 requests whose order live cannot enforce)",
+  "transform cells (islp2.5, osl4.0, 27-29 min per run) and sessions-s6-think4.0 (65 min) were trimmed for time; sessions-s9-base-n4-open-L1 not added (36 min per run, at ceiling in sim like s6)",
+  "sessions-s6 is at ceiling in simulation (ramjet, m1v2, m1, m0 within 0.3%): it checks the ceiling and the default and round-robin gaps live, and is excluded from the M1-v2 vs ramjet sign test by the informativeness rule below"
+ ],
+ "runs": {
+  "mooncake-w3-base-n4-open-L2__default_a": {
+   "cell_id": "mooncake-w3-base-n4-open-L2",
+   "label": "default_a",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-mooncake-w3-base-n4-open-L2-default_a-k0-a1",
+   "k": 0,
+   "est_s": 1139,
+   "sim_makespan_s_k0": 1041.432
+  },
+  "mooncake-w3-base-n4-open-L2__default_b": {
+   "cell_id": "mooncake-w3-base-n4-open-L2",
+   "label": "default_b",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-mooncake-w3-base-n4-open-L2-default_b-k0-a1",
+   "k": 0,
+   "est_s": 1139,
+   "sim_makespan_s_k0": 1041.432
+  },
+  "mooncake-w3-base-n4-open-L2__ramjet": {
+   "cell_id": "mooncake-w3-base-n4-open-L2",
+   "label": "ramjet",
+   "policy_key": "ramjet",
+   "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+   "salt": "lrfin-mooncake-w3-base-n4-open-L2-ramjet-k0-a1",
+   "k": 0,
+   "est_s": 1138,
+   "sim_makespan_s_k0": 1040.897
+  },
+  "mooncake-w3-base-n4-open-L2__m1v2": {
+   "cell_id": "mooncake-w3-base-n4-open-L2",
+   "label": "m1v2",
+   "policy_key": "m1v2",
+   "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+   "salt": "lrfin-mooncake-w3-base-n4-open-L2-m1v2-k0-a1",
+   "k": 0,
+   "est_s": 1140,
+   "sim_makespan_s_k0": 1042.033
+  },
+  "mooncake-w3-base-n4-open-L2__m1": {
+   "cell_id": "mooncake-w3-base-n4-open-L2",
+   "label": "m1",
+   "policy_key": "m1",
+   "slug": "m1_p2-m1c-s1-g20-mean",
+   "salt": "lrfin-mooncake-w3-base-n4-open-L2-m1-k0-a1",
+   "k": 0,
+   "est_s": 1138,
+   "sim_makespan_s_k0": 1040.654
+  },
+  "mooncake-w3-base-n4-open-L2__m0": {
+   "cell_id": "mooncake-w3-base-n4-open-L2",
+   "label": "m0",
+   "policy_key": "m0",
+   "slug": "m0_p2-m0-s3-g20-mean",
+   "salt": "lrfin-mooncake-w3-base-n4-open-L2-m0-k0-a1",
+   "k": 0,
+   "est_s": 1139,
+   "sim_makespan_s_k0": 1041.862
+  },
+  "mooncake-w3-base-n4-open-L2__round_robin": {
+   "cell_id": "mooncake-w3-base-n4-open-L2",
+   "label": "round_robin",
+   "policy_key": "round_robin",
+   "slug": "round_robin",
+   "salt": "lrfin-mooncake-w3-base-n4-open-L2-round_robin-k0-a1",
+   "k": 0,
+   "est_s": 1139,
+   "sim_makespan_s_k0": 1041.552
+  },
+  "mooncake-w5-base-n4-open-L3__default_a": {
+   "cell_id": "mooncake-w5-base-n4-open-L3",
+   "label": "default_a",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-mooncake-w5-base-n4-open-L3-default_a-k0-a1",
+   "k": 0,
+   "est_s": 924,
+   "sim_makespan_s_k0": 836.835
+  },
+  "mooncake-w5-base-n4-open-L3__default_b": {
+   "cell_id": "mooncake-w5-base-n4-open-L3",
+   "label": "default_b",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-mooncake-w5-base-n4-open-L3-default_b-k0-a1",
+   "k": 0,
+   "est_s": 924,
+   "sim_makespan_s_k0": 836.835
+  },
+  "mooncake-w5-base-n4-open-L3__ramjet": {
+   "cell_id": "mooncake-w5-base-n4-open-L3",
+   "label": "ramjet",
+   "policy_key": "ramjet",
+   "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+   "salt": "lrfin-mooncake-w5-base-n4-open-L3-ramjet-k0-a1",
+   "k": 0,
+   "est_s": 928,
+   "sim_makespan_s_k0": 840.675
+  },
+  "mooncake-w5-base-n4-open-L3__m1v2": {
+   "cell_id": "mooncake-w5-base-n4-open-L3",
+   "label": "m1v2",
+   "policy_key": "m1v2",
+   "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+   "salt": "lrfin-mooncake-w5-base-n4-open-L3-m1v2-k0-a1",
+   "k": 0,
+   "est_s": 932,
+   "sim_makespan_s_k0": 844.053
+  },
+  "mooncake-w5-base-n4-open-L3__m1": {
+   "cell_id": "mooncake-w5-base-n4-open-L3",
+   "label": "m1",
+   "policy_key": "m1",
+   "slug": "m1_p2-m1c-s1-g20-mean",
+   "salt": "lrfin-mooncake-w5-base-n4-open-L3-m1-k0-a1",
+   "k": 0,
+   "est_s": 928,
+   "sim_makespan_s_k0": 840.59
+  },
+  "mooncake-w5-base-n4-open-L3__m0": {
+   "cell_id": "mooncake-w5-base-n4-open-L3",
+   "label": "m0",
+   "policy_key": "m0",
+   "slug": "m0_p2-m0-s3-g20-mean",
+   "salt": "lrfin-mooncake-w5-base-n4-open-L3-m0-k0-a1",
+   "k": 0,
+   "est_s": 925,
+   "sim_makespan_s_k0": 837.61
+  },
+  "mooncake-w5-base-n4-open-L3__round_robin": {
+   "cell_id": "mooncake-w5-base-n4-open-L3",
+   "label": "round_robin",
+   "policy_key": "round_robin",
+   "slug": "round_robin",
+   "salt": "lrfin-mooncake-w5-base-n4-open-L3-round_robin-k0-a1",
+   "k": 0,
+   "est_s": 928,
+   "sim_makespan_s_k0": 840.921
+  },
+  "mooncake-w5-base-n4-closed-L3__default_a": {
+   "cell_id": "mooncake-w5-base-n4-closed-L3",
+   "label": "default_a",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-mooncake-w5-base-n4-closed-L3-default_a-k0-a1",
+   "k": 0,
+   "est_s": 833,
+   "sim_makespan_s_k0": 749.587
+  },
+  "mooncake-w5-base-n4-closed-L3__default_b": {
+   "cell_id": "mooncake-w5-base-n4-closed-L3",
+   "label": "default_b",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-mooncake-w5-base-n4-closed-L3-default_b-k0-a1",
+   "k": 0,
+   "est_s": 833,
+   "sim_makespan_s_k0": 749.587
+  },
+  "mooncake-w5-base-n4-closed-L3__ramjet": {
+   "cell_id": "mooncake-w5-base-n4-closed-L3",
+   "label": "ramjet",
+   "policy_key": "ramjet",
+   "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+   "salt": "lrfin-mooncake-w5-base-n4-closed-L3-ramjet-k0-a1",
+   "k": 0,
+   "est_s": 817,
+   "sim_makespan_s_k0": 734.36
+  },
+  "mooncake-w5-base-n4-closed-L3__m1v2": {
+   "cell_id": "mooncake-w5-base-n4-closed-L3",
+   "label": "m1v2",
+   "policy_key": "m1v2",
+   "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+   "salt": "lrfin-mooncake-w5-base-n4-closed-L3-m1v2-k0-a1",
+   "k": 0,
+   "est_s": 803,
+   "sim_makespan_s_k0": 721.01
+  },
+  "mooncake-w5-base-n4-closed-L3__m1": {
+   "cell_id": "mooncake-w5-base-n4-closed-L3",
+   "label": "m1",
+   "policy_key": "m1",
+   "slug": "m1_p2-m1c-s1-g20-mean",
+   "salt": "lrfin-mooncake-w5-base-n4-closed-L3-m1-k0-a1",
+   "k": 0,
+   "est_s": 805,
+   "sim_makespan_s_k0": 723.211
+  },
+  "mooncake-w5-base-n4-closed-L3__m0": {
+   "cell_id": "mooncake-w5-base-n4-closed-L3",
+   "label": "m0",
+   "policy_key": "m0",
+   "slug": "m0_p2-m0-s3-g20-mean",
+   "salt": "lrfin-mooncake-w5-base-n4-closed-L3-m0-k0-a1",
+   "k": 0,
+   "est_s": 820,
+   "sim_makespan_s_k0": 737.31
+  },
+  "mooncake-w5-base-n4-closed-L3__round_robin": {
+   "cell_id": "mooncake-w5-base-n4-closed-L3",
+   "label": "round_robin",
+   "policy_key": "round_robin",
+   "slug": "round_robin",
+   "salt": "lrfin-mooncake-w5-base-n4-closed-L3-round_robin-k0-a1",
+   "k": 0,
+   "est_s": 939,
+   "sim_makespan_s_k0": 850.555
+  },
+  "conv-w3-base-n4-open-L2__default_a": {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "label": "default_a",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-conv-w3-base-n4-open-L2-default_a-k0-a1",
+   "k": 0,
+   "est_s": 845,
+   "sim_makespan_s_k0": 761.153
+  },
+  "conv-w3-base-n4-open-L2__default_b": {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "label": "default_b",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-conv-w3-base-n4-open-L2-default_b-k0-a1",
+   "k": 0,
+   "est_s": 845,
+   "sim_makespan_s_k0": 761.153
+  },
+  "conv-w3-base-n4-open-L2__ramjet": {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "label": "ramjet",
+   "policy_key": "ramjet",
+   "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+   "salt": "lrfin-conv-w3-base-n4-open-L2-ramjet-k0-a1",
+   "k": 0,
+   "est_s": 851,
+   "sim_makespan_s_k0": 767.224
+  },
+  "conv-w3-base-n4-open-L2__m1v2": {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "label": "m1v2",
+   "policy_key": "m1v2",
+   "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+   "salt": "lrfin-conv-w3-base-n4-open-L2-m1v2-k0-a1",
+   "k": 0,
+   "est_s": 843,
+   "sim_makespan_s_k0": 759.236
+  },
+  "conv-w3-base-n4-open-L2__m1": {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "label": "m1",
+   "policy_key": "m1",
+   "slug": "m1_p2-m1c-s1-g20-mean",
+   "salt": "lrfin-conv-w3-base-n4-open-L2-m1-k0-a1",
+   "k": 0,
+   "est_s": 842,
+   "sim_makespan_s_k0": 759.027
+  },
+  "conv-w3-base-n4-open-L2__m0": {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "label": "m0",
+   "policy_key": "m0",
+   "slug": "m0_p2-m0-s3-g20-mean",
+   "salt": "lrfin-conv-w3-base-n4-open-L2-m0-k0-a1",
+   "k": 0,
+   "est_s": 852,
+   "sim_makespan_s_k0": 768.413
+  },
+  "conv-w3-base-n4-open-L2__round_robin": {
+   "cell_id": "conv-w3-base-n4-open-L2",
+   "label": "round_robin",
+   "policy_key": "round_robin",
+   "slug": "round_robin",
+   "salt": "lrfin-conv-w3-base-n4-open-L2-round_robin-k0-a1",
+   "k": 0,
+   "est_s": 874,
+   "sim_makespan_s_k0": 789.22
+  },
+  "fast25_synthetic-x0-base-n4-open-L2__default_a": {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "label": "default_a",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-fast25_synthetic-x0-base-n4-open-L2-default_a-k0-a1",
+   "k": 0,
+   "est_s": 831,
+   "sim_makespan_s_k0": 748.412
+  },
+  "fast25_synthetic-x0-base-n4-open-L2__default_b": {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "label": "default_b",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-fast25_synthetic-x0-base-n4-open-L2-default_b-k0-a1",
+   "k": 0,
+   "est_s": 831,
+   "sim_makespan_s_k0": 748.412
+  },
+  "fast25_synthetic-x0-base-n4-open-L2__ramjet": {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "label": "ramjet",
+   "policy_key": "ramjet",
+   "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+   "salt": "lrfin-fast25_synthetic-x0-base-n4-open-L2-ramjet-k0-a1",
+   "k": 0,
+   "est_s": 830,
+   "sim_makespan_s_k0": 746.879
+  },
+  "fast25_synthetic-x0-base-n4-open-L2__m1v2": {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "label": "m1v2",
+   "policy_key": "m1v2",
+   "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+   "salt": "lrfin-fast25_synthetic-x0-base-n4-open-L2-m1v2-k0-a1",
+   "k": 0,
+   "est_s": 832,
+   "sim_makespan_s_k0": 749.443
+  },
+  "fast25_synthetic-x0-base-n4-open-L2__m1": {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "label": "m1",
+   "policy_key": "m1",
+   "slug": "m1_p2-m1c-s1-g20-mean",
+   "salt": "lrfin-fast25_synthetic-x0-base-n4-open-L2-m1-k0-a1",
+   "k": 0,
+   "est_s": 830,
+   "sim_makespan_s_k0": 747.25
+  },
+  "fast25_synthetic-x0-base-n4-open-L2__m0": {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "label": "m0",
+   "policy_key": "m0",
+   "slug": "m0_p2-m0-s3-g20-mean",
+   "salt": "lrfin-fast25_synthetic-x0-base-n4-open-L2-m0-k0-a1",
+   "k": 0,
+   "est_s": 831,
+   "sim_makespan_s_k0": 748.023
+  },
+  "fast25_synthetic-x0-base-n4-open-L2__round_robin": {
+   "cell_id": "fast25_synthetic-x0-base-n4-open-L2",
+   "label": "round_robin",
+   "policy_key": "round_robin",
+   "slug": "round_robin",
+   "salt": "lrfin-fast25_synthetic-x0-base-n4-open-L2-round_robin-k0-a1",
+   "k": 0,
+   "est_s": 846,
+   "sim_makespan_s_k0": 762.672
+  },
+  "sessions-s6-base-n4-open-L2__default_a": {
+   "cell_id": "sessions-s6-base-n4-open-L2",
+   "label": "default_a",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-sessions-s6-base-n4-open-L2-default_a-k0-a1",
+   "k": 0,
+   "est_s": 2299,
+   "sim_makespan_s_k0": 2145.771
+  },
+  "sessions-s6-base-n4-open-L2__default_b": {
+   "cell_id": "sessions-s6-base-n4-open-L2",
+   "label": "default_b",
+   "policy_key": "default",
+   "slug": "default_defaults",
+   "salt": "lrfin-sessions-s6-base-n4-open-L2-default_b-k0-a1",
+   "k": 0,
+   "est_s": 2299,
+   "sim_makespan_s_k0": 2145.771
+  },
+  "sessions-s6-base-n4-open-L2__ramjet": {
+   "cell_id": "sessions-s6-base-n4-open-L2",
+   "label": "ramjet",
+   "policy_key": "ramjet",
+   "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+   "salt": "lrfin-sessions-s6-base-n4-open-L2-ramjet-k0-a1",
+   "k": 0,
+   "est_s": 2295,
+   "sim_makespan_s_k0": 2142.234
+  },
+  "sessions-s6-base-n4-open-L2__m1v2": {
+   "cell_id": "sessions-s6-base-n4-open-L2",
+   "label": "m1v2",
+   "policy_key": "m1v2",
+   "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+   "salt": "lrfin-sessions-s6-base-n4-open-L2-m1v2-k0-a1",
+   "k": 0,
+   "est_s": 2294,
+   "sim_makespan_s_k0": 2141.795
+  },
+  "sessions-s6-base-n4-open-L2__m1": {
+   "cell_id": "sessions-s6-base-n4-open-L2",
+   "label": "m1",
+   "policy_key": "m1",
+   "slug": "m1_p2-m1c-s1-g20-mean",
+   "salt": "lrfin-sessions-s6-base-n4-open-L2-m1-k0-a1",
+   "k": 0,
+   "est_s": 2297,
+   "sim_makespan_s_k0": 2144.655
+  },
+  "sessions-s6-base-n4-open-L2__m0": {
+   "cell_id": "sessions-s6-base-n4-open-L2",
+   "label": "m0",
+   "policy_key": "m0",
+   "slug": "m0_p2-m0-s3-g20-mean",
+   "salt": "lrfin-sessions-s6-base-n4-open-L2-m0-k0-a1",
+   "k": 0,
+   "est_s": 2293,
+   "sim_makespan_s_k0": 2140.289
+  },
+  "sessions-s6-base-n4-open-L2__round_robin": {
+   "cell_id": "sessions-s6-base-n4-open-L2",
+   "label": "round_robin",
+   "policy_key": "round_robin",
+   "slug": "round_robin",
+   "salt": "lrfin-sessions-s6-base-n4-open-L2-round_robin-k0-a1",
+   "k": 0,
+   "est_s": 2318,
+   "sim_makespan_s_k0": 2164.191
+  },
+  "idle__P4-mcopenL3": {
+   "cell_id": null,
+   "label": "idle-e0",
+   "slug": "default_defaults",
+   "salt": "lrfin-idle-P4-mcopenL3-k0-a1",
+   "est_s": 200
+  },
+  "idle__P5-mcopenL2": {
+   "cell_id": null,
+   "label": "idle-e0",
+   "slug": "default_defaults",
+   "salt": "lrfin-idle-P5-mcopenL2-k0-a1",
+   "est_s": 200
+  },
+  "idle__P6-sessA": {
+   "cell_id": null,
+   "label": "idle-e0",
+   "slug": "default_defaults",
+   "salt": "lrfin-idle-P6-sessA-k0-a1",
+   "est_s": 200
+  },
+  "idle__P7-sessB": {
+   "cell_id": null,
+   "label": "idle-e0",
+   "slug": "default_defaults",
+   "salt": "lrfin-idle-P7-sessB-k0-a1",
+   "est_s": 200
+  },
+  "idle__P4a-mcopenL3": {
+   "cell_id": null,
+   "label": "idle-e0",
+   "slug": "default_defaults",
+   "salt": "lrfin-idle-P4a-mcopenL3-k0-a1",
+   "est_s": 200
+  },
+  "idle__P4b-mcopenL3": {
+   "cell_id": null,
+   "label": "idle-e0",
+   "slug": "default_defaults",
+   "salt": "lrfin-idle-P4b-mcopenL3-k0-a1",
+   "est_s": 200
+  },
+  "idle__P5a-mcopenL2": {
+   "cell_id": null,
+   "label": "idle-e0",
+   "slug": "default_defaults",
+   "salt": "lrfin-idle-P5a-mcopenL2-k0-a1",
+   "est_s": 200
+  },
+  "idle__P5b-mcopenL2": {
+   "cell_id": null,
+   "label": "idle-e0",
+   "slug": "default_defaults",
+   "salt": "lrfin-idle-P5b-mcopenL2-k0-a1",
+   "est_s": 200
+  }
+ },
+ "salt_rule": "salt = lrfin-<cell>-<label>-k0-a<attempt>; a re-run takes the next attempt number and a fresh input directory <cell>__<label>__a<attempt>; idle E0 inputs lrfin-idle-<pack>-k0-a1",
+ "run_order": {
+  "protocol": "lr-live-order-v1",
+  "rule": "per cell, seed = int(sha256('lr-live-order-v1|<cell_id>')[:16], 16); order = random.Random(seed).sample(labels, 7) over [default_a, default_b, ramjet, m1v2, m1, m0, round_robin] (CPython random); a split cell keeps that order within each half; the idle E0 calibration (when present) runs last"
+ },
+ "packs": [
+  {
+   "pack": "P1-conv",
+   "cells": [
+    "conv-w3-base-n4-open-L2"
+   ],
+   "labels": [
+    "default_a",
+    "default_b",
+    "ramjet",
+    "m1v2",
+    "m1",
+    "m0",
+    "round_robin"
+   ],
+   "partition": "<partition>",
+   "time_limit": "01:55:00",
+   "idle_e0": false,
+   "pair_margin_s": 150,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P1-conv.pairs",
+   "pairs_sha256": "43af7bb405f17c29518f0e674418bd68decdac3e6095a44e85d8be4848fd5295",
+   "pairs": [
+    {
+     "label": "conv-w3-base-n4-open-L2__ramjet",
+     "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+     "run": "conv-w3-base-n4-open-L2__ramjet",
+     "est_s": 851
+    },
+    {
+     "label": "conv-w3-base-n4-open-L2__default_b",
+     "slug": "default_defaults",
+     "run": "conv-w3-base-n4-open-L2__default_b",
+     "est_s": 845
+    },
+    {
+     "label": "conv-w3-base-n4-open-L2__round_robin",
+     "slug": "round_robin",
+     "run": "conv-w3-base-n4-open-L2__round_robin",
+     "est_s": 874
+    },
+    {
+     "label": "conv-w3-base-n4-open-L2__m1",
+     "slug": "m1_p2-m1c-s1-g20-mean",
+     "run": "conv-w3-base-n4-open-L2__m1",
+     "est_s": 842
+    },
+    {
+     "label": "conv-w3-base-n4-open-L2__m1v2",
+     "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+     "run": "conv-w3-base-n4-open-L2__m1v2",
+     "est_s": 843
+    },
+    {
+     "label": "conv-w3-base-n4-open-L2__m0",
+     "slug": "m0_p2-m0-s3-g20-mean",
+     "run": "conv-w3-base-n4-open-L2__m0",
+     "est_s": 852
+    },
+    {
+     "label": "conv-w3-base-n4-open-L2__default_a",
+     "slug": "default_defaults",
+     "run": "conv-w3-base-n4-open-L2__default_a",
+     "est_s": 845
+    }
+   ],
+   "est_work_s": 6477,
+   "est_total_s": {
+    "fresh_wheel": 7037,
+    "reused_wheel": 6807
+   },
+   "slack_s_reused_wheel": 93,
+   "slack_s_fresh_wheel": -137
+  },
+  {
+   "pack": "P2-fsyn",
+   "cells": [
+    "fast25_synthetic-x0-base-n4-open-L2"
+   ],
+   "labels": [
+    "default_a",
+    "default_b",
+    "ramjet",
+    "m1v2",
+    "m1",
+    "m0",
+    "round_robin"
+   ],
+   "partition": "<partition>",
+   "time_limit": "01:55:00",
+   "idle_e0": false,
+   "pair_margin_s": 150,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P2-fsyn.pairs",
+   "pairs_sha256": "46388233484e25bdd232bf3ef48a67ab3c2e741fae7d5a419f8187f48dc0be36",
+   "pairs": [
+    {
+     "label": "fast25_synthetic-x0-base-n4-open-L2__m0",
+     "slug": "m0_p2-m0-s3-g20-mean",
+     "run": "fast25_synthetic-x0-base-n4-open-L2__m0",
+     "est_s": 831
+    },
+    {
+     "label": "fast25_synthetic-x0-base-n4-open-L2__m1",
+     "slug": "m1_p2-m1c-s1-g20-mean",
+     "run": "fast25_synthetic-x0-base-n4-open-L2__m1",
+     "est_s": 830
+    },
+    {
+     "label": "fast25_synthetic-x0-base-n4-open-L2__default_a",
+     "slug": "default_defaults",
+     "run": "fast25_synthetic-x0-base-n4-open-L2__default_a",
+     "est_s": 831
+    },
+    {
+     "label": "fast25_synthetic-x0-base-n4-open-L2__round_robin",
+     "slug": "round_robin",
+     "run": "fast25_synthetic-x0-base-n4-open-L2__round_robin",
+     "est_s": 846
+    },
+    {
+     "label": "fast25_synthetic-x0-base-n4-open-L2__m1v2",
+     "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+     "run": "fast25_synthetic-x0-base-n4-open-L2__m1v2",
+     "est_s": 832
+    },
+    {
+     "label": "fast25_synthetic-x0-base-n4-open-L2__ramjet",
+     "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+     "run": "fast25_synthetic-x0-base-n4-open-L2__ramjet",
+     "est_s": 830
+    },
+    {
+     "label": "fast25_synthetic-x0-base-n4-open-L2__default_b",
+     "slug": "default_defaults",
+     "run": "fast25_synthetic-x0-base-n4-open-L2__default_b",
+     "est_s": 831
+    }
+   ],
+   "est_work_s": 6356,
+   "est_total_s": {
+    "fresh_wheel": 6916,
+    "reused_wheel": 6686
+   },
+   "slack_s_reused_wheel": 214,
+   "slack_s_fresh_wheel": -16
+  },
+  {
+   "pack": "P3-mcclosed",
+   "cells": [
+    "mooncake-w5-base-n4-closed-L3"
+   ],
+   "labels": [
+    "default_a",
+    "default_b",
+    "ramjet",
+    "m1v2",
+    "m1",
+    "m0",
+    "round_robin"
+   ],
+   "partition": "<partition>",
+   "time_limit": "01:55:00",
+   "idle_e0": false,
+   "pair_margin_s": 150,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P3-mcclosed.pairs",
+   "pairs_sha256": "bdba0e64cf30e5283e36e78916ed8dac85dfbdff7a8f3e13811020d046177eec",
+   "pairs": [
+    {
+     "label": "mooncake-w5-base-n4-closed-L3__m1",
+     "slug": "m1_p2-m1c-s1-g20-mean",
+     "run": "mooncake-w5-base-n4-closed-L3__m1",
+     "est_s": 805
+    },
+    {
+     "label": "mooncake-w5-base-n4-closed-L3__m0",
+     "slug": "m0_p2-m0-s3-g20-mean",
+     "run": "mooncake-w5-base-n4-closed-L3__m0",
+     "est_s": 820
+    },
+    {
+     "label": "mooncake-w5-base-n4-closed-L3__m1v2",
+     "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+     "run": "mooncake-w5-base-n4-closed-L3__m1v2",
+     "est_s": 803
+    },
+    {
+     "label": "mooncake-w5-base-n4-closed-L3__default_a",
+     "slug": "default_defaults",
+     "run": "mooncake-w5-base-n4-closed-L3__default_a",
+     "est_s": 833
+    },
+    {
+     "label": "mooncake-w5-base-n4-closed-L3__ramjet",
+     "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+     "run": "mooncake-w5-base-n4-closed-L3__ramjet",
+     "est_s": 817
+    },
+    {
+     "label": "mooncake-w5-base-n4-closed-L3__default_b",
+     "slug": "default_defaults",
+     "run": "mooncake-w5-base-n4-closed-L3__default_b",
+     "est_s": 833
+    },
+    {
+     "label": "mooncake-w5-base-n4-closed-L3__round_robin",
+     "slug": "round_robin",
+     "run": "mooncake-w5-base-n4-closed-L3__round_robin",
+     "est_s": 939
+    }
+   ],
+   "est_work_s": 6375,
+   "est_total_s": {
+    "fresh_wheel": 6935,
+    "reused_wheel": 6705
+   },
+   "slack_s_reused_wheel": 195,
+   "slack_s_fresh_wheel": -35
+  },
+  {
+   "pack": "P4-mcopenL3",
+   "cells": [
+    "mooncake-w5-base-n4-open-L3"
+   ],
+   "labels": [
+    "default_a",
+    "default_b",
+    "ramjet",
+    "m1v2",
+    "m1",
+    "m0",
+    "round_robin"
+   ],
+   "partition": "batch",
+   "time_limit": "02:45:00",
+   "idle_e0": true,
+   "pair_margin_s": 300,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P4-mcopenL3.pairs",
+   "pairs_sha256": "0cfcdc5a5f39f2599ad06810d428497b0ddd28f1ec6ca2f367d93023002840c8",
+   "pairs": [
+    {
+     "label": "mooncake-w5-base-n4-open-L3__default_b",
+     "slug": "default_defaults",
+     "run": "mooncake-w5-base-n4-open-L3__default_b",
+     "est_s": 924
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__m1",
+     "slug": "m1_p2-m1c-s1-g20-mean",
+     "run": "mooncake-w5-base-n4-open-L3__m1",
+     "est_s": 928
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__m1v2",
+     "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+     "run": "mooncake-w5-base-n4-open-L3__m1v2",
+     "est_s": 932
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__default_a",
+     "slug": "default_defaults",
+     "run": "mooncake-w5-base-n4-open-L3__default_a",
+     "est_s": 924
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__round_robin",
+     "slug": "round_robin",
+     "run": "mooncake-w5-base-n4-open-L3__round_robin",
+     "est_s": 928
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__m0",
+     "slug": "m0_p2-m0-s3-g20-mean",
+     "run": "mooncake-w5-base-n4-open-L3__m0",
+     "est_s": 925
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__ramjet",
+     "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+     "run": "mooncake-w5-base-n4-open-L3__ramjet",
+     "est_s": 928
+    },
+    {
+     "label": "idle-e0__P4-mcopenL3",
+     "slug": "default_defaults",
+     "run": "idle__P4-mcopenL3",
+     "est_s": 200
+    }
+   ],
+   "est_work_s": 7289,
+   "est_total_s": {
+    "fresh_wheel": 7849,
+    "reused_wheel": 7619
+   },
+   "slack_s_reused_wheel": 2281,
+   "slack_s_fresh_wheel": 2051
+  },
+  {
+   "pack": "P5-mcopenL2",
+   "cells": [
+    "mooncake-w3-base-n4-open-L2"
+   ],
+   "labels": [
+    "default_a",
+    "default_b",
+    "ramjet",
+    "m1v2",
+    "m1",
+    "m0",
+    "round_robin"
+   ],
+   "partition": "batch",
+   "time_limit": "03:10:00",
+   "idle_e0": true,
+   "pair_margin_s": 300,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P5-mcopenL2.pairs",
+   "pairs_sha256": "4154701f72c16e35ad81b318daedc55df796b8f32303c49a403d4663bf3f86b8",
+   "pairs": [
+    {
+     "label": "mooncake-w3-base-n4-open-L2__m1v2",
+     "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+     "run": "mooncake-w3-base-n4-open-L2__m1v2",
+     "est_s": 1140
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__round_robin",
+     "slug": "round_robin",
+     "run": "mooncake-w3-base-n4-open-L2__round_robin",
+     "est_s": 1139
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__default_a",
+     "slug": "default_defaults",
+     "run": "mooncake-w3-base-n4-open-L2__default_a",
+     "est_s": 1139
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__m0",
+     "slug": "m0_p2-m0-s3-g20-mean",
+     "run": "mooncake-w3-base-n4-open-L2__m0",
+     "est_s": 1139
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__default_b",
+     "slug": "default_defaults",
+     "run": "mooncake-w3-base-n4-open-L2__default_b",
+     "est_s": 1139
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__m1",
+     "slug": "m1_p2-m1c-s1-g20-mean",
+     "run": "mooncake-w3-base-n4-open-L2__m1",
+     "est_s": 1138
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__ramjet",
+     "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+     "run": "mooncake-w3-base-n4-open-L2__ramjet",
+     "est_s": 1138
+    },
+    {
+     "label": "idle-e0__P5-mcopenL2",
+     "slug": "default_defaults",
+     "run": "idle__P5-mcopenL2",
+     "est_s": 200
+    }
+   ],
+   "est_work_s": 8772,
+   "est_total_s": {
+    "fresh_wheel": 9332,
+    "reused_wheel": 9102
+   },
+   "slack_s_reused_wheel": 2298,
+   "slack_s_fresh_wheel": 2068
+  },
+  {
+   "pack": "P6-sessA",
+   "cells": [
+    "sessions-s6-base-n4-open-L2"
+   ],
+   "labels": [
+    "default_a",
+    "m1v2",
+    "ramjet",
+    "m1"
+   ],
+   "partition": "batch",
+   "time_limit": "03:15:00",
+   "idle_e0": true,
+   "pair_margin_s": 300,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P6-sessA.pairs",
+   "pairs_sha256": "4e7eea89324e1b1fe7be182af92151365fe519d341135a1c3e899db14151ddb7",
+   "pairs": [
+    {
+     "label": "sessions-s6-base-n4-open-L2__ramjet",
+     "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+     "run": "sessions-s6-base-n4-open-L2__ramjet",
+     "est_s": 2295
+    },
+    {
+     "label": "sessions-s6-base-n4-open-L2__m1v2",
+     "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+     "run": "sessions-s6-base-n4-open-L2__m1v2",
+     "est_s": 2294
+    },
+    {
+     "label": "sessions-s6-base-n4-open-L2__m1",
+     "slug": "m1_p2-m1c-s1-g20-mean",
+     "run": "sessions-s6-base-n4-open-L2__m1",
+     "est_s": 2297
+    },
+    {
+     "label": "sessions-s6-base-n4-open-L2__default_a",
+     "slug": "default_defaults",
+     "run": "sessions-s6-base-n4-open-L2__default_a",
+     "est_s": 2299
+    },
+    {
+     "label": "idle-e0__P6-sessA",
+     "slug": "default_defaults",
+     "run": "idle__P6-sessA",
+     "est_s": 200
+    }
+   ],
+   "est_work_s": 9760,
+   "est_total_s": {
+    "fresh_wheel": 10320,
+    "reused_wheel": 10090
+   },
+   "slack_s_reused_wheel": 1610,
+   "slack_s_fresh_wheel": 1380
+  },
+  {
+   "pack": "P7-sessB",
+   "cells": [
+    "sessions-s6-base-n4-open-L2"
+   ],
+   "labels": [
+    "default_b",
+    "m0",
+    "round_robin"
+   ],
+   "partition": "batch",
+   "time_limit": "02:40:00",
+   "idle_e0": true,
+   "pair_margin_s": 300,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P7-sessB.pairs",
+   "pairs_sha256": "8576f45fe94015846fcf93220e680b7b73ed4cf6136c76a3427593005f8f6cad",
+   "pairs": [
+    {
+     "label": "sessions-s6-base-n4-open-L2__round_robin",
+     "slug": "round_robin",
+     "run": "sessions-s6-base-n4-open-L2__round_robin",
+     "est_s": 2318
+    },
+    {
+     "label": "sessions-s6-base-n4-open-L2__default_b",
+     "slug": "default_defaults",
+     "run": "sessions-s6-base-n4-open-L2__default_b",
+     "est_s": 2299
+    },
+    {
+     "label": "sessions-s6-base-n4-open-L2__m0",
+     "slug": "m0_p2-m0-s3-g20-mean",
+     "run": "sessions-s6-base-n4-open-L2__m0",
+     "est_s": 2293
+    },
+    {
+     "label": "idle-e0__P7-sessB",
+     "slug": "default_defaults",
+     "run": "idle__P7-sessB",
+     "est_s": 200
+    }
+   ],
+   "est_work_s": 7410,
+   "est_total_s": {
+    "fresh_wheel": 7970,
+    "reused_wheel": 7740
+   },
+   "slack_s_reused_wheel": 1860,
+   "slack_s_fresh_wheel": 1630
+  }
+ ],
+ "fallback_packs": [
+  {
+   "pack": "P4a-mcopenL3",
+   "cells": [
+    "mooncake-w5-base-n4-open-L3"
+   ],
+   "labels": [
+    "default_a",
+    "m1v2",
+    "ramjet",
+    "m1"
+   ],
+   "partition": "<partition>",
+   "time_limit": "01:55:00",
+   "idle_e0": true,
+   "pair_margin_s": 150,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P4a-mcopenL3.pairs",
+   "pairs_sha256": "b66b805b7727d56c49dd420c5d7a855392f0c159b8ea485a0fb63b423e5d077a",
+   "pairs": [
+    {
+     "label": "mooncake-w5-base-n4-open-L3__m1",
+     "slug": "m1_p2-m1c-s1-g20-mean",
+     "run": "mooncake-w5-base-n4-open-L3__m1",
+     "est_s": 928
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__m1v2",
+     "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+     "run": "mooncake-w5-base-n4-open-L3__m1v2",
+     "est_s": 932
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__default_a",
+     "slug": "default_defaults",
+     "run": "mooncake-w5-base-n4-open-L3__default_a",
+     "est_s": 924
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__ramjet",
+     "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+     "run": "mooncake-w5-base-n4-open-L3__ramjet",
+     "est_s": 928
+    },
+    {
+     "label": "idle-e0__P4a-mcopenL3",
+     "slug": "default_defaults",
+     "run": "idle__P4a-mcopenL3",
+     "est_s": 200
+    }
+   ],
+   "est_work_s": 4287,
+   "est_total_s": {
+    "fresh_wheel": 4847,
+    "reused_wheel": 4617
+   },
+   "slack_s_reused_wheel": 2283,
+   "slack_s_fresh_wheel": 2053
+  },
+  {
+   "pack": "P4b-mcopenL3",
+   "cells": [
+    "mooncake-w5-base-n4-open-L3"
+   ],
+   "labels": [
+    "default_b",
+    "m0",
+    "round_robin"
+   ],
+   "partition": "<partition>",
+   "time_limit": "01:55:00",
+   "idle_e0": true,
+   "pair_margin_s": 150,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P4b-mcopenL3.pairs",
+   "pairs_sha256": "d1071ad91216f43e099075cf6f0372e14ad2935b345b4fbe8bf59392f3a31768",
+   "pairs": [
+    {
+     "label": "mooncake-w5-base-n4-open-L3__default_b",
+     "slug": "default_defaults",
+     "run": "mooncake-w5-base-n4-open-L3__default_b",
+     "est_s": 924
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__round_robin",
+     "slug": "round_robin",
+     "run": "mooncake-w5-base-n4-open-L3__round_robin",
+     "est_s": 928
+    },
+    {
+     "label": "mooncake-w5-base-n4-open-L3__m0",
+     "slug": "m0_p2-m0-s3-g20-mean",
+     "run": "mooncake-w5-base-n4-open-L3__m0",
+     "est_s": 925
+    },
+    {
+     "label": "idle-e0__P4b-mcopenL3",
+     "slug": "default_defaults",
+     "run": "idle__P4b-mcopenL3",
+     "est_s": 200
+    }
+   ],
+   "est_work_s": 3277,
+   "est_total_s": {
+    "fresh_wheel": 3837,
+    "reused_wheel": 3607
+   },
+   "slack_s_reused_wheel": 3293,
+   "slack_s_fresh_wheel": 3063
+  },
+  {
+   "pack": "P5a-mcopenL2",
+   "cells": [
+    "mooncake-w3-base-n4-open-L2"
+   ],
+   "labels": [
+    "default_a",
+    "m1v2",
+    "ramjet",
+    "m1"
+   ],
+   "partition": "<partition>",
+   "time_limit": "01:55:00",
+   "idle_e0": true,
+   "pair_margin_s": 150,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P5a-mcopenL2.pairs",
+   "pairs_sha256": "942e051f476dfab90d9a8f2ac3aa545c707cca8725c66447a5472633d265a20a",
+   "pairs": [
+    {
+     "label": "mooncake-w3-base-n4-open-L2__m1v2",
+     "slug": "m1v2_p2-m1v2-s1-g20-best_so_far",
+     "run": "mooncake-w3-base-n4-open-L2__m1v2",
+     "est_s": 1140
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__default_a",
+     "slug": "default_defaults",
+     "run": "mooncake-w3-base-n4-open-L2__default_a",
+     "est_s": 1139
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__m1",
+     "slug": "m1_p2-m1c-s1-g20-mean",
+     "run": "mooncake-w3-base-n4-open-L2__m1",
+     "est_s": 1138
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__ramjet",
+     "slug": "ramjet_p2-ramjet-s3-g25-best_so_far",
+     "run": "mooncake-w3-base-n4-open-L2__ramjet",
+     "est_s": 1138
+    },
+    {
+     "label": "idle-e0__P5a-mcopenL2",
+     "slug": "default_defaults",
+     "run": "idle__P5a-mcopenL2",
+     "est_s": 200
+    }
+   ],
+   "est_work_s": 5130,
+   "est_total_s": {
+    "fresh_wheel": 5690,
+    "reused_wheel": 5460
+   },
+   "slack_s_reused_wheel": 1440,
+   "slack_s_fresh_wheel": 1210
+  },
+  {
+   "pack": "P5b-mcopenL2",
+   "cells": [
+    "mooncake-w3-base-n4-open-L2"
+   ],
+   "labels": [
+    "default_b",
+    "m0",
+    "round_robin"
+   ],
+   "partition": "<partition>",
+   "time_limit": "01:55:00",
+   "idle_e0": true,
+   "pair_margin_s": 150,
+   "pairs_file": "<campaign-root>/runs/live/finalists/pairs/P5b-mcopenL2.pairs",
+   "pairs_sha256": "68812a2ffd79349667afd9d13bf136babcefe524c83f9be06342f5a8a912e4c5",
+   "pairs": [
+    {
+     "label": "mooncake-w3-base-n4-open-L2__round_robin",
+     "slug": "round_robin",
+     "run": "mooncake-w3-base-n4-open-L2__round_robin",
+     "est_s": 1139
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__m0",
+     "slug": "m0_p2-m0-s3-g20-mean",
+     "run": "mooncake-w3-base-n4-open-L2__m0",
+     "est_s": 1139
+    },
+    {
+     "label": "mooncake-w3-base-n4-open-L2__default_b",
+     "slug": "default_defaults",
+     "run": "mooncake-w3-base-n4-open-L2__default_b",
+     "est_s": 1139
+    },
+    {
+     "label": "idle-e0__P5b-mcopenL2",
+     "slug": "default_defaults",
+     "run": "idle__P5b-mcopenL2",
+     "est_s": 200
+    }
+   ],
+   "est_work_s": 3917,
+   "est_total_s": {
+    "fresh_wheel": 4477,
+    "reused_wheel": 4247
+   },
+   "slack_s_reused_wheel": 2653,
+   "slack_s_fresh_wheel": 2423
+  }
+ ],
+ "scheduling": {
+  "budget": "about 8 h wall for the whole matrix, at most 4 concurrent 8-GPU jobs (GPU cluster interactive allows 2 concurrent 1-node jobs of <= 2 h; batch allows 4 h but was estimated to start about 3.7 h after submission at registration time)",
+  "est_rule": "est_s per run = ceil(1.05 x replay makespan of that policy at k0 + 45 s); job_node.sh skips (never truncates) a pair whose est_s + pair_margin_s no longer fits before the job's end",
+  "est_node_hours": 15.52,
+  "est_gpu_hours": 124.2,
+  "interactive_pack_note": "P1-P3 have about 0-4 min of slack under the conservative est_s; at the smoke's measured ratios (live wall 1.021 x makespan + 24 s, about 45-60 s of switch and checks per pair) they need about 100-102 min of work plus 5.5 min setup, inside 1 h 55 min; a final pair that the guard skips is re-run under the rerun rule",
+  "acceptance_job": {
+   "name": "P0-accept",
+   "what": "one interactive job, --time 00:30:00, no payload, --policies with all six plan slugs: builds the wheel and venv for the staged commit and runs every policy's check unit (wait, smoke with policy_evidence, cold reset) on 8 GPUs before any 7-run pack is spent",
+   "est_node_hours": 0.25
+  },
+  "suggested_waves": [
+   "wave 0: P0-accept; continue only if every policy's check is ok",
+   "wave 1: P1-conv and P2-fsyn on interactive (immediate start); P5-mcopenL2 and P4-mcopenL3 on batch",
+   "when an interactive slot frees: P3-mcclosed; then P6-sessA and P7-sessB on batch (or, if batch has not started within 60 min while an interactive slot is idle, run the P4/P5 fallback halves on interactive)",
+   "the first job builds the wheel and venv for the staged commit; build_env.sh makes concurrent jobs wait for that build"
+  ],
+  "first_job_gpu_acceptance": "the first job's check phases are the GPU acceptance of every live policy type (learned-choice feature_set v2 and v1, ramjet, dynamo-default-cost-fn with parameters, round_robin): policy_evidence must pass for each before its run is used; a check_failed pair is fixed and re-run, it never silently drops a policy",
+  "trim_order": "if the budget or scheduler cannot fit the matrix, drop whole cells in this order: sessions-s6-base-n4-open-L2 (P6/P7), then mooncake-w5-base-n4-open-L3 (P4); never drop a policy from a cell that runs",
+  "rerun_rule": "a pair whose status is not ok, or whose score has fidelity_ok false, is re-run once with a new salt (attempt 2), preferably in a pack that holds the same cell's defaults; if it still fails, that (cell, policy) is missing and reported"
+ },
+ "scoring": {
+  "adapter": "benchmarks/learned_routing/live/score_live.py score (harness goodput.compute_metrics: the A2 rule, the cell's SLA, measure window and warm-up, occupancy rule)",
+  "primary_metric": "goodput_rps_window under the AIS E0 (ais-chunked-estimator-v2), the simulator's own reference",
+  "validity": "a run counts only if score_live reports fidelity_ok (every request matched, exact prompts, ISL and forced OSL, usage, session headers) and the pair status is ok; AIPerf's empty-detokenization OSL=1 errors count as not good, as the scorer does, and are reported",
+  "secondary": [
+   "A19 good_tokens_rps_window over the same in-window requests and good rule",
+   "goodput under the live-idle E0 (score --e0 live), fitted on the pooled idle calibration runs of the finalist jobs (plus each node's own fit as a sensitivity)",
+   "TTFT p50/p90, mean-ITL p50/p90, prefix-cache hit rate, per-worker request share (LR-13 cap 0.5 at N = 4) and schedule lateness, descriptive"
+  ]
+ },
+ "sim_counterparts": {
+  "path": "<campaign-root>/runs/live_sim/sim_counterparts.json",
+  "sha256": "4139505acea6de313ecc225585ca6a2a4e4853d455523702d03a27d8d0525d38",
+  "results": "<campaign-root>/runs/live_sim/results.jsonl",
+  "rule": "same cell, N = 4, load, frozen spec and CRN replicate k = 0 (policy seed 1) on the tuning build 6955b0ee; all 108 (k0-2) were cache hits on the frozen test pass, so no test cell was replayed",
+  "primary": "k0 at router-state lag 0",
+  "secondary": "mean over k0-2; the robustness pass's lag 10/50/200 ms k0 records (round_robin has no lag records; it reads no router state)"
+ },
+ "analysis": {
+  "pair_score": "s(a, b) = clip(ln((a + 1e-3) / (b + 1e-3)), -ln 3, +ln 3), as facts/HEADLINE_TEST.json",
+  "live_default_reference": "D(c, p) = mean goodput of the default@defaults runs in the same job as p (both defaults when they share p's job, as in every unsplit pack)",
+  "paired_deltas": [
+   "vs default: dDef_live(c, p) = s(g_live(c, p), D(c, p)) for p in {ramjet, m1v2, m1, m0, round_robin}; sim: dDef_sim(c, p) = s(g_sim_k0(c, p), g_sim_k0(c, default))",
+   "vs ramjet: dRj_live(c, p) = s(g_live(c, p), g_live(c, ramjet)) for p in {m1v2, m1, m0, round_robin, default (=D)}; flagged cross-node when p and ramjet ran in different jobs (never for m1v2, by the split rule)",
+   "per cell, and the mean over cells with its range; no significance claims (6 cells at most)"
+  ],
+  "kendall_tau": [
+   "per cell: Kendall tau-b between dDef_sim(c, .) and dDef_live(c, .) over the 6 policies (default fixed at 0)",
+   "pooled (primary pooled): tau-b between the per-policy means over cells of dDef_sim and dDef_live (6 policies), with the exact one-sided permutation p-value over the 720 orderings (descriptive)",
+   "secondary pooled: tau-b over all non-default (cell, policy) points of dDef_sim vs dDef_live; and the mean of the per-cell taus",
+   "sensitivity: the same with the sim counterpart at k0-2 mean and at lag 10 ms and 50 ms"
+  ],
+  "sign_agreement": "per cell, sign(s(g_live(m1v2), g_live(ramjet))) vs sign(s(g_sim_k0(m1v2), g_sim_k0(ramjet))); reported for every cell; the count is taken over informative cells (|sim delta| > 0.01: all but sessions-s6), and separately over informative cells where |live delta| exceeds 2 x sqrt(2) x sigma_live",
+  "live_noise": "per cell r(c) = s(g(default_a), g(default_b)) (within-job except the split sessions cell, flagged cross-node); sigma_live = sqrt(mean_c r(c)^2 / 2) estimates the per-run sd of ln goodput; reported next to every live delta (dDef sd ~ 1.22 sigma, dRj sd ~ 1.41 sigma)",
+  "calibration": "g_live / g_sim_k0 per (cell, policy), as in the smoke (0.9976): absolute live-vs-sim goodput agreement, descriptive",
+  "wording_rules": [
+   "the live ranking 'agrees' with simulation if the pooled tau-b >= 0.6 (at most 3 discordant of 15 pairs); otherwise state the disagreement and where it comes from",
+   "'M1-v2 > ramjet holds live' only if the live delta is positive in at least 2/3 of informative cells and its mean over informative cells is positive; otherwise report it as not reproduced (or reversed)",
+   "live results are validation only and never change selection, the headline or any frozen number; public text names no cluster, node, partition, account, job ID or internal path"
+  ],
+  "completeness": "a cell enters the per-cell and pooled tau only with all 6 policies valid; a cell missing one default uses the other (noise unmeasured there); partial cells are reported descriptively"
+ },
+ "evidence_prep": {
+  "replay_policy_check": "<campaign-root>/runs/live/finalists/cpu_check/replay_policy_check.json",
+  "mocker_frontend_check": "<campaign-root>/runs/live/finalists/cpu_check/mocker_frontend",
+  "pairs_dryrun": "<campaign-root>/runs/live/finalists/cpu_check/pairs_dryrun2"
+ }
+}

@@ -1,7 +1,7 @@
 # Audit: build checkpoint, lens "goodput-normalization", round 2 (dynamic)
 
 - Auditor: independent dynamic auditor, 2026-10-02 (about 17:03–17:35 PDT).
-- Audited state: WT `rupei/learned-routing-public` at `<commit-12>` (build fixer r1 head), bindings build_id
+- Audited state: WT `rupei/learned-routing` at `<commit-12>` (build fixer r1 head), bindings build_id
   `6955b0ee…`, `HARNESS_VERSION` `lrh-3`, cells `lr-cells-v3` (SPLIT_MANIFEST `c42dacea…`).
 - Evidence directory: `CR/runs/audits/build-goodput-normalization-r2/` (`scripts/`, `out/`, `logs/`,
   `cells/`). Key outputs: `out/goodput_compare.json`, `out/knife_edge_fixes.json`,

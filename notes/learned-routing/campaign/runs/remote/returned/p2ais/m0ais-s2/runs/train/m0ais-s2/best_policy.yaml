@@ -1,0 +1,12 @@
+name: "m0-ais-default-tuned@m0ais-s2"
+parameters:
+  decode_active_request_weight: 2531.730039954035
+  overlap_score_credit: 1.2356781555703658
+  overlap_score_credit_decay: 0.28812143315136984
+  prefill_load_scale: 53.034606238296384
+  router_temperature: 0.0010910204553340479
+router_config:
+  router_prefill_load_model: "ais"
+router_mode: "kv_router"
+seeded: true
+type: "dynamo-default-cost-fn"

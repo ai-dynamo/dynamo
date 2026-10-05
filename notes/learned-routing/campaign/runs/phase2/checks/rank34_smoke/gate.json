@@ -1,0 +1,45 @@
+{
+ "rule": "run M2 ranks 3-4 iff val k0-2 selection of M2 rank 2 >= max(M1 selected, M1-continued selected) + MDE (facts/tierBC.json decisions.m2_rank3_4_gate, registered before any M2 result)",
+ "mde": 0.03815006761727529,
+ "mde_source": "facts/gate.json mde_vs_best_heuristic (= facts/pilot.json mde.learned_vs_val_best_default_arm_heuristic)",
+ "m2_rank2": {
+  "run": "m2r2-s1",
+  "generation": 5,
+  "which": "mean",
+  "val_objective": 0.16685459482659679,
+  "policy_sha": "b4eddf934784e7637a3874129f108b41bb02bc55327ae45c5c4d2b357ab38c73"
+ },
+ "m1": {
+  "run": "m1c-s1",
+  "generation": 20,
+  "which": "mean",
+  "val_objective": 0.16599470141735354,
+  "policy_sha": "9a44cb58e904b29985b971092da790e2b8fde78829cad7d0a600d41ec1aa2e57"
+ },
+ "m1_continued": {
+  "run": "m1c-s1",
+  "generation": 20,
+  "which": "mean",
+  "val_objective": 0.16599470141735354,
+  "policy_sha": "9a44cb58e904b29985b971092da790e2b8fde78829cad7d0a600d41ec1aa2e57"
+ },
+ "bar": 0.16599470141735354,
+ "margin": 0.0008598934092432509,
+ "passed": false,
+ "selections_complete": false,
+ "written": "2026-10-04 03:45:06 PDT",
+ "spaces": {
+  "m2_rank3.yaml": {
+   "path": "<session-scratch>",
+   "file_sha256": "fd106165526f6464992a9ca4a03a0a017a8a6056c62458021eb4f7e6411dfffe",
+   "space_sha": "dd1fed901558e6ff0c3dea2f4cffcc4bd84b28342c3c11f489bed3d4bf175caf",
+   "dimension": 27
+  },
+  "m2_rank4.yaml": {
+   "path": "<session-scratch>",
+   "file_sha256": "b29b782b63134cc0502668431490b6f350614368398e65cd25e272415f31753f",
+   "space_sha": "bd563e3ff603667e066d7f2f9efb6273eb81f5a1c6980e1abcbdad1366d34d97",
+   "dimension": 34
+  }
+ }
+}

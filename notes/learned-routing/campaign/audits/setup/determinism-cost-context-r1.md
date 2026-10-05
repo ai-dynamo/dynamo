@@ -22,7 +22,7 @@
 
 | Claim (setup) | My evidence | Result |
 |---|---|---|
-| WT on `rupei/learned-routing-public`, base `2be8d9c43a` = `origin/rupei/router-policy-aic-ttft` | `git merge-base HEAD origin/...` = `2be8d9c43ac1b275fa6e5743caee9b01c0522463`, the same SHA that `git ls-remote origin` reports. HEAD is now `<commit-02>` (fixer) on top of `<commit-01>` (setup). Both commits are signed off, with no Co-Authored-By. Upstream is unset and the tree is clean. | PASS |
+| WT on `rupei/learned-routing`, base `2be8d9c43a` = `origin/rupei/router-policy-aic-ttft` | `git merge-base HEAD origin/...` = `2be8d9c43ac1b275fa6e5743caee9b01c0522463`, the same SHA that `git ls-remote origin` reports. HEAD is now `<commit-02>` (fixer) on top of `<commit-01>` (setup). Both commits are signed off, with no Co-Authored-By. Upstream is unset and the tree is clean. | PASS |
 | Bindings unchanged since setup | `_core.abi3.so` SHA-256 `2679f4dd…` equals `facts/setup.json`, built at 13:21:03. The fixer commit touches only `benchmarks/learned_routing/` (Python). | PASS |
 | Main checkout untouched | `git status` shows exactly the 3 pre-existing `M` files (mtimes 2026-10-01 21:49–22:13) plus `?? notes/`. HEAD is `8cd79d84ee` on `rupei/recovery-snapshot-cache`. The only file modified today outside `.git/.claude/target` is `notes/learned-routing/PLAN.md`, the top-level session's file (A2 edit at 14:11). | PASS |
 | Determinism, pair 1: `dynamo-two-tier-cost-fn`, N=8, 2000-row Mooncake | Two fresh processes give identical full and compact hashes. The compact hash `bc73ec6b…` equals **setup's recorded hash** (cross-session). Goodput is 3.2145089936290185 in all three, and recomputed goodput = native. | PASS |
@@ -64,7 +64,7 @@
   - The per-row prefix-reuse fraction correlates at **0.9998** (means 0.62979 vs 0.62975).
 - **Provenance.**
   - The upstream file is the same: Mooncake's `FAST25-release/traces/toolagent_trace.jsonl` has the
-    identical SHA-256 `48a2db1a…`. The shared-corpus doc (`<trace-corpus>/benchmark-traces.md:20`)
+    identical SHA-256 `48a2db1a…`. The shared-corpus doc (`<trace-corpus-index>:20`)
     nevertheless labels it an "Applied Compute-derived workload".
   - `FAST25-release/traces/conversation_trace.jsonl` (`b8cbb061…`, 12,031 rows) is no clean substitute
     (`A/out/fast25/conversation_vs_mooncake.txt`):
@@ -92,7 +92,7 @@
      candidate before use. If FAST25 `conversation_trace` is used, label it as sharing Mooncake/toolagent's
      arrival and length skeleton, so its windows are correlated with theirs and are not independent
      segments.
-  4. The top-level agent should correct the label in `<trace-corpus>/benchmark-traces.md` (an instruction
+  4. The top-level agent should correct the label in `<trace-corpus-index>` (an instruction
      gap in user-space skills; not changed by me).
 
 ### F2 (MINOR, FIXED): `facts/setup.json` misstated the `max_model_len` rule (round-0 F2, still open)

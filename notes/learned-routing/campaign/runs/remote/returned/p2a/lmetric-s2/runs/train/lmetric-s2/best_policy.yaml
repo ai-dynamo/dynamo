@@ -1,0 +1,9 @@
+name: "lmetric-tuned@lmetric-s2"
+parameters:
+  class_prefix_blocks: 4
+  hotspot_detection: true
+  window_requests: 140
+router_config: {}
+router_mode: "kv_router"
+seeded: false
+type: "lmetric"

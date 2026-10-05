@@ -1,0 +1,11 @@
+name: "m0-default-tuned@m0-s1"
+parameters:
+  decode_active_request_weight: 3810.5921117041835
+  overlap_score_credit: 1.705051527663633
+  overlap_score_credit_decay: 2.8395203833714286
+  prefill_load_scale: 238.58205743387077
+  router_temperature: 0.0010086796420084154
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "dynamo-default-cost-fn"

@@ -1,0 +1,229 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: why worker selection is a deployment decision worth learning, why it is hard to settle by
+%   hand or by experiments on GPUs, what the campaign does about it, how "better" is decided, and
+%   what was found, with its scope.
+% EVIDENCE LEVELS: latencies quoted here are AIS performance-model timings, not GPU measurements.
+%   Headline numbers: CR/facts/test_results.json; scope: report_must_state.
+% STATUS: final, including the live GPU check (sec:live).
+
+\section{Introduction}
+\label{sec:intro}
+
+\paragraph{The decision.}
+A KV-aware router places each request on the worker whose cache already holds the longest prefix
+of its prompt, unless that worker is busy enough that recomputing the prefix elsewhere is cheaper.
+On the deployment studied here, Qwen3-32B on vLLM with two H100 GPUs per worker, both sides of this
+trade are large in \ais{}'s timing model. Reuse saves prefill: a \num{120000}-token prompt has a
+time to first token of \SI{17.8}{s} on an idle worker that lacks its prefix and \SI{56}{ms} on an
+idle worker that already holds the first \num{119808} tokens.
+% src: CR/audits/setup/determinism-cost-context-r1.md "New: long prefix reuse at 120K"
+%      (17,815.54 ms without the prefix; TTFT 56.06 ms with reused_input_tokens 119,808);
+%      CR/facts/setup.json long_context.evidence.single_request_ttft_ms_ais."120000"
+Load costs decode speed: one decode step at \num{8192} tokens of context takes \SI{15.3}{ms} at
+batch size 1 and \SI{109.9}{ms} at batch size 256, so each request placed on a worker slows the
+token stream of every other request there.
+% src: CR/facts/setup.json ais_active_evidence.decode_step_ms_by_batch_and_context
+%      (b1_ctx8192 15.3367 ms, b256_ctx8192 109.935 ms)
+Dynamo's default router makes the trade with a fixed cost, the prefill blocks a worker would still
+have to compute plus its decode load (\cref{eq:default-cost}). Published routers draw the line
+elsewhere. LMetric multiplies a worker's prefill work by its number of running requests instead of
+adding the two \citep{zhang2026lmetric}. DualMap hashes a prefix of each prompt to two candidate
+workers and picks between them by their current state \citep{yuan2026dualmap}. Lodestar narrows its
+candidates to two consistent-hash choices in the same way, but only while cluster memory
+utilization is above a threshold, 80\% in its evaluation \citep{lim2026lodestar}. SMetric keeps a
+session's follow-up turns on the worker that holds its context while that worker can still meet a
+latency deadline \citep{wang2026smetric}.
+% src: CR/literature/LESSONS.md LR-04 (LMetric P-token x batch; SMetric Fig 13 rule) and LR-07
+%      (Lodestar k = 2 filter, pdf p.6; DualMap pdf p.5-6), all VERIFIED
+
+These rules disagree, and which one wins depends on the traffic. LMetric's authors report that the
+product beats linear scores tuned for each workload, Dynamo's among them, on their traces
+\citep{zhang2026lmetric}, whose ideal prefix reuse SMetric's authors put at about 50--70\%. On an
+agentic workload with 82\% ideal reuse and no global KV tier, which is the setting of our replay,
+SMetric's authors measured LMetric 36\% below a tuned linear score in throughput within SLO,
+because its reuse ratio fell to 45\% against 74\% \citep{wang2026smetric}. Even the best linear
+weight moves: LMetric's own sweep put it at 0.7 on one workload and 0.55 on another with a similar
+access pattern \citep{zhang2026lmetric}.
+% src: CR/literature/LESSONS.md LR-07 evidence (SMetric pdf p.6; LMetric pdf p.6, p.11), VERIFIED
+An operator has to choose one rule and tune it for a deployment whose traffic may change.
+
+\paragraph{Why the choice is hard to settle.}
+Three properties of the problem make the comparison expensive.
+\begin{enumerate}
+  \item \emph{No per-decision label.} A routing decision changes the cache contents and queues
+    that later requests meet, so its quality shows only in aggregate, over minutes of traffic at a
+    realistic load. A policy can be scored only on whole episodes.
+  \item \emph{Small differences next to workload variation.} On this deployment, the two strongest
+    tuned heuristics finished within 0.002 of each other in mean validation score, and their order
+    flipped between the mean over cells ($+0.0018$) and the mean over independent segments
+    ($-0.0087$) (\cref{sec:res-selection}). Detecting effects of a few percent needs many cells,
+    replicates and independent workload segments.
+    % src: CR/facts/finalists.json rankings_val_k3_10.baseline_pool (ramjet 0.14113, llmdpp 0.13934);
+    %      CR/facts/tierBC.json decisions.val_best_baseline ("margin +0.0018 cell mean (SE 0.0061,
+    %      9/14 cells) but -0.0087 segment mean (3/6 segments): a near tie")
+  \item \emph{Regime dependence.} In classical load balancing, how much waiting a dispatch
+    policy can avoid depends on the number of servers and on the load
+    \citep{vanderboor2022survey}. In a measured study of learned routing for disaggregated
+    serving, the learned router tied join-the-shortest-queue at decode width 3, led at width 4
+    and tied round-robin again at width 6 \citep{tumkur2026calibrate}. A policy tuned at
+    one worker count can therefore lose at another.
+    % src: CR/literature/LESSONS.md LR-12 evidence (CtR pdf p.4-5), VERIFIED
+\end{enumerate}
+Settling the choice by measurement means many long runs. LMetric's authors note that they could
+not sweep all configurations because replaying each trace on their testbed consumes substantial GPU
+time \citep{zhang2026lmetric}. The tuning in this study is larger: 66 CMA-ES restarts of 400
+evaluations each, every evaluation replaying all 34 train cells on 2 workload replicates, plus
+validation. Each train cell simulates 6 to 29 minutes of serving on 4 or 8 workers, that is, 8 to
+16 GPUs.
+% src: CR/audits/final/completeness.md and refute-headline-2.md (66 restarts, 400 evals, 34 train
+%      cells, K = 2); CR/cells/train.jsonl measure.warmup_ms + measure.window_ms over the
+%      arrival-basis cells (6.3 to 29.0 simulated minutes); N in {4, 8} at TP2.
+% src: CR/literature/txt/llm-routing/zhang2026-lmetric.txt lines 767-772 ("we cannot afford to sweep
+%      all possible configurations, as replaying each trace on the testbed consumes a substantial
+%      amount of GPU time")
+
+\paragraph{Approach.}
+We first describe the router's worker-selection API (\cref{sec:background}). A routing policy is a
+YAML instance of a catalog type that composes filters, scorers and a picker over inputs it declares:
+cache overlap, load, capacity and request facts. Dynamo's default cost function and every ported
+heuristic in this study are such instances, and so is the learned policy, so all of them are
+configured, tuned and replayed through the same interface. We then use \aisim{} offline replay as a
+development environment (\cref{sec:simulator}). It runs Dynamo's router, including the builtin policy
+catalog the live router loads, against mock vLLM engines in simulated time, and times every forward
+pass with AISimulate's performance model for the configured model, GPU and parallelism. A
+\num{2000}-request trace replays in about \SI{1.5}{s} of one CPU core, and identical inputs replay
+identically, so competing policies can be compared on common random numbers.
+% src: CR/facts/setup.json replay_cost (about 1.5 s per 2,000-request replay in a fresh process);
+%      CR/CONTRACT.md A1 (identical re-runs are deterministic)
+In that environment we tune a worker-selection function, \lc{} (\cref{sec:model}). It is a
+conditional-logit choice model: it scores every candidate worker with one shared utility, linear
+in features the live router already computes, and picks the highest. CMA-ES tunes the
+coefficients on windowed SLO goodput (\cref{sec:training}). The simulator only trains and scores:
+the headline policy reads no performance-model signal, so the YAML file that training writes runs
+in the live router unchanged. A separately reported league of variants may read AISimulate
+estimates at runtime (\cref{sec:res-ais}).
+% src: CR/CONTRACT.md A16 (AIS league, secondary); WT/lib/router-plugins/builtin/src/learned_choice/FEATURES.md
+
+The choice-model form gives three properties the study relies on. It is defined for any candidate
+set, so a policy tuned at $\Nw \in \{4, 8\}$ can run at $\Nw = 2$ or 32 and be tested there. It
+contains the default router: the coefficient vector $\theta = -\basis{0}$ reproduces the default
+router's choice (\cref{sec:parity}), so training starts from the status quo and every learned
+coefficient reads as a change to it. And it is cheap: a decision costs $O(\Nw\dfeat)$ operations
+for $\dfeat$ features (8 in the base set, 23 in the extended set that won).
+
+\begin{figure}[tbp]
+  \centering
+  \begin{tikzpicture}[
+      node distance=6mm and 7mm,
+      box/.style={draw, rounded corners=2pt, align=center, font=\small, inner sep=4pt, minimum height=9mm},
+      arr/.style={-{Stealth[length=2mm]}, thick}]
+    \node[box] (cells) {frozen cells\\\scriptsize trace, transform, load, $\Nw$, SLO};
+    \node[box, right=of cells] (replay) {\aisim{} replay\\\scriptsize router + mock vLLM, \ais{} timing};
+    \node[box, right=of replay] (score) {scorer\\\scriptsize $\good_j$, $\Gw_{\cell,\krep}$, $\clr$};
+    \node[box, below=of score] (cma) {CMA-ES\\\scriptsize $\Jobj(\pol)$, CRN replicates};
+    \node[box, below=of replay] (yaml) {policy YAML\\\scriptsize \lc{} coefficients};
+    \node[box, below=of cells, fill=black!5] (live) {live KV router\\\scriptsize same YAML, no \ais{}};
+    \draw[arr] (cells) -- (replay);
+    \draw[arr] (replay) -- (score);
+    \draw[arr] (score) -- (cma);
+    \draw[arr] (cma) -- (yaml);
+    \draw[arr] (yaml) -- (replay);
+    \draw[arr, dashed] (yaml) -- node[above, font=\scriptsize] {ship} (live);
+  \end{tikzpicture}
+  \caption{The training loop. A policy is a YAML file read by the router's builtin policy catalog,
+    so each CMA-ES candidate costs a new YAML and a set of replays, with no rebuild. \ais{} times
+    the simulated engines and so shapes the score; the headline policy never reads it.}
+  \label{fig:loop}
+\end{figure}
+
+\paragraph{How ``better'' is decided.}
+The comparison is on equal footing. Every policy, the learned arms and each of 11 tuned heuristic
+baselines, is one configuration tuned on the pooled train cells with the same CMA-ES budget and
+restarts and selected on validation; the best baseline, and by the same rule the headline learned
+arm, are chosen on fresh validation replicates (\cref{sec:baselines,sec:eval}).
+% src: CR/CONTRACT.md A2.1, A17.2; CR/facts/finalists.json selection
+The comparison is made once, on a test set frozen with SHA-256 hashes before any tuning. Its 60
+cells come from 12 independent workload segments and hold out time windows, agent plays, session
+seeds, a trace family, transform ranges and worker counts. The headline is a one-sided exact
+Wilcoxon signed-rank test over the segments, registered before training. Reported but not tested
+are robustness to the SLO scale and definition, to stale router state (replay gives the router
+perfectly fresh cache and load information, a live router does not) and to engine timing, and a
+check of the ranking on GPUs.
+% src: CR/facts/HEADLINE_TEST.json; CR/facts/test_freeze.json; CR/CONTRACT.md A5, A13, A14
+
+\paragraph{What we found.}
+% src: CR/facts/test_results.json headline, report_must_state; CR/facts/fairness_in_class_heuristic.json;
+%      CR/facts/robustness.json; CR/audits/phase2-mid/gaming-concentration.md
+Stated as the final audit allows: in AIS-timed simulation, the learned router M1-v2 beats the
+branch's ported heuristics, each tuned with an equal budget. Against the validation-selected best
+baseline, tuned \policy{ramjet}, it is ahead on 10 of the 12 test segments and on all 8 informative
+ones (the 4 session segments tie at ceiling), with a segment-mean clipped log-ratio of $+0.0316$
+and one-sided exact Wilcoxon $p = 0.0017$ (\cref{sec:res-headline}). It keeps first place among the
+robustness finalists under router-state lag of 10 to \SI{200}{ms} and under four engine-timing
+perturbations, and it ranks first under all four alternative definitions of a good request. Four
+qualifications travel with the result.
+\begin{itemize}
+  \item Only the sign is a claim: the effect is below the pre-registered minimum detectable effect
+    (0.038) and below the spread the timing perturbations induce (0.060).
+  \item It is not ``learning beats every heuristic''. The baseline pool holds the branch's ports as
+    implemented, and its \policy{lmetric} port lacks LMetric's queued-prefill term. Faithful LMetric
+    lies inside the learned model's class; untuned, it beats every tuned baseline on validation, and
+    with the default cost it reproduces 53--66\% of the learned model's validation margin
+    (\cref{sec:res-fairness}).
+  \item It is a request-count property. A token-weighted goodput is mixed, and prompts of 32K
+    to 64K tokens see higher time to first token than under \policy{ramjet}
+    (\cref{sec:gaming}).
+    % src: CR/facts/test_results.json report_must_state MS-F1-ttft (32K-64K p90 +0.135, 11/12; >= 64K
+    %      filtered +0.021, 3/7, p 1.0, so the TTFT statement stops at 64K)
+  \item Black-box search games a request-count objective. The first tuned model kept a worker
+    whose requests were all bad; constraining load coefficients so that load cannot attract
+    removed it, and every later learned arm runs under that constraint (\cref{sec:gaming}).
+\end{itemize}
+A pre-registered live check then served six of the $\Nw = 4$ test cells on H100 GPUs with Dynamo's
+router running the same policy files (\cref{sec:live}). The live ranking of the six policies checked
+agrees with simulation (pooled Kendall $\kendall$-b 1.00), and M1-v2 leads \policy{ramjet} in each of the
+five cells where simulation predicts a lead, each time by more than the registered noise bar. The
+check validates the ranking and that sign only: with one run per policy on six cells chosen after the
+test pass, it says nothing about the headline's magnitude, and live goodput departs from simulation
+by policy-dependent factors of 0.72 to 2.18, enough that on one cell the simulated gain over the
+default router is not reproduced beyond live noise.
+% src: CR/facts/live_results.json wording, primary.kendall_tau.k0 (tau_b 1.0), primary.sign_agreement
+%      (5 of 5, beyond_noise_agree 5); CR/report/LIVE.md 15.2 (0.72-2.18; sessions not reproduced beyond
+%      live noise), 15.7
+
+\paragraph{Contributions.}
+\begin{itemize}
+  \item A description of Dynamo's worker-selection API as routing primitives, with the default
+    cost function and nine other catalog policy types written in that vocabulary, and a list of the
+    major caveats the campaign uncovered in the API, the replay host and the workloads, each with
+    its evidence and status (\cref{sec:background}).
+  \item \lc{}, a deployable worker-selection policy for Dynamo's router plugin catalog: a
+    discrete-choice model over router-observable features that contains the default router as one
+    coefficient setting and reads no simulator signal (\cref{sec:model}).
+  \item A tuning method for routing policies in replay: CMA-ES on an episodic, windowed goodput
+    objective with common-random-number workload replicates, applied with the same budget,
+    restarts and selection rule to the learned model and to every heuristic baseline
+    (\cref{sec:training,sec:baselines}).
+  \item An objective and evaluation protocol for routing studies: goodput defined by inter-token
+    latency and end-to-end slowdown over a request's own uncontended latency, measured in a window
+    that excludes warm-up and drain; held-out worker counts; a pre-registered test over independent
+    workload segments; and staged adversarial audits (\cref{sec:setup,sec:eval}).
+  \item Results with their scope: the headline and its strata, worker-count extrapolation, the
+    model ladder, the learned coefficients, robustness, the objective-gaming finding and its
+    remedy, the secondary metrics that bound the claim, and a pre-registered live GPU check of the
+    ranking (\cref{sec:results,sec:gaming,sec:live}).
+\end{itemize}
+
+\paragraph{Reading guide.}
+\Cref{sec:background} introduces the routing primitives, the policies and the caveats.
+\Cref{sec:setup} defines the decision and the objective, \cref{sec:simulator} the simulator and
+workloads, \cref{sec:model} the policy and \cref{sec:training} its training. \Cref{sec:baselines}
+describes how the baselines are tuned, \cref{sec:eval} the evaluation protocol, \cref{sec:results}
+the results and \cref{sec:gaming} the concentration findings. \Cref{sec:live} reports the live GPU
+validation. \Cref{sec:threats} discusses limitations and threats to validity, and
+\cref{sec:related} relates the work to prior research. Labels of the form A$n$ refer to the
+campaign contract's numbered amendments and LR-$n$ to the numbered lessons of its literature
+review; both are part of the campaign record (\cref{app:repro}). Every number traces to a campaign
+record named in a comment in the \LaTeX{} source.

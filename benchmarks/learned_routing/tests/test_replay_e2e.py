@@ -275,3 +275,64 @@ def test_idle_requests_are_good_at_unit_slowdown(setup):
         assert record["slowdown_atom_frac"] == 1.0
         # the tolerance is float-noise sized: a tighter scale fails every request
         assert record["rescore"]["0.75"]["good_frac_window"] == 0.0
+
+
+def test_timing_perturbed_idle_requests_match_the_consistent_e0(setup):
+    """Phase2-mid sim-exploitation F2: on a perturbed engine (speedup 0.8, decode x1.25) an idle,
+    no-reuse request runs exactly E0' = prefill / s + decode / (s d). lr-eval's nominal E0 makes
+    every one of them miss a unit slowdown; the consistent rescoring makes every one good.
+    """
+    from learned_routing.rescore_timing import ConsistentE0, rescore_record
+
+    layout, cell, specs = setup
+    trace = layout.root / "idle_pert.jsonl"
+    lines, next_hash = [], 0
+    for i, (isl, osl) in enumerate(IDLE_REQUESTS):
+        blocks = -(-isl // 512)
+        hash_ids = list(range(next_hash, next_hash + blocks))  # fresh: no reuse
+        next_hash += blocks
+        lines.append(
+            json.dumps(
+                {
+                    "timestamp": i * 600_000,
+                    "input_length": isl,
+                    "output_length": osl,
+                    "hash_ids": hash_ids,
+                }
+            )
+        )
+    trace.write_text("\n".join(lines) + "\n")
+    s, d = 0.8, 1.25
+    pert = Cell(
+        raw={
+            **cell.raw,
+            "cell_id": "e2e-idle-pert",
+            "trace_files": [str(trace)],
+            "num_workers": 2,
+            "sla": {"itl_ms": None, "e2e_slowdown": 1.0, "ttft_ms": None},
+            "engine_overrides": {"speedup_ratio": s, "decode_speedup_ratio": d},
+        },
+        layout=layout,
+    )
+    records = run(layout, [Task(specs[1], pert, 0)])
+    engine = json.loads(CAMPAIGN.engine_json.read_text())
+    table = E0Table(engine, layout.e0_dir)
+    consistent = ConsistentE0(table, s, d)
+    n = len(IDLE_REQUESTS)
+    (record,) = records
+    assert record["error"] is None, record["error"]
+    rows = per_request(record)
+    assert len(rows) == n and all(not r["reused_input_tokens"] for r in rows)
+    for r in rows:
+        isl, osl = r["input_length"], r["output_length"]
+        assert r["e2e_latency_ms"] == pytest.approx(consistent(isl, osl), rel=1e-7), r
+        # prefill runs at 1 / s = 1.25x, decode at 1 / (s d) = 1x: slower than the nominal E0
+        assert r["e2e_latency_ms"] > table(isl, osl) * (1 + 1e-4)
+    # lr-eval scores against the nominal E0: the slower engine also tightened the SLA
+    assert record["good"] == 0
+    both = rescore_record(record, pert, table)
+    assert both["nominal_e0"]["goodput_rps_window"] == record["goodput_rps_window"]
+    assert both["nominal_e0"]["good_frac_window"] == 0.0
+    assert both["consistent_e0"]["good_frac_window"] == 1.0
+    assert both["consistent_e0"]["slowdown_atom_frac"] == 1.0
+    assert (both["speedup_ratio"], both["decode_speedup_ratio"]) == (s, d)

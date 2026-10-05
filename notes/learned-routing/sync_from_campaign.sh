@@ -14,9 +14,23 @@ DEST="$(cd "$(dirname "$0")" && pwd)/campaign"
 MAX_BYTES=$((5 * 1024 * 1024))
 BUDGET_BYTES=$((25 * 1024 * 1024))
 
+# Per-allocation compute records name clusters, nodes, accounts, partitions and job IDs: never mirror
+# them (the public mirror summarizes them in facts/compute_summary.md instead).
+compute_record() {
+    case "$1" in
+        facts/remote.json | facts/live.json | facts/cluster_cleanup.json | *CLEANUP.md | *.lock \
+            | *.jobs.json | *.jobs.*.json | *bundle_jobs*) return 0 ;;
+    esac
+    return 1
+}
+
 copy() {
     local src="$1" rel="$2"
     [[ -f "$src" ]] || return 0
+    if compute_record "$rel"; then
+        echo "skip (compute record): $rel" >&2
+        return 0
+    fi
     local size
     size=$(stat -c %s "$src")
     if (( size > MAX_BYTES )); then

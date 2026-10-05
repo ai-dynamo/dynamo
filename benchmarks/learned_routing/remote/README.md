@@ -31,7 +31,7 @@ needs `LR_P2ORCH_TARGETS`, a JSON list of placement targets (`p2orch_targets.exa
 | `prematerialize.py` | Parallel CRN replicate materialization. The harness otherwise materializes replicates one at a time while planning tasks, which took minutes on a fresh node. Output files are byte-identical to the harness's. |
 | `parity_check.py` | Field-by-field and per-request byte comparison of remote records against local cache records by cache key. |
 | `lane.py` | Bookkeeping: the `remote.json` allocation records (flock + atomic replace), `traces.sha256` and trace provenance, the train-bundle assembly, and the bundle index used for `rsync --link-dest`. |
-| `p2orch.py` | Phase-2 orchestrator: places the `CR/runs/phase2/MANIFEST.json` training runs on Slurm nodes (one per node, `submit_train.sh --only RUN` pinned with `--nodelist`) and the workstation, fetches and ingests finished runs, resumes paused ones, enforces an optional weekly job-end cutoff (`--cutoff`, `LR_TZ`), counts evaluations and runs the LR-10 selection. |
+| `p2orch.py` | Phase-2 orchestrator: places the `CR/runs/phase2/MANIFEST.json` training runs on Slurm nodes (one per node, `submit_train.sh --only RUN` pinned with `--nodelist`) and the workstation, fetches and ingests finished runs, resumes paused ones, enforces an optional job-end cutoff (`--cutoff` or `LR_CUTOFF`, in `LR_TZ`; no built-in default), counts evaluations and runs the LR-10 selection. Documented in `CR/runs/phase2/ORCHESTRATOR.md`. A second instance, run from another worktree so its bundle carries that worktree's build, keeps its own manifest and state under `LR_P2_DIR` and, with `init --yield-to OTHER/state.json[:MAX_WAVE]`, never takes the other instance's targets and waits while it has eligible runs (`CR/runs/phase2-ais/README.md`). |
 | `common.sh`, `siteenv.py` | Shared settings: the site values from `site.env` (no built-in defaults), plus `LR_MEM`, `LR_TIME` and the other overridable knobs. |
 
 ## Typical use
@@ -70,8 +70,8 @@ ssh "$LR_SSH_ALIAS" scancel <job_id>
 ## Shape and placement
 
 - **Account, QoS and time:** set in `site.env`. Some QoS settings let Slurm start a job with less
-  than the requested time (`TimeMin`), and some clusters require jobs to end before a weekly
-  maintenance cutoff, so the node scripts clamp their budget to `SLURM_JOB_END_TIME` rather than
+  than the requested time (`TimeMin`), and some clusters require jobs to end before a site
+  cutoff, so the node scripts clamp their budget to `SLURM_JOB_END_TIME` rather than
   trusting the requested `--time`.
 - **Partitions:** zero-GPU x86_64 partitions whose image meets the bundle's glibc floor. On
   partitions that share nodes between jobs (`OverSubscribe=FORCE`), `--exclusive` may be rejected

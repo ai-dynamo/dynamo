@@ -1,0 +1,1169 @@
+{
+ "schema": "learned-routing.live-smoke.v1",
+ "status": "ok",
+ "updated_local": "2026-10-03 12:43:56 PDT",
+ "task": "A13.1 live-lane GPU smoke: one 8xH100 GPU cluster node, N = 4 x TP2, default@defaults (seed 1) on one full Mooncake train cell via AIPerf, compared with offline replay of the same cell and replicate; idle E0 calibration",
+ "operator_request": "at approrpiate checkpoint do some runs with real gpus, to see whether the results (at least relative wise) still holds on a real deployment, at which point you may need aiperf for loadgen, so just need to make sure the two loadgens offline and live are like semanticlaly the same, /the cluster runbook if needed",
+ "verdict": "The live deployment reproduced the replay of this cell within the replicate noise of replay itself: windowed goodput (AIS E0) 3.4454 live vs 3.4535 replay (ratio 0.9976; 2113 vs 2118 good of 2376 in-window requests), prefix-cache hit rate 0.3599 vs 0.3589, E2E distribution KS 0.022, AIPerf dispatch within 2.5 ms (p99) of the schedule with no drift. Systematic engine-level differences offset each other here: real TTFT is higher (p50 176 vs 130 ms) and real decode ITL lower (p50 22.9 vs 25.6 ms). One cell, one policy, one run: this validates the lane, not any policy ranking.",
+ "evidence_root": "<campaign-root>/runs/live/smoke",
+ "jobs": {
+  "note": "every job is also recorded with its cancel command in facts/live.json; all ended, lock released, no allocation held",
+  "<job-1>": {
+   "node": "<node>",
+   "elapsed": "00:01:15",
+   "state": "FAILED",
+   "commit": "<commit-34>",
+   "cause": "build_env.sh: mktemp under a missing LR_LIVE_ROOT/wheels parent",
+   "fix": "<commit-35>"
+  },
+  "<job-2>": {
+   "node": "<node>",
+   "elapsed": "00:01:33",
+   "state": "FAILED",
+   "commit": "<commit-35>",
+   "cause": "nixl-sys bindgen with the PyPI libclang: 'stdbool.h' not found (wheel has no clang resource headers)",
+   "fix": "<commit-36> (BINDGEN_EXTRA_CLANG_ARGS=-I$(cc -print-file-name=include))"
+  },
+  "<job-3>": {
+   "node": "<node>",
+   "elapsed": "00:29:00",
+   "state": "COMPLETED",
+   "commit": "<commit-36>",
+   "purpose": "the smoke run (cell + idle E0)",
+   "run_dir_gpu": "<scratch>/live/runs/<job-3>-lr-live-n4-20261003T185522Z",
+   "run_dir_local": "<campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z"
+  },
+  "<job-4>": {
+   "node": "<node>",
+   "elapsed": "00:14:35",
+   "state": "COMPLETED",
+   "commit": "<commit-37>",
+   "purpose": "verify the frontend-lifecycle fix (default_defaults then round_robin, fresh frontend per phase) and repeat the idle E0 on a second node",
+   "run_dir_local": "<campaign-root>/runs/live/smoke/s2/gpu-cluster/<job-4>-lr-live-n4-20261003T192534Z"
+  },
+  "gpu_cost": {
+   "node_minutes": 46.4,
+   "node_hours": 0.773,
+   "gpu_hours_charged": 6.19,
+   "rule": "whole nodes, 8 GPUs charged per node-hour; sum of sacct Elapsed of the 4 jobs"
+  }
+ },
+ "deployment": {
+  "plan_id": "756e8e3b3246b0b2",
+  "policy": {
+   "name": "default@defaults",
+   "yaml_sha256": "3eb7e0104a4747731fee1acd7caba430795e3d9eb9b07e8dbf770de3dd788753",
+   "seed": 1,
+   "byte_identical_to_replay_yaml": true
+  },
+  "hardware": "8 x H100 80GB HBM3 (<node>), Ubuntu 22.04.3, driver 535 with CUDA 13 forward compatibility",
+  "engine": "vLLM 0.24.0 (image vllm/vllm-openai@sha256:f9de5cd9...), torch 2.11.0+cu130, Qwen/Qwen3-32B@9216db57, TP2 x 4 workers, block 16, max_model_len 131072 (YaRN factor 4), max_num_batched_tokens 8192, max_num_seqs 1024, chunked prefill, prefix caching",
+  "kv_capacity": "profiled num_gpu_blocks 19717 on every worker (both nodes), overridden to 18864 = 18863 usable (replay capacity); preemptions during the cell: 0",
+  "router": "frontend aggregated KV router, router_mode kv, KV events over ZMQ from every worker, no session affinity, no busy thresholds, no migration",
+  "health_checks": {
+   "wait": "ok (4 generate instances, model served)",
+   "exact_isl_forced_osl": "ok (4 pinned requests, prompt_tokens = ISL, completion_tokens = OSL)",
+   "kv_events_reach_router": "ok (stored events 24 -> 25)",
+   "prefix_reuse": "ok (2048-token prefix extension routed to the same worker, cached_tokens 2048)",
+   "policy_evidence": "ok (frontend config dump: router_mode kv, policy YAML sha256 3eb7e010..., kwarg_diffs {})",
+   "cold_reset": "ok (per worker: control cached 496 -> flush -> 0 cached, no vllm prefix hit increase)"
+  },
+  "timeline_<job-3>_utc": {
+   "job_start": "18:55:27",
+   "wheel_built": "19:00:47 (254 s release build)",
+   "venv_verified": "19:01:07",
+   "ready": "19:03:17 (weights load 14.5 s, CUDA graphs 6 s; model to ready 2 min 10 s)",
+   "checks_done": "19:03:33",
+   "payload": "19:03:43-19:24:26 (cell 1062.6 s wall, idle 176.5 s)",
+   "job_end": "19:24:27"
+  }
+ },
+ "cell": {
+  "cell_id": "mooncake-w2-base-n4-open-L2",
+  "split": "train",
+  "shortened": false,
+  "k": 0,
+  "replicate_protocol": "crn-spread-v1",
+  "replicate_sha256": "4a834e35f04088f555417ba0539a1f3cad14a0e5224858995810a923bb67f454",
+  "load": "open_speedup 0.587001 (L2, 8244.61 input tokens/s/worker)",
+  "num_workers": 4,
+  "requests": 4002,
+  "input_tokens": 34178246,
+  "output_tokens": 715409,
+  "sla": {
+   "itl_ms": 252.117,
+   "e2e_slowdown": 3.46625
+  },
+  "measure": {
+   "basis": "arrival",
+   "warmup_ms": 403653.486,
+   "window_ms": 613286.86
+  },
+  "inputs": "<campaign-root>/runs/live/smoke/s1/inputs/cell (manifest_id 87033253ccff9b7d..., salt lr-live-smoke-s1-20261003)",
+  "verify_replay": "exact (4002 arrival/ISL/OSL tuples bit-identical to the cached replay rows)",
+  "replay_record": {
+   "build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+   "cache_key": "b83cb30c8b804e80bba51a0b22a75a57a01895c9993e1b6412e3234a6403f1be",
+   "path": "<campaign-root>/runs/cache/results/b8/b83cb30c8b804e80bba51a0b22a75a57a01895c9993e1b6412e3234a6403f1be.json",
+   "policy_name": "default@defaults",
+   "policy_seed": 1
+  },
+  "replay_rescore_through_live_scorer_exact": true
+ },
+ "fidelity": {
+  "request_level": {
+   "fidelity_ok": true,
+   "isl_mismatch": 0,
+   "matched": 4002,
+   "missing": 0,
+   "osl_mismatch": 0,
+   "prompt_checked": 4002,
+   "prompt_mismatch": 0,
+   "records": 4002,
+   "session_header_mismatch": 0,
+   "statuses": {
+    "completed": 4001,
+    "error": 1
+   },
+   "usage_isl_mismatch": 0,
+   "workers_seen": 4
+  },
+  "schedule": {
+   "credit_issue_lateness_ms": {
+    "max": 9.424,
+    "min": -0.0,
+    "n": 4002,
+    "p50": 1.37,
+    "p99": 2.499
+   },
+   "http_start_lag_ms": {
+    "max": 10.616,
+    "min": 0.535,
+    "n": 4002,
+    "p50": 2.105,
+    "p99": 3.307
+   },
+   "lateness_by_schedule_decile_p50_ms": [
+    1.472,
+    1.385,
+    1.334,
+    1.296,
+    1.443,
+    1.37,
+    1.285,
+    1.263,
+    1.456,
+    1.397
+   ],
+   "frac_lateness_over_10ms": 0.0,
+   "makespan_ms": {
+    "live": 1039047.7,
+    "replay": 1040674.5
+   },
+   "client": "AIPerf 0.13.0 in the vLLM container on the head node, pinned to 28 CPUs (42-55,154-167), same host as the frontend"
+  },
+  "latency_all_completed": {
+   "live": {
+    "ttft_ms": {
+     "mean": 672.27,
+     "p10": 53.89,
+     "p25": 78.4,
+     "p50": 175.95,
+     "p75": 690.28,
+     "p90": 1687.51,
+     "p95": 2566.75,
+     "p99": 6746.04,
+     "max": 20146.15
+    },
+    "itl_mean_ms": {
+     "mean": 46.9,
+     "p10": 15.07,
+     "p25": 16.76,
+     "p50": 22.89,
+     "p75": 39.35,
+     "p90": 78.84,
+     "p95": 164.88,
+     "p99": 544.19,
+     "max": 1150.87
+    },
+    "e2e_ms": {
+     "mean": 6611.38,
+     "p10": 125.63,
+     "p25": 407.54,
+     "p50": 1787.1,
+     "p75": 10572.42,
+     "p90": 18792.44,
+     "p95": 24767.6,
+     "p99": 39146.3,
+     "max": 69362.67
+    }
+   },
+   "replay": {
+    "ttft_ms": {
+     "mean": 599.39,
+     "p10": 49.86,
+     "p25": 65.67,
+     "p50": 129.85,
+     "p75": 633.64,
+     "p90": 1554.65,
+     "p95": 2410.05,
+     "p99": 5841.29,
+     "max": 17851.91
+    },
+    "itl_mean_ms": {
+     "mean": 47.76,
+     "p10": 17.37,
+     "p25": 19.22,
+     "p50": 25.57,
+     "p75": 39.93,
+     "p90": 73.2,
+     "p95": 139.54,
+     "p99": 535.67,
+     "max": 1010.95
+    },
+    "e2e_ms": {
+     "mean": 6758.12,
+     "p10": 121.78,
+     "p25": 424.58,
+     "p50": 1691.4,
+     "p75": 11252.88,
+     "p90": 19405.64,
+     "p95": 24339.24,
+     "p99": 38581.71,
+     "max": 70690.15
+    }
+   }
+  },
+  "latency_window": {
+   "live": {
+    "ttft_ms": {
+     "mean": 693.58,
+     "p10": 54.19,
+     "p25": 78.99,
+     "p50": 172.32,
+     "p75": 671.03,
+     "p90": 1708.32,
+     "p95": 2704.53,
+     "p99": 7000.67,
+     "max": 19640.55
+    },
+    "itl_mean_ms": {
+     "mean": 46.0,
+     "p10": 15.06,
+     "p25": 16.56,
+     "p50": 22.55,
+     "p75": 38.64,
+     "p90": 78.12,
+     "p95": 161.09,
+     "p99": 558.42,
+     "max": 1150.87
+    },
+    "e2e_ms": {
+     "mean": 6601.28,
+     "p10": 125.47,
+     "p25": 418.75,
+     "p50": 1703.47,
+     "p75": 10412.28,
+     "p90": 18390.81,
+     "p95": 24962.07,
+     "p99": 42351.96,
+     "max": 64929.44
+    }
+   },
+   "replay": {
+    "ttft_ms": {
+     "mean": 621.51,
+     "p10": 50.3,
+     "p25": 66.8,
+     "p50": 132.44,
+     "p75": 636.26,
+     "p90": 1610.24,
+     "p95": 2593.8,
+     "p99": 5892.62,
+     "max": 17851.91
+    },
+    "itl_mean_ms": {
+     "mean": 47.3,
+     "p10": 17.24,
+     "p25": 19.07,
+     "p50": 25.63,
+     "p75": 39.73,
+     "p90": 73.04,
+     "p95": 128.54,
+     "p99": 544.14,
+     "max": 1010.95
+    },
+    "e2e_ms": {
+     "mean": 6796.23,
+     "p10": 123.26,
+     "p25": 445.79,
+     "p50": 1728.46,
+     "p75": 11135.63,
+     "p90": 19305.25,
+     "p95": 24892.38,
+     "p99": 40253.89,
+     "max": 63224.95
+    }
+   }
+  },
+  "ks_statistic_all": {
+   "e2e_ms": 0.0218,
+   "itl_mean_ms": 0.1892,
+   "ttft_ms": 0.0886
+  },
+  "per_request_live_over_replay": {
+   "e2e_live_over_replay": {
+    "max": 25.933,
+    "min": 0.0281,
+    "n": 4001,
+    "p50": 0.9717,
+    "p99": 6.7015
+   },
+   "itl_live_over_replay": {
+    "max": 34.2477,
+    "min": 0.0,
+    "n": 3984,
+    "p50": 0.9126,
+    "p99": 11.5623
+   },
+   "ttft_live_over_replay": {
+    "max": 44.3332,
+    "min": 0.029,
+    "n": 4001,
+    "p50": 1.0786,
+    "p99": 14.6028
+   },
+   "unmatched_live": 0,
+   "unmatched_replay": 0
+  },
+  "by_isl_bucket_live_replay": {
+   "0-2048": {
+    "n": 448,
+    "ttft_p50": [
+     89.3,
+     71.5
+    ],
+    "ttft_p90": [
+     626.9,
+     531.7
+    ],
+    "itl_p50": [
+     29.54,
+     31.54
+    ],
+    "e2e_p50": [
+     10090.3,
+     10441.6
+    ]
+   },
+   "2048-8192": {
+    "n": 2683,
+    "ttft_p50": [
+     115.9,
+     95.4
+    ],
+    "ttft_p90": [
+     706.7,
+     545.0
+    ],
+    "itl_p50": [
+     20.23,
+     22.74
+    ],
+    "e2e_p50": [
+     605.1,
+     628.8
+    ]
+   },
+   "8192-32768": {
+    "n": 745,
+    "ttft_p50": [
+     1083.5,
+     1032.0
+    ],
+    "ttft_p90": [
+     2468.3,
+     2285.1
+    ],
+    "itl_p50": [
+     26.44,
+     28.92
+    ],
+    "e2e_p50": [
+     10560.6,
+     11408.9
+    ]
+   },
+   "32768-65536": {
+    "n": 92,
+    "ttft_p50": [
+     4112.6,
+     3719.9
+    ],
+    "ttft_p90": [
+     6353.8,
+     5824.9
+    ],
+    "itl_p50": [
+     23.38,
+     24.23
+    ],
+    "e2e_p50": [
+     13709.3,
+     14293.2
+    ]
+   },
+   "65536-": {
+    "n": 33,
+    "ttft_p50": [
+     11131.1,
+     10359.8
+    ],
+    "ttft_p90": [
+     19452.2,
+     17649.6
+    ],
+    "itl_p50": [
+     21.15,
+     23.03
+    ],
+    "e2e_p50": [
+     20079.2,
+     20324.6
+    ]
+   }
+  },
+  "prefix_cache": {
+   "replay_reused_fraction": 0.35888,
+   "live_usage_cached_fraction": 0.35986,
+   "live_vllm_counter_hit_rate": 0.35986,
+   "reused_tokens": {
+    "live": 12299280,
+    "replay": 12265904
+   },
+   "note": "vLLM hits/queries over the cell equal the per-request usage cached_tokens sum exactly (no preemption recompute)"
+  },
+  "load_balance": {
+   "live": {
+    "input_token_share_sorted": [
+     0.2665,
+     0.2453,
+     0.2442,
+     0.244
+    ],
+    "input_tokens_cv": 0.0382,
+    "input_tokens_max_over_mean": 1.0661,
+    "request_share_sorted": [
+     0.2731,
+     0.2484,
+     0.2416,
+     0.2369
+    ],
+    "requests_cv": 0.0558,
+    "requests_max_over_mean": 1.0925,
+    "rows_with_worker": 4002,
+    "uncached_prefill_share_sorted": [
+     0.2628,
+     0.2522,
+     0.2446,
+     0.2404
+    ],
+    "workers_used": 4
+   },
+   "replay": {
+    "input_token_share_sorted": [
+     0.2546,
+     0.2525,
+     0.2506,
+     0.2423
+    ],
+    "input_tokens_cv": 0.0187,
+    "input_tokens_max_over_mean": 1.0184,
+    "request_share_sorted": [
+     0.2651,
+     0.2551,
+     0.2466,
+     0.2331
+    ],
+    "requests_cv": 0.0469,
+    "requests_max_over_mean": 1.0605,
+    "rows_with_worker": 4002,
+    "uncached_prefill_share_sorted": [
+     0.2547,
+     0.2503,
+     0.2494,
+     0.2456
+    ],
+    "workers_used": 4
+   },
+   "per_worker_requests_live": {
+    "w0": 1093.0,
+    "w1": 994.0,
+    "w2": 967.0,
+    "w3": 948.0
+   },
+   "engine_gauges_live": {
+    "w0": {
+     "vllm:kv_cache_usage_perc": {
+      "max": 0.851,
+      "mean": 0.24,
+      "n": 107,
+      "p90": 0.453
+     },
+     "vllm:num_requests_running": {
+      "max": 18.0,
+      "mean": 6.234,
+      "n": 107,
+      "p90": 12.4
+     },
+     "vllm:num_requests_waiting": {
+      "max": 1.0,
+      "mean": 0.009,
+      "n": 107,
+      "p90": 0.0
+     }
+    },
+    "w1": {
+     "vllm:kv_cache_usage_perc": {
+      "max": 0.736,
+      "mean": 0.232,
+      "n": 107,
+      "p90": 0.494
+     },
+     "vllm:num_requests_running": {
+      "max": 20.0,
+      "mean": 5.85,
+      "n": 107,
+      "p90": 12.0
+     },
+     "vllm:num_requests_waiting": {
+      "max": 0.0,
+      "mean": 0.0,
+      "n": 107,
+      "p90": 0.0
+     }
+    },
+    "w2": {
+     "vllm:kv_cache_usage_perc": {
+      "max": 0.962,
+      "mean": 0.24,
+      "n": 107,
+      "p90": 0.499
+     },
+     "vllm:num_requests_running": {
+      "max": 28.0,
+      "mean": 6.308,
+      "n": 107,
+      "p90": 13.0
+     },
+     "vllm:num_requests_waiting": {
+      "max": 5.0,
+      "mean": 0.047,
+      "n": 107,
+      "p90": 0.0
+     }
+    },
+    "w3": {
+     "vllm:kv_cache_usage_perc": {
+      "max": 0.783,
+      "mean": 0.245,
+      "n": 107,
+      "p90": 0.479
+     },
+     "vllm:num_requests_running": {
+      "max": 26.0,
+      "mean": 5.748,
+      "n": 107,
+      "p90": 12.0
+     },
+     "vllm:num_requests_waiting": {
+      "max": 1.0,
+      "mean": 0.019,
+      "n": 107,
+      "p90": 0.0
+     }
+    }
+   },
+   "routing_agreement_best_relabel": {
+    "agreement": 0.2874,
+    "first_disagreement_index": 0,
+    "mapping": {
+     "12710278735763442586": 3,
+     "15202434899816326508": 0,
+     "1644122982284347862": 2,
+     "4939660834514023933": 1
+    },
+    "pairs": 4002
+   },
+   "note": "shares are sorted (live instance IDs and replay worker indices are unrelated labels); per-request decisions diverge from the first request, as expected (deploy README difference 4)"
+  },
+  "goodput": {
+   "ais_e0": {
+    "live": {
+     "completed_rows": 4001,
+     "good_frac": 0.8853,
+     "good_frac_window": 0.8893,
+     "goodput_rps": 3.4099,
+     "goodput_rps_window": 3.4454,
+     "guards": {
+      "frac_slowdown_gt_3S": 0.0147,
+      "frac_ttft_gt_3T": null,
+      "queue_wait_p99_ms": 0.0,
+      "session_split_frac": null,
+      "session_workers_mean": null,
+      "sessions_multi_turn": 0,
+      "slowdown_clip_mean": 0.5506,
+      "worker_prefill_max_over_mean": 1.0661,
+      "worker_share_cap": 0.5,
+      "worker_share_max": 0.2731,
+      "workers_used": 4
+     },
+     "incomplete": 1,
+     "itl_p50": 22.8887,
+     "itl_p90": 78.8429,
+     "makespan_ms": 1039047.7141,
+     "rescore_goodput_rps_window": {
+      "0.5": 2.516,
+      "0.75": 3.1665,
+      "1.0": 3.4454,
+      "1.5": 3.6508,
+      "2.0": 3.7209,
+      "3.0": 3.8155
+     },
+     "slowdown_p50": 1.3134,
+     "slowdown_p90": 3.568,
+     "slowdown_p95": 5.4864,
+     "ttft_p50": 175.9458,
+     "ttft_p90": 1687.5087,
+     "window_good": 2113,
+     "window_requests": 2376
+    },
+    "replay": {
+     "completed_rows": 4002,
+     "good_frac": 0.8933,
+     "good_frac_window": 0.8914,
+     "goodput_rps": 3.4353,
+     "goodput_rps_window": 3.4535,
+     "guards": {
+      "frac_slowdown_gt_3S": 0.0115,
+      "frac_ttft_gt_3T": null,
+      "queue_wait_p99_ms": 0.0,
+      "session_split_frac": null,
+      "session_workers_mean": null,
+      "sessions_multi_turn": 0,
+      "slowdown_clip_mean": 0.5348,
+      "worker_prefill_max_over_mean": 1.0189,
+      "worker_share_cap": 0.5,
+      "worker_share_max": 0.2651,
+      "workers_used": 4
+     },
+     "incomplete": 0,
+     "itl_p50": 25.5672,
+     "itl_p90": 73.198,
+     "makespan_ms": 1040674.4893,
+     "rescore_goodput_rps_window": {
+      "0.5": 2.3643,
+      "0.75": 3.1307,
+      "1.0": 3.4535,
+      "1.5": 3.6688,
+      "2.0": 3.7209,
+      "3.0": 3.8383
+     },
+     "slowdown_p50": 1.4065,
+     "slowdown_p90": 3.3865,
+     "slowdown_p95": 4.8158,
+     "ttft_p50": 129.8489,
+     "ttft_p90": 1554.6527,
+     "window_good": 2118,
+     "window_requests": 2376
+    },
+    "live_over_replay_window": 0.99764
+   },
+   "live_e0": {
+    "live": {
+     "completed_rows": 4001,
+     "good_frac": 0.8731,
+     "good_frac_window": 0.8758,
+     "goodput_rps": 3.3627,
+     "goodput_rps_window": 3.3932,
+     "guards": {
+      "frac_slowdown_gt_3S": 0.0152,
+      "frac_ttft_gt_3T": null,
+      "queue_wait_p99_ms": 0.0,
+      "session_split_frac": null,
+      "session_workers_mean": null,
+      "sessions_multi_turn": 0,
+      "slowdown_clip_mean": 0.5712,
+      "worker_prefill_max_over_mean": 1.0511,
+      "worker_share_cap": 0.5,
+      "worker_share_max": 0.2731,
+      "workers_used": 4
+     },
+     "incomplete": 1,
+     "itl_p50": 22.8887,
+     "itl_p90": 78.8429,
+     "makespan_ms": 1039047.7141,
+     "rescore_goodput_rps_window": {
+      "0.5": 2.3937,
+      "0.75": 3.103,
+      "1.0": 3.3932,
+      "1.5": 3.6247,
+      "2.0": 3.7112,
+      "3.0": 3.8139
+     },
+     "slowdown_p50": 1.3714,
+     "slowdown_p90": 3.7607,
+     "slowdown_p95": 5.6094,
+     "ttft_p50": 175.9458,
+     "ttft_p90": 1687.5087,
+     "window_good": 2081,
+     "window_requests": 2376
+    },
+    "replay": {
+     "completed_rows": 4002,
+     "good_frac": 0.8818,
+     "good_frac_window": 0.8796,
+     "goodput_rps": 3.3911,
+     "goodput_rps_window": 3.4079,
+     "guards": {
+      "frac_slowdown_gt_3S": 0.0117,
+      "frac_ttft_gt_3T": null,
+      "queue_wait_p99_ms": 0.0,
+      "session_split_frac": null,
+      "session_workers_mean": null,
+      "sessions_multi_turn": 0,
+      "slowdown_clip_mean": 0.5556,
+      "worker_prefill_max_over_mean": 1.0189,
+      "worker_share_cap": 0.5,
+      "worker_share_max": 0.2651,
+      "workers_used": 4
+     },
+     "incomplete": 0,
+     "itl_p50": 25.5672,
+     "itl_p90": 73.198,
+     "makespan_ms": 1040674.4893,
+     "rescore_goodput_rps_window": {
+      "0.5": 2.2339,
+      "0.75": 3.0687,
+      "1.0": 3.4079,
+      "1.5": 3.641,
+      "2.0": 3.7209,
+      "3.0": 3.8367
+     },
+     "slowdown_p50": 1.4602,
+     "slowdown_p90": 3.5742,
+     "slowdown_p95": 5.0406,
+     "ttft_p50": 129.8489,
+     "ttft_p90": 1554.6527,
+     "window_good": 2090,
+     "window_requests": 2376
+    },
+    "live_over_replay_window": 0.99569
+   },
+   "own_reference_live_at_live_e0_over_replay_at_ais_e0": 0.98253,
+   "replay_replicate_context": {
+    "default_k0_to_k7_goodput_rps_window": [
+     3.45352,
+     3.36547,
+     3.40298,
+     3.45352,
+     3.38504,
+     3.34917,
+     3.42417,
+     3.42254
+    ],
+    "mean": 3.40705,
+    "sd": 0.03861,
+    "note": "spread of replay across CRN replicates (different traces), for scale only; live run-to-run noise at fixed k was not measured (one live run)"
+   }
+  }
+ },
+ "idle_e0": {
+  "inputs": "<campaign-root>/runs/live/smoke/s1/inputs/idle (ISL 256..129024, 9 points x 2 repeats, OSL 256, one request at a time, unique prompts)",
+  "fit_s1_<node>": {
+   "method": "live-idle-v1",
+   "prefill_points": [
+    [
+     256,
+     39.1492295
+    ],
+    [
+     1024,
+     63.100843499999996
+    ],
+    [
+     4096,
+     238.679016
+    ],
+    [
+     8192,
+     500.508144
+    ],
+    [
+     16384,
+     1142.517952
+    ],
+    [
+     32768,
+     2771.9237335
+    ],
+    [
+     65536,
+     7509.608120499999
+    ],
+    [
+     98304,
+     14163.434097999998
+    ],
+    [
+     129024,
+     22114.3127855
+    ]
+   ],
+   "decode": {
+    "d0_ms": 13.729383461066366,
+    "d1_ms_per_token": 4.4218564733613344e-05,
+    "n": 18,
+    "r2": 0.997743276315107
+   },
+   "check": {
+    "e2e_over_e0": {
+     "n": 18,
+     "min": 0.987028095362914,
+     "p50": 0.9994600450439184,
+     "p99": 1.009303859897777,
+     "max": 1.0095096737185203
+    }
+   }
+  },
+  "live_over_ais_e2e_by_isl": {
+   "256": 0.9078,
+   "1024": 0.9225,
+   "4096": 0.9177,
+   "8192": 0.9301,
+   "16384": 0.9602,
+   "32768": 0.9769,
+   "65536": 1.0238,
+   "98304": 1.0465,
+   "129024": 1.0523
+  },
+  "components_live_vs_ais": [
+   {
+    "isl": 256,
+    "live_ttft_ms": 39.1,
+    "ais_prefill_ms": 21.7,
+    "ttft_ratio": 1.801,
+    "live_step_ms": 13.75,
+    "ais_step_ms": 15.03,
+    "step_ratio": 0.915
+   },
+   {
+    "isl": 1024,
+    "live_ttft_ms": 63.1,
+    "ais_prefill_ms": 55.5,
+    "ttft_ratio": 1.137,
+    "live_step_ms": 13.78,
+    "ais_step_ms": 15.12,
+    "step_ratio": 0.912
+   },
+   {
+    "isl": 4096,
+    "live_ttft_ms": 238.7,
+    "ais_prefill_ms": 224.1,
+    "ttft_ratio": 1.065,
+    "live_step_ms": 13.92,
+    "ais_step_ms": 15.23,
+    "step_ratio": 0.914
+   },
+   {
+    "isl": 8192,
+    "live_ttft_ms": 500.5,
+    "ais_prefill_ms": 476.0,
+    "ttft_ratio": 1.052,
+    "live_step_ms": 14.1,
+    "ais_step_ms": 15.34,
+    "step_ratio": 0.919
+   },
+   {
+    "isl": 16384,
+    "live_ttft_ms": 1142.5,
+    "ais_prefill_ms": 1059.0,
+    "ttft_ratio": 1.079,
+    "live_step_ms": 14.46,
+    "ais_step_ms": 15.54,
+    "step_ratio": 0.931
+   },
+   {
+    "isl": 32768,
+    "live_ttft_ms": 2771.9,
+    "ais_prefill_ms": 2550.4,
+    "ttft_ratio": 1.087,
+    "live_step_ms": 15.18,
+    "ais_step_ms": 16.7,
+    "step_ratio": 0.909
+   },
+   {
+    "isl": 65536,
+    "live_ttft_ms": 7509.6,
+    "ais_prefill_ms": 6838.3,
+    "ttft_ratio": 1.098,
+    "live_step_ms": 16.63,
+    "ais_step_ms": 18.26,
+    "step_ratio": 0.911
+   },
+   {
+    "isl": 98304,
+    "live_ttft_ms": 14163.4,
+    "ais_prefill_ms": 12866.9,
+    "ttft_ratio": 1.101,
+    "live_step_ms": 18.08,
+    "ais_step_ms": 20.19,
+    "step_ratio": 0.895
+   },
+   {
+    "isl": 129024,
+    "live_ttft_ms": 22114.3,
+    "ais_prefill_ms": 20100.4,
+    "ttft_ratio": 1.1,
+    "live_step_ms": 19.44,
+    "ais_step_ms": 21.5,
+    "step_ratio": 0.904
+   }
+  ],
+  "repeat_s2_<node>": {
+   "default_defaults": {
+    "decode": {
+     "d0_ms": 13.800472797258724,
+     "d1_ms_per_token": 4.416947376088902e-05,
+     "n": 18,
+     "r2": 0.99862853201081
+    },
+    "prefill_points": [
+     [
+      256,
+      38.786441999999994
+     ],
+     [
+      1024,
+      62.976364499999995
+     ],
+     [
+      4096,
+      239.22652799999997
+     ],
+     [
+      8192,
+      495.75683849999996
+     ],
+     [
+      16384,
+      1136.740664
+     ],
+     [
+      32768,
+      2746.9433615
+     ],
+     [
+      65536,
+      7409.436872
+     ],
+     [
+      98304,
+      14072.677513999999
+     ],
+     [
+      129024,
+      22157.1804345
+     ]
+    ]
+   },
+   "round_robin": {
+    "decode": {
+     "d0_ms": 13.744475692120199,
+     "d1_ms_per_token": 4.422858616355718e-05,
+     "n": 18,
+     "r2": 0.9975368243115721
+    },
+    "prefill_points": [
+     [
+      256,
+      38.269903
+     ],
+     [
+      1024,
+      61.825919
+     ],
+     [
+      4096,
+      238.954604
+     ],
+     [
+      8192,
+      496.52272949999997
+     ],
+     [
+      16384,
+      1127.4574069999999
+     ],
+     [
+      32768,
+      2736.1402470000003
+     ],
+     [
+      65536,
+      7466.152153499999
+     ],
+     [
+      98304,
+      14047.317392500001
+     ],
+     [
+      129024,
+      21953.063778999996
+     ]
+    ]
+   },
+   "prefill_ratio_vs_s1_range": [
+    0.978,
+    1.002
+   ],
+   "d0_ms": [
+    13.729,
+    13.8,
+    13.744
+   ]
+  },
+  "summary": "Real batch-1 decode step is 7-10% faster than AIS at every context (13.75 vs 15.03 ms at ISL 256; 19.4 vs 21.5 ms at 129K). Real idle TTFT is 5-10% slower than AIS prefill from 4K up (2771.9 vs 2550.4 ms at 32K; 22114 vs 20100 ms at 129K), plus about 17 ms of fixed HTTP/frontend/client overhead visible at small ISL (39 vs 22 ms at 256). Net E2E at OSL 256: live/AIS 0.91-0.93 up to 8K, 0.96-0.98 at 16-32K, 1.02-1.07 at 64-129K. Repeatable within 2.2% across two nodes and three runs."
+ },
+ "discrepancies_live": [
+  {
+   "id": "D1",
+   "severity": "fixed (recipe)",
+   "what": "serve-phase frontend never ran: job_node.sh killed the wrapper subshell of a backgrounded step function, so the check frontend kept serving and the serve frontend failed to bind port 18000; readiness was answered by the old frontend",
+   "effect_on_this_run": "the cell was served by the check-phase frontend of the same plan and policy (policy_evidence ok on it); its router had served 26 probe requests and the workers were flushed and proven cold before the payload, so the payload saw identical config and empty caches but not a fresh router process (policy RNG draws and the indexer's probe entries carried over); hypothesis: no measurable effect, since probe blocks never overlap workload blocks",
+   "fix": "<commit-37>: background srun launched directly (PID is srun), wait for the port to close, require the new frontend alive after readiness, bounded teardown",
+   "verified": "job <job-4>: four fresh frontends (check and serve for default_defaults and round_robin), each logged shutdown, no port conflicts, round_robin serve config router_mode round-robin, policy switch took 27 s"
+  },
+  {
+   "id": "D2",
+   "severity": "fixed (recipe)",
+   "what": "job_node.sh sourced the job env file without exporting it, so srun steps never saw LR_COMMIT or --env extras",
+   "fix": "<commit-33> (found by review before the first submission)"
+  },
+  {
+   "id": "D3",
+   "severity": "low",
+   "what": "AIPerf counts an OSL=1 request whose only token detokenizes to empty text as an error (InvalidInferenceResultError), although the server reports completion_tokens 1",
+   "observed": "1 of 4002 (request_576, ISL 1481, in warm-up, so no window effect); the cell has 18 OSL=1 requests",
+   "replay": "completed",
+   "mitigation_options": "score it from usage (completion_tokens == OSL) with TTFT = E2E, or avoid OSL=1 rows live; not changed yet"
+  },
+  {
+   "id": "D4",
+   "severity": "systematic, offsetting",
+   "what": "engine timing differs from AIS in both directions: TTFT p50 +35% overall (176 vs 130 ms; +18-20 ms at ISL < 8K, +5-11% at ISL >= 8K) and mean ITL p50 -10% (22.9 vs 25.6 ms)",
+   "effect": "E2E distributions agree (KS 0.022, p50 1787 vs 1691 ms, p90 18792 vs 19406 ms); goodput, which scores ITL and E2E slowdown, agrees within 0.25% (AIS E0) and 0.43% (both sides at the live E0)",
+   "hypothesis": "TTFT gap = HTTP/frontend/client path (about 17 ms, absent in replay) plus slower real long-context prefill; ITL gap = real decode step faster than the AIS model"
+  },
+  {
+   "id": "D5",
+   "severity": "low",
+   "what": "load balance slightly less even live: request max/mean 1.092 vs 1.060, input-token max/mean 1.066 vs 1.018",
+   "hypothesis": "decision divergence from timing and RNG; one run cannot separate this from noise"
+  },
+  {
+   "id": "D6",
+   "severity": "info",
+   "what": "client timing on the GPU cluster client CPUs is tighter than on the shared workstation audit: credit lateness p50 1.37 ms, p99 2.50 ms, max 9.4 ms, flat across the run (no accumulated drift; the workstation audit saw up to 0.56 s); HTTP start lag p50 2.1 ms, p99 3.3 ms"
+  },
+  {
+   "id": "D7",
+   "severity": "info",
+   "what": "AIPerf logs that its GPU telemetry endpoint (localhost:9401) is unreachable; no DCGM exporter runs in the job; harmless"
+  },
+  {
+   "id": "D8",
+   "severity": "info",
+   "what": "not exercised live: closed-loop and multi-turn session cells, FAST25, learned-choice and other policies, N = 8 (the two-node path is still untested); AgentX has no live path"
+  }
+ ],
+ "finalist_cost_model": {
+  "measured": {
+   "setup_to_ready_fresh_wheel_s": [
+    470,
+    459
+   ],
+   "setup_wheel_build_s": [
+    254,
+    255
+   ],
+   "setup_to_ready_reused_wheel_s_estimate": "about 200 (job prolog 31 s + node prep and weights about 30 s + venv reuse + model to ready 130 s); estimate, not measured: every job here built its own commit's wheel",
+   "policy_switch_s": 27,
+   "first_policy_checks_s": 16,
+   "open_loop_cell_wall_s_over_replay_makespan": 1.0211,
+   "aiperf_phase_s": 1039.05,
+   "aiperf_startup_and_export_s": 23.6,
+   "idle_e0_run_s": [
+    176.5,
+    179.1,
+    174.7
+   ]
+  },
+  "per_run_rule": "wall per (policy, cell) ~= replay makespan x 1.0 + about 1 min (AIPerf startup/export 24 s + frontend switch and checks 27 s); closed-loop and session cells are an extrapolation (only open loop was run)",
+  "replay_makespans_min_default_k0": {
+   "mooncake open N=4": [
+    12.3,
+    23.7
+   ],
+   "mooncake closed N=4": [
+    12.3,
+    14.1
+   ],
+   "synthetic_sessions open N=4": [
+    18.2,
+    33.9
+   ],
+   "synthetic_sessions closed N=4": [
+    18.2,
+    28.1
+   ],
+   "fast25": "unmeasured (test-only family)"
+  },
+  "example": "5 policies (default@defaults, val-best baseline, M1, M0, round-robin) x 4 N=4 cells averaging 18 min -> 20 runs x 19 min = 6.3 node-hours = 51 GPU-hours, in 4 interactive jobs of 5 runs each (about 1 h 40 min per job including about 4-8 min setup); sequential under the one-request rule, about 7 h wall. Each extra N=4 cell adds about 1.6 node-hours (13 GPU-hours) across 5 policies. N=8 doubles node count and needs the untested two-node path first.",
+  "job_shape": "<partition> partition, 1 node, --time up to 01:55:00 (2 h cap, no preemption); GPU cluster started every job here within seconds"
+ },
+ "code": {
+  "worktree": "<worktree>",
+  "commits": {
+   "<commit-33>": "export job settings to srun steps; smoke payload and metric scraper",
+   "<commit-34>": "pinned AIPerf env on GPU-cluster shared storage",
+   "<commit-35>": "wheel/venv parent dirs",
+   "<commit-36>": "bindgen builtin headers",
+   "<commit-37>": "frontend lifecycle fix",
+   "<commit-38>": "live vs replay comparison tool",
+   "<commit-39>": "README updates for the smoke and the recipe fixes"
+  },
+  "files": [
+   "benchmarks/learned_routing/live/smoke_payload.sh",
+   "benchmarks/learned_routing/live/scrape_metrics.py",
+   "benchmarks/learned_routing/live/aiperf_env.sh",
+   "benchmarks/learned_routing/live/smoke_compare.py",
+   "benchmarks/learned_routing/live/deploy/job_node.sh",
+   "benchmarks/learned_routing/live/deploy/build_env.sh"
+  ],
+  "reproduce_compare": "cd WT/benchmarks/learned_routing/live && ../../../.venv/bin/python smoke_compare.py --inputs <campaign-root>/runs/live/smoke/s1/inputs/cell --live-run <campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/payload/cell --replay-record <campaign-root>/runs/cache/results/b8/b83cb30c8b804e80bba51a0b22a75a57a01895c9993e1b6412e3234a6403f1be.json --idle-inputs <campaign-root>/runs/live/smoke/s1/inputs/idle --idle-run <campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/payload/idle --marks <campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/payload/metrics-marks.jsonl --series <campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/payload/metrics-series.jsonl --out <campaign-root>/runs/live/smoke/s1/analysis/compare.json",
+  "aiperf_env_gpu": "<scratch>/live/env/aiperf-0.13.0 (uv CPython 3.12.3; freeze identical to the workstation parity env)"
+ },
+ "artifacts": {
+  "compare_json": "<campaign-root>/runs/live/smoke/s1/analysis/compare.json",
+  "compare_json_sha256": "c9e4903f4b4acab943e248f6fdc1bc7e187f4594db409fd248c63ddfdd549183",
+  "live_rows": "<campaign-root>/runs/live/smoke/s1/analysis/live_rows.jsonl.gz",
+  "e0_live_fit": "<campaign-root>/runs/live/smoke/s1/analysis/e0_live.json",
+  "aiperf_records": "<campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/payload/cell/profile_export.jsonl",
+  "aiperf_raw": "<campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/payload/cell/profile_export_raw.jsonl",
+  "router_log": "<campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/check/frontend.log (the frontend that served the payload, see D1)",
+  "engine_logs": "<campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/logs/<node>.<internal-host>/worker-*.log",
+  "engine_metrics": "<campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/payload/metrics-series.jsonl (10 s scrapes), metrics-marks.jsonl (run brackets), <campaign-root>/runs/live/smoke/s1/gpu-cluster/<job-3>-lr-live-n4-20261003T185522Z/policies/default_defaults/metrics/"
+ },
+ "deviations": "facts/DEVIATIONS.md, section \"Live GPU smoke (A13.1), 2026-10-03\""
+}

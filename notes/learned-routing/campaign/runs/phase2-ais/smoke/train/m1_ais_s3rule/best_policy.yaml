@@ -1,0 +1,17 @@
+name: "m1-ais-v3@m1_ais_s3rule"
+parameters:
+  ais_closed_form:
+    decode_step:
+      alpha_ms: 15.150484762339268
+      beta_ms_per_request: 0.032211397437967804
+      gamma_ms_per_token: 4.310341316381139e-05
+  feature_set: "v3"
+  prefill_source: "host"
+  temperature: 0.0
+  theta: [-1.0, 168.0517960634191, -22.510429408300496, -22.516118042306573, 2.526636388545569, -2.3182762444881178, 0.28048600788968514, -0.14187792215895456, 0.4801169061289272, -7.529176518578094, 0.0, -110.65490301558384, 31.19457108604911]
+  tie_break: "one_draw"
+router_config:
+  router_prefill_load_model: "ais"
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

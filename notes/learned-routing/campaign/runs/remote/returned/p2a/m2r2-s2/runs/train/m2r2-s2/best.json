@@ -1,0 +1,345 @@
+{
+ "best_ever_train": {
+  "generation": 24,
+  "objective": 0.17870316032029235,
+  "per_cell": {
+   "agentx-A1-base-n4-lanes-L1": 0.01937422252890297,
+   "agentx-A1-base-n4-lanes-L3": 0.2187455167064683,
+   "agentx-A1_A2-base-n8-lanes-L3": 0.23901860524693302,
+   "agentx-A2-base-n4-lanes-L2": 0.060645589307697687,
+   "agentx-A2-think0.5-n4-lanes-L2": 0.032194314993151035,
+   "agentx-A3-base-n8-lanes-L2": 0.0702602320349715,
+   "agentx-A3-osl1.5-n4-lanes-L2": 0.04881058775201921,
+   "agentx-A3-think2.0-n8-lanes-L1": 0.02568055856186218,
+   "mooncake-w0-base-n4-open-L1": 0.051503465431329255,
+   "mooncake-w0-base-n4-open-L3": 0.47433472573215507,
+   "mooncake-w0-base-n8-closed-L2": 0.2660279495198894,
+   "mooncake-w0-base-n8-open-L2": 0.19876614470492915,
+   "mooncake-w0-islp1.5-n4-closed-L2": 0.18466567447244406,
+   "mooncake-w0-islu1.5-n4-open-L2": 0.1503079246321108,
+   "mooncake-w0-osl0.5-n8-open-L2": 0.18223692986500725,
+   "mooncake-w2-base-n4-closed-L3": 0.3350441510059897,
+   "mooncake-w2-base-n4-open-L2": 0.08768646156695933,
+   "mooncake-w2-base-n8-closed-L1": 0.10791879568739582,
+   "mooncake-w2-base-n8-open-L3": 0.3438997690562268,
+   "mooncake-w2-islu1.5-n8-closed-L2": 0.1963453010921733,
+   "mooncake-w2-root2-n4-open-L2": 0.09536917473449805,
+   "mooncake-w4-base-n4-closed-L2": 0.1295425161985199,
+   "mooncake-w4-base-n8-open-L1": 0.02806187202418303,
+   "mooncake-w4-islp1.5-n8-open-L2": 0.11031373694706709,
+   "mooncake-w4-osl2.0-n4-open-L2": 0.0888670828968519,
+   "mooncake-w4-root2-n8-open-L3": 0.24141529206465512,
+   "sessions-s0-base-n4-open-L2": 0.037023619800898515,
+   "sessions-s0-base-n8-closed-L2": 0.216856152114204,
+   "sessions-s1-base-n4-open-L3": 0.8778916986597591,
+   "sessions-s1-base-n8-open-L1": 0.05938091760621617,
+   "sessions-s2-think0.5-n8-open-L2": 0.3484719930881607,
+   "sessions-s2-think2.0-n4-closed-L2": 0.3022014141623961,
+   "sessions-s3-islu1.5-n8-open-L3": 0.21147294744374212,
+   "sessions-s3-root2-n4-open-L2": 0.035572113250171726
+  },
+  "policy_sha": "f8e4937c5a41ca242935ed003449c7856366af9c30b9be3d6cb369750b7d5bf9",
+  "spec": {
+   "name": "m2-learned-v1-rank2",
+   "parameters": {
+    "context": {
+     "p": [
+      [
+       0.0,
+       -0.010768355164987753,
+       0.12215168921390962,
+       0.0,
+       -0.1480929270913549,
+       -2.2497822261452,
+       -0.17491718215437757,
+       0.0
+      ],
+      [
+       0.0,
+       -0.011189126961795637,
+       -0.8477528182692424,
+       0.0,
+       0.0,
+       0.0,
+       0.09728227969157643,
+       0.0
+      ]
+     ],
+     "sources": [
+      "isl_k",
+      "mean_active_prefill_tokens_k"
+     ]
+    },
+    "feature_set": "v1",
+    "temperature": 0.0,
+    "theta": [
+     -1.0,
+     14.718193844098863,
+     -1.6322086342257762,
+     0.0,
+     0.0,
+     -49.2189586882356,
+     1.7211359805473307,
+     0.0
+    ],
+    "tie_break": "one_draw"
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "learned-choice"
+  },
+  "values": {
+   "parameters.context.p": [
+    [
+     0.0,
+     -0.010768355164987753,
+     0.12215168921390962,
+     0.0,
+     -0.1480929270913549,
+     -2.2497822261452,
+     -0.17491718215437757,
+     0.0
+    ],
+    [
+     0.0,
+     -0.011189126961795637,
+     -0.8477528182692424,
+     0.0,
+     0.0,
+     0.0,
+     0.09728227969157643,
+     0.0
+    ]
+   ],
+   "parameters.theta": [
+    -1.0,
+    14.718193844098863,
+    -1.6322086342257762,
+    0.0,
+    0.0,
+    -49.2189586882356,
+    1.7211359805473307,
+    0.0
+   ]
+  },
+  "z": [
+   0.5735909692204944,
+   0.48834136689838736,
+   0.5075254867464749,
+   0.5309579234404882,
+   0.444069365127005,
+   0.5101243292973372,
+   0.4997552646553412,
+   0.504071722973797,
+   0.5072682541146217,
+   0.4989421933779189,
+   0.4882823842388271,
+   0.4953969162590953,
+   0.5053380119211826,
+   0.4999164990525239,
+   0.49098135299713574,
+   0.5073323256173644,
+   0.5043845560829159,
+   0.5052131315619647,
+   0.5008533533306279,
+   0.5025790990355459
+  ]
+ },
+ "fevals": 400,
+ "generation": 25,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "clipped_log_ratio",
+  "popsize": 16,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 2,
+  "space_sha": "0bcbaca0999423f72c1769b3bf518e15512874df8873774ad4c0930437920de5",
+  "train_cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "agentx-A1-base-n4-lanes-L3",
+   "agentx-A1_A2-base-n8-lanes-L3",
+   "agentx-A2-base-n4-lanes-L2",
+   "agentx-A2-think0.5-n4-lanes-L2",
+   "agentx-A3-base-n8-lanes-L2",
+   "agentx-A3-osl1.5-n4-lanes-L2",
+   "agentx-A3-think2.0-n8-lanes-L1",
+   "mooncake-w0-base-n4-open-L1",
+   "mooncake-w0-base-n4-open-L3",
+   "mooncake-w0-base-n8-closed-L2",
+   "mooncake-w0-base-n8-open-L2",
+   "mooncake-w0-islp1.5-n4-closed-L2",
+   "mooncake-w0-islu1.5-n4-open-L2",
+   "mooncake-w0-osl0.5-n8-open-L2",
+   "mooncake-w2-base-n4-closed-L3",
+   "mooncake-w2-base-n4-open-L2",
+   "mooncake-w2-base-n8-closed-L1",
+   "mooncake-w2-base-n8-open-L3",
+   "mooncake-w2-islu1.5-n8-closed-L2",
+   "mooncake-w2-root2-n4-open-L2",
+   "mooncake-w4-base-n4-closed-L2",
+   "mooncake-w4-base-n8-open-L1",
+   "mooncake-w4-islp1.5-n8-open-L2",
+   "mooncake-w4-osl2.0-n4-open-L2",
+   "mooncake-w4-root2-n8-open-L3",
+   "sessions-s0-base-n4-open-L2",
+   "sessions-s0-base-n8-closed-L2",
+   "sessions-s1-base-n4-open-L3",
+   "sessions-s1-base-n8-open-L1",
+   "sessions-s2-think0.5-n8-open-L2",
+   "sessions-s2-think2.0-n4-closed-L2",
+   "sessions-s3-islu1.5-n8-open-L3",
+   "sessions-s3-root2-n4-open-L2"
+  ],
+  "val_cells": [
+   "agentx-V1-base-n4-lanes-L2",
+   "agentx-V2-base-n4-lanes-L3",
+   "agentx-V2-base-n6-lanes-L2",
+   "agentx-V3-base-n8-lanes-L1",
+   "mooncake-w1-base-n4-open-L2",
+   "mooncake-w1-base-n6-open-L2",
+   "mooncake-w1-base-n8-closed-L2",
+   "mooncake-w1-base-n8-open-L3",
+   "mooncake-w1-islu1.25-n6-closed-L2",
+   "sessions-s4-base-n4-open-L2",
+   "sessions-s4-base-n8-closed-L2",
+   "sessions-s5-base-n4-closed-L1",
+   "sessions-s5-base-n8-open-L3",
+   "sessions-s5-think1.5-n6-open-L2"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": {
+  "generation": 15,
+  "policy_sha": "b973c82fce50d362fcbda7d69b74e1402c1abf014b3f541fb996999ede3496c4",
+  "spec": {
+   "name": "m2-learned-v1-rank2",
+   "parameters": {
+    "context": {
+     "p": [
+      [
+       0.0,
+       -0.11529016333127373,
+       0.07289930493112884,
+       0.0,
+       0.0,
+       -0.7028163504485292,
+       -0.1718179363379413,
+       0.0
+      ],
+      [
+       0.0,
+       0.25665918243923613,
+       -0.10809437829436064,
+       0.0,
+       0.0,
+       0.0,
+       -0.25268962776017645,
+       0.0
+      ]
+     ],
+     "sources": [
+      "isl_k",
+      "mean_active_prefill_tokens_k"
+     ]
+    },
+    "feature_set": "v1",
+    "temperature": 0.0,
+    "theta": [
+     -1.0,
+     14.415795939030644,
+     -0.42375783734202344,
+     0.0,
+     0.0,
+     -40.93615178090437,
+     0.8674843406546984,
+     0.0
+    ],
+    "tie_break": "one_draw"
+   },
+   "router_config": {},
+   "router_mode": "kv_router",
+   "seeded": true,
+   "type": "learned-choice"
+  },
+  "val_objective": 0.16868245266358844,
+  "val_per_cell": {
+   "agentx-V1-base-n4-lanes-L2": 0.08608581693051705,
+   "agentx-V2-base-n4-lanes-L3": 0.07324565427348644,
+   "agentx-V2-base-n6-lanes-L2": 0.018948013323707293,
+   "agentx-V3-base-n8-lanes-L1": 0.05603972177806212,
+   "mooncake-w1-base-n4-open-L2": 0.09504540427936914,
+   "mooncake-w1-base-n6-open-L2": 0.13479764705831138,
+   "mooncake-w1-base-n8-closed-L2": 0.2614563624215112,
+   "mooncake-w1-base-n8-open-L3": 0.43379802579754995,
+   "mooncake-w1-islu1.25-n6-closed-L2": 0.20485716024939285,
+   "sessions-s4-base-n4-open-L2": 0.10882484796165957,
+   "sessions-s4-base-n8-closed-L2": 0.2632588421650531,
+   "sessions-s5-base-n4-closed-L1": 0.12748525952736794,
+   "sessions-s5-base-n8-open-L3": 0.4265926821750931,
+   "sessions-s5-think1.5-n6-open-L2": 0.07111889934915701
+  },
+  "values": {
+   "parameters.context.p": [
+    [
+     0.0,
+     -0.11529016333127373,
+     0.07289930493112884,
+     0.0,
+     0.0,
+     -0.7028163504485292,
+     -0.1718179363379413,
+     0.0
+    ],
+    [
+     0.0,
+     0.25665918243923613,
+     -0.10809437829436064,
+     0.0,
+     0.0,
+     0.0,
+     -0.25268962776017645,
+     0.0
+    ]
+   ],
+   "parameters.theta": [
+    -1.0,
+    14.415795939030644,
+    -0.42375783734202344,
+    0.0,
+    0.0,
+    -40.93615178090437,
+    0.8674843406546984,
+    0.0
+   ]
+  },
+  "which": "best_so_far",
+  "z": [
+   0.5720789796951532,
+   0.49697315830469985,
+   0.5013456619618242,
+   0.5148089722794171,
+   0.45348164570351773,
+   0.5051028490626747,
+   0.4973797690151983,
+   0.5024299768310376,
+   0.5014253342269253,
+   0.501694417271992,
+   0.49633949817474726,
+   0.4954784753595279,
+   0.5026748954768796,
+   0.5019153670331287,
+   0.49885005980537916,
+   0.5035088504241997,
+   0.5012967190168005,
+   0.5028785714602955,
+   0.4977834243178932,
+   0.5027039826154365
+  ]
+ },
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

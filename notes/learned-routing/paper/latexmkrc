@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# latexmk configuration for the learned-routing draft: pdflatex + BibTeX, all outputs in build/.
+# latexmk reads ./latexmkrc automatically when run from this directory (the Makefile does).
+$pdf_mode = 1;
+$out_dir = 'build';
+$aux_dir = 'build';
+$bibtex_use = 2;
+$pdflatex = 'pdflatex -interaction=nonstopmode -halt-on-error -file-line-error %O %S';
+@default_files = ('main.tex');

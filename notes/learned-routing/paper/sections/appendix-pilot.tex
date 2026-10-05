@@ -1,0 +1,222 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: the pilot that gated phase 2, kept for the record. Every number is preliminary (pilot,
+%   validation split or train subset) and was superseded by the phase-2 tuning and the test pass.
+% EVIDENCE: CR/facts/pilot.json, CR/facts/gate.json.
+% UNITS (read before editing): "segment mean" and the MDE are in units of the paired goodput
+%   ratio minus one, G(pi)/G(pi') - 1, without eps and unclipped (learned_routing/noise.py
+%   differs_beyond_noise; CR/runs/gate/scripts/recompute_gate.py verdict). "Mean Delta" columns
+%   are clipped log-ratios with eps (eq:clr). The two agree to first order at these sizes.
+
+\section{The pilot (preliminary)}
+\label{sec:pilot}
+
+The pilot asked whether tuning moves any policy away from the default router by more than
+replicate noise, and how large the learned model's margin over the best heuristics might be,
+before the campaign committed to phase 2. Its numbers come from the validation split and from a
+smaller tuning setup than phase 2, so they are \prelim{} and were superseded by the phase-2 results
+of \cref{sec:results}. They are kept because they shaped phase 2: the budget, the step-size cap, the
+multi-start initialization, the extended feature set and the concentration audit all trace back to
+them.
+% src: CR/facts/pilot.json decisions, train_subset, runs, selected; CR/facts/STATE.md pilot(phase3)
+
+The setup was smaller than phase 2's in four ways.
+\begin{itemize}
+  \item M0 (the default cost, tuned) and M1 (\lc{} on feature set \code{v1}) were tuned on 12 of
+    the 34 train cells, chosen to cover every family, both train worker counts and every load
+    mode, with 480 evaluations (30 generations of 16) per run.
+  \item Each model was tuned twice with different CMA-ES seeds from the \emph{same} start
+    (M1 from $\theta = -\basis{0}$, M0 from the shipped defaults). Below they are called seed 1
+    and seed 2; they are not phase 2's restarts s1--s3, which differ in their start.
+  \item The configuration of each model was selected on validation replicates $\krep = 0, 1, 2$
+    over both seeds and their checkpoints: seed 1 at generation 25 for M0, seed 2 at generation
+    30 for M1.
+  \item The heuristics were not tuned. A screen of all nine catalog heuristics at shipped
+    defaults on the 12 train cells ($\krep = 0, 1$) ranked \policy{llm-d-precise-prefix}
+    ($+0.169$), \policy{ramjet} ($+0.166$) and \policy{lmetric} ($+0.165$) first by mean clipped
+    log-ratio; the last two are tied, so all three went to validation. \policy{dualmap}
+    ($-0.150$) and \policy{chwbl} ($-0.214$) lost to the default on that subset.
+\end{itemize}
+% src: CR/facts/pilot.json heuristic_screen_train_subset.mean_clipped_log_ratio, ranking, sanity_note
+All policies were then scored on the 14 validation cells with 8 fresh replicates
+($\krep = 3,\dots,10$) that no selection step had used, paired with $\piref$ on the same
+replicate. The pilot ran \num{56552} fresh replays with 0 errors, and an independent judge,
+working from the raw records without importing the harness, reproduced every comparison against
+$\piref$ and against the heuristics in \cref{tab:pilot,tab:pilot-h2h} to four decimals.
+
+``Beyond noise'' below is the campaign's two-clause rule (\cref{sec:noise-floor}): on some cell
+the replicate-mean goodput ratio to the reference departs from 1 by more than three pooled
+replicate standard deviations, and over at least three independent segments the mean of the
+per-segment mean of (ratio $-\,1$) exceeds twice its standard error in absolute value. The rule
+is two-sided, so a policy worse than the reference also passes it.
+% src: CR/CONTRACT.md A1 ("Differs beyond noise"); WT/benchmarks/learned_routing/learned_routing/noise.py
+%      differs_beyond_noise (k_sd 3, k_se 2, min_segments 3)
+% src: CR/facts/gate.json criteria.1_error_rate, selection_hygiene.val_k3_10_unused_by_selection,
+%      context_not_gate.agreement_with_pilot ("every vs-default and vs-heuristic number ... reproduces to 4 decimals")
+
+\begin{table}[tbp]
+  \centering\footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \caption{Pilot, validation split, every policy against $\piref$ (\prelim). Mean $\clr$: mean
+    over cells of the replicate-mean clipped log-ratio, overall and per family (Mooncake 5 cells,
+    sessions 5, AgentX 4). Ratio: mean over cells of the replicate-mean goodput ratio
+    $\Gw(\pol)/\Gw(\piref)$. Better: cells whose mean ratio exceeds 1. Seg.\ mean (SE):
+    mean over the 6 validation segments of the per-segment mean of (ratio $-\,1$), with its
+    standard error. Over cap: cells on which, in at least one replicate, one worker received more
+    than $\min(2/\Nw,\ 1/\Nw + 0.25)$ of the requests.}
+  \label{tab:pilot}
+  % src: CR/facts/pilot.json validation_k3_10_vs_default.policies.<name>: mean_clipped_log_ratio,
+  %      by_family_mean_clipped_log_ratio.{mooncake,synthetic_sessions,agentx}, mean_ratio,
+  %      cells_better, mean_segment_delta, segment_se, worker_share_cap_exceeded_cells.
+  %      Rounded to 3 places. Cross-check: CR/facts/gate.json criteria.3_differs_beyond_noise.vs_default.
+  \begin{tabular}{@{}lrrrrrcrc@{}}
+    \toprule
+    & \multicolumn{4}{c}{Mean $\clr$} & & & & \\
+    \cmidrule(lr){2-5}
+    Policy & all & Mooncake & sessions & AgentX & Ratio & Better & Seg.\ mean (SE) & Over cap \\
+    \midrule
+    M1, seed 2 (selected)          & 0.165 & 0.221 & 0.205 & 0.045 & 1.191 & 13/14 & 0.147 (0.044) & 5 \\
+    M1, seed 1                     & 0.162 & 0.220 & 0.200 & 0.043 & 1.187 & 13/14 & 0.142 (0.044) & 4 \\
+    \policy{llm-d-precise-prefix}  & 0.135 & 0.124 & 0.203 & 0.064 & 1.153 & 14/14 & 0.135 (0.034) & 1 \\
+    \policy{ramjet}                & 0.135 & 0.154 & 0.194 & 0.038 & 1.152 & 14/14 & 0.122 (0.038) & 0 \\
+    \policy{lmetric}               & 0.133 & 0.116 & 0.208 & 0.060 & 1.150 & 14/14 & 0.132 (0.036) & 0 \\
+    M0, seed 2                     & 0.129 & 0.129 & 0.194 & 0.047 & 1.145 & 14/14 & 0.124 (0.035) & 0 \\
+    M0, seed 1 (selected)          & 0.128 & 0.128 & 0.198 & 0.041 & 1.144 & 14/14 & 0.121 (0.037) & 0 \\
+    \policy{round\_robin}          & $-0.577$ & $-0.273$ & $-0.892$ & $-0.562$ & 0.571 & 0/14 & $-0.473$ (0.066) & 0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Everything beat the default router; round-robin collapsed.}
+Every tuned and heuristic policy in \cref{tab:pilot} differed from $\piref$ beyond noise, in the
+positive direction, overall and separately in each load mode; round-robin differed in the negative
+direction. The three cache-aware heuristics at shipped defaults already reached a mean per-cell
+goodput ratio over $\piref$ of 1.150--1.153, and M1 reached 1.191. M0 was the weakest of the tuned
+and heuristic policies: tuning the default cost's five knobs on 12 cells gained less than
+switching to an untuned cache-aware heuristic. The bar M1 had to clear in phase 2 was therefore set
+by those heuristics, after they got the same tuning budget, not by the default.
+% src: CR/facts/gate.json criteria.3_differs_beyond_noise.per_mode_pass, policies_passing_per_mode;
+%      CR/facts/pilot.json gate.condition_3_differs_beyond_noise.note
+
+\paragraph{M1 against the strongest heuristic: not beyond noise.}
+\Cref{tab:pilot-h2h} pairs the selected M1 and M0 directly with each heuristic. Against
+\policy{llm-d-precise-prefix}, the validation-best heuristic, M1's mean clipped log-ratio was
+$+0.030$ (mean ratio 1.032, 10 of 14 cells better). The pre-registered minimum detectable effect
+(MDE) is $\max(1\%,\ 2\,\mathrm{SE})$, where SE is the standard error of the paired segment mean
+on validation, in units of (ratio $-\,1$). At the pilot that SE was 0.019, so the MDE is 0.038.
+M1's segment mean was only $+0.009$: the Mooncake window that carried the gain is 5 of the 14
+cells but 1 of the 6 segments. Under the campaign's noise rule M1 did not differ from this
+heuristic, overall or in any single load mode. The same held against \policy{ramjet} and
+\policy{lmetric}, with one exception: M1's lead over \policy{ramjet} in closed loop ($+0.038$, SE
+0.013, over 3 segments) passed the rule.
+% src: CR/facts/pilot.json validation_vs_best_heuristic.llm-d-precise-prefix.M1_tuned; mde.learned_vs_val_best_default_arm_heuristic
+%      (segment_se 0.019075, mde 0.038150); CR/facts/gate.json context_not_gate.learned_vs_best_default_arm_heuristic
+%      ["m1-s2@sel-g30 vs ramjet@defaults"].by_mode.closed_concurrency (0.0380, SE 0.0127, differs true)
+
+\begin{table}[tbp]
+  \centering\footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \caption{Pilot, validation split, head to head (\prelim): the selected M1 and M0 against each
+    untuned heuristic, paired on the same replicates $\krep = 3,\dots,10$. Columns as in
+    \cref{tab:pilot}; positive values favor the tuned model. Noise: whether the pair differs beyond
+    noise under the rule defined above. MDE $= 0.038$ in the units of the segment mean.}
+  \label{tab:pilot-h2h}
+  % src: CR/facts/pilot.json validation_vs_best_heuristic.<heuristic>.{M1_tuned,M0_tuned}: mean_clipped_log_ratio,
+  %      by_family_mean_clipped_log_ratio, mean_ratio, cells_better, mean_segment_delta, segment_se,
+  %      differs_beyond_noise, differs_by_mode. M1 = m1-s2@sel-g30, M0 = m0-s1@sel-g25.
+  \begin{tabular}{@{}lrrrrrcrl@{}}
+    \toprule
+    & \multicolumn{4}{c}{Mean $\clr$} & & & & \\
+    \cmidrule(lr){2-5}
+    Against & all & Mooncake & sessions & AgentX & Ratio & Better & Seg.\ mean (SE) & Noise \\
+    \midrule
+    \multicolumn{9}{@{}l}{\emph{M1 (seed 2, selected)}} \\
+    \policy{llm-d-precise-prefix} & 0.030 & 0.097 & 0.002 & $-0.019$ & 1.032 & 10/14 & 0.009 (0.019) & no \\
+    \policy{ramjet}               & 0.030 & 0.067 & 0.011 & 0.007    & 1.031 & 12/14 & 0.021 (0.011) & closed$^{a}$ \\
+    \policy{lmetric}              & 0.032 & 0.105 & $-0.003$ & $-0.015$ & 1.034 & 6/14 & 0.012 (0.020) & no \\
+    \midrule
+    \multicolumn{9}{@{}l}{\emph{M0 (seed 1, selected)}} \\
+    \policy{llm-d-precise-prefix} & $-0.007$ & 0.004 & $-0.005$ & $-0.023$ & 0.993 & 3/14 & $-0.012$ (0.006) & no \\
+    \policy{ramjet}               & $-0.007$ & $-0.026$ & 0.004 & 0.003 & 0.993 & 7/14 & $-0.001$ (0.005) & no \\
+    \policy{lmetric}              & $-0.005$ & 0.012 & $-0.010$ & $-0.019$ & 0.995 & 4/14 & $-0.010$ (0.005) & lanes$^{a}$ \\
+    \bottomrule
+    \multicolumn{9}{@{}l}{$^{a}$ Not beyond noise overall; beyond noise in this load mode only.}
+  \end{tabular}
+\end{table}
+
+\paragraph{Where the margin came from.}
+M1's lead over \policy{llm-d-precise-prefix} came from one of the six validation segments. Per
+segment, the mean of (ratio $-\,1$) was $+0.102$ on the Mooncake window w1 (5 cells), $+0.003$ and
+$+0.001$ on the session seeds s4 and s5, and $-0.014$, $-0.025$ and $-0.012$ on the three AgentX
+play subsets V1--V3. On validation, then, M1 gained where requests share a few hot prefixes across
+users, and lost slightly, but on every segment, on long agent contexts. That AgentX deficit shaped
+phase 2: M1's second and third restarts started from a behavior clone of
+\policy{llm-d-precise-prefix} and from a cache-heavy point (\cref{sec:restarts}), and the 23-feature
+set \code{v2} became a mandatory arm, the one that won.
+% src: CR/facts/gate.json context_not_gate.m1_vs_llm_d_precise_prefix_segment_deltas;
+%      audit_flags_for_stage4 ("whole lead from mooncake:w1"); CR/CONTRACT.md A11.1, A17.1
+
+\paragraph{The lead came with concentration.}
+Over all validation records, the selected pilot M1 exceeded the share cap on 5 Mooncake cells (27
+of 112 cell-replicate records), with a largest share of 0.646 in one record;
+\policy{llm-d-precise-prefix} exceeded it on one cell. This flag became the phase-2 midpoint's
+gaming audit (\cref{sec:gaming}).
+% src: CR/facts/gate.json context_not_gate.guards_worker_share["m1-s2@sel-g30"] (5 cells, 27 records,
+%      max 0.6465), guards_worker_share (llm-d-precise-prefix: 1 cell), audit_flags_for_stage4
+
+\begin{table}[tbp]
+  \centering\footnotesize
+  \caption{What the pilot M1 learned (\prelim). $s_f = \mathrm{sd}(x_0)/\mathrm{sd}(x_f)$, with
+    within-set standard deviations measured on candidate tables reconstructed from $\piref$'s
+    train replays; $\theta_f / s_f$ is the utility change per one within-set standard deviation of
+    feature $f$, in units of the anchor's ($\theta_0 = -1$). The search bound was
+    $|\theta_f| \le 4 s_f$.}
+  \label{tab:pilot-theta}
+  % src: CR/facts/pilot.json selected.M1_tuned.values (seed 2); runs.m1-s1.selected_by_val.values (seed 1);
+  %      feature_scaling.pooled_within_set_sd. theta_f / s_f = theta_f * sd(x_f) / sd(x_0), computed
+  %      2026-10-03 from those fields; s_f matches pilot.json decisions.
+  \begin{tabular}{@{}rlrrrr@{}}
+    \toprule
+    $f$ & Feature & $s_f$ & $\theta_f$, seed 2 & $\theta_f/s_f$, seed 2 & $\theta_f/s_f$, seed 1 \\
+    \midrule
+    0 & \code{default\_logit\_scaled}     & 1     & $-1$ (pinned) & $-1$     & $-1$ \\
+    1 & \code{overlap\_frac}              & 25.6  & 13.60   & 0.532    & 0.383 \\
+    2 & \code{new\_prefill\_tokens\_k}    & 17.7  & $-8.71$ & $-0.493$ & $-0.143$ \\
+    3 & \code{active\_prefill\_tokens\_k} & 5.33  & $-0.546$ & $-0.102$ & $-0.158$ \\
+    4 & \code{kv\_load\_frac}             & 80.8  & $-0.434$ & $-0.005$ & 0.015 \\
+    5 & \code{active\_requests\_s}        & 110   & $-49.2$ & $-0.449$ & $-0.407$ \\
+    6 & \code{session\_affinity}          & 21.2  & 0.995   & 0.047    & 0.018 \\
+    7 & \code{isl\_x\_prefill\_load}      & 3.22  & 0.041   & 0.013    & 0.021 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{What the pilot M1 learned.}
+Relative to the default cost they start from, both pilot M1 seeds moved in three directions
+(\cref{tab:pilot-theta}): more weight on the overlap fraction, a penalty on new prefill tokens
+(strongly in seed 2 only), and a penalty on the number of active requests, a quantity the default
+cost ignores at its shipped weight $\breq = 0$. Both tuned M0 configurations moved the same way
+within their own family: more overlap credit ($\bov = 1.62$ and 1.65, shipped 1), a larger
+prefill-load scale ($\bpf = 24.8$ and 16.9, shipped 1) and a nonzero active-request weight
+($\breq = 854$ and \num{1152}, shipped 0), so that each active request costs as much as 34 or 68
+prefill blocks. Two model classes tuned independently thus both added a request-count load term,
+the direction the phase-2 M1-v2 took further with its prefill-by-requests interaction
+(\cref{sec:res-coefficients}).
+% src: CR/facts/pilot.json selected.M0_tuned.values (m0-s1: credit 1.6176, decay 1.5253, prefill_load_scale 24.823,
+%      decode_active_request_weight 853.59, temperature 0.00197); runs.m0-s2.selected_by_val.values
+%      (1.6536, 0.5756, 16.877, 1151.5, 0.0238). 853.59/24.823 = 34.4; 1151.5/16.877 = 68.2 (arithmetic).
+
+\paragraph{How the search behaved.}
+M1's validation score (the CMA-ES mean, on $\krep = 0,1,2$) reached 0.163--0.165 within 160--240
+evaluations and then stayed within 0.005 of each run's maximum; the two seeds ended 0.0004 apart.
+M0 plateaued within 80--160 evaluations on train, but in one seed the CMA-ES step size then grew
+from 0.18 to 10.8 internal units and the generation mean fell to $-0.23$, a drift along
+near-flat directions of the default cost's knobs. Phase 2 therefore capped the per-coordinate
+step size at 0.3 internal units and set the budget at 400 evaluations per run, the latest
+validation plateau among the four pilot runs (\cref{sec:space,sec:noise}). On 16 candidates, the
+objective on the 12-cell subset ranked candidates like the objective on all 34 train cells
+(Spearman 0.947); phase 2 nevertheless tuned on all 34.
+% src: CR/facts/pilot.json measurements.cma_progress_curves.summary; projection.inputs.plateau.runs.*.val_by_generation;
+%      measurements.subset_vs_full_objective (spearman 0.947, n 16); recommendations_for_phase2;
+%      CR/facts/gate.json full_plan.budget, objective_cells_repeats.cells ("all 34 train cells every evaluation")

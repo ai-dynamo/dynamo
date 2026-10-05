@@ -2,7 +2,7 @@
 
 - **Auditor role:** independent static auditor (adversarial), with small dynamic checks.
 - **Date:** 2026-10-02.
-- **Audited state:** WT `rupei/learned-routing-public` at `<commit-07>` (clean), bindings build_id
+- **Audited state:** WT `rupei/learned-routing` at `<commit-07>` (clean), bindings build_id
   `4b4525a9…` (`.so` sha `ecdd2202…`).
 - **Evidence directory:** `runs/audits/build-leakage-features-r0/` (`scripts/`, `out/`, `traces/`,
   `policies/`).

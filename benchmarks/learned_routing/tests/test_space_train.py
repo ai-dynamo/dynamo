@@ -151,6 +151,88 @@ def test_invalid_params_are_rejected(param, match):
         space([param])
 
 
+def learned_theta_space(clamp=None, init=(-1.0, 0.0, 0.0, 0.0)):
+    param = {
+        "path": "parameters.theta",
+        "kind": "vector",
+        "dim": 4,
+        "bounds": [[-1, -1], [-8, 8], [-4, 4], [-2, 2]],
+        "init": list(init),
+        "fixed": {0: -1.0},
+    }
+    if clamp is not None:
+        param["clamp"] = clamp
+    return Space(
+        {
+            "base": {"type": "learned-choice", "parameters": {"feature_set": "v1"}},
+            "params": [param],
+            "cma": {"sigma0": 0.05},
+        }
+    )
+
+
+def test_clamp_keeps_the_internal_search_and_only_clips_the_decoded_policy():
+    plain = learned_theta_space()
+    clamped = learned_theta_space(clamp=[None, None, [None, 0.0], [None, 0.0]])
+    # Same internal start and box: a start on the constraint stays in the interior of the box.
+    assert clamped.x0() == plain.x0() == pytest.approx([0.5, 0.5, 0.5])
+    assert clamped.cma_bounds() == plain.cma_bounds()
+    assert clamped.spec(clamped.x0()).sha == plain.spec(plain.x0()).sha
+    assert clamped.sha != plain.sha
+    z = [0.75, 0.9, 0.2]
+    assert plain.spec(z).parameters["theta"] == pytest.approx([-1.0, 4.0, 3.2, -1.2])
+    assert clamped.spec(z).parameters["theta"] == pytest.approx([-1.0, 4.0, 0.0, -1.2])
+    # One pair applies to every free element; the pinned anchor is never clipped.
+    every = learned_theta_space(clamp=[None, 0.0])
+    assert every.spec([1.0, 1.0, 1.0]).parameters["theta"] == [-1.0, 0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    "clamp, init, match",
+    [
+        ([None, 0.0], (-1.0, 0.5, 0.0, 0.0), "outside clamp"),
+        ([1.0, 0.0], (-1.0, 0.0, 0.0, 0.0), "low <= high"),
+        ([[None, 0.0], [None, 0.0]], (-1.0, 0.0, 0.0, 0.0), "per-element"),
+        ([None, None, 0.0, None], (-1.0, 0.0, 0.0, 0.0), r"\[low, high\]"),
+    ],
+)
+def test_invalid_clamps_are_rejected(clamp, init, match):
+    with pytest.raises(SpaceError, match=match):
+        learned_theta_space(clamp=clamp, init=init)
+
+
+def test_clamped_and_plain_runs_ask_the_same_first_generation(tmp_path):
+    # Same seed, start and sigma: CMA-ES proposes identical internal points in generation 0,
+    # and the clamped run's policies are the plain run's with theta[2], theta[3] clipped at 0.
+    histories = {}
+    for name, clamp in (
+        ("plain", None),
+        ("clamped", [None, None, [None, 0.0], [None, 0.0]]),
+    ):
+        run = tmp_path / name
+        Trainer(
+            learned_theta_space(clamp=clamp),
+            cells(1, tmp_path),
+            [],
+            run,
+            fake_quadratic_evaluator({"parameters.overlap_score_credit": 1.0}),
+            default_reference(),
+            config(budget_evals=6, popsize=6, val_every=0),
+        ).run()
+        histories[name] = gen_lines(run)[0]
+    plain, clamped = histories["plain"], histories["clamped"]
+    assert [c["z"] for c in plain["candidates"]] == [
+        c["z"] for c in clamped["candidates"]
+    ]
+    space_plain = learned_theta_space()
+    for cand in clamped["candidates"]:
+        theta = space_plain.spec(cand["z"]).parameters["theta"]
+        clipped = theta[:2] + [min(v, 0.0) for v in theta[2:]]
+        assert learned_theta_space(clamp=[None, None, [None, 0.0], [None, 0.0]]).spec(
+            cand["z"]
+        ).parameters["theta"] == pytest.approx(clipped)
+
+
 def test_example_spaces_load():
     for path in sorted(SPACES.glob("*.yaml")):
         loaded = Space.load(path)

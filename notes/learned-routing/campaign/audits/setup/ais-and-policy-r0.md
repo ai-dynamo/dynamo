@@ -3,7 +3,7 @@
 - **Auditor role:** independent dynamic auditor. I ran my own replays and wrote my own check scripts;
   I did not take the setup summaries on trust.
 - **Date:** 2026-10-02.
-- **Worktree:** `rupei/learned-routing-public` at `<commit-01>`. Bindings `_core.abi3.so` were built at
+- **Worktree:** `rupei/learned-routing` at `<commit-01>`. Bindings `_core.abi3.so` were built at
   13:21:03. The seed patch's Rust sources date from 13:17:52; only the test file changed after the
   build, so the `.so` contains the patch.
 - **Python:** `WT/.venv/bin/python`, with `DYN_LOG=warn` and `PYTHONDONTWRITEBYTECODE=1`.

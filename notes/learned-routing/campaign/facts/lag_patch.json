@@ -1,0 +1,370 @@
+{
+ "schema": "learned-routing.lag-patch.v1",
+ "stage": "A5 router-state lag patch, isolated per A11.5",
+ "written": "2026-10-03 06:15:03 PDT",
+ "status": "ok",
+ "summary": "Offline KV-router replay gains router_state_lag_ms: KV cache events, prefill completions and request completions reach the router lag_ms of simulated time late. Lag 0 reproduces the tuning build exactly (64/64 records, every non-environment field and 404,704 per-request rows); lag 50/200 ms change routing in 64/64 and 64/64 pairs and goodput in 63/64 and 61/64. CPU cluster parity of the lag bundle: IDENTICAL (192/192 records, 1,214,112 rows).",
+ "worktree": {
+  "path": "<other-worktree>",
+  "branch": "rupei/learned-routing-lag (local only, not pushed)",
+  "base": "rupei/learned-routing @ <commit-21> (Rust/Python replay and harness sources identical to the tuning build's <commit-08>; later tuning-branch commits <commit-22>, <commit-23> only add remote/p2orch.py)",
+  "commit": "<commit-lag-01> feat(replay): add an offline router-state lag knob for A5 robustness runs",
+  "venv": "<other-worktree>/.venv (uv venv on /usr/bin/python3.12 3.12.3; packages = campaign venv's uv pip freeze, identical apart from the editable paths)",
+  "python": "<other-worktree>/.venv/bin/python",
+  "lr_eval": "<other-worktree>/.venv/bin/lr-eval"
+ },
+ "build": {
+  "command": "cd lib/bindings/python && VIRTUAL_ENV=<lag WT>/.venv CARGO_BUILD_JOBS=8 nice -n 10 maturin develop --uv --release --features ais-forward-pass; then uv pip install -e . -e lib/gpu_memory_service -e benchmarks/learned_routing",
+  "bindings_target": "started as a copy of the campaign WT's lib/bindings/python/target (cp -a), so only workspace crates recompiled",
+  "core_so": "<other-worktree>/lib/bindings/python/src/dynamo/_core.abi3.so",
+  "core_so_sha256": "90464b9b50d7a44b82ee239f306a1c90230d3c0b3960bc25a8c3291c34ec7f1c",
+  "build_id": "a6c6b04ef3a52f3477d0f16052764fbfb50cf7300bfea647226aafc5e958cff4",
+  "harness_version": "lrh-4 (unchanged; the lag enters the cache key only when set)",
+  "reproducible": "yes: a touch-only rebuild reproduced 90464b9b byte for byte (logs/core_so_sha256.build2.txt, logs/maturin_release_ais_rebuild3.log). The first build (122ed2ad, build_id da33635e) predates two test-only edits and is superseded; its proof records (parity/lag/, compare_r0.json, router_view_smoke.json) match the final build's on every lag-effect row (64/64 per lag) and smoke statistic.",
+  "tuning_build_untouched": {
+   "core_so_sha256": "1d67c131deca024373a2eb4b96f70156e04eb32e1046c2cf7235ac50ddeb288b (re-checked after this stage)",
+   "build_id": "6955b0eea4c2c312958eea9f716e75c4007ef1fdb97964392b97729b194a407a",
+   "campaign_cache": "not written: every lag-build replay ran in private roots (runs/lag_patch/root_*), the CPU cluster results were fetched with --no-ingest, and CR/runs/cache/build_ids.json still lists only the tuning-WT .so"
+  }
+ },
+ "semantics": {
+  "lagged": "worker-originated router updates: KV cache events (indexer / overlap), prefill completion (mark_prefill_completed) and request completion (free) in the router's active-sequence load state",
+  "immediate": "the router's own dispatch bookkeeping (add_request at admission), as in a live router that books what it routes; router-side prefill-token decay is a time model, not a signal",
+  "visibility": "FIFO queue keyed by observed_ms + lag_ms; due updates are applied, in order, at the start of the first router callback (arrival, KV observation, prefill completion, request completion, topology change) at or after their visibility time, with slot updates stamped at the visibility time; if a load update was applied the router queue is drained then. There is no timer, so a queued request (router_queue_threshold, unused by the campaign's headline policies) is released at the next callback after its capacity becomes visible.",
+  "worker_removal": "a removed worker's queued KV events are dropped (its lagged completions are no-ops after unregister)",
+  "scope": "offline replay with router_mode kv_router (aggregated and disaggregated compositions). replay_mode online rejects lag > 0; round_robin ignores it (no router state).",
+  "lag_zero": "lag 0 (or None) takes the pre-patch synchronous path"
+ },
+ "interfaces": {
+  "python_api": "dynamo.replay.run_trace_replay(..., router_state_lag_ms=L) and run_synthetic_trace_replay(..., router_state_lag_ms=L)",
+  "binding": "dynamo._core.run_mocker_trace_replay / run_mocker_synthetic_trace_replay kwarg router_state_lag_ms (validated finite >= 0); Rust dynamo_mocker::replay::with_router_state_lag_ms(lag, || replay) scopes it to the calling thread",
+  "harness": "lr-eval --router-state-lag-ms 0 50 200 (each task once per lag; Task.lag_ms; cache key adds router_state_lag_ms only when set; records carry router_state_lag_ms; report CONTENT_KEYS include it so lags never pool)",
+  "bundle": "lr-eval --bundle-out ... --router-state-lag-ms ... bakes the lags into run.sh and MANIFEST.router_state_lag_ms, and the site check requires lag-capable bindings",
+  "slurm": "<lag WT>/benchmarks/learned_routing/remote/submit_eval.sh ... --router-state-lag-ms 0 50 200; fetch_ingest.sh from the same WT (its lr-eval recomputes lag-aware keys and expects build a6c6b04e)"
+ },
+ "tests": {
+  "rust_new": [
+   "kv_router::tests::lagged_kv_events_and_completions_stay_invisible_until_due (overlap 0 at t=49 and 1 at t=50 for an event observed at t=0 with lag 50; a completion at t=60 keeps 64 active prefill tokens at t=109 and 0 at t=110)",
+   "kv_router::tests::lagged_completion_releases_queued_request_once_visible (queued request admitted at t=60, not at the t=10 completion)",
+   "kv_router::tests::router_state_lag_is_validated_and_scoped_to_the_call",
+   "kv_router::composition::tests::router_state_lag_hides_finished_requests_and_their_blocks_from_routing (end to end: lag 0 routes the repeat prompt to the cached worker with overlap > 0; lag 60 s routes it to the other worker with overlap 0)"
+  ],
+  "results": "cargo test -p dynamo-mocker --lib: 227 passed (logs/cargo_test_mocker_lib.log); cargo clippy -p dynamo-mocker --all-targets -D warnings: clean; cargo clippy (bindings, --features ais-forward-pass) -D warnings: clean; rustfmt --check: clean; harness pytest tests/: 105 passed incl. 4 new (tests/test_router_state_lag.py); components replay test_api_telemetry.py: 6 passed; pre-commit hooks passed on the commit"
+ },
+ "proof_lag0_identical": {
+  "cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "agentx-A3-base-n8-lanes-L2",
+   "mooncake-w0-base-n8-open-L2",
+   "mooncake-w2-root2-n4-open-L2",
+   "mooncake-w4-base-n4-closed-L2",
+   "mooncake-w4-osl2.0-n4-open-L2",
+   "sessions-s0-base-n4-open-L2",
+   "sessions-s2-think2.0-n4-closed-L2"
+  ],
+  "cells_file": "runs/lag_patch/cells/sample_train.jsonl (lines copied from cells/train.jsonl; no val or test cell touched)",
+  "policies": [
+   [
+    "default@defaults",
+    "dynamo-default-cost-fn"
+   ],
+   [
+    "llm-d-precise-prefix@defaults",
+    "llm-d-precise-prefix"
+   ],
+   [
+    "m0-s2@sel-g25",
+    "dynamo-default-cost-fn"
+   ],
+   [
+    "m1-s2@sel-g30",
+    "learned-choice"
+   ]
+  ],
+  "repeats": [
+   0,
+   1
+  ],
+  "pairs": 64,
+  "identical": 64,
+  "fields_compared_per_record_min": 76,
+  "per_request_rows_compared": 404704,
+  "environment_fields_excluded": "build_id, cache_key, cached, eval_wall_s, ingested_from, native_wall_time_ms, per_request_path, policy_spec_path, policy_yaml, router_state_lag_ms, run_id, slot, wall_s, worker_peak_rss_mib, worker_pid",
+  "tuning_side": "fresh tuning-build lr-eval in runs/lag_patch/root_tuning (tuning WT venv, build 6955b0ee); it reproduces the campaign cache on all 26/26 keys that exist there (every cache-entry field + per-request bytes)",
+  "lag_side": "runs/lag_patch/root_lag, lr-eval --router-state-lag-ms 0 50 200 (lag WT venv, build a6c6b04e)",
+  "errors": 0,
+  "evidence": [
+   "runs/lag_patch/parity/tuning/results.jsonl",
+   "runs/lag_patch/parity/lag_r1/results.jsonl",
+   "runs/lag_patch/parity/compare_r1.json",
+   "runs/lag_patch/scripts/compare_lag.py (stdlib, no learned_routing import)"
+  ]
+ },
+ "proof_lag_changes_what_policies_see": {
+  "decision_level": {
+   "lr_eval_pairs": {
+    "200.0": {
+     "pairs": 64,
+     "pairs_with_changed_routing": 64,
+     "pairs_per_request_identical": 0,
+     "routing_changed_frac_mean": 0.7434765337227915
+    },
+    "50.0": {
+     "pairs": 64,
+     "pairs_with_changed_routing": 64,
+     "pairs_per_request_identical": 0,
+     "routing_changed_frac_mean": 0.7376494913744382
+    }
+   },
+   "note": "routing_changed_frac = matched requests whose routing_workers differ from lag 0 (requests matched by session_id, turn, play, ISL, requested OSL); once one decision differs, later states diverge, so this is not a per-decision staleness rate",
+   "router_view_smoke": {
+    "cell": "mooncake-w0-base-n8-open-L2",
+    "repeat": 0,
+    "lags": [
+     0.0,
+     50.0,
+     200.0
+    ],
+    "method": "direct replays of the exact lr-eval jobs (Evaluator.plan) in one slot, keeping raw routing_history; every per-request canonical SHA equals the lr-eval record's",
+    "first_divergence_note": "open-loop arrivals are exogenous, so every decision before the first divergent arrival is identical; the divergence is caused by the lagged state",
+    "by_policy": {
+     "default@defaults": {
+      "0.0": {
+       "router_seen_overlap_tokens": 11129360,
+       "engine_reused_tokens": 11121408,
+       "seen_over_reused": 1.0007150173790944,
+       "frac_router_sees_less_than_reused": 0.0008766803039158387,
+       "frac_router_sees_more_than_reused": 0.0017533606078316774,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 5.939999657214808
+      },
+      "200.0": {
+       "router_seen_overlap_tokens": 11107888,
+       "engine_reused_tokens": 11126944,
+       "seen_over_reused": 0.998287400385946,
+       "frac_router_sees_less_than_reused": 0.0014611338398597311,
+       "frac_router_sees_more_than_reused": 0.0011689070718877848,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 5.866801879553504,
+       "first_divergence_vs_lag0": {
+        "arrival_rank": 12,
+        "arrival_time_ms": 1649.2607547284374,
+        "requests_identical_before": 12,
+        "router_seen_overlap_tokens_lag": 512,
+        "router_seen_overlap_tokens_lag0": 0,
+        "workers_lag": [
+         5
+        ],
+        "workers_lag0": [
+         4
+        ]
+       }
+      },
+      "50.0": {
+       "router_seen_overlap_tokens": 11257792,
+       "engine_reused_tokens": 11274912,
+       "seen_over_reused": 0.9984815846012811,
+       "frac_router_sees_less_than_reused": 0.0029222676797194622,
+       "frac_router_sees_more_than_reused": 0.0011689070718877848,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 6.013197434876112,
+       "first_divergence_vs_lag0": {
+        "arrival_rank": 20,
+        "arrival_time_ms": 2884.119129299614,
+        "requests_identical_before": 20,
+        "router_seen_overlap_tokens_lag": 512,
+        "router_seen_overlap_tokens_lag0": 512,
+        "workers_lag": [
+         5
+        ],
+        "workers_lag0": [
+         0
+        ]
+       }
+      }
+     },
+     "m0-s2@sel-g25": {
+      "0.0": {
+       "router_seen_overlap_tokens": 11564240,
+       "engine_reused_tokens": 11545600,
+       "seen_over_reused": 1.001614467849224,
+       "frac_router_sees_less_than_reused": 0.0,
+       "frac_router_sees_more_than_reused": 0.0011689070718877848,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 6.814713100267389
+      },
+      "200.0": {
+       "router_seen_overlap_tokens": 11515488,
+       "engine_reused_tokens": 11507408,
+       "seen_over_reused": 1.0007021563848262,
+       "frac_router_sees_less_than_reused": 0.0008766803039158387,
+       "frac_router_sees_more_than_reused": 0.003798947983635301,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 6.704916433775433,
+       "first_divergence_vs_lag0": {
+        "arrival_rank": 12,
+        "arrival_time_ms": 1649.2607547284374,
+        "requests_identical_before": 12,
+        "router_seen_overlap_tokens_lag": 512,
+        "router_seen_overlap_tokens_lag0": 0,
+        "workers_lag": [
+         5
+        ],
+        "workers_lag0": [
+         2
+        ]
+       }
+      },
+      "50.0": {
+       "router_seen_overlap_tokens": 11480896,
+       "engine_reused_tokens": 11492512,
+       "seen_over_reused": 0.9989892549165926,
+       "frac_router_sees_less_than_reused": 0.0011689070718877848,
+       "frac_router_sees_more_than_reused": 0.0011689070718877848,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 6.811053211384324,
+       "first_divergence_vs_lag0": {
+        "arrival_rank": 12,
+        "arrival_time_ms": 1649.2607547284374,
+        "requests_identical_before": 12,
+        "router_seen_overlap_tokens_lag": 512,
+        "router_seen_overlap_tokens_lag0": 0,
+        "workers_lag": [
+         5
+        ],
+        "workers_lag0": [
+         2
+        ]
+       }
+      }
+     },
+     "m1-s2@sel-g30": {
+      "0.0": {
+       "router_seen_overlap_tokens": 11983376,
+       "engine_reused_tokens": 11960816,
+       "seen_over_reused": 1.001886158937651,
+       "frac_router_sees_less_than_reused": 0.0,
+       "frac_router_sees_more_than_reused": 0.0014611338398597311,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 7.180701988573908
+      },
+      "200.0": {
+       "router_seen_overlap_tokens": 11960960,
+       "engine_reused_tokens": 11874448,
+       "seen_over_reused": 1.0072855597161232,
+       "frac_router_sees_less_than_reused": 0.0,
+       "frac_router_sees_more_than_reused": 0.0035067212156633548,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 7.228280544053756,
+       "first_divergence_vs_lag0": {
+        "arrival_rank": 26,
+        "arrival_time_ms": 3604.389932906281,
+        "requests_identical_before": 26,
+        "router_seen_overlap_tokens_lag": 512,
+        "router_seen_overlap_tokens_lag0": 512,
+        "workers_lag": [
+         7
+        ],
+        "workers_lag0": [
+         3
+        ]
+       }
+      },
+      "50.0": {
+       "router_seen_overlap_tokens": 12000080,
+       "engine_reused_tokens": 11936208,
+       "seen_over_reused": 1.0053511131843547,
+       "frac_router_sees_less_than_reused": 0.0002922267679719462,
+       "frac_router_sees_more_than_reused": 0.0020455873758036236,
+       "per_request_sha_matches_lr_eval_record": true,
+       "goodput_rps_window_lr_eval": 7.264879432884408,
+       "first_divergence_vs_lag0": {
+        "arrival_rank": 57,
+        "arrival_time_ms": 7349.949907404596,
+        "requests_identical_before": 57,
+        "router_seen_overlap_tokens_lag": 512,
+        "router_seen_overlap_tokens_lag0": 512,
+        "workers_lag": [
+         3
+        ],
+        "workers_lag0": [
+         4
+        ]
+       }
+      }
+     }
+    },
+    "evidence": "runs/lag_patch/parity/router_view_smoke_r1.json, runs/lag_patch/scripts/router_view_smoke.py"
+   },
+   "mechanism_tests": "the four Rust tests above show the exact visibility boundary for KV events, load releases and queue drains"
+  },
+  "goodput_level": {
+   "200.0": {
+    "goodput_ratio_max": 1.0196560196560198,
+    "goodput_ratio_mean": 0.9968436987029258,
+    "goodput_ratio_mean_by_policy": {
+     "default@defaults": 0.9969415896135093,
+     "llm-d-precise-prefix@defaults": 0.9930124522145167,
+     "m0-s2@sel-g25": 0.9968733812626057,
+     "m1-s2@sel-g30": 1.0005473717210716
+    },
+    "goodput_ratio_min": 0.955930359085963,
+    "pairs": 64,
+    "pairs_goodput_changed": 61,
+    "pairs_per_request_identical": 0,
+    "pairs_with_changed_routing": 64,
+    "routing_changed_frac_mean": 0.7434765337227915
+   },
+   "50.0": {
+    "goodput_ratio_max": 1.0230601867809455,
+    "goodput_ratio_mean": 0.9984615366649995,
+    "goodput_ratio_mean_by_policy": {
+     "default@defaults": 0.9972165472577277,
+     "llm-d-precise-prefix@defaults": 0.99624951411727,
+     "m0-s2@sel-g25": 0.9988810005212493,
+     "m1-s2@sel-g30": 1.0014990847637508
+    },
+    "goodput_ratio_min": 0.9719064401153559,
+    "pairs": 64,
+    "pairs_goodput_changed": 63,
+    "pairs_per_request_identical": 0,
+    "pairs_with_changed_routing": 64,
+    "routing_changed_frac_mean": 0.7376494913744382
+   }
+  },
+  "caveat": "8 train cells x 2 replicates; single-replicate per-pair ratios, no noise model applied. These numbers show the knob is live, not how lag affects the policy ranking; that is the test stage's A5 pass."
+ },
+ "slurm_parity": {
+  "bundle": "runs/remote/bundles/lag-parity-r0 (192 tasks = the 64 proof tasks x lags 0/50/200; MANIFEST build_id a6c6b04e, router_state_lag_ms [0, 50, 200], site check router_state_lag_api true)",
+  "job": "<job> (COMPLETED, 00:07:02, cancel: ssh <cpu-cluster> scancel <job>)",
+  "node": "<node>",
+  "image": "Ubuntu 24.04.5 LTS, glibc 2.39, Python 3.12.3, AMD EPYC 7702P 64-Core Processor (partition <partition>, --mem 64G, 16 slots, co-located with a p2a lr-train job)",
+  "verdict": "IDENTICAL",
+  "records_identical": "192/192",
+  "per_request_rows_compared": 1214112,
+  "evidence": "runs/lag_patch/parity/slurm_parity_lag-parity-r0.json (remote/parity_check.py, remote vs runs/lag_patch/root_lag cache); facts/remote.json parity.lag_build_a6c6b04e and allocations[job <job>]",
+  "ingested": false
+ },
+ "test_stage_usage": [
+  "Use only the lag WT for the A5 pass: <lag WT>/.venv/bin/lr-eval --policy-spec FINALISTS --cells cells/test.jsonl --repeats 3 --router-state-lag-ms 0 50 200 --out runs/test/lag/results.jsonl, or on the CPU cluster <lag WT>/benchmarks/learned_routing/remote/submit_eval.sh --name test-lag-r1 --nodes N --repeats 3 --specs FINALISTS --cells cells/test.jsonl --router-state-lag-ms 0 50 200 --time HH:MM:SS, then the same WT's fetch_ingest.sh.",
+  "The lag-0 arm can be taken from this build (identical to the tuning build by the proof above) or from the headline test records; the 50/200 arms must come from this build.",
+  "Lag records carry build a6c6b04e and router_state_lag_ms; report them per lag (the lag WT's lr-report keeps lags apart; the tuning WT's report.py would pool lags of one build, so keep one lag per results file there).",
+  "round_robin ignores the lag (no router state), so its three lag arms are identical replays; it can be run at lag 0 only.",
+  "Do not rebuild the lag bindings: the bundle and records are tied to core_so 90464b9b. If the tuning branch changes evaluation code (HARNESS_VERSION bump) before the test stage, cherry-pick <commit-lag-01> onto it, rebuild, and re-run the lag-0 parity (runs/lag_patch/scripts/compare_lag.py).",
+  "LR-14 also suggests a 10 ms arm; the option takes any list (e.g. --router-state-lag-ms 0 10 50 200) at extra cost."
+ ],
+ "lessons": {
+  "applied": [
+   "LR-14 (KV-event and load-signal delay patch with proof; logged in UPSTREAM_FOLLOWUPS #14)",
+   "LR-11 (proof pairs by CRN replicate k)"
+  ],
+  "deferred_to_test_stage": [
+   "LR-14 action 2 extras: tau > 0 and hash_home-restricted variants, Kendall tau across perturbations"
+  ],
+  "rejected": []
+ },
+ "deviations": [
+  "A5's 'lag = 0 is byte-identical to the unpatched replay' is shown as identical records (every non-environment field) and byte-identical per-request rows against the tuning build; the .so itself differs by construction (different build)."
+ ],
+ "upstream_followup": "facts/UPSTREAM_FOLLOWUPS.md #14 (straight-main candidate: n)"
+}

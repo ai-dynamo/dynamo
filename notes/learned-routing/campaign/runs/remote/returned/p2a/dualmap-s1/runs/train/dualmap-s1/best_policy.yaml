@@ -1,0 +1,9 @@
+name: "dualmap-tuned@dualmap-s1"
+parameters:
+  hash_prefix_blocks: 63
+  pending_prefill_token_budget: 2343
+  window_requests: 578
+router_config: {}
+router_mode: "kv_router"
+seeded: false
+type: "dualmap"

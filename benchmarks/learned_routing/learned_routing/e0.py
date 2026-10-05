@@ -22,6 +22,8 @@ v1 used context ``ISL + j + 1``, so it sat 6e-8 to 1.6e-5 below every isolated r
 uncontended no-reuse request (``e2e == E0``) failed ``S = 1`` (build audit goodput r2 F1). v2
 matches 17,233 isolated single-request replays to within 2e-8 relative (fixer r2). The engine is the nominal
 ``engine.json`` identity; per-cell ``engine_overrides`` (timing perturbations) do not change E0.
+:mod:`learned_routing.rescore_timing` scores timing-perturbed records a second time against the
+perturbation-consistent E0' = prefill / s + decode / (s d) (phase2-mid sim-exploitation F2).
 
 Values are cached per engine identity and method in ``CR/runs/cache/e0/<engine_sha>-<method>.json``
 (``{"ISL,OSL": ms}``); concurrent writers merge under an ``flock``.
@@ -80,6 +82,10 @@ class E0Table:
                 done += new
             self._prefill[isl] = total
         return self._prefill[isl]
+
+    def prefill_ms(self, isl: int) -> float:
+        """The prefill part of E0 (chunked, no reuse) for ``isl`` input tokens."""
+        return self._prefill_ms(max(int(isl), 1))
 
     def _step_ms(self, ctx: int) -> float:
         if ctx not in self._step:

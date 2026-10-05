@@ -1,7 +1,7 @@
 # Audit: build checkpoint, lens "goodput-normalization", round 0 (dynamic)
 
 - Auditor: independent dynamic auditor, 2026-10-02.
-- Audited state: WT `rupei/learned-routing-public` at `<commit-07>` (clean), bindings build_id `4b4525a9…`.
+- Audited state: WT `rupei/learned-routing` at `<commit-07>` (clean), bindings build_id `4b4525a9…`.
 - Evidence directory: `CR/runs/audits/build-goodput-normalization-r0/` (scripts in `scripts/`, outputs in `out/`,
   console logs in `logs/`).
 - **Verdict: FAIL.** 0 blocker, 1 major, 8 minor.

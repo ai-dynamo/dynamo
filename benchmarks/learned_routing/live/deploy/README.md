@@ -54,12 +54,14 @@ bash benchmarks/learned_routing/live/deploy/submit.sh --plan-id <plan_id> --comm
 |---|---|---|
 | `plan.py` | workstation, worktree `.venv` | Freezes a plan from `CR/config/engine.json` and harness policy specs; proves flag parity (below). |
 | `specs/smoke.json` | input to `plan.py` | `default@defaults`, `round_robin`, `learned-choice@theta0` (the contract's parity anchor). |
+| `specs/finalists.json` | input to `plan.py` | The A20 live finalists, copied verbatim from `CR/facts/finalists.json`: `default@defaults`, `round_robin`, tuned `ramjet`, `m1v2` (learned-choice feature_set v2), `m1` (v1) and `m0` (tuned default cost function). |
 | `stage_source.sh` | workstation, then cluster login | Thin git bundle of the commit, remote checkout, engine shim patch, plan upload, node-side `site.env`. |
 | `fetch_etcd.sh` | workstation, then cluster login | Two-node only: pinned, checksummed etcd binary on the shared filesystem. |
-| `submit.sh` / `finish.sh` | workstation | Lock, `sbatch`, `facts/live.json` record; end state and lock release. |
+| `submit.sh` / `finish.sh` | workstation | Lock (optional), `sbatch`, `facts/live.json` record; end state and lock release. |
 | `hold_lock.sh` | workstation | The cooperative GPU hold lock (`$LR_HOLD_LOCK_DIR/ACTIVE`, default `~/.lr-gpu-hold`). |
 | `live_facts.py` | workstation | Appends and updates job records in `CR/facts/live.json`. |
-| `job_node.sh` | Slurm batch script (head node) | The whole job: prep, staging, build, workers, per-policy checks and payload, teardown. |
+| `job_node.sh` | Slurm batch script (head node) | The whole job: prep, staging, build, workers, per-policy or per-pair checks and payload, teardown. |
+| `pairs.py` | head node host, workstation | Validates a pairs file (one job's batch of (label, policy, input) runs) before any setup cost. |
 | `common.sh` | sourced everywhere | Site settings (`site.env`), paths, topology, ports, CPU masks, container and runtime environment. |
 | `site.env.example` | template | Every site-specific setting, as placeholders. |
 | `node_prep.sh` | each node, host | Hardware check (8 x H100 80GB HBM3), node-local root, image copy, topology record. |
@@ -71,6 +73,7 @@ bash benchmarks/learned_routing/live/deploy/submit.sh --plan-id <plan_id> --comm
 | `patches/0001-vllm-0.24-engine-compat.patch` | applied by `stage_source.sh` | Live-only shim so this commit's `dynamo.vllm` runs on vLLM 0.24 (below). |
 | `qwen3-32b-9216db57.manifest.json` | input | Sizes and hashes of every file at the pinned revision, from the Hugging Face API. |
 | `tests/test_deploy.py`, `tests/local_mocker_smoke.sh` | workstation | Unit tests; CPU preflight against mocker workers. |
+| `tests/local_pairs_dryrun.sh` | workstation | Dry run of `job_node.sh` pairs mode with stubbed Slurm, setup, workers, frontend and payload. |
 
 ## What "same router" means here
 
@@ -195,7 +198,35 @@ before step 5.
    ```
 
    The default partition is `LR_PARTITION` with `--time 01:55:00`; pick a partition and time
-   limit that fit your cluster's policy. The lock caps any job at 2 h 45 min.
+   limit that fit your cluster's policy. The lock caps any job at 2 h 45 min. `--no-lock` skips the
+   cooperative lock (for when no other user of the allocation needs it), so several jobs can run at
+   once and only the partition bounds `--time`.
+
+   **Batches of runs (pairs mode).** To run several (cell, policy) pairs in one allocation, write a
+   pairs file and pass it with `--pairs` instead of `--policies`:
+
+   ```text
+   # label                        policy slug (plan)               input run (under LR_SMOKE_INPUTS)  est_s
+   conv-w3-base-n4-open-L2__m1v2  m1v2_p2-m1v2-s1-g20-best_so_far  conv-w3-base-n4-open-L2__m1v2      843
+   idle-e0__P4                    default_defaults                 idle__P4                           200
+   ```
+
+   ```bash
+   bash .../submit.sh --plan-id <id> --commit <sha> --no-lock --partition <partition> --time 03:10:00 \
+     --pairs <cluster pairs file> --payload <cluster path>/live/smoke_payload.sh \
+     --env LR_SMOKE_INPUTS=<cluster inputs root> --env LR_AIPERF_ENV=<cluster aiperf env> --purpose "..."
+   ```
+
+   The vLLM workers start once and stay up for the whole batch. Each pair gets a fresh check
+   frontend (wait, smoke with policy evidence, cold reset of every engine's prefix cache), then a
+   fresh serve frontend whose payload runs exactly that pair's input, so the model load is paid once
+   per allocation and every run still starts from a fresh router and cold caches. `pairs.py check`
+   runs first and refuses the job if a slug is not in the plan, an input is missing, an input's
+   replicate or worker count differs from the plan and the job, or two pairs share a label or a
+   salt. A pair runs only if its `est_s` plus `LR_PAIR_MARGIN_S` (default 300 s) still fits before
+   the scheduler's end of the job; otherwise it is recorded as `skipped_time` instead of being cut
+   short. The AIPerf run timeout is 1.5 x `est_s` + 300 s. Pairs mode never stops after a failed
+   pair; it stops running pairs (`not_run_workers_down`) once a worker step has exited.
 6. **Monitor** read-only from the login node: `squeue -j <id>`, and the run directory
    `.../live/runs/<id>-<tag>/` (`job.log`, `logs/`, `policies/<slug>/check/*.json`).
 7. **Finish:** `bash .../finish.sh <id> <tag>` records the Slurm end state in `facts/live.json`
@@ -212,11 +243,17 @@ before step 5.
 | 2 | weights to node-local disk on every node, in parallel with the wheel build on the head host | 65.5 GB copy + hash; release Rust build (the Oct 1 SGLang-image build took 315 s on 128 CPUs) |
 | 3 | venv + `verify_env.py` in the container | seconds when reused |
 | 4 | etcd (two-node), then one `node_workers.sh` step per node | model load + CUDA graph capture |
-| 5 | per policy: `check` frontend -> `wait` -> `smoke` -> `reset`; then `serve` frontend -> `wait` -> snapshot -> payload -> snapshot | |
+| 5 | per policy (or per pair): `check` frontend -> `wait` -> `smoke` -> `reset`; then `serve` frontend -> `wait` -> snapshot -> payload -> snapshot | about 45-60 s of switching and checks per unit (smoke: 16 s checks, 27 s policy switch) |
 | 6 | teardown, `runtime-manifest.json` | |
 
 The wheel and venv are reused by later jobs at the same commit, so stage 2 shrinks to the weights.
-Set `LR_STOP_ON_FAILURE=0` (via `--env`) to continue to the next policy after a failed check.
+Concurrent jobs at one commit build once: the first takes `<wheel or venv dir>.building` (mkdir is
+atomic on the shared filesystem) and the others wait for its manifest (`LR_BUILD_WAIT_S`, default 2,400 s). The lock
+directory is never removed; if its owner job is gone without a manifest, waiters fail at once and
+name it, and the lock must be renamed before a rebuild. Pair outputs go to
+`runs/<job>-<tag>/pairs/<NN>-<label>/` with a `status.json` each, and `runtime-manifest.json` lists
+them. Set `LR_STOP_ON_FAILURE=0` (via `--env`) to continue to the next policy after a failed check
+(policy mode).
 
 ## Health checks
 
@@ -413,6 +450,21 @@ smudge and making the step resumable); the shared checkpoint passed the manifest
 Not validated locally: anything that needs vLLM or a GPU (`stage_weights.sh` on real paths,
 `build_env.sh`, `verify_env.py`, `worker.sh`, the cold reset, `job_node.sh` as a whole), and the
 two-node path.
+
+### Finalist prep (2026-10-05, no GPU)
+
+- `plan.py` with `specs/finalists.json` at replicate 0: flag and kwarg parity pass for all six
+  finalist policies, and every planned YAML is byte-identical to the YAML the frozen test pass
+  replayed at k0 (the harness names each YAML by its sha256).
+- `tests/local_mocker_smoke.sh` on that plan with four mocker workers: `wait` and `smoke` pass for
+  all six (learned-choice feature_set v2 and v1, ramjet, the tuned default cost function and
+  round-robin), including policy evidence.
+- The same YAMLs route a short replay through the tuning bindings; a feature_set v2 YAML with 22
+  coefficients is refused at startup.
+- `tests/local_pairs_dryrun.sh`: three pairs run in file order with a check and a serve frontend
+  each and exactly their own input; the pair that no longer fits the job's remaining time is
+  `skipped_time`; a pairs file with an unplanned policy fails before node prep.
+- `tests/test_deploy.py`: 23 tests pass (7 new for `pairs.py`).
 
 ## What the first GPU job must confirm
 

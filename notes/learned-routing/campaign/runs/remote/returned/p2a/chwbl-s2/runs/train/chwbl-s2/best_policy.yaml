@@ -1,0 +1,8 @@
+name: "chwbl-tuned@chwbl-s2"
+parameters:
+  load_factor: 1.1123287835296056
+  prefix_tokens: 4899
+router_config: {}
+router_mode: "kv_router"
+seeded: false
+type: "chwbl"

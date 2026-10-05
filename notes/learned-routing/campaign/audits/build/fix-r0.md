@@ -5,7 +5,7 @@
   `goodput-normalization-r0.md` (F1) and `harness-robustness-splits-r0.md` (S1, B1).
 - **Verdict:** all four are **valid**. All four are **fixed at the root**, with code committed on
   WT and the affected tests and smoke runs re-run. No finding is rebutted.
-- **WT:** `rupei/learned-routing-public`, three signed-off commits on `<commit-07>`:
+- **WT:** `rupei/learned-routing`, three signed-off commits on `<commit-07>`:
   - `<commit-08>` fix(router-plugins): key learned-choice hash_home on the prompt prefix only
   - `<commit-09>` fix(learned-routing): pair report ratios on cell content and verify bundles
   - `<commit-10>` fix(learned-routing): use disjoint workload windows and identity warm-up

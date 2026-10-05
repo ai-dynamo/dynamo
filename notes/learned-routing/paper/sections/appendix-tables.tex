@@ -1,0 +1,73 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: full generated tables that the body shows in part. Every table here is copied from the final
+%   report's fragments (CR/report/data/tables/*.md) by scripts/make_tables.py; nothing is computed here.
+
+\section{Full result tables}
+\label{app:tables}
+
+The tables in this appendix are generated from the final report's table fragments, like those in
+\cref{sec:results}. Intervals are 95\% segment-bootstrap intervals ($\dagger$: within-segment cell
+bootstrap for strata with fewer than three segments); only the headline row of
+\cref{tab:leaderboard-full} is a test.
+
+\input{generated/leaderboard_full}
+
+\begin{table}[htbp]
+  \centering
+  \caption{By worker count, against $\piref$ (generated; selected rows).}
+  \label{tab:N-default}
+  \input{generated/N_vs_default}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{By family, against $\piref$ (generated; selected rows).}
+  \label{tab:family-default}
+  \input{generated/family_vs_default}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{By load mode, against tuned \policy{ramjet} (top) and against $\piref$ (bottom)
+    (generated; selected rows).}
+  \label{tab:mode}
+  \input{generated/mode_vs_ramjet}
+
+  \vspace{6pt}
+  \input{generated/mode_vs_default}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Hold-out strata, against tuned \policy{ramjet} (top) and against $\piref$ (bottom)
+    (generated; selected rows).}
+  \label{tab:holdout}
+  \input{generated/holdout_vs_ramjet}
+
+  \vspace{6pt}
+  \input{generated/holdout_vs_default}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Coefficients of the \code{v1} learned arms, $\theta_f$ (with $\theta_f\,\mathrm{sd}_f$ in
+    parentheses); $\theta_0 = -1$ throughout (generated). M2 rank 2 also has a context term, whose
+    directions are in the finalists file.}
+  \label{tab:coef-v1}
+  \input{generated/coef_v1}
+\end{table}
+
+\input{generated/secondary_full_a}
+
+\input{generated/secondary_full_b}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.6\linewidth]{performance_profiles}
+  \caption{Performance profiles over the 60 test cells (copied from the final report): the fraction
+    of cells on which a policy's clipped log-ratio against $\piref$ exceeds $\tau$. Cells are not
+    independent, so the profiles are descriptive.}
+  \label{fig:profiles}
+\end{figure}

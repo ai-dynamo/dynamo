@@ -1,0 +1,674 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: answer, in order: which configurations were selected; does the learned policy beat the best
+%   baseline on held-out data (headline, exact scoped wording); where does it win and lose, including
+%   unseen worker counts; do richer models help; what did it learn; does the result survive SLO
+%   changes, router-state lag and timing perturbation; what the secondary comparisons and the AIS
+%   league add; how much of the margin an in-class heuristic carries.
+% EVIDENCE: CR/facts/{finalists,test_results,robustness,secondary_metrics_test,
+%   fairness_in_class_heuristic,tierA,tierBC}.json; CR/report/REPORT.md and CR/report/data/ (the
+%   generated tables under generated/ are copied from report/data/tables/*.md by
+%   scripts/make_tables.py); CR/audits/final/*.md.
+% CI NOTE: generated tables carry the report's 10,000-draw segment bootstrap (fixed seed). The
+%   headline facts file's own bootstrap gives [0.0150, 0.0498] for the headline segment mean, against
+%   the report's [0.0150, 0.0501]; the difference is resampling noise. The text quotes the report's.
+% STATUS: final for the simulation results. Everything here is AIS-timed replay.
+
+\section{Results}
+\label{sec:results}
+
+Every number in this section comes from AIS-timed offline replay. The tables marked
+\emph{generated} are copied character for character from the campaign's final report, which builds
+them from the single test pass and the robustness records without any replay. Intervals are 95\%
+percentile intervals from a bootstrap that resamples whole test segments with all their cells; where
+a stratum has fewer than three segments, cells are resampled within each segment instead, marked
+$\dagger$, and those intervals are optimistic because cells of one segment are not independent. Only
+the pre-registered headline is a test; every other $p$-value is descriptive.
+% src: CR/report/data/report_data.json method (10,000 draws, fixed seed; dagger rule)
+
+% =====================================================================================
+\subsection{Selection: the finalists}
+\label{sec:res-selection}
+
+Each policy's configuration was chosen on validation replicates $\krep = 0,1,2$ over its three
+restarts and their checkpoints. The cross-policy choices were then made on fresh replicates
+$\krep = 3,\dots,10$, by the same rule for baselines and learned arms, and the finalists file was
+frozen before the first test record was written.
+\begin{itemize}
+  \item \textbf{Best baseline.} Tuned \policy{ramjet}, 0.1411, ahead of \policy{ramjet} with a tuned
+    queue threshold (0.1405) and \policy{llm-d-precise-prefix} (0.1393). The choice between
+    \policy{ramjet} and \policy{llm-d-precise-prefix} was a near tie: \policy{ramjet} led by 0.0018
+    in the mean over cells but trailed by 0.0087 in the mean over segments, so the comparison with
+    \policy{llm-d-precise-prefix} was registered as a secondary before the test pass.
+  \item \textbf{Headline learned arm.} M1-v2, 0.1783, ahead of M1-noaff (0.1692), M1 with a tuned
+    queue threshold (0.1684), M2 rank 2 (0.1677) and M1 (0.1656). Its configuration is the
+    best-so-far sample at generation 20 of the restart that started from the default router
+    ($\theta = -\basis{0}$). On the fresh replicates it led \policy{ramjet} by $+0.0372$ per cell and
+    $+0.0290$ per segment, on 5 of 6 validation segments.
+  \item \textbf{Multiplicity.} 314 learned variants were validated over the campaign (every
+    validation checkpoint of every learned run, the pilot and the post-hoc variants); 5 learned arms
+    competed for the headline.
+\end{itemize}
+% src: CR/facts/finalists.json rankings_val_k3_10 (baseline_pool, learned_pool), headline
+%      (learned m1v2@p2-m1v2-s1-g20-best_so_far, val_k3_10_margin: cell 0.03717, segment 0.02896,
+%      5/6 segments), secondary_comparisons; CR/facts/tierBC.json decisions.val_best_baseline
+%      (+0.0018 cell, -0.0087 segment); CR/facts/test_results.json lr11 (314; 5)
+
+% =====================================================================================
+\subsection{Headline: M1-v2 against the best baseline}
+\label{sec:res-headline}
+
+\begin{center}
+\fcolorbox{black!40}{black!3}{\parbox{0.92\linewidth}{\small
+\textbf{Headline, as the final audit allows.} In AIS-timed simulation, the learned router M1-v2
+beats the branch's ported heuristics, each tuned with an equal budget. Against the
+validation-selected best baseline, tuned \policy{ramjet}, its windowed goodput on the 60 frozen
+test cells is higher by a segment-mean clipped log-ratio of $+0.0316$ (95\% segment-bootstrap
+interval $[+0.0150, +0.0501]$; geometric-mean ratio 1.032, interval $[1.015, 1.051]$). It is ahead
+on 10 of 12 independent test segments and on all 8 informative ones; the 4 session segments are ties
+at ceiling. The pre-registered one-sided exact Wilcoxon test gives $p = 0.0017$, and
+$\Pr(\text{M1-v2} \succ \text{ramjet}) = 0.833$ with interval $[0.583, 1.0]$, significant and
+meaningful by the registered rule.}}
+\end{center}
+% src: CR/facts/test_results.json report_must_state MS-RH2-F1-scope (wording), headline
+%      (segment_mean 0.031555, segments_ahead 10, wilcoxon 0.001709, p_greater 0.8333 [0.5833, 1.0],
+%      geomean 1.0321 [1.0151, 1.0510]); interval [0.0150, 0.0501] from CR/report/REPORT.md section 1
+%      and generated/strata.tex (the facts file's own bootstrap: [0.0150, 0.0498])
+
+\Cref{tab:headline,fig:headline} show the twelve units the test counts. The claim was pre-registered,
+evaluated once, reproduced bit for bit from the raw per-request rows by an independent auditor, and
+not refuted by the robustness and simulator-dependence audit. It survives leaving out any one
+segment (largest $p$ 0.0034), any one family (largest $p$ 0.027), the $\Nw = 6$ cells and the
+FAST25 conversation cells; with the latter removed the segment mean is $+0.026$ and $p$ is unchanged.
+% src: CR/audits/final/refute-headline-1.md (bit-for-bit reproduction; leave-one-segment-out max p
+%      0.0034; drop-family max p 0.027; excluding N6 / conv cells); CR/report/REPORT.md section 3.3
+%      ("Without them, the headline is +0.026 with p 0.0017 unchanged")
+
+\begin{table}[tbp]
+  \centering\small
+  \caption{The headline per test segment: $\segstat_{\seg}$ (\cref{eq:segstat}), the mean over the
+    segment's cells and replicates $\krep = 0,1,2$ of the clipped log-ratio of M1-v2's windowed
+    goodput against tuned \policy{ramjet}'s.}
+  \label{tab:headline}
+  % src (D_omega): CR/facts/test_results.json headline.by_segment; (cells, modes): CR/cells/test.jsonl
+  %      metadata (FAST25 conversation cells: 2 in w3, 1 in w5); statistics: headline
+  \begin{adjustbox}{max width=\linewidth}
+  \begin{tabular}{@{}llrlr@{}}
+    \toprule
+    Segment & Family & Cells & Load modes (cells) & $\segstat_{\seg}$ \\
+    \midrule
+    w3 & Mooncake 11, FAST25 conv.\ 2 & 13 & open 11, closed 2 & $+0.0668$ \\
+    w5 & Mooncake 14, FAST25 conv.\ 1 & 15 & open 9, closed 6  & $+0.1009$ \\
+    s6 & sessions & 6 & open 6           & $-0.0000$ \\
+    s7 & sessions & 2 & open 1, closed 1 & $-0.0001$ \\
+    s8 & sessions & 2 & open 1, closed 1 & $+0.0000$ \\
+    s9 & sessions & 5 & open 1, closed 4 & $+0.0006$ \\
+    T1 & AgentX & 4 & lanes 4 & $+0.0366$ \\
+    T2 & AgentX & 2 & lanes 2 & $+0.0309$ \\
+    T3 & AgentX & 5 & lanes 5 & $+0.0397$ \\
+    T4 & AgentX & 3 & lanes 3 & $+0.0426$ \\
+    x0 & FAST25 synthetic & 2 & open 1, closed 1 & $+0.0556$ \\
+    x1 & FAST25 synthetic & 1 & open 1 & $+0.0051$ \\
+    \midrule
+    \multicolumn{4}{@{}l}{Segment mean (SE)} & $+0.0316$ (0.0093) \\
+    \multicolumn{4}{@{}l}{One-sided exact Wilcoxon signed-rank $p$, 12 segments} & 0.0017 \\
+    \multicolumn{4}{@{}l}{$\Pr(\text{M1-v2} \succ \text{ramjet})$ over segments, 95\% interval} & 0.833 $[0.583, 1.0]$ \\
+    \multicolumn{4}{@{}l}{Geometric mean of segment ratios, 95\% interval} & 1.032 $[1.015, 1.051]$ \\
+    \multicolumn{4}{@{}l}{Interquartile mean of segment ratios, 95\% interval} & 1.026 $[1.005, 1.050]$ \\
+    \multicolumn{4}{@{}l}{Mean over cells (SE); cells ahead} & $+0.0506$ (0.0117); 50 of 60 \\
+    \bottomrule
+  \end{tabular}
+  \end{adjustbox}
+\end{table}
+% src: CR/facts/test_results.json headline (by_segment; segment_se 0.009332; iqm 1.0264 [1.0054, 1.0503];
+%      cell_mean 0.050584, cell_se 0.011666, cells_ahead 50)
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.85\linewidth]{headline_segments}
+  \caption{The headline per test segment (copied from the final report). The four session segments
+    tie at ceiling; every other segment favors M1-v2.}
+  \label{fig:headline}
+\end{figure}
+
+\paragraph{Limits that travel with the headline.}
+The final audit requires each of the following next to the claim.
+\begin{enumerate}
+  \item \textbf{Only the sign is a claim.} The effect is below the pre-registered minimum detectable
+    effect (0.038) and below the spread that timing perturbations induce (0.060). Its magnitude
+    depends on the perturbation (\cref{sec:res-robustness}).
+  \item \textbf{It is not ``learning beats every heuristic''.} The baseline pool lacks faithful
+    LMetric, which lies inside M1-v2's class; added to the default cost, it carries most of M1-v2's
+    validation margin (\cref{sec:res-fairness}).
+  \item \textbf{It holds at the calibrated SLO and looser.} At SLO scales 1 to 3 it is significant;
+    at 0.75 and 0.5 the sign holds but significance does not, and at 0.75 all four session segments
+    turn against M1-v2 (\cref{sec:res-robustness}).
+  \item \textbf{It is a request-count property.} The token-weighted goodput is mixed; prompts of
+    32K to 64K tokens wait longer for their first token than under \policy{ramjet}, and prompts of
+    32K tokens and more lose about 4 points of good fraction on average (\cref{sec:gaming}).
+    % src: CR/facts/test_results.json report_must_state MS-F1-ttft (32K-64K TTFT p90 +0.135, 11/12;
+    %      >= 64K +0.021, 3/7, p 1.0), MS-F1-goodfrac-by-isl (32K-64K -3.8 pp, >= 64K -3.7 pp)
+  \item \textbf{The headline is simulated.} The live finalist runs (\cref{sec:live}; validation only,
+    on six $\Nw = 4$ test cells chosen after the test pass, not at random, with one run per policy)
+    agree with the simulated policy ranking (pooled Kendall $\kendall$-b 1.00, per cell 0.87 to 1.00)
+    and with the sign of M1-v2 minus \policy{ramjet} on hardware. They test neither the magnitude nor
+    the significance of the headline, and they validate neither absolute goodput (live over simulated
+    0.72 to 2.18, depending on the policy) nor the size of the gaps between policies: on the sessions
+    cell, the simulated gain of every tuned policy over $\piref$ is not reproduced beyond live noise.
+\end{enumerate}
+% src: CR/facts/test_results.json report_must_state; CR/report/REPORT.md section 1 items 1-5 (item 5 as
+%      revised after the live runs, audits/live/fix.md)
+
+\paragraph{Secondary statements that hold.}
+\begin{itemize}
+  \item \textbf{Each tuned baseline.} M1-v2 is Wilcoxon-significant against each of the 11 tuned
+    baselines (intersection-union test, largest $p$ 0.0105). The effect-size leg of LR-11 fails for
+    \policy{lmetric} and sticky-bounded, which M1-v2 trails by up to 0.5\% on the at-ceiling session
+    segments. It also beats every heuristic at its shipped defaults (largest $p$ 0.0105).
+  \item \textbf{The best baseline on test.} On test the best baseline is \policy{llm-d-precise-prefix}
+    (tuned), not \policy{ramjet}. M1-v2 beats it by $+0.0293$, ahead on 12 of 12 segments
+    ($p = 0.00024$); this comparison was registered before the test pass.
+  \item \textbf{Per cell.} M1-v2 is the single best of the 29 router-observable test policies on
+    31 of 60 cells, at or above the per-cell best tuned baseline (a virtual best no single policy can
+    match) on 42 of 60 cells with a mean gap of $+0.037$, and above $\piref$ on all 60.
+\end{itemize}
+% src: CR/facts/test_results.json secondary.beats_every_tuned_baseline_IUT (max p 0.0105),
+%      secondary.m1v2_vs_other_type_llmdpp (segment_mean 0.02934, 12/12, p 0.000244),
+%      per_cell_winner_map, per_cell_gap_to_best_tuned_baseline; CR/audits/final/refute-headline-1.md F1
+%      (LR-11 P(>) leg fails for lmetric and stickybounded); CR/audits/final/completeness.md
+%      (every heuristic at defaults, max p 0.0105); CR/report/REPORT.md sections 1, 3.1
+
+% =====================================================================================
+\subsection{Every policy}
+\label{sec:res-leaderboard}
+
+\Cref{fig:leaderboard} places every test policy against $\piref$; \cref{tab:leaderboard-full} in the
+appendix gives the numbers. Four observations frame the headline.
+\begin{itemize}
+  \item \textbf{Cache-aware routing matters a lot here.} The learned arms and the strong heuristics
+    beat $\piref$ by 0.13 to 0.18 in segment-mean clipped log-ratio, while round-robin, which ignores
+    the cache, loses 0.56.
+  \item \textbf{Tuning the default's knobs is not enough.} M0, the default cost function tuned with
+    the same budget, gains $+0.116$ over $\piref$, less than untuned \policy{llm-d-precise-prefix}
+    ($+0.144$).
+  \item \textbf{Hash-pinned routing hurts on these workloads.} Tuned \policy{chwbl} and
+    \policy{dualmap} are near $\piref$ ($-0.030$ and $-0.004$), and below it at their shipped
+    defaults.
+  \item \textbf{Validation transferred to test.} The ranking on fresh validation predicts the test
+    ranking (\cref{fig:val-test}); test numbers are higher than validation numbers mainly because
+    test holds more cells at $\Nw = 16$ and 32, where every cache-aware policy gains more.
+\end{itemize}
+% src: generated/leaderboard_full.tex (from report/data/tables/leaderboard.md): round_robin -0.5631,
+%      M0 +0.1162, llm-d-precise-prefix@defaults +0.1442, chwbl -0.0299, dualmap -0.0044;
+%      CR/report/REPORT.md section 3.1 (val k3-10 minus test note)
+An independent plain-ratio view of the same records gives M1-v2 a mean normalized goodput of 1.222
+$[1.154, 1.286]$ against \policy{ramjet}'s 1.156 $[1.108, 1.216]$.
+% src: CR/report/REPORT.md section 3.1 (lr-report test-tuning, two-stage segment-then-replicate bootstrap)
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.82\linewidth]{leaderboard}
+  \caption{Every test policy against $\piref$ (60 cells, 12 segments; segment means with 95\%
+    segment-bootstrap intervals). Blue: router-observable learned arms; orange: tuned baselines;
+    green: the \ais{} league; purple: shipped defaults. Copied from the final report.}
+  \label{fig:leaderboard}
+\end{figure}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.6\linewidth]{val_vs_test}
+  \caption{Validation (fresh replicates) against test, mean over cells of the clipped log-ratio
+    against $\piref$. The two compare different cells, so the dashed line is a reference, not an
+    expectation.}
+  \label{fig:val-test}
+\end{figure}
+
+% =====================================================================================
+\subsection{Strata: load mode, worker count, family and transforms}
+\label{sec:res-strata}
+
+\Cref{tab:strata} breaks the headline down. Only the first row is a test; the rest are descriptive,
+and per-worker-count claims would need Holm's correction, under which every per-count $p$ is at
+least 0.070.
+% src: CR/report/REPORT.md section 2 ("all Holm-adjusted per-N p >= 0.070")
+
+\begin{table}[tbp]
+  \centering
+  \caption{The headline by stratum, M1-v2 minus tuned \policy{ramjet} (generated). One-sided exact
+    Wilcoxon $p$ over the stratum's segments; only the first row is a test. Rows marked $\dagger$
+    use the within-segment cell bootstrap.}
+  \label{tab:strata}
+  \input{generated/strata}
+\end{table}
+
+\paragraph{Load modes.}
+M1-v2 leads in all three modes, by $+0.028$ in open loop, $+0.035$ in closed loop and $+0.037$ in
+agentic lanes, none significant on its own ($p$ 0.06 to 0.08). AgentX ran only in closed-loop lanes.
+% src: generated/strata.tex rows load mode
+
+\subsection{Held-out worker counts}
+\label{sec:res-n}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\linewidth]{worker_count_extrapolation}
+  \caption{Worker-count extrapolation on test (copied from the final report). Left: against
+    $\piref$ by $\Nw$. Right: M1-v2 minus tuned \policy{ramjet} by $\Nw$, with segments ahead.
+    Shaded: the train counts 4 and 8. Each $\Nw$ holds different cells, and loads are matched to
+    $\piref$'s knee at each $\Nw$, not to a fixed per-worker rate.}
+  \label{fig:n-extrapolation}
+\end{figure}
+
+Every learned arm was trained on $\Nw \in \{4, 8\}$ only and runs unchanged at any $\Nw$, because its
+utility is per worker and its features are set-size invariant (\cref{sec:set-size}).
+\begin{itemize}
+  \item \textbf{The margin persists at unseen worker counts.} Over \policy{ramjet} it is positive at
+    every $\Nw$: $+0.038$ at $\Nw = 2$, $+0.029$ at 16 and $+0.024$ at 32 (\cref{tab:N-ramjet}). Over
+    the 7 segments with cells at unseen counts it is ahead on all 7 ($+0.034$, uncorrected $p$
+    0.008); this stratum was not pre-registered as a test.
+  \item \textbf{No regression.} The pre-registered no-regression check holds at $\Nw = 2$, 16 and 32
+    against both \policy{ramjet} and $\piref$: the lower end of the interval exceeds
+    $-\ln 1.005$.
+  \item \textbf{Gains over the default grow with $\Nw$} for every cache-aware policy, M1-v2's from
+    $+0.105$ at $\Nw = 2$ to $+0.27$ at 16 and 32, but the learned margin over \policy{ramjet} does
+    not grow at the unseen large counts.
+  \item \textbf{$\Nw = 6$ is selection-exposed} and the weakest stratum: 3 of 6 segments ahead,
+    $p$ 0.219.
+  \item \textbf{The curve is not a pure $\Nw$ effect.} Each $\Nw$ holds different cells and
+    segments, and with loads matched to $\piref$'s knee per $\Nw$ the per-worker load varies 1.2 to
+    1.9 times across $\Nw$. A per-worker-matched extrapolation was not run.
+\end{itemize}
+% src: generated/N_vs_ramjet.tex, generated/strata.tex (unseen_N 7/7, p 0.0078; N:6 3/6, p 0.2188);
+%      CR/facts/test_results.json parity_and_no_regression; CR/report/REPORT.md section 4;
+%      CR/audits/calibration/independent-rerun-r1.md F3 (1.2-1.9x)
+
+\begin{table}[tbp]
+  \centering
+  \caption{By worker count, against tuned \policy{ramjet} (generated; selected rows). Segment means
+    with 95\% intervals. Cells (segments) per $\Nw$: 2: 8 (6); 4: 13 (7); 6: 7 (6),
+    selection-exposed; 8: 17 (8); 16: 7 (6); 32: 8 (6). \Cref{tab:N-default} in the appendix gives
+    the same against $\piref$.}
+  \label{tab:N-ramjet}
+  \input{generated/N_vs_ramjet}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\linewidth]{cache_pressure}
+  \caption{Per-cell gain against cache pressure on the 22 open-loop Mooncake and FAST25 test cells
+    (copied from the final report). Cache pressure is distinct prefix tokens per \SI{100}{s} over
+    the cluster's KV capacity. The trend is descriptive: pressure is confounded with load level, and
+    cells of one segment are not independent.}
+  \label{fig:cache-pressure}
+\end{figure}
+
+\paragraph{Cache pressure.}
+On the 22 open-loop Mooncake and FAST25 test cells, M1-v2's gain rises with cache pressure: Spearman
+$\rho$ 0.79 against $\piref$ and 0.71 against \policy{ramjet} (\cref{fig:cache-pressure}). Pressure
+ranges from 1.0 to 2.7, so no test cell has little cache pressure, a design gap calibration recorded.
+% src: CR/report/REPORT.md section 4 (Spearman 0.79, 0.71; 1.0-2.7); CR/facts/calibration.json
+%      cache_pressure_open_loop lessons ("no split has cells below 0.5")
+
+\subsection{Families and transforms}
+
+\begin{table}[tbp]
+  \centering
+  \caption{By family, against tuned \policy{ramjet} (generated; selected rows). Each family has 2 to
+    4 segments, so these are descriptive; $\dagger$ marks the within-segment cell bootstrap.
+    \Cref{tab:family-default} in the appendix gives the same against $\piref$.}
+  \label{tab:family-ramjet}
+  \input{generated/family_vs_ramjet}
+\end{table}
+
+\Cref{tab:family-ramjet} shows where the margin comes from. It is largest on the FAST25 conversation
+cells ($+0.387$), a family no policy was trained on; those three cells carry about 35\% of M1-v2's
+cell-mean gain, and their request-count gains ($+0.48$, $+0.49$, $+0.08$) contrast with token-weighted
+deltas of $+0.02$, $-0.15$ and $+0.02$ (\cref{sec:gaming}). On Mooncake the lead is $+0.050$, on
+AgentX $+0.037$ with all four segments ahead, and on FAST25 synthetic $+0.030$. Sessions sit at
+ceiling at the calibrated SLO: every strong policy serves nearly every in-window session request
+well, so the four session segments tie. The ten cells with transforms beyond the train ranges show
+$+0.025$ with 4 of 7 segments ahead ($p$ 0.109), so generalization to held-out transform values is
+not established.
+% src: generated/family_vs_ramjet.tex; CR/report/REPORT.md section 3.3 (35%, +0.48/+0.49/+0.08 vs
+%      +0.02/-0.15/+0.02); generated/strata.tex (transform_extrapolation +0.0250, 4/7, 0.1094)
+
+% =====================================================================================
+\subsection{The model ladder and the ablations}
+\label{sec:res-ladder}
+
+\begin{table}[tbp]
+  \centering
+  \caption{The model ladder (generated). Selected: restart and generation of the configuration chosen
+    on validation replicates $k_{0..2}$; columns 3 and 4 are mean clipped log-ratios against $\piref$
+    on the selection and on the fresh replicates; test against $\piref$ is a mean over cells; test
+    against tuned \policy{ramjet} a segment mean with its 95\% interval and one-sided $p$.}
+  \label{tab:ladder-results}
+  \input{generated/ladder}
+\end{table}
+
+\begin{table}[tbp]
+  \centering
+  \caption{Rung-to-rung comparisons on test (generated; descriptive).}
+  \label{tab:ladder-pairs}
+  \input{generated/ladder_pairs}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\linewidth]{ladder}
+  \caption{The model ladder on the selection replicates, the fresh validation replicates and test
+    (copied from the final report). Left: router-observable arms; right: the \ais{} league.}
+  \label{fig:ladder}
+\end{figure}
+
+\Cref{tab:ladder-results,tab:ladder-pairs,fig:ladder} read as follows.
+\begin{itemize}
+  \item \textbf{M0 $\to$ M1 is the one clear step.} Learning over the default cost's features beats
+    tuning the default cost's knobs: $+0.047$ per segment, 11 of 12 segments ahead.
+  \item \textbf{M1 is the sign-constrained re-run.} The unconstrained tier-A M1 gamed the objective
+    (\cref{sec:gaming}); it is reported only as a flagged secondary row, and it is weaker on test.
+  \item \textbf{M1 $\to$ M2 rank 2: no gain.} The context term adds $+0.0025$ on test (6 of 12
+    segments) and does not beat M1 continued for the same added 400 evaluations ($-0.0045$). The
+    pre-registered gate for ranks 3 and 4 failed: M2 rank 2 minus the better of M1 and M1 continued
+    was $-0.0016$ on validation, against an MDE of 0.038, so ranks 3 and 4 were not run. M3 (nested
+    logit) was never built, since this deployment has no nests.
+  \item \textbf{M1 $\to$ M1-v2 is the step that passes.} The extended feature set, with log,
+    set-relative, interaction and prefill-attention terms, beats M1 by $+0.013$ on 11 of 12 segments
+    ($p$ 0.0034). The originally planned M1 and M2 alone do \emph{not} pass against \policy{ramjet}
+    on test ($p$ 0.055 each); the passing arm is a redesign made after the pilot, on validation
+    evidence (\cref{sec:res-fairness}).
+  \item \textbf{Ablation (a), a jointly tuned queue threshold: nothing measurable.} The learned arm
+    with the threshold against M1 continued is $+0.0015$ ($p$ 0.055), and \policy{ramjet} with the
+    threshold against \policy{ramjet} is $-0.0016$. Removing the tuned threshold after the fact
+    changes the validation score by $+0.0001$ and $-0.0006$.
+  \item \textbf{Session affinity (A15).} M1-noaff, retrained without $\theta_6$, is not worse than M1
+    on test ($+0.0084$, $p$ 0.21), and zeroing $\theta_6$ in the selected M1 changes its validation
+    score by $-0.0010$. Under router-state lag, M1 minus M1-noaff stays between $-0.008$ and
+    $-0.005$, so the hypothesis that affinity gains value as the router's state goes stale is not
+    supported. For M1-v2, zeroing $\theta_6$ changes the validation score by $+0.0005$.
+  \item \textbf{Initialization (A12).} The headline M1 came from the s1 restart, the default router,
+    so the registered M1-default-init row is the same policy as M1. M1-v2 also came from s1; its
+    informed restarts s2 (the behavior clone) and s3 (the faithful LMetric point) reached 0.1609 and
+    0.1724 on the selection replicates, against s1's 0.1767.
+\end{itemize}
+% src: generated/ladder_pairs.tex and generated/ladder.tex; CR/facts/tierBC.json m2_rank3_4_gate
+%      (via REPORT section 5: -0.0016 vs MDE 0.038), tier_c_final_i9 (q removed +0.00010 / -0.00064);
+%      CR/facts/test_results.json secondary.m1noaff_vs_m1 (+0.008367, p 0.2119), m1_vs_ramjet and
+%      m2r2_vs_ramjet (p 0.0549), m1v2_vs_m1 (+0.012958, 11/12, p 0.003418), m1_A12_note;
+%      CR/facts/robustness.json a15_affinity_under_lag; CR/audits/final/refute-headline-2.md
+%      (M1-v2 theta6 = 0: +0.0005); CR/report/REPORT.md section 5 (restart bests)
+
+% =====================================================================================
+\subsection{What M1-v2 learned}
+\label{sec:res-coefficients}
+
+The shipped artifact is one policy YAML: \lc{} with \code{feature\_set: v2}, $\temp = 0$,
+\code{tie\_break: one\_draw} and the 23 coefficients of \cref{tab:coef-m1v2}. It reads no \ais{}
+signal; a decision costs $O(\Nw\dfeat)$ with $\dfeat = 23$. Following LR-15, we read the
+coefficients through standardized magnitudes and ablations, not raw values: \cref{tab:coef-m1v2}
+scales each $\theta_f$ by the feature's within-candidate-set standard deviation on train, so
+$\theta_f\,\mathrm{sd}_f$ is the utility change for a typical difference between two candidates. The
+anchor, the default cost per request block, has $\theta_0\,\mathrm{sd}_0 = -6.51$.
+% src: CR/facts/finalists.json headline.learned.spec; CR/report/REPORT.md section 6 (sd on train from
+%      CR/runs/phase2/m1v2/prep.json)
+
+\begin{table}[tbp]
+  \centering
+  \caption{M1-v2's coefficients (generated). sd$_f$: pooled within-candidate-set standard deviation
+    of feature $f$ on train; constraint: the sign rule of \cref{sec:sign-constraint}.}
+  \label{tab:coef-m1v2}
+  \input{generated/coef_m1v2}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.78\linewidth]{coefficients_m1v2}
+  \caption{M1-v2's nonzero coefficients, standardized (copied from the final report). Positive
+    attracts a worker, negative repels it; the default-cost anchor is at $-6.51$.}
+  \label{fig:coef}
+\end{figure}
+
+\begin{enumerate}
+  \item \textbf{The default router plus corrections.} $\theta_0 = -1$ dominates; every learned term
+    is a fraction of the anchor's spread.
+  \item \textbf{Uncached prefill costs more the busier the worker.} The largest learned term is
+    \code{new\_prefill\_x\_requests} ($\theta_{21}\,\mathrm{sd}_{21} = -2.13$). With $\theta_2$, the
+    linear weight on uncached prefill is $+1.275 - 0.525 \times$(active requests) per 8K tokens,
+    negative on any worker with three or more active requests: uncached work is steered to near-idle
+    workers, while cache affinity is kept on lightly loaded ones. Zeroing $\theta_{21}$ costs 0.018 on
+    validation (13 of 14 cells worse), and the fairness audit attributes M1-v2's increment over the
+    in-class LMetric heuristic to this term.
+  \item \textbf{Cache terms reward hits beyond the default's credit.} \code{overlap\_frac}
+    ($+1.29$ per sd) and the log of uncached prefill ($-0.76$ per sd) both favor the worker holding
+    more of the prompt; the log term rewards near-complete hits most. Zeroing $\theta_1$ alone costs
+    only 0.002 on validation: overlap is largely redundant with the anchor and the prefill terms.
+  \item \textbf{Rank-like load terms do the balancing.} The set-relative terms
+    \code{active\_requests\_below\_frac} ($-0.70$) and \code{active\_prefill\_below\_frac} ($-0.32$),
+    with request excess and ratio, outweigh the absolute load terms ($-0.36$ and $-0.13$). LMetric's
+    own product terms (\code{log\_ptok}, \code{log\_bs}) are 0 in the selected policy.
+  \item \textbf{Session and prefix-home terms are unneeded.} \code{session\_affinity} ($+0.45$) and
+    \code{hash\_home} ($-0.74$, a mild avoidance of the prefix's rendezvous pair) can each be zeroed
+    with no validation loss ($+0.0005$ and $+0.0010$), so the policy depends on neither session IDs
+    nor rendezvous homes.
+\end{enumerate}
+% src: CR/report/REPORT.md section 6 interpretation (items 1-5); CR/audits/final/refute-headline-2.md
+%      (theta21 = 0: -0.0178; theta6 = 0 +0.0005; theta11 = 0 +0.0010)
+
+The \code{v1} arms agree on a simpler structure (\cref{tab:coef-v1} in the appendix): a strong extra
+overlap credit ($\theta_1\,\mathrm{sd}_1$ of $+4.2$ to $+4.9$) and a strong penalty on active requests
+($-2.1$ to $-2.9$) on top of the default. The unconstrained M1 used overlap and request weights about
+3.5 to 3.7 times larger and a positive $\theta_7$, the gaming pattern of \cref{sec:gaming}.
+% src: CR/report/REPORT.md section 6 ("The v1 arms ...")
+
+% =====================================================================================
+\subsection{Robustness}
+\label{sec:res-robustness}
+
+\begin{table}[tbp]
+  \centering
+  \caption{The headline under perturbations and alternative SLOs (generated). ``Nominal $\Ezero$''
+    scores timing-perturbed replays against the unperturbed $\Ezero$; ``$\Ezero'$'' uses the
+    perturbation-consistent reference (\cref{sec:robustness}). $s$: speedup; $d$: decode speedup.
+    $\kendall$-b compares the condition's ranking with the nominal ranking, over the 17 robustness
+    finalists for lag and timing and over all 32 non-default policies for SLO variants. A19 is the
+    token-weighted secondary metric.}
+  \label{tab:robustness}
+  \input{generated/robustness}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.85\linewidth]{robustness}
+  \caption{The headline under perturbations and alternative SLOs (copied from the final report;
+    dashed: the MDE).}
+  \label{fig:robustness}
+\end{figure}
+
+\Cref{tab:robustness,fig:robustness} answer whether the ranking survives changes training never saw.
+\begin{itemize}
+  \item \textbf{Router-state lag.} At 10, 50 and \SI{200}{ms} the lead is $+0.031$, $+0.029$ and
+    $+0.030$ ($p \le 0.0081$), M1-v2 stays first among the 17 robustness finalists, and the ranking's
+    $\kendall$-b is 0.92 to 0.95. The lag build reproduces the tuning build at lag 0 per request (180
+    of 180 test records for $\piref$ and M1, and 448 of 448 validation records for M1-v2,
+    \policy{ramjet}, \policy{llm-d-precise-prefix} and $\piref$). Beyond the registered range, on
+    validation only, \SI{1000}{ms} gives $+0.033$ against $+0.029$ at 0: the baselines lose more to
+    staleness than M1-v2 does.
+  \item \textbf{Engine timing.} The sign holds under speedup and decode speedup of 0.8 and 1.2, on
+    both references, and with the ITL bound also rescaled the lead is $+0.022$ to $+0.080$
+    ($p \le 0.0081$). Speedup 0.8 on the nominal $\Ezero$ is not significant ($p$ 0.117), a degenerate
+    scoring in which no zero-reuse AgentX request can be good. The spread across conditions (0.060,
+    set by speedup 0.8) exceeds the nominal effect, so by LR-14 the direction is robust and the
+    magnitude is perturbation-dependent.
+  \item \textbf{SLO scale.} The sign is positive at every scale; significance holds at 1 to 3 and is
+    lost at 0.75 and 0.5. At 0.75 the four session segments reverse ($-0.014$ to $-0.042$), as they do
+    at speedup 0.8 on the nominal reference, so ``sessions at ceiling'' holds only where the SLO does
+    not bind. At 0.5 the scaled slowdown bound falls below 1 for AgentX, so only cache hits can be
+    good there.
+  \item \textbf{SLO definition (A14, registered before the test pass).} M1-v2 ranks first under all
+    four alternative definitions of a good request, and the ranking's $\kendall$-b against the
+    trained SLO is 0.85 to 0.99: ITL only $+0.0089$ ($p$ 0.013), slowdown only $+0.035$ ($p$ 0.0012),
+    length-scaled TTFT plus ITL $+0.013$ ($p$ 0.0105), absolute end-to-end plus ITL $+0.019$
+    ($p$ 0.0061).
+  \item \textbf{Window and warm-up.} Starting the window 25\% or 50\% later gives $+0.0345$ and
+    $+0.0297$; halving or doubling the warm-up, or a common completion window, leaves the result
+    unchanged on the same cells.
+  \item \textbf{Simulator model} (validation only, an audit-only \aisim{} build). Against $+0.0290$
+    on the unmodified simulator, the lead is $+0.0274$ when mixed prefill passes are priced
+    attention-equivalent, $+0.0291$ when priced as a per-request sum, $+0.0268$ with an extra
+    \SI{0.1}{ms} of decode cost per running sequence, and $+0.0269$ when decode inside a prefill pass
+    costs a quarter. These bracket fidelity errors that act on M1-v2's concentration mechanism; they
+    are not measurements of reality, and FAST25, a test-only family, is not covered.
+\end{itemize}
+% src: generated/robustness.tex; CR/facts/robustness.json (conditions, lag0_identity_lag_build_vs_tuning_build,
+%      lr14_summary); CR/audits/final/refute-headline-3.md (lag0 448/448; lag 1000 ms val +0.0333 vs
+%      +0.0290; consistent timing SLO +0.022..+0.080, p <= 0.0081; window +25%/+50%; simulator model
+%      variants); CR/report/REPORT.md section 7.1
+
+\paragraph{Temperature and prefix-home guards.}
+Two guards against herding were registered before M1-v2 won, so they ran as variants of M1
+(\cref{tab:tau-hashhome}). A positive temperature does not help: $\temp = 0.747$ is within noise of
+M1, and $\temp = 2.75$ costs 0.028, more at $\Nw = 16$ and 32 than at 2, as expected when the softmax
+mass on non-best workers grows with $\Nw$. Restricting candidates to the prefix's \code{hash\_home}
+pair is harmful at large $\Nw$ ($-0.57$ at 16 and $-0.68$ at 32); at $\Nw = 2$ every worker is home,
+so the variant is identical there. No herding failure of the argmax appeared under the tested lags.
+% src: generated/tau_hashhome.tex; CR/facts/robustness.json m1_lr14_variants; CR/report/REPORT.md section 7.2
+
+\begin{table}[tbp]
+  \centering
+  \caption{Herding guards, as variants of M1 on the lag build at lag 0 (generated): segment-mean
+    clipped log-ratio against M1 with 95\% intervals, over all test cells and at the unseen worker
+    counts.}
+  \label{tab:tau-hashhome}
+  \input{generated/tau_hashhome}
+\end{table}
+
+% =====================================================================================
+\subsection{The AIS league}
+\label{sec:res-ais}
+
+The \ais{} league may read \ais{}-modeled prefill and decode estimates at runtime
+(\cref{sec:features,sec:excluded}); it is a pre-registered secondary comparison.
+\begin{itemize}
+  \item \textbf{Against its own baseline and the overall best.} M2-ais, the selected \ais{}-league
+    learned arm, beats M0-ais, the better \ais{}-informed baseline on validation, by $+0.0305$
+    ($p$ 0.0012), and tuned \policy{ramjet} by $+0.0286$ ($p$ 0.0005).
+  \item \textbf{\ais{} features add nothing at the learned level.} M2-ais minus M1-v2 is $-0.0029$,
+    ahead on 3 of 12 segments.
+  \item \textbf{The \ais{} load model helps the default cost function.} M0-ais beats M0 by $+0.026$
+    and roughly matches \policy{ramjet} ($-0.002$).
+  \item \textbf{No robustness evidence.} The league has no lag robustness, because the lag build
+    predates feature set \code{v3}, and no timing robustness, which was never registered; under LR-14
+    even its direction is unverified under perturbation.
+  \item \textbf{Not portable as is.} M1-ais and M2-ais read a request's own modeled prefill time, a
+    research input only offline replay fills; live they would need the closed-form estimate (6.6\%
+    mean error).
+\end{itemize}
+% src: CR/facts/test_results.json secondary.ais (m2ais_vs_m0ais +0.030526, p 0.001221; vs ramjet;
+%      vs m1v2); generated/ladder_pairs.tex (M2-ais - M1-v2 -0.0029, 3/12; M0-ais - M0 +0.0262);
+%      generated/ladder.tex (M0-ais vs ramjet -0.0019); CR/facts/robustness.json execution.ais_league;
+%      CR/audits/final/completeness.md F2; CR/facts/UPSTREAM_FOLLOWUPS.md #15
+
+% =====================================================================================
+\subsection{Scope: the in-class heuristic and asymmetric iteration}
+\label{sec:res-fairness}
+
+Equal footing was verified from the raw tuning histories by two auditors: every tuned policy, learned
+or baseline, ran three restarts of 400 evaluations with the same cells, replicates, validation
+schedule, objective and reference, and the splits share no trace files. The fairness audit then found
+a gap that equal budgets do not close. By operator decision the baseline pool holds the branch's
+ports as implemented, and the \policy{lmetric} port lacks LMetric's queued-prefill term
+(\cref{sec:ports}). Faithful LMetric is inside M1-v2's hypothesis class, and M1-v2's restart s3
+started from default plus 20.7 times the faithful LMetric point. \Cref{tab:fairness} shows what that
+heuristic does on its own.
+% src: CR/audits/final/refute-headline-2.md (equal footing PASS: 48 runs, one budget signature;
+%      no leakage), F1; CR/facts/fairness_in_class_heuristic.json; CR/facts/test_results.json
+%      report_must_state MS-RH2-F1-table, MS-RH2-F1-increment
+
+\begin{table}[tbp]
+  \centering\small
+  \caption{The in-class heuristic. \emph{Auditor diagnostic, not pre-registered, never used for
+    selection; train and validation only, the test split was not evaluated.} Mean clipped
+    log-ratio against $\piref$; the last column is the margin over \policy{ramjet} on the fresh
+    validation replicates, per cell and per segment.}
+  \label{tab:fairness}
+  % src: CR/facts/fairness_in_class_heuristic.json (via CR/report/REPORT.md section 9 table, which
+  %      re-derives every value from the cache: runs/final-fix/scripts/verify_fairness.py)
+  \begin{adjustbox}{max width=\linewidth}
+  \begin{tabular}{@{}P{0.38\linewidth}rrrl@{}}
+    \toprule
+    Policy (tuning) & Train $k_{0..1}$ & Val $k_{0..2}$ & Val $k_{3..10}$ & vs ramjet on $k_{3..10}$: cell / segment \\
+    \midrule
+    M1-v2 ($3 \times 400$ evaluations) & 0.1851 & 0.1767 & \textbf{0.1783} & $+0.0372$ / $+0.0290$ (5 of 6) \\
+    default $+$ $10\times$ faithful LMetric (8 train evaluations) & 0.1566 & 0.1609 & \textbf{0.1609} & $+0.0197$ / $+0.0179$ (4 of 6) \\
+    M1-v2's s3 start, $c = 20.7$ (untuned) & 0.1566 & 0.1596 & \textbf{0.1612} & $+0.0200$ / $+0.0190$ (6 of 6) \\
+    faithful LMetric alone (untuned) & 0.1466 & 0.1493 & \textbf{0.1490} & $+0.0079$ / $+0.0110$ (6 of 6) \\
+    \policy{ramjet} (best of 11 tuned baselines, $3 \times 400$) & 0.1435 & 0.1420 & \textbf{0.1411} & --- \\
+    \bottomrule
+  \end{tabular}
+  \end{adjustbox}
+\end{table}
+
+\begin{itemize}
+  \item \textbf{Faithful LMetric beats every tuned baseline untuned,} on the selection replicates
+    (0.1493 against at most 0.1423) and on the fresh ones (0.1490 against 0.1411).
+  \item \textbf{Most of the margin is the heuristic.} Default plus faithful LMetric reproduces 53 to
+    66\% of M1-v2's fresh-validation margin over \policy{ramjet}.
+  \item \textbf{The learned increment} over it is about $+0.011$ per segment (standard error 0.0065,
+    5 of 6 segments; $+0.017$ per cell), about 0.29 of the MDE, and it \emph{was not measured on
+    test}; it sits mostly on one Mooncake validation segment.
+  \item \textbf{Follow-up.} A pre-registered comparison with faithful LMetric and an SMetric-style
+    baseline, each tuned with the equal budget and evaluated on fresh segments or on live runs over
+    cells outside the frozen test set, has not been run and is not part of this paper.
+    (The live runs of \cref{sec:live} used frozen test cells and so cannot serve it.)
+\end{itemize}
+% src: CR/facts/fairness_in_class_heuristic.json; CR/report/REPORT.md section 9 (increment +0.0110 per
+%      segment, SE 0.0065, 5/6; cell +0.0174; mostly Mooncake w1 +0.044); CR/audits/final/fix.md (escalation)
+
+\paragraph{Asymmetric iteration.}
+The learned side was redesigned on validation evidence: multi-start initialization, the sign
+constraints, and M1-v2 itself, which was written to target the pilot's weakest family, plus M2,
+M1-noaff and the queue-threshold arm. The baseline side gained one arm and no new heuristic types.
+Selection among the five learned arms used the same fresh-validation rule as the baselines, and the
+test pass was single, so the headline $p$-value is valid for the selected arm; but the originally
+planned M1 and M2 do not pass on test. Two registration choices (excluding M1 continued from the
+headline candidates and including the queue-threshold \policy{ramjet} in the baseline pool) cannot be
+shown to predate the fresh-validation results; both were outcome-neutral on those values, and we do
+not claim strict pre-registration for them.
+% src: CR/audits/final/refute-headline-2.md F2; CR/audits/final/completeness.md F5;
+%      CR/audits/final/refute-headline-1.md F6; CR/report/REPORT.md section 9 ("Registration timing")
+
+% =====================================================================================
+\subsection{Cost}
+\label{sec:res-cost}
+
+\Cref{tab:cost} collects the compute. Replay-seconds sum the wall time of single-threaded replays, so
+they measure work, not elapsed time.
+
+\begin{table}[tbp]
+  \centering\footnotesize
+  \caption{Compute by stage. Every row is measured and comes from the stage facts, except where it
+    says otherwise.}
+  \label{tab:cost}
+  \begin{tabularx}{\linewidth}{@{}lYl@{}}
+    \toprule
+    Stage & Value & Source \\
+    \midrule
+    Calibration, first pass & \num{13532} replays, \num{122436} replay-s, about 3.3\,h on the
+      workstation & \file{facts/calibration.json} \\
+    Calibration fix & \num{9792} replays, \num{112561} replay-s, 0 errors & \file{facts/STATE.md} \\
+    Pilot & \num{56552} fresh replays, 0 errors & \file{facts/pilot.json} \\
+    One evaluation, all 34 train cells, $\Krep = 2$ & 700.9 replay-s; 37.0\,s wall on the
+      20-slot workstation pool (pilot) & \file{facts/pilot.json} \\
+    Phase 2 & 66 restarts of 400 evaluations; about 30,000 result records per run; generations of
+      about 300\,s (EPYC 9654P) to 690\,s (EPYC 7702P); replay-seconds not totaled &
+      \file{facts/STATE.md} \\
+    Test pass & \num{5220} + 900 records, 0 errors & \file{facts/test\_results.json} \\
+    Robustness & \num{23940} records, 0 errors & \file{facts/robustness.json} \\
+    Per-decision policy latency & not measured & --- \\
+    \bottomrule
+  \end{tabularx}
+  % src: CR/facts/calibration.json summary; CR/facts/STATE.md fix(calibration r0), tier-B/C relays;
+  %      CR/facts/pilot.json measurements; CR/facts/test_results.json execution; CR/facts/robustness.json
+  %      execution
+\end{table}

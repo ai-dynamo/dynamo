@@ -1,0 +1,11 @@
+name: "ramjet-tuned@ramjet-s1"
+parameters:
+  affinity_block_tokens: 512
+  alpha: 1.120165985924826
+  basis: "relative"
+  load_unit_tokens: 5166
+  max_affinity_blocks: 42
+router_config: {}
+router_mode: "kv_router"
+seeded: false
+type: "ramjet"

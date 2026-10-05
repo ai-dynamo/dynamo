@@ -1,0 +1,12 @@
+name: "sticky-hard-tuned@stickyhard-s2"
+parameters:
+  mode: "hard"
+router_config:
+  decode_active_request_weight: 2642.5858426192613
+  overlap_score_credit: 1.5256793584667168
+  overlap_score_credit_decay: 1.7983133143658727
+  prefill_load_scale: 3.8851024615997414
+  router_temperature: 0.019827551344336985
+router_mode: "kv_router"
+seeded: true
+type: "sticky-session"

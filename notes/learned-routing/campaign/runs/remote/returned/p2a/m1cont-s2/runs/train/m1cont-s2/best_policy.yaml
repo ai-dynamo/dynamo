@@ -1,0 +1,10 @@
+name: "m1-continue-v1@m1cont-s2"
+parameters:
+  feature_set: "v1"
+  temperature: 0.0
+  theta: [-1.0, 16.922427425654305, -1.7685017055100332, 0.0, 0.0, -42.228291567843826, -0.977323882092719, 0.0]
+  tie_break: "one_draw"
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

@@ -1,0 +1,143 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% Learned worker selection for Dynamo's KV router, developed in AISim offline replay.
+%
+% Build:   make            (latexmk + pdflatex + BibTeX; output in build/main.pdf)
+%          make tables     (regenerate generated/*.tex from the report's table fragments)
+%          make clean      (removes build/ only)
+%
+% Conventions for every writer:
+%   1. Sources of truth. Every number traces to a campaign file. Put the path in a LaTeX
+%      comment on the line before or after it:  % src: CR/facts/test_results.json headline
+%      CR is the campaign root and WT the campaign worktree, both named in
+%      notes/learned-routing/README.md; printed and commented paths are relative to them.
+%      The mirrored copies under notes/learned-routing/campaign/ are equally valid sources.
+%      Never write an absolute host path, a cluster, node, partition, account or job name, or an
+%      internal URL, in text or comments (public-content rule, contract amendment A18).
+%   2. Results that do not exist yet use \pending{...} (inline, short) or the pendingblock
+%      environment. Never write a placeholder number.
+%   3. Pilot numbers always carry \prelim ("preliminary (pilot, validation split)").
+%   4. Symbols come from macros.tex; their meaning is fixed in sections/notation.tex.
+%   5. Citations: refs.bib holds the sources of the campaign's literature review plus the software,
+%      data and documentation the study runs on (each entry says which).
+%   6. Label every hypothesis as one. Keep "measured in replay" distinct from "expected live".
+%   7. Tables under generated/ are copied from the final report's table fragments by
+%      scripts/make_tables.py; never edit them by hand.
+
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in,headheight=14pt]{geometry}
+\usepackage{microtype}
+\DisableLigatures[-]{family=tt*}  % keep "--flag" literal in typewriter text
+\usepackage[dvipsnames]{xcolor}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{adjustbox}
+\usepackage[section]{placeins}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{framed}
+\usepackage{caption}
+\usepackage[group-separator={,},group-minimum-digits=4,group-digits=integer]{siunitx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{fancyhdr}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{xurl}
+\usepackage[colorlinks=true,linkcolor=MidnightBlue,citecolor=MidnightBlue,urlcolor=MidnightBlue]{hyperref}
+\usepackage[capitalise,noabbrev]{cleveref}
+
+\graphicspath{{fig/}}
+
+\input{macros}
+
+% Draft banner on every page, including the title page.
+\fancypagestyle{draft}{%
+  \fancyhf{}%
+  \fancyhead[C]{\color{red}\sffamily\footnotesize\draftbanner}%
+  \fancyfoot[C]{\thepage}%
+  \renewcommand{\headrulewidth}{0pt}}
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyhead[C]{\color{red}\sffamily\footnotesize\draftbanner}%
+  \fancyfoot[C]{\thepage}%
+  \renewcommand{\headrulewidth}{0pt}}
+\pagestyle{draft}
+
+\setlist{itemsep=2pt,topsep=4pt}
+% Long typewriter identifiers cannot hyphenate; let TeX stretch lines instead of overflowing.
+\setlength{\emergencystretch}{3em}
+% Float placement: the results section has many tables and figures; let them share pages and keep
+% them inside their own section (placeins), so none drifts to the end of the document.
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.7}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+% Ragged-right paragraph columns for tables: Y (tabularx) and P{width}.
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\captionsetup{font=small,labelfont=bf}
+
+\title{Learning a Worker-Selection Policy for Dynamo's KV Router\\in Offline Replay\\[4pt]
+  \large A simulation study on Qwen3-32B (vLLM, TP2, H100), aggregated serving}
+% Authorship is not decided; do not add names without the operator's say-so.
+\author{Dynamo routing team\\\pending{author list}}
+% src: CR/facts/STATE.md (last stage line at the time of this draft)
+\newcommand{\snapshot}{2026-10-05; phase 2, the frozen test pass and the live GPU check complete}
+\date{Draft: \snapshot}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{plain}
+
+\begin{center}
+  \fcolorbox{red}{red!4}{\parbox{0.9\linewidth}{\centering\color{red}\sffamily
+    \textbf{\draftbanner.}\\[2pt]
+    \small The headline and every result outside \cref{sec:live} come from AISim offline replay,
+    not from GPUs; \cref{sec:live} checks the ranking on GPUs. Boxed PENDING items mark
+    the open items.}}
+\end{center}
+
+\input{sections/abstract}
+
+\tableofcontents
+
+\input{sections/intro}
+\input{sections/background}
+\input{sections/setup}
+\input{sections/simulator}
+\input{sections/model}
+\input{sections/training}
+\input{sections/baselines}
+\input{sections/evaluation}
+\input{sections/results}
+\input{sections/gaming}
+\input{sections/live}
+\input{sections/discussion}
+\input{sections/related}
+\input{sections/conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\appendix
+\input{sections/appendix-tables}
+\input{sections/appendix-pilot}
+\input{sections/appendix-reproducibility}
+
+\end{document}

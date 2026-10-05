@@ -1,0 +1,269 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: enough identifiers for a teammate to rebuild any number in the paper: branch and commits,
+%   versions, frozen-artifact hashes, the REPRODUCE.md procedure in summary, determinism and
+%   cross-host parity evidence, entry points and where each stage's facts live. The step-by-step
+%   procedure stays in WT/notes/learned-routing/REPRODUCE.md; do not duplicate its commands here.
+% EVIDENCE: WT/notes/learned-routing/{README.md,REPRODUCE.md}; CR/facts/{setup,build_rust,integration,
+%   test_freeze,remote,lag_patch,pilot,gate}.json; CR/facts/STATE.md; CR/facts/UPSTREAM_FOLLOWUPS.md;
+%   CR/facts/DEVIATIONS.md; git log of WT (read 2026-10-03).
+% STATUS: final for this draft. Internal commit hashes are deliberately not printed: the public copy
+%   of the branch has different commits (public-content rule, A18). Name branches and files instead.
+% PATHS: CR = campaign root (REPRODUCE.md calls it LR_ROOT); WT = the campaign worktree. Printed
+%   paths are relative to those; do not print absolute home-directory paths.
+
+\section{Reproducibility}
+\label{app:repro}
+
+The campaign's durable record is the directory \file{notes/learned-routing/} on the Dynamo
+branch \code{rupei/learned-routing}, whose sanitized copy \code{rupei/learned-routing-public} is
+public. \file{README.md} describes the
+campaign and its state, \file{REPRODUCE.md} rebuilds it step by step on a clean Linux x86\_64
+machine, and \file{campaign/} mirrors every small file the steps need: facts, cells, audits, run
+summaries, calibration scripts and the AgentX base manifests. Bulky artifacts (traces, workload
+replicates, the replay cache) stay in the campaign root and are regenerated from pinned public
+sources. Off the original host, git and the public sources are enough for the steps
+\file{REPRODUCE.md} covers. This appendix lists the
+identifiers; the procedure is in \file{REPRODUCE.md}.
+% src: WT/notes/learned-routing/README.md (intro, "Directory map", "Artifacts not in git"); REPRODUCE.md intro
+
+\subsection{Branches}
+
+% src: WT/notes/learned-routing/README.md; CR/CONTRACT.md "Paths", A5, A11.5, A16; CR/facts/lag_patch.json
+%      worktree; CR/facts/ais_features.json worktree, build
+The campaign's code and record live on three branches of the Dynamo repository.
+\begin{itemize}
+  \item \code{rupei/learned-routing}: the policies (\lc{} and \policy{sticky-session} in the builtin
+    catalog, and the \code{seed} parameter on \defaultcf{}), the harness (\code{lr-eval},
+    \code{lr-train}, \code{lr-report} and the remote CPU lane), the live lane, and the campaign notes
+    under \file{notes/learned-routing/}, including this paper. It starts from the head of the
+    router-policy pull-request stack (\#15450 and \#15453), which already runs catalog policies in
+    offline replay and passes the device-tier overlap to them.
+  \item \code{rupei/learned-routing-lag}: the router-state lag knob for offline replay, built
+    separately so that the tuning build and its result cache stay untouched.
+  \item \code{rupei/learned-routing-ais}: feature set \code{v3} and the research input for a
+    request's modeled prefill time, also on its own build, for the \ais{} league.
+\end{itemize}
+Every stage's facts file records the worktree head it ran at. Only the first branch is published,
+as the sanitized copy \code{rupei/learned-routing-public}, in which internal commits appear as
+position labels; the lag and \ais{} branches are not, so the lag part of the robustness pass
+and the \ais{} league can be checked against the mirrored facts but not yet rebuilt from public
+sources.
+% src: CR/CONTRACT.md A20 "Publication" (only the sanitized copy of the campaign branch is pushed);
+%      CR/facts/robustness.json execution (lag records on the lag build, timing records on the tuning build)
+\file{REPRODUCE.md} rebuilds the campaign to its calibrated, frozen cells; the later stages are
+reproduced from the mirrored facts and the analysis scripts named in the final report's reproduction
+section. \pending{a REPRODUCE.md revision that walks through the pilot, phase 2, the test pass and
+the robustness pass}
+
+\subsection{Environment}
+
+% src: CR/facts/setup.json versions; CR/facts/build_rust.json correction_fix_r0.bindings;
+%      CR/facts/test_freeze.json bindings_build_id, harness_version; CR/facts/lag_patch.json build;
+%      REPRODUCE.md section 2 (host image), CR/facts/calibration.json compute (24 cores)
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+  \toprule
+  Python, Rust & CPython 3.12.3; rustc 1.96.1 (pinned by \file{rust-toolchain.toml}); maturin 1.15.0 \\
+  Simulator & \code{aisimulate} 0.13.0.dev202609300000000061 (wheel) and the matching
+    \code{aisimulate-core} crate \\
+  Dynamo & \code{ai-dynamo} and \code{ai-dynamo-runtime} 1.6.0, editable from the worktree \\
+  Bindings & built with feature \code{ais-forward-pass} (required for \ais{} engine timing);
+    \code{\_core.abi3.so} SHA-256 \code{1d67c131\ldots}, build ID \code{6955b0ee\ldots} \\
+  Lag-check bindings & separate build, \code{.so} \code{90464b9b\ldots}, build ID \code{a6c6b04e\ldots} \\
+  Harness & package \code{learned\_routing}, harness version \code{lrh-4} \\
+  Python packages & \code{cma} 4.5.0, \code{numpy} 2.5.3, \code{scipy} 1.18.1, \code{pandas} 3.0.6,
+    \code{matplotlib} 3.11.2 \\
+  Host & Ubuntu 24.04, glibc 2.39, 24 cores; local replays share a pool of 20 slots \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+The build ID is a hash of the bindings' shared object together with the simulator version, and
+it is part of every result-cache key. A rebuild almost always yields a new ID, because the shared
+object embeds build-tree paths, so cached results from another build are never reused by accident.
+% src: REPRODUCE.md section 3 ("Build IDs"); UPSTREAM_FOLLOWUPS #7 (RPATH); learned_routing/cache.py bindings_build_id
+
+\subsection{The rebuild procedure in brief}
+
+\Cref{tab:reproduce} condenses \file{REPRODUCE.md}. ``Verified'' there means the step was re-run
+while the notes were written, on the campaign host or in a fresh private root.
+
+\begin{table}[tbp]
+  \centering\footnotesize
+  \caption{Sections of \file{REPRODUCE.md} and what each establishes.}
+  \label{tab:reproduce}
+  % src: WT/notes/learned-routing/REPRODUCE.md sections 1-17 and its "What reproduces exactly" list
+  \begin{tabularx}{\linewidth}{@{}rlY@{}}
+    \toprule
+    \S & Step & What it establishes, and how it was checked \\
+    \midrule
+    1 & Branch and SHAs & worktree at the snapshot commit; base is an ancestor \\
+    2--3 & Environment, bindings & pinned versions; the KV-capacity estimate (\num{18863} blocks) and a
+      one-request replay whose TTFT equals the \ais{} value prove \ais{} timing is in effect \\
+    4 & Harness and tests & Rust policy tests (127 pass, 2 pre-existing ignored) and harness tests \\
+    5 & Campaign root & \file{config/engine.json} copied from git and checked by SHA-256; every
+      \code{DYN\_ROUTER\_*} variable unset, since replay workers inherit them and they change policies
+      without changing the cache key \\
+    6 & Traces & source traces regenerated byte-identically (106 of 106 files, verified) \\
+    7 & Cells & frozen cells \code{lr-cells-v5} installed from git, not regenerated \\
+    8 & AgentX lowering & six base manifests from git; lowering checked field for field by an
+      independent re-implementation for all 82 plays and 6 transforms \\
+    9 & Derived traces & every trace the frozen cells reference regenerated byte-identically (34/34
+      train, 14/14 validation, 60/60 test cells, verified); then a parity smoke against a mirrored
+      reference (4 identical, 0 different) \\
+    10 & Calibration & mirrored driver scripts; every load level follows from the mirrored load curves
+      (171/171 levels and 108/108 cell loads, verified) \\
+    11 & Frozen test set & SHA-256 of \file{cells/test.jsonl} and of every test trace \\
+    12 & Replicates & the replicate protocols, policy seeds and the noise rule \\
+    13 & Entry points & \code{lr-eval}, \code{lr-train}, \code{lr-report}; the remote bundle flow and
+      the cluster CPU lane \\
+    14 & Gate and headline & the pilot gate and the pre-registered headline test \\
+    15 & Later stages & listed as not yet run when the notes were written (see above) \\
+    16--17 & Costs, mirrored files & measured costs; the small files that used to live only in the
+      campaign root \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Frozen inputs}
+
+% src: CR/facts/test_freeze.json (engine_json_sha256, test_jsonl, traces, split_manifest_sha256,
+%      traces_manifest_sha256, written 2026-10-03 01:53:07 PDT); WT/notes/learned-routing/README.md
+%      ("Frozen test traces (39 files, 2,130,865,265 bytes)"); CR/facts/HEADLINE_TEST.json
+\begin{itemize}
+  \item Engine configuration \file{config/engine.json}, SHA-256 \code{7b5ff164\ldots}: the single source
+    of truth for model, hardware, backend, parallelism, context length and engine arguments.
+  \item Cells \code{lr-cells-v5}: test file \file{cells/test.jsonl}, SHA-256 \code{7b998b8e\ldots};
+    split manifest, SHA-256 \code{0e84edf1\ldots}. The freeze record \file{facts/test_freeze.json}
+    also hashes the content of every test cell and all 39 test traces (\num{2130865265} bytes).
+  \item Source traces, pinned by SHA-256 in \file{traces/MANIFEST.json} (\code{b2616d0d\ldots}).
+  \item The headline test, pre-registered in \file{facts/HEADLINE_TEST.json} before any training.
+  \item Before the single test pass the test stage verified all 149 freeze hashes, and
+    \file{facts/finalists.json} was frozen (SHA-256 \code{e0bae29d\ldots}) before the first test record.
+\end{itemize}
+% src: CR/facts/test_results.json execution.evaluated_once (149/149; finalists.json sha256 e0bae29d)
+
+\subsection{Determinism}
+\label{app:determinism}
+
+Replay is deterministic: the same policy on the same cell and replicate reproduces every
+per-request row. The campaign relies on this in four places.
+\begin{itemize}
+  \item \textbf{Seeds.} The shipped default router broke ties with an unseeded random number
+    generator, so identical runs of one Mooncake cell gave different goodput (2.8934 against 2.8290
+    for the catalog policy). The branch adds a \code{seed} parameter. The harness passes seed
+    $\krep + 1$ to the seeded policy types (\defaultcf{}, \lc{}, \policy{sticky-session}); every
+    other type takes no seed.
+    % src: CR/facts/UPSTREAM_FOLLOWUPS.md #1; REPRODUCE.md section 12 "Policy seeds"
+  \item \textbf{Replicates.} Variation comes from workload replicates shared by every policy:
+    replicate $\krep$ permutes arrivals logged at the same instant (protocol \code{crn-order-v1}),
+    re-draws each session's first arrival inside its logging slot (\code{crn-spread-v1}, for traces
+    logged on a grid), or permutes recycled AgentX copies.
+    % src: REPRODUCE.md section 12 (protocol table)
+  \item \textbf{Parity with the default.} \lc{} at $\theta = -\basis{0}$, with the tie-break that
+    replays the default picker's random stream, chose the same worker as the seeded \defaultcf{} on
+    every request of 88 of 88 (cell, replicate) pairs, and again on 22 of 22 after the bindings were
+    rebuilt. With the tie-break used in training (\code{one\_draw}) individual ties resolve
+    differently, but goodput did not differ beyond noise.
+    % src: CR/facts/integration.json parity (exact_reservoir 88/88; one_draw_noise_rule differs false);
+    %      CR/facts/STATE.md fix(build r0) ("theta0-reservoir == default 22/22 post-rebuild")
+  \item \textbf{Re-runs and resumes.} An independent calibration audit re-ran replicates 0 and 1 of
+    11 cells for $\piref$ and round-robin and matched the cache on 44 of 44 records, every field and
+    every per-request byte; new replicates run twice were identical on 44 of 44. A harness audit
+    killed \code{lr-train} three times by process ID and the resumed runs were bit-identical,
+    including their continuation.
+    % src: CR/facts/STATE.md audit(calibration/independent-rerun r1) ("k0,1 == calibration cache 44/44 ...
+    %      new k10,11 run twice 44/44 identical"); audit(build/harness-robustness-splits r1)
+    %      ("lr-train 3x kill -9 exact PIDs resume bit-identical incl. continuation")
+\end{itemize}
+Results are cached under a SHA-256 of the canonical policy, the cell identifier and content, the
+replicate and its protocol, the harness version and the bindings build ID. One residual
+nondeterminism is harmless: replay orders its per-request output by random request identifiers, so
+summary means can differ in the last bits ($\sim 10^{-15}$ relative); the harness recomputes every
+metric from a sorted copy of the rows.
+% src: CR/facts/DEVIATIONS.md build B3 "cache key"; CR/facts/UPSTREAM_FOLLOWUPS.md #2
+
+\subsection{Cross-host parity}
+\label{app:parity}
+
+Replay calls the host's math library, so bit-exact results require the same OS and C library
+image. Most tuning ran on a pool of shared CPU nodes, one run per node, from a self-contained bundle holding the exact local shared object, the harness, the traces
+and the cells. Before any node image was used, a parity smoke compared its records with the
+workstation's.
+\begin{itemize}
+  \item \textbf{Lane validation.} Ten comparisons on AMD EPYC 7702P and EPYC 9654P nodes (Ubuntu
+    24.04.5, glibc 2.39, CPython 3.12.3) were all identical: \num{6312} remote records with no field
+    differences, and \num{48901384} per-request rows byte-identical. They covered seven cells
+    (Mooncake open and closed loop, sessions, lowered AgentX, including one AgentX cell at
+    $\Nw = 16$), six replicas of the calibration reference batch, and two short tuning runs.
+  \item \textbf{Tuning numerics.} With default settings, \code{numpy} and OpenBLAS dispatch AVX-512
+    kernels on the EPYC 9654P, and the CMA-ES state differed from the workstation's in the last bits
+    from the first generation. The node scripts pin the dispatch (\code{OPENBLAS\_CORETYPE=Haswell},
+    \code{OPENBLAS\_NUM\_THREADS=1}, \code{NPY\_DISABLE\_CPU\_FEATURES}); with the pins, a 60-generation
+    check matched the workstation on every generation on both CPU types, and the remote tuning
+    smoke runs wrote byte-identical histories, best points and policy files.
+  \item \textbf{Test pass.} Tasks that ran twice, once in a first wave and again after a timeout
+    fix, were bit-identical on different nodes in every field and per-request byte.
+  \item \textbf{Pilot and phase 2.} The 384 records of the pilot's 16 first-generation candidates on
+    the 12 subset cells were identical locally and on the cluster. A node image added during
+    phase 2 passed its smoke (28 of 28 records, \num{186548} rows) before it ran any tuning.
+  \item \textbf{Lag build.} The separate lag-check build was validated on five node images before
+    the robustness pass (the first: 192 of 192 records, \num{1214112} rows).
+\end{itemize}
+% src: CR/facts/remote.json summary, environment, parity.totals ("10 comparisons, all IDENTICAL: 6,312 remote
+%      records ... 48,901,384 per-request rows"), parity.core_6_train_cells.cells, parity.step4_replicas,
+%      parity.lr_train.numerics_check (EPYC 9654P default 0/60; pinned 60/60), a later node image's
+%      parity entry (28/28, 186,548), parity.lag_build_a6c6b04e (192/192, 1,214,112); CR/facts/robustness.json
+%      execution.lag_build (5 node images); CR/facts/test_results.json execution.duplicate_parity; CR/facts/pilot.json
+%      measurements.cross_host_bitwise (384/384); CR/CONTRACT.md A9 addendum, A10
+%      UPSTREAM_FOLLOWUPS #11 (numerics)
+
+\subsection{Entry points and stage facts}
+
+Three command-line tools carry every number: \code{lr-eval} evaluates policies on cells with
+replicates, through the slot pool and the cache; \code{lr-train} runs \cref{alg:train}; and
+\code{lr-report} builds paired tables with segment-bootstrap intervals and refuses to pool records
+from different builds or cell contents. Every long job is resumable and takes
+\code{--max-wall-seconds}. A policy is one JSON or YAML object, and the tuned result
+\file{best_policy.yaml} is itself a valid policy for \code{lr-eval}.
+% src: REPRODUCE.md section 13
+
+Each stage writes one facts file under \file{facts/} and one line in the append-only
+\file{facts/STATE.md}: setup, the three build stages and their fixes, AgentX lowering, noise,
+calibration and its fix, the test freeze, the pre-registered headline test, the cluster lane, the
+pilot, the gate, phase-2 preparation, the lag patch, the \ais{} features
+(\file{facts/ais\_features.json}), the tier-A and tier-B/C tuning (\file{facts/tierA.json},
+\file{facts/tierBC.json}) and the phase-2 midpoint fix (\file{facts/phase2\_mid\_fix.json}), the
+SLO-transfer constants (\file{facts/sla\_transfer\_spec.json}), the frozen finalists
+(\file{facts/finalists.json}), the single test pass (\file{facts/test\_results.json} with its
+\code{report\_must\_state} wording), the robustness pass (\file{facts/robustness.json}), the
+secondary metrics (\file{facts/secondary\_metrics\_test.json}), the in-class heuristic diagnostic
+(\file{facts/fairness\_in\_class\_heuristic.json}), the live lane (\file{facts/live.json},
+\file{facts/live\_smoke.json}, \file{facts/live\_loadgen\_parity.json}), the live finalist runs
+(the registration \file{facts/live\_plan.json} and the analysis \file{facts/live\_results.json}) and
+this paper's derived numbers (\file{facts/paper\_draft.json}, \file{facts/paper\_final.json}). Every
+audit report is under \file{audits/}, and the final report is \file{report/REPORT.md}; its live
+section is also \file{report/LIVE.md}. The live analysis is reproducible from the raw load-generator
+exports: \file{runs/live/finalists/scripts/live\_results.py} \code{verify} re-scores every live run
+and requires identical scores, and \code{build} re-runs the registered analysis and writes the live
+facts, \file{report/LIVE.md} and the report's table fragment, from which \code{make tables} copies the
+live tables of \cref{sec:live}.
+% src: CR/facts/ directory listing (2026-10-05); CR/report/REPORT.md section 14 "Live validation (§15)";
+%      CR/facts/live_results.json reproduction
+
+\paragraph{Footprint.}
+On 2026-10-03 the campaign root held 95\,GB of traces and 247\,GB of run outputs, mostly workload
+replicates (183\,GB) and the result cache (37\,GB); all of it regenerates from the steps above.
+Compute per stage is in \cref{tab:cost}.
+% src: REPRODUCE.md section 16 "Disk" (du at 02:14 PDT)
+
+\subsection{Building this document}
+
+The sources are in \file{notes/learned-routing/paper/}; \code{make} there runs \code{latexmk} with
+\code{pdflatex} and BibTeX and writes \file{build/main.pdf}, and \code{make tables}, given the
+campaign root, regenerates \file{generated/} from the final report's table fragments. The figures in
+\file{fig/} are copies of the final report's. Every number in the text carries a source comment
+(\code{\% src:}) naming the campaign file it comes from, and results that do not exist yet are
+marked with a boxed \textsc{pending} tag.

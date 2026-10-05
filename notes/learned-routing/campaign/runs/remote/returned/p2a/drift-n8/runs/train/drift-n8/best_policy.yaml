@@ -1,0 +1,10 @@
+name: "m1-learned-v1@drift-n8"
+parameters:
+  feature_set: "v1"
+  temperature: 0.0
+  theta: [-1.0, 0.41536738284221997, -2.9411864307955398, -0.1764088801156376, 1.693486264146543, -21.420562725324373, 0.2881572634181566, -0.08287227170801614]
+  tie_break: "one_draw"
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

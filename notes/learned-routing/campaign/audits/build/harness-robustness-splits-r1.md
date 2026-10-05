@@ -1,7 +1,7 @@
 # Audit: build checkpoint, lens "harness-robustness-splits", round 1 (dynamic)
 
 - **Auditor:** independent dynamic auditor (adversarial), 2026-10-02 16:15–16:40 PDT.
-- **Audited state:** WT `rupei/learned-routing-public` at `<commit-10>` (clean apart from an untracked
+- **Audited state:** WT `rupei/learned-routing` at `<commit-10>` (clean apart from an untracked
   `benchmarks/learned_routing/tools/agentx_lower/` that belongs to the A3 sidecar), bindings build_id
   `6955b0ee…`, cells lr-cells-v2 (SPLIT_MANIFEST `0f8ea452…`), pycma 4.5.0. pytest: 114 passed
   (`out/pytest.txt`).

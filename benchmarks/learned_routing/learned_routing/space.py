@@ -23,6 +23,7 @@ Example::
         bounds: [-10.0, 10.0]      # one pair, or one pair (or null) per element
         init: [-1, 0, 0, 0, 0, 0, 0, 0]
         fixed: {0: -1.0}           # pinned elements, e.g. the LR-05 scale anchor
+        clamp: [null, [null, null], [null, 0.0], null, null, null, null, null]  # theta[2] <= 0
       - path: parameters.context   # {p: [[dim]] * rank, q: [[dim]] * rank}
         kind: lowrank
         dim: 8
@@ -37,6 +38,15 @@ Example::
 - bounded log: ``u in [0, 1]``, ``x = exp(ln low + u (ln high - ln low))``;
 - unbounded (``bounds: null``): ``u = x / unit`` (``unit`` defaults to 1);
 - ``int``: the linear or log value rounded to the nearest integer.
+
+**Clamp (physical clip).** ``clamp`` (one ``[low, high]`` pair, or one pair or null per element;
+either end may be null) clips the physical value after the transform:
+``x = min(max(x, low), high)``. The internal box and its geometry are unchanged, so a clamped
+space searches exactly the same internal coordinates, step sizes and start as the unclamped one,
+and only the decoded policy differs. Use it for sign constraints whose natural start sits on the
+constraint (e.g. ``theta_j <= 0`` from ``theta_j = 0``): moving the box bound there instead puts the
+start on pycma's boundary transform, whose slope is zero at the bound, so the first generations
+barely move that coordinate. ``init`` must satisfy the clamp.
 
 Bounded coordinates get the box ``[0, 1]`` (pycma's ``BoundTransform``). ``std`` gives a
 per-parameter initial standard deviation in internal units (pycma ``CMA_stds``, relative to
@@ -75,6 +85,8 @@ class Coord:
     integer: bool
     unit: float
     std: float | None
+    clip_low: float | None = None
+    clip_high: float | None = None
 
     @property
     def bounded(self) -> bool:
@@ -92,6 +104,10 @@ class Coord:
             else:
                 x = self.low + u * (self.high - self.low)
             x = min(max(x, self.low), self.high)
+        if self.clip_low is not None:
+            x = max(x, self.clip_low)
+        if self.clip_high is not None:
+            x = min(x, self.clip_high)
         return int(round(x)) if self.integer else float(x)
 
     def to_internal(self, x: float) -> float:
@@ -135,6 +151,30 @@ def _element_bounds(spec: dict, count: int, path: str) -> list[tuple]:
     for pair in bounds:
         out.append((None, None) if pair is None else tuple(float(b) for b in pair))
     return out
+
+
+def _element_clamps(spec: dict, count: int, path: str) -> list[tuple]:
+    clamp = spec.get("clamp")
+    if clamp is None:
+        return [(None, None)] * count
+
+    def pair(value) -> tuple:
+        if value is None:
+            return (None, None)
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            raise SpaceError(
+                f"{path}: clamp entries must be [low, high] (null for open)"
+            )
+        lo, hi = (None if b is None else float(b) for b in value)
+        if lo is not None and hi is not None and lo > hi:
+            raise SpaceError(f"{path}: clamp must have low <= high")
+        return (lo, hi)
+
+    if len(clamp) == 2 and all(isinstance(b, (int, float)) or b is None for b in clamp):
+        return [pair(clamp)] * count
+    if len(clamp) != count:
+        raise SpaceError(f"{path}: clamp needs one pair or {count} per-element entries")
+    return [pair(value) for value in clamp]
 
 
 def _flat_init(spec: dict, shape: tuple[int, ...], path: str) -> list[float]:
@@ -253,6 +293,7 @@ class Space:
             "shape",
             "fixed",
             "fields",
+            "clamp",
         }
         unknown = sorted(set(spec) - allowed)
         path = spec.get("path")
@@ -285,6 +326,7 @@ class Space:
                 raise SpaceError(
                     f"{path}: bounds must be [low, high] with low <= high, or null"
                 )
+        clamps = _element_clamps(spec, count, path)
         init = _flat_init(spec, shape, path)
         pinned = {int(k): float(v) for k, v in (spec.get("fixed") or {}).items()}
         if any(not 0 <= k < count for k in pinned):
@@ -296,6 +338,14 @@ class Space:
             if flat_index in pinned:
                 continue
             lo, hi = bounds[flat_index]
+            clip_lo, clip_hi = clamps[flat_index]
+            value = init[flat_index]
+            if (clip_lo is not None and value < clip_lo) or (
+                clip_hi is not None and value > clip_hi
+            ):
+                raise SpaceError(
+                    f"{path}[{flat_index}]: init {value} outside clamp [{clip_lo}, {clip_hi}]"
+                )
             coords.append(
                 Coord(
                     param=path,
@@ -306,6 +356,8 @@ class Space:
                     integer=kind == "int",
                     unit=unit,
                     std=None if std is None else float(std),
+                    clip_low=clip_lo,
+                    clip_high=clip_hi,
                 )
             )
             free.append(flat_index)

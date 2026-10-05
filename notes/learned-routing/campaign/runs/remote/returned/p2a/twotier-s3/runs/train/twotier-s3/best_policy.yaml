@@ -1,0 +1,9 @@
+name: "two-tier-tuned@twotier-s3"
+parameters:
+  balance_abs_threshold: 86
+  balance_rel_threshold: 2.674309550596131
+  cache_threshold: 0.6681386971215153
+router_config: {}
+router_mode: "kv_router"
+seeded: false
+type: "dynamo-two-tier-cost-fn"

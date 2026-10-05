@@ -8,7 +8,8 @@
 # with exactly the manifest's argv (run_aiperf.py) and brackets the run with metric scrapes; a
 # background scraper records the frontend and every worker every LR_SCRAPE_INTERVAL_S seconds.
 #
-# From job_node.sh: LR_ENDPOINT, LR_PAYLOAD_DIR, LR_NUM_WORKERS, LR_POLICY_SLUG.
+# From job_node.sh: LR_ENDPOINT, LR_PAYLOAD_DIR, LR_NUM_WORKERS, LR_POLICY_SLUG; in pairs mode
+# also LR_SMOKE_RUNS (the pair's one input), LR_RUN_TIMEOUT_S and LR_PAIR_LABEL.
 # From the job env file (submit.sh --env):
 #   LR_SMOKE_INPUTS     directory of generator outputs, one subdirectory per run (manifest.json)
 #   LR_AIPERF_ENV       AIPerf 0.13.0 environment; its python also runs the stdlib tools here
@@ -40,6 +41,7 @@ done
 {
   date -u +%FT%TZ
   echo "host=$(hostname) endpoint=$LR_ENDPOINT policy=${LR_POLICY_SLUG:-} workers=${LR_NUM_WORKERS:-}"
+  echo "pair=${LR_PAIR_LABEL:-} runs=${LR_SMOKE_RUNS:-cell idle} run_timeout_s=${LR_RUN_TIMEOUT_S:-2400}"
   echo "nproc=$(nproc) affinity=$(taskset -pc $$ 2> /dev/null | awk -F': ' '{print $2}')"
   echo "ulimit_n=$(ulimit -n)"
   "$py" --version

@@ -1,0 +1,207 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: the objective-gaming finding (phase-2 midpoint), its sign-constraint remedy and what remains:
+%   concentration of short requests, the long-prompt trade, the A19 token-weighted secondary metric
+%   and the other secondary metrics.
+% EVIDENCE: CR/audits/phase2-mid/{gaming-concentration,sim-exploitation,fix}.md; CR/facts/
+%   {phase2_mid_fix,tierBC,test_results,secondary_metrics_test}.json; CR/report/REPORT.md sections
+%   10.1-10.3; generated/{lr13_flags,isl_buckets,secondary_vs_ramjet}.tex.
+% STATUS: final for the simulation results.
+
+\section{Objective gaming, concentration and long prompts}
+\label{sec:gaming}
+
+The objective counts good requests. A request is good or not, whatever its size, so a policy can
+raise the count by serving many short requests well at the expense of a few long ones. This section
+reports how the search exploited that, how the exploit was removed, and what remains in the
+headline policy.
+
+\subsection{The finding: a sacrificial worker}
+\label{sec:gaming-finding}
+
+At the phase-2 midpoint an adversarial audit replayed the selected tier-A M1 (unconstrained) and
+every contender on the 14 validation cells with its own scorer, and examined each request.
+% src: CR/audits/phase2-mid/gaming-concentration.md (882 replays, 0 errors; own scorer matches the
+%      harness on 882/882; results tables)
+\begin{itemize}
+  \item \textbf{Concentration.} M1 sent more than the cap $\min(2/\Nw, 1/\Nw + 0.25)$ of a cell's
+    requests to one worker on 4 of the 5 Mooncake validation cells (up to 0.454 against a cap of
+    0.333), while every contender baseline stayed within the cap. The concentration was in requests,
+    not work: the hottest worker's share of prefill tokens stayed near $1/\Nw$. It carried one
+    shared-prefix group, and the extra concentration bought almost no cache: on the violating cells,
+    M1's prefix reuse was at most 0.0065 above the best within-cap baseline and below it on two.
+  \item \textbf{A worker of lost requests.} On the heaviest Mooncake cell, in every replicate, M1 left
+    one worker receiving only 14 to 16 in-window requests, all very long (median prompt 98K to 100K
+    tokens), and none of them good, while the hot workers served 519 to \num{1014} mostly short,
+    cached requests at 0.90 to 0.99 good. These long requests share only one 512-token block, so
+    stacking them has no cache rationale, and they were not doomed: $\piref$, \policy{ramjet} and M0
+    served every request of 60K tokens or more well on that cell, M1 only 42.5\%.
+  \item \textbf{Mechanism: load attracted long requests.} When a request of 60K tokens or more
+    arrived, M1 sent it to the worker with the most outstanding prefill 58\% of the time, against a
+    chance rate of 12.5\% and 0 to 2\% for the baselines. The selected coefficients predict this:
+    with $\theta_7 > 0$ (the product of prompt length and active prefill), the net coefficient on a
+    worker's active prefill turns positive for prompts above about 77K tokens, so a long request is
+    drawn to a worker that is already busy. Setting $\theta_7 = 0$ alone removed the lost-requests
+    worker on all three restarts and brought the long requests back to 0.94 to 1.00 good.
+  \item \textbf{Not starvation in the long-wait sense.} M1's share of requests slower than three
+    times the slowdown bound was below every baseline's; the sacrificed requests missed narrowly
+    (median slowdown 1.13 times the bound).
+\end{itemize}
+% src: CR/audits/phase2-mid/gaming-concentration.md "Concentration" (4 of 5 cells; 0.454 at
+%      islu1.25-n6-closed-L2, cap 0.333; prefill share 0.146 vs 0.125 at N8; reuse at most +0.0065),
+%      "Sacrifice and starvation" (k0 0/16, k1 0/14, k2 0/15; median ISL 98-100K; 519-1,014 at
+%      0.90-0.99; group 14 shares 1 block; ISL >= 60K good 0.425 vs 1.000), "Mechanism" (0.580 vs 0.125;
+%      default 0.7-2.2%, ramjet 0-0.7%; threshold about 77K; theta7 = 0 -> 0.943, 1.000, 1.000),
+%      "No starvation" (median slowdown of a giant 1.13 S)
+The audit's verdict was objective gaming, which triggered the remedy registered in advance
+(Amendment A11.2). Black-box search exploiting a gap in its objective is a known pattern
+\citep{lehman2020creativity}, and a binary per-request goodput invites exactly this trade
+\citep{wang2024slo}; a router tuned by an evolution strategy on tail TTFT alone sent all traffic to
+one replica \citep{toniolo2026gorgo}. A companion audit of simulator exploitation found the
+long-prompt sacrifice stable across 26 perturbations of timing, lag, window and SLO, so it is a
+property of the policy, not of a fragile corner of the simulator.
+% src: CR/audits/phase2-mid/gaming-concentration.md F1 ("A11.2 decision: GAMING");
+%      CR/audits/phase2-mid/sim-exploitation.md F1 (via CR/facts/STATE.md: "Mooncake long-ISL sacrifice
+%      is stable, not sim-fragile ... in 12/12 conditions"; "26 counterfactuals")
+
+\subsection{The remedy: load must not attract}
+\label{sec:gaming-remedy}
+
+The remedy re-ran all three M1 restarts with $\theta_3, \theta_4, \theta_5, \theta_7 \le 0$, at the
+same budget, seeds and starting points (\cref{sec:sign-constraint}), and every later learned arm used
+the same rule. A re-audit with the audit's own scripts, unchanged, then compared the constrained M1
+with the unconstrained one.
+\begin{itemize}
+  \item \textbf{Removed.} No Mooncake validation cell has a lost-requests worker (the unconstrained
+    M1 had one per replicate on two cells); requests of 60K tokens or more are 0.92 to 1.00 good
+    (0.425 to 0.966 before); the share of them sent to the worker with the most outstanding prefill
+    fell to 0.07 to 0.20, near or below chance (0.37 to 0.58 before).
+  \item \textbf{Remaining.} The constrained M1 still exceeds the share cap on 4 of 5 Mooncake cells,
+    at higher shares than before (0.56 against a cap of 0.25 on the two cells at $\Nw = 8$), and still
+    segregates by prompt length: the normalized mutual information between worker and prompt-length
+    quartile is 0.21 to 0.23 at $\Nw = 8$, against at most 0.095 for the contender baselines. Long
+    prompts still lose: on the heaviest cell 0.826 of prompts of 32K tokens or more are good, against
+    0.995 under $\piref$ and 0.963 under \policy{ramjet}, and 65 to 69\% of the requests that turn
+    bad against $\piref$ fall in the top prompt-length quartile.
+\end{itemize}
+% src: CR/audits/phase2-mid/fix.md "Re-audit result" (dump workers 0; ISL >= 60K good 0.920-1.000 vs
+%      0.425-0.966; giants to max-prefill worker 0.071-0.203 vs 0.370-0.580, chance 0.125-0.25; shares
+%      0.558/0.567 vs cap 0.25; NMI 0.211/0.228, contenders <= 0.095; >= 32K good 0.826 vs 0.995/0.963;
+%      65-69% of good-to-bad in the top quartile)
+The sign constraint removed the pathological mechanism, a worker that collects long requests it
+cannot serve, but not the underlying trade: short cached requests are packed onto a hot worker and
+long prompts compete for the rest. By the outcome rule registered with the remedy, the flags are
+reported on every learned row and are never a reason to retune or reselect; retuning under a
+size-aware objective is a design decision for the operator. The operator kept the request-count
+objective, headline and selection unchanged and added one token-weighted secondary metric (Amendment
+A19, \cref{sec:a19}). The same re-audit on the later learned arms (M2, M1-v2, M1-noaff and M1
+continued) flagged each on 3 or 4 Mooncake validation cells, with no lost-requests worker for any.
+% src: CR/facts/phase2_mid_fix.json preregistration.gaming_reaudit (outcome rule); CR/CONTRACT.md A19;
+%      CR/facts/tierBC.json decisions.tier_b_reaudit_i9 (m2r2, m1v2, m1noaff flagged on 4 cells,
+%      m1cont 3; "No dump worker for any arm")
+
+\subsection{Concentration on test}
+\label{sec:gaming-test}
+
+\Cref{tab:lr13} applies the window-basis guards to every test policy. Every learned arm concentrates
+and segregates by prompt length far more than the strong baselines: M1-v2 exceeds the share cap on 24
+of 60 test cells, against 5 for \policy{ramjet} and 0 for $\piref$, and its worker assignment carries
+information about prompt length on 19 cells, against 5. A worker with no good request (``dump
+worker'' in the table) appears on 5 of M1-v2's cells and 3 of \policy{ramjet}'s; the unconstrained M1
+has 9, and more long-request flags than M1-v2 (20, 20 and 15 cells against 11, 10 and 10).
+% src: generated/lr13_flags.tex (from report/data/tables/lr13_flags.md; CR/facts/test_results.json lr13_flags)
+
+\begin{table}[tbp]
+  \centering
+  \caption{Concentration and long-request flags on test, counts of the 60 test cells (generated).
+    Share $>$ cap: the window-basis largest worker request share exceeds
+    $\min(2/\Nw, 1/\Nw + 0.25)$. NMI: normalized mutual information between worker and prompt-length
+    quartile above 0.10. $\geq$32K, $\geq$64K, top decile: the good fraction of those prompts is more
+    than 0.05 below $\piref$'s. Dump worker: a worker with 0\% good in-window requests. Last column:
+    mean over cells of the smallest per-worker good fraction.}
+  \label{tab:lr13}
+  \input{generated/lr13_flags}
+\end{table}
+
+The engine state stays inside the simulator's measured range. On Mooncake, M1-v2's hottest worker
+carries 1.85 times the per-worker mean of in-flight requests (\policy{ramjet} 1.04, $\piref$ 1.18), and
+2.21 and 1.67 times on FAST25 conversation and synthetic. Peak in-flight requests are 59 and 65, inside
+\ais{}'s measured vLLM decode grid and far below \code{max\_num\_seqs}, so the concentration does not
+push the engine into the performance model's extrapolation. M1-v2 also shows no preference for pairing
+short prompts with long prefill chunks, the mixed-batch pricing artifact a search could exploit
+(caveat 13 in \cref{tab:caveats}), and has fewer requests that finish below their uncontended latency
+than \policy{ramjet} or \policy{llm-d-precise-prefix}.
+% src: CR/report/REPORT.md section 10.1 "Engine state" (from CR/audits/final/refute-headline-3.md section 6:
+%      1.85x, 1.04, 1.18; 2.21x, 1.67x; peak 59 and 65; decode grid up to batch 2,048, context 131,071;
+%      max_num_seqs 1,024; fewer below-E0 rows; closes UPSTREAM_FOLLOWUPS #17's exploit check)
+
+\subsection{Where the gain comes from: prompt length}
+\label{sec:gaming-isl}
+
+\begin{table}[tbp]
+  \centering
+  \caption{Good fraction and TTFT by prompt length on test (generated; descriptive, computed after
+    the test pass from its records). Good-fraction differences in percentage points, with the number
+    of segments on which M1-v2 is higher; TTFT p90 as a segment-mean log-ratio.}
+  \label{tab:isl}
+  \input{generated/isl_buckets}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=\linewidth]{isl_buckets}
+  \caption{Where M1-v2's gain comes from (copied from the final report). Left: in-window good fraction
+    by prompt length, \policy{ramjet} minus $\piref$ (orange) and M1-v2 minus \policy{ramjet} (blue).
+    Right: TTFT p90 log-ratio of M1-v2 against \policy{ramjet}.}
+  \label{fig:isl}
+\end{figure}
+
+\Cref{tab:isl,fig:isl} show the trade the request-count objective rewards.
+\begin{itemize}
+  \item \textbf{The gain sits in short and mid prompts.} M1-v2 gains 4.3 points of good fraction
+    below 8K tokens and gives up 1.7 to 3.8 points at 8K and above.
+  \item \textbf{Long prompts wait longer than under \policy{ramjet}.} Its TTFT p90 for 32K to 64K
+    prompts is higher on 11 of 12 segments (log-ratio $+0.135$, a factor of 1.145); counting only
+    records with at least 20 such prompts in both arms it is $+0.169$ on 8 of 8. That is about the
+    default router's own long-prompt TTFT ($-0.011$ against $\piref$), while \policy{ramjet} is
+    $-0.180$ below $\piref$ there. Overall TTFT is on par with \policy{ramjet}: p50 $+0.006$, p90
+    $-0.002$, p99 $-0.082$.
+\end{itemize}
+% src: CR/facts/test_results.json report_must_state MS-F1-ttft (p50 +0.006, p90 -0.002, p99 -0.082;
+%      32K-64K +0.135, 11/12; filtered +0.169, 8/8; vs default -0.011; ramjet -0.180), MS-F1-goodfrac-by-isl
+
+\subsection{Token-weighted goodput (A19)}
+\label{sec:a19}
+
+Amendment A19 added one secondary metric, registered before it was computed: the headline pipeline
+with each good in-window request weighted by its prompt plus output tokens, on exactly the requests
+and good rule that produce the headline's goodput. It never selects a policy or decides the headline.
+Against \policy{ramjet}, M1-v2's token-weighted goodput is mixed: segment mean $-0.0092$, interval
+$[-0.0645, +0.0244]$, ahead on 10 of 12 segments ($p$ 0.032). One segment drives the mean: FAST25
+synthetic x0, at $-0.29$. The three FAST25 conversation cells, which carry about 35\% of the
+headline's cell-mean gain, gain $+0.48$, $+0.49$ and $+0.08$ in request count but $+0.02$, $-0.15$
+and $+0.02$ in tokens. The headline's magnitude is therefore partly a request-count effect.
+% src: CR/facts/test_results.json a19_good_tokens_rps_window.headline (segment_mean -0.009248, 10/12,
+%      p 0.031982; by_segment fast25_synthetic:x0 -0.2909); generated/robustness.tex (A19 row interval
+%      [-0.0645, +0.0244]); CR/report/REPORT.md section 3.3 (conversation cells);
+%      CR/audits/final/refute-headline-1.md ("magnitude partly request-count-only")
+
+\subsection{Other secondary metrics}
+
+\begin{table}[tbp]
+  \centering
+  \caption{Secondary metrics against tuned \policy{ramjet} on test (generated; selected rows and
+    columns; descriptive). Segment-mean log-ratio, with the number of segments on which the policy's
+    value is higher; lower is better for latencies, higher for prefix reuse.
+    \Cref{tab:secondary-full} in the appendix has every policy and metric.}
+  \label{tab:secondary}
+  \input{generated/secondary_vs_ramjet}
+\end{table}
+
+Against \policy{ramjet} (\cref{tab:secondary}), M1-v2's end-to-end p90 over the scored in-window
+requests is better ($-0.048$, higher on 3 of 12 segments), its prefix reuse lower ($-0.024$, higher on
+1 of 12) and its per-request ITL p90 on par ($+0.006$); AgentX trajectory latency is slightly better
+($-0.012$). Against $\piref$ it cuts TTFT p50 by 44\% ($-0.573$ log-ratio) and raises prefix reuse by
+27\% ($+0.238$).
+% src: CR/facts/test_results.json report_must_state MS-F1-other-secondary; CR/report/REPORT.md section 10.3

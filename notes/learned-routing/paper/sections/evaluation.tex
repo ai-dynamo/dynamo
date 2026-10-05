@@ -1,0 +1,502 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: how a claim of "better" is decided: splits and hold-out axes, the unit of independence,
+%   the noise floor, selection hygiene, the pre-registered headline test and what 12 segments can
+%   show, the minimum detectable effect, strata, parity, secondary comparisons, robustness checks,
+%   live validation and the staged audits.
+% CLAIMS: protocol only. The primary test was pre-registered before any training
+%   (CR/facts/HEADLINE_TEST.json, written at calibration); later amendments (A12, A14-A17) add
+%   secondary comparisons and the headline-arm rule, all registered before any test evaluation.
+%   The significance arithmetic (minimum attainable p, Holm per N) is our own computation of the
+%   exact Wilcoxon null distribution, not a campaign file; it is marked as such.
+% EVIDENCE: CR/facts/HEADLINE_TEST.json; CR/cells/{train,val,test}.jsonl; CR/cells/SPLIT_MANIFEST.json;
+%   CR/facts/test_freeze.json; CR/facts/{noise,noise_calibration,pilot,gate,lag_patch,remote}.json;
+%   CR/CONTRACT.md A1, A2, A4, A5, A11-A17; WT/notes/learned-routing/campaign/PLAN.md
+%   (campaign control table); CR/facts/STATE.md audit/fix/gate lines; CR/audits/;
+%   WT/benchmarks/learned_routing/learned_routing/goodput.py (guard metrics).
+% STATUS: final. The protocol was fixed before the test pass and did not change.
+
+\section{Evaluation protocol}
+\label{sec:eval}
+
+% src: CR/facts/HEADLINE_TEST.json written ("2026-10-02 (calibration stage, before any training)"),
+%      status; CR/CONTRACT.md A12 (05:50), A14 ("registered BEFORE the test stage runs"), A15, A16,
+%      A17 ("Registered before facts/finalists.json and before any test evaluation");
+%      CR/facts/pilot.json state.test_cells_touched 0; CR/facts/gate.json selection_hygiene
+%      (pilot_records_touching_test 0)
+The protocol that decides every comparison in this paper was fixed before any policy was tuned.
+The primary test was written at calibration on 2026-10-02, before any training run, in
+\file{facts/HEADLINE_TEST.json}. Later amendments added secondary comparisons and fixed which
+learned arm is the headline model (Amendments A12 and A14 to A17), all before any test cell was
+evaluated; none of them changed the primary test.
+
+\subsection{Splits and hold-out axes}
+\label{sec:splits}
+
+% src: CR/cells/{train,val,test}.jsonl (counts recomputed 2026-10-03: cells, num_workers, load.mode,
+%      holdout_axis, holdout_axes, segment, selection_exposed); CR/cells/SPLIT_MANIFEST.json segments_by_split
+\begin{table}[tbp]
+  \centering\small
+  \caption{Splits. A segment is a disjoint piece of a source trace (\cref{tab:families}); all cells
+    of one segment, whatever their $\Nw$, load or transform, are one workload for statistics.
+    $^{\dagger}$One train cell pools the plays of AgentX segments A1 and A2.}
+  \label{tab:splits}
+  \begin{tabular}{@{}lrrlr@{}}
+    \toprule
+    Split & Cells & Segments & Worker counts $\Nw$ & Open / closed / lanes \\
+    \midrule
+    Train      & 34 & 10$^{\dagger}$ & 4, 8               & 18 / 8 / 8 \\
+    Validation & 14 & 6              & 4, 6, 8            & 6 / 4 / 4 \\
+    Test       & 60 & 12             & 2, 4, 6, 8, 16, 32 & 31 / 15 / 14 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[tbp]
+  \centering\small
+  \caption{Test cells by worker count and primary hold-out axis, and the number of test segments
+    at each worker count. Window: held-out Mooncake time window; Family: FAST25; Plays: held-out
+    AgentX plays; Seeds: held-out session seeds. Every cell at $\Nw \in \{2, 6, 16, 32\}$ is also on
+    a held-out segment.}
+  \label{tab:test-axes}
+  % src: CR/cells/test.jsonl (num_workers x holdout_axis counts; distinct segment per num_workers),
+  %      recomputed 2026-10-03
+  \begin{tabular}{@{}rrrrrrrrr@{}}
+    \toprule
+    $\Nw$ & Worker count & Transform & Window & Family & Plays & Seeds & Cells & Segments \\
+    \midrule
+    2  & 8  &   &   &   &   &   & 8  & 6 \\
+    4  &    & 4 & 3 & 2 & 2 & 2 & 13 & 7 \\
+    6  & 7  &   &   &   &   &   & 7  & 6 \\
+    8  &    & 6 & 3 & 4 & 2 & 2 & 17 & 8 \\
+    16 & 7  &   &   &   &   &   & 7  & 6 \\
+    32 & 8  &   &   &   &   &   & 8  & 6 \\
+    \midrule
+    All & 30 & 10 & 6 & 6 & 4 & 4 & 60 & 12 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% src: CR/cells/test.jsonl holdout_axes pairs: (worker_count, time_window) 14, (worker_count,
+%      workload_draw) 8, (worker_count, agentx_plays) 8; transform tags of the 10
+%      transform_extrapolation cells; CR/cells/SPLIT_MANIFEST.json train_ranges, holdout_axes;
+%      CR/cells/val.jsonl (4 cells at N = 6); CR/CONTRACT.md A11.3
+Each test cell is held out from training along one primary axis (\cref{tab:test-axes}). The 30
+cells at unseen worker counts also lie on held-out segments: 14 on held-out Mooncake windows, 8 on
+held-out session seeds and 8 on held-out AgentX plays. The 10 transform cells use values outside
+the train ranges: prompt stretches of 2.5 (three cells), output-length multipliers of 0.25, 2.5
+and 4, think-time multipliers of 0.25 (one cell) and 4 (two cells), and four times as many prefix
+roots.
+Training sees only $\Nw \in \{4, 8\}$, so $\Nw = 2$, 16 and 32 are extrapolation and $\Nw = 6$ is
+interpolation. Validation also has 4 cells at $\Nw = 6$, so every configuration was selected with
+that worker count in view, and the 7 test cells at $\Nw = 6$ are labeled
+\emph{selection-exposed} (Amendment A11.3; \citealp{cawley2010overfitting}).
+
+\paragraph{Unit of independence.}
+% src: CR/facts/HEADLINE_TEST.json test_set.segment_note; CR/cells/test.jsonl (cells per segment:
+%      1, 2, 2, 2, 2, 3, 4, 5, 5, 6, 13, 15); CR/CONTRACT.md A4 "Statistics"; CR/literature/LESSONS.md
+%      LR-11; WT/notes/learned-routing/README.md (agentx:A1+A2 label)
+Cells are not independent: all cells cut from one segment share its arrival and length structure,
+whatever their worker count, load level or transform. Every statistic below is therefore computed
+over segments. The test has 12, holding between 1 and 15 cells each. The FAST25 conversation cells
+share the arrival and length skeleton of Mooncake windows w3 and w5 and are averaged into those two
+segments. CRN replicates and duplicated trace copies (Amendment A4) re-draw or lengthen a segment
+but add no independent units. One train cell draws from the plays of two AgentX train segments
+(\cref{tab:splits}); train segments enter no test statistic.
+
+\subsection{Noise floor}
+\label{sec:noise-floor}
+
+What counts as a real difference depends on three sources of variation, which the campaign
+measured separately.
+\begin{itemize}
+  \item \textbf{Repeated runs: none.} Replay is deterministic for a given policy, workload and seed,
+    so a repeated run reproduces every per-request row and measures nothing (Amendment A1). Changing
+    only the default router's tie-break seed moved its goodput by 1.8\% on an 8-worker setup cell.
+    Every policy therefore runs seeded, and noise is measured over workload replicates, each of
+    which re-draws the arbitrary parts of the workload and the policy seed (\cref{sec:aisim}).
+    % src: CR/facts/noise.json why; CR/literature/LESSONS.md LR-02 [setup] (runs/setup/determinism/seeded/
+    %      determinism.json: n8_default_seed1 2.8687, seed2 2.8180; spread 1.80%)
+  \item \textbf{Replicate noise.} Over 8 replicates per cell at calibrated loads, $\piref$'s
+    windowed goodput had a coefficient of variation between 0.37\% and 6.5\% across the 48 train and
+    validation cells (median 1.4\%). The paired ratio of round-robin to $\piref$ on the same
+    replicate had a pooled standard deviation of 0.027 on train and 0.026 on validation.
+    % src: CR/facts/noise_calibration.json per_cell_default_goodput_cv (48 non-noise cells: min 0.003743
+    %      mooncake-w4-base-n8-open-L1, max 0.06535 sessions-s1-base-n4-open-L3, median 0.01376),
+    %      rr_vs_default_differs_beyond_noise.{train,val}.pooled_sd (0.02679, 0.02566), protocol (8 replicates)
+  \item \textbf{Segment heterogeneity.} Policies differ by segment far more than replicates differ.
+    In the pilot's comparison of M1 with \policy{llm-d-precise-prefix}, the pooled replicate standard
+    deviation of the paired ratio was 0.015, while the standard error of the mean over 6 validation
+    segments was 0.019 and was, by the pilot's own reading, dominated by differences between
+    segments. The mean lead of $+0.030$ came almost entirely from one Mooncake segment ($+0.102$),
+    and M1 trailed on all three AgentX segments ($-0.012$ to $-0.025$); these numbers are \prelim.
+    % src: CR/facts/pilot.json validation_vs_best_heuristic.llm-d-precise-prefix.M1_tuned (pooled_sd
+    %      0.01510, segment_se 0.01908, mean_clipped_log_ratio 0.02978), mde.note ("SE is dominated by
+    %      between-segment heterogeneity ... not by replicate noise"); CR/facts/gate.json
+    %      audit_flags_for_stage4[1] (mooncake:w1 +0.102; AgentX -0.012 to -0.025)
+\end{itemize}
+Segment heterogeneity, not replicate noise, limits what the campaign can resolve; hence the
+segment-level test and minimum detectable effect below.
+% src: CR/CONTRACT.md A1 ("differs beyond noise"); CR/facts/noise.json rules.differs_beyond_noise;
+%      CR/facts/gate.json rule
+The pilot gate used Amendment A1's two-clause rule: a policy differs from $\piref$ if on some
+validation cell its mean paired ratio differs from 1 by more than three pooled replicate standard
+deviations, \emph{and} the mean of its per-segment deltas exceeds two standard errors over at least
+three segments. The headline test below replaces this rule for the final comparison.
+
+\subsection{Selection hygiene}
+\label{sec:hygiene}
+
+% src: CR/facts/gate.json full_plan.objective_cells_repeats (selection, test), selection_hygiene
+%      (val_k3_10_unused_by_selection true; repeats_by_split train 0-7, val 0-2); CR/CONTRACT.md A17.2
+The data are split into four disjoint uses, so that selection cannot leak into the result.
+\begin{enumerate}
+  \item Train cells, replicates $\krep = 0,\dots,7$: the CMA-ES objective (\cref{sec:train-objective}).
+  \item Validation cells, $\krep = 0,1,2$: selection within a policy (\cref{sec:selection}).
+  \item Validation cells, $\krep = 3,\dots,10$: selection across policies, of $\pibase$ and of the
+    headline learned arm $\pilearn$; the pilot gate also used them. No within-policy selection reads
+    them.
+  \item Test cells, $\krep = 0,1,2$: one pass, for a fixed list of finalists.
+\end{enumerate}
+% src: CR/facts/test_freeze.json (test_jsonl sha256 7b998b8e..., cell_content_sha256 60 entries, traces 39,
+%      trace_sources 7, engine_json_sha256, bindings_build_id, harness_version, split_manifest_sha256,
+%      traces_manifest_sha256, rule); CR/facts/gate.json selection_hygiene.pilot_records_touching_test 0;
+%      CR/facts/HEADLINE_TEST.json counting
+The test split was frozen at calibration. \file{facts/test_freeze.json} records the SHA-256 of the
+test cell file, of each of the 60 cells' contents, of the 39 test traces and their 7 sources, of
+the engine configuration and of the split manifest, together with the bindings build and harness
+version; the test stage verified all of them (149 of 149) before its single pass. A completeness
+audit later found that the test cells were touched once: the \num{30060} test-cell records in the
+cache are exactly the expected set, all written after the finalists file was frozen. The one
+exception predates calibration: five default-router-only validation replays of the AgentX trace
+conversion ran on test play pools, at pre-calibration loads, before the test set was frozen; they
+compared no policies. Every learned variant scored on validation (rung, rank, feature set,
+restart) is counted and reported: 314 variants, of which 5 arms competed for the headline.
+% src: CR/facts/test_results.json execution.evaluated_once (149/149), lr11
+%      (learned_variants_validated_total 314, learned_arms_compared_for_the_headline_A17_2 5);
+%      CR/audits/final/completeness.md (30,060 test-cell records, all after finalists.json; F7)
+
+\subsection{Headline test (pre-registered)}
+\label{sec:headline}
+
+% src: CR/facts/HEADLINE_TEST.json (binding, per_cell_statistic, per_segment_statistic, primary_test,
+%      replicates); CR/CONTRACT.md A2.1, A17.2
+The headline compares the selected learned policy $\pilearn$ with the best baseline $\pibase$
+(\cref{sec:selection}) on the test set. For each test segment $\seg$,
+\begin{equation}
+  \label{eq:segstat}
+  \segstat_{\seg} = \frac{1}{|\seg|}\sum_{\cell \in \seg}\ \frac{1}{3}\sum_{\krep=0}^{2}
+    \clr_{\cell,\krep}(\pilearn, \pibase),
+\end{equation}
+where $|\seg|$ is the number of test cells in the segment, so each segment weighs the same however
+many cells it holds. The primary test is a one-sided exact Wilcoxon signed-rank test over the 12
+segment statistics, against the alternative that their median is positive, at level 0.05
+\citep{demsar2006}.
+
+It compares one learned policy with one baseline, each chosen on validation before the test, so
+no multiplicity correction applies. It does not test the stronger claim that the learned policy
+beats \emph{every} baseline. The literature review proposed that claim as an intersection of
+per-baseline tests (LR-11); Amendment A2.1 replaced it with the comparison against the
+validation-selected best baseline.
+% src: CR/literature/LESSONS.md LR-11 action 1 (per-baseline intersection-union test); CR/CONTRACT.md A2.1
+
+\paragraph{What 12 segments allow.}
+% src: own computation (2026-10-03) of the exact null distribution of the Wilcoxon signed-rank statistic:
+%      n = 12: min one-sided p = 1/4096; P(W- <= 17) = 0.0461, P(W- <= 18) > 0.05; n = 4: min p = 1/16;
+%      n = 5: min p = 1/32. Consistent with CR/literature/LESSONS.md LR-11 ("At n = 5 its minimum p is 1/32")
+With 12 segments the smallest attainable one-sided $p$ is $1/4096$. The test rejects at 0.05
+exactly when the segments on which the learned policy loses have ranks, by $|\segstat_{\seg}|$,
+summing to at most 17; it can therefore tolerate a few losses if they are small. With 4 segments
+the exact test cannot reach 0.05 at all (its minimum $p$ is $1/16$), and with 5 it needs every
+segment to favor the same policy. Per-family claims, which rest on 2 to 4 segments, are
+therefore descriptive only.
+
+\paragraph{Effect size.}
+% src: CR/facts/HEADLINE_TEST.json effect_size; CR/literature/LESSONS.md LR-11 (Bouthillier sec. 4,
+%      pdf p.8-10: significant if P - CI_min > 0.5, meaningful if P + CI_max > gamma = 0.75)
+We report $\Pr(\pilearn \succ \pibase)$, the share of segments with $\segstat_{\seg} > 0$, with a
+95\% bootstrap interval that resamples whole segments together with all their cells. The effect is
+called significant if the interval's lower end exceeds 0.5 and meaningful if its upper end exceeds
+0.75, following \citet{bouthillier2021variance}. Next to it we report the interquartile mean and
+the geometric mean of segment ratios with intervals \citep{agarwal2021precipice}, the arithmetic
+mean of per-cell ratios (the contract's original objective), a per-cell map of which policy wins,
+and the gap to the per-cell best tuned baseline.
+
+\paragraph{Minimum detectable effect.}
+% src: CR/facts/HEADLINE_TEST.json parity_and_no_regression.mde; CR/facts/pilot.json
+%      mde.learned_vs_val_best_default_arm_heuristic (segment_se 0.019075, mde 0.038150, comparator),
+%      mde.learned_vs_default (segment_se 0.043676, mde 0.087352); uses: HEADLINE_TEST n2 parity;
+%      p2orch.py drift_matrix (mde 0.038); CR/facts/gate.json full_plan.tiers.C_conditional
+The MDE is $\max(1\%,\ 2\,\mathrm{SE})$, where SE is the standard error of the paired segment mean
+measured on validation at the pilot. Against \policy{llm-d-precise-prefix} at shipped defaults, the
+best untuned heuristic on validation then, it is 0.038 in clipped log-ratio (SE 0.019 over 6
+segments); against $\piref$ the same rule gives 0.087. Both are \prelim. The MDE is not a
+threshold of the headline test. It is used where a decision needs a size: a difference within it
+counts as parity at $\Nw = 2$ (\cref{sec:strata}), it set the drift-check rule
+(\cref{sec:drift}), and M2 at ranks 3 and 4 trains only if rank 2 beats M1 on validation by at
+least the MDE.
+
+\subsection{Strata and parity}
+\label{sec:strata}
+
+% src: CR/facts/HEADLINE_TEST.json stratification; CR/cells/test.jsonl (segments per load mode: open 8,
+%      closed 6, lanes 4; transform_extrapolation: 10 cells, 7 segments)
+\paragraph{Strata.} Every table and the bootstrap are also given per load mode (8 open-loop, 6
+closed-loop and 4 agentic-lane segments), per worker count, for the 10 transform-extrapolation
+cells (7 segments) as their own stratum, and per family, descriptively. A significance claim for
+an individual worker count uses Holm's correction across the six counts.
+
+% src: own arithmetic (2026-10-03), assuming each per-N test is the same exact one-sided Wilcoxon test:
+%      Holm first threshold 0.05/6 = 0.00833; min p with 6 segments 1/64 = 0.0156 > 0.00833; with 7
+%      segments 1/128 = 0.0078 (N = 4); with 8 segments 1/256 = 0.0039 (N = 8); after rejecting both,
+%      the next threshold 0.05/4 = 0.0125 < 0.0156. Segments per N from tab:test-axes.
+Assuming each per-count test is the same exact test, the correction leaves little room. Holm's
+first threshold is $0.05/6 \approx 0.0083$, below the smallest $p$ attainable with 6 segments
+($1/64 \approx 0.016$). Each unseen worker count, $\Nw = 2$, 6, 16 and 32, has 6 test segments, so
+none of them can produce a significant per-count result, whatever the data; only $\Nw = 4$ (7
+segments, all favoring one policy) and $\Nw = 8$ (8 segments), both train worker counts, can.
+Results at unseen worker counts are therefore descriptive, or take the parity and no-regression
+form below. This is our own arithmetic, not part of the pre-registration.
+
+\paragraph{Parity and no regression.}
+% src: CR/facts/HEADLINE_TEST.json parity_and_no_regression (n2, tost_margin); CR/literature/LESSONS.md
+%      LR-12 (Calibrate-then-Route sec. V-D, pdf p.4-5: ties at width 3, leads at 4, reconverges at 6)
+Two kinds of claim say ``no worse''. For \lc{} at $\theta = -\basis{0}$ against $\piref$, and for
+any claim of no regression at an unseen worker count, the protocol uses two one-sided tests with a
+margin of $\pm 0.5\%$ normalized goodput. At $\Nw = 2$ a difference within the MDE counts as
+parity rather than failure, because informed routing tends to tie simpler policies when there are
+few workers to choose from \citep{tumkur2026calibrate}. The $\pm 0.5\%$ margin is small next to
+the pilot's segment standard error of 0.019 (\prelim), so before the test we expected most
+no-regression claims to remain unestablished. In the event, the check held at every unseen worker
+count against both $\piref$ and \policy{ramjet}: the lower end of the interval exceeded
+$-\ln 1.005$ (\cref{sec:res-n}).
+% src: CR/facts/test_results.json parity_and_no_regression; CR/report/REPORT.md section 3.2
+
+\subsection{Secondary comparisons}
+\label{sec:secondary}
+
+% src: CR/CONTRACT.md A2.1, A2.5, A12, A13 (finalists), A15, A16.3-4, A17.2; CR/facts/HEADLINE_TEST.json
+%      effect_size.also_report; CR/literature/LESSONS.md LR-11 (Genet sec. 2 and discussion, pdf p.3-4, p.12)
+These were registered before the test pass and are reported next to the headline. Only the
+headline is a confirmatory test; the rest are descriptive or secondary.
+\begin{itemize}
+  \item \textbf{Learned-arm variants}: M1-default-init, M1 selected over its default start alone
+    (Amendment A12, \cref{sec:restarts}), and M1-noaff (Amendment A15), as test finalists.
+  \item \textbf{Reference points}: M0, round-robin, and every heuristic at its shipped defaults
+    (Amendment A2.5).
+  \item \textbf{Oracles}: the best baseline per family and the best tuned baseline per cell, which no
+    single policy can match (Amendment A2.1). The gap to the per-cell oracle shows how much a
+    per-workload choice of heuristic would add, a comparison \citet{xia2022genet} suggest for
+    learned network policies.
+  \item \textbf{The AIS league} (Amendment A16): arms that read \ais{}-derived estimates at runtime,
+    compared with the best \ais{}-informed baseline and with the best baseline overall. Every arm is
+    normalized by the same $\piref$, which does not use \ais{}, so the two leagues share one scale
+    and the report can state how much the \ais{} estimates add. These arms cannot become $\pilearn$.
+  \item \textbf{Every tuned baseline and the runner-up.} The learned arm against each of the 11
+    tuned baselines, as an intersection-union test (LR-11), and against the best baseline of another
+    type, \policy{llm-d-precise-prefix}, registered because the validation choice between it and
+    \policy{ramjet} was a near tie.
+  \item \textbf{Token-weighted goodput} (Amendment A19): the headline pipeline with each good
+    in-window request weighted by its prompt plus output tokens, a check that the request-count
+    objective does not hide a loss in served work.
+% src: CR/facts/finalists.json secondary_comparisons (every_tuned_baseline_IUT, best_baseline_of_another_type
+%      llmdpp, runner_up_baseline_registered ablabase); CR/facts/tierBC.json handoff_select_test_i9 (3);
+%      CR/CONTRACT.md A19
+\end{itemize}
+
+\subsection{Robustness checks}
+\label{sec:robustness}
+
+% src: CR/facts/HEADLINE_TEST.json robustness_reported_not_tested; CR/literature/LESSONS.md LR-14 action 4
+%      ("claim only gaps larger than the spread the perturbations induce"; Kendall tau of the ranking)
+These checks are reported, not tested, for the finalists on the frozen test cells and replicates.
+Each asks whether the headline ranking survives a change that training never saw. Agreement between
+two rankings of the finalists is summarized by Kendall's rank correlation $\kendall$. As a reading
+rule taken from the literature review rather than from the pre-registration, a headline gap smaller
+than the spread these perturbations induce is reported as fragile (LR-14).
+
+\paragraph{SLO re-scoring.}
+% src: CR/CONTRACT.md A2.2 (scale sweep, "REPORT states where the headline flips"), A14 (alternatives,
+%      constants from train records in facts/sla_transfer_spec.json before test scoring, per-SLA outputs);
+%      CR/facts/STATE.md audit(build/goodput-normalization r3) (rescore at all 6 scales verified)
+Every evaluation keeps its per-request rows, so the good-request indicator (\cref{eq:good}) can be
+recomputed under another SLO without new replays or retraining. The scale sweep multiplies
+$(\Imax, \Smax)$ by 0.5, 0.75, 1, 1.5, 2 and 3 and states where the headline ranking flips.
+Amendment A14 adds four other definitions of a good request:
+\begin{itemize}
+  \item the mean-ITL bound alone;
+  \item the end-to-end slowdown bound alone;
+  \item the mean-ITL bound plus a TTFT bound that grows with prompt length, $b + a\,\ISL_j$, where
+    $a$ is three times \ais{}'s uncontended per-token prefill time and $b$ is $\piref$'s median TTFT
+    at L2 on train cells;
+  \item the mean-ITL bound plus an absolute end-to-end bound, $\piref$'s 90th-percentile end-to-end
+    latency at L2 on train cells.
+\end{itemize}
+Their constants are computed per family from train records and written down before test scoring.
+For each definition the report gives every finalist's goodput ratio against $\piref$, the paired
+segment delta against $\pibase$, and $\kendall$ against the ranking under the trained SLO. None of
+them changes selection or the headline test. The constants were computed from 160 train records of
+$\piref$ at L2 and written down before any test record was scored; for Mooncake, for example, the
+TTFT bound's intercept is $\piref$'s median TTFT there, \SI{146.7}{ms}.
+% src: CR/facts/sla_transfer_spec.json (records 160, replicates 0-7; families.mooncake.b_ttft_ms 146.74)
+
+\paragraph{Router-state lag.}
+% src: CR/CONTRACT.md A5.1, A11.5, A15; CR/facts/lag_patch.json (summary, semantics, worktree, build,
+%      proof_lag0_identical: 8 train cells x 4 policies x k0,1 = 64 pairs, 404,704 rows;
+%      proof_lag_changes_what_policies_see.goodput_level: 50 ms changed 63/64, ratio 0.9719-1.0231;
+%      200 ms changed 61/64, ratio 0.9559-1.0197; routing changed 64/64 at both; caveat;
+%      remote-node parity 192/192, 1,214,112 rows; test_stage_usage); CR/literature/LESSONS.md LR-14
+%      (Mitzenmacher pdf p.2)
+Replay hands the router perfectly fresh state, and load balancing on stale information can behave
+very differently \citep{mitzenmacher1998old}. A replay patch delays three kinds of worker-originated
+updates by $\lag$ milliseconds of simulated time: KV cache events, prefill completions and request
+completions. A delayed update becomes visible at the first router callback at or after its due time;
+the router's own bookkeeping of what it has dispatched stays immediate, as in a live router. The
+patch lives in a separate worktree and build, so the tuning build and its result cache are
+untouched. On 8 train cells, 4 policies and 2 replicates (64 runs), $\lag = 0$ reproduced the tuning
+build in every non-environment record field and in all \num{404704} per-request rows. At $\lag = 50$ and
+\SI{200}{ms} routing changed in all 64 runs, and goodput relative to $\lag = 0$ ranged from 0.972 to
+1.023 and from 0.956 to 1.020; these single-replicate ratios show that the knob is live, not how
+lag affects the ranking. The test stage re-evaluated 17 finalists on all test cells at
+$\lag \in \{10, 50, 200\}$\,ms, with a lag-0 run on the lag build as its identity check, and
+reports whether the headline ranking holds; M1-noaff ran alongside M1 to test the hypothesis that
+session affinity matters more under lag (Amendment A15). Training never sees lag.
+% src: CR/facts/robustness.json set, conditions, lag0_identity_lag_build_vs_tuning_build
+
+\paragraph{Timing perturbation.}
+% src: CR/facts/HEADLINE_TEST.json robustness_reported_not_tested[2] ("speedup_ratio /
+%      decode_speedup_ratio 0.8 and 1.2 (PLAN stage 5)"); WT/lib/mocker/src/common/protocols.rs:549-559
+%      (decode_speedup_ratio: decode only; effective decode speedup = speedup_ratio x decode_speedup_ratio)
+Two timing scale factors of the mock engines are set to 0.8 and 1.2. The first,
+\code{speedup\_ratio}, scales every forward pass; the second, \code{decode\_speedup\_ratio},
+scales decode only, so the effective decode speedup is their product. This tests sensitivity of the ranking to a global error in \ais{}'s timing,
+not to errors confined to particular batch sizes or context lengths. A timing perturbation also
+changes what an uncontended request can achieve, so each perturbed record is scored twice: against
+the nominal $\Ezero$ and against the perturbation-consistent
+$\Ezero' = \text{prefill}/s + \text{decode}/(s\,d)$ for speedup $s$ and decode speedup $d$. Under the
+nominal $\Ezero$ at $s = 0.8$, no zero-reuse AgentX request can be good, a degenerate scoring that is
+flagged where it appears. The spread rule and $\kendall$ use $\Ezero'$.
+% src: CR/audits/phase2-mid/fix.md "sim-exploitation F2" (rescore_timing, E0' pre-registered, AgentX at
+%      s0.8 degenerate under nominal E0); CR/facts/phase2_mid_fix.json preregistration.timing_robustness
+
+\paragraph{Herding guards.}
+% src: CR/literature/LESSONS.md LR-14 action 2, LR-15 action 3; CR/facts/gate.json
+%      full_plan.tiers.C_conditional ("robustness extras (speedup 0.8/1.2, tau > 0, hash_home)");
+%      CR/facts/lag_patch.json lessons.deferred_to_test_stage
+A deterministic argmax over stale state can herd requests onto one worker. Two variants guard
+against it: \lc{} at $\temp > 0$, which samples instead of taking the argmax (at a fixed
+temperature, the probability left to non-best workers grows with $\Nw$), and a variant restricted to the request's hash-home workers (feature
+\code{hash\_home} of \code{v2}). Both were registered before M1-v2 won, so they ran as variants of M1
+(\code{v1}), at two temperatures, on the lag build (\cref{sec:res-robustness}).
+% src: CR/facts/robustness.json m1_lr14_variants
+
+\paragraph{Live validation.}
+A check on GPUs of the relative result, with its own pre-registered analysis, is described in
+\cref{sec:live}; it validates the ranking only and never feeds selection.
+
+\subsection{Audits}
+\label{sec:audits}
+
+% src: WT/notes/learned-routing/campaign/PLAN.md "Campaign control" table; CR/audits/ (17 audit
+%      reports, 6 fix reports); audit report headers (e.g. CR/audits/build/goodput-normalization-r3.md,
+%      CR/audits/calibration/independent-rerun-r1.md: private root, own scorer, no harness import)
+Each campaign stage ends at a checkpoint that independent auditors review before the next stage
+starts, each auditor through one named lens. A static audit reads code and artifacts; a dynamic
+audit also re-runs part of the pipeline in a private result root and recomputes results with its
+own code, without importing the campaign harness. Findings are graded blocker, major or minor. A
+fixer answers each major finding, either fixing it or rebutting it with evidence, and the lens is
+audited again.
+
+% src: CR/facts/STATE.md audit(...)/fix(...) lines 2-31: majors setup r0 F1, setup r1 F1, goodput r0 F1,
+%      leakage r0 F1, harness r0 S1 + B1, goodput r1 F1, agentx parity r0 F1, goodput r2 F1, calibration r0 F1
+%      (10); fix lines "VALID, FIXED, 0 rebutted"; toolagent: CR/cells/SPLIT_MANIFEST.json families.toolagent,
+%      CR/facts/DEVIATIONS.md 2026-10-02 build B2 "workload families differ from PLAN"
+\Cref{tab:audits} lists the rounds. Through the pilot gate there were 17 audit reports and 6 fix
+reports. All 10 major findings were judged valid and none was rebutted. Nine were fixed and the fix
+verified by a later round; the tenth, a second public trace that turned out to be a relabeled copy of
+the Mooncake trace, was resolved by excluding that family. The pilot gate was reviewed the same way:
+an independent judge recomputed every pilot number from raw records with its own scripts, reproduced
+each to four decimals, and approved escalation. Two more checkpoints followed. At the phase-2
+midpoint, three dynamic audits looked for overfitting, objective gaming and simulator exploitation;
+their five major findings were all fixed, including the gaming finding of \cref{sec:gaming}. After the
+single test pass, a completeness critic and three adversarial refuters reviewed the headline before
+any report was written; their two major findings were fixed by adding the missing secondary metrics
+and by narrowing the headline's wording to the scope the evidence supports
+(\cref{sec:res-fairness}).
+% src: CR/facts/STATE.md gate(phase3 judge) ("Independent recompute from raw records ... every pilot
+%      number reproduces to 4 decimals"); audit(phase2-mid/*) and fix(phase2-mid) ("5/5 majors VALID,
+%      FIXED, 0 rebutted"); audit(final/*) and fix(final) ("2/2 majors VALID, FIXED, 0 rebutted")
+
+\begin{table}[tbp]
+  \centering\footnotesize
+  \caption{Audit rounds by checkpoint and lens, with each major finding and its resolution.}
+  \label{tab:audits}
+  % src: CR/facts/STATE.md audit/fix lines (verdicts, majors, fixes); CR/audits/<checkpoint>/<lens>*.md
+  \begin{tabularx}{\linewidth}{@{}P{0.27\linewidth}lY@{}}
+    \toprule
+    Checkpoint, lens & Rounds & Major findings $\rightarrow$ resolution \\
+    \midrule
+    Setup, \ais{} and policy in effect & r0 pass & none \\
+    Setup, determinism, cost, context & r0, r1 fail &
+      identical re-runs cannot measure noise $\rightarrow$ CRN workload replicates (Amendment A1);
+      the toolagent trace is a relabeled Mooncake copy $\rightarrow$ family excluded \\
+    Build, goodput and normalization & r0--r2 fail, r3 pass &
+      reports paired records across builds and cell contents $\rightarrow$ pairing on content, build
+      and protocol; closed-loop and lane windows scored the drain $\rightarrow$ window ends at full
+      occupancy; the slowdown clause was a coin flip at scale 1 $\rightarrow$ $\Ezero$ aligned with
+      replay's decode context, plus a $10^{-6}$ relative tolerance \\
+    Build, feature leakage & r0 fail, r1 pass &
+      \code{v2}'s \code{hash\_home} keyed on replay-synthesized session identifiers $\rightarrow$
+      keyed on the prompt prefix only \\
+    Build, harness robustness and splits & r0 fail, r1 pass &
+      Mooncake windows overlapped across splits $\rightarrow$ six disjoint slices; the remote bundle
+      lacked a dependency $\rightarrow$ shipped and checked at build time \\
+    AgentX lowering, isolation and arrivals & r0, r1 pass & none \\
+    AgentX lowering, parity and fidelity & r0 fail, r1 pass &
+      think-time and output-length transforms could not be lowered $\rightarrow$ supported \\
+    Calibration, independent re-run & r0 fail, r1 pass &
+      open-loop session windows opened during the session-population ramp $\rightarrow$ warm-up of two
+      session-lifetime envelopes, sessions re-calibrated, test re-frozen \\
+    Pilot gate, independent recompute & escalate & none; all pilot numbers reproduced \\
+    \midrule
+    Phase-2 midpoint, overfitting and selection & fail, fixed &
+      the drift check was recorded as decisive although underpowered $\rightarrow$ recorded as
+      inconclusive, not used for M2's sources \\
+    Phase-2 midpoint, gaming and concentration & fail, fixed &
+      M1 games the objective (a 0\%-good worker of long requests) $\rightarrow$ sign-constrained
+      re-runs (\cref{sec:sign-constraint}); the remaining size segregation $\rightarrow$ re-audited
+      and reported on every learned row \\
+    Phase-2 midpoint, simulator exploitation & fail, fixed &
+      the long-prompt sacrifice is stable under perturbation $\rightarrow$ same re-runs; timing
+      robustness scored against the nominal $\Ezero$ $\rightarrow$ consistent $\Ezero'$ scoring \\
+    \midrule
+    Final, completeness & fail, fixed &
+      TTFT by prompt length and the planned secondary metrics were missing $\rightarrow$ computed from
+      the test records, no replay (\cref{sec:gaming}) \\
+    Final, refute the headline (reproduction) & pass & none; the headline reproduced bit for bit \\
+    Final, refute the headline (fairness) & fail, fixed &
+      faithful LMetric, outside the baseline pool, carries most of the margin $\rightarrow$ headline
+      worded as beating the branch's ported heuristics (\cref{sec:res-fairness}) \\
+    Final, refute the headline (robustness, simulator) & pass & none \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+% src (final rows): CR/audits/final/{completeness,refute-headline-1,refute-headline-2,refute-headline-3,fix}.md;
+%      (phase-2 rows): CR/audits/phase2-mid/{overfit-selection,gaming-concentration,sim-exploitation,fix}.md
+
+% src: WT/benchmarks/learned_routing/learned_routing/goodput.py guard_metrics; window_guards.py
+%      (added by the phase-2 midpoint fix: window-basis share, per-worker good minimum, long-prompt good,
+%      NMI by prompt-length quartile); CR/literature/LESSONS.md LR-13
+Every evaluation record carries guard metrics that these audits read: the largest worker's share of
+requests against the cap $\min(2/\Nw,\ 1/\Nw + 0.25)$, the largest worker's prefill tokens over the
+mean, the share of multi-turn sessions split across workers, the share of requests slower than three
+times the slowdown bound, and the largest worker's share within each prompt-length bucket, which
+exposes length segregation. Black-box search is known to exploit gaps in its objective
+\citep{lehman2020creativity}; an evolution strategy tuning a router on 95th-percentile TTFT alone
+sent all traffic to one replica \citep{toniolo2026gorgo}; and binary goodput invites sacrificing
+requests that would miss their SLO anyway \citep{wang2024slo}. The gaming audit showed that the
+original guards, computed over all rows, could not see a worker whose in-window requests were all
+bad, so the midpoint fix added window-basis guards: the share cap over exactly the scored requests,
+each worker's good fraction, the good fraction of long prompts against $\piref$, and the
+normalized mutual information between worker and prompt-length quartile (\cref{sec:gaming}).

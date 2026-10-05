@@ -19,6 +19,25 @@ LANE_REMOTE="${LR_LANE_REMOTE:-$(dirname "$(dirname "$BUNDLE_NFS")")/lane}"
 source "$LANE_REMOTE/node_common.sh"
 echo "[node_train] $(date -Is) job=$JOB host=$(hostname) run=$RUN local=$LOCAL"
 
+# A9 addendum: train only on an OS/glibc image that passed a bit-exact parity smoke, so a resumed
+# run never continues its CMA-ES trajectory on unvalidated libm (e.g. after a node reimage). The
+# check runs before staging and before node.json is rewritten: a refused job changes nothing but
+# node.log and image_refused.json, and p2orch.py then takes the node out of rotation. Keep the
+# list (';'-separated "PRETTY_NAME|glibc") in step with VALIDATED_IMAGES in p2orch.py;
+# LR_VALIDATED_IMAGES='*' skips the check.
+IMAGE="$(. /etc/os-release && echo "$PRETTY_NAME")|$(ldd --version 2>&1 | awk 'NR == 1 {print $NF}')"
+image_ok=0
+IFS=';' read -ra VALIDATED <<< "${LR_VALIDATED_IMAGES:-Ubuntu 24.04.5 LTS|2.39}"
+for allowed in "${VALIDATED[@]}"; do
+  if [ "$allowed" = "*" ] || [ "$allowed" = "$IMAGE" ]; then image_ok=1; fi
+done
+if [ "$image_ok" != 1 ]; then
+  echo "[node_train] $(date -Is) node image '$IMAGE' is not parity-validated; lr-train not started"
+  printf '{"job": "%s", "host": "%s", "run": "%s", "image": "%s", "at": "%s"}\n' \
+    "$JOB" "$(hostname)" "$RUN" "$IMAGE" "$(date -Is)" > "$OUT_NFS/image_refused.json"
+  exit 0
+fi
+
 lane_stage
 lane_probe
 mkdir -p "$LOCAL/runs/cache" "$LOCAL/runs/train"

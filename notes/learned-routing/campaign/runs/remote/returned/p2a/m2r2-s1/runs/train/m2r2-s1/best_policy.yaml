@@ -1,0 +1,13 @@
+name: "m2-learned-v1-rank2@m2r2-s1"
+parameters:
+  context:
+    p: [[0.0, -0.04210345777982738, 0.06368334854186841, 0.0, 0.0, 0.0, -0.0921332719009591, 0.0], [0.0, -0.197605101474835, -0.035510519132955665, 0.0, 0.0, 0.0, -0.04350475928811903, 0.0]]
+    sources: ["isl_k", "mean_active_prefill_tokens_k"]
+  feature_set: "v1"
+  temperature: 0.0
+  theta: [-1.0, 16.27531735052679, -0.7459849789876642, 0.0, 0.0, -39.72345798258601, -0.7677342621965408, 0.0]
+  tie_break: "one_draw"
+router_config: {}
+router_mode: "kv_router"
+seeded: true
+type: "learned-choice"

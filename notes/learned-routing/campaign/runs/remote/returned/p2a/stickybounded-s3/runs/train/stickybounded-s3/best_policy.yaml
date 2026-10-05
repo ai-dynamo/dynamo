@@ -1,0 +1,13 @@
+name: "sticky-bounded-tuned@stickybounded-s3"
+parameters:
+  load_factor: 1.2607289508144606
+  mode: "bounded"
+router_config:
+  decode_active_request_weight: 2543.0467220555233
+  overlap_score_credit: 3.3288053124074226
+  overlap_score_credit_decay: 3.594396046544831
+  prefill_load_scale: 274.15237193624984
+  router_temperature: 0.0009346810537592095
+router_mode: "kv_router"
+seeded: true
+type: "sticky-session"

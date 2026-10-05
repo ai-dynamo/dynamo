@@ -10,7 +10,7 @@ returned summary.
 | Name | Path |
 |---|---|
 | CR (campaign root) | `<campaign-root>` |
-| WT (worktree) | `<worktree>`, branch `rupei/learned-routing-public`, created from `origin/rupei/router-policy-aic-ttft` |
+| WT (worktree) | `<worktree>`, branch `rupei/learned-routing`, created from `origin/rupei/router-policy-aic-ttft` |
 | PY | `WT/.venv/bin/python`. Install with `uv pip install --python WT/.venv/bin/python ...`. Never use bare pip or another worktree's venv. |
 | Harness code | `WT/benchmarks/learned_routing/` (package `learned_routing`, installed editable into PY) |
 | Engine config | `CR/config/engine.json`, written by setup. It is the single source of truth for model, hardware, backend, TP, `max_model_len`, AIS config and `MockEngineArgs`. |
@@ -426,7 +426,7 @@ ai-dynamo/dynamo and ai-dynamo/aisimulate.
   - `README.md` and `REPRODUCE.md`;
   - `campaign/`, a mirror of small curated files from CR, produced by `sync_from_campaign.sh`.
 
-  It pushes the branch to `origin/rupei/learned-routing-public` (no PR) at milestones.
+  It pushes the branch to `origin/rupei/learned-routing` (no PR) at milestones.
 - **Size limit:** no bulky artifacts in git. The per-file cap is 1 MiB; traces, runs, caches and PDFs
   stay in CR and are identified by manifests and SHA-256s.
 - **Stage agents:**
@@ -437,7 +437,7 @@ ai-dynamo/dynamo and ai-dynamo/aisimulate.
 
 ## Amendment A9: use the CPU-cluster lane eagerly (operator, 2026-10-03 ~01:40 PDT)
 
-- **Operator request:** use CPU-cluster nodes as needed. Workflow `wf_e37792bc-dd5` is provisioning and
+- **Operator request:** use CPU-cluster nodes as needed. Workflow `<workflow-run>` is provisioning and
   validating the lane; it writes `facts/remote.json` and runner scripts under
   `WT/benchmarks/learned_routing/remote/`.
 - **When to use it:** once `facts/remote.json` reports `"status": "ok"`, any stage (pilot, phase-2
@@ -467,7 +467,7 @@ ai-dynamo/dynamo and ai-dynamo/aisimulate.
 - **Status:** `facts/remote.json` reports `"status": "ok"`, independently verified as bit-exact across
   4 node images. Runner scripts are in `WT/benchmarks/learned_routing/remote/` (commit <commit-18>). Use
   them per A9.
-- **Hard deadline:** CPU cluster has a weekly maintenance cutoff. Every <qos> job must
+- **Hard deadline:** CPU cluster has a job-end cutoff. Every <qos> job must
   end by then, and longer `--time` is rejected.
   - Size remote jobs to finish about 30 min before the cutoff.
   - `lr-train` checkpoints sync back at least every 540 s; resume locally or resubmit after the maintenance window.
@@ -506,7 +506,271 @@ AgentX).
    not attract), at the same B. REPORT includes the concentration and segregation flags.
 3. **N = 6 is in both val and test.** Label test N = 6 results "selection-exposed" in REPORT (LR-10/11).
 4. **Scale.** CPU cluster per A9, A10 and the addendum: as many nodes as are available. Respect the
-   weekly maintenance cutoff. Breadth-first waves, per the gate.
+   job-end cutoff. Breadth-first waves, per the gate.
 5. **Lag patch (A5).** Implement it in a SEPARATE worktree with its own venv or bundle, so the tuning
    build's `build_id` and cache stay untouched. Prove lag = 0 gives identical results to the tuning
    build on sample cells. Use it only for the test-stage robustness pass.
+
+## Amendment A12: M1 init disclosure (operator, 2026-10-03 ~05:50 PDT)
+
+- **Decision:** the operator approved A11.1's multi-start, with disclosure.
+- **Test set:** the Select+Test stage MUST also carry "M1-default-init" as a test finalist: M1 restricted
+  to the s1 restart, initialized from θ0 = −e0, and selected on val k0-2 over that restart's
+  checkpoints only. It is evaluated on test next to the headline M1, which is selected over all
+  restarts.
+- **Report:** the REPORT shows both rows and states which initialization the headline M1 came from.
+- **Pre-registration:** this is a pre-registered secondary comparison and doesn't change the headline
+  test.
+
+## Amendment A13: live GPU validation (operator, 2026-10-03 ~06:20 PDT)
+
+**Operator, verbatim:** "at approrpiate checkpoint do some runs with real gpus, to see whether the
+results (at least relative wise) still holds on a real deployment, at which point you may need aiperf for
+loadgen, so just need to make sure the two loadgens offline and live are like semanticlaly the same,
+/the cluster runbook if needed"
+
+1. **Live-lane prep (workflow `live-lane-prep`, now).**
+   - Build `WT/benchmarks/learned_routing/live/`:
+     - AIPerf inputs generated from our cells;
+     - a deployment recipe: Dynamo frontend plus a KV router running catalog policy YAMLs (including
+       `learned-choice`), with vLLM 0.24 Qwen3-32B TP2 on H100;
+     - a scoring adapter from AIPerf per-request exports to the A2 scorer.
+   - **Prove loadgen semantic equivalence**, offline and live, per request:
+     - arrival schedule, including crn-spread-v1 and speedup;
+     - exact ISL/OSL, with OSL forced;
+     - prefix-sharing structure (token LCP between requests that share hash prefixes);
+     - sessions and think times;
+     - open-loop vs concurrency admission;
+     - warm-up and scoring window.
+   - One GPU smoke on a single 8×H100 node (N = 4 workers × TP2): default router, one Mooncake cell,
+     compared against offline replay.
+2. **Live finalist runs (after phase 2's `facts/finalists.json`).**
+   - Policies: default@defaults, the val-best baseline, M1, M0 and round-robin.
+   - Cells: a few test-like cells per supported family and load mode.
+   - Report paired deltas and the Kendall τ of the ranking, sim vs live.
+   - These are validation of the relative result only. They never feed selection.
+3. **GPU etiquette:**
+   - Use the cluster runbook.
+   - Use the GPU cluster cooperative lock (`<home>/.gpu-hold/ACTIVE`, shared with the other campaign),
+     with one owned 8-GPU request at a time.
+   - Record jobs with cancel commands in `facts/live.json`.
+   - Release promptly; no idle holds.
+   - Never delete remote data; list it in `CLEANUP.md`.
+
+### A13 addendum (operator, 2026-10-03 ~06:35 PDT)
+
+- **Operator:** "there shouldn't be anything else besides this campaign using gpu-cluster btw, or slurm for that
+  matter, so as you go along please nuke like holds + artifacts + files unrelated to dynamo / aisim".
+- **The GPU cluster cooperative lock is no longer required.** There's no other tenant, but keep recording your
+  own jobs.
+- **Cleanup of unrelated remote holds and artifacts** runs as a separate top-level workflow, with
+  campaign jobs protected by `facts/remote.json`, `facts/live.json` and the phase2 and live job files.
+  Campaign agents still never delete.
+
+## Amendment A14: pre-registered "SLA transfer" secondary analysis (top-level, 2026-10-03 ~06:55 PDT)
+
+- **Why:** the operator asked how the learned policy would do on test under a slightly different SLA
+  objective.
+- **Timing:** registered BEFORE the test stage runs; `facts/finalists.json` didn't exist at
+  registration.
+- **What:** the Select+Test stage re-scores the SAME test per-request records (no new replays, no
+  retraining, no selection) under each alternative below.
+- **Per SLA, report:**
+  - every finalist's windowed goodput ratio against default;
+  - the paired per-segment delta against the val-best baseline;
+  - the Kendall τ of the policy ranking against the trained-SLA ranking.
+
+1. **Scale sweep (already in the plan):** (I, S_slow) × {0.5, 0.75, 1, 1.5, 2, 3}.
+2. **ITL-only:** mean ITL ≤ I, with the E2E bound dropped.
+3. **E2E-slowdown only:** E2E ≤ S_slow × E0, with the ITL bound dropped.
+4. **Length-scaled TTFT (LR-08 form)**, plus mean ITL ≤ I:
+   - T(L) = b + a·L per family;
+   - a = 3 × the AIS uncontended per-token prefill time;
+   - b = default@defaults' median TTFT at L2 on TRAIN cells (computed from existing calibration
+     records, never from test).
+5. **Absolute E2E:** E2E ≤ that family's p90 E2E of default@defaults at L2 on TRAIN cells, plus mean
+   ITL ≤ I.
+
+**Rules:**
+- Secondary analysis only. It never changes the headline test or selection.
+- Report all five, even unflattering ones.
+- Constants for (4) and (5) are derived from train records and written to `facts/sla_transfer_spec.json`
+  BEFORE test scoring.
+
+## Amendment A15: session-affinity ablation (operator idea, 2026-10-03 ~07:10 PDT)
+
+**Operator:** feature 6 `session_affinity` "sorta gives like strictly less info than overlap_frac".
+
+**Evidence:** pilot and early phase-2 M1 runs learned a small θ₆ (0.38 to 1.87, against a natural
+scale s₆ ≈ 21), while θ₁ (overlap_frac) is about 10 against s₁ ≈ 26.
+
+**Hypothesis:** affinity is near-redundant in replay, where the index is perfectly fresh, but may
+matter under router-state lag or live.
+
+**Arm (Tier B/C, mandatory, not conditional): "M1-noaff".**
+- **Retrain:** M1 with θ₆ pinned at 0. Same space otherwise, same multi-start inits as M1 (A11.1),
+  3 restarts at B = 400, selected on val k0-2 like M1.
+- **Post-hoc check (cheap, no retraining):** the selected M1 with θ₆ set to 0, scored on val k0-2.
+  Report its decision-change rate and goodput delta.
+- **Reporting:**
+  - Report M1-noaff against M1 on fresh val k3-10.
+  - Include it as a secondary test finalist, alongside A12's M1-default-init.
+  - Run it in the A5 lag robustness pass (lag 0/50/200 ms) next to M1. The hypothesis is that
+    affinity's value grows with lag.
+- **Selection:** this never changes the headline test or selection unless M1-noaff wins on val, in
+  which case it is simply M1's selected config under the usual rule. Document that.
+
+## Amendment A16: AIS-informed features allowed; an AIS league (operator, 2026-10-03 ~07:40 PDT)
+
+**Operator, verbatim:** "ok i kinda retract the thing about not wanting to use like ais now, assume
+that this we can aslo use, to like estimate semntic stuff like estiamted prefill time, or like how much
+frac is left in the in preogress prefill or whatnot, we should use it then".
+
+**Supersedes:** A2/PLAN's "no AIS at runtime" restriction, for NEW arms only. The existing v1 M1/M2
+arms are unchanged and stay the "router-observable" league.
+
+1. **Feature set v3** = v1 plus AIS-derived per-worker features. It's built by workflow `ais-features`
+   in an ISOLATED worktree/bundle (the tier-A build and cache are untouched):
+   - `est_prefill_ms_s`: AIS-predicted prefill time of this request's uncached n tokens at context L on
+     worker i;
+   - `prefill_backlog_ms_s`: the remaining AIS-modeled in-flight prefill on worker i
+     (`modeled_prefill_backlog_ms`, the PREFILL_TIME input with `router_prefill_load_model: ais`). It
+     accounts for the elapsed fraction of in-progress prefills;
+   - `est_ttft_ms_s` = backlog + own prefill;
+   - `est_decode_step_ms_s`: AIS-calibrated decode step time at the worker's current batch and context;
+   - `itl_externality_ms_s`: the marginal decode-step increase this request would impose on worker i.
+
+   **Context sources:** `min_est_ttft_ms_s`, `mean_est_decode_step_ms_s`.
+   **Still excluded:** the true OSL and `expected_output_tokens`.
+   **Info parity:** each AIS signal must be one a live router can compute (AIS available in-process, or
+   an AIS-calibrated closed form with constants fit offline per deployment). Document which.
+2. **AIS league:** a separate leaderboard, each arm with 3 restarts at B = 400, selected on val k0-2,
+   then fresh val k3-10 and test as secondary finalists:
+   - **M1-ais** (v3, rank 0; multi-start like A11.1, plus an init that reproduces
+     llm-d-optimized-baseline's modeled-TTFT rule where it's representable);
+   - **M2-ais** (v3 plus named sources), warm-started from M1-ais;
+   - **M0-ais:** the default cost fn with `router_prefill_load_model: ais`, tuned;
+   - **llm-d-optimized-baseline** with `ttft_source: modeled` and the AIS load model, tuned.
+3. **Normalization:** every arm is normalized against the SAME reference, default@defaults without AIS,
+   so the two leagues are comparable. If the AIS host load model changes default's own behavior,
+   M0-ais shows that effect explicitly.
+4. **Headline:** the pre-registered headline (HEADLINE_TEST.json) stays the router-observable league's
+   M1 against the val-best baseline. The AIS league is a pre-registered SECONDARY comparison: AIS M1 vs
+   the best AIS-informed baseline and vs the best overall baseline. REPORT shows both leagues and how
+   much AIS adds.
+5. **Scheduling:** phase-2 Tier B/C relays schedule these arms once `facts/ais_features.json` status is
+   ok, using its bundle and spaces. Same CPU cluster rules (A9, A10).
+
+## Amendment A17: top-level decisions the operator delegated (2026-10-03 ~08:00 PDT)
+
+Registered before `facts/finalists.json` and before any test evaluation.
+
+1. **M1-v2 is a mandatory Tier B arm.**
+   - **Model:** learned-choice with feature_set v2, rank 0, θ0 pinned at −1, 3 restarts at B = 400.
+   - **Inits:** (s1) θ0 = −e0; (s2) the A11.1 behavior-clone ML fit to llm-d-precise-prefix on TRAIN
+     with v2 features; (s3) LMetric's representable point θ = −e0 − (e_log_ptok + e_log_bs), scaled
+     to the pinned anchor (LR-07).
+   - **Why:** the pilot's headline risk is M1 against the best heuristic (+0.030 < MDE), with M1
+     trailing on AgentX. v2's log, set-relative and prefill-attention terms target exactly that.
+2. **Headline learned-model selection is symmetric with the baseline rule.**
+   - Each router-observable learned arm (M1, M2, M1-noaff, M1-v2, and any tier-C learned arm) picks its
+     config on val k0-2, as every policy does.
+   - The headline "learned model" is the arm with the best mean clipped log-ratio on FRESH val k3-10,
+     the same rule that picks the val-best baseline.
+   - REPORT discloses the number of learned arms compared (LR-11).
+   - AIS-league arms (A16) are excluded from the headline; they're a secondary comparison.
+   - A12's M1-default-init row stays a secondary test finalist.
+3. **Compute cut order if CPU cluster or wall-clock runs short.** Cut first to last:
+   - tier-C ablation (b) (simulator-only features);
+   - M2 ranks 3–4;
+   - M2-ais;
+   - the M1-noaff retrain (keep its post-hoc θ₆ = 0 check);
+   - the tier-C queue-threshold ablation (a).
+
+   Never cut tier A, M1-v2, M2 rank 2, M1-ais, M0-ais, llm-d-optimized-baseline-modeled, the test
+   pass or robustness.
+
+## Amendment A18: nothing internal in public content (operator, 2026-10-03 ~11:20 PDT)
+
+- **Rule:** anything pushed or posted publicly (branches on ai-dynamo/*, PR text, notes, paper) must not
+  mention internal NVIDIA infrastructure: cluster names, node or host names, Slurm accounts, QoS,
+  partitions or job IDs, internal storage or home paths, internal URLs, or other internal campaigns.
+  Portable hardware descriptions are fine.
+- **Incident:** the public campaign branch was deleted from origin at about 11:15 PDT after exposure.
+- **Republishing:** only through the sanitized publish pipeline (workflow `public-publish`), with a
+  fail-closed denylist scan that lives outside the public tree.
+- **Stage agents:** keep internal detail in CR, facts and the local worktree as before. Never push.
+  Write the paper and any public-facing text in sanitized form from the start.
+
+## Amendment A19: size-weighted secondary metric (operator, 2026-10-04 ~09:35 PDT)
+
+- **Context:** the phase2-mid re-audit of the constrained M1 escalated one design question to the
+  operator. M1 concentrates short requests on one worker (request share above the cap on 4/5
+  Mooncake val cells, prefill-token share near 1/N) and gives up some long-prompt goodput, which
+  the request-count objective rewards.
+- **Decision (operator):** keep the pre-registered request-count headline, objective and
+  selection unchanged. Report the LR-13 flags on every M1 row (as already registered). Add ONE
+  size-weighted secondary metric. No retraining, no new arm, no new replays.
+- **Metric `good_tokens_rps_window`:** over exactly the in-window requests and the A2 good rule
+  that produce the record's `goodput_rps_window` (`learned_routing.window_guards.in_window_flags`),
+  sum `input_length + output_length` over good in-window requests and divide by the same window
+  duration as `goodput_rps_window`. Companion descriptive field `good_token_frac_window` = good
+  in-window tokens / all in-window tokens.
+- **Implementation guard:** the rescoring tool first recomputes the unweighted count from the rows
+  and asserts it equals the record's `window_good` and `goodput_rps_window` (as
+  `learned_routing.rescore_timing` does), and refuses the record otherwise. It reads
+  `per_request_path` only; no replay is run.
+- **Scope:** every test-pass record of every finalist and of default@defaults (headline M1, the
+  val-best baseline, every other finalist, the A12 row, the AIS-league finalists), on the same
+  cells and replicates as the headline.
+- **Statistic:** the headline's own pipeline with `good_tokens_rps_window` in place of
+  `goodput_rps_window`: clipped log-ratio vs default@defaults per cell and replicate, the same
+  cell and segment aggregation, and the same one-sided exact Wilcoxon over the 12 segments.
+  Reported next to the headline as SECONDARY: it never selects a policy, changes a finalist or
+  decides the headline claim, and REPORT says so.
+- **Not in scope:** robustness conditions and validation splits (report there only if free).
+
+## Amendment A20: phase 3, live finalists, paper and publication (top-level, 2026-10-05 ~01:55 PDT)
+
+- **Phase 2 is complete.** `facts/finalists.json` is frozen (sha256 e0bae29d…), with the test
+  results, robustness, final audit and REPORT in place. Headline: M1-v2 beats tuned ramjet on test,
+  segment mean +0.0316, one-sided exact Wilcoxon p 0.0017. The scope wording is in
+  `facts/test_results.json` `report_must_state`.
+- **A13.2 finalist set, updated.** The headline learned arm is M1-v2, not M1 as A13.2 expected.
+  Live policies: default@defaults (run twice, to estimate live noise), the val-best baseline (tuned
+  ramjet), M1-v2, M1, M0 and round_robin, each exactly as frozen in `facts/finalists.json` and in
+  the tier-A/B selections. Live results are validation only: they never change a finalist, the
+  headline or any pre-registered number.
+- **Live cells.** Pick a few test-like cells per supported family and load mode (Mooncake open and
+  closed, FAST25, sessions; no AgentX). The worker count is whatever an 8×H100 node, or several,
+  gives at TP2. Each live cell gets an offline-replay counterpart at the same worker count and
+  load, from the same frozen policy specs. Pre-register the analysis in `facts/live_plan.json`
+  before the first finalist live run:
+  - paired live deltas vs default@defaults and vs ramjet;
+  - the sim-vs-live Kendall τ of the policy ranking;
+  - the sign agreement of M1-v2 − ramjet per cell;
+  - live noise from the repeated default@defaults run.
+- **GPU etiquette (A13.3 and its addendum):** record every job with its cancel command in
+  `facts/live.json`, release promptly, and leave no idle holds. Several concurrent 8-GPU jobs are
+  allowed.
+- **Paper (PAPER_REQUESTS R1, R2):** one batched pass in `WT/notes/learned-routing/paper/`, built
+  from REPORT and the partial drafts. Then the live results, then an `/audit` publication pass.
+  Sanitized per A18 from the start. Use the installed TeX only; no tlmgr.
+- **Publication:** only through `CR/publish/publish.sh` (sync, scan), pushing only
+  `rupei/learned-routing-public`, after applying `CR/publish/TODO.md`. That stage may push that
+  one branch; no other stage pushes.
+- **Not in phase 3, pending the operator:** the faithful-LMetric/SMetric equal-budget follow-up
+  escalated by the final fixer, and any change to the `lmetric` port on the PR stack.
+
+## Amendment A21: the lmetric port was fixed after the campaign froze (operator, 2026-10-05 ~08:10 PDT)
+
+- **Operator:** "fix the port". On #15450, `bba12df941` adds the worker's queued prefill
+  (`active_prefill_tokens`) to lmetric's P-token, as the LMetric paper defines it. It is merged up
+  into #15453 at `33a53229af`.
+- **Replay:** on the PR's own setup (Mooncake, first 5,000 rows), mean TTFT fell 31–35% (263→180,
+  291→190, 194→139 ms). The unchanged ramjet and two-tier rows reproduce exactly.
+- **The campaign's frozen results are unchanged.** Its `lmetric` baseline is the pre-fix port, as
+  CONTRACT A2.5 evaluated it. REPORT and the paper must say so where they discuss lmetric or the
+  in-class faithful-LMetric diagnostic: the shipped port now matches the faithful P-token, and the
+  headline scope ("beats the branch's ported heuristics") refers to the ports as evaluated.
+- The faithful-LMetric equal-budget follow-up is still not run; the operator has not asked for it.

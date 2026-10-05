@@ -1,0 +1,12 @@
+name: "abla-ramjet-queue@ablabase-s3"
+parameters:
+  affinity_block_tokens: 512
+  alpha: 1.066655130800898
+  basis: "relative"
+  load_unit_tokens: 5939
+  max_affinity_blocks: 140
+router_config:
+  router_queue_threshold: 17.5557920244583
+router_mode: "kv_router"
+seeded: false
+type: "ramjet"

@@ -1,0 +1,55 @@
+{
+ "schema": "learned-routing.paper-draft.v1",
+ "stage": "paper draft (PAPER_REQUESTS R1, R2; CONTRACT A20)",
+ "written_local": "2026-10-05 02:17:38 PDT",
+ "derived_numbers": {
+  "agentx_32k_fit": {
+   "question": "does any AgentX play fit a 32,768-token context (every request satisfies in + max(out, 1) <= 32768)?",
+   "method": "read-only scan of traces/agentx/plays/*.json (the 82 selected plays); per play, max over all requests (recursively, every dict with 'in' and 'out') of in + max(out, 1); no replay",
+   "plays": 82,
+   "requests": 3132,
+   "min_play_peak_tokens": 44048,
+   "plays_at_or_below_32768": 0,
+   "note": "every source play that fits 32K would also fit 131,072 and so be among these 82 (facts/build_workloads.json agentx.selection predicate), so no source play fits 32K"
+  }
+ },
+ "status": "ok",
+ "outputs": {
+  "paper_dir": "WT/notes/learned-routing/paper (sources, generated/ tables, fig/ copies, scripts/make_tables.py; build/ gitignored)",
+  "pdf_copy": "CR/report/paper/learned-routing-paper-draft.pdf",
+  "pdf_sha256": "982e2d93ebc7c24ea119b90d1a58961227b5a7a47363230f1b629afdf52a5916",
+  "pages": 107,
+  "build": "latexmk + pdflatex + BibTeX (installed TinyTeX; no tlmgr, nothing installed); 0 overfull boxes, 0 undefined references"
+ },
+ "structure": [
+  "abstract",
+  "1 introduction",
+  "2 background: routing primitives and the worker-selection API (R1: abstraction, default cost fn, 10 catalog types mapped, learned-choice as generalization, 15 major caveats with evidence/status)",
+  "3 problem and objective",
+  "4 simulator and workloads",
+  "5 learned policy",
+  "6 training (new: sign constraints)",
+  "7 baselines",
+  "8 evaluation protocol (audits through final)",
+  "9 results (headline in report_must_state wording; strata; worker counts; ladder; coefficients; robustness; AIS league; in-class heuristic scope; cost)",
+  "10 objective gaming, concentration and long prompts (A11.2 finding/remedy, LR-13 flags, ISL buckets, A19)",
+  "11 live GPU validation (PLACEHOLDER: lane, loadgen parity, smoke, pre-registered plan from facts/live_plan.json; results pending)",
+  "12 discussion and threats",
+  "13 related work",
+  "14 conclusion",
+  "appendix A full generated tables",
+  "appendix B pilot (preliminary, moved from results)",
+  "appendix C reproducibility"
+ ],
+ "decisions": [
+  "headline wording copied from facts/test_results.json report_must_state MS-RH2-F1-scope; the four limits (sign only, not every heuristic, SLO scales 1-3, request-count property) and simulation-only stated next to it",
+  "tables copied character for character from report/data/tables/*.md by scripts/make_tables.py (column selection only; duplicate header names addressed positionally; checkpoint labels gNN printed as \"gen NN\" so the public denylist does not flag them); CIs are the report bootstrap (headline [0.0150, 0.0501]); the facts file bootstrap [0.0150, 0.0498] is noted in a source comment",
+  "figures: the ten report/fig PNGs copied; leaderboard.png re-encoded losslessly (pixels identical, asserted) because its compressed bytes contained a denylisted three-letter token",
+  "A18: no internal commit hashes (the public copy has different commits), no cluster/node/partition/job/home-path names, no internal URLs; refs.bib author \"other Card\" abbreviated to \"D. Card\" (denylisted word); sanitized tree scan (publish/scan.py tree, internal refs) CLEAN on the committed paths",
+  "citations: literature entries from CR/literature only; added software/data/documentation entries (Dynamo, AISimulate, AIPerf, Mooncake traces, AgentX dataset, llm-d optimized-baseline blog, Mirrokni et al. SODA 2018 named in the chwbl port docs); conditional logit cited via Train 2009 (in the campaign literature) instead of an uncited McFadden",
+  "caveat list (R1) compiled from UPSTREAM_FOLLOWUPS, DEVIATIONS, audits and code; the policy-file snapshot race is evidenced by the policy-stack fix commit message only (worded as such); \"no AgentX play fits 32K\" computed here (derived_numbers.agentx_32k_fit)",
+  "live section kept as a clearly marked placeholder; the pre-registered plan (facts/live_plan.json, written by the parallel live-prep stage at 02:03) is summarized without internal details; no live finalist number written",
+  "pilot results moved to an appendix; REPRODUCE.md revision for phase 2 onward left as a pending item (outside this stage; notes/ are synced by the top-level session)",
+  "PDF not committed (A8: no PDFs in git); a copy is kept at CR/report/paper/"
+ ]
+}

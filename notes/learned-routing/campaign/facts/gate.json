@@ -41,7 +41,7 @@
   },
   "2_cost": {
    "pass": true,
-   "basis": "16.95 M local-equivalent replay-s for all tiers (PROJECTION); 248 h workstation only, 39.4 h on the 5 measured CPU cluster nodes + workstation; every single run fits one node (3.5 h epyc9654p, 5.5 h epyc7702p) and is resumable across the weekly maintenance window. Agrees with the pilot's 16.8 M / 40 h.",
+   "basis": "16.95 M local-equivalent replay-s for all tiers (PROJECTION); 248 h workstation only, 39.4 h on the 5 measured CPU cluster nodes + workstation; every single run fits one node (3.5 h epyc9654p, 5.5 h epyc7702p) and is resumable across the maintenance window. Agrees with the pilot's 16.8 M / 40 h.",
    "measured_inputs": {
     "E_full_replay_s_per_candidate_eval": 700.895219796193,
     "E_sub_replay_s_per_candidate_eval": 204.19322135318998,
@@ -1050,7 +1050,7 @@
   "scheduling": [
    "One lr-train per CPU cluster node (--mem 400G epyc9654p, 160G epyc7702p-256g, more than half the RAM on the 512 GB / 1 TB nodes); pinned CMA numerics; ingest every return into the cache; record allocations and cancel commands in facts/remote.json.",
    "Breadth-first over restarts: wave 1 = seed 1 of all 11 tier-A policies + the LR-15 drift check, wave 2 = seed 2, wave 3 = seed 3, then tier B, then tier C. A cut at any time then leaves every policy with the same number of restarts.",
-   "CPU cluster weekly maintenance cutoff: size --time to end 30 min before it, resume after the maintenance window with submit_train.sh --bundle-dir; if CPU cluster is not back, continue on the workstation (4.76 h per run).",
+   "CPU cluster job-end cutoff: size --time to end 30 min before it, resume after the maintenance window with submit_train.sh --bundle-dir; if CPU cluster is not back, continue on the workstation (4.76 h per run).",
    "Before the cutoff the 5 measured nodes + workstation hold about 14 run slots (2 epyc9654p x 3 + 3 epyc7702p x 2 + workstation x 2), enough for wave 1. The 5 image-validated but unmeasured nodes (epyc7702p-512g x 3, 7702p-alt-1024 x 2) may start wave 2; record their generation walls."
   ],
   "cut_order_if_over": [

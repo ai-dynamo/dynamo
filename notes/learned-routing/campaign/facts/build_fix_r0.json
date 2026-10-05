@@ -6,7 +6,7 @@
   "previous_build_id": "4b4525a9914bd4beb598c8aae0519b1a062ed8b8877be2448c80ac15dd4a1313",
   "so_sha256": "1d67c131deca024373a2eb4b96f70156e04eb32e1046c2cf7235ac50ddeb288b"
  },
- "branch": "rupei/learned-routing-public",
+ "branch": "rupei/learned-routing",
  "cells": {
   "cells_version": "lr-cells-v2",
   "split_manifest_sha256": "0f8ea45267c678534ebc44cd3bb12ef201d5583fb65bbc16d1e49807ec8d1d1d",

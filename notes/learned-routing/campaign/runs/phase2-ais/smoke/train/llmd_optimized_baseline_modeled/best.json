@@ -1,0 +1,93 @@
+{
+ "best_ever_train": {
+  "generation": 1,
+  "objective": 0.03791265139434734,
+  "per_cell": {
+   "agentx-A1-base-n4-lanes-L1": -0.05863556435248374,
+   "mooncake-w0-base-n8-open-L2": 0.13446086714117841
+  },
+  "policy_sha": "f7b8e13a3526305b3ce3d290467530c6e5325e60b4d2b1d98cbc919c98aa64e0",
+  "spec": {
+   "name": "llm-d-optimized-baseline-modeled-tuned",
+   "parameters": {
+    "affinity_threshold": 0.998836281612039,
+    "max_ttft_penalty_ms": 322.5709516584571,
+    "queue_threshold_tokens": 25529619,
+    "ttft_source": "modeled"
+   },
+   "router_config": {
+    "router_prefill_load_model": "ais"
+   },
+   "router_mode": "kv_router",
+   "seeded": false,
+   "type": "llm-d-optimized-baseline"
+  },
+  "values": {
+   "parameters.affinity_threshold": 0.998836281612039,
+   "parameters.max_ttft_penalty_ms": 322.5709516584571,
+   "parameters.queue_threshold_tokens": 25529619
+  },
+  "z": [
+   0.998836281612039,
+   0.11276359161273303,
+   0.6628542914406756
+  ]
+ },
+ "fevals": 4,
+ "generation": 2,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "clipped_log_ratio",
+  "popsize": 2,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 1,
+  "space_sha": "fac6f991d769b6748990d7b5b0f4f1aee852ab03034cb2ebe5d091bcb8d12bd3",
+  "train_cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "mooncake-w0-base-n8-open-L2"
+  ],
+  "val_cells": [
+   "sessions-s2-think2.0-n4-closed-L2"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": {
+  "generation": 1,
+  "policy_sha": "966eeae52d4a3f51adc15a3bedab1fb88c58dec043e6ca7312b4af6afaf07ce7",
+  "spec": {
+   "name": "llm-d-optimized-baseline-modeled-tuned",
+   "parameters": {
+    "affinity_threshold": 0.8126963909010275,
+    "max_ttft_penalty_ms": 2675.7914179828817,
+    "queue_threshold_tokens": 723529,
+    "ttft_source": "modeled"
+   },
+   "router_config": {
+    "router_prefill_load_model": "ais"
+   },
+   "router_mode": "kv_router",
+   "seeded": false,
+   "type": "llm-d-optimized-baseline"
+  },
+  "val_objective": 0.3084993980622282,
+  "val_per_cell": {
+   "sessions-s2-think2.0-n4-closed-L2": 0.3084993980622282
+  },
+  "values": {
+   "parameters.affinity_threshold": 0.8126963909010275,
+   "parameters.max_ttft_penalty_ms": 2675.7914179828817,
+   "parameters.queue_threshold_tokens": 723529
+  },
+  "which": "best_so_far",
+  "z": [
+   0.8126963909010275,
+   0.3164700170974192,
+   0.34154319251541115
+  ]
+ },
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}

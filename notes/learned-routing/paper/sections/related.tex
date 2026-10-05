@@ -1,0 +1,275 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: place the work among (1) KV-cache-aware routing heuristics, (2) learned routers for LLM
+%   serving, (3) learned systems policies trained in simulation and black-box policy search,
+%   (4) discrete-choice models with context effects, (5) goodput, SLO and evaluation methodology.
+%   Each paragraph says what we take from the area and where we differ; it is not a survey.
+% EVIDENCE: CR/literature/LESSONS.md (adversarially verified lessons; "VERIFIED (pdf p.N)" lines),
+%   CR/literature/notes/*.md (scout notes with section and page pointers), CR/literature/BIBLIOGRAPHY.md
+%   (read depth). Claims not in LESSONS.md were re-checked against CR/literature/txt/ or
+%   pdftotext of CR/literature/pdfs/ on 2026-10-03 (marked "re-checked" below). Sources read only as
+%   an abstract or web page are cited for what that abstract or page says, nothing more.
+% STATUS: final for this draft.
+
+\section{Related work}
+\label{sec:related}
+
+Five lines of work meet in this study. For each we say what we take from it and where we differ.
+
+\paragraph{KV-cache-aware routing.}
+Most of our baselines come from this line (\cref{sec:baselines}), and the published rules weigh
+prefix reuse against load in different ways.
+% src: CR/literature/notes/llm-routing.md 2.4 (Preble sec. 3.2, p.5); re-checked txt/llm-routing/srivatsa2024-preble.txt l.67-80
+Preble sends a request to the GPU holding its prefix when the shared part outweighs the rest of
+the prompt, and otherwise to the GPU with the lowest cost, which counts recent load, the eviction
+the request would cause and the prefill of its missed tokens \citep{srivatsa2025preble}.
+% src: LESSONS.md LR-07 (LMetric sec. 4.4: 0.7 ChatBot, 0.55 API; pdf p.6, VERIFIED); LR-04 (P-token, pdf p.2, p.8-9)
+LMetric replaces weighted sums with the product of a worker's new prefill tokens and its batch
+size, arguing that the best weight of a linear score changes with the workload: 0.7 on one of
+its traces and 0.55 on another \citep{zhang2026lmetric}.
+% src: LESSONS.md LR-07 (DualMap sec. 2, pdf p.5-6, VERIFIED)
+DualMap restricts each prefix to two hashed candidates; it argues that picking the best of all
+workers amounts to a power-of-$\Nw$-choices rule that scatters shared prefixes, and that a
+per-request minimum-TTFT rule oscillates between cache-aware and load-aware decisions
+\citep{yuan2026dualmap}.
+% src: LESSONS.md LR-12 (CacheRoute Table 2, pdf p.4, VERIFIED); re-checked txt/llm-routing/cheng2026-cacheroute.txt
+%      l.579-586 ("A cache-hit increase is not enough; the plan is enabled only when p99 or capacity improves")
+CacheRoute periodically plans which replicas serve the most popular prefixes, and gates each plan
+on a shadow replay because a higher cache-hit rate alone did not guarantee lower tail latency or
+higher capacity \citep{cheng2026cacheroute}.
+% src: BIBLIOGRAPHY.md (llm-d blog, read on the web); the port's provenance in llm_d/precise_prefix.rs
+llm-d scores workers with a prefix scorer fed by an index of the engines' KV events
+\citep{llmd2025kvcache}.
+For agent traffic,
+% src: LESSONS.md LR-07 (SMetric Fig. 13, pdf p.8, VERIFIED)
+SMetric sends a session's follow-up turns to the worker with the most cached context unless that
+worker's estimated load would break a slack multiple of the TTFT SLO \citep{wang2026smetric};
+% src: BIBLIOGRAPHY.md (Autellix, read on the web, sec. 4.3); CR/literature/notes/llm-routing.md 2.7
+Autellix keeps an agent program's long calls on the program's engine and sends short calls to
+the least-used engine \citep{luo2025autellix};
+% src: LESSONS.md LR-14 (ThunderAgent sec. 3.2, pdf p.4-5, VERIFIED)
+and ThunderAgent schedules whole programs, observing that a router-side prefix tree that
+approximates worker caches goes stale under eviction thrashing \citep{kang2026thunderagent}.
+% src: CR/literature/notes/llm-routing.md 2.7 (Nixon et al. sec. 7.2, read on the web)
+A workload study simulated cache-first, load-first and sticky routing at several instance counts
+and tracked hit ratio, per-session replication and load imbalance \citep{nixon2026year}.
+
+% src: LESSONS.md LR-07 (SMetric sec. 4.1, pdf p.6: 920 vs 1,437 TPS within SLO, reuse 45% vs 74%,
+%      no global tier; VERIFIED); LR-04 (advantage "except for setups without any global KV$ store", pdf p.10)
+These rules disagree about which signal should dominate. On an agentic workload without a global
+KV tier, which is the setting of our replay, SMetric measured LMetric serving 36\% less
+SLO-meeting throughput than a tuned linear cache-plus-load score, with prefix reuse of 45\%
+against 74\% \citep{wang2026smetric}. We do not propose another heuristic. We tune these rules
+on equal terms, and the learned policy's features draw on their signals: uncached prefill, active prefill, batch size, KV utilization and session affinity, and, in feature set
+\code{v2}, LMetric's log-product and a hashed home-worker indicator in the spirit of DualMap
+(\cref{tab:features,tab:features-v2}).
+% src: FEATURES.md "Feature set v2" (log_ptok, log_bs: LR-07 LMetric; hash_home: LR-07 Lodestar, DualMap)
+
+\paragraph{Learned routers for LLM serving.}
+Learned routers differ in what they learn and in where they learn it.
+% src: CR/literature/notes/llm-routing.md 1.3 (Jain et al. sec. 5.3); re-checked
+%      txt/llm-routing/jain2024-intelligent-router.txt l.895-898 ("a in {0, ..., m}")
+Jain et al.\ train a reinforcement-learning router with a heuristic-guided reward; its action
+picks one of $m$ instances or none, so the network's shape is tied to the instance count
+\citep{jain2024intelligent}.
+% src: LESSONS.md LR-06 (Lodestar sec. 4.1, pdf p.5, VERIFIED: shared parameters, no instance identity);
+%      re-checked txt/llm-routing/lim2026-lodestar.txt l.488-505 (circular dependency, Fig. 3a)
+Lodestar learns online an MLP that predicts each instance's reward from per-instance features,
+with parameters shared across instances and no instance identity, so it does not depend on the
+instance count. It also shows that a latency predictor trained offline on logs of other routers
+loses its ranking signal once it routes, because the routing policy changes the states the
+predictor is evaluated on \citep{lim2026lodestar}.
+% src: LESSONS.md LR-13 (GORGO sec. 5, App. D, pdf p.7-8, VERIFIED)
+GORGO tunes the weights of an additive routing cost with an evolution strategy; optimizing p95
+TTFT alone drove the queue weight to zero and sent every request to the closest replica
+\citep{toniolo2026gorgo}.
+% src: BIBLIOGRAPHY.md (Wu et al., ICLR 2026, key sections); title-level claim only
+Wu et al.\ analyze KV eviction and learning-based load balancing together
+\citep{wu2026randomization}.
+% src: BIBLIOGRAPHY.md (Jha et al. 2024, RouteBalance 2026: abstract only, "tangential")
+Routers that choose among models or service-quality levels, rather than among replicas of one
+model, address a different decision \citep{jha2024learned,da2026routebalance}.
+% src: LESSONS.md LR-02 (CtR: hand-set weights, only constants fitted, pdf p.4, p.6), LR-04 (sec. V-B:
+%      0.819 vs 0.864, pdf p.3-5), LR-14 (sec. VI: residual 0.068, "does not reproduce the measured
+%      winner on any workload", pdf p.5-6), LR-13/LR-12 (sec. V-E: 0.292 vs RR 0.680, pdf p.4-5); all VERIFIED
+The closest study in method is Calibrate-then-Route \citep{tumkur2026calibrate}, a router with
+hand-set weights and fitted constants that was developed in a simulator and then measured on GPUs
+in disaggregated serving. With simulator-derived constants it lost 4.5 goodput points to the same
+router with measured constants (0.819 against 0.864). After re-fitting, the simulator matched
+measured goodput to a mean absolute residual of 0.068 but did not reproduce the measured winner
+on any workload. In a starved pool, greedy cost minimization collapsed to 0.292 goodput while
+round-robin held 0.680.
+% src: LESSONS.md LR-09 (AgentServeSim, causal release, pdf p.1-2, p.4) and LR-02 (sec. 5 Table 2:
+%      0.5% KV retention, 2.8% scheduling, pdf p.8); both VERIFIED
+AgentServeSim releases agent turns causally in simulation and searches policies with an
+LLM-driven evolutionary loop; its best evolved policies improved mean job completion time by
+0.5\% for KV retention and 2.8\% for scheduling over hand-written starting policies
+\citep{rajib2026agentservesim}.
+Our policy differs from these in three ways. It is trained on-policy, since every candidate is
+scored by replaying it, which avoids the logged-policy mismatch Lodestar describes, and it is
+frozen afterwards. Its objective counts a request as good only if both its inter-token latency
+and its end-to-end slowdown are within bounds, where GORGO's objective was p95 TTFT alone. And
+Calibrate-then-Route's findings are why ranking
+stability under router-state lag and on GPUs is part of the protocol
+(\cref{sec:robustness,sec:live}).
+% src: CR/literature/notes/llm-routing.md 4.3 ("None of the learned routers report training on some N and
+%      testing on unseen N, except Lodestar's architectural N-independence")
+Among the learned routers we read, none trains at some worker counts and tests at unseen ones;
+Lodestar's shared predictor is independent of the instance count by construction.
+
+\paragraph{Learned systems policies and black-box search.}
+% src: LESSONS.md LR-03 (Decima sec. 5.3 fixed arrival sequences, pdf p.7, p.10; Mao ICLR'19, pdf p.3, p.5),
+%      LR-10 (Decima App. I Table 3: 630 vs 610 s, pdf p.19), LR-15 (Decima Table 2: 104.8 s vs 91.2 s,
+%      pdf p.11); all VERIFIED
+Decima learns cluster scheduling with reinforcement learning in a simulator, and it fixes the
+job-arrival sequence across episodes to cut the variance that stochastic arrivals add
+\citep{mao2019decima,mao2019inputdriven}. It shows both sides of transfer: an agent trained on a
+cluster ten times smaller was 3\% worse in average job completion time (630 against 610 s),
+while one trained on a mismatched load did worse than the tuned heuristic (104.8 against 91.2 s)
+\citep{mao2019decima}.
+% src: re-checked txt/learned-systems-policies/mao2017-pensieve.txt l.298-360 (slow-start-restart disabled)
+Pensieve trains a bitrate controller in a chunk-level simulator and disabled TCP slow-start
+restart on its video server so that deployment matched a simulator assumption
+\citep{mao2017pensieve}.
+% src: LESSONS.md LR-07 (Park sec. 3.1 bootstrapping, pdf p.4) and LR-13 (Park sec. 3.3 reservation,
+%      pdf p.5); VERIFIED
+Park catalogs the difficulties of learning systems policies; one of its load balancers learned to
+keep a server free for small jobs and was not robust when the job mix changed, and it suggests
+bootstrapping search from existing policies \citep{mao2019park}, as M1's heuristic-derived
+starting points do (\cref{sec:restarts}).
+% src: LESSONS.md LR-14 (Puffer sec. 5.2, pdf p.9-10), LR-09 (CausalSim, pdf p.1-3), LR-11 (Genet,
+%      pdf p.3-4), LR-14 (Peng Tables II-III, pdf p.7), LR-13 (Lehman, pdf p.9-10); all VERIFIED;
+%      Puffer abstract re-checked txt/learned-systems-policies/yan2020-puffer.txt l.22-32
+The cautions are empirical. Puffer's randomized trial found it difficult for sophisticated or
+learned bitrate controllers to outperform a simple buffer-based scheme despite good results in
+emulation, and a controller whose predictor was trained in emulation performed poorly in
+deployment
+\citep{yan2020puffer}. Trace-driven simulation is biased when the policy changes the traces it
+replays \citep{alomar2023causalsim}. Learned policies that win on average can still lose to the
+baselines in a substantial fraction of environments \citep{xia2022genet}. Randomizing latency
+and observation noise was necessary for simulation-trained robot control to transfer
+\citep{peng2018sim2real}. And search exploits simulator bugs \citep{lehman2020creativity}. These
+findings motivate the closed-loop and agent-lane cells, the per-cell winner map, the timing and
+lag perturbations, the concentration audit and the live check (\cref{sec:eval}).
+
+% src: re-checked txt/learned-systems-policies/mania2018-ars.txt l.17, l.84 (static linear policies);
+%      LESSONS.md LR-05 (ARS sec. 3.2 state normalization, pdf p.7-8; Hansen tutorial sec. 5, pdf p.24),
+%      LR-03 (PEGASUS, pdf p.3-7; UH-CMA-ES, pdf p.4, p.8-9); re-checked
+%      txt/learned-systems-policies/salimans2017-es.txt l.282-290, l.450 (variance independent of T)
+On method, static linear policies trained by random search matched reinforcement learning's
+sample efficiency on the MuJoCo benchmarks, given normalized inputs \citep{mania2018ars};
+evolution strategies' gradient estimates do not depend on episode length, which suits long
+horizons with delayed reward \citep{salimans2017es}. We use CMA-ES \citep{hansen2016tutorial},
+score every candidate of a generation on the same random scenarios, as PEGASUS fixes scenarios to
+make policy evaluation deterministic \citep{ng2000pegasus}, and borrow UH-CMA-ES's rank-change
+measurement as a diagnostic, without its treatment of the measured uncertainty
+\citep{hansen2009uh}.
+% src: LESSONS.md LR-14 (Mitzenmacher, pdf p.2; Tahir sec. 1, pdf p.1-2), LR-12 (van der Boor sec. 1, 2.4,
+%      pdf p.4, p.7, p.11-12); VERIFIED
+Load-balancing theory frames two risks of our setting: sending work to the least-loaded server
+on old load information can significantly hurt performance \citep{mitzenmacher1998old}, and
+delayed information makes join-the-shortest-queue dispatch herd \citep{tahir2022meanfield}; how balancing rules compare
+also changes with the number of servers and the load regime \citep{vanderboor2022survey}.
+
+\paragraph{Discrete choice with context effects.}
+With rank 0, \lc{} is a conditional logit, the base case of the generalized extreme-value family
+\citep{train2009gev}: one coefficient vector scores every candidate, so the same parameters serve any worker count, and at $\temp = 0$
+the policy takes the logit's most likely choice.
+% src: re-checked pdftotext CR/literature/pdfs/dcm-context/maragheh2018-halo-mnl.pdf (sec. 1: two-way
+%      interaction terms between items); BIBLIOGRAPHY.md ("design confirmation (no worker-ID terms)")
+Halo models add pairwise terms between specific items \citep{maragheh2018halo}; \lc{} has no
+worker-identity terms, so its parameters apply unchanged as workers come and go.
+% src: re-checked pdftotext CR/literature/pdfs/dcm-context/rosenfeld2020-set-dependent-aggregation.pdf
+%      (sec. 1: argmax predictions "are clearly independent of s"; cannot be fixed by more complex F)
+A plain logit satisfies the independence of irrelevant alternatives: the preference between two
+candidates never depends on which others are present, however rich the item score
+\citep{rosenfeld2020setdependent}. M2's context terms and \code{v2}'s set-relative features add
+that dependence.
+% src: LESSONS.md LR-05 (Tomlinson sec. 3.1-3.2, pdf p.4-5: column-restricted LCL, not DLCL), LR-06
+%      (Lemma 4.3, Prop. 4.5, pdf p.4-6), LR-15 (footnote 3, Fig. 2, pdf p.10-11, p.13); VERIFIED
+In the linear context logit (LCL) of \citet{tomlinson2021lcl} the coefficient vector shifts
+linearly with the mean features of the choice set, $\theta + A\fbar$. M2's pooled form is an LCL
+with a low-rank $A$; its named-source form is an LCL over a vector of named set statistics, with
+one free column of $A$ per statistic. Neither is their DLCL, a mixture of logits with separate
+intercepts. Three of their results shaped our design. Choice depends only on deviations from the set mean, so terms that are constant across
+the set cancel. $A$ is identifiable only from at least $\dfeat + 1$ choice sets with affinely
+independent mean features. And LCL did not beat the plain logit within a fixed training budget
+although it nests it, one reason the ladder adds context in a small step that starts from the
+selected M1 and is compared with M1 trained for the same added evaluations (\cref{sec:ladder}).
+
+% src: LESSONS.md LR-05 (Seshadri pdf p.4, p.8; Rosenfeld Fig. 3, pdf p.7-8; Ko & Li eq. 3, pdf p.5),
+%      LR-06 (Pfannschmidt pdf p.7, p.11, p.22-23; Webb pdf p.26-30), LR-15 (Aouad pdf p.8; DeepHalo
+%      pdf p.5-6; Train pdf p.2-9); VERIFIED
+Other set-dependent models use pairwise context vectors summed over the set
+\citep{seshadri2019cdm}, set-dependent aggregation \citep{rosenfeld2020setdependent}, pooled set
+embeddings \citep{pfannschmidt2022context}, mixtures of random-utility networks
+\citep{aouad2023rumnet}, self-attention \citep{ko2024attention} and stacked interaction layers
+\citep{zhang2026deephalo}; divisive normalization fits human choices across set sizes from 2 to
+12 \citep{webb2021normalization} and inspired \code{v2}'s ratio features. Low-rank choice
+parameters are unique only up to a multiplicative factor unless a penalty fixes the scale
+\citep{ko2024attention}. M2's pooled form has the same freedom, since scaling $p_{\cidx}$ up and
+$q_{\cidx}$ down by one factor changes nothing, while the named-source form, which is linear in
+$p_{\cidx}$, has none. The nested logit groups alternatives whose unobserved utilities are
+correlated \citep{train2009gev}; under a deterministic argmax its nest parameters have no effect
+(our inference), so node structure would enter as nest-level features rather than as a GEV model
+(\cref{sec:nested}).
+% src: re-checked pdftotext CR/literature/pdfs/dcm-context/jain2020-generalization-new-actions.pdf
+%      (softmax over available actions; subsampled action sets; validation on held-out action sets,
+%      Alg. 1 l.17); LESSONS.md LR-10 (pdf p.4-5, p.8, VERIFIED); LR-06 (Deep Sets, corrected scope)
+In reinforcement learning, \citet{jain2020newactions} use a shared utility followed by a softmax
+over the available actions, a conditional logit over a variable action set; generalizing it to
+unseen action sets took subsampled action sets, entropy regularization and model selection on
+held-out action sets. Our analogue of the last is validation at $\Nw = 6$, a worker count
+training never sees. The named context sources are request-level quantities or means and maxima
+over candidates, a permutation-invariant pooling \citep{zaheer2017deepsets}, chosen so that
+duplicating every worker leaves them unchanged.
+% src: FEATURES.md "Context sources" (unit test duplicating_the_worker_set_keeps_features_sources_and_choice)
+
+\paragraph{Goodput, SLOs and evaluation methodology.}
+% src: re-checked txt/eval-methodology/zhong2024-distserve.txt l.76-82 (goodput = max request rate at the
+%      SLO attainment goal); LESSONS.md LR-08 (SLO-scale sweep, pdf p.10, VERIFIED)
+DistServe defines goodput as the highest request rate that meets an SLO-attainment target, and
+sweeps a single scale factor over its SLOs \citep{zhong2024distserve}. We measure good requests
+per second at a fixed load inside a window, and judge a request by its mean inter-token latency
+and its end-to-end slowdown against an uncontended latency (\cref{sec:objective}); as our
+analogue of DistServe's sweep, the finalists' test runs are re-scored at several SLO scales.
+% src: LESSONS.md LR-08 and LR-13 (Wang et al. sec. 4.2 eq. 8 and sec. 1, pdf p.1, p.6, VERIFIED)
+Binary SLO goodput rewards giving up on requests that will miss anyway, and a TPOT-style bound
+averages out stalls in the middle of a request \citep{wang2024slo}; both are why the audits look
+for sacrificed requests and concentrated load (\cref{sec:audits}).
+% src: LESSONS.md LR-09 (Schroeder principles (v), (vii), pdf p.10-11, VERIFIED; scope: an analogy for routing)
+Open and closed load generators behave differently: scheduling helps a closed system only at
+moderate load, and, as a rule of thumb, sessions of more than ten requests make a partly open
+system behave as closed \citep{schroeder2006open}; we therefore stratify by load mode.
+% src: LESSONS.md LR-14 (Vidur sec. 7.2, pdf p.9, VERIFIED); BIBLIOGRAPHY.md (Abdelfattah et al.:
+%      abstract only; "22.2%" and "14 industrial cases" from the abstract, CR/literature/notes/eval-methodology.md sec. 4)
+Simulator error grows near capacity: in Vidur, small prediction errors near the capacity point
+blow up into large latency errors \citep{agrawal2024vidur}. A load-testing study reports that
+handling warm-up properly improved the accuracy of capacity estimates by 22.2\% across 14
+industrial cases \citep{abdelfattah2026loadtesting}.
+% src: LESSONS.md LR-10, LR-11 (Demsar pdf p.5, p.7; Agarwal pdf p.5-8; Bouthillier pdf p.8-10;
+%      Henderson pdf p.5; Dodge pdf p.1-3; Cawley pdf p.1, p.16, p.25); VERIFIED
+Our statistics follow the guidance for comparisons over few independent tasks: a Wilcoxon
+signed-rank test over independent units \citep{demsar2006}, bootstrap intervals and
+interquartile means over tasks \citep{agarwal2021precipice}, a probability-of-improvement effect
+size with thresholds for significant and meaningful \citep{bouthillier2021variance}, several
+seeds and restarts \citep{henderson2018matters}, budget-aware reporting \citep{dodge2019show}, and
+selection on data the final test never sees \citep{cawley2010overfitting}.
+
+\paragraph{Position of this work.}
+The study combines four choices that we did not find together in the work above. The policy is a
+deployable choice rule, linear in inputs the live router already has, rather than a latency
+predictor. Every baseline is tuned with the same budget and selection rule as the learned model,
+and the headline comparison is against the validation-selected best of them. Worker counts are
+held out: training uses $\Nw \in \{4, 8\}$, and the test adds 2, 6, 16 and 32. And the headline
+test is pre-registered over independent trace segments. Two of our findings echo this literature.
+The learned policy's advantage over the ported heuristics is largely an LMetric-style
+interaction between uncached prefill and load (\cref{sec:res-coefficients,sec:res-fairness}), which
+supports LMetric's point that the two should interact, though here as a correction added to the
+default's additive cost rather than in place of it; and the first unconstrained
+search found the kind of objective gaming GORGO and Lehman et al.\ document, which a sign constraint
+on load coefficients removed (\cref{sec:gaming}). The price is that every result in this paper is
+simulated; as Calibrate-then-Route and Puffer show, a simulated ranking need not survive deployment.
+Our live check on six test cells found the simulated ranking intact on GPUs, but not the simulated
+gap sizes (\cref{sec:live}).

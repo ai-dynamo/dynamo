@@ -135,7 +135,7 @@ If (3) fails, recalibrate the loads once and retry. Otherwise stop with a diagno
 - The top-level session keeps a worklog in the worklog.
 
 **Paths:** campaign root `<campaign-root>/`, worktree
-`<worktree>` on branch `rupei/learned-routing-public`; the final report
+`<worktree>` on branch `rupei/learned-routing`; the final report
 is copied here.
 
 ## Decisions (operator, 2026-10-02)

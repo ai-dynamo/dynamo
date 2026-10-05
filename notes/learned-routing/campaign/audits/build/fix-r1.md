@@ -2,7 +2,7 @@
 
 - Fixer: build fixer r1, 2026-10-02 (about 16:44–17:05 PDT).
 - Input: one major finding, `goodput-normalization-r1.md` F1. The other two lenses passed in round 1.
-- Worktree: WT `rupei/learned-routing-public`, head `<commit-12>` (one signed commit on the A3 sidecar's
+- Worktree: WT `rupei/learned-routing`, head `<commit-12>` (one signed commit on the A3 sidecar's
   `<commit-11>`). Bindings were not rebuilt; `build_id` is still `6955b0ee…`.
 - Evidence: `CR/runs/build-fix-r1/` (`smoke/`, `a3_smoke/`, `candidates_check/`, `cells/`).
 - **Verdict on F1: VALID, FIXED at the root.** Nothing was rebutted.

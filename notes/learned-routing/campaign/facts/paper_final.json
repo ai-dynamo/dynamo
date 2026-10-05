@@ -1,0 +1,158 @@
+{
+ "schema": "paper-final-v1",
+ "stage": "paper final (A20; PAPER_REQUESTS R1, R2): live section filled, numbers reconciled, PDF rebuilt",
+ "written_local": "2026-10-05 07:51 PDT",
+ "status": "ok",
+ "inputs_sha256": {
+  "facts/live_results.json": "3dbc532392d798d8188e57dd40cb1d94a9a4c5118aca0131de4568febe20a9af",
+  "report/LIVE.md": "b0ec46916ca229da33cdc34f1ddc75ea2c6fde1f704a4896ecec03145aa32fce",
+  "facts/live_plan.json": "9c01e4a58c5d198c3795026972280a80836eff34c51f64f3501ab2c444d78acc",
+  "report/REPORT.md": "03f0d0e1f1c7ee1b3adde1259e57c985db001af82001d531f616dd79251e192d",
+  "report/data/tables/live_validation.md": "56c6b50078c1d2f92f34056c426d4c4ebc8e93cb1d2b5df176a9596603d39526",
+  "facts/finalists.json": "e0bae29d7fb7e4bc88a93ba6f5fa4fd0498668a8559139230bb1472c838d0c87",
+  "facts/test_results.json": "f22f5d1633279d603a1bbbe01f1f9d2897c83528cc0a4a90a8b301dee5845ba0",
+  "facts/robustness.json": "a8b5c973cfe86812886315ee6fa2dc4d3c1bcb70b6e44b9fc84b7af4bdf3b41b"
+ },
+ "outputs": {
+  "worktree_commit": "<commit-47> (rupei/learned-routing, docs(learned-routing): fill the paper's live GPU validation section; git commit -s, no co-author trailer; 20 paths under notes/learned-routing/paper/)",
+  "pdf_copy": "report/paper/learned-routing-paper-final.pdf",
+  "pdf_sha256": "43a970edbd095692af31aaea88e69a207f4d40ef22f310524fc0549bdb10d598",
+  "pdf_pages": 113,
+  "build": "make (latexmk + pdflatex + BibTeX, installed TinyTeX only; no tlmgr): 0 overfull boxes, 0 undefined references or citations; BibTeX empty-year warnings on software entries only",
+  "generated_tables_added": [
+   "live_goodput",
+   "live_vs_default",
+   "live_vs_ramjet",
+   "live_minus_sim",
+   "live_tau",
+   "live_sign",
+   "live_engine"
+  ],
+  "derived_numbers_script": "runs/paper-final/scripts/paper_final_numbers.py -> runs/paper-final/derived.json",
+  "number_check_script": "runs/paper-final/scripts/number_check.py -> runs/paper-final/number_check.out"
+ },
+ "derived_numbers_note": "the next keys up to number_reconciliation are runs/paper-final/derived.json verbatim (paper_final_numbers.py); the paper's src comments cite them as facts/paper_final.json <key>",
+ "n4_test_cells": 13,
+ "n4_k0_m1v2_minus_ramjet_by_cell": {
+  "conv-w3-base-n4-open-L2": 0.469934,
+  "mooncake-w5-base-n4-closed-L3": 0.141206,
+  "mooncake-w5-base-n4-open-L3": 0.121967,
+  "mooncake-w5-islp2.5-n4-open-L2": 0.071304,
+  "mooncake-w3-base-n4-open-L2": 0.068537,
+  "agentx-T1-think4.0-n4-lanes-L2": 0.051339,
+  "mooncake-w3-osl4.0-n4-open-L2": 0.02538,
+  "fast25_synthetic-x0-base-n4-open-L2": 0.010785,
+  "sessions-s6-base-n4-open-L2": -0.000442,
+  "sessions-s6-think4.0-n4-open-L2": -0.001175,
+  "sessions-s9-base-n4-open-L1": -0.001539,
+  "agentx-T3-base-n4-lanes-L3": -0.016144,
+  "agentx-T1-base-n4-lanes-L2": -0.022696
+ },
+ "n4_k0_cell_mean": 0.07065058694939713,
+ "live_cells_k0_mean": 0.13533120723792602,
+ "live_cells_rank_among_n4": {
+  "mooncake-w3-base-n4-open-L2": 5,
+  "mooncake-w5-base-n4-open-L3": 3,
+  "mooncake-w5-base-n4-closed-L3": 2,
+  "conv-w3-base-n4-open-L2": 1,
+  "fast25_synthetic-x0-base-n4-open-L2": 8,
+  "sessions-s6-base-n4-open-L2": 9
+ },
+ "sigma_live": {
+  "value": 0.009043387121902755,
+  "df": 6,
+  "ci95_two_sided": [
+   0.005827499046734643,
+   0.019914136326268952
+  ],
+  "upper95_one_sided": 0.017321959622940343,
+  "bar_2sqrt2_at_upper95": 0.048993900451282754,
+  "m1v2_minus_ramjet_live_informative": {
+   "conv-w3-base-n4-open-L2": {
+    "live": 0.6625187931494511,
+    "clears_bar_at_upper95": true
+   },
+   "fast25_synthetic-x0-base-n4-open-L2": {
+    "live": 0.034692143868272116,
+    "clears_bar_at_upper95": false
+   },
+   "mooncake-w3-base-n4-open-L2": {
+    "live": 0.0768092183249148,
+    "clears_bar_at_upper95": true
+   },
+   "mooncake-w5-base-n4-closed-L3": {
+    "live": 0.13289580663022924,
+    "clears_bar_at_upper95": true
+   },
+   "mooncake-w5-base-n4-open-L3": {
+    "live": 0.19026053972798176,
+    "clears_bar_at_upper95": true
+   }
+  }
+ },
+ "usage_prefix_hit": {
+  "runs": 42,
+  "max_abs_diff": 0.015192737002234113,
+  "runs_within_0p010": 40,
+  "source": "runs/audits/live-fidelity/prefix_out.txt (usage cached_tokens / ISL vs sim prefix_reuse)"
+ },
+ "m1v2_minus_m1_sim_pooled_mean": {
+  "k0": 0.0009135206870630186,
+  "k012_mean": 0.007381874125708482,
+  "a19_perm_p": 0.06805555555555555
+ },
+ "number_reconciliation": {
+  "method": "every number of 31+ or with a decimal point in the hand-written sections (comments, labels and refs stripped) was looked up in REPORT.md, LIVE.md, report/data/tables/*.md, facts/*.json (floats at 0-4 decimals and as percentages), facts/*.md, audits/**/*.md, literature lessons and notes, CONTRACT.md and config/engine.json; generated/*.tex were checked separately by regenerating them from the report fragments (byte-identical before and after this stage's script change)",
+  "unmatched_before_fix": 42,
+  "resolved": {
+   "baselines search ranges and llm-d defaults (4194304, 50000, 262144, 2097152, 3240000, 1073741824)": "runs/phase2/spaces/{dualmap,lmetric,ramjet,abla_ramjet,llmd_optimized_baseline}.yaml",
+   "test-trace bytes 2130865265": "sum of facts/test_freeze.json traces[*].bytes over 39 traces",
+   "trace statistics (FAST25 rows)": "traces/MANIFEST.json files[*].stats",
+   "trace statistics (sessions pooled)": "recomputed from traces/synthetic_sessions/sessions_seed*.jsonl: n 36170, ISL mean 6542.4, p50 5539, p90 11932, OSL mean 340.8, p50 249",
+   "trace statistics (AgentX)": "not re-derived here (play files mix request and group records); values carry the draft stage's computation recorded in the simulator.tex source comment",
+   "calibration level lines": "runs/calibrate-fix-r0/decisions.json levels",
+   "AgentX warm-up 1825-13191 s": "cells/{train,val,test}.jsonl measure.warmup_ms over 26 AgentX cells",
+   "feature normalizers 0.08173, 0.06031": "facts/pilot.json feature_scaling.pooled_within_set_sd",
+   "262,000 and 131{,}072 tokens": "arithmetic (128 x 2048 = 32 x 8192 = 8 x 32768 = 262,144) and engine context length"
+  },
+  "corrected": [
+   "robustness record total: the draft printed 24,840 (results.tex cost table, training.tex); facts/robustness.json execution.records gives lag 10,800 + lag-0 900 + timing 4 x 3,060 = 23,940 and coverage[*].records sums to 23,940; both places now read 23,940"
+  ],
+  "arithmetic_in_source_comments_rechecked": [
+   "853.59/24.823",
+   "1151.5/16.877",
+   "131072/301808",
+   "66313/301808",
+   "1634/3245",
+   "3132/82",
+   "34 x 2 x 3",
+   "Holm thresholds and Wilcoxon minimum p values"
+  ]
+ },
+ "a18": {
+  "tree_scan": "publish/scan.py --internal-ref rupei/learned-routing tree <copy of paper dir without build/> --repo WT: CLEAN (64 files)",
+  "git_scan": "publish/scan.py --internal-ref rupei/learned-routing git --repo WT --base HEAD~1 --head HEAD: CLEAN",
+  "pdf_text_scan": "publish/scan.py tree on pdftotext of the built PDF: CLEAN",
+  "notes": "facts/live_results.json and facts/live.json hold job IDs and internal paths and were never copied verbatim; the execution notes name no queue, partition, node, job or file system"
+ },
+ "audit_minors_carried_into_paper": {
+  "claims F1 (major, fixed upstream)": "rule-based departure account with both directions; sessions gain over default not reproduced beyond live noise; never called ceiling",
+  "claims F2": "headline limit 5 uses 'agree with', states cells not random and that absolute goodput and gap sizes are not validated",
+  "claims F3": "paper's follow-up wording no longer says the live runs avoid the frozen test cells; REPORT's stale lines are out of this stage's scope (see issues)",
+  "claims F4": "like-for-like k0 cell mean over all 13 N = 4 test cells (+0.071) next to +0.135 and the stratum segment mean +0.055; cells chosen after the test pass; the three largest N = 4 gaps are in the live set",
+  "claims F5 / fidelity F3": "sigma_live 6 df, 95% interval 0.006-0.020; at the one-sided 95% upper bound the bar is 0.049 and FAST25 synthetic's +0.035 does not clear it; 0.011 vs 0.013 sd by reference",
+  "claims F6": "pooled tau 1.00 rests on a 0.0009 sim gap between M1-v2 and M1 (0.0074 over k0-2); the permutation null is weak; A19 permutation p 0.068 reported",
+  "claims F7": "execution notes: watchdog threshold 3 -> 60 on later jobs, two jobs through a different scheduler queue, cross-job comparisons, FAST25 synthetic tie groups, closed-loop admission by concurrency, round-robin keeps k0 under lag",
+  "claims F8 / fidelity F1": "usage-based prefix hit rate for all 42 runs (within 0.015 of replay; within 0.010 in 40); vLLM counter mechanism stated as our reading of the vLLM 0.24.0 scheduler, with preemption as a second re-query path; counter-comparable runs are the low-queueing ones",
+  "fidelity F2": "engine-timing reading stated as an untested hypothesis; cache reuse ruled out as the cause",
+  "fidelity F4": "session context reaching learned-choice live is listed under what the runs cannot show"
+ },
+ "decisions": [
+  "live tables are copied from report/data/tables/live_validation.md (REPORT 15) by scripts/make_tables.py, extended to pick one table of a multi-table fragment and to split rows on unescaped pipes; every pre-existing generated table is byte-identical after the change",
+  "the engine-descriptive table drops the vLLM-counter prefix column (computable for 14 of 42 runs) and the text reports the usage-based hit rate for all 42 runs from the live-fidelity audit's per-run output instead",
+  "the descriptive departure rule is presented as added after the registered analysis at the audit's request, never as registered",
+  "the paper states the registered verdicts in the registered words ('agrees', 'holds live') and limits them to the ranking and the M1-v2 - ramjet sign",
+  "the faithful-LMetric follow-up wording now asks for live runs on non-test cells, since the live finalist runs used frozen test cells (claims F3)",
+  "conclusion next steps: a larger live check (repeats, random cells, other N, AgentX load generator) replaces the placeholder item"
+ ]
+}

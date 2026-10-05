@@ -594,7 +594,7 @@
     "osl_mean": 182.1,
     "path": "traces/mooncake/mooncake_trace.jsonl",
     "provenance": {
-     "contract": "_shared/benchmark-traces.md",
+     "contract": "<trace-corpus-index>",
      "expected_sha256": "b434f1816a707f4bac697235588184ebc374c9907cb981bb65fb0643471fe711",
      "source": "<traces>/mooncake_trace.jsonl",
      "upstream": "kvcache-ai/Mooncake (toolagent: FAST25-release/traces/toolagent_trace.jsonl, identical SHA)"
@@ -612,7 +612,7 @@
     "osl_mean": 182.1,
     "path": "traces/toolagent/toolagent_trace.jsonl",
     "provenance": {
-     "contract": "_shared/benchmark-traces.md",
+     "contract": "<trace-corpus-index>",
      "expected_sha256": "48a2db1a13d3bc05e6330140c64f604ba366df20d3c9e128b5c35a01c1fa5f71",
      "source": "<traces>/toolagent_trace.jsonl",
      "upstream": "kvcache-ai/Mooncake (toolagent: FAST25-release/traces/toolagent_trace.jsonl, identical SHA)"

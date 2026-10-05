@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,7 @@ plan = load("plan")
 weights = load("weights")
 health = load("health_check")
 facts = load("live_facts")
+pairs = load("pairs")
 
 CAMPAIGN_ENGINE = {
     "model": "Qwen/Qwen3-32B",
@@ -353,3 +355,81 @@ def test_metric_parsing_matches_counters_with_labels_and_total_suffix():
     )
     assert health.metric_sum(samples, "vllm:num_requests_running") is None
     assert int(samples[-1][1]["worker_id"], 16) == 42
+
+
+def _pairs_fixture(tmp_path, runs):
+    plan_dir = tmp_path / "plan"
+    for slug in ("default_defaults", "m1v2"):
+        (plan_dir / "policies" / slug).mkdir(parents=True)
+        (plan_dir / "policies" / slug / "policy_plan.json").write_text("{}")
+    (plan_dir / "PLAN.json").write_text(json.dumps({"replicate": 0}))
+    inputs = tmp_path / "inputs"
+    for run, manifest in runs.items():
+        (inputs / run).mkdir(parents=True)
+        (inputs / run / "manifest.json").write_text(json.dumps(manifest))
+        (inputs / run / "aiperf_input.jsonl").write_text("")
+    return plan_dir, inputs
+
+
+def test_pairs_check_accepts_a_batch_and_keeps_file_order(tmp_path):
+    cell = {"cell_id": "c", "k": 0, "num_workers": 4}
+    plan_dir, inputs = _pairs_fixture(
+        tmp_path,
+        {
+            "c__default_a": {**cell, "salt": "s1"},
+            "c__m1v2": {**cell, "salt": "s2"},
+            "idle__p1": {"cell_id": None, "salt": "s3"},
+        },
+    )
+    text = (
+        "# label slug run est_s\n"
+        "m1v2 m1v2 c__m1v2 780\n"
+        "default_a default_defaults c__default_a 775  # trailing comment\n"
+        "idle-e0 default_defaults idle__p1 200\n"
+    )
+    batch = pairs.parse(text)
+    assert pairs.check(batch, plan_dir, inputs, 4) == []
+    assert pairs.table(batch).splitlines() == [
+        "01\tm1v2\tm1v2\tc__m1v2\t780",
+        "02\tdefault_a\tdefault_defaults\tc__default_a\t775",
+        "03\tidle-e0\tdefault_defaults\tidle__p1\t200",
+    ]
+
+
+def test_pairs_check_refuses_batches_that_cannot_run_as_planned(tmp_path):
+    plan_dir, inputs = _pairs_fixture(
+        tmp_path,
+        {
+            "a": {"cell_id": "c", "k": 0, "num_workers": 4, "salt": "same"},
+            "b": {"cell_id": "c", "k": 1, "num_workers": 8, "salt": "same"},
+        },
+    )
+    batch = pairs.parse(
+        "x default_defaults a 10\nx m1v2 b 10\ny ramjet a 10\nz m1v2 missing 10\n"
+    )
+    problems = "\n".join(pairs.check(batch, plan_dir, inputs, 4))
+    for expected in (
+        "pair 2 (x): label repeats pair 1",
+        "input replicate k=1 but the plan is k=0",
+        "input is for 8 workers, job has 4",
+        "pair 2 (x): salt 'same' repeats pair 1",
+        "pair 3 (y): policy 'ramjet' is not in the plan",
+        "pair 3 (y): salt 'same' repeats pair 1",
+        "pair 4 (z): unreadable",
+    ):
+        assert expected in problems, (expected, problems)
+
+
+@pytest.mark.parametrize(
+    "line, message",
+    [
+        ("a b c", "want 'label slug run est_s'"),
+        ("a b c 0", "not a positive integer"),
+        ("a b c 1.5", "not a positive integer"),
+        ("a b c/d 10", "is not [A-Za-z0-9._-]+"),
+        ("# only a comment", "no pairs"),
+    ],
+)
+def test_pairs_parse_rejects_malformed_lines(line, message):
+    with pytest.raises(pairs.PairsError, match=re.escape(message)):
+        pairs.parse(line + "\n")

@@ -1,0 +1,1841 @@
+{
+ "schema": "learned-routing.tier-bc.v1",
+ "written": "2026-10-04 21:06:49 PDT",
+ "status": "complete",
+ "binding": "facts/gate.json full_plan tiers B and C as amended by CONTRACT A11 (and A12-A17); facts/phase2_mid_fix.json preregistration",
+ "orchestration": {
+  "phase2": "runs/phase2/ORCHESTRATOR.md (tier-B/C section)",
+  "ais": "runs/phase2-ais/README.md"
+ },
+ "decisions": {
+  "scope": "Tier B/C = gate full_plan tiers B and C (M2 rank 2 + M1 continued; M2 ranks 3-4, ablations a and b) plus the arms CONTRACT amendments add to the same relays: A15 M1-noaff (mandatory), A17.1 M1-v2 (tier B, never cut) and the A16 AIS league (M1-ais, M0-ais, llm-d-optimized-baseline-modeled, M2-ais; A16.5 assigns its scheduling to these relays). The relay prompt names only the gate's arms; the contract amendments bind as well.",
+  "m1_identity": "theta*_M1 = selection/tierA.json m1 (m1c-s1 g20 mean, val k0-2 0.16599, the A11.2 sign-constrained arm); every warm start uses it (facts/phase2_mid_fix.json preregistration.m1_identity).",
+  "m2_rank2": {
+   "space": "runs/phase2/spaces/m2_rank2.yaml (scripts/make_tierb_spaces.py)",
+   "sources": [
+    "isl_k",
+    "mean_active_prefill_tokens_k"
+   ],
+   "why_sources": "Pre-registered from LR-06's N-stable list before any M2 evaluation, without val data: isl_k targets the documented M1 failure axis (long-request sacrifice/segregation in the phase2-mid audits; M1 trails on AgentX's long contexts) and lets ISL enter only through the context (LR-06 action 2); mean_active_prefill_tokens_k is the set's prefill pressure, the router-observable analogue of A16.1's min_est_ttft_ms_s source for M2-ais, and has the largest within-cell spread of the load sources on the train tables (sd 1.10 vs mean 0.80; runs/phase2-ais/calib/m2ais_sources.json). The LR-15 drift check is INCONCLUSIVE and was not used (phase2_mid_fix lr15_drift).",
+   "form": "named-source LCL (LR-05): w = theta + sum_k c_k p_k; p_k0 pinned 0 (scale anchor, as M2-ais); theta7 pinned 0 and theta*_7 folded into p[isl_k][3] (feature 7 = isl_k x feature 3, an exact duplicate; LR-06, FEATURES.md)",
+   "bounds": "theta: M1 bounds; p: +-4 s_j / rms(source) (rms on the AIS-prep train theta0 tables; the same requests, isl_k is policy-independent, mean_active_prefill is the AIS-load default trajectory's: an approximation)",
+   "sign_rule": "theta3/4/5 clamped <= 0 (prereg) AND p_kj clamped <= 0 on load columns 3, 4, 5, 7 (both sources >= 0, so every effective load weight w_j stays <= 0 for every request): a tightening of the prereg's 'context term not sign-constrained', decided before any M2 evaluation, because p[isl_k][3] is exactly theta7's role and an unconstrained p would undo the A11.2 remedy (facts/DEVIATIONS.md)",
+   "warm_start": "theta*_M1 physical (clamped values 0 on theta3/4/7 start at the clamp edge, internal 0.5), p = 0, p std 0.3 x sigma0 = 0.0012 (LR-15); identical start for m1cont; at p = 0 M2 decides exactly as M1 (runs/phase2/checks/tierb_smoke: identical goodput on 2 cells)",
+   "dimension": 20
+  },
+  "m1_continue": "runs/phase2/spaces/m1_continue.yaml: the m1c space (theta3/4/5/7 clamped <= 0, sigma0 0.004) started at theta*_M1; B = 400 more evaluations, seeds 1/2/3 (LR-15 comparator; also ablation a's learned comparator)",
+  "m1_noaff": "runs/phase2/spaces/m1noaff_{s1,s2bc,s3cache}.yaml: the m1c spaces with theta6 pinned 0 (A15; prereg m1_noaff); inits s1 theta0, s2 the projected BC with theta6 -0.324 -> 0, s3 the cache-heavy init with theta6 42.4 -> 0. Post-hoc theta6 = 0 check of the selected M1 is a Select+Test item.",
+  "m1_v2": {
+   "prep": "runs/phase2/scripts/m1v2_prep.py -> runs/phase2/m1v2/prep.json, inits/m1v2_s{1,2,3}.json",
+   "spaces": "runs/phase2/spaces/m1v2_{s1,s2bc,s3lmetric}.yaml, 22 free coordinates, theta0 pinned -1",
+   "bounds": "theta0-7 = M1 bounds (M1-v2 nests M1); 8-22 +-4 s_j on reconstructed TRAIN k0 default tables (34 cells; the recomputed v1 s_j agree with the pilot's within 6%)",
+   "sign_rule": "clamp <= 0 on 3, 4, 5, 7, 8, 10, 12-21 (prereg m1_v2)",
+   "sigma0": "0.0028 = flip rate 0.196 (the M1 space's measured rate at sigma0 0.004) at the s1 start",
+   "inits": "s1 theta0; s2 BC of llm-d-precise-prefix@defaults (TRAIN k0, theta11 hash_home pinned 0 in the fit because its offline value is a stand-in) projected onto the constraint: agreement 0.914 -> 0.887 (theta0 0.512); s3 LMetric's point -e0 - 20.7 (e_log_ptok + e_log_bs), 90% of bound_8 (agreement 0.924 with the pure LMetric rule on the default tables)",
+   "hash_home_caveat": "feature 11 is reconstructed with Python's hash, not the Rust rendezvous: exact for its scale (count only), not for its values",
+   "seeds": "CMA seeds 1/2/3 for s1/s2/s3 as every other 3-restart arm; m1v2-s2/s3 had inherited --seed 1 from the m1c-s1 template and were corrected at 03:41 PDT 2026-10-04 by the tier-B/C relay i1, before either was placed (facts/DEVIATIONS.md; runs/phase2/checks/MANIFEST.pre-m1v2-seedfix.json)"
+  },
+  "ais_league": {
+   "instance": "second p2orch instance from the AIS worktree (runs/phase2-ais, bundle p2ais, build 555ca082), yield-to runs/phase2/state.json up to wave 6, ws:0 disabled",
+   "sign_rule": "M1-ais restarts use runs/phase2-ais/spaces/m1c_ais_{s1,s2bc,s3rule}.yaml: clamp <= 0 on v3 load features 3, 4, 5, 7, 9, 11, 12 (prereg ais_league_recommendation; 8 est_prefill_ms_s free); s2 BC init projected (llm-d agreement 0.6876 -> 0.6653, runs/phase2-ais/calib/m1c_ais_spaces.json); decided before any M1-ais evaluation; M0-ais and llm-d modeled unchanged",
+   "m2_ais": "pending the M1-ais selection (README 'After waves 1-3' recipe). Pre-registered now: make_m2_ais_space.py applies the M2 sign rule (theta and p load columns 3, 4, 5, 7, 9, 11, 12 clamped <= 0; A16.1 default sources min_est_ttft_ms_s and mean_est_decode_step_ms_s, both >= 0)."
+  },
+  "scheduling": {
+   "rule": "breadth-first per restart, in A17.3 keep order: phase2 waves 4/5/6 = restarts 1/2/3 of M2 rank 2, M1 continued, M1-v2; then the AIS league's waves 1-3 (M1-ais, M0-ais, llm-d modeled; never cut); then phase2 waves 7/8/9 = ablation a (learned, baseline) and M1-noaff; 10-12 = M2 ranks 3-4 and ablation b (above max_wave 9 unless the rank 3-4 gate passes). Enforced without a mutual wait: the AIS instance yields to phase2 waves <= 6; phase2 (max_wave 9, yield_to AIS:3, yield_own_from_wave 7, WT <commit-44>) holds back only its waves >= 7 while the AIS league has eligible waves 1-3 (scratch-tested with mocked nodes).",
+   "first_placement": "02:44-02:58 PDT 2026-10-04: m2r2-s1, m1cont-s1, m2r2-s2, m1cont-s2 (phase2), m1ais-s1, m0ais-s1, llmdobm-s1 (AIS) on the 7 free CPU cluster nodes; m1v2-s1 on the workstation once its spaces existed",
+   "nodes": "7 of the 12 parity-validated CPU cluster targets were free; both epyc9654p nodes and <node>/<node> are held by our account's other workloads, <node> by another user until 2026-10-04 14:15. sinfo showed no other idle x86 0gpu node with a validated image (an aarch64 build node and a <partition> node only).",
+   "deadline": "CPU cluster job-end cutoff: the next cutoff; jobs request --time 12:00:00 (max_time_s) and finish far earlier (PROJECTION 2.3-5.7 h per run).",
+   "ws0_ais_i1": "04:01 PDT 2026-10-04 (relay i1): ws:0 enabled in the AIS instance. The phase-2 instance holds back its waves 7-9 while the AIS league has eligible waves 1-3, which the AIS instance could not place on a disabled ws:0, so the workstation would have idled from m1v2-s1's end (~08:00, PROJECTION) until the AIS waves 1-3 were all placed on the CPU cluster (~11:30). Both instances treat each other's running targets as held, so no double booking; the next AIS wave-3 run takes the workstation, in A17.3 order.",
+   "m2_ais_priority_i1": "Recommendation for the AIS 'after waves 1-3' step: M2-ais is cut before the M1-noaff retrain and ablation a (A17.3), so re-init the AIS instance with yield-to phase2:9 and yield_own_from_wave 4 (waves 1-3 never wait; no mutual wait) and restart its loop on <commit-ais-05> (runs/phase2-ais/README.md). Applied by relay i3 (m2_ais_priority_i3, loops_i3).",
+   "capacity_check_i1": "03:40 PDT 2026-10-04 (relay i1): unchanged. <node>/<node> have <job> of ~<job> MB allocated to our account's indexer-yoy / indexer-yoy-prof jobs (ends 2026-10-05/06), <node>/<node> <job> of <job> MB to alloc-eval / crtc-opt; their CPU load was 0.06-0.66. Decision: do not co-locate a 128-192-thread lr-train with them (it would perturb the other workloads' measurements, notably a profiling job, and A10's more-than-half-RAM rule exists to keep one heavy job per node). <node> frees at 14:15 (another user) and the loops place on it automatically. The only other idle x86 node, a 48-CPU GPU-partition node, was not used (GPU users' node, unvalidated image, ~2.7x slower).",
+   "loops_i3": "07:44-07:53 PDT 2026-10-04 (relay i3): both loops stopped between ticks by exact PID (no children) and restarted in their own sessions with --max-wall-s 129600 (36 h, the prep recipe's value) instead of 43200, so neither stops at 14:48 / 15:27 with work left; each still exits by itself once nothing up to its max_wave is queued or running. AIS 1681624 (code loaded from <commit-ais-04>) -> 3923329 on the AIS WT file <commit-ais-05> (adds yield_own_from_wave; p2orch.py byte-identical to the tier-A WT's); phase2 2452725 -> 3928723 (same code, <commit-44>). Same cwd and LR_P2_DIR; first ticks 07:44:20 and 07:53.",
+   "m2_ais_priority_i3": "07:54:55 PDT 2026-10-04 (relay i3): the pre-registered M2-ais priority applied now, under the state lock (runs/phase2-ais/scripts/set_m2ais_priority.py, record runs/phase2-ais/checks/set_m2ais_priority_bc_i3.json, config_history in the AIS state): max_wave 3 -> 4, yield_to phase2:6 -> phase2:9, yield_own_from_wave 4. Waves 1-3 still never wait (placeable set unchanged: m1ais-s3, m0ais-s3, llmdobm-s3); m2ais-s1..3 stay 'pending' until spaces/m2_ais_rank2.yaml exists and the manifest marks them planned, then queue behind phase 2's waves <= 9 (A17.3). No init --force and no further loop restart is needed for the 'After waves 1-3' step. Note: the AIS loop still exits when waves 1-3 are done if M2-ais is not queued by then (pending runs do not keep a loop alive).",
+   "m2_ais_step_i5": "13:16-13:22 PDT 2026-10-04 (relay i5), the AIS README 'After waves 1-3' step as soon as M1-ais was complete (m1ais-s3 done on ws:0 13:11:50, marked done 13:16:44): select --tier AIS 13:16:51 -> m1ais-s1 g25 best_so_far, val k0-2 0.17314 (30 candidates; m0ais/llmdobm interim, s3 running); runs/phase2-ais/checks/selection_recheck_bc_i5_AIS.json exact (84 records, 0 missing); make_m2_ais_space.py -> spaces/m2_ais_rank2.yaml (A16.1 default sources min_est_ttft_ms_s, mean_est_decode_step_ms_s; sign rule; 33 coordinates; file sha256 9421d4c9...); warm-start identity smoke runs/phase2-ais/checks/m2ais_smoke/result.json (x0 theta == theta*_M1-ais exactly, p == 0, identical goodput and per-request digests on the 2 tier-B smoke train cells at k = 0); then scripts/plan_m2ais.py marked m2ais-s1..3 planned atomically (same content as make_manifest_ais.py --m2-planned + amend_manifest_m1c_ais.py, checked on scratch copies; pre-change copy checks/MANIFEST.pre-m2ais.json). The AIS loop queued them at 13:21:55 and yields them to phase 2's eligible waves <= 9 (A17.3); its m0ais-s3/llmdobm-s3 keep it alive, so no restart. LR-10 action 3: the M1-ais selection sits at the last checkpoint (g25); nothing extended (equal B).",
+   "capacity_check_i5": "12:05 PDT 2026-10-04 (relay i5): unchanged. <node>/<node>: <job> of ~<job> MB and all 192 CPUs allocated to our account's indexer-yoy / indexer-yoy-prof jobs (end 2026-10-06 19:42 / 2026-10-05 20:00); <node>/<node>: <job> of <job> MB and all 128 CPUs to alloc-eval (ends 20:37 today) / crtc-opt (2026-10-05 20:50); <node>: another user's job until 14:15:44. No co-location (capacity_check_i1 reasons). At 14:16:27 <node> went IDLE+DRAIN with Reason 'Epilog error' (BootTime still 2026-10-03 09:39, i.e. its maintenance reboot is pending) when that job ended, so p2orch skips it (DRAIN) and ablam1-s3 waits for the CPU cluster nodes that free ~16:00; undraining is an admin action, not ours. The ~16:00 round has 7 nodes for the 6 remaining CPU cluster runs (ablam1-s3, ablabase-s3, m1noaff-s3, m2ais-s1..3), so the PROJECTED finish (~20:15-20:45) is unchanged.",
+   "capacity_check_i6": "14:51 PDT 2026-10-04 (relay i6): <node> rebooted (BootTime 14:28:27, after DOWN+DRAIN 'SCREL_POWER_OPERATION' at 14:22) and was taken at 14:30:45 by another user's job (<job>, all 128 CPUs and <job> MB, ends 2026-10-05 14:30:45), so it stays unavailable. <node>/<node> (<job> MB, 192/192 CPUs) and <node>/<node> (<job> MB, 128/128 CPUs) still hold our account's other workloads (14:22 scontrol); no co-location (capacity_check_i1 reasons). The 7 usable CPU cluster nodes plus ws:0 stayed busy for the whole relay.",
+   "ais_waves_1_3_final_i6": "16:12 PDT 2026-10-04 (relay i6): m0ais-s3 (job <job>) and llmdobm-s3 (job <job>) finished and were ingested by the AIS loop at 16:04 (30,516 and 30,750 records, 0 rejected, Ubuntu 24.04.5 / glibc 2.39), completing the AIS waves 1-3. select --tier AIS at 16:12:42 (pre-run copy runs/phase2-ais/checks/tierAIS.pre-final-bc_i6.json): M1-ais m1ais-s1 g25 best_so_far 0.17314 (unchanged), M0-ais m0ais-s2 g20 best_so_far 0.14102, llm-d-optimized-baseline-modeled llmdobm-s2 g15 mean 0.09828, each complete with 30 validated candidates (val k0-2). runs/phase2-ais/checks/selection_recheck_bc_i6_AIS.json (AIS venv) recomputes all three exactly from the cache (84 records each, 0 missing). The best AIS baseline is chosen on fresh val k3-10 by Select+Test (README), not here. Only M2-ais (wave 4) remains.",
+   "all_started_i6": "16:37 PDT 2026-10-04 (relay i6): every one of the 30 in-scope runs has started. The phase-2 loop placed its wave 9 at 16:06:36-38 (ablam1-s3 <job>, ablabase-s3 <job>, m1noaff-s3 <job>) and the AIS loop then placed m2ais-s1..3 (<job> 16:31:09, <job> 16:37:11, <job> 16:37:14) in A17.3 order; all --time 12:00:00 and in facts/remote.json with scancel. Nothing is queued in either instance, so <node> (free since ablabase-s1 ended, 16:37) stays unused and both loops exit by themselves after their last run. PROJECTION: m1noaff-s2 (ws:0) ~18:30-18:45, wave 9 ~20:20-20:40, m2ais ~20:45-21:05.",
+   "capacity_check_i7": "16:44 PDT 2026-10-04 (relay i7): nothing is queued in either instance, so no node is needed. <node> (free of our runs since 16:37) carries another service job (128 CPUs, <job> MB, ends 17:57); <node> another user's job until 2026-10-05 14:30; <node>/<node> (<job> MB) and <node>/<node> (<job> MB) our account's other workloads (indexer-yoy, alloc-eval, crtc-opt). m1noaff-s2 finished on ws:0 at 18:12:17 (launch.sh PID <job> exit 0; marked done 18:13:30; 400 evals, 25 contiguous generations, 10 val lines at g5-25 on val ks 0-2), and ws:0 stays idle: every remaining run is already placed on the CPU cluster, where a generation takes ~610 s (wave 9: 10 generations in ~6,100 s of lr-train wall) against ~690 s on ws:0 (m1noaff-s2: 17,292 s for 25), so no move would help.",
+   "space_compliance_i7": "18:15 PDT 2026-10-04 (relay i7), new read-only check runs/phase2/checks/space_compliance.py: every validated (kind: val) candidate, i.e. every candidate LR-10 selection can pick, lies in its run's declared space: Space.load(space).sha == the run's identity.json space_sha; decode(z) == recorded values == recorded spec at every param path, base and fixed keys; independently of the decoder, every element within bounds, within its clamp (the A11.2 / LR-13 sign rule: m1cont/m1noaff/ablam1 theta3,4,5,7 <= 0, m1noaff theta6 pinned 0, m2r2 theta + p load columns, m1v2 16 v2 load features, m1c_ais 7, m2ais theta 7 + p 14) and equal to its pins; val_ks [0,1,2]. Negative tests (theta3 > 0, theta6 != 0, spec drift, val_ks 3-4, an M2 p clamp) are all caught. Result: all_ok for phase 2 (18 runs, 162 val lines; checks/space_compliance_bc_i7.json) and the AIS league (12 runs, 96 val lines; runs/phase2-ais/checks/space_compliance_bc_i7.json, AIS venv). Re-run it once all runs are done, before tier_bc_facts.py --status complete.",
+   "ablabase_s3_resume_i8": "18:41-19:43 PDT 2026-10-04 (relay i8): ablabase-s3's job <job> (<node>) ended FAILED with ExitCode 0:13 (signal 13, SIGPIPE) at 18:41:41, 33 s after its chunk-15 checkpoint was synced (18:41:08: generation 15, 240 evals, phase paused, 'max_wall_seconds (validation)'). slurmd restarted on every CPU cluster node we use between 18:39:06 and 18:44:41 (SlurmdStartTime); the other five jobs kept running. HYPOTHESIS, not verified (compute nodes refuse our ssh): the SIGPIPE came from that restart. p2orch requeued the run with resume at 18:44:49 and placed it on <node>, which our account's other workload had just freed (job <job>, 18:45:04, --time 12:00:00, in facts/remote.json with scancel). It passed the image guard (Ubuntu 24.04.5 LTS / glibc 2.39) and resumed from the scratch checkpoint. The old job wrote nothing after 18:41:08 (run-dir mtimes). The resumed job redid the generation-15 validation, ran ~300 s per generation, COMPLETED at 19:40:50 and was ingested at 19:43:17 (30,754 records, 0 rejected). Its history has 25 contiguous generation lines, 400 evals and 10 val lines at g5-25 on val ks 0-2, with no duplicate. Ingest spot-check: 40/40 identical (checks/ingest_spotcheck_bc_i8.json). No manual action was needed.",
+   "capacity_check_i8": "18:47 PDT 2026-10-04 (relay i8): <node>/<node> were freed from our account's other workloads. 0769 took ablabase-s3's resume (until 19:40); 0770 stays idle, as does ws:0. Nothing is queued, and rebalance moves only cutoff-bound runs (next cutoff). A manual move (exact-ID cancel, then resume elsewhere) would not shorten the critical path. The three m2ais runs end ~20:55-21:00 (PROJECTION) on their own nodes, and one free fast node can speed up only one of them. The wave-9 runs ablam1-s3 and m1noaff-s3 end earlier (~20:27). A move would also lose the in-flight generation and ~5 min of restaging.",
+   "wave9_done_i9": "20:35 PDT 2026-10-04 (relay i9): ablam1-s3 (job <job>, <node>) and m1noaff-s3 (job <job>, <node>) COMPLETED (lr-train done 20:29:37 and 20:30:03) and the loop ingested them at 20:35:23 and 20:35:39 (30,762 and 30,732 records, 0 rejected, Ubuntu 24.04.5 LTS / glibc 2.39). Each has 25 contiguous generation lines, 400 evals and 10 val lines at g5-25 on val ks 0-2. Ingest spot-check 80/80 identical (checks/ingest_spotcheck_bc_i9.json). The phase-2 loop (PID <job>) then exited by itself at 20:35:40 ('nothing queued or running up to max_wave'); orchestrator.pid still names it. p2orch budget: tier B 12/12 and tier C 6/6 done, equal budget true (400 evals, 5 val checkpoints).",
+   "m2ais_done_i9": "20:58-21:04 PDT 2026-10-04 (relay i9): m2ais-s1 (job <job>, <node>), m2ais-s3 (<job>, <node>) and m2ais-s2 (<job>, <node>) COMPLETED (lr-train done 20:55:07, 20:55:16 and 21:01:52; facts/remote.json allocations COMPLETED, none live) and the AIS loop ingested them at 20:58:44, 20:59:04 and 21:04:21 (30,762, 30,750 and 30,792 records, 0 rejected, Ubuntu 24.04.5 LTS / glibc 2.39), one attempt each. Each has 25 contiguous generation lines, 400 evals and 10 val lines at g5-25 on val ks 0-2. Ingest spot-check 120/120 identical (runs/phase2-ais/checks/ingest_spotcheck_bc_i9.json). The AIS loop (PID <job>) exited by itself at 21:04:21. p2orch budget: AIS 12/12 done, equal budget true.",
+   "no_jobs_left_i9": "21:04 PDT 2026-10-04 (relay i9): every in-scope run is done; no campaign CPU cluster job of these instances is live and nothing is queued, so no node or workstation slot is needed. Both loops exited by themselves; no loop was restarted."
+  },
+  "ais_final_i9": "21:04 PDT 2026-10-04 (relay i9): select --tier AIS with all 12 AIS runs done; all four arms complete with 30 validated candidates (val k0-2): M2-ais = m2ais-s3 g10 mean 0.17515 (new), M1-ais = m1ais-s1 g25 best_so_far 0.17314, M0-ais = m0ais-s2 g20 best_so_far 0.14102, llm-d-optimized-baseline modeled = llmdobm-s2 g15 mean 0.09828 (the last three unchanged from relay i6). Pre-run copy runs/phase2-ais/checks/tierAIS.pre-final-bc_i9.json. runs/phase2-ais/checks/selection_recheck_bc_i9_AIS.json (AIS venv): 4/4 exact (84 records each, 0 missing). M2-ais - M1-ais = +0.0020 on val k0-2 (selection split, not a test). The best AIS baseline is picked by Select+Test on fresh val k3-10.",
+  "handoff_select_test_i9": "Open for Select+Test, not decided by the tier-B/C relays: (1) A17.2 headline learned arm = best router-observable learned selection on FRESH val k3-10 among M1 (tierA m1), M2 rank 2, M1-noaff, M1-v2 and ablation-a's ablam1 (tier-C learned arm); whether m1cont enters is open (m1cont_role); disclose the number of learned arms compared (LR-11). (2) Best AIS baseline = the better of M0-ais and llmdobm on fresh val k3-10 (AIS README). (3) Register the runner-up baseline comparison (ramjet vs llmdpp near tie; phase2-mid overfit F2) before the test pass. (4) LR-13 flags on every M1-family row (tier_b_reaudit_i9, results.tierb_reaudit_rules/guards) and the A19 good_tokens_rps_window secondary metric. Selections: selection/tierB.json, selection/tierC.json, runs/phase2-ais/selection/tierAIS.json and their specs.jsonl. Val k3-10 is fresh for all 10 selected configs: 0 of 112 campaign-cache records exist for each, by cache key (positive controls: 42/42 val k0-2 records each, and the method finds the tier-A baselines' 112 valcheck records); checks/valk3_10_fresh_bc_i9_{B,C}.json, runs/phase2-ais/checks/valk3_10_fresh_bc_i9_AIS.json (AIS venv).",
+  "improving_at_cutoff_i9": "LR-10 action 3 diagnostic (checks/improving_at_cutoff_bc_i9.json, read-only over the run histories): no tuned baseline of tiers B/C or the AIS league (ablabase g5, M0-ais g20, llmdobm g15) is selected at the last validated generation, so action 3 calls for no extension. Learned arms selected at g25: m1cont, m1noaff, m2r2, ablam1, M1-ais, whose best val k0-2 rose 0.0001-0.0033 over the last interval (at most 0.086 x MDE). Equal B is never cut; reported for REPORT's incumbent-vs-evaluations note.",
+  "tier_b_final_i9": "20:36 PDT 2026-10-04 (relay i9): select --tier B with all 12 tier-B runs done; all four policies complete with 30 validated candidates (val k0-2): m1v2 = m1v2-s1 g20 best_so_far 0.17674, m1cont = m1cont-s3 g25 best_so_far 0.17040, m2r2 = m2r2-s3 g25 mean 0.16879 (all three unchanged from relay i4), m1noaff = m1noaff-s1 g25 best_so_far 0.16820 (new). Pre-run copy checks/tierB.pre-final-bc_i9.json. checks/selection_recheck_bc_i9_B.json: 4/4 recomputed exactly from the campaign cache (84 records each, 0 missing). Val k0-2 is the selection split; the A17.2 headline learned arm is chosen by Select+Test on fresh val k3-10, not here.",
+  "tier_c_final_i9": "20:36 PDT 2026-10-04 (relay i9): select --tier C with all 6 ablation-a runs done: ablam1 = ablam1-s1 g25 mean 0.16900, ablabase = ablabase-s3 g5 best_so_far 0.14229 (both complete, 30 validated candidates); m2r3/m2r4 (blocked by the gate) and ablb (skipped) are listed with selected null. checks/selection_recheck_bc_i9_C.json: 2/2 exact (84 records each, 0 missing). abla_qremoved.py (PID 3671997, 20:36:37-20:39:52; 210 lr-eval rows, 84 fresh replays, 0 errors): removing q changes val k0-2 by +0.00010 for ablam1 (q 17.58; 1 AgentX cell better, 13 equal) and -0.00064 for ablabase (q 17.56; 1 AgentX cell worse, 13 equal), with q-present values equal to the history values; comparators ablam1 - m1cont -0.00140 and ablabase - tier-A val-best baseline +0.00027. All far below MDE 0.03815: the joint queue threshold adds nothing measurable on val k0-2 (abla/qremoved/result.json).",
+  "tier_b_reaudit_i9": "20:36-20:44 PDT 2026-10-04 (relay i9): the pre-registered re-audit (reaudit_tierb/run.sh m2r2 m1v2 m1noaff m1cont, PID 3671892 in reaudit_tierb/run.pid, log reaudit_tierb/run.log) ran on the final tier-B selections: 168 val k0-2 replays (0 errors) in the private root, all 168 bit-identical to the campaign cache (per-request digests and window counts; checks/reaudit_cache_match_bc_i9.json); window_guards 1092/1092 records match. The gaming audit's pre-set rules flag m2r2, m1v2 and m1noaff on 4 Mooncake val cells and m1cont on 3, against 3 for the constrained M1 (m1c-s1 g20 mean) and 0 for every contender baseline except chwbl and dualmap. No dump worker for any arm. On mooncake-w1-base-n8-open-L3, 60K+ prompts go to the worker with the most outstanding prefill 0.25-0.33 of the time for the four tier-B arms (M1 0.20, chance 0.125; the unconstrained M1 was 0.58 in the gaming audit) and are good 0.84-0.90 (M1 0.92, ramjet and default 1.00). Outcome rule (facts/phase2_mid_fix.json): flags reported on every row, never a reason to retune or reselect.",
+  "val_best_baseline": "selection/valbest_baseline.json (scripts/valbest_baseline.py): the 10 tier-A baseline selections + default@defaults on val x k3-10 (1,232 records, 0 errors; valcheck/): ramjet 0.14113 > llmdpp 0.13934 > twotier 0.13452; margin +0.0018 cell mean (SE 0.0061, 9/14 cells) but -0.0087 segment mean (3/6 segments): a near tie (phase2-mid overfit F2). The gate rule picks ramjet for ablation a. Select+Test re-derives it from the same cached records.",
+  "ablation_a": {
+   "design": "scripts/make_abla_spaces.py: learned = selected M1 (m1_continue space + q), baseline = the val-best baseline (its tier-A space started at its selection + q); q = router_config.router_queue_threshold log [0.25, 256], start 32, std 0.12. q = 32 and the spaces' decoded x0 (q 31.999999999999986) replay identically to the unset knob for both start policies on all 34 train cells at k = 0 (summary fields and per-request canonical digests; abla/identity_check.json); q = 0.5 changes goodput on 28/34 cells for both (the knob acts in replay); the reconstructed default trajectory never has every worker above 21.3 x 8192 active prefill tokens (abla/busy_scan.json). Relay i1: the decoded x0 of both spaces is also identical to the unset knob on val k0-2 (14 cells, 42/42 per-request digests each; abla/val_identity/, the abla_qremoved.py self-test)",
+   "comparators": "learned: tier-B m1cont runs (same start and budget, no q). Both: post-hoc, the ablation's selected config with q removed, on val k0-2 (isolates q at the ablation optimum without extra training). Pre-registered here. Tool (relay i1): scripts/abla_qremoved.py -> abla/qremoved/result.json.",
+   "learned_model_choice": "the headline learned arm is chosen only after tier B (A17.2, fresh val k3-10); ablation a uses M1, the learned arm available now, and is not re-run for a later winner"
+  },
+  "m2_rank3_4_gate": {
+   "rule": "run M2 ranks 3-4 only if the LR-10 selection of M2 rank 2 (argmax val k0-2 over m2r2 restarts x checkpoints) exceeds max(M1 selected 0.16599, M1-continued selected) by >= MDE 0.038 (gate tier C; LR-15: compare with M1 continued for the same added evaluations). Pre-registered before any M2 result.",
+   "if_run": "rank 3 adds source max_overlap_frac, rank 4 adds mean_kv_load_frac (LR-06 list order after the rank-2 sources), warm start from the selected M2 rank 2 with the new p rows 0, same clamps and std rule",
+   "tool": "scripts/m2_rank34_gate.py (relay i1): decides from selection/tierA.json m1 and selection/tierB.json m2r2/m1cont (both complete), MDE = facts/gate.json mde_vs_best_heuristic 0.03815 (the '0.038'); writes selection/m2_rank34_gate.json; --apply writes spaces/m2_rank{3,4}.yaml and plans m2r3/m2r4 (pass) or blocks them with the reason (fail). Scratch-tested on interim data only: spaces load, x0 reproduces the warm start, and the rank-3/4 x0 specs replay identically to the rank-2 warm start on 2 train cells (per-request digests; runs/phase2/checks/rank34_smoke/)."
+  },
+  "m2_reaudit": "Pre-registered (facts/phase2_mid_fix.json derived_arms_sign_rule.m1cont_and_m2): the selected M2 gets the gaming audit's window-guard/rules re-audit on val k0-2 before test, flags reported, never a reason to retune. Tool (relay i1): runs/phase2/reaudit_tierb/run.sh [KEY...] (default m2r2; other tier-B learned keys optional), the fixer's method with the audit scripts copied unchanged except rules.py also treating m2* names as learned. Self-test: a renamed copy of the constrained M1 reproduces the fixer's M1 re-audit exactly (guards 14/14, paired 40/40, rules, giant 5/5, attraction 5/5, window guards 14/14; reaudit_tierb/selftest.json).",
+  "ablation_b": "SKIPPED (gate cut order 1; A17.3 cuts it first). It needs a new Rust feature set over simulator-only engine state (waiting counts, KV usage %) that the plugin API does not expose, replay plumbing to pass it, a separate build_id/worktree/bundle/cache (as the AIS and lag builds) and a parity check, then 3 x B = 400 runs (~15 node-hours), while the never-cut arms alone need ~18 runs on 8 targets. It never ships, and the A16 AIS league already measures what information beyond the router's own adds. Manifest ablb-s1..3 stay blocked.",
+  "ablation_b_recheck_i8": "Re-checked (relay i8) because CPU cluster and ws:0 capacity frees up tonight; still SKIPPED. (1) It is cut first by the pre-registered cut order (gate cut_order_if_over 1, A17.3). (2) It needs new Rust plumbing for simulator-only engine state that the plugin API does not expose, plus a separate build_id, worktree, bundle and cache and a parity smoke: an implementation stage, not an orchestration relay. (3) After that, its 3 runs at B = 400 take ~2.1 h each on epyc9654p or ~4.3 h on the other CPU cluster nodes (25 generations at ~300 s or ~625 s, measured this relay), so tier B/C completion and Select+Test would wait at least that long after the plumbing, for an arm that never ships. (4) The A16 AIS league already measures what information beyond the router's own adds. Manifest ablb-s1..3 stay blocked.",
+  "reaudit_scope_i3": "Registered 2026-10-04 ~08:20 PDT (relay i3), before any tier-B selection exists: the window-guard/rules re-audit (reaudit_tierb/run.sh) runs on every router-observable learned tier-B selection, i.e. KEYs m2r2 m1v2 m1noaff (m1cont is theta*_M1's continuation and already covered by the fixer's M1 re-audit), because A17.2 lets any of them become the headline learned model on fresh val k3-10. The prereg names only M2. For the extra keys the outcome rule is the same (flags reported on every row, never a reason to retune or reselect). run.sh writes fixed output paths (guards.json, rules.json, ...), so run it once with all three keys after the last of them is complete; an earlier m2r2-only run is fine if its outputs are copied aside first.",
+  "reaudit_scope_i4": "Registered 2026-10-04 11:45 PDT (relay i4), after the m1cont/m2r2 val k0-2 selections and before any tier-B arm is evaluated on val k3-10 or test: m1cont joins the re-audit keys (run.sh m2r2 m1v2 m1noaff m1cont). Relay i3 left it out as 'theta*_M1's continuation, covered by the fixer's M1 re-audit', but the selected m1cont (m1cont-s3 g25 best_so_far) moved away from theta*_M1 (theta2 -2.27 -> +0.75, theta5 -39.2 -> -47.5, theta6 +0.21 -> -0.79), so that audit no longer covers it. Same outcome rule (flags reported, never a retune or reselection); about 42 extra val k0-2 replays. facts/DEVIATIONS.md.",
+  "reaudit_prewarm_i5": "Considered and declined (relay i5): running reaudit_tierb/run.sh now for the three complete keys (m2r2 m1v2 m1cont) to cache their val k0-2 replays early. lr-eval --out appends, so the final four-key run would append duplicate records to val_k012/results_new.jsonl unless the early file were moved aside, and the saving is ~126 replays (minutes on an idle workstation after the last run). The re-audit stays one run with all four keys after m1noaff-s1..3 are done.",
+  "m1cont_role": "M1 continued is the LR-15 comparator of the M2 rank 3-4 gate (gate tier C). A17.2's headline-candidate list (M1, M2, M1-noaff, M1-v2, tier-C learned arms) does not name it; it starts from theta*_M1 and adds B = 400, as M2 does. Whether it enters the A17.2 headline comparison is a Select+Test registration (recorded here as open, not decided by a relay); either way it counts as a learned variant for LR-11.",
+  "robustness_extras": "Gate tier C's 'robustness extras (speedup 0.8/1.2, tau > 0, hash_home)' are evaluation passes over the finalists on TEST cells, not training runs (facts/pilot.json budget item 'robustness (test cells, 3 replicates)': lag 50/200 ms, speedup 0.8/1.2 and the two LR-14 guard variants, learned-choice at tau > 0 and restricted to hash_home candidates). Test cells are touched only by the single Select+Test pass, and the finalists do not exist yet, so these relays place no run for them: they are assigned to Select+Test's robustness pass (gate cut order 4). Speedup 0.8/1.2 is already the pre-registered stage-5 timing readout (HEADLINE_TEST robustness_reported_not_tested item 3, scored on nominal E0 and E0'). Recorded by relay i2.",
+  "lessons_applied": [
+   "LR-05 (named sources, pinned anchor, flat-direction pins, CMA_stds 0.3x)",
+   "LR-06 (N-stable sources, isl only through the context)",
+   "LR-07 (multi-start inits for M1-v2, LMetric point)",
+   "LR-10 (per-policy selection over restarts)",
+   "LR-11 (counting learned variants: m2r2, m1cont, m1noaff, m1v2, ablam1, m1ais, m2ais)",
+   "LR-13 (sign constraints on every learned arm)",
+   "LR-15 (warm start, continued-M1 comparator, drift inconclusive not used)"
+  ]
+ },
+ "runs": {
+  "ablabase-s1": {
+   "instance": "phase2",
+   "policy_key": "ablabase",
+   "wave": 7,
+   "status": "done",
+   "space": "runs/phase2/spaces/abla_ramjet.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.14280767699671665,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27484,
+    "selected_val_objective": 0.14216873967615964,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T16:32:23-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15667.79
+   }
+  },
+  "ablabase-s2": {
+   "instance": "phase2",
+   "policy_key": "ablabase",
+   "wave": 8,
+   "status": "done",
+   "space": "runs/phase2/spaces/abla_ramjet.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.14256499473017098,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.14214560706357857,
+    "tasks_requested": 34018,
+    "time": "2026-10-04T16:25:35-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15286.91
+   }
+  },
+  "ablabase-s3": {
+   "instance": "phase2",
+   "policy_key": "ablabase",
+   "wave": 9,
+   "status": "done",
+   "space": "runs/phase2/spaces/abla_ramjet.yaml",
+   "attempts": 2,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.14303253057111934,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27496,
+    "selected_val_objective": 0.1422864080073374,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T19:40:13-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 12049.89
+   }
+  },
+  "ablam1-s1": {
+   "instance": "phase2",
+   "policy_key": "ablam1",
+   "wave": 7,
+   "status": "done",
+   "space": "runs/phase2/spaces/abla_m1.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.1791485225417389,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27454,
+    "selected_val_objective": 0.1690002698298348,
+    "tasks_requested": 34018,
+    "time": "2026-10-04T16:02:34-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14991.77
+   }
+  },
+  "ablam1-s2": {
+   "instance": "phase2",
+   "policy_key": "ablam1",
+   "wave": 8,
+   "status": "done",
+   "space": "runs/phase2/spaces/abla_m1.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17809387872093407,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27476,
+    "selected_val_objective": 0.16592247122872586,
+    "tasks_requested": 34222,
+    "time": "2026-10-04T16:22:47-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15120.22
+   }
+  },
+  "ablam1-s3": {
+   "instance": "phase2",
+   "policy_key": "ablam1",
+   "wave": 9,
+   "status": "done",
+   "space": "runs/phase2/spaces/abla_m1.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17774458334180587,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.1674196180112965,
+    "tasks_requested": 34018,
+    "time": "2026-10-04T20:29:37-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15167.47
+   }
+  },
+  "ablb-s1": {
+   "instance": "phase2",
+   "policy_key": "ablb",
+   "wave": 10,
+   "status": "blocked",
+   "space": "(new feature set; to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "ablb-s2": {
+   "instance": "phase2",
+   "policy_key": "ablb",
+   "wave": 11,
+   "status": "blocked",
+   "space": "(new feature set; to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "ablb-s3": {
+   "instance": "phase2",
+   "policy_key": "ablb",
+   "wave": 12,
+   "status": "blocked",
+   "space": "(new feature set; to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "m1cont-s1": {
+   "instance": "phase2",
+   "policy_key": "m1cont",
+   "wave": 4,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1_continue.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17799787698932276,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27437,
+    "selected_val_objective": 0.1673478295135511,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T07:15:24-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15579.41
+   }
+  },
+  "m1cont-s2": {
+   "instance": "phase2",
+   "policy_key": "m1cont",
+   "wave": 5,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1_continue.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17916699865037453,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27476,
+    "selected_val_objective": 0.16622239479789355,
+    "tasks_requested": 34222,
+    "time": "2026-10-04T07:08:56-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15059.26
+   }
+  },
+  "m1cont-s3": {
+   "instance": "phase2",
+   "policy_key": "m1cont",
+   "wave": 6,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1_continue.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.1792612843806579,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.1704010804209599,
+    "tasks_requested": 34018,
+    "time": "2026-10-04T11:35:31-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15074.01
+   }
+  },
+  "m1noaff-s1": {
+   "instance": "phase2",
+   "policy_key": "m1noaff",
+   "wave": 7,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1noaff_s1.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17747442930293833,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.16820085589858194,
+    "tasks_requested": 34018,
+    "time": "2026-10-04T16:29:05-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15366.87
+   }
+  },
+  "m1noaff-s2": {
+   "instance": "phase2",
+   "policy_key": "m1noaff",
+   "wave": 8,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1noaff_s2bc.yaml",
+   "attempts": 1,
+   "target": "ws:0",
+   "job": null,
+   "pid": 721115,
+   "evals": {
+    "best_train_objective": 0.1738089783374814,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 20,
+    "replays_fresh": 5858,
+    "selected_val_objective": 0.16578425906823435,
+    "tasks_requested": 33610,
+    "time": "2026-10-04T18:12:17-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 17291.67
+   }
+  },
+  "m1noaff-s3": {
+   "instance": "phase2",
+   "policy_key": "m1noaff",
+   "wave": 9,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1noaff_s3cache.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17505631874331767,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.16611253651076338,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T20:30:03-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15208.27
+   }
+  },
+  "m1v2-s1": {
+   "instance": "phase2",
+   "policy_key": "m1v2",
+   "wave": 4,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1v2_s1.yaml",
+   "attempts": 1,
+   "target": "ws:0",
+   "job": null,
+   "pid": 2070816,
+   "evals": {
+    "best_train_objective": 0.1853363692821544,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 20,
+    "replays_fresh": 6070,
+    "selected_val_objective": 0.1767435156036474,
+    "tasks_requested": 33610,
+    "time": "2026-10-04T08:06:22-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 18377.9
+   }
+  },
+  "m1v2-s2": {
+   "instance": "phase2",
+   "policy_key": "m1v2",
+   "wave": 5,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1v2_s2bc.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.16571700952408208,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.16085387509735685,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T11:25:00-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14806.19
+   }
+  },
+  "m1v2-s3": {
+   "instance": "phase2",
+   "policy_key": "m1v2",
+   "wave": 6,
+   "status": "done",
+   "space": "runs/phase2/spaces/m1v2_s3lmetric.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17836061894461228,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.17237021046469117,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T11:52:55-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15635.94
+   }
+  },
+  "m2r2-s1": {
+   "instance": "phase2",
+   "policy_key": "m2r2",
+   "wave": 4,
+   "status": "done",
+   "space": "runs/phase2/spaces/m2_rank2.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.1783848702277369,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.16818125762734648,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T07:06:30-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15039.89
+   }
+  },
+  "m2r2-s2": {
+   "instance": "phase2",
+   "policy_key": "m2r2",
+   "wave": 5,
+   "status": "done",
+   "space": "runs/phase2/spaces/m2_rank2.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17870316032029235,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.16868245266358844,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T07:04:49-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14700.5
+   }
+  },
+  "m2r2-s3": {
+   "instance": "phase2",
+   "policy_key": "m2r2",
+   "wave": 6,
+   "status": "done",
+   "space": "runs/phase2/spaces/m2_rank2.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.17895891287924875,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.16878966053653194,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T11:34:46-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15073.66
+   }
+  },
+  "m2r3-s1": {
+   "instance": "phase2",
+   "policy_key": "m2r3",
+   "wave": 10,
+   "status": "blocked",
+   "space": "runs/phase2/spaces/m2_rank3.yaml (to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "m2r3-s2": {
+   "instance": "phase2",
+   "policy_key": "m2r3",
+   "wave": 11,
+   "status": "blocked",
+   "space": "runs/phase2/spaces/m2_rank3.yaml (to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "m2r3-s3": {
+   "instance": "phase2",
+   "policy_key": "m2r3",
+   "wave": 12,
+   "status": "blocked",
+   "space": "runs/phase2/spaces/m2_rank3.yaml (to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "m2r4-s1": {
+   "instance": "phase2",
+   "policy_key": "m2r4",
+   "wave": 10,
+   "status": "blocked",
+   "space": "runs/phase2/spaces/m2_rank4.yaml (to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "m2r4-s2": {
+   "instance": "phase2",
+   "policy_key": "m2r4",
+   "wave": 11,
+   "status": "blocked",
+   "space": "runs/phase2/spaces/m2_rank4.yaml (to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "m2r4-s3": {
+   "instance": "phase2",
+   "policy_key": "m2r4",
+   "wave": 12,
+   "status": "blocked",
+   "space": "runs/phase2/spaces/m2_rank4.yaml (to be written)",
+   "attempts": 0,
+   "target": null,
+   "job": null,
+   "pid": null,
+   "evals": null
+  },
+  "llmdobm-s1": {
+   "instance": "phase2-ais",
+   "policy_key": "llmdobm",
+   "wave": 1,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/llmd_optimized_baseline_modeled.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.09354772241136529,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 17,
+    "replays_fresh": 23849,
+    "selected_val_objective": 0.09618024657360492,
+    "tasks_requested": 32998,
+    "time": "2026-10-04T07:26:08-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 16029.1
+   }
+  },
+  "llmdobm-s2": {
+   "instance": "phase2-ais",
+   "policy_key": "llmdobm",
+   "wave": 2,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/llmd_optimized_baseline_modeled.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.0970619715133226,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27454,
+    "selected_val_objective": 0.09827630911850974,
+    "tasks_requested": 34018,
+    "time": "2026-10-04T11:56:17-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14931.96
+   }
+  },
+  "llmdobm-s3": {
+   "instance": "phase2-ais",
+   "policy_key": "llmdobm",
+   "wave": 3,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/llmd_optimized_baseline_modeled.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.09390266405567761,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27476,
+    "selected_val_objective": 0.09747529824633187,
+    "tasks_requested": 34222,
+    "time": "2026-10-04T16:00:37-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14986.61
+   }
+  },
+  "m0ais-s1": {
+   "instance": "phase2-ais",
+   "policy_key": "m0ais",
+   "wave": 1,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m0_ais.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.13765472077378346,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 16,
+    "replays_fresh": 22457,
+    "selected_val_objective": 0.14061747015496293,
+    "tasks_requested": 32794,
+    "time": "2026-10-04T07:36:13-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 16659.25
+   }
+  },
+  "m0ais-s2": {
+   "instance": "phase2-ais",
+   "policy_key": "m0ais",
+   "wave": 2,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m0_ais.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.13749448831456235,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 21,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.14102164778955317,
+    "tasks_requested": 33814,
+    "time": "2026-10-04T11:55:23-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15186.56
+   }
+  },
+  "m0ais-s3": {
+   "instance": "phase2-ais",
+   "policy_key": "m0ais",
+   "wave": 3,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m0_ais.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.13572034966559823,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 18,
+    "replays_fresh": 26323,
+    "selected_val_objective": 0.1388149663939444,
+    "tasks_requested": 33202,
+    "time": "2026-10-04T16:01:18-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15205.76
+   }
+  },
+  "m1ais-s1": {
+   "instance": "phase2-ais",
+   "policy_key": "m1ais",
+   "wave": 1,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m1c_ais_s1.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.18095155696386248,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 19,
+    "replays_fresh": 27410,
+    "selected_val_objective": 0.17313714730249014,
+    "tasks_requested": 33406,
+    "time": "2026-10-04T07:16:56-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15405.73
+   }
+  },
+  "m1ais-s2": {
+   "instance": "phase2-ais",
+   "policy_key": "m1ais",
+   "wave": 2,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m1c_ais_s2bc.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.16677862760126083,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 24,
+    "replays_fresh": 27476,
+    "selected_val_objective": 0.16622808098455794,
+    "tasks_requested": 34426,
+    "time": "2026-10-04T11:53:04-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15623.26
+   }
+  },
+  "m1ais-s3": {
+   "instance": "phase2-ais",
+   "policy_key": "m1ais",
+   "wave": 3,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m1c_ais_s3rule.yaml",
+   "attempts": 1,
+   "target": "ws:0",
+   "job": null,
+   "pid": 3932626,
+   "evals": {
+    "best_train_objective": 0.17308522967612935,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 24,
+    "replays_fresh": 3776,
+    "selected_val_objective": 0.16706240446451173,
+    "tasks_requested": 34426,
+    "time": "2026-10-04T13:11:50-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 17968.86
+   }
+  },
+  "m2ais-s1": {
+   "instance": "phase2-ais",
+   "policy_key": "m2ais",
+   "wave": 4,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m2_ais_rank2.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.18486895540783407,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 22,
+    "replays_fresh": 27432,
+    "selected_val_objective": 0.1751261041418532,
+    "tasks_requested": 34018,
+    "time": "2026-10-04T20:55:07-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15127.61
+   }
+  },
+  "m2ais-s2": {
+   "instance": "phase2-ais",
+   "policy_key": "m2ais",
+   "wave": 4,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m2_ais_rank2.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.18314618823826959,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27454,
+    "selected_val_objective": 0.17507699641891988,
+    "tasks_requested": 34222,
+    "time": "2026-10-04T21:01:52-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 15202.24
+   }
+  },
+  "m2ais-s3": {
+   "instance": "phase2-ais",
+   "policy_key": "m2ais",
+   "wave": 4,
+   "status": "done",
+   "space": "runs/phase2-ais/spaces/m2_ais_rank2.yaml",
+   "attempts": 1,
+   "target": "slurm:<node>",
+   "job": "<job>",
+   "pid": null,
+   "evals": {
+    "best_train_objective": 0.18371452797241455,
+    "budget_evals": 400,
+    "fevals": 400,
+    "gen_lines": 25,
+    "generation": 25,
+    "phase": "done",
+    "reeval_generations": 23,
+    "replays_fresh": 27476,
+    "selected_val_objective": 0.1751499238515255,
+    "tasks_requested": 34222,
+    "time": "2026-10-04T20:55:16-0700",
+    "val_candidates": 10,
+    "val_checkpoints": 5,
+    "wall_s": 14866.8
+   }
+  }
+ },
+ "counts": {
+  "blocked": 9,
+  "done": 30
+ },
+ "equal_budget": {
+  "done_runs": 30,
+  "all_400_evals_5_val_checkpoints": true,
+  "orchestrator_reports": {
+   "phase2": {
+    "per_policy_restarts_done": {
+     "ablabase": 3,
+     "ablam1": 3,
+     "chwbl": 3,
+     "dualmap": 3,
+     "llmdob": 3,
+     "llmdpp": 3,
+     "lmetric": 3,
+     "m0": 3,
+     "m1": 3,
+     "m1cont": 3,
+     "m1noaff": 3,
+     "m1u": 3,
+     "m1v2": 3,
+     "m2r2": 3,
+     "ramjet": 3,
+     "stickybounded": 3,
+     "stickyhard": 3,
+     "twotier": 3
+    },
+    "tier_A_done": 36,
+    "tier_A_equal_budget": true,
+    "tier_A_reeval_generations": {
+     "chwbl-s1": 21,
+     "chwbl-s2": 13,
+     "chwbl-s3": 21,
+     "dualmap-s1": 22,
+     "dualmap-s2": 21,
+     "dualmap-s3": 22,
+     "llmdob-s1": 19,
+     "llmdob-s2": 15,
+     "llmdob-s3": 23,
+     "llmdpp-s1": 21,
+     "llmdpp-s2": 21,
+     "llmdpp-s3": 21,
+     "lmetric-s1": 23,
+     "lmetric-s2": 22,
+     "lmetric-s3": 23,
+     "m0-s1": 21,
+     "m0-s2": 20,
+     "m0-s3": 21,
+     "m1-s1": 21,
+     "m1-s2": 23,
+     "m1-s3": 20,
+     "m1c-s1": 21,
+     "m1c-s2": 16,
+     "m1c-s3": 17,
+     "ramjet-s1": 21,
+     "ramjet-s2": 21,
+     "ramjet-s3": 21,
+     "stickybounded-s1": 21,
+     "stickybounded-s2": 22,
+     "stickybounded-s3": 22,
+     "stickyhard-s1": 21,
+     "stickyhard-s2": 22,
+     "stickyhard-s3": 21,
+     "twotier-s1": 21,
+     "twotier-s2": 23,
+     "twotier-s3": 23
+    },
+    "tier_A_signatures_(fevals,val_checkpoints)": [
+     [
+      400,
+      5
+     ]
+    ],
+    "tier_B_done": 12,
+    "tier_B_equal_budget": true,
+    "tier_B_reeval_generations": {
+     "m1cont-s1": 21,
+     "m1cont-s2": 23,
+     "m1cont-s3": 22,
+     "m1noaff-s1": 22,
+     "m1noaff-s2": 20,
+     "m1noaff-s3": 21,
+     "m1v2-s1": 20,
+     "m1v2-s2": 21,
+     "m1v2-s3": 21,
+     "m2r2-s1": 21,
+     "m2r2-s2": 21,
+     "m2r2-s3": 21
+    },
+    "tier_B_signatures_(fevals,val_checkpoints)": [
+     [
+      400,
+      5
+     ]
+    ],
+    "tier_C_done": 6,
+    "tier_C_equal_budget": true,
+    "tier_C_reeval_generations": {
+     "ablabase-s1": 21,
+     "ablabase-s2": 22,
+     "ablabase-s3": 21,
+     "ablam1-s1": 22,
+     "ablam1-s2": 23,
+     "ablam1-s3": 22
+    },
+    "tier_C_signatures_(fevals,val_checkpoints)": [
+     [
+      400,
+      5
+     ]
+    ]
+   },
+   "phase2-ais": {
+    "per_policy_restarts_done": {
+     "llmdobm": 3,
+     "m0ais": 3,
+     "m1ais": 3,
+     "m2ais": 3
+    },
+    "tier_AIS_done": 12,
+    "tier_AIS_equal_budget": true,
+    "tier_AIS_reeval_generations": {
+     "llmdobm-s1": 17,
+     "llmdobm-s2": 22,
+     "llmdobm-s3": 23,
+     "m0ais-s1": 16,
+     "m0ais-s2": 21,
+     "m0ais-s3": 18,
+     "m1ais-s1": 19,
+     "m1ais-s2": 24,
+     "m1ais-s3": 24,
+     "m2ais-s1": 22,
+     "m2ais-s2": 23,
+     "m2ais-s3": 23
+    },
+    "tier_AIS_signatures_(fevals,val_checkpoints)": [
+     [
+      400,
+      5
+     ]
+    ]
+   }
+  }
+ },
+ "selections": {
+  "tierB": {
+   "source": "runs/phase2/selection/tierB.json",
+   "written": "2026-10-04 20:36:07 PDT",
+   "policies": {
+    "m1cont": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "m1cont-s3",
+      "generation": 25,
+      "which": "best_so_far",
+      "val_objective": 0.1704010804209599,
+      "policy_sha": "b5e7cfcaeec971740fbe35e0f5313453c8af99b15284d3ced75ac261041ad2c8"
+     }
+    },
+    "m1noaff": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "m1noaff-s1",
+      "generation": 25,
+      "which": "best_so_far",
+      "val_objective": 0.16820085589858194,
+      "policy_sha": "2af78d0b3ebaf9077e82ca36a55aa6fd70d2270e731553e3ed4092af5ed9434c"
+     }
+    },
+    "m1v2": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "m1v2-s1",
+      "generation": 20,
+      "which": "best_so_far",
+      "val_objective": 0.1767435156036474,
+      "policy_sha": "07f95e14b195c7c2bc5662987f1b2c32cd5bf68253cdb53e3e079de50746d365"
+     }
+    },
+    "m2r2": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "m2r2-s3",
+      "generation": 25,
+      "which": "mean",
+      "val_objective": 0.16878966053653194,
+      "policy_sha": "60bbae47fee59af613efee1b243b2c9021f59f6f8c3c65a0e4ccf7eb140881f8"
+     }
+    }
+   }
+  },
+  "tierC": {
+   "source": "runs/phase2/selection/tierC.json",
+   "written": "2026-10-04 20:36:27 PDT",
+   "policies": {
+    "ablabase": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "ablabase-s3",
+      "generation": 5,
+      "which": "best_so_far",
+      "val_objective": 0.1422864080073374,
+      "policy_sha": "b4ee189d64c6515f4cc5185dda80c1728b063d484e0c3e91e80b979304164b52"
+     }
+    },
+    "ablam1": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "ablam1-s1",
+      "generation": 25,
+      "which": "mean",
+      "val_objective": 0.1690002698298348,
+      "policy_sha": "91de0247bedfffb2f673210738b59a5c76138389187476d0c4def4754b34eb5d"
+     }
+    },
+    "ablb": {
+     "complete": false,
+     "runs_missing": [
+      "ablb-s1",
+      "ablb-s2",
+      "ablb-s3"
+     ],
+     "val_candidates_counted": null,
+     "selected": null
+    },
+    "m2r3": {
+     "complete": false,
+     "runs_missing": [
+      "m2r3-s1",
+      "m2r3-s2",
+      "m2r3-s3"
+     ],
+     "val_candidates_counted": null,
+     "selected": null
+    },
+    "m2r4": {
+     "complete": false,
+     "runs_missing": [
+      "m2r4-s1",
+      "m2r4-s2",
+      "m2r4-s3"
+     ],
+     "val_candidates_counted": null,
+     "selected": null
+    }
+   }
+  },
+  "tierAIS": {
+   "source": "runs/phase2-ais/selection/tierAIS.json",
+   "written": "2026-10-04 21:04:43 PDT",
+   "policies": {
+    "llmdobm": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "llmdobm-s2",
+      "generation": 15,
+      "which": "mean",
+      "val_objective": 0.09827630911850974,
+      "policy_sha": "ce1c20af3826dd9b93ce57c1baf34e96d681416e7206acf73c1db9b30ae76ed8"
+     }
+    },
+    "m0ais": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "m0ais-s2",
+      "generation": 20,
+      "which": "best_so_far",
+      "val_objective": 0.14102164778955317,
+      "policy_sha": "62c958809331e2631d9ff6c37caebb265aae7e73a2474bdba3b0adb64803bb02"
+     }
+    },
+    "m1ais": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "m1ais-s1",
+      "generation": 25,
+      "which": "best_so_far",
+      "val_objective": 0.17313714730249014,
+      "policy_sha": "489e1143dd477d2ab9f1949066a83e11b22006d3045064bfcbbff49edc1dcfc7"
+     }
+    },
+    "m2ais": {
+     "complete": true,
+     "runs_missing": [],
+     "val_candidates_counted": 30,
+     "selected": {
+      "run": "m2ais-s3",
+      "generation": 10,
+      "which": "mean",
+      "val_objective": 0.1751499238515255,
+      "policy_sha": "c614886e31d2bb45075990e6769bb4b445532a1c1783303be3fabc1cf97238cb"
+     }
+    }
+   }
+  },
+  "m2_rank34_gate": {
+   "source": "runs/phase2/selection/m2_rank34_gate.json",
+   "bar": 0.1704010804209599,
+   "margin": -0.0016114198844279504,
+   "mde": 0.03815006761727529,
+   "passed": false,
+   "selections_complete": true,
+   "applied": "2026-10-04 11:37:53 PDT",
+   "written": "2026-10-04 11:37:53 PDT"
+  }
+ },
+ "results": {
+  "ablation_a_q_removed": {
+   "source": "runs/phase2/abla/qremoved/result.json (scripts/abla_qremoved.py), val k0-2 (selection split)",
+   "arms": {
+    "ablam1": {
+     "q": 17.57880318326318,
+     "with_q": 0.1690002698298348,
+     "q_removed": 0.1690997418994228,
+     "with_q_matches_history": true,
+     "delta": {
+      "val_k0_2": 9.947206958801913e-05,
+      "by_family": {
+       "agentx": 0.00034815224355806695,
+       "mooncake": 0.0,
+       "synthetic_sessions": 0.0
+      },
+      "cells_worse": 0,
+      "cells_better": 1,
+      "cells_equal": 13
+     }
+    },
+    "ablabase": {
+     "q": 17.5557920244583,
+     "with_q": 0.1422864080073374,
+     "q_removed": 0.1416494605034692,
+     "with_q_matches_history": true,
+     "delta": {
+      "val_k0_2": -0.0006369475038682237,
+      "by_family": {
+       "agentx": -0.0022293162635388455,
+       "mooncake": 0.0,
+       "synthetic_sessions": 0.0
+      },
+      "cells_worse": 1,
+      "cells_better": 0,
+      "cells_equal": 13
+     }
+    }
+   },
+   "comparators": {
+    "ablam1_vs_m1cont": {
+     "m1cont": {
+      "run": "m1cont-s3",
+      "generation": 25,
+      "which": "best_so_far",
+      "val_objective": 0.1704010804209599
+     },
+     "m1cont_complete": true,
+     "delta_ablam1_minus_m1cont": -0.0014008105911250956
+    },
+    "ablabase_vs_tierA_baseline": {
+     "baseline": "ramjet",
+     "tierA": {
+      "run": "ramjet-s3",
+      "generation": 25,
+      "which": "best_so_far",
+      "val_objective": 0.14201773497049403
+     },
+     "delta_ablabase_minus_tierA": 0.0002686730368433865
+    }
+   }
+  },
+  "tierb_reaudit_rules": {
+   "source": "runs/phase2/reaudit_tierb/ (run.sh; guards.json, rules.json, giant_60000.json, attraction.json, window_guards.json)",
+   "policies": {
+    "m1-default-init@p2-m1-s1-g25-mean": {
+     "violating_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ],
+     "gaming_cells": [
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ]
+    },
+    "m1@p2-m1-s2-g15-mean": {
+     "violating_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ],
+     "gaming_cells": [
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ]
+    },
+    "m1@p2-m1c-s1-g20-mean": {
+     "violating_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ],
+     "gaming_cells": [
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ]
+    },
+    "m1cont@p2-m1cont-s3-g25-best_so_far": {
+     "violating_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ],
+     "gaming_cells": [
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ]
+    },
+    "m1noaff@p2-m1noaff-s1-g25-best_so_far": {
+     "violating_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ],
+     "gaming_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ]
+    },
+    "m1v2@p2-m1v2-s1-g20-best_so_far": {
+     "violating_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ],
+     "gaming_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ]
+    },
+    "m2r2@p2-m2r2-s3-g25-mean": {
+     "violating_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ],
+     "gaming_cells": [
+      "mooncake-w1-base-n6-open-L2",
+      "mooncake-w1-base-n8-closed-L2",
+      "mooncake-w1-base-n8-open-L3",
+      "mooncake-w1-islu1.25-n6-closed-L2"
+     ]
+    }
+   }
+  },
+  "tierb_reaudit_guards": {
+   "source": "runs/phase2/reaudit_tierb/{giant_60000,attraction}.json (val k0-2, Mooncake val cells, prompts >= 60K tokens)",
+   "policies": {
+    "m2r2@p2-m2r2-s3-g25-mean": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 0.8850574712643678,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.32608695652173914,
+     "chance_at_max": 0.125,
+     "cell_at_max": "mooncake-w1-base-n8-open-L3"
+    },
+    "m1v2@p2-m1v2-s1-g20-best_so_far": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 0.8390804597701149,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.30434782608695654,
+     "chance_at_max": 0.125,
+     "cell_at_max": "mooncake-w1-base-n8-open-L3"
+    },
+    "m1noaff@p2-m1noaff-s1-g25-best_so_far": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 0.896551724137931,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.2826086956521739,
+     "chance_at_max": 0.125,
+     "cell_at_max": "mooncake-w1-base-n8-open-L3"
+    },
+    "m1cont@p2-m1cont-s3-g25-best_so_far": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 0.8850574712643678,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.2536231884057971,
+     "chance_at_max": 0.125,
+     "cell_at_max": "mooncake-w1-base-n8-open-L3"
+    },
+    "m1@p2-m1c-s1-g20-mean": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 0.9195402298850575,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.2028985507246377,
+     "chance_at_max": 0.125,
+     "cell_at_max": "mooncake-w1-base-n8-open-L3"
+    },
+    "default@defaults": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 1.0,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.043478260869565216,
+     "chance_at_max": 0.25,
+     "cell_at_max": "mooncake-w1-base-n4-open-L2"
+    },
+    "ramjet@p2-ramjet-s3-g25-best_so_far": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 1.0,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.014492753623188406,
+     "chance_at_max": 0.25,
+     "cell_at_max": "mooncake-w1-base-n4-open-L2"
+    },
+    "llmdpp@p2-llmdpp-s2-g25-mean": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 0.8620689655172413,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.14492753623188406,
+     "chance_at_max": 0.125,
+     "cell_at_max": "mooncake-w1-base-n8-open-L3"
+    },
+    "m0@p2-m0-s3-g20-mean": {
+     "mooncake_cells": 5,
+     "min_giant60k_good_frac": 0.9885057471264368,
+     "dump_workers_per_k_sum": 0.0,
+     "max_giant_to_max_prefill_worker_frac": 0.007246376811594203,
+     "chance_at_max": 0.25,
+     "cell_at_max": "mooncake-w1-base-n4-open-L2"
+    }
+   }
+  },
+  "tierb_reaudit_cache_match": {
+   "source": "runs/phase2/checks/reaudit_cache_match_bc_i9.json",
+   "rows": 168,
+   "identical": 168,
+   "all_identical": true
+  },
+  "a15_posthoc_theta6_zero": {
+   "source": "runs/phase2/noaff_posthoc/result.json (scripts/noaff_posthoc.py), val k0-2 (selection split)",
+   "m1_val_k0_2": 0.16599470141735354,
+   "theta6_zero_val_k0_2": 0.16502464888952786,
+   "delta": {
+    "val_k0_2": -0.0009700525278256711,
+    "by_family": {
+     "mooncake": 0.0,
+     "synthetic_sessions": -5.73881511675145e-05,
+     "agentx": -0.0033234486584304487
+    },
+    "cells_worse": 5,
+    "cells_better": 4,
+    "cells": 14
+   },
+   "decision_change_rate": {
+    "overall": 0.657076788420513,
+    "requests": 446721,
+    "by_family": {
+     "agentx": 0.7713981376490396,
+     "mooncake": 0.0,
+     "synthetic_sessions": 0.7427134029638541
+    }
+   },
+   "note": "decision changes are trajectory-level (after a first different choice the states and worker labels diverge); Mooncake val cells carry no session continuity, so theta6 never acts there"
+  },
+  "val_best_baseline_k3_10": {
+   "source": "runs/phase2/selection/valbest_baseline.json",
+   "ranking": [
+    [
+     "ramjet@p2-ramjet-s3-g25-best_so_far",
+     0.1411348331803814
+    ],
+    [
+     "llmdpp@p2-llmdpp-s2-g25-mean",
+     0.13933790761239287
+    ],
+    [
+     "twotier@p2-twotier-s1-g15-mean",
+     0.13451775465167037
+    ],
+    [
+     "stickybounded@p2-stickybounded-s2-g25-mean",
+     0.13380951224916446
+    ],
+    [
+     "m0@p2-m0-s3-g20-mean",
+     0.13262963505096179
+    ],
+    [
+     "lmetric@p2-lmetric-s2-g10-mean",
+     0.1320527687218506
+    ],
+    [
+     "stickyhard@p2-stickyhard-s1-g25-mean",
+     0.1125374192869206
+    ],
+    [
+     "llmdob@p2-llmdob-s1-g5-mean",
+     0.10349998934991964
+    ],
+    [
+     "dualmap@p2-dualmap-s3-g10-mean",
+     0.026285052719892177
+    ],
+    [
+     "chwbl@p2-chwbl-s1-g5-mean",
+     0.02175477178467915
+    ]
+   ],
+   "val_best": "ramjet@p2-ramjet-s3-g25-best_so_far",
+   "runner_up": "llmdpp@p2-llmdpp-s2-g25-mean",
+   "margin_cells": {
+    "cell_mean": 0.0017969255679885514,
+    "cell_se": 0.006139427735521152,
+    "cells_ahead": 9,
+    "cells": 14
+   },
+   "margin_segments": {
+    "segment_mean": -0.008678878774665553,
+    "segment_se": 0.010385074626832233,
+    "segments_ahead": 3,
+    "segments": 6
+   }
+  },
+  "m2ais_warm_start_smoke": {
+   "source": "runs/phase2-ais/checks/m2ais_smoke/result.json (run_smoke.py, relay i5)",
+   "ok": true,
+   "space_sha": "02c2a719e7f9b7c4f286f4bac04ffe0b17584a589195754b64d0875427930eba",
+   "m1ais_selected": {
+    "run": "m1ais-s1",
+    "generation": 25,
+    "which": "best_so_far",
+    "val_objective": 0.17313714730249014
+   },
+   "parameter_check": {
+    "theta_equal": true,
+    "theta_max_abs_diff": 0.0,
+    "p_all_zero": true,
+    "sources": [
+     "min_est_ttft_ms_s",
+     "mean_est_decode_step_ms_s"
+    ],
+    "dimension": 33
+   },
+   "cells": {
+    "mooncake-w0-base-n4-open-L1": {
+     "digest_equal": true,
+     "errors": []
+    },
+    "mooncake-w0-base-n4-open-L3": {
+     "digest_equal": true,
+     "errors": []
+    }
+   }
+  },
+  "space_compliance_phase2": {
+   "source": "runs/phase2/checks/space_compliance_bc_i9.json",
+   "written": "2026-10-04 20:45:07 PDT",
+   "all_ok": true,
+   "runs_checked": 18,
+   "val_lines_checked": 180
+  },
+  "space_compliance_phase2-ais": {
+   "source": "runs/phase2-ais/checks/space_compliance_bc_i9.json",
+   "written": "2026-10-04 21:04:53 PDT",
+   "all_ok": true,
+   "runs_checked": 12,
+   "val_lines_checked": 120
+  },
+  "val_k3_10_fresh": {
+   "tierB": {
+    "all_k3_10_fresh": true,
+    "all_k0_2_present": true,
+    "written": "2026-10-04 21:06:21 PDT"
+   },
+   "tierC": {
+    "all_k3_10_fresh": true,
+    "all_k0_2_present": true,
+    "written": "2026-10-04 21:06:22 PDT"
+   },
+   "tierAIS": {
+    "all_k3_10_fresh": true,
+    "all_k0_2_present": true,
+    "written": "2026-10-04 21:06:23 PDT"
+   }
+  },
+  "lr10_improving_at_cutoff": {
+   "source": "runs/phase2/checks/improving_at_cutoff_bc_i9.json",
+   "baselines_selected_at_last_generation": [],
+   "selected_at_last_generation": [
+    "ablam1",
+    "m1ais",
+    "m1cont",
+    "m1noaff",
+    "m2r2"
+   ],
+   "max_rise_over_last_interval": 0.0032936236252016082
+  },
+  "ablation_a_start_identity": {
+   "source": "runs/phase2/abla/identity_check.json",
+   "all_identical": true,
+   "pairs": {
+    "m1@p2-m1c-s1-g20-mean": {
+     "cells": 34,
+     "identical_cells": 34
+    },
+    "ramjet@p2-ramjet-s3-g25-best_so_far": {
+     "cells": 34,
+     "identical_cells": 34
+    }
+   },
+   "decoded_x0": {
+    "abla-x0-abla_m1": {
+     "vs": "m1@p2-m1c-s1-g20-mean",
+     "cells": 34,
+     "identical_cells": 34
+    },
+    "abla-x0-abla_ramjet": {
+     "vs": "ramjet@p2-ramjet-s3-g25-best_so_far",
+     "cells": 34,
+     "identical_cells": 34
+    }
+   },
+   "functional_q0.5": {
+    "m1@p2-m1c-s1-g20-mean": {
+     "cells": 34,
+     "goodput_changed_cells": 28,
+     "errors": 0
+    },
+    "ramjet@p2-ramjet-s3-g25-best_so_far": {
+     "cells": 34,
+     "goodput_changed_cells": 28,
+     "errors": 0
+    }
+   }
+  }
+ },
+ "relays": [
+  {
+   "relay": "i0",
+   "at": "2026-10-04 03:34:25 PDT",
+   "note": "02:35-03:40 PDT 2026-10-04. Tier-B/C and AIS-league spaces written and smoke-tested; manifests amended; 8 runs placed (m2r2-s1/s2, m1cont-s1/s2, m1ais-s1, m0ais-s1, llmdobm-s1 on the CPU cluster jobs <job>; m1v2-s1 on the workstation); two p2orch loops running (phase2 PID <job>, AIS PID <job>); val-best baseline on val k3-10 = ramjet; ablation-a spaces identity-verified; A15 post-hoc theta6=0 done; ablation b skipped; no tier-B/C run finished yet."
+  },
+  {
+   "relay": "i1",
+   "at": "2026-10-04 05:28:59 PDT",
+   "note": "2026-10-04 03:39-05:35 PDT. No tier-B/C or AIS run finished (CPU cluster wave-4/5 and AIS wave-1 runs at generation 14-15 of 25 at 05:28, about 9.5 min per generation; m1v2-s1 on the workstation at generation 10, about 12 min per generation; PROJECTION: CPU cluster returns about 07:00-07:30, m1v2-s1 about 08:30). No cancel, no new submission, no loop restart, no p2orch change. Fixed m1v2-s2/s3 CMA seeds (1 -> 2/3) before placement. Enabled ws:0 in the AIS instance so the workstation does not idle while phase 2 holds back waves 7-9. Wrote and self-tested the post-selection tools: scripts/m2_rank34_gate.py, scripts/abla_qremoved.py, reaudit_tierb/run.sh, checks/selection_recheck.py --selection."
+  },
+  {
+   "relay": "i2",
+   "at": "2026-10-04 07:40:50 PDT",
+   "note": "2026-10-04 05:29-07:42 PDT. Monitoring relay; no loop restart, no p2orch/WT change, no cancel, no manual submission. 7 of 30 tier-B/C/AIS runs done and ingested by the loops (0 rejected): m2r2-s1/s2, m1cont-s1/s2, m1ais-s1, llmdobm-s1, m0ais-s1; equal budget exact (400 evals, 5 val checkpoints, 25 contiguous generations each). Loops placed m1v2-s2/m2r2-s3/m1cont-s3/m1v2-s3 (jobs <job>) and AIS m1ais-s2/m0ais-s2/llmdobm-s2 (<job>); m1v2-s1 continues on the workstation (gen 21 at 07:21). Every phase-2 wave <= 6 run and every AIS wave <= 2 run has started. Capacity unchanged (7 CPU cluster nodes + workstation). Decision: gate tier C robustness extras (speedup 0.8/1.2, tau > 0, hash_home) assigned to Select+Test's robustness pass (test-cell evaluations of finalists). No selection yet (m2r2/m1cont 2 of 3 restarts)."
+  },
+  {
+   "relay": "i3",
+   "at": "2026-10-04 09:24:23 PDT",
+   "note": "2026-10-04 07:42-09:30 PDT. 8 of 30 tier-B/C/AIS runs done (m1v2-s1 finished on the workstation 08:06:22: 400 evals, 5 val checkpoints, 25 contiguous generations); equal budget exact for all 8; ingest spot-check 280/280 identical (m2r2-s1/s2, m1cont-s1/s2, m1ais-s1, m0ais-s1, llmdobm-s1). Both loops restarted between ticks by exact PID with --max-wall-s 129600 (AIS 1681624 -> 3923329 on <commit-ais-05> at 07:44; phase2 2452725 -> 3928723 at 07:53), so neither stops at 14:48/15:27 with work left. AIS M2-ais priority (max_wave 4, yield_to phase2:9, yield_own_from_wave 4) applied under the state lock at 07:54:55 (set_m2ais_priority.py); waves 1-3 unaffected. AIS placed m1ais-s3 on ws:0 at 08:10:48 (launch.sh PID 3932626). Re-audit scope registered before any tier-B selection: m2r2, m1v2, m1noaff. No cancel, no manual submission, no WT change, no deletion. Capacity unchanged (7 CPU cluster nodes + workstation). PROJECTION: CPU cluster round ends ~11:15-11:50, m1ais-s3 ~13:10; tier-B selection for m2r2/m1cont and the M2 rank 3-4 gate after ~11:25."
+  },
+  {
+   "relay": "i4",
+   "at": "2026-10-04 12:02:55 PDT",
+   "note": "2026-10-04 09:25-12:05 PDT. 15 of 30 tier-B/C/AIS runs done. New: m1v2-s2 11:30, m1cont-s3 11:36, m2r2-s3 11:37, m1v2-s3 11:59, and AIS llmdobm-s2/m0ais-s2/m1ais-s2 at 11:58, all ingested by the loops with 0 rejected. Equal budget is exact for all 15 (400 evals, 5 val checkpoints, 25 contiguous generations); ingest spot-check 280/280 identical. Tier-B selection (select --tier B, 12:01:48): m2r2-s3 g25 mean 0.16879, m1cont-s3 g25 best_so_far 0.17040, m1v2-s1 g20 best_so_far 0.17674 (complete; recheck 3/3 exact); m1noaff not started. M2 rank 3-4 gate FAILED (margin -0.00161 vs MDE 0.03815), applied 11:37:53: m2r3/m2r4 blocked. Re-audit scope adds m1cont (decisions.reaudit_scope_i4); m1cont's headline candidacy is left to Select+Test (decisions.m1cont_role). Loops placed m0ais-s3 <job>, llmdobm-s3 <job>, ablam1-s1 <job>, ablabase-s1 <job>, m1noaff-s1 <job>, ablam1-s2 <job>, ablabase-s2 <job> (all RUNNING, end by 00:02 on 10-05). No loop restart, no p2orch/WT change, no cancel, no deletion, no commit."
+  },
+  {
+   "relay": "i5",
+   "at": "2026-10-04 14:22:04 PDT",
+   "note": "2026-10-04 12:03-14:25 PDT. 16 of 30 tier-B/C/AIS runs done (9 phase2 tier B, 7 AIS), equal budget true 16/16. m1ais-s3 done on ws:0 13:11:50 -> M1-ais complete: select --tier AIS 13:16:51 m1ais-s1 g25 best_so_far val k0-2 0.17314 (recheck exact); spaces/m2_ais_rank2.yaml; warm-start smoke ok; m2ais-s1..3 planned 13:17 (plan_m2ais.py) and queued 13:21:55 behind phase2 waves <= 9. Loop placed m1noaff-s2 on ws:0 13:22:36 (PID <job>). <node> IDLE+DRAIN (Epilog error 14:16:27) after the other user's job; skipped. No restart, no cancel, no manual submission, no deletion, no commit. PROJECTION: CPU cluster round ends ~16:00-16:25, then ablam1-s3, ablabase-s3, m1noaff-s3, m2ais-s1..3 (6 runs, 7 nodes) end ~20:15-20:45; m1noaff-s2 ~18:30."
+  },
+  {
+   "relay": "i6",
+   "at": "2026-10-04 16:39:41 PDT",
+   "note": "14:22-16:45 PDT 2026-10-04: 23 of 30 tier-B/C/AIS runs done (tier B 10, tier C 4, AIS 9), equal budget exact for all 23; ingested by the loops 16:04-16:37 (llmdobm-s3, m0ais-s3, ablam1-s1, ablam1-s2, ablabase-s2, m1noaff-s1, ablabase-s1; 0 rejected); spot-checks 280/280 identical (runs/phase2/checks/ingest_spotcheck_bc_i6.json, runs/phase2-ais/checks/ingest_spotcheck_bc_i6.json). AIS waves 1-3 final: select --tier AIS 16:12:42 (M1-ais m1ais-s1 g25 0.17314, M0-ais m0ais-s2 g20 0.14102, llmdobm llmdobm-s2 g15 0.09828; recheck 3/3 exact). All 30 runs started: wave 9 (ablam1-s3, ablabase-s3, m1noaff-s3) 16:06, m2ais-s1..3 16:31-16:37; 7 running (6 CPU cluster + m1noaff-s2 on ws:0). No restart, no code change, no cancel, no manual submission, no deletion, no commit."
+  },
+  {
+   "relay": "bc_i7",
+   "at": "2026-10-04 18:16:46 PDT",
+   "note": "16:40-18:20 PDT 2026-10-04: 24 of 30 done (tier B 11, tier C 4, AIS 9). m1noaff-s2 finished on ws:0 18:12:17 (400 evals, 25 contiguous generations, 10 val lines; marked done 18:13:30). Equal budget true for tier B 11, tier C 4, AIS 9. Running on the CPU cluster: ablam1-s3, ablabase-s3, m1noaff-s3 (jobs <job>) and m2ais-s1..3 (<job>), all passed the image guard, in facts/remote.json with scancel. New read-only space-compliance check: all validated candidates of tier-B/C and AIS runs lie in their declared spaces (sign-rule clamps and pins hold), all ok. No restart, cancel, manual submission, code change, deletion or commit. PROJECTION: wave 9 ~20:25-20:35, m2ais ~20:50-21:00."
+  },
+  {
+   "relay": "bc_i8",
+   "at": "2026-10-04 20:09:28 PDT",
+   "note": "18:17-20:15 PDT 2026-10-04: 25 of 30 done (tier B 11, tier C 5, AIS 9). ablabase-s3: job <job> (<node>) FAILED with ExitCode 0:13 (SIGPIPE) at 18:41:41, 33 s after its generation-15 checkpoint synced; slurmd restarted on our CPU cluster nodes 18:39-18:44 (hypothesis: the cause). The loop requeued it with resume and placed it on the freed <node>: job <job> (18:45:04, --time 12:00:00, in facts/remote.json with scancel) passed the image guard, COMPLETED 19:40:50, ingested 19:43:17 (30,754 records, 0 rejected; 25 contiguous generations, 400 evals, 10 val lines; spot-check 40/40 identical). Equal budget true: tier B 11, tier C 5. Running: ablam1-s3, m1noaff-s3 (jobs <job>, generation 22 at 20:04) and m2ais-s1..3 (<job>, generations 19-20 at 20:06). <node> and ws:0 idle (nothing queued; a move would not shorten the m2ais critical path). Ablation b re-checked, still skipped. No restart, no code change, no cancel, no manual submission, no deletion, no commit. PROJECTION: wave 9 ~20:35-20:40, m2ais ~21:00-21:10."
+  },
+  {
+   "relay": "bc_i9",
+   "at": "2026-10-04 21:06:49 PDT",
+   "note": "20:10-21:15 PDT 2026-10-04: COMPLETE, 30 of 30 done (tier B 12, tier C 6, AIS 12), equal budget true (400 evals, 5 val checkpoints each). Last five runs: ablam1-s3 and m1noaff-s3 (jobs <job>) ingested 20:35:23/20:35:39, m2ais-s1/s3/s2 (<job>) ingested 20:58:44/20:59:04/21:04:21, 0 rejected, spot-checks 80/80 and 120/120 identical; both loops exited by themselves (phase2 20:35:40, AIS 21:04:21). Final selections (val k0-2, all complete, 30 candidates, rechecks exact 84 records each): tier B m1v2 0.17674, m1cont 0.17040, m2r2 0.16879, m1noaff m1noaff-s1 g25 best_so_far 0.16820; tier C ablam1 0.16900, ablabase ablabase-s3 g5 best_so_far 0.14229; AIS M2-ais m2ais-s3 g10 mean 0.17515, M1-ais 0.17314, M0-ais 0.14102, llmdobm 0.09828. Ablation a q removed: +0.00010 (ablam1), -0.00064 (ablabase). Tier-B re-audit (PID <job>): 168/168 replays identical to the cache; gaming flags m2r2/m1v2/m1noaff 4 Mooncake cells, m1cont 3 (M1 3); reported, not retuned. Space compliance all ok (phase2 18 runs/180 val lines, AIS 12/120). Val k3-10 fresh for all 10 selected configs. No baseline selected at the last generation (LR-10 action 3: no extension)."
+  }
+ ]
+}

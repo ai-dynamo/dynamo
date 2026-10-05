@@ -4,7 +4,7 @@
   small replay checks. I did not rely on the stage summaries or on r0's scripts; every number below
   comes from my own runs.
 - **Date:** 2026-10-02.
-- **Audited state:** WT `rupei/learned-routing-public` at `<commit-10>`; `lib/` clean. Installed bindings
+- **Audited state:** WT `rupei/learned-routing` at `<commit-10>`; `lib/` clean. Installed bindings
   `_core.abi3.so` sha `1d67c131…`, build_id `6955b0ee…`.
 - **Evidence directory:** `runs/audits/build-leakage-features-r1/`, containing:
   - `probe/`: a scratch Rust crate outside WT that links WT's `dynamo-custom-policy-builtin` and

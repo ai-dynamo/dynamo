@@ -57,5 +57,26 @@
   "router-state lag 0, 50, 200 ms on the frozen test cells (Amendment A5)",
   "timing perturbation speedup_ratio / decode_speedup_ratio 0.8 and 1.2 (PLAN stage 5)"
  ],
- "counting": "every learned-model variant (rung, rank, feature set, restart) evaluated on validation is counted and reported (LR-11 action 3)"
+ "counting": "every learned-model variant (rung, rank, feature set, restart) evaluated on validation is counted and reported (LR-11 action 3)",
+ "addenda": [
+  {
+   "at": "2026-10-03 ~22:25 PDT, phase2-mid fixer, before any test evaluation (test.jsonl 7b998b8e unchanged, 0 test records)",
+   "changes_primary_test": false,
+   "what": [
+    "M1 identity: the headline learned arm's M1 is the CONTRACT A11.2 sign-constrained re-run (policy key m1 = m1c-s1/s2/s3, LR-10 selection); the unconstrained tier-A M1 (m1u) is a disclosed gaming-flagged row only",
+    "timing robustness (robustness_reported_not_tested item 3): every timing-perturbed record is scored against nominal E0 and the consistent E0' = prefill/s + decode/(s d) (learned_routing.rescore_timing); both reported; LR-14 spread and Kendall tau on E0'; AgentX at speedup 0.8 flagged degenerate under nominal E0",
+    "REPORT flags (LR-13) for every M1 row and finalist in the test pass and every robustness condition: window-basis worker share vs cap, NMI(worker; ISL quartile), ISL >= 32K / >= 64K / top-decile good fractions vs default@defaults, dump workers (learned_routing.window_guards)"
+   ],
+   "ref": "facts/phase2_mid_fix.json preregistration; audits/phase2-mid/fix.md"
+  },
+  {
+   "at": "2026-10-04 ~09:35 PDT, top-level (operator decision), before any test evaluation (0 test records)",
+   "changes_primary_test": false,
+   "what": [
+    "CONTRACT A19: secondary size-weighted metric good_tokens_rps_window (sum of input_length + output_length over good in-window requests / window duration; same window and A2 good rule as goodput_rps_window), run through the headline's own clipped log-ratio, aggregation and one-sided exact Wilcoxon over 12 segments; reported next to the headline, never used for selection or the headline claim",
+    "operator kept the request-count objective; no size-aware retune; LR-13 flags stay on every M1 row"
+   ],
+   "ref": "CONTRACT.md A19"
+  }
+ ]
 }

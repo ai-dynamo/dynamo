@@ -19,7 +19,10 @@
 #        editable from LR_SRC (the commit + live engine shims applied by stage_source.sh); then
 #        verify_env.py.
 # Artifacts are reused while their manifest names the same source manifest; a rebuild writes a
-# temporary directory and renames it into place.
+# temporary directory and renames it into place. Concurrent jobs at one commit build once: the
+# first takes <artifact>.building (mkdir is atomic on the shared filesystem) and the others wait for its manifest.
+# The lock directory is never removed; a stale one (builder died) makes waiters fail after
+# LR_BUILD_WAIT_S with its owner named.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 [[ $# -eq 2 ]] || die "usage: build_env.sh wheel|venv OUT_DIR"
@@ -38,11 +41,36 @@ manifest_matches() {
   [[ -s "$1" ]] && "$python_bin" -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("source_manifest_sha256") != sys.argv[2])' "$1" "$source_sha"
 }
 
+# Returns 0 when this job must build TARGET, 1 when a concurrent job's build of it appeared.
+claim_build() {
+  local target=$1 manifest=$2 lock="$1.building" waited=0
+  mkdir -p "$(dirname "$target")"
+  until mkdir "$lock" 2> /dev/null; do
+    if manifest_matches "$manifest"; then
+      log "reusing $target built by $(cat "$lock/owner" 2> /dev/null || echo 'another job')"
+      return 1
+    fi
+    (( waited < ${LR_BUILD_WAIT_S:-2400} )) \
+      || die "no manifest at $manifest after ${waited}s; $lock is held by $(cat "$lock/owner" 2> /dev/null)"
+    # A builder that is no longer a live Slurm job left a stale lock: fail now, not at the timeout.
+    local owner_job
+    owner_job="$(awk '{print $2}' "$lock/owner" 2> /dev/null || true)"
+    if [[ "$owner_job" =~ ^[0-9]+$ ]] && command -v squeue > /dev/null \
+      && [[ -z "$(squeue -h -j "$owner_job" -o %T 2> /dev/null)" ]]; then
+      die "stale $lock: owner job $owner_job is gone and $manifest is missing; rename the lock to rebuild"
+    fi
+    sleep 15
+    waited=$((waited + 15))
+  done
+  echo "job ${SLURM_JOB_ID:-none} on $(hostname) at $(date -u +%FT%TZ)" > "$lock/owner"
+}
+
 build_wheel() {
   if manifest_matches "$LR_WHEEL_DIR/build-manifest.json"; then
     log "reusing wheel in $LR_WHEEL_DIR"
     return
   fi
+  claim_build "$LR_WHEEL_DIR" "$LR_WHEEL_DIR/build-manifest.json" || return 0
   [[ ! -e "$LR_WHEEL_DIR" ]] || die "$LR_WHEEL_DIR exists with a stale manifest; set a new LR_WHEEL_DIR"
   export CARGO_TARGET_DIR="$LR_NODE_ROOT/cargo-target"
   export CARGO_BUILD_JOBS="${LR_CARGO_JOBS:-96}"
@@ -107,6 +135,8 @@ build_venv() {
   manifest_matches "$LR_WHEEL_DIR/build-manifest.json" || die "no wheel for this source in $LR_WHEEL_DIR"
   if manifest_matches "$LR_VENV/venv-manifest.json"; then
     log "reusing venv $LR_VENV"
+  elif ! claim_build "$LR_VENV" "$LR_VENV/venv-manifest.json"; then
+    :
   else
     [[ ! -e "$LR_VENV" ]] || die "$LR_VENV exists with a stale manifest; set a new LR_VENV"
     local wheel

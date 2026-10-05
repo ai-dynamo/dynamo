@@ -5,13 +5,18 @@
 # Submit one live deployment job to the GPU cluster from the workstation.
 #
 #   submit.sh --plan-id ID --commit SHA [--nodes 1|2] [--partition P] [--time 01:55:00]
-#             [--policies "slug ..."] [--payload CLUSTER_PATH] [--payload-timeout S] [--tag TAG]
-#             [--purpose TEXT] [--env KEY=VALUE]... [--test-only]
+#             [--policies "slug ..." | --pairs CLUSTER_PATH] [--payload CLUSTER_PATH] [--payload-timeout S]
+#             [--tag TAG] [--purpose TEXT] [--env KEY=VALUE]... [--no-lock] [--test-only]
 #
 # Requires stage_source.sh to have staged COMMIT and the plan. --partition defaults to LR_PARTITION.
 # Without --test-only it takes the cooperative GPU hold lock (hold_lock.sh; hard expiry = time limit + 15 min, at most 3 h), submits a
 # whole-node exclusive job running job_node.sh, and records the job with its cancel command in
 # CR/facts/live.json. finish.sh records the end state and releases the lock.
+#
+# --pairs runs a batch of (label, policy, input) pairs in one allocation (pairs.py; the inputs live
+# under the payload's LR_SMOKE_INPUTS, passed with --env). --no-lock skips the cooperative lock, so
+# several jobs can run at once (when no other user of the allocation needs it); the partition's own
+# limits then bound --time.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$here/common.sh"
@@ -19,7 +24,7 @@ lr_need LR_SSH_ALIAS LR_ACCOUNT LR_PARTITION LR_LIVE_ROOT LR_CR
 ssh_alias="$LR_SSH_ALIAS"
 account="$LR_ACCOUNT"
 nodes=1 partition="$LR_PARTITION" time_limit=01:55:00 policies="" payload="" payload_timeout=5400
-tag="" purpose="live deployment" test_only=0 plan_id="" commit="" extra_env=()
+tag="" purpose="live deployment" test_only=0 plan_id="" commit="" extra_env=() pairs="" lock=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --plan-id) plan_id=$2; shift 2 ;;
@@ -33,23 +38,30 @@ while [[ $# -gt 0 ]]; do
     --tag) tag=$2; shift 2 ;;
     --purpose) purpose=$2; shift 2 ;;
     --env) extra_env+=("$2"); shift 2 ;;
+    --pairs) pairs=$2; shift 2 ;;
+    --no-lock) lock=0; shift ;;
     --test-only) test_only=1; shift ;;
     *) die "unknown argument $1" ;;
   esac
 done
 [[ -n "$plan_id" && "$commit" =~ ^[0-9a-f]{40}$ ]] || die "need --plan-id and a full 40-hex --commit"
 [[ "$nodes" == 1 || "$nodes" == 2 ]] || die "--nodes must be 1 or 2"
+[[ -z "$pairs" || -z "$policies" ]] || die "--pairs and --policies are exclusive"
+[[ -z "$pairs" || -n "$payload" ]] || die "--pairs needs --payload"
 tag="${tag:-lr-live-n$((4 * nodes))-$(date -u +%Y%m%dT%H%M%SZ)}"
 deploy="$LR_LIVE_ROOT/src/${commit:0:12}/benchmarks/learned_routing/live/deploy"
 plan="$LR_LIVE_ROOT/plans/$plan_id"
 ssh -o BatchMode=yes "$ssh_alias" "test -f '$deploy/job_node.sh' && test -f '$plan/PLAN.json' \
   && test -s '$LR_LIVE_ROOT/src/${commit:0:12}.source-manifest.json' && mkdir -p '$LR_LIVE_ROOT/jobs' '$LR_RUNS_ROOT'" \
   || die "commit or plan not staged on the cluster; run stage_source.sh"
+if [[ -n "$pairs" ]]; then
+  ssh -o BatchMode=yes "$ssh_alias" "test -s '$pairs'" || die "pairs file $pairs not on the cluster"
+fi
 
 env_file="$LR_LIVE_ROOT/jobs/$tag.env"
 {
   printf '%s=%q\n' LR_COMMIT "$commit" LR_PLAN_DIR "$plan" LR_DEPLOY_DIR "$deploy" LR_RUN_TAG "$tag" \
-    LR_POLICIES "$policies" LR_PAYLOAD "$payload" LR_PAYLOAD_TIMEOUT_S "$payload_timeout"
+    LR_POLICIES "$policies" LR_PAIRS "$pairs" LR_PAYLOAD "$payload" LR_PAYLOAD_TIMEOUT_S "$payload_timeout"
   for kv in "${extra_env[@]}"; do
     [[ "$kv" =~ ^LR_[A-Z0-9_]+= ]] || die "--env takes LR_*=VALUE, got $kv"
     printf '%s=%q\n' "${kv%%=*}" "${kv#*=}"
@@ -64,23 +76,27 @@ if [[ $test_only -eq 1 ]]; then
   exit 0
 fi
 
-limit_s=$(awk -F: '{ if (NF == 3) print $1 * 3600 + $2 * 60 + $3; else print $1 * 60 + $2 }' <<< "${time_limit#*-}")
-hours=$(awk -v s="$limit_s" 'BEGIN { h = (s + 900) / 3600; if (h > 3) h = 3; printf "%.3f", h }')
-(( limit_s + 900 <= 10800 )) || die "time limit too long for the 3 h lock; shorten --time"
-bash "$here/hold_lock.sh" acquire "learned-routing live ($purpose)" "$tag" "$hours"
+lock_start=none
+if [[ $lock -eq 1 ]]; then
+  limit_s=$(awk -F: '{ if (NF == 3) print $1 * 3600 + $2 * 60 + $3; else print $1 * 60 + $2 }' <<< "${time_limit#*-}")
+  hours=$(awk -v s="$limit_s" 'BEGIN { h = (s + 900) / 3600; if (h > 3) h = 3; printf "%.3f", h }')
+  (( limit_s + 900 <= 10800 )) || die "time limit too long for the 3 h lock; shorten --time"
+  bash "$here/hold_lock.sh" acquire "learned-routing live ($purpose)" "$tag" "$hours"
+  lock_start=$tag
+fi
 if ! job_id=$(ssh -o BatchMode=yes "$ssh_alias" sbatch --parsable "${sbatch_args[@]}" "$deploy/job_node.sh"); then
-  bash "$here/hold_lock.sh" release "$tag"
-  die "sbatch failed; lock released"
+  [[ $lock -eq 0 ]] || bash "$here/hold_lock.sh" release "$tag"
+  die "sbatch failed (lock released if taken)"
 fi
 job_id="${job_id%%;*}"
 python3 "$here/live_facts.py" add-job --job-id "$job_id" \
   --field cluster="${LR_CLUSTER:-gpu}" --field account="$account" --field partition="$partition" \
   --field nodes="$nodes" --field gpus="$((8 * nodes))" --field workers="$((4 * nodes))" \
   --field time_limit="$time_limit" --field tag="$tag" --field purpose="$purpose" \
-  --field commit="$commit" --field plan_id="$plan_id" --field policies="$policies" \
+  --field commit="$commit" --field plan_id="$plan_id" --field policies="$policies" --field pairs="$pairs" \
   --field payload="$payload" --field env_file="$env_file" \
   --field run_dir="$LR_RUNS_ROOT/$job_id-$tag" --field slurm_output="$LR_RUNS_ROOT/slurm-$job_id-$tag.out" \
-  --field lock_start="$tag" --field cancel="ssh $ssh_alias scancel $job_id" --field state=SUBMITTED \
+  --field lock_start="$lock_start" --field cancel="ssh $ssh_alias scancel $job_id" --field state=SUBMITTED \
   --field submitted_utc="$(date -u +%FT%TZ)"
 echo "submitted job $job_id (tag $tag); cancel: ssh $ssh_alias scancel $job_id"
 echo "when it ends: bash $here/finish.sh $job_id $tag"

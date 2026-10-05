@@ -193,7 +193,7 @@
  },
  "base_ref": "origin/rupei/router-policy-aic-ttft",
  "base_sha": "2be8d9c43ac1b275fa6e5743caee9b01c0522463",
- "branch": "rupei/learned-routing-public",
+ "branch": "rupei/learned-routing",
  "determinism": {
   "agentic_and_sessions": {
    "agentx_default_seed1": {

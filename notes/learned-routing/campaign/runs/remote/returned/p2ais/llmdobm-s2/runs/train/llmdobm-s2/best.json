@@ -1,0 +1,183 @@
+{
+ "best_ever_train": {
+  "generation": 17,
+  "objective": 0.0970619715133226,
+  "per_cell": {
+   "agentx-A1-base-n4-lanes-L1": -0.05253887763235781,
+   "agentx-A1-base-n4-lanes-L3": -0.04740183034925187,
+   "agentx-A1_A2-base-n8-lanes-L3": -0.005130276257081185,
+   "agentx-A2-base-n4-lanes-L2": -0.008472287503013463,
+   "agentx-A2-think0.5-n4-lanes-L2": -0.011081673461883698,
+   "agentx-A3-base-n8-lanes-L2": -0.11030095078946114,
+   "agentx-A3-osl1.5-n4-lanes-L2": -0.11190515735474277,
+   "agentx-A3-think2.0-n8-lanes-L1": -0.12422685653252165,
+   "mooncake-w0-base-n4-open-L1": 0.039159718673854496,
+   "mooncake-w0-base-n4-open-L3": 0.1728705637572695,
+   "mooncake-w0-base-n8-closed-L2": 0.13636953677366898,
+   "mooncake-w0-base-n8-open-L2": 0.13361187909564995,
+   "mooncake-w0-islp1.5-n4-closed-L2": 0.08246998113448917,
+   "mooncake-w0-islu1.5-n4-open-L2": 0.05967559605872377,
+   "mooncake-w0-osl0.5-n8-open-L2": 0.1324553004542994,
+   "mooncake-w2-base-n4-closed-L3": 0.16710774462152939,
+   "mooncake-w2-base-n4-open-L2": 0.057979788186296274,
+   "mooncake-w2-base-n8-closed-L1": 0.011025919936173809,
+   "mooncake-w2-base-n8-open-L3": 0.20216434940179356,
+   "mooncake-w2-islu1.5-n8-closed-L2": 0.08245977533098081,
+   "mooncake-w2-root2-n4-open-L2": 0.05055217201377089,
+   "mooncake-w4-base-n4-closed-L2": 0.03881678273521176,
+   "mooncake-w4-base-n8-open-L1": 0.017199783521729163,
+   "mooncake-w4-islp1.5-n8-open-L2": 0.05209865337032697,
+   "mooncake-w4-osl2.0-n4-open-L2": 0.05147857625647162,
+   "mooncake-w4-root2-n8-open-L3": 0.13985275800409608,
+   "sessions-s0-base-n4-open-L2": 0.05081619612590507,
+   "sessions-s0-base-n8-closed-L2": 0.22043540695745098,
+   "sessions-s1-base-n4-open-L3": 0.9251350240931587,
+   "sessions-s1-base-n8-open-L1": 0.05984389936118738,
+   "sessions-s2-think0.5-n8-open-L2": 0.3125586732262218,
+   "sessions-s2-think2.0-n4-closed-L2": 0.30461417725167406,
+   "sessions-s3-islu1.5-n8-open-L3": 0.22502227983279366,
+   "sessions-s3-root2-n4-open-L2": 0.045390405158554484
+  },
+  "policy_sha": "ffa875acb085c9970284342e41fba5ecab25afe14e06bc33d6e4bc0a1ec92a47",
+  "spec": {
+   "name": "llm-d-optimized-baseline-modeled-tuned",
+   "parameters": {
+    "affinity_threshold": 0.3504380493943928,
+    "max_ttft_penalty_ms": 125.63981336321898,
+    "queue_threshold_tokens": 26085,
+    "ttft_source": "modeled"
+   },
+   "router_config": {
+    "router_prefill_load_model": "ais"
+   },
+   "router_mode": "kv_router",
+   "seeded": false,
+   "type": "llm-d-optimized-baseline"
+  },
+  "values": {
+   "parameters.affinity_threshold": 0.3504380493943928,
+   "parameters.max_ttft_penalty_ms": 125.63981336321898,
+   "parameters.queue_threshold_tokens": 26085
+  },
+  "z": [
+   0.3504380493943928,
+   0.021976786034104627,
+   0.04193419330611039
+  ]
+ },
+ "fevals": 400,
+ "generation": 25,
+ "identity": {
+  "cells_per_gen": null,
+  "eps": 0.001,
+  "metric": "goodput_rps_window",
+  "objective": "clipped_log_ratio",
+  "popsize": 16,
+  "reference_sha": "38a792859e78178fda49fd11d828eaf4cb8cbcdd0bd5efa4a27d1c55dcbcc165",
+  "replicate_pool": 8,
+  "replicates": 2,
+  "seed": 2,
+  "space_sha": "fac6f991d769b6748990d7b5b0f4f1aee852ab03034cb2ebe5d091bcb8d12bd3",
+  "train_cells": [
+   "agentx-A1-base-n4-lanes-L1",
+   "agentx-A1-base-n4-lanes-L3",
+   "agentx-A1_A2-base-n8-lanes-L3",
+   "agentx-A2-base-n4-lanes-L2",
+   "agentx-A2-think0.5-n4-lanes-L2",
+   "agentx-A3-base-n8-lanes-L2",
+   "agentx-A3-osl1.5-n4-lanes-L2",
+   "agentx-A3-think2.0-n8-lanes-L1",
+   "mooncake-w0-base-n4-open-L1",
+   "mooncake-w0-base-n4-open-L3",
+   "mooncake-w0-base-n8-closed-L2",
+   "mooncake-w0-base-n8-open-L2",
+   "mooncake-w0-islp1.5-n4-closed-L2",
+   "mooncake-w0-islu1.5-n4-open-L2",
+   "mooncake-w0-osl0.5-n8-open-L2",
+   "mooncake-w2-base-n4-closed-L3",
+   "mooncake-w2-base-n4-open-L2",
+   "mooncake-w2-base-n8-closed-L1",
+   "mooncake-w2-base-n8-open-L3",
+   "mooncake-w2-islu1.5-n8-closed-L2",
+   "mooncake-w2-root2-n4-open-L2",
+   "mooncake-w4-base-n4-closed-L2",
+   "mooncake-w4-base-n8-open-L1",
+   "mooncake-w4-islp1.5-n8-open-L2",
+   "mooncake-w4-osl2.0-n4-open-L2",
+   "mooncake-w4-root2-n8-open-L3",
+   "sessions-s0-base-n4-open-L2",
+   "sessions-s0-base-n8-closed-L2",
+   "sessions-s1-base-n4-open-L3",
+   "sessions-s1-base-n8-open-L1",
+   "sessions-s2-think0.5-n8-open-L2",
+   "sessions-s2-think2.0-n4-closed-L2",
+   "sessions-s3-islu1.5-n8-open-L3",
+   "sessions-s3-root2-n4-open-L2"
+  ],
+  "val_cells": [
+   "agentx-V1-base-n4-lanes-L2",
+   "agentx-V2-base-n4-lanes-L3",
+   "agentx-V2-base-n6-lanes-L2",
+   "agentx-V3-base-n8-lanes-L1",
+   "mooncake-w1-base-n4-open-L2",
+   "mooncake-w1-base-n6-open-L2",
+   "mooncake-w1-base-n8-closed-L2",
+   "mooncake-w1-base-n8-open-L3",
+   "mooncake-w1-islu1.25-n6-closed-L2",
+   "sessions-s4-base-n4-open-L2",
+   "sessions-s4-base-n8-closed-L2",
+   "sessions-s5-base-n4-closed-L1",
+   "sessions-s5-base-n8-open-L3",
+   "sessions-s5-think1.5-n6-open-L2"
+  ],
+  "val_replicates": 3
+ },
+ "selected_by_val": {
+  "generation": 15,
+  "policy_sha": "ce1c20af3826dd9b93ce57c1baf34e96d681416e7206acf73c1db9b30ae76ed8",
+  "spec": {
+   "name": "llm-d-optimized-baseline-modeled-tuned",
+   "parameters": {
+    "affinity_threshold": 0.35805439981026393,
+    "max_ttft_penalty_ms": 139.20132257223653,
+    "queue_threshold_tokens": 26222,
+    "ttft_source": "modeled"
+   },
+   "router_config": {
+    "router_prefill_load_model": "ais"
+   },
+   "router_mode": "kv_router",
+   "seeded": false,
+   "type": "llm-d-optimized-baseline"
+  },
+  "val_objective": 0.09827630911850974,
+  "val_per_cell": {
+   "agentx-V1-base-n4-lanes-L2": -0.11700120251437124,
+   "agentx-V2-base-n4-lanes-L3": -0.07615279938024039,
+   "agentx-V2-base-n6-lanes-L2": -0.04990606684162343,
+   "agentx-V3-base-n8-lanes-L1": -0.018869281788307355,
+   "mooncake-w1-base-n4-open-L2": 0.06432931987063466,
+   "mooncake-w1-base-n6-open-L2": 0.08770613232228304,
+   "mooncake-w1-base-n8-closed-L2": 0.12291128978125403,
+   "mooncake-w1-base-n8-open-L3": 0.2665513181153532,
+   "mooncake-w1-islu1.25-n6-closed-L2": 0.09091941545387039,
+   "sessions-s4-base-n4-open-L2": 0.10771629222725153,
+   "sessions-s4-base-n8-closed-L2": 0.27256960094635435,
+   "sessions-s5-base-n4-closed-L1": 0.13126361442756704,
+   "sessions-s5-base-n8-open-L3": 0.42292712527647397,
+   "sessions-s5-think1.5-n6-open-L2": 0.07090356976263666
+  },
+  "values": {
+   "parameters.affinity_threshold": 0.35805439981026393,
+   "parameters.max_ttft_penalty_ms": 139.20132257223653,
+   "parameters.queue_threshold_tokens": 26222
+  },
+  "which": "mean",
+  "z": [
+   0.35805439981026393,
+   0.031846120871168296,
+   0.04240452798627847
+  ]
+ },
+ "selection_rule": "argmax validation objective over validated candidates (best-so-far train sample and CMA distribution mean every --val-every generations); falls back to the best-ever train sample until a validation exists (LR-10)"
+}
