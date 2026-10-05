@@ -74,54 +74,29 @@ COPY examples/router/custom-policy-example/ examples/router/custom-policy-exampl
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
-# The `/src/target` cache below is keyed by a name that changes whenever a
-# build-script *input* is renamed or removed. The TensorRT-LLM sidecar's
-# vendored protos moved from `proto/trtllm_service.proto` to
-# `proto/openengine/v1/`, and a cached build-script binary compiled against the
-# old layout keeps asking protoc for a file this tree no longer has. Bumping the
-# id costs one cold build and makes that impossible.
-
-# ---- vLLM builder -----------------------------------------------------------
-FROM builder-base AS vllm-builder
+# ---- sidecar builders -------------------------------------------------------
+FROM builder-base AS sidecar-builder
 
 ARG TARGETARCH
 
-# The three builders share one target cache per architecture, so each backend
-# reuses the dependency artifacts the previous one compiled. sharing=locked
-# serializes them, which is required for correctness — cargo's .package-cache
-# lock lives in $CARGO_HOME, outside these mounts, so it cannot coordinate
-# separate build containers — and is also what bounds peak memory, since
-# codegen-units=1 plus LTO makes each release link expensive on its own.
-# Every id is per-architecture so the amd64 and arm64 halves of a multi-platform
-# build do not serialize against each other.
+# A persistent target cache can contain workspace artifacts newer than the
+# source copied by Docker, causing Cargo's mtime checks to reuse another
+# revision's code. Clean workspace artifacts while holding the cache locks;
+# keep registry/git dependency artifacts cached. Build each sidecar separately
+# to preserve its feature set, and serially to bound release-link memory use.
+# One RUN keeps cleanup and all three builds in the same locked cache session.
+# Per-architecture cache IDs let amd64 and arm64 build independently.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
-    cargo build --release --locked -p dynamo-vllm-sidecar \
+    cargo clean --workspace --release --locked \
+    && cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
-    && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
-
-# ---- SGLang builder ---------------------------------------------------------
-FROM builder-base AS sglang-builder
-
-ARG TARGETARCH
-
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
-    cargo build --release --locked -p dynamo-sglang-sidecar \
+    && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar \
+    && cargo build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar \
-    && install -D target/release/dynamo-sglang-sidecar /out/dynamo-sglang-sidecar
-
-# ---- TensorRT-LLM builder ---------------------------------------------------
-FROM builder-base AS trtllm-builder
-
-ARG TARGETARCH
-
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
-    cargo build --release --locked -p dynamo-trtllm-sidecar \
+    && install -D target/release/dynamo-sglang-sidecar /out/dynamo-sglang-sidecar \
+    && cargo build --release --locked -p dynamo-trtllm-sidecar \
     && strip target/release/dynamo-trtllm-sidecar \
     && install -D target/release/dynamo-trtllm-sidecar /out/dynamo-trtllm-sidecar
 
@@ -196,9 +171,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && { userdel -r ubuntu 2>/dev/null || true; } \
     && useradd --create-home --uid 1000 --gid 0 dynamo
 
-COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
-COPY --from=sglang-builder /out/dynamo-sglang-sidecar /usr/local/bin/
-COPY --from=trtllm-builder /out/dynamo-trtllm-sidecar /usr/local/bin/
+COPY --from=sidecar-builder /out/ /usr/local/bin/
 
 COPY --chmod=755 lib/sidecar/dynamo-sidecar /usr/local/bin/dynamo-sidecar
 
@@ -252,9 +225,7 @@ COPY --from=licenses /legal/ /
 # builder runners route to a remote BuildKit worker with no local docker
 # daemon (see shared-build-sidecar.yml). Not used for any shipped image.
 FROM scratch AS sidecar-binaries
-COPY --from=vllm-builder /out/dynamo-vllm-sidecar /
-COPY --from=sglang-builder /out/dynamo-sglang-sidecar /
-COPY --from=trtllm-builder /out/dynamo-trtllm-sidecar /
+COPY --from=sidecar-builder /out/ /
 
 # ---- shipped runtime ---------------------------------------------------------
 FROM runtime-base AS runtime
