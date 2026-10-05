@@ -31,3 +31,29 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         assert!(stdout.contains(expected), "help omits {expected}");
     }
 }
+
+#[test]
+fn invalid_arguments_fail_before_runtime_configuration() {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"));
+    for (key, _) in std::env::vars().filter(|(key, _)| {
+        key.starts_with("DYN_") || key.starts_with("ETCD_") || key.starts_with("NATS_")
+    }) {
+        command.env_remove(key);
+    }
+    // A runtime configuration error must not mask a local argument error.
+    let output = command
+        .args([
+            "--grpc-endpoint",
+            "http://127.0.0.1:0",
+            "--route-to-encoder",
+        ])
+        .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("route-to-encoder is not supported"),
+        "{stderr}"
+    );
+}

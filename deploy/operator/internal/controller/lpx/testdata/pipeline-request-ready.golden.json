@@ -1,0 +1,82 @@
+{
+  "binding": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Pending",
+    "message": "LPX scheduler is binding the planned workload Pods. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "degraded": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Pending",
+    "message": "LPX scheduler is repairing or releasing a degraded placement. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "future": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Failed",
+    "message": "LPX scheduler reported unknown phase \"future\". LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "noFit": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Pending",
+    "message": "LPX scheduler found no placement for the current request. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "pending": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Pending",
+    "message": "LPX scheduler is waiting to plan the current request. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "planned": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Pending",
+    "message": "LPX scheduler committed a placement plan for the current request. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "released": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Pending",
+    "message": "LPX scheduler released the current plan. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "releasing": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Pending",
+    "message": "LPX scheduler is releasing the current plan. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "reserving": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Pending",
+    "message": "LPX scheduler is reserving the planned LPU allocation. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  },
+  "unsupported": {
+    "type": "Ready",
+    "status": "False",
+    "observedGeneration": 7,
+    "lastTransitionTime": "2026-01-01T00:00:00Z",
+    "reason": "Failed",
+    "message": "LPX scheduler cannot support the current request. LPX diagnostics: ExactDiagnostic [requests/current]: the exact scheduler detail"
+  }
+}

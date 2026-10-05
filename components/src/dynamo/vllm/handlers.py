@@ -74,6 +74,7 @@ from dynamo.common.utils.input_params import (
 )
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -96,7 +97,7 @@ from dynamo.vllm.kv_hints import _apply_kv_hint, publish_kv_hint_capabilities
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
 from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
     adapt_engine_generate_request,
@@ -167,6 +168,38 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
 )
 # An object sentinel cannot collide with a caller-supplied version.
 _WEIGHT_VERSION_UNDECLARED: Final = object()
+
+
+def _modelexpress_startup_weight_version(config: Config) -> Any:
+    """Return the version enforced by the ModelExpress RL startup loader.
+
+    ModelExpress releases without the RL startup policy leave the version
+    undeclared. When the policy is available, its environment modules provide
+    the same parsed values used by the loader. The RL loader fails engine
+    initialization unless every rank loads the desired version, so a
+    subsequently constructed handler serves that version.
+    """
+    load_format = config.engine_args.load_format
+    if load_format not in MX_LOAD_FORMATS:
+        return _WEIGHT_VERSION_UNDECLARED
+
+    try:
+        modelexpress_envs = importlib.import_module("modelexpress.envs")
+        modelexpress_rl_envs = importlib.import_module("modelexpress_rl.envs")
+    except ModuleNotFoundError as exc:
+        if exc.name not in {
+            "modelexpress",
+            "modelexpress.envs",
+            "modelexpress_rl",
+            "modelexpress_rl.envs",
+        }:
+            raise
+        return _WEIGHT_VERSION_UNDECLARED
+
+    if getattr(modelexpress_envs, "MX_LOAD_STRATEGY_CHAIN", None) != "RL":
+        return _WEIGHT_VERSION_UNDECLARED
+    desired = getattr(modelexpress_rl_envs, "MX_REFIT_DESIRED_VERSION_UID", None)
+    return desired if desired is not None else _WEIGHT_VERSION_UNDECLARED
 
 
 def build_prompt_tokens_details(
@@ -713,7 +746,7 @@ def _accumulate_engine_data(
                 len(logprob_accumulator),
                 len(token_accumulator),
             )
-    if request_prompt_token_ids:
+    if request_prompt_token_ids and "prompt_token_ids" not in engine_data:
         engine_data["prompt_token_ids"] = list(request_prompt_token_ids)
     tok["engine_data"] = engine_data
 
@@ -1218,7 +1251,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # to prevent both bypassing the check before either inserts (atomicity).
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
-        self._weight_version: Any = _WEIGHT_VERSION_UNDECLARED
+        self._weight_version: Any = _modelexpress_startup_weight_version(config)
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -3309,6 +3342,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     @staticmethod
+    def _kv_cache_hit_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
+        """Expose final cache counters for internal router observability."""
+        prompt_tokens = request_output.prompt_token_ids
+        cached_tokens = request_output.num_cached_tokens
+        if prompt_tokens is None or cached_tokens is None:
+            return {}
+        return {
+            "prompt_tokens": len(prompt_tokens),
+            "reused_tokens": cached_tokens,
+        }
+
+    @staticmethod
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
@@ -3367,6 +3412,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
         session_id=None,
+        report_kv_cache_hit=True,
+        want_engine_data=False,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3402,8 +3449,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # carries None. Capture the first non-None payload and attach it to
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
+            engine_prompt_token_ids: Optional[list[int]] = None
             async for res in gen:
                 # res is vllm's RequestOutput
+                if want_engine_data and engine_prompt_token_ids is None:
+                    engine_prompt_token_ids = res.prompt_token_ids
                 if (
                     prompt_logprobs_payload is None
                     and getattr(res, "prompt_logprobs", None) is not None
@@ -3449,7 +3499,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     finish_reason,
                     stop_reason,
                 ) in prepared_outputs:
-                    out = {
+                    out: Dict[str, Any] = {
                         "index": output_idx,
                         "token_ids": token_ids,
                     }
@@ -3476,12 +3526,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
+                        if engine_prompt_token_ids is not None:
+                            out["engine_data"] = {
+                                "prompt_token_ids": list(engine_prompt_token_ids)
+                            }
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        # With n > 1, later samples hit the prompt blocks earlier
+                        # ones just cached, and vLLM keeps the first buffered
+                        # sample's count when it merges outputs, so no sample's
+                        # count reliably measures prior reuse.
+                        kv_cache_hit = (
+                            BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                            if report_kv_cache_hit and sampling_params.n == 1
+                            else {}
+                        )
+                        if kv_cache_hit:
+                            out.setdefault("engine_data", {})[
+                                "kv_cache_hit"
+                            ] = kv_cache_hit
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
@@ -3587,6 +3654,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         ] = None
 
     async def generate(self, request, context):
+        normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
@@ -3959,11 +4027,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # `NvExtResponseFieldSelection.engine_data` so this payload
                 # only reaches clients that asked for it.
                 want_engine_data = _nvext_extra_field_requested(request, "engine_data")
-                # Prompt token IDs the engine actually saw. Either the
-                # pre-tokenized `nvext.token_data` (TITO) or whatever the
-                # preprocessor produced from messages (MITO). We echo them
-                # back in engine_data so the client doesn't have to re-derive
-                # them from a request it might no longer hold.
+                # Fallback when the engine does not report prompt IDs. MITO
+                # image expansion can change these during engine preprocessing.
                 request_prompt_token_ids = (
                     _prompt_token_ids_for_engine_data(request, prompt)
                     if want_engine_data
@@ -3983,6 +4048,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
                         session_id=session_id,
+                        # Transferred prefill KV counts as cached in vLLM, so a
+                        # decode attempt's count would not be local reuse.
+                        report_kv_cache_hit=kv_params is None,
+                        want_engine_data=want_engine_data,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -4168,6 +4237,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self._multimodal_request_processor.initialize_prefill_handoff()
 
     async def generate(self, request, context):
+        normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug("Prefill Request ID: %s", request_id)
@@ -4305,6 +4375,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         request_output=res,
                     ),
                 }
+                # Parallel samples make the count unreliable; see generate_tokens.
+                kv_cache_hit = (
+                    BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                    if sampling_params.n == 1
+                    else {}
+                )
+                if kv_cache_hit:
+                    output["engine_data"] = {"kv_cache_hit": kv_cache_hit}
 
                 # Log prefill completion with LoRA info
                 self._log_with_lora_context(

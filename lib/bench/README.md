@@ -21,6 +21,7 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | Entrypoint | Feature |
 |---|---|
 | `claude_trace_export` | `claude-trace-export` |
+| `codex_trace_export` | `codex-trace-export` |
 | `request_trace_to_mooncake` | `request-trace-to-mooncake` |
 | `request_trace_to_satf` | `satf` |
 | `shadow_consumer` | `shadow-consumer` |
@@ -191,4 +192,4 @@ to the consumer totals so the two can be compared.
 
 See [kv_router/INDEXER_BENCH.md](kv_router/INDEXER_BENCH.md) for trace
 acquisition, benchmark commands, and results for the `mooncake_bench` suite:
-`concurrent-radix-tree-compressed` and `branch-sharded-crtc`.
+`concurrent-radix-tree-compressed` and `nested-map`.
