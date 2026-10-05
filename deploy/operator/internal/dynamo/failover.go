@@ -311,13 +311,14 @@ func gmsRCTName(serviceName string, rank int32) string {
 }
 
 // gmsResourceClaimTemplateConfigs builds one PCS-level ResourceClaimTemplateConfig
-// per rank. Each RCT has the same GPU spec but a distinct per-rank name so that
-// each rank's GMS + engine pods get their own ResourceClaim.
-func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements, roles []ServiceRole) ([]grovev1alpha1.ResourceClaimTemplateConfig, error) {
-	gpuCount, err := getGPUCount(resources)
-	if err != nil {
-		return nil, err
-	}
+// per rank. Each rank resolves the complete template for its semantic engine
+// role, so Leader and Worker may request different GPU counts.
+func gmsResourceClaimTemplateConfigs(
+	serviceName string,
+	gmsSpec *v1beta1.GPUMemoryServiceSpec,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	roles []ServiceRole,
+) ([]grovev1alpha1.ResourceClaimTemplateConfig, error) {
 	seen := map[int32]bool{}
 	configs := make([]grovev1alpha1.ResourceClaimTemplateConfig, 0, len(roles))
 	for _, r := range roles {
@@ -325,6 +326,18 @@ func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMem
 			continue
 		}
 		seen[r.Rank] = true
+		engineRole, ok := engineRoleForRank(roles, r.Rank)
+		if !ok {
+			return nil, fmt.Errorf("rank %d has no engine role", r.Rank)
+		}
+		resourceComponent, err := EffectiveComponentForRole(component, engineRole)
+		if err != nil {
+			return nil, fmt.Errorf("resolve GPU resources for rank %d role %q: %w", r.Rank, engineRole, err)
+		}
+		gpuCount, err := getGPUCount(GetMainContainerResources(resourceComponent))
+		if err != nil {
+			return nil, fmt.Errorf("resolve GPU count for rank %d role %q: %w", r.Rank, engineRole, err)
+		}
 		configs = append(configs, grovev1alpha1.ResourceClaimTemplateConfig{
 			Name: gmsRCTName(serviceName, r.Rank),
 			TemplateSpec: resourcev1.ResourceClaimTemplateSpec{
@@ -346,6 +359,15 @@ func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMem
 		})
 	}
 	return configs, nil
+}
+
+func engineRoleForRank(roles []ServiceRole, rank int32) (Role, bool) {
+	for _, role := range roles {
+		if role.Rank == rank && role.Role != RoleGMS {
+			return role.Role, true
+		}
+	}
+	return "", false
 }
 
 // gmsResourceSharingEntries builds one PCSG-level ResourceSharingSpec per rank.
