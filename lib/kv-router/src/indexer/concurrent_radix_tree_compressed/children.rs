@@ -421,7 +421,6 @@ impl NodeChildren {
         unsafe { self.take_exclusive() }
     }
 
-    /// Publishes `next` only if `current` is still the published snapshot.
     fn compare_and_swap<'g>(
         &self,
         current: Shared<'g, ChildrenState>,
