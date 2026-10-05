@@ -4,6 +4,7 @@
 """The SGLang worker checks client token IDs on every request path."""
 
 import json
+import struct
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -138,6 +139,23 @@ def test_token_array_prompt_with_in_range_ids_passes():
     request = {"token_ids": [0, 1, MAX_TOKEN_ID]}
 
     assert handler._get_input_param(request) == {"input_ids": [0, 1, MAX_TOKEN_ID]}
+
+
+@pytest.mark.parametrize(
+    "token_ids",
+    # Packed int32 bytes of [1, 4294967295] decode to [1, -1].
+    [[1, -1], struct.pack("<2I", 1, OUT_OF_RANGE)],
+    ids=["list", "packed-int32"],
+)
+def test_token_id_list_with_negative_id_is_rejected(token_ids):
+    handler = _decode_handler()
+
+    with pytest.raises(
+        HttpError, match=r"token_ids\[1\] must not be negative$"
+    ) as error:
+        handler._get_input_param({"token_ids": token_ids})
+
+    assert error.value.code == 400
 
 
 @pytest.mark.asyncio
@@ -348,6 +366,28 @@ async def test_embedding_token_input_with_out_of_range_id_is_rejected(
     with pytest.raises(
         HttpError, match=rf"Token id 4294967295 is out of vocabulary at {position}$"
     ) as error:
+        await anext(
+            handler.generate(
+                {"model": "embedding-model", "input": embedding_input},
+                _embedding_context(),
+            )
+        )
+
+    assert error.value.code == 400
+    assert handler.engine.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("embedding_input", "position"),
+    [([1, -1], r"input\[1\]"), ([[1, 2], [3, -1]], r"input\[1\]\[1\]")],
+)
+async def test_embedding_token_input_with_negative_id_is_rejected(
+    embedding_input, position
+):
+    handler = _embedding_handler()
+
+    with pytest.raises(HttpError, match=rf"{position} must not be negative$") as error:
         await anext(
             handler.generate(
                 {"model": "embedding-model", "input": embedding_input},

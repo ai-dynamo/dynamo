@@ -1080,7 +1080,11 @@ class BaseWorkerHandler(
                         400,
                         f"{prompt_label}[{index}] must be an integer token ID",
                     )
-                # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
+                # Packed int32 token_ids decode ids above i32::MAX as negative numbers.
+                if token_id < 0:
+                    raise HttpError(
+                        400, f"{prompt_label}[{index}] must not be negative"
+                    )
                 if (
                     max_input_token_id is not None and token_id > max_input_token_id
                 ) and token_id not in allowed_oov_ids:
