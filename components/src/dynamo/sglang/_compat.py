@@ -391,10 +391,6 @@ def require_reasoning_kwargs(
 ) -> dict[str, Any]:
     """Build the optional SGLang per-request reasoning-gate argument."""
     require_reasoning = bool(request.get("require_reasoning", False))
-    if thinking_budget_requested and not require_reasoning:
-        raise InvalidArgument(
-            "thinking_token_budget requires reasoning to be enabled for the request"
-        )
     kwargs = filter_supported_async_generate_kwargs(
         engine,
         {"require_reasoning": require_reasoning},
