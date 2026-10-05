@@ -432,6 +432,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			},
 		)...)
 	}
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) {
+		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntime(spec, fldPath)...)
+	}
 
 	// Validate conductor requirements on the converted graph.
 	for index := range spec.Components {
@@ -777,8 +780,23 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
+	newOrigin, newOriginExists := newObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	oldOrigin, oldOriginExists := oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
 	newProvider, newProviderExists := newObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
 	oldProvider, oldProviderExists := oldObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
+
+	// Keep creation provenance immutable, including whether it exists at all.
+	if newOriginExists != oldOriginExists || newOrigin != oldOrigin {
+		var invalidValue any
+		if newOriginExists {
+			invalidValue = newOrigin
+		}
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
 
 	// Reserve the initial legacy-provider materialization for the configured operator identity.
 	if !oldProviderExists && newProviderExists && v.operatorPrincipal != "" &&
@@ -858,7 +876,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	}
 
 	canModifyReplicas := v.userInfo != nil && internalwebhook.CanModifyDGDReplicas(v.operatorPrincipal, *v.userInfo)
-	const validateGPUMemoryServiceNewState = true // DGD updates do not run the stateless new-state traversal.
 	componentsPath := fldPath.Child("components")
 	for i := range newSpec.Components {
 		newComponent := &newSpec.Components[i]
@@ -879,6 +896,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			componentsPath.Index(i).Child("multinode"),
 		)...)
 
+		// The stateless DGD validation run before this update traversal validates
+		// every complete role template. The legacy update path has only one
+		// component-level resource shape.
+		validateGPUMemoryServiceNewState := !dynamo.HasRolePodTemplates(newComponent)
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent,
 			oldComponent,
@@ -955,13 +976,25 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 	}
 
 	if oldHasPowerLimit {
-		// Keep the Planner's remaining cached per-replica power inputs stable.
+		// Keep the Planner's cached main-container GPU input stable.
 		newNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(newComponent, fldPath)
 		oldNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(oldComponent, fldPath)
 		if !newNumberOfGPUs.equal(oldNumberOfGPUs) {
 			allErrs = append(allErrs, field.Invalid(
 				newNumberOfGPUs.path,
 				newNumberOfGPUs.invalidValue(),
+				apivalidation.FieldImmutableErrorMsg,
+			))
+			return allErrs
+		}
+
+		// Keep auxiliary-container GPU allocations used by the cached per-replica cost stable.
+		newPodGPUs, newErr := effectivePodGPUCountV1Beta1(v.ctx, newComponent, fldPath)
+		oldPodGPUs, oldErr := effectivePodGPUCountV1Beta1(v.ctx, oldComponent, fldPath)
+		if newErr == nil && oldErr == nil && !newPodGPUs.equal(oldPodGPUs) {
+			allErrs = append(allErrs, field.Invalid(
+				newPodGPUs.path,
+				newPodGPUs.invalidValue(),
 				apivalidation.FieldImmutableErrorMsg,
 			))
 		}
