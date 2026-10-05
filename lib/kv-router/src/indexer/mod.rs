@@ -85,6 +85,9 @@ mod tests;
 #[cfg(test)]
 mod delegate_tests;
 
+#[cfg(test)]
+mod ledger_key_tests;
+
 // Re-export everything that was public in the old single-file module.
 pub use approximate_lru::*;
 pub use branch_sharded::*;
