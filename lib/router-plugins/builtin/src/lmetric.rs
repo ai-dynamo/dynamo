@@ -4,15 +4,18 @@
 //! LMetric: multiplicative cache-and-load scoring with KV-cache hot-spot mitigation.
 //!
 //! Ported from "Simple is Better: Multiplication May Be All You Need for LLM Request Scheduling"
-//! (<https://arxiv.org/abs/2603.15202>). Each worker scores
-//! `new_prefill_tokens × batch_size` and the lowest score wins. The product needs no weight
+//! (<https://arxiv.org/abs/2603.15202>). Each worker scores `prefill_tokens × batch_size` and the
+//! lowest score wins. `prefill_tokens` is the paper's P-token: the prefill already queued on the
+//! worker plus the prompt tokens it would still prefill for this request, so a worker whose cache
+//! hit sits behind a long prefill backlog does not look cheap. The product needs no weight
 //! between its cache-aware and load-aware factors: a weight on either factor scales every
 //! worker's score equally and cancels out of the comparison.
 //!
-//! Two factors are floored at one so neither alone can zero a score. A worker holding the whole
-//! prompt still prefills one token, and the batch size counts the incoming request. Without the
-//! floors, every fully cached worker and every idle worker would tie at zero regardless of the
-//! other factor.
+//! Two factors are floored at one so neither alone can zero a score. A worker with no queued
+//! prefill that holds the whole prompt still prefills one token, and the batch size counts the
+//! incoming request. Without the floors, every fully cached worker with an empty prefill queue
+//! would score zero whatever its batch size, and every idle worker would score zero whatever its
+//! prefill.
 //!
 //! The hot-spot detector follows the paper's two phases. A request class is the set of requests
 //! sharing the first `class_prefix_blocks` prompt blocks. For class `c` with arrival share `x`
@@ -149,10 +152,13 @@ impl WorkerPicker for LMetricPicker {
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
         let score = |row: usize| -> Option<(f64, WorkerWithDpRank)> {
-            let new_prefill = uncached_prompt_tokens(context, cache.get(row)?).max(1);
-            let batch_size = load.get(row)?.active_requests() + 1;
+            let worker_load = load.get(row)?;
+            let prefill_tokens = (worker_load.active_prefill_tokens()
+                + uncached_prompt_tokens(context, cache.get(row)?))
+            .max(1);
+            let batch_size = worker_load.active_requests() + 1;
             Some((
-                new_prefill as f64 * batch_size as f64,
+                prefill_tokens as f64 * batch_size as f64,
                 candidates.get(row)?.worker(),
             ))
         };
@@ -261,6 +267,19 @@ mod tests {
         // A fourth request makes worker 1 cost 32 × 5 = 160 and ties; worker 0 wins the tie.
         let workers = [Worker::new(0), Worker::new(1).cached(8).requests(4)];
         assert_eq!(select(&policy, request(10, 1), &workers), 0);
+    }
+
+    #[test]
+    fn queued_prefill_counts_toward_prefill_tokens() {
+        let policy = without_detector();
+        // 10 blocks = 160 tokens. Worker 1 caches 8 blocks, so it would prefill only 32 new tokens,
+        // but 400 tokens already wait in its prefill stage: (400 + 32) × 1 = 432 loses to worker
+        // 0's 160 × 1 = 160.
+        let workers = [Worker::new(0), Worker::new(1).cached(8).prefill(400)];
+        assert_eq!(select(&policy, request(10, 1), &workers), 0);
+        // Without the backlog, worker 1's cache hit wins: 32 × 1 = 32.
+        let workers = [Worker::new(0), Worker::new(1).cached(8)];
+        assert_eq!(select(&policy, request(10, 1), &workers), 1);
     }
 
     #[test]
