@@ -26,6 +26,14 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      run_kimi_disagg:
+        description: 'Run only the Kimi K2.5 disaggregated recipe after the TensorRT-LLM build'
+        type: boolean
+        default: false
+      kimi_preflight_only:
+        description: 'Validate the Kimi recipe without deploying'
+        type: boolean
+        default: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -136,12 +144,26 @@ jobs:
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   # Triton images are published to AWS ECR only (no Azure ACR mirror), so there
   # is no triton-copy-to-acr job.
+
+  # ============================================================================
+  # RECIPE-ONLY MANUAL RUN
+  # ============================================================================
+
+  kimi-disagg-perf:
+    name: Kimi K2.5 disaggregated CI overlay
+    needs: [trtllm-copy-to-acr]
+    if: ${{ inputs.run_kimi_disagg }}
+    uses: ./.github/workflows/kimi-k25-disagg-nightly.yml
+    with:
+      source_ref: ${{ github.sha }}
+      image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
+      preflight_only: ${{ inputs.kimi_preflight_only }}
+    secrets: inherit
 
   # ============================================================================
   # OPERATOR (build-only)
