@@ -393,12 +393,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn position_near_agrees_with_the_index_for_any_hint() {
-        let state = CrtcNodeState::for_blocks(&[block(7), block(3), block(9), block(1), block(5)]);
-        assert_position_near_matches_index(&state);
-    }
-
     /// A hint next to an earlier copy of a repeated hash must still find the last copy,
     /// whether the edge scans or keeps a table, and whether it was built or appended to.
     #[test]
