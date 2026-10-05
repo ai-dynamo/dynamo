@@ -1074,6 +1074,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/basic-serving-overview.mdx
+                slug: basic-serving
               - page: Aggregated Serving
                 path: pages/recipes/examples/aggregated.mdx
                 slug: aggregated
@@ -1096,6 +1099,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/routing-overview.mdx
+                slug: routing
               - page: Aggregated KV-Aware Routing
                 path: pages/recipes/examples/aggregated-kv-routing.mdx
                 slug: aggregated-kv-routing
@@ -1118,6 +1124,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/kv-cache-offloading-overview.mdx
+                slug: kv-cache-offloading
               - page: KV Block Manager
                 path: pages/recipes/examples/kvbm.mdx
                 slug: kvbm
@@ -1131,6 +1140,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/multimodal-serving-overview.mdx
+                slug: multimodal-serving
               - page: Aggregated Multimodal Serving
                 path: pages/recipes/examples/multimodal.mdx
                 slug: multimodal
@@ -1153,6 +1165,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/workloads-overview.mdx
+                slug: workloads
               - page: LoRA Serving
                 path: pages/recipes/examples/lora.mdx
                 slug: lora
@@ -1191,6 +1206,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/autoscaling-and-budgets-overview.mdx
+                slug: autoscaling-and-budgets
               - page: Planner Autoscaling
                 path: pages/recipes/examples/planner.mdx
                 slug: planner
@@ -1204,6 +1222,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/observability-and-recovery-overview.mdx
+                slug: observability-and-recovery
               - page: OpenTelemetry Tracing
                 path: pages/recipes/examples/tracing.mdx
                 slug: tracing
@@ -1223,6 +1244,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/cloud-and-integrations-overview.mdx
+                slug: cloud-and-integrations
               - page: Cloud Deployments
                 path: pages/recipes/examples/cloud-deployments.mdx
                 slug: cloud-deployments
@@ -1233,6 +1257,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Overview
+                path: pages/recipes/examples/development-examples-overview.mdx
+                slug: development-examples
               - page: Custom Backends and Testing
                 path: pages/recipes/examples/custom-backends.mdx
                 slug: custom-backends

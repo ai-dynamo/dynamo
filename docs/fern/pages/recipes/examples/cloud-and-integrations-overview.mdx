@@ -1,0 +1,30 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Cloud and Integration Examples
+sidebar-title: Overview
+subtitle: Explore managed Kubernetes and batch gateway deployment examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose a cloud or integration example, then filter its available inference backends.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="cloud-deployments" data-topic="cloud-and-integrations" data-topic-label="Cloud and Integrations" data-targets="kubernetes:vllm kubernetes:sglang" data-keywords="agg.yaml disagg-p5.yaml disagg-tcp.yaml disagg.yaml">
+<span className="dynamo-example-eyebrow">Cloud and Integrations · Example</span>
+### [Cloud Deployments](cloud-deployments.mdx)
+DynamoGraphDeployment manifests for Amazon EKS and Google GKE.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM, SGLang</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="batch-gateway" data-topic="cloud-and-integrations" data-topic-label="Cloud and Integrations" data-targets="kubernetes:vllm" data-keywords="dynamo.yaml">
+<span className="dynamo-example-eyebrow">Cloud and Integrations · Example</span>
+### [llm-d Batch Gateway](batch-gateway.mdx)
+Batch inference on a dedicated Dynamo worker pool.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span></div>
+</div>
+
+</ExamplesCatalog>
