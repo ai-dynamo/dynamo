@@ -107,3 +107,7 @@
 # canonical blob/main and tree/main links 404 from CI until they reach main.
 # Remove this entry once the recipe is on main.
 ^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/(recipes/motif-3|docs/fern/pages/recipes/model-recipes/motif-3\.mdx)
+
+# The Qwen3-ASR DGD manifest is introduced by the same PR as its vLLM multimodal
+# guide link, so the blob/main URL returns 404 until merge. Remove this entry after merge.
+^https://github\.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr\.yaml$
