@@ -440,6 +440,7 @@ areas:
   - components/src/dynamo/common/tests/test_snapshot*
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/
+  - lib/gms_kv_ring/
   - lib/gpu_memory_service/
   - lib/gpu_memory_service/cli/
   - lib/gpu_memory_service/client/
