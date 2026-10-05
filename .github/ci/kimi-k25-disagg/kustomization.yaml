@@ -12,6 +12,7 @@ resources:
 - ../../../recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml
 patches:
 - path: patch-deploy.yaml
+- path: patch-prefill-config.yaml
 - path: patch-perf.yaml
 - target:
     kind: ComputeDomain

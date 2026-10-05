@@ -254,8 +254,7 @@ data:
     max_seq_len: 200000
     tensor_parallel_size: 4
     moe_expert_parallel_size: 4
-    # EAGLE3 currently allocates the same request slot twice with attention DP.
-    enable_attention_dp: false
+    enable_attention_dp: true
     pipeline_parallel_size: 1
     print_iter_log: true
     stream_interval: 100
