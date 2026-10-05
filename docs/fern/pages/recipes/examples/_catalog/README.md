@@ -14,10 +14,17 @@ Each example has three authoring surfaces:
 
 1. A topic page beside `overview.mdx`, with a `<Code src="…">` for each source asset. Use platform
    and backend choices only for variants that exist. Keep multi-resource DGD files intact.
-2. One card in `overview.mdx`. Its Markdown link is resolved by Fern for each version and locale.
+2. One card in `overview.mdx`, mirrored on the matching subsection overview page. Tests require the
+   card metadata and destination to stay aligned. Markdown links are resolved by Fern for each
+   version and locale.
 3. A page entry under **Recipes → Examples** in `docs/fern/index.yml`.
 
-`diffusion-overview.mdx` is a topic landing page, not another source-picker example. Its
+Each Examples subsection starts with an overview page that uses `ExamplesCatalog` and mirrors the
+matching cards from `overview.mdx`. `overview.mdx` remains the catalog source of truth. Keep the
+mirrored cards scoped to one `data-topic`; the catalog test checks their metadata and links against
+the source cards.
+
+`diffusion-overview.mdx` is a specialized topic landing page, not another source-picker example. Its
 `DiffusionCatalog` component supplies server-rendered styling and a search/filter/sort widget;
 native MDX images and one stretched page link per card preserve Fern's asset, version, and locale
 rewriting. The widget reads the existing card metadata and chip labels, without a second catalog

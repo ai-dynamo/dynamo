@@ -1,0 +1,44 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Workload Examples
+sidebar-title: Overview
+subtitle: Explore LoRA, embeddings, classification, and realtime audio serving examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose a workload example, then filter its available deployment platforms and inference backends.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="lora" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:vllm local:sglang local:vllm" data-keywords="agg_lora.sh agg_lora.yaml agg_lora_hf.sh agg_lora_hf.yaml agg_lora_router.sh agg_lora_router_xpu.sh agg_lora_xpu.sh agg_qwen_lora.yaml lora_agg.sh omni_lora_agg.sh">
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [LoRA Serving](lora.mdx)
+LoRA adapters for text, multimodal, and vLLM-Omni serving.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span><span>Local / CLI: SGLang, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="embeddings" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang local:vllm" data-keywords="agg_embed.sh agg_embed_multiworker.sh">
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Text Embeddings](embeddings.mdx)
+Embedding workers, load balancing, and model-name dispatch.
+<div className="dynamo-example-badges"><span>Local / CLI: SGLang, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="classification" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_classify.sh">
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Sequence Classification](classification.mdx)
+vLLM sequence classification and pooling.
+<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_omni_realtime.sh agg_realtime_transcription.sh">
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Audio and Realtime Serving](audio.mdx)
+Transcription and realtime speech-to-speech serving.
+<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+</div>
+
+</ExamplesCatalog>
