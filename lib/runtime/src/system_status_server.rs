@@ -206,7 +206,7 @@ pub async fn spawn_system_status_server(
 
     let initial_bind_address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {initial_bind_address}");
-    let (listener, actual_address) = bind_system_status_listener(initial_bind_address.clone())
+    let (listener, actual_address) = bind_system_status_listener(&initial_bind_address)
         .await
         .map_err(|error| {
             tracing::error!("Failed to bind to address {initial_bind_address}: {error}");
@@ -339,9 +339,9 @@ fn build_system_status_router(
 }
 
 async fn bind_system_status_listener(
-    address: String,
+    address: &str,
 ) -> anyhow::Result<(TcpListener, std::net::SocketAddr)> {
-    let listener = TcpListener::bind(&address)
+    let listener = TcpListener::bind(address)
         .await
         .map_err(|error| anyhow::anyhow!("Failed to bind to address: {error}"))?;
 
@@ -378,17 +378,18 @@ impl Listener for RebindingTcpListener {
             let Some(listener) = self.listener.as_ref() else {
                 tokio::time::sleep_until(next_rebind).await;
                 next_rebind = tokio::time::Instant::now() + self.rebind_backoff;
-                tracing::info!("System status server rebinding to {}", self.address);
-                match bind_system_status_listener(self.address.to_string()).await {
-                    Ok((listener, actual_address)) => {
-                        tracing::info!("System status server rebound to {actual_address}");
+                tracing::debug!(address = %self.address, "System status server rebinding");
+                match TcpListener::bind(self.address).await {
+                    Ok(listener) => {
+                        tracing::info!(address = %self.address, "System status server rebound");
                         self.listener = Some(listener);
                     }
                     Err(error) => {
                         tracing::error!(
-                            "System status server failed to rebind {}; retrying after {:?}: {error}",
-                            self.address,
-                            self.rebind_backoff
+                            address = %self.address,
+                            %error,
+                            retry_after = ?self.rebind_backoff,
+                            "System status server failed to rebind"
                         );
                     }
                 }
@@ -397,23 +398,29 @@ impl Listener for RebindingTcpListener {
 
             match listener.accept().await {
                 Ok(accepted) => return accepted,
-                // A dropped connection does not invalidate the listener.
-                Err(error) if is_dead_connection_error(&error) => {
-                    tracing::trace!("system status connection dropped before accept: {error}");
+                // Connection errors do not invalidate the listener.
+                Err(error) if is_connection_error(&error) => {
+                    tracing::trace!(
+                        address = %self.address,
+                        %error,
+                        "System status connection failed before accept"
+                    );
                 }
                 // Resource exhaustion does not invalidate the listener.
                 Err(error) if is_resource_exhaustion_error(&error) => {
                     tracing::error!(
-                        "System status listener cannot accept on {} for want of a process resource; retrying the same socket after {:?}: {error}",
-                        self.address,
-                        self.rebind_backoff
+                        address = %self.address,
+                        %error,
+                        retry_after = ?self.rebind_backoff,
+                        "System status listener lacks resources; retrying the same socket"
                     );
                     tokio::time::sleep(self.rebind_backoff).await;
                 }
                 Err(error) => {
                     tracing::error!(
-                        "System status listener stopped accepting on {}; rebinding: {error}",
-                        self.address
+                        address = %self.address,
+                        %error,
+                        "System status listener stopped accepting; rebinding"
                     );
                     // Drop before rebinding or the address remains in use.
                     self.listener = None;
@@ -427,17 +434,35 @@ impl Listener for RebindingTcpListener {
     }
 }
 
-/// Matches connection failures that leave the listener usable.
-fn is_dead_connection_error(error: &io::Error) -> bool {
-    matches!(
+fn is_connection_error(error: &io::Error) -> bool {
+    if matches!(
         error.kind(),
         io::ErrorKind::ConnectionRefused
             | io::ErrorKind::ConnectionAborted
             | io::ErrorKind::ConnectionReset
-    )
+    ) {
+        return true;
+    }
+
+    // Linux accept(2) also reports pending network errors for the queued connection.
+    #[cfg(target_os = "linux")]
+    if let Some(code) = error.raw_os_error() {
+        return matches!(
+            code,
+            libc::ENETDOWN
+                | libc::EPROTO
+                | libc::ENOPROTOOPT
+                | libc::EHOSTDOWN
+                | libc::ENONET
+                | libc::EHOSTUNREACH
+                | libc::EOPNOTSUPP
+                | libc::ENETUNREACH
+        );
+    }
+
+    false
 }
 
-/// Matches shortages that require retrying the same socket.
 /// EMFILE, ENFILE, and ENOBUFS require raw errno checks because Rust has no distinct kinds.
 fn is_resource_exhaustion_error(error: &io::Error) -> bool {
     if error.kind() == io::ErrorKind::OutOfMemory {
@@ -446,16 +471,8 @@ fn is_resource_exhaustion_error(error: &io::Error) -> bool {
 
     #[cfg(unix)]
     {
-        // ENOBUFS differs between Linux and BSD-derived systems.
-        const ENFILE: i32 = 23;
-        const EMFILE: i32 = 24;
-        #[cfg(target_os = "linux")]
-        const ENOBUFS: i32 = 105;
-        #[cfg(not(target_os = "linux"))]
-        const ENOBUFS: i32 = 55;
-
         if let Some(code) = error.raw_os_error() {
-            return matches!(code, ENFILE | EMFILE | ENOBUFS);
+            return matches!(code, libc::ENFILE | libc::EMFILE | libc::ENOBUFS);
         }
     }
 
@@ -1058,7 +1075,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_resource_exhaustion_does_not_look_like_a_dead_listener() {
-        for code in [23 /* ENFILE */, 24 /* EMFILE */] {
+        for code in [libc::ENFILE, libc::EMFILE, libc::ENOBUFS] {
             let error = io::Error::from_raw_os_error(code);
             assert!(
                 is_resource_exhaustion_error(&error),
@@ -1066,10 +1083,59 @@ mod tests {
                 error.kind()
             );
             assert!(
-                !is_dead_connection_error(&error),
+                !is_connection_error(&error),
                 "errno {code} is not a dead connection"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_pending_network_errors_leave_the_listener_usable() {
+        for code in [
+            libc::ENETDOWN,
+            libc::EPROTO,
+            libc::ENOPROTOOPT,
+            libc::EHOSTDOWN,
+            libc::ENONET,
+            libc::EHOSTUNREACH,
+            libc::EOPNOTSUPP,
+            libc::ENETUNREACH,
+        ] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                is_connection_error(&error),
+                "errno {code} should retry accept"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rebinding_listener_shutdown_interrupts_failed_rebinds() {
+        let holder = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = RebindingTcpListener {
+            address: holder.local_addr().unwrap(),
+            listener: None,
+            rebind_backoff: Duration::from_secs(60),
+        };
+        let cancel_token = CancellationToken::new();
+        let observer = cancel_token.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new())
+                .with_graceful_shutdown(observer.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !server.is_finished(),
+            "server should keep retrying the held address"
+        );
+        cancel_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("shutdown should interrupt the 60-second rebind backoff")
+            .expect("server task should not panic");
     }
 
     #[cfg(target_os = "linux")]
@@ -1134,10 +1200,13 @@ mod tests {
         let error = listener.accept().await.unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
 
-        let mut rebinding =
-            RebindingTcpListener::new(listener, address, Duration::from_millis(200));
+        let backoff = Duration::from_millis(200);
+        let mut rebinding = RebindingTcpListener::new(listener, address, backoff);
+        let started = tokio::time::Instant::now();
+        let accepted = rebinding.accept();
+        tokio::pin!(accepted);
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), rebinding.accept())
+            tokio::time::timeout(Duration::from_millis(50), accepted.as_mut())
                 .await
                 .is_err(),
             "accept should wait during descriptor exhaustion"
@@ -1151,10 +1220,13 @@ mod tests {
             io::ErrorKind::AddrInUse,
             "the original listening address should remain held"
         );
-        let (_stream, accepted_peer) =
-            tokio::time::timeout(Duration::from_secs(2), rebinding.accept())
-                .await
-                .expect("the queued connection should survive the shortage");
+        let (_stream, accepted_peer) = tokio::time::timeout(Duration::from_secs(2), accepted)
+            .await
+            .expect("the queued connection should survive the shortage");
+        assert!(
+            started.elapsed() >= backoff,
+            "accept should finish its resource-shortage backoff before retrying"
+        );
         assert_eq!(accepted_peer, peer);
     }
 }
