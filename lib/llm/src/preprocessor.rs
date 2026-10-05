@@ -95,7 +95,7 @@ use crate::protocols::{
         },
     },
     openai::{
-        DeltaGeneratorExt,
+        DeltaGeneratorExt, ParsingOptions,
         chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             scrub_synthetic_chunk_metadata,
@@ -1410,6 +1410,7 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
+pub(crate) const REQUEST_PARSING_OPTIONS_CONTEXT_KEY: &str = "dynamo.llm.request_parsing_options";
 
 const EMBEDDING_ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
 
@@ -7623,6 +7624,29 @@ impl
         )?;
         let tool_processing_route =
             self.tool_processing_route(&request, &guided_tool_constraint)?;
+        let payload_parsing_options = payload_handle.as_ref().map(|_| {
+            context
+                .get_optional::<ParsingOptions>(REQUEST_PARSING_OPTIONS_CONTEXT_KEY)
+                .ok()
+                .flatten()
+                .map(|options| options.as_ref().clone())
+                .unwrap_or_else(|| {
+                    let mut options = ParsingOptions::new(
+                        self.tool_call_parser.clone(),
+                        self.runtime_config.reasoning_parser.clone(),
+                    );
+                    options.tool_choice = request.inner.tool_choice.clone();
+                    options.guided_tool_constraint = guided_tool_constraint.clone();
+                    options.parallel_tool_calls = request.inner.parallel_tool_calls;
+                    options
+                        .with_tool_call_parsing_enabled(Self::tool_call_parsing_enabled(&request))
+                        .with_move_reasoning_to_content_when_empty(
+                            Self::wants_reasoning_as_content_when_empty(
+                                request.chat_template_args.as_ref(),
+                            ),
+                        )
+                })
+        });
         validate_legacy_jail_nvext_choice_count(
             request.inner.n.unwrap_or(1),
             request
@@ -7698,10 +7722,13 @@ impl
         // layer unchanged (metrics, errors, aggregation all behave as with capture
         // off) while a copy is aggregated on the side for the record.
         let final_stream = if let Some(payload) = payload_handle {
+            let parsing_options = payload_parsing_options
+                .expect("payload capture has matching request parsing options");
             let (stream, agg_fut) =
-                crate::request_trace::payload_stream::scan_aggregate_with_future(Box::pin(
-                    transformed_stream,
-                ));
+                crate::request_trace::payload_stream::scan_aggregate_with_future(
+                    Box::pin(transformed_stream),
+                    parsing_options,
+                );
 
             // Spawn the payload emit off the request path. The outcome carries a drop
             // reason and any recovered partial response, so emit the record either way.

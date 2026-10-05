@@ -56,7 +56,10 @@ use super::{
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
-use crate::preprocessor::{PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, decode_base64_to_floats};
+use crate::preprocessor::{
+    PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
+    decode_base64_to_floats,
+};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
@@ -3577,6 +3580,7 @@ async fn chat_completions(
         );
     let parsing_options = parsing_options
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+    request.insert(REQUEST_PARSING_OPTIONS_CONTEXT_KEY, parsing_options.clone());
 
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.
@@ -4303,6 +4307,7 @@ async fn responses(
         );
     let parsing_options = parsing_options
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+    request.insert(REQUEST_PARSING_OPTIONS_CONTEXT_KEY, parsing_options.clone());
 
     // Computed before `request` moves into `generate`. Responses streams use
     // the same force-nonempty deferral as chat completions and therefore need

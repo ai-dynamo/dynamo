@@ -4912,8 +4912,10 @@ mod tests {
             impl std::future::Future<Output = crate::request_trace::payload_stream::PayloadOutcome>,
         ) {
             let plain = observe_and_aggregate(preprocessed(false, outputs.clone())).await;
-            let (captured, future) =
-                scan_aggregate_with_future(Box::pin(preprocessed(true, outputs)));
+            let (captured, future) = scan_aggregate_with_future(
+                Box::pin(preprocessed(true, outputs)),
+                crate::protocols::openai::ParsingOptions::default(),
+            );
             let capture = observe_and_aggregate(captured).await;
             (plain, capture, future)
         }
@@ -5151,8 +5153,10 @@ mod tests {
             };
             let (plain_registry, _) =
                 observe_and_aggregate(futures::stream::iter(dual_carrier())).await;
-            let (captured, _future) =
-                scan_aggregate_with_future(futures::stream::iter(dual_carrier()));
+            let (captured, _future) = scan_aggregate_with_future(
+                futures::stream::iter(dual_carrier()),
+                crate::protocols::openai::ParsingOptions::default(),
+            );
             let (capture_registry, _) = observe_and_aggregate(captured).await;
 
             let expected = MetricSignature {
