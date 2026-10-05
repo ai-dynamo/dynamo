@@ -50,7 +50,7 @@ class NoopTrafficMetricsProvider:
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         return None
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
         del interval_str
         return None
 
@@ -162,8 +162,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         return await self.traffic_provider.collect_traffic()
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
-        return self.traffic_provider.collect_accept_length(interval_str)
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
+        return await self.traffic_provider.collect_accept_length(interval_str)
 
     async def collect_kv_hit_rate_observation(
         self, duration_s: float
@@ -496,8 +496,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                     f"decode_min_endpoint={decode_min_endpoint} at {d_watts}W "
                     "per replica) exceeds "
                     f"total_gpu_power_limit={budget}W. Raise the budget or lower "
-                    "the endpoint minimums or per-GPU caps on the worker "
-                    "podTemplate annotations."
+                    "the endpoint minimums or per-GPU caps authored on the "
+                    "worker components."
                 ]
             )
 

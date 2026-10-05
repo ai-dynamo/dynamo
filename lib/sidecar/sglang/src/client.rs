@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use dynamo_backend_common::{BackendError, DisaggregationMode, DynamoError, ErrorType};
-use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig, format_error_chain,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
@@ -189,6 +191,7 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Metadata exposed by SGLang's model/server discovery RPCs.
 #[derive(Clone, Debug)]
@@ -203,43 +206,45 @@ pub struct Discovery {
 
 #[derive(Debug)]
 pub(crate) enum StartupDiscovery {
-    Leader(Discovery),
+    Leader(Box<Discovery>),
     Follower,
 }
 
-pub(crate) fn bootstrap_discover(
+pub(crate) async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
+    bootstrap: bool,
 ) -> Result<StartupDiscovery, DynamoError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| engine_shutdown(format!("bootstrap runtime: {err}")))?;
-    runtime.block_on(async {
-        let deadline = Instant::now() + transport.startup_deadline;
-        let mut client = connect(endpoint, transport, deadline).await?;
-        let server_info = get_server_info(&mut client, deadline).await?;
-        if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
-            // Followers expose metadata only. Their local KV sources are
-            // validated by the headless startup path before relaying.
-            Ok(StartupDiscovery::Follower)
-        } else {
-            discover_with_server_info(&mut client, server_info, deadline)
-                .await
-                .map(StartupDiscovery::Leader)
-        }
-    })
+    let deadline = Instant::now() + transport.startup_deadline;
+    let mut client = connect(endpoint, transport, deadline, bootstrap).await?;
+    let server_info = get_server_info(&mut client, deadline).await?;
+    if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
+        // Followers expose metadata only. Their local KV sources are
+        // validated by the headless startup path before relaying.
+        Ok(StartupDiscovery::Follower)
+    } else {
+        discover_with_server_info(&mut client, server_info, deadline)
+            .await
+            .map(|d| StartupDiscovery::Leader(Box::new(d)))
+    }
 }
 
+/// `bootstrap`: true for synchronous constructors before logging setup;
+/// false for deferred launcher discovery and `LLMEngine::start`.
 pub async fn connect(
     uri: &GrpcEndpoint,
     cfg: &GrpcTransportConfig,
     deadline: Instant,
+    bootstrap: bool,
 ) -> Result<Client, DynamoError> {
     let endpoint = Endpoint::from_shared(uri.to_string())
         .map_err(|err| invalid_arg(format!("invalid SGLang gRPC endpoint `{uri}`: {err}")))?;
+    let started = Instant::now();
+    let mut attempt = 0_u64;
     let mut last_err;
+    let mut last_logged_at: Option<Instant> = None;
     loop {
+        attempt += 1;
         match try_connect_once(&endpoint, cfg, deadline).await {
             Ok(client) => return Ok(client),
             Err(err) => {
@@ -250,7 +255,30 @@ pub async fn connect(
                         cfg.startup_deadline
                     )));
                 }
-                tokio::time::sleep_until((Instant::now() + cfg.retry_interval).min(deadline)).await;
+                let now = Instant::now();
+                if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
+                {
+                    // Synchronous constructors may precede logging setup;
+                    // deferred launcher discovery already has a subscriber.
+                    if bootstrap {
+                        eprintln!(
+                            "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
+                            started.elapsed(),
+                            cfg.retry_interval,
+                        );
+                    } else {
+                        tracing::warn!(
+                            endpoint = %uri,
+                            attempt,
+                            elapsed = ?started.elapsed(),
+                            retry_interval = ?cfg.retry_interval,
+                            error = %last_err,
+                            "SGLang gRPC connection attempt failed; retrying"
+                        );
+                    }
+                    last_logged_at = Some(now);
+                }
+                tokio::time::sleep_until((now + cfg.retry_interval).min(deadline)).await;
             }
         }
     }
@@ -271,7 +299,7 @@ async fn try_connect_once(
     let channel = timeout_at(deadline, endpoint.connect())
         .await
         .map_err(|_| "startup deadline elapsed while connecting".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format_error_chain(&e))?;
     Ok(client_from_channel(channel))
 }
 
@@ -289,6 +317,9 @@ pub struct Pool {
 }
 
 impl Pool {
+    // bootstrap=false: Pool::connect's only call site is LLMEngine::start
+    // (lib/sidecar/sglang/src/engine.rs), after the tracing subscriber is
+    // installed. See connect()'s own doc comment.
     pub async fn connect(
         uri: &GrpcEndpoint,
         cfg: &GrpcTransportConfig,
@@ -297,7 +328,7 @@ impl Pool {
         let size = cfg.connections.get();
         let mut clients = Vec::with_capacity(size);
         for _ in 0..size {
-            clients.push(connect(uri, cfg, deadline).await?);
+            clients.push(connect(uri, cfg, deadline, false).await?);
         }
         Ok(Self {
             clients,
@@ -409,6 +440,19 @@ fn parse_discovery(
     models: Vec<pb::ModelCard>,
 ) -> Result<Discovery, DynamoError> {
     let model_info = parse_json_object("GetModelInfo.json_info", &model.json_info)?;
+    // Generate responses are forwarded as token deltas. Accepting cumulative
+    // output here would duplicate tokens and inflate completion usage.
+    if server_info
+        .get("incremental_streaming_output")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(invalid_arg(
+            "SGLang sidecar requires incremental streaming output; restart the SGLang server \
+             with --incremental-streaming-output to prevent duplicated tokens and inflated \
+             completion-token counts",
+        ));
+    }
     let model_path = if model.model_path.trim().is_empty() {
         model_info
             .get("model_path")
@@ -509,6 +553,15 @@ pub fn invalid_arg(message: impl Into<String>) -> DynamoError {
     backend(BackendError::InvalidArgument, message)
 }
 
+/// The frontend returns `message` to the client, so it takes only fixed request-validation text.
+pub(crate) fn invalid_request(message: &'static str) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+        .message(message)
+        .public_message(message)
+        .build()
+}
+
 pub fn engine_shutdown(message: impl Into<String>) -> DynamoError {
     backend(BackendError::EngineShutdown, message)
 }
@@ -549,6 +602,7 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
 mod tests {
     use std::time::Duration;
 
+    use dynamo_backend_common::{BackendError, ErrorType};
     use serde_json::json;
     use tokio::net::TcpListener;
     use tokio::time::Instant;
@@ -556,7 +610,7 @@ mod tests {
 
     use super::{
         NodeMetadata, client_from_channel, discover, discovery_mode, json_u32, json_u64,
-        parse_discovery, worker_group_id_from_addresses,
+        parse_discovery, rpc_with_deadline, status_to_dynamo, worker_group_id_from_addresses,
     };
     use crate::proto as pb;
 
@@ -566,6 +620,25 @@ mod tests {
         assert_eq!(json_u64(&value, "a"), Some(16));
         assert_eq!(json_u32(&value, "b"), Some(32));
         assert_eq!(json_u64(&value, "c"), None);
+        for value in [json!(u64::MAX), json!(u64::MAX.to_string())] {
+            let info = json!({"limit": value});
+            assert_eq!(json_u64(&info, "limit"), Some(u64::MAX));
+            assert_eq!(json_u32(&info, "limit"), None);
+        }
+        for value in [json!(u32::MAX), json!(u32::MAX.to_string())] {
+            assert_eq!(json_u32(&json!({"limit": value}), "limit"), Some(u32::MAX));
+        }
+        for value in [
+            json!(null),
+            json!(true),
+            json!(1.5),
+            json!("-1"),
+            json!("1.5"),
+            json!("18446744073709551616"),
+        ] {
+            assert_eq!(json_u64(&json!({"limit": value}), "limit"), None);
+        }
+        assert_eq!(json_u32(&json!({}), "limit"), None);
     }
 
     #[test]
@@ -575,7 +648,7 @@ mod tests {
                 model_path: "model-repo".to_string(),
                 json_info: json!({"tokenizer_path": "tokenizer-repo"}).to_string(),
             },
-            json!({}),
+            json!({"incremental_streaming_output": true}),
             Vec::new(),
         )
         .unwrap();
@@ -701,6 +774,220 @@ mod tests {
             DisaggregationMode::Decode
         );
         assert!(discovery_mode(&json!({"disaggregation_mode": "unknown"})).is_err());
+    }
+
+    #[test]
+    fn discovery_requires_incremental_streaming() {
+        for info in [
+            json!({}),
+            json!({"incremental_streaming_output": false}),
+            json!({"incremental_streaming_output": "true"}),
+            json!({"incremental_streaming_output": null}),
+        ] {
+            let error = parse_discovery(
+                pb::GetModelInfoResponse {
+                    model_path: "model-repo".to_string(),
+                    json_info: "{}".to_string(),
+                },
+                info,
+                Vec::new(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::InvalidArgument)
+            );
+            assert!(
+                error.to_string().contains("--incremental-streaming-output"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_rejects_malformed_json_and_non_object_metadata() {
+        for label in ["GetModelInfo.json_info", "GetServerInfo.json_info"] {
+            for raw in ["{", "null", "[]", "1", "\"metadata\""] {
+                let error = super::parse_json_object(label, raw).unwrap_err();
+                assert_eq!(
+                    error.error_type(),
+                    ErrorType::Backend(BackendError::Unknown)
+                );
+                assert!(error.to_string().contains(label), "{raw}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_resolves_model_path_and_tokenizer_fallbacks() {
+        for (native_path, json_path, expected) in [
+            ("native-model", "json-model", Some("native-model")),
+            (" ", "json-model", Some("json-model")),
+            ("", " ", None),
+        ] {
+            for tokenizer in [json!(null), json!(""), json!(" "), json!(7)] {
+                let result = parse_discovery(
+                    pb::GetModelInfoResponse {
+                        model_path: native_path.into(),
+                        json_info: json!({"model_path": json_path, "tokenizer_path": tokenizer})
+                            .to_string(),
+                    },
+                    json!({"incremental_streaming_output": true}),
+                    vec![],
+                );
+                if let Some(expected) = expected {
+                    let info = result.unwrap();
+                    assert_eq!(info.model_path, expected);
+                    assert_eq!(info.tokenizer_path, expected);
+                    assert_eq!(info.served_model_name, None);
+                    assert_eq!(info.max_model_len, None);
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(
+                        error.error_type(),
+                        ErrorType::Backend(BackendError::Unknown)
+                    );
+                    assert!(error.to_string().contains("empty model_path"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_prefers_matching_model_and_server_alias() {
+        for (id, root, fallback_name) in [
+            ("card-alias", "model", Some("card-alias")),
+            ("model", "different-root", None),
+        ] {
+            for server_name in [None, Some("server-alias")] {
+                let model_info = json!({"tokenizer_path": "tokenizer", "custom": [1, 2]});
+                let server_info = json!({
+                    "incremental_streaming_output": true,
+                    "served_model_name": server_name,
+                    "context_length": 1024,
+                });
+                let info = parse_discovery(
+                    pb::GetModelInfoResponse {
+                        model_path: "model".into(),
+                        json_info: model_info.to_string(),
+                    },
+                    server_info.clone(),
+                    vec![
+                        pb::ModelCard {
+                            id: "unrelated".into(),
+                            max_model_len: Some(512),
+                            ..Default::default()
+                        },
+                        pb::ModelCard {
+                            id: id.into(),
+                            root: root.into(),
+                            max_model_len: Some(4096),
+                            ..Default::default()
+                        },
+                    ],
+                )
+                .unwrap();
+                assert_eq!(
+                    info.served_model_name.as_deref(),
+                    server_name.or(fallback_name)
+                );
+                assert_eq!(info.max_model_len, Some(4096));
+                assert_eq!(info.model_info, model_info);
+                assert_eq!(info.server_info, server_info);
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_falls_back_to_first_card_and_valid_server_limits() {
+        for (card_limit, context, input_limit, expected) in [
+            (Some(2048), json!(4096), json!(8192), Some(2048)),
+            (Some(-1), json!("4096"), json!(8192), Some(4096)),
+            (
+                None,
+                json!(u64::from(u32::MAX) + 1),
+                json!("8192"),
+                Some(8192),
+            ),
+            (None, json!(null), json!(-1), None),
+        ] {
+            let info = parse_discovery(
+                pb::GetModelInfoResponse {
+                    model_path: "model".into(),
+                    json_info: "{}".into(),
+                },
+                json!({
+                    "incremental_streaming_output": true,
+                    "served_model_name": "",
+                    "context_length": context,
+                    "max_req_input_len": input_limit,
+                }),
+                vec![pb::ModelCard {
+                    id: "first-alias".into(),
+                    max_model_len: card_limit,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+            assert_eq!(info.served_model_name.as_deref(), Some("first-alias"));
+            assert_eq!(info.max_model_len, expected);
+        }
+    }
+
+    #[test]
+    fn rpc_status_mapping_preserves_error_kind_and_context() {
+        for (code, kind) in [
+            (tonic::Code::InvalidArgument, BackendError::InvalidArgument),
+            (tonic::Code::NotFound, BackendError::InvalidArgument),
+            (tonic::Code::OutOfRange, BackendError::InvalidArgument),
+            (tonic::Code::Unavailable, BackendError::CannotConnect),
+            (tonic::Code::Cancelled, BackendError::Cancelled),
+            (
+                tonic::Code::DeadlineExceeded,
+                BackendError::ConnectionTimeout,
+            ),
+            (tonic::Code::Internal, BackendError::Unknown),
+        ] {
+            let error =
+                status_to_dynamo("GetModelInfo", tonic::Status::new(code, "native failure"));
+            assert_eq!(error.error_type(), ErrorType::Backend(kind));
+            assert!(error.to_string().contains("GetModelInfo: native failure"));
+            assert!(error.to_string().contains(&format!("{code:?}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_deadline_preserves_success_status_and_timeout() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        assert_eq!(
+            rpc_with_deadline("HealthCheck", deadline, async { Ok(17) })
+                .await
+                .unwrap(),
+            17
+        );
+        let error = rpc_with_deadline::<(), _>("HealthCheck", deadline, async {
+            Err(tonic::Status::unavailable("offline"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::CannotConnect)
+        );
+
+        let error =
+            rpc_with_deadline::<(), _>("HealthCheck", Instant::now(), std::future::pending())
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::ConnectionTimeout)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("HealthCheck exceeded the configured deadline")
+        );
     }
 
     #[tokio::test]

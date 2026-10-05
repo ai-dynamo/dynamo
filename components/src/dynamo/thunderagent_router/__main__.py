@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 import uvloop
 
+from dynamo.common.utils.token_ids import token_ids_len
 from dynamo.llm import (
     KvRouter,
     ModelInput,
@@ -34,7 +35,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.thunderagent_router.args import (
     ThunderAgentRouterConfig,
-    build_aic_perf_config,
+    build_ais_perf_config,
     build_kv_router_config,
     parse_args,
 )
@@ -160,7 +161,7 @@ class ThunderAgentRouterHandler:
             endpoint=worker_endpoint,
             block_size=self._config.router_block_size,
             kv_router_config=build_kv_router_config(self._config),
-            aic_perf_config=build_aic_perf_config(self._config),
+            ais_perf_config=build_ais_perf_config(self._config),
         )
 
         worker_client = await worker_endpoint.client()
@@ -240,8 +241,7 @@ class ThunderAgentRouterHandler:
 
         # Path B: program lifecycle.
         self._stat_program_requests += 1
-        token_ids = request["token_ids"]
-        estimated_prompt_tokens = len(token_ids) if isinstance(token_ids, list) else 0
+        estimated_prompt_tokens = token_ids_len(request.get("token_ids"))
 
         decision = await self._scheduler.before_request(
             program_id,
@@ -358,8 +358,8 @@ class ThunderAgentRouterHandler:
         finally:
             # Fall back to len(token_ids) if the engine didn't report usage --
             # still better than upstream's chars/5 estimator.
-            if prompt_tokens_seen == 0 and isinstance(token_ids, list):
-                prompt_tokens_seen = len(token_ids)
+            if prompt_tokens_seen == 0:
+                prompt_tokens_seen = estimated_prompt_tokens
             await self._scheduler.after_request(
                 program_id,
                 prompt_tokens_seen,

@@ -1089,6 +1089,13 @@ pub struct WorkerSelectionResult {
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
 
+    /// Greatest raw router-visible overlap among eligible workers, in tokens,
+    /// for tracked requests.
+    pub max_raw_cached_tokens: Option<usize>,
+
+    /// Selected worker's raw router-visible overlap, in tokens, for tracked requests.
+    pub selected_raw_cached_tokens: Option<usize>,
+
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
@@ -1466,9 +1473,6 @@ pub enum KvCacheEventError {
     UnsupportedResidencyDomain,
 }
 
-/// Reserved session key for events that predate session attribution.
-pub const UNATTRIBUTED_SESSION_ID: &str = "__dynamo_unattributed__";
-
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
@@ -1557,13 +1561,6 @@ impl RouterEvent {
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
-    }
-
-    /// Return the reported session or the shared fallback for unattributed events.
-    pub fn session_id_or_unattributed(&self) -> &str {
-        self.session_id
-            .as_deref()
-            .unwrap_or(UNATTRIBUTED_SESSION_ID)
     }
 
     /// Resolve a storage mutation to its canonical logical domain.

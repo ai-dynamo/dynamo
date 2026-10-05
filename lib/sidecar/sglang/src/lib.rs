@@ -40,19 +40,62 @@ pub use engine::SglangSidecarEngine;
 /// distinguish invalid configuration from runtime failures.
 pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
     let args = Args::try_parse_from(argv).map_err(SidecarStartupError::from)?;
-    let discovery =
-        client::bootstrap_discover(&args.sidecar.grpc_endpoint, &args.sidecar.grpc.config())
+    SglangSidecarEngine::validate_args(&args).map_err(SidecarStartupError::from)?;
+    dynamo_sidecar_common::run_task(|runtime, shutdown| async move {
+        use dynamo_runtime::system_status_server::SystemProbePolicy;
+        use dynamo_runtime::{DistributedRuntime, distributed::DistributedConfig};
+        let startup = async {
+            let drt = DistributedRuntime::new_with_probe_policy(
+                runtime.clone(),
+                DistributedConfig::try_from_settings()?,
+                SystemProbePolicy::RuntimeOnly,
+            )
+            .await?;
+            tracing::info!("Sidecar runtime connected; discovering engine metadata");
+            let discovery = client::bootstrap_discover(
+                &args.sidecar.grpc_endpoint,
+                &args.sidecar.grpc.config(),
+                false,
+            )
+            .await
             .map_err(SidecarStartupError::from)?;
-    match discovery {
-        client::StartupDiscovery::Follower => HeadlessSidecar::from_args(args)
-            .map_err(SidecarStartupError::from)?
-            .run(),
-        client::StartupDiscovery::Leader(discovery) => {
-            let (engine, config) = SglangSidecarEngine::from_discovery(args, discovery)
-                .map_err(SidecarStartupError::from)?;
-            dynamo_backend_common::run(Arc::new(engine), config)
+            Ok::<_, anyhow::Error>((drt, discovery))
+        };
+        let runtime_shutdown = runtime.shutdown_started_token();
+        let result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Ok(()),
+            _ = runtime_shutdown.cancelled() => anyhow::bail!("runtime shut down during sidecar initialization"),
+            result = startup => result,
+        };
+        if runtime.is_shutting_down() {
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
+            anyhow::bail!("runtime shut down during sidecar initialization");
         }
-    }
+        let (drt, discovery) = result?;
+        match discovery {
+            client::StartupDiscovery::Follower => {
+                let follower =
+                    HeadlessSidecar::from_args(args).map_err(SidecarStartupError::from)?;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => Ok(()),
+                    _ = runtime_shutdown.cancelled() => anyhow::bail!("runtime shut down during follower relay"),
+                    result = follower.run_inner(drt, shutdown.clone()) => result,
+                }
+            }
+            client::StartupDiscovery::Leader(discovery) => {
+                let (engine, config) = SglangSidecarEngine::from_discovered(args, *discovery)
+                    .map_err(SidecarStartupError::from)?;
+                dynamo_backend_common::Worker::new(Arc::new(engine), config)
+                    .run_with_drt(drt, shutdown)
+                    .await
+                    .map_err(Into::into)
+            }
+        }
+    })
 }
 
 #[cfg(test)]

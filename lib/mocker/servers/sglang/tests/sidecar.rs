@@ -201,8 +201,9 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     decode.start(1).await.unwrap();
 
     let prefill_outputs = collect(&prefill, request(3)).await;
-    assert_eq!(prefill_outputs.len(), 1);
+    assert_eq!(prefill_outputs.len(), 2);
     assert!(prefill_outputs[0].token_ids.is_empty());
+    assert!(prefill_outputs[0].finish_reason.is_none());
     let handoff = prefill_outputs[0]
         .disaggregated_params
         .clone()
@@ -210,6 +211,8 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     assert_eq!(handoff["bootstrap_host"], "127.0.0.1");
     assert_eq!(handoff["bootstrap_port"], 8_998);
     assert!(handoff["bootstrap_room"].is_number());
+    assert_eq!(prefill_outputs[1].finish_reason, Some(FinishReason::Length));
+    assert!(prefill_outputs[1].disaggregated_params.is_none());
 
     let mut decode_request = request(3);
     decode_request.prefill_result = Some(PrefillResult {
@@ -317,4 +320,19 @@ async fn request_cancellation_is_isolated_and_shutdown_reaches_grpc_streams() {
     })
     .await
     .expect("request cancellation and engine shutdown must finish promptly");
+}
+
+#[path = "../../tests/common/mod.rs"]
+mod common;
+
+#[tokio::test]
+async fn sidecar_relays_stored_and_evicted_blocks() {
+    let mut args = fast_engine_args();
+    args.enable_prefix_caching = true;
+    args.num_gpu_blocks = 8;
+    let block_size = u32::try_from(args.block_size).unwrap();
+    let server = RunningServer::start(ServerMode::Aggregated, args).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    common::check_kv_events(&engine, block_size).await;
 }

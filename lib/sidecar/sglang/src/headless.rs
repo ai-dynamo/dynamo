@@ -14,9 +14,8 @@ use dynamo_llm::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig};
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::config::HealthStatus;
-use dynamo_runtime::distributed::{DistributedConfig, DistributedRuntime};
+use dynamo_runtime::distributed::DistributedRuntime;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
-use dynamo_runtime::{Runtime, logging};
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use serde::Deserialize;
 use serde_json::Value;
@@ -56,33 +55,11 @@ impl HeadlessSidecar {
         })
     }
 
-    pub(crate) fn run(self) -> Result<()> {
-        logging::init();
-        let runtime = Runtime::from_settings()?;
-        runtime.secondary().block_on(async {
-            let shutdown = CancellationToken::new();
-            let result = async {
-                // Install signal listeners before discovery so a follower waiting
-                // for its leader can still shut down immediately.
-                let mut terminate =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-                let mut interrupt =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-                tokio::select! {
-                    result = self.run_inner(runtime.clone(), shutdown.clone()) => result,
-                    _ = terminate.recv() => Ok(()),
-                    _ = interrupt.recv() => Ok(()),
-                    _ = runtime.primary_token().cancelled_owned() => Ok(()),
-                }
-            }
-            .await;
-            shutdown.cancel();
-            runtime.shutdown();
-            result
-        })
-    }
-
-    async fn run_inner(&self, runtime: Runtime, shutdown: CancellationToken) -> Result<()> {
+    pub(crate) async fn run_inner(
+        &self,
+        drt: DistributedRuntime,
+        shutdown: CancellationToken,
+    ) -> Result<()> {
         // Followers only implement GetServerInfo. Do not use the full engine's
         // model discovery, HealthCheck, connection pool, or native HTTP client.
         let (mut client, metadata, mode) = self.connect_local_engine().await?;
@@ -96,7 +73,7 @@ impl HeadlessSidecar {
         tokio::select! {
             _ = shutdown.cancelled() => Ok(()),
             result = monitor_local_engine(&mut client, &metadata, mode, self.transport.connect_attempt_timeout) => result,
-            result = self.relay(runtime, shutdown.clone(), &metadata, mode, &group_id) => result,
+            result = self.relay(drt, shutdown.clone(), &metadata, mode, &group_id) => result,
         }
     }
 
@@ -104,7 +81,8 @@ impl HeadlessSidecar {
         &self,
     ) -> Result<(client::Client, NodeMetadata, DisaggregationMode)> {
         let deadline = Instant::now() + self.transport.startup_deadline;
-        let mut client = client::connect(&self.grpc_endpoint, &self.transport, deadline).await?;
+        let mut client =
+            client::connect(&self.grpc_endpoint, &self.transport, deadline, false).await?;
         let info = client::get_server_info(&mut client, deadline).await?;
         let (metadata, mode) = follower_metadata(&info)?;
         Ok((client, metadata, mode))
@@ -112,13 +90,12 @@ impl HeadlessSidecar {
 
     async fn relay(
         &self,
-        runtime: Runtime,
+        drt: DistributedRuntime,
         shutdown: CancellationToken,
         metadata: &NodeMetadata,
         mode: DisaggregationMode,
         group_id: &str,
     ) -> Result<()> {
-        let drt = DistributedRuntime::new(runtime, DistributedConfig::from_settings()).await?;
         let component = if mode == DisaggregationMode::Aggregated {
             &self.common.component
         } else {
@@ -320,6 +297,7 @@ fn start_publishers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -458,15 +436,11 @@ mod tests {
             *server.service.info.lock().unwrap() = info;
             server.service.calls.lock().unwrap().clear();
             let endpoint = GrpcEndpoint::parse(&server.endpoint, "test").unwrap();
-            let result = tokio::task::spawn_blocking(move || {
-                let transport = GrpcTransportConfig {
-                    startup_deadline: Duration::from_secs(5),
-                    ..Default::default()
-                };
-                client::bootstrap_discover(&endpoint, &transport)
-            })
-            .await
-            .unwrap();
+            let transport = GrpcTransportConfig {
+                startup_deadline: Duration::from_secs(5),
+                ..Default::default()
+            };
+            let result = client::bootstrap_discover(&endpoint, &transport, false).await;
             let mut expected = vec!["/sglang.runtime.v1.SglangService/GetServerInfo"];
             if follower {
                 assert!(matches!(

@@ -54,15 +54,16 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 	}
 
 	type workerTemplate struct {
-		Labels         map[string]string                     `json:"labels,omitempty"`
-		Annotations    map[string]string                     `json:"annotations,omitempty"`
-		RuntimeVersion string                                `json:"runtimeVersion,omitempty"`
-		Spec           v1beta1.DynamoComponentDeploymentSpec `json:"spec"`
+		Labels              map[string]string                     `json:"labels,omitempty"`
+		Annotations         map[string]string                     `json:"annotations,omitempty"`
+		RuntimeVersion      string                                `json:"runtimeVersion,omitempty"`
+		RoleRuntimeVersions map[string]string                     `json:"roleRuntimeVersions,omitempty"`
+		Spec                v1beta1.DynamoComponentDeploymentSpec `json:"spec"`
 	}
 
 	workerDCDs := make(map[string]workerTemplate, len(dcds))
 	for _, dcd := range dcds {
-		if dcd != nil && IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+		if dcd != nil && (IsWorkerComponent(string(dcd.Spec.ComponentType)) || dcd.Spec.IsLPX()) {
 			componentName := GetDCDComponentName(dcd)
 			if componentName == "" {
 				return "", fmt.Errorf("generated worker DCD %q has no component name label", dcd.Name)
@@ -71,10 +72,11 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 				return "", fmt.Errorf("duplicate generated worker DCD component name %q", componentName)
 			}
 			workerDCDs[componentName] = workerTemplate{
-				Labels:         GetDCDKubeLabels(dcd),
-				Annotations:    GetDCDKubeAnnotations(dcd),
-				RuntimeVersion: resolvedRuntimeVersionForHash(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
-				Spec:           workerHashSpec(dcd),
+				Labels:              GetDCDKubeLabels(dcd),
+				Annotations:         GetDCDKubeAnnotations(dcd),
+				RuntimeVersion:      resolvedRuntimeVersionForHash(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+				RoleRuntimeVersions: resolvedRoleRuntimeVersionsForHash(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+				Spec:                workerHashSpec(dcd),
 			}
 		}
 	}
@@ -96,28 +98,37 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.Replicas = nil
 	spec.MinAvailable = nil
 	spec.ScalingAdapter = nil
+	if spec.IsLPX() {
+		// Agent-only replicas expand speculative models; conductor replicas scale engines.
+		spec.LPX.Scheduling = nil
+		if conductor := spec.ComponentRole(v1beta1.ComponentRoleLPXConductor); conductor != nil {
+			conductor.Replicas = nil
+		} else {
+			spec.Replicas = ptr.To(ptr.Deref(dcd.Spec.Replicas, 1))
+		}
+	}
 
 	// Hash the resolved version separately so equivalent image-derived and
 	// explicit versions produce the same worker hash.
 	spec.RuntimeVersionOverride = ""
 
-	// Roles are a Kubernetes map-list keyed by name. Canonicalize the copied
-	// slice so declaration order does not create a new worker generation. Role
-	// replicas only assert cardinality already defined by the component shape,
-	// so their optional presence must not create a generation either.
+	// Multinode role replicas only assert cardinality already defined by the
+	// component shape, so their optional presence must not create a generation.
 	if spec.Multinode != nil {
 		for i := range spec.Roles {
 			spec.Roles[i].Replicas = nil
 		}
 	}
-	sort.Slice(spec.Roles, func(i, j int) bool {
-		return spec.Roles[i].Name < spec.Roles[j].Name
-	})
 
 	// An explicit declaration of the established multinode roles is a
 	// representation-only migration and must not create a worker generation.
 	if ExplicitMultinodeRolesMatchImplicit(&spec.DynamoComponentDeploymentSharedSpec) {
 		spec.Roles = nil
+	} else {
+		// Roles are a map keyed by name; authored list order is not semantic.
+		sort.Slice(spec.Roles, func(i, j int) bool {
+			return spec.Roles[i].Name < spec.Roles[j].Name
+		})
 	}
 
 	// forceScalingGroup false and omitted select the same rendering, so an
@@ -127,7 +138,53 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 		spec.Experimental.Grove.ForceScalingGroup = nil
 	}
 
+	// Empty wrappers and disabled checkpoint configurations are equivalent to omission.
+	if spec.Experimental != nil {
+		if spec.Experimental.Grove != nil && *spec.Experimental.Grove == (v1beta1.GroveSpec{}) {
+			spec.Experimental.Grove = nil
+		}
+		if spec.Experimental.Checkpoint != nil && !spec.Experimental.Checkpoint.Enabled {
+			spec.Experimental.Checkpoint = nil
+		}
+		if *spec.Experimental == (v1beta1.ExperimentalSpec{}) {
+			spec.Experimental = nil
+		}
+	}
+
+	// Omitted and backend-default cache paths render identically. This requires
+	// GenerateDynamoComponentsDeployments to populate spec.BackendFramework
+	// on the generated DCD before workerHashSpec is called.
+	if spec.CompilationCache != nil {
+		defaultPath := getDefaultCompilationCacheMountPoint(BackendFramework(spec.BackendFramework))
+		if defaultPath != "" && spec.CompilationCache.MountPath == defaultPath {
+			spec.CompilationCache.MountPath = ""
+		}
+	}
+
 	return *spec
+}
+
+func resolvedRoleRuntimeVersionsForHash(component *v1beta1.DynamoComponentDeploymentSharedSpec) map[string]string {
+	if component == nil || !HasRolePodTemplates(component) {
+		return nil
+	}
+
+	versions := make(map[string]string, len(component.Roles))
+	for i := range component.Roles {
+		role := &component.Roles[i]
+		effective, err := EffectiveComponentForRole(component, Role(role.Name))
+		if err != nil {
+			continue
+		}
+		version := resolvedRuntimeVersionForHash(effective)
+		if version != "" {
+			versions[role.Name] = version
+		}
+	}
+	if len(versions) == 0 {
+		return nil
+	}
+	return versions
 }
 
 // resolvedRuntimeVersionForHash returns the canonical runtime version included

@@ -45,7 +45,7 @@ use dynamo_runtime::metrics::{
     tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -443,6 +443,7 @@ struct StateFlags {
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
     classify_endpoints_enabled: AtomicBool,
+    rerank_endpoints_enabled: AtomicBool,
     pooling_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
@@ -461,6 +462,7 @@ impl StateFlags {
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Classify => self.classify_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Rerank => self.rerank_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Pooling => self.pooling_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
@@ -488,6 +490,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Classify => self
                 .classify_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Rerank => self
+                .rerank_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Pooling => self
                 .pooling_endpoints_enabled
@@ -538,6 +543,7 @@ impl State {
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 classify_endpoints_enabled: AtomicBool::new(false),
+                rerank_endpoints_enabled: AtomicBool::new(false),
                 pooling_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
@@ -866,9 +872,7 @@ impl HttpService {
 
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
     /// port-allocation gap for tests that need to know the bound port up front. Not
-    /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
-    /// bind, so a pre-bound listener cannot be threaded through and dropping it before
-    /// `bind_rustls` would just re-open the same race. Returns an error if invoked on a
+    /// supported in TLS mode, which binds internally. Returns an error if invoked on a
     /// service built with `enable_tls(true)`.
     ///
     /// [`spawn`]: HttpService::spawn
@@ -918,14 +922,11 @@ impl HttpService {
         if self.enable_tls {
             if listener.is_some() {
                 return Err(anyhow::anyhow!(
-                    "Pre-bound listener is not supported in TLS mode; \
-                     axum_server::bind_rustls owns its own bind. \
+                    "Pre-bound listener is not supported in TLS mode. \
                      Use run()/spawn() (which bind internally) when enable_tls is set."
                 ));
             }
-            let addr: SocketAddr = address
-                .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+            let addr = listen_socket_addr(&self.host, self.port)?;
             let cert_path = self
                 .tls_cert_path
                 .as_ref()
@@ -944,7 +945,18 @@ impl HttpService {
             let config = RustlsConfig::from_config(Arc::new(server_config));
 
             let handle = tls_handle.unwrap_or_default();
-            let server = axum_server::bind_rustls(addr, config)
+            let std_listener = bind_listener(addr)
+                .and_then(|l| l.into_std())
+                .map_err(|e| {
+                    tracing::error!(
+                        protocol = %protocol,
+                        address = %address,
+                        error = %e,
+                        "Failed to bind server to address"
+                    );
+                    anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
+                })?;
+            let server = axum_server::from_tcp_rustls(std_listener, config)
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
@@ -993,10 +1005,8 @@ impl HttpService {
             let listener = match listener {
                 Some(l) => l,
                 None => {
-                    let addr: SocketAddr = address
-                        .parse()
-                        .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
-                    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                    let addr = listen_socket_addr(&self.host, self.port)?;
+                    bind_listener(addr).map_err(|e| {
                         tracing::error!(
                             protocol = %protocol,
                             address = %address,
@@ -1061,11 +1071,11 @@ impl HttpService {
         let Some(rl_router) = self.rl_router.clone() else {
             return Ok(());
         };
-        let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        let rl_addr = listen_socket_addr(&self.host, self.rl_port)?;
         // Bind eagerly and fail fast: when RL discovery is enabled, a bind failure
         // should abort service startup rather than silently leave RL discovery
         // unavailable while the main HTTP service keeps running.
-        let listener = tokio::net::TcpListener::bind(&rl_addr).await.map_err(|e| {
+        let listener = tokio::net::TcpListener::bind(rl_addr).await.map_err(|e| {
             tracing::error!(
                 address = %rl_addr,
                 error = %e,
@@ -1126,6 +1136,49 @@ fn get_graceful_shutdown_timeout() -> usize {
         .unwrap_or(5)
 }
 
+const DEFAULT_LISTEN_BACKLOG: u32 = 4096;
+
+// `listen(2)` takes an `int`; anything above `i32::MAX` would go negative.
+fn parse_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
+    value
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|n| (1..=i32::MAX as u32).contains(n))
+        .unwrap_or(DEFAULT_LISTEN_BACKLOG)
+}
+
+fn listen_backlog() -> u32 {
+    parse_listen_backlog(std::env::var(env_llm::DYN_HTTP_LISTEN_BACKLOG))
+}
+
+/// Build the listen address from an IP literal host. IPv6 brackets are optional,
+/// so `::` and `[::]` are equivalent.
+fn listen_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    let literal = host.trim();
+    let literal = literal
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(literal);
+    let ip: IpAddr = literal
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid address '{host}:{port}': {e}"))?;
+    Ok(SocketAddr::new(ip, port))
+}
+
+/// `tokio::net::TcpListener::bind` listens with a backlog of 128. A few thousand
+/// clients connecting within seconds overflow that, and overflowed connections
+/// are delayed or, depending on host TCP settings, fail.
+fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(listen_backlog())
+}
+
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
 static HTTP_SVC_METRICS_PATH_ENV: &str = "DYN_HTTP_SVC_METRICS_PATH";
 /// Environment variable to set the models endpoint path (default: `/v1/models`)
@@ -1142,6 +1195,8 @@ static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 /// Environment variable to set the classify endpoint path (default: `/v1/classify`)
 static HTTP_SVC_CLASSIFY_PATH_ENV: &str = "DYN_HTTP_SVC_CLASSIFY_PATH";
+/// Environment variable to set the rerank endpoint path (default: `/v1/rerank`)
+static HTTP_SVC_RERANK_PATH_ENV: &str = "DYN_HTTP_SVC_RERANK_PATH";
 /// Environment variable to set the pooling endpoint path (default: `/v1/pooling`)
 static HTTP_SVC_POOLING_PATH_ENV: &str = "DYN_HTTP_SVC_POOLING_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
@@ -1555,6 +1610,8 @@ impl HttpServiceConfigBuilder {
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let (classify_docs, classify_route) =
             super::openai::classify_router(state.clone(), var(HTTP_SVC_CLASSIFY_PATH_ENV).ok());
+        let (rerank_docs, rerank_route) =
+            super::openai::rerank_router(state.clone(), var(HTTP_SVC_RERANK_PATH_ENV).ok());
         let (pooling_docs, pooling_route) =
             super::openai::pooling_router(state.clone(), var(HTTP_SVC_POOLING_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
@@ -1571,6 +1628,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Classify, (classify_docs, classify_route));
+        endpoint_routes.insert(EndpointType::Rerank, (rerank_docs, rerank_route));
         endpoint_routes.insert(EndpointType::Pooling, (pooling_docs, pooling_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
@@ -2689,6 +2747,65 @@ mod tests {
             .checked_add(interval)
             .map(|_| interval);
         assert_eq!(parse_sse_keep_alive(Ok(u64::MAX.to_string())), expected);
+    }
+
+    #[test]
+    fn test_listen_backlog_env_var() {
+        assert_eq!(
+            parse_listen_backlog(Err(std::env::VarError::NotPresent)),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok("0".to_string())),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok("invalid".to_string())),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok((i32::MAX as u32 + 1).to_string())),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok(i32::MAX.to_string())),
+            i32::MAX as u32
+        );
+        assert_eq!(parse_listen_backlog(Ok(" 8192 ".to_string())), 8192);
+    }
+
+    #[tokio::test]
+    async fn test_bind_listener_accepts_connections() {
+        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_ne!(addr.port(), 0);
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (_server_side, peer) = listener.accept().await.unwrap();
+        assert_eq!(peer, client.local_addr().unwrap());
+    }
+
+    #[test]
+    fn test_listen_socket_addr_accepts_ip_literals() {
+        for (host, expected) in [
+            ("0.0.0.0", "0.0.0.0:8000"),
+            ("127.0.0.1", "127.0.0.1:8000"),
+            ("::", "[::]:8000"),
+            ("[::]", "[::]:8000"),
+            (" [::1] ", "[::1]:8000"),
+        ] {
+            assert_eq!(
+                listen_socket_addr(host, 8000).unwrap(),
+                expected.parse::<SocketAddr>().unwrap(),
+                "{host}"
+            );
+        }
+        for host in ["localhost", "[::", "::1]", ""] {
+            let error = listen_socket_addr(host, 8000).unwrap_err().to_string();
+            assert!(
+                error.starts_with(&format!("Invalid address '{host}:8000'")),
+                "{host}: {error}"
+            );
+        }
     }
 
     #[test]

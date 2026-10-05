@@ -9,17 +9,7 @@ import random
 import re
 import threading
 from abc import ABC, abstractmethod
-from contextlib import asynccontextmanager
-from typing import (
-    Any,
-    AsyncGenerator,
-    AsyncIterator,
-    Dict,
-    Generic,
-    Optional,
-    Tuple,
-    TypeVar,
-)
+from typing import Any, AsyncIterator, Dict, Generic, Optional, Tuple, TypeVar
 
 import sglang as sgl
 from sglang.srt.managers.io_struct import ProfileReq
@@ -44,15 +34,24 @@ from dynamo.llm import (
     register_llm,
     unregister_llm,
 )
-from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import supports_disagg_prefill_cancel_anytime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
-from dynamo.sglang.pause import SGLangEnginePauseController
+from dynamo.sglang.gateway import follow_pause_broadcasts
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.cancellation import CancellationMixin
 
 logger = logging.getLogger(__name__)
+
+
+_DEFAULT_NATIVE_ENGINE_ROUTES = (
+    ("pause_generation", "pause_generation:tm"),
+    ("continue_generation", "continue_generation:tm"),
+    ("release_memory_occupation", "release_memory_occupation:tm"),
+    ("resume_memory_occupation", "resume_memory_occupation:tm"),
+)
 
 
 RequestT = TypeVar("RequestT")
@@ -549,7 +548,9 @@ class LoraMixin:
             yield {"status": "error", "message": str(e)}
 
 
-class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
+class BaseWorkerHandler(
+    CancellationMixin, LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]
+):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -584,6 +585,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         self.generate_endpoint = generate_endpoint
         self.publisher = publisher
         self.shutdown_event = shutdown_event
+        self._abort_tasks: set[asyncio.Task[Any]] = set()
+        self._supports_ordered_cancellation = (
+            engine is not None and supports_disagg_prefill_cancel_anytime(engine)
+        )
+        logger.info(
+            "SGLang ordered cancellation support: %s",
+            self._supports_ordered_cancellation,
+        )
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
@@ -607,10 +616,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             # have an sgl.Engine.
             self.input_param_manager = InputParamManager(None)
             self._engine_supports_priority = False
-        self._pause_controller = (
-            SGLangEnginePauseController(engine) if engine is not None else None
-        )
-        self._pause_lock = asyncio.Lock()
+        self._engine_route_lock = asyncio.Lock()
 
         # Serializes elastic-EP scaling: SGLang tracks a single in-flight scale
         # phase, so concurrent scale_elastic_ep calls must not overlap.
@@ -629,122 +635,6 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             return {"priority": normalized}
         return {}
 
-    async def release_memory_occupation(self, body: dict) -> dict:
-        """Release GPU memory occupation and unregister from discovery.
-
-        Args:
-            body: Optional dict with "tags" to target specific memory regions.
-
-        Order of operations:
-        1. Unregister from discovery - stop accepting new requests
-        2. Pause generation - drain in-flight requests
-        3. Release memory - safe now that no requests are active
-        """
-        if self._pause_controller is None:
-            return {
-                "status": "error",
-                "message": "memory control not supported on this worker",
-            }
-
-        body = body or {}
-        tags = body.get("tags")
-        async with self._pause_lock:
-            if self._pause_controller.is_paused:
-                return {
-                    "status": "ok",
-                    "message": "Memory already released",
-                }
-            if self._pause_controller.needs_resume_recovery:
-                return {
-                    "status": "error",
-                    "message": "resume_memory_occupation required before retrying release",
-                }
-
-            unregistered = False
-            try:
-                # Stop new requests and drain in-flight work before releasing memory.
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.unregister_endpoint_instance()
-                    unregistered = True
-
-                await self._pause_controller.pause(tags)
-
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"Memory released for tags: {tags}"
-                        if tags is not None
-                        else "Memory released"
-                    ),
-                }
-            except Exception as e:
-                logging.error(f"Failed to release memory occupation: {e}")
-                # If pause rolled back cleanly the engine is serving-safe again,
-                # but discovery still shows us unregistered and resume will
-                # early-return. Re-register so the worker rejoins the routing pool.
-                if (
-                    unregistered
-                    and not self._pause_controller.is_paused
-                    and not self._pause_controller.needs_resume_recovery
-                    and self.generate_endpoint is not None
-                ):
-                    try:
-                        await self.generate_endpoint.register_endpoint_instance()
-                        logging.info(
-                            "Re-registered endpoint after failed memory release rollback"
-                        )
-                    except Exception as reg_err:
-                        logging.error(
-                            f"Failed to re-register endpoint after release failure: {reg_err}"
-                        )
-                return {"status": "error", "message": str(e)}
-
-    async def resume_memory_occupation(self, body: dict) -> dict:
-        """Resume GPU memory occupation and re-register to discovery.
-
-        Args:
-            body: Optional dict with "tags" to target specific memory regions.
-
-        Order of operations:
-        1. Resume memory - restore GPU allocations
-        2. Continue generation - ready to serve requests
-        3. Re-register to discovery - allow frontend to route here
-        """
-        if self._pause_controller is None:
-            return {
-                "status": "error",
-                "message": "memory control not supported on this worker",
-            }
-
-        body = body or {}
-        tags = body.get("tags")
-        async with self._pause_lock:
-            needs_recovery = self._pause_controller.needs_resume_recovery
-            if not self._pause_controller.is_paused and not needs_recovery:
-                return {
-                    "status": "ok",
-                    "message": "Memory already resumed",
-                }
-
-            try:
-                await self._pause_controller.resume(tags)
-
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
-                self._pause_controller.mark_resumed()
-
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"Memory resumed for tags: {tags}"
-                        if tags is not None
-                        else "Memory resumed"
-                    ),
-                }
-            except Exception as e:
-                logging.error(f"Failed to resume memory occupation: {e}")
-                return {"status": "error", "message": str(e)}
-
     async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
         """Flush SGLang's local cache when no requests are active."""
         tokenizer_manager = (
@@ -760,7 +650,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             return
 
         try:
-            async with self._pause_lock:
+            async with self._engine_route_lock:
                 if getattr(tokenizer_manager, "rid_to_state", None):
                     yield {
                         "status": "error",
@@ -978,6 +868,48 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             return backend_error
         return dict(self.engine.tokenizer_manager.get_elastic_ep_state())
 
+    async def _sync_discovery_with_sglang_pause_state(self) -> None:
+        """Make discovery match SGLang's authoritative generation pause state."""
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if (
+            self.generate_endpoint is None
+            or tokenizer_manager is None
+            or not hasattr(tokenizer_manager, "is_pause")
+        ):
+            return
+
+        if tokenizer_manager.is_pause:
+            await self.generate_endpoint.unregister_endpoint_instance()
+        else:
+            await self.generate_endpoint.register_endpoint_instance()
+
+    def follow_shared_pause_state(self) -> None:
+        async def resync() -> None:
+            async with self._engine_route_lock:
+                await self._sync_discovery_with_sglang_pause_state()
+
+        follow_pause_broadcasts(getattr(self.engine, "tokenizer_manager", None), resync)
+
+    async def _invoke_engine_route(self, route_handler, body: dict) -> dict:
+        """Invoke one engine route and then synchronize worker discovery."""
+        async with self._engine_route_lock:
+            try:
+                return await route_handler(body)
+            finally:
+                await self._sync_discovery_with_sglang_pause_state()
+
+    def _wrap_engine_route(self, route_handler):
+        """Add discovery synchronization to an SGLang route."""
+
+        async def synchronized_handler(body: dict) -> dict:
+            return await self._invoke_engine_route(route_handler, body)
+
+        return synchronized_handler
+
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -991,8 +923,6 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         built_in_routes = {
             "control/start_profile": self.start_profile,
             "control/stop_profile": self.stop_profile,
-            "control/release_memory_occupation": self.release_memory_occupation,
-            "control/resume_memory_occupation": self.resume_memory_occupation,
             "control/update_weights_from_disk": self.update_weights_from_disk,
             "control/update_weights_from_tensor": self.update_weights_from_tensor,
             "control/update_weights_from_distributed": (
@@ -1016,11 +946,23 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     "with a built-in route"
                 )
 
+        configured_paths = {path for path, _ in configured_routes}
+        # Expose the SGLang lifecycle methods without requiring --engine-route.
+        # An explicit route with the same public path overrides the default.
+        default_native_routes = resolve_configured_engine_routes(
+            self.engine,
+            [
+                descriptor
+                for path, descriptor in _DEFAULT_NATIVE_ENGINE_ROUTES
+                if path not in configured_paths
+            ],
+        )
+
         register_model_taint_route(runtime, self.generate_endpoint)
         for path, handler in built_in_routes.items():
             runtime.register_engine_route(path, handler)
-        for path, configured_handler in configured_routes:
-            runtime.register_engine_route(path, configured_handler)
+        for path, route_handler in [*default_native_routes, *configured_routes]:
+            runtime.register_engine_route(path, self._wrap_engine_route(route_handler))
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -1037,6 +979,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
+        self._cancel_abort_tasks()
         if self.publisher is not None:
             self.publisher.cleanup()
 
@@ -1233,152 +1176,3 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             )
 
         return bootstrap_host, bootstrap_port
-
-    async def _handle_cancellation(
-        self, request_id_future: asyncio.Future, context: Context
-    ):
-        """Background task to handle cancellation and shutdown by monitoring both signals.
-
-        Args:
-            request_id_future: Future that will be set with the SGLang request ID
-                              when the first response arrives.
-            context: Context object for cancellation handling.
-
-        Raises:
-            EngineShutdown: If shutdown event was triggered.
-        """
-        cancellation_future: asyncio.Future[Any] | None = None
-        shutdown_task: asyncio.Task[Any] | None = None
-        try:
-            logging.debug(f"Cancellation monitor started for Context: {context.id()}")
-
-            # Always wait for the request ID to ensure we can abort the request
-            sglang_request_id = await request_id_future
-            logging.debug(
-                f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
-            )
-            logging.debug(f"Request ID future cancelled for Context: {context.id()}")
-
-            # Get the cancellation future
-            cancellation_future = context.async_killed_or_stopped()
-
-            # Build list of futures/tasks to wait for
-            wait_for: list[asyncio.Future[Any]] = [cancellation_future]
-
-            if self.shutdown_event:
-                # Create task for shutdown monitoring and add to wait list
-                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
-                wait_for.append(shutdown_task)
-
-            # Wait for whichever happens first
-            done, pending = await asyncio.wait(
-                wait_for,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            # Cancel the pending task/future
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-            logging.info(
-                f"Cancellation or shutdown signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
-            )
-
-            # Call abort_request on the tokenizer_manager through the engine
-            if (
-                hasattr(self.engine, "tokenizer_manager")
-                and self.engine.tokenizer_manager
-            ):
-                logging.info(
-                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
-                )
-                self.engine.tokenizer_manager.abort_request(
-                    rid=sglang_request_id, abort_all=False
-                )
-                logging.info(f"Aborted Request ID: {context.id()}")
-            else:
-                logging.error(
-                    f"SGLang tokenizer_manager not found for abort request: {context.id()}"
-                )
-
-            # Check which event triggered and raise EngineShutdown if shutdown
-            if shutdown_task and shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during token generation")
-
-        except asyncio.CancelledError:
-            # Task was cancelled, which is expected when generation completes
-            request_id = "unknown"
-            if request_id_future.done() and not request_id_future.cancelled():
-                try:
-                    request_id = request_id_future.result()
-                except Exception:
-                    pass
-            logging.debug(
-                f"Cancellation monitor task cancelled for SGLang Request ID {request_id}, Context: {context.id()}"
-            )
-            raise
-        finally:
-            for awaitable in (cancellation_future, shutdown_task):
-                if awaitable is None or awaitable.done():
-                    continue
-                awaitable.cancel()
-                try:
-                    await awaitable
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-    @asynccontextmanager
-    async def _cancellation_monitor(
-        self, request_id_future: asyncio.Future, context: Context
-    ) -> AsyncGenerator[asyncio.Task, None]:
-        """
-        Context manager for monitoring request cancellation and shutdown.
-        Automatically creates a background task to monitor for cancellation and
-        shutdown events, cleaning it up when the context exits.
-
-        If shutdown event was triggered, raises EngineShutdown on exit.
-
-        Args:
-            request_id_future: Future that will be set with the SGLang request ID
-                              when the first response arrives.
-            context: Context object for cancellation handling
-
-        Yields:
-            asyncio.Task: The cancellation monitoring task being managed
-        """
-        logging.debug(f"Creating cancellation monitor task for Context: {context.id()}")
-
-        # Start the cancellation monitoring task
-        cancellation_task = asyncio.create_task(
-            self._handle_cancellation(request_id_future, context)
-        )
-
-        try:
-            yield cancellation_task
-        finally:
-            # Clean up the background cancellation task
-            request_id = "unknown"
-            if request_id_future.done() and not request_id_future.cancelled():
-                try:
-                    request_id = request_id_future.result()
-                except Exception:
-                    pass
-
-            if not cancellation_task.done():
-                logging.debug(
-                    f"Cancelling cancellation monitor task for SGLang Request ID {request_id}, Context: {context.id()}"
-                )
-                cancellation_task.cancel()
-                try:
-                    await cancellation_task
-                except asyncio.CancelledError:
-                    pass
-            else:
-                cancellation_task.result()
-
-            if self.shutdown_event and self.shutdown_event.is_set():
-                raise EngineShutdown("Engine was shut down during token generation")

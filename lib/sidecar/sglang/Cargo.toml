@@ -51,3 +51,4 @@ dynamo-kv-router = { workspace = true }
 rmp-serde = { workspace = true }
 tempfile = { workspace = true }
 tmq = { workspace = true }
+tracing-subscriber = { workspace = true }
