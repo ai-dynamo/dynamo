@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A failed lease seal on vLLM's free path is lost ownership, not a soft error.
+"""vLLM free-path lease handling: lost ownership and native free semantics.
+
+A failed lease seal on vLLM's free path is lost ownership, not a soft error.
 
 The lease ring seals all-or-nothing and fails only when a successor has moved
 the lease generation. The engine must stop without returning the blocks to its
@@ -78,3 +80,35 @@ def test_seal_failure_on_free_path_stops_engine_without_touching_leases():
     assert client.released == []
     assert pool.free_block_queue.blocks == []
     assert pool._gms_kv_leases_by_block == leases
+
+
+class _SealingClient:
+    namespace = "test"
+    owner_id = "primary"
+
+    def __init__(self):
+        self.sealed = []
+        self.released = []
+
+    def seal(self, leases):
+        self.sealed.append([lease.block_id for lease in leases])
+
+    def release(self, leases):
+        self.released.extend(leases)
+
+
+def test_block_listed_twice_is_freed_once_like_native_block_pool():
+    """Native BlockPool classifies inside the decrement loop; so must GMS."""
+    block = SimpleNamespace(
+        block_id=1, ref_cnt=2, block_hash=b"\x01" * 32, is_null=False
+    )
+    lease = KVLease(1, 7)
+    client = _SealingClient()
+    pool = _pool(client, [block], {1: lease})
+    pool._gms_kv_directory = None  # no directory: plain release path
+
+    leases_mod._free_blocks(pool, [block, block])
+
+    assert block.ref_cnt == 0
+    assert pool.free_block_queue.blocks == [block]
+    assert client.released == [lease]

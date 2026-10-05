@@ -948,12 +948,13 @@ def _free_blocks(self, ordered_blocks):
     assert client is not None
 
     blocks_list = list(ordered_blocks)
+    # Classify inside the decrement loop, like native BlockPool.free_blocks:
+    # a block listed twice becomes free once, on the decrement that reaches 0.
+    free_blocks = []
     for block in blocks_list:
         block.ref_cnt -= 1
-
-    free_blocks = [
-        block for block in blocks_list if block.ref_cnt == 0 and not block.is_null
-    ]
+        if block.ref_cnt == 0 and not block.is_null:
+            free_blocks.append(block)
     leases = []
     missing_lease_blocks = []
     retained = []
