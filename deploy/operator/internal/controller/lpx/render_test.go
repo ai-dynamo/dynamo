@@ -469,7 +469,7 @@ func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	root := t.TempDir()
 	const buildID = "split-io"
 	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, testV2GraphManifestFixture{
-		topology:       "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
+		topology:       "test-topology",
 		partitionCount: 1, numChips: 8, devicesPerNode: 8,
 		compilationMode:   manifestcapnpv2.CompilationMode_lpx,
 		nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
@@ -660,14 +660,14 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 
 	v2Builds := map[string]testV2GraphManifestFixture{
 		"node-local-v2-connected": {
-			topology:              "URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA",
+			topology:              "test-topology",
 			partitionCount:        2,
 			numChips:              16,
 			devicesPerNode:        8,
 			selectedPropSyncChain: []uint32{0, 1},
 		},
 		"node-local-v2-connected-lpx": {
-			topology:              "URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA",
+			topology:              "test-topology",
 			partitionCount:        2,
 			numChips:              16,
 			devicesPerNode:        8,
@@ -676,7 +676,7 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 			nonLPUDeviceTypes:     []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
 		},
 		"llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c": {
-			topology:          "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
+			topology:          "test-topology",
 			partitionCount:    17,
 			numChips:          8,
 			devicesPerNode:    8,
@@ -684,7 +684,7 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 			nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
 		},
 		"llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c": {
-			topology:       "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
+			topology:       "test-topology",
 			partitionCount: 17,
 			numChips:       8,
 			devicesPerNode: 8,
@@ -763,7 +763,7 @@ func newTestGraphProgram(
 func testGbuildManifestCapnp(t *testing.T) []byte {
 	t.Helper()
 
-	const topology = "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106"
+	const topology = "test-topology"
 
 	msg, seg := capnp.NewSingleSegmentMessage(nil)
 	manifest, err := manifestcapnpv2.NewRootManifest(seg)
@@ -820,10 +820,23 @@ func testGbuildManifestCapnp(t *testing.T) []byte {
 	require.NoError(t, lpuDetail.SetTopology(topology))
 	lpuDetail.SetNumChips(8)
 	lpuDetail.SetDevicesPerNode(8)
+	setTestChipArchitecture(t, lpuDetail, "polaris")
 
 	data, err := msg.Marshal()
 	require.NoError(t, err)
 	return data
+}
+
+func setTestChipArchitecture(t *testing.T, detail manifestcapnpv2.LpuPartitionArtifact, architecture string) {
+	t.Helper()
+
+	programs, err := capnp.NewCompositeList(detail.Segment(), capnp.ObjectSize{PointerCount: 2}, 1)
+	require.NoError(t, err)
+	require.NoError(t, detail.SetReserved4(programs.ToPtr()))
+	chips, err := capnp.NewCompositeList(programs.Struct(0).Segment(), capnp.ObjectSize{DataSize: 8, PointerCount: 2}, 1)
+	require.NoError(t, err)
+	require.NoError(t, programs.Struct(0).SetPtr(1, chips.ToPtr()))
+	require.NoError(t, chips.Struct(0).SetText(1, architecture))
 }
 
 func testV2GraphManifestCapnp(t *testing.T, fixture testV2GraphManifestFixture) []byte {
@@ -873,6 +886,7 @@ func testV2GraphManifestCapnp(t *testing.T, fixture testV2GraphManifestFixture) 
 		require.NoError(t, detail.SetTopology(fixture.topology))
 		detail.SetNumChips(fixture.numChips)
 		detail.SetDevicesPerNode(fixture.devicesPerNode)
+		setTestChipArchitecture(t, detail, "polaris")
 	}
 	for index, deviceType := range fixture.nonLPUDeviceTypes {
 		partition := partitions.At(fixture.partitionCount + index)
@@ -931,6 +945,7 @@ func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) 
 	require.NoError(t, detail.SetTopology("opaque-v3-topology"))
 	detail.SetNumChips(16)
 	detail.SetDevicesPerNode(16)
+	setTestChipArchitecture(t, detail, "polarisB0")
 	for offset, deviceType := range fixture.nonLPUDeviceTypes {
 		partition := partitions.At(1 + offset)
 		ref, err := partition.NewPartition()
@@ -1037,9 +1052,10 @@ func writeLPXTestBuild(
 		detail, err := partition.Detail().NewLpu()
 		require.NoError(t, err)
 		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partitionID)))
-		require.NoError(t, detail.SetTopology("URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA"))
+		require.NoError(t, detail.SetTopology("test-topology"))
 		detail.SetNumChips(16)
 		detail.SetDevicesPerNode(8)
+		setTestChipArchitecture(t, detail, "polaris")
 	}
 	if compilationMode == manifestcapnpv2.CompilationMode_lpx {
 		partition := partitions.At(len(partitionIDs))

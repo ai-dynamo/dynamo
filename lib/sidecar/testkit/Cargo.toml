@@ -30,3 +30,9 @@ tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
 tonic-v14 = { workspace = true }
 tonic-health-v14 = { workspace = true }
+dynamo-runtime = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
+tempfile = { workspace = true }
+tokio-util = { workspace = true }
+libc = { workspace = true }
+prost-types-v14 = { workspace = true }

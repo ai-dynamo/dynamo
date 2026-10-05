@@ -28,6 +28,36 @@ const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 
+// Size cap for a `data:` URL, which carries its whole payload inline. Keep the
+// name and default in sync with the Python counterpart
+// (components/src/dynamo/common/http/url_validator.py::max_data_url_bytes).
+const MAX_DATA_URL_MB_ENV: &str = "DYN_MM_MAX_DATA_URL_MB";
+const DEFAULT_MAX_DATA_URL_MB: usize = 16;
+
+/// Size cap in bytes for a `data:` URL, from `DYN_MM_MAX_DATA_URL_MB`.
+///
+/// Read per call, like the Python workers. An unparseable or non-positive
+/// value falls back to the default with a warning.
+pub fn max_data_url_bytes() -> usize {
+    let default = DEFAULT_MAX_DATA_URL_MB * 1024 * 1024;
+    let Ok(raw) = std::env::var(MAX_DATA_URL_MB_ENV) else {
+        return default;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return default;
+    }
+    match raw.parse::<usize>() {
+        Ok(mb) if mb > 0 => mb.saturating_mul(1024 * 1024),
+        _ => {
+            tracing::warn!(
+                "Ignoring invalid {MAX_DATA_URL_MB_ENV}={raw:?}; using {DEFAULT_MAX_DATA_URL_MB} MB"
+            );
+            default
+        }
+    }
+}
+
 // IP ranges that must never be reachable from a user-controlled URL.
 // Source: RFC1918 (private), RFC6598 (CGNAT), RFC5735 (loopback, link-local,
 // 0.0.0.0/8), RFC4193 (ULA), RFC4291 (IPv6 loopback / link-local), RFC6890
@@ -959,6 +989,22 @@ mod tests_non_nixl {
             current = cause.source();
         }
         panic!("error chain did not contain InvalidArgument: {error}");
+    }
+
+    #[test]
+    fn max_data_url_bytes_reads_env_and_ignores_bad_values() {
+        const DEFAULT: usize = 16 * 1024 * 1024;
+        temp_env::with_var(MAX_DATA_URL_MB_ENV, None::<&str>, || {
+            assert_eq!(max_data_url_bytes(), DEFAULT);
+        });
+        temp_env::with_var(MAX_DATA_URL_MB_ENV, Some(" 2 "), || {
+            assert_eq!(max_data_url_bytes(), 2 * 1024 * 1024);
+        });
+        for raw in ["", "abc", "1.5", "0", "-1"] {
+            temp_env::with_var(MAX_DATA_URL_MB_ENV, Some(raw), || {
+                assert_eq!(max_data_url_bytes(), DEFAULT, "{raw:?}");
+            });
+        }
     }
 
     #[test]
