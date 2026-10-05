@@ -732,16 +732,16 @@ class PlannerConfig(BaseModel):
     # Per-GPU caps are NOT configured here. They are authored on each worker
     # component's ``podTemplate.metadata.annotations``
     # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
-    # and enforced by the Power Agent. The planner reads those caps from the DGD
-    # and combines them with ``total_gpu_power_limit`` to project and clamp a
+    # and enforced by the Power Agent. The operator projects those caps into
+    # component status; the Planner combines them with ``total_gpu_power_limit`` to project and clamp a
     # power budget. It never writes per-GPU caps. These inputs are
     # process-static; changing the total budget requires a Planner restart.
     enable_power_awareness: bool = Field(
         default=False,
         description=(
             "Enable power-aware budget projection and budget-gated replica "
-            "scaling. Per-GPU caps are read from DGD worker podTemplate "
-            "annotations; this planner combines them with total_gpu_power_limit "
+            "scaling. Per-GPU caps are read from operator-projected DGD component "
+            "status; this planner combines them with total_gpu_power_limit "
             "to publish power-budget gauges and clamp scale-up. Requires "
             "total_gpu_power_limit, environment='kubernetes', and "
             "mode in ('disagg', 'prefill', 'decode'). Not supported for "
@@ -915,9 +915,9 @@ class PlannerConfig(BaseModel):
                 f"got {self.fpm_sample_bucket_size}"
             )
 
-        # Power-awareness validation. Per-GPU caps come from DGD worker
-        # podTemplate annotations, not this config, so the only required knob
-        # is the total budget — and a Kubernetes connector to read the DGD.
+        # Power-awareness validation. Per-GPU caps come from operator-projected
+        # DGD component status, not this config, so the only required knob is
+        # the total budget — and a Kubernetes connector to read the DGD.
         if self.enable_power_awareness:
             if self.total_gpu_power_limit is None:
                 raise ValueError(
@@ -929,8 +929,8 @@ class PlannerConfig(BaseModel):
             if self.environment != "kubernetes":
                 raise ValueError(
                     "enable_power_awareness=True requires environment='kubernetes'. "
-                    "Per-GPU caps are read from DGD worker podTemplate annotations, "
-                    "which only the Kubernetes connector resolves; virtual/replay and "
+                    "Per-GPU caps are read from DGD component status, which only "
+                    "the Kubernetes connector resolves; virtual/replay and "
                     "global-planner modes have no DGD with authoritative caps."
                 )
             if self.mode == "agg":

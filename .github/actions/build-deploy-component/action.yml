@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: 'Build Deploy Component'
-description: 'Build and push a deploy component container (operator, checkpoint-placeholder, or power-agent)'
+description: 'Build and push a deploy component container (operator or power-agent)'
 
 inputs:
   component:
-    description: 'Component to build: operator, checkpoint-placeholder, or power-agent'
+    description: 'Component to build: operator or power-agent'
     required: true
   image_tag:
     description: 'Image tag to apply to built images'
@@ -69,7 +69,7 @@ inputs:
       as a workflow artifact. Off by default — top-level callers opt in
       (post-merge-ci.yml sets true for push to main / release branches).
       Applies to the inline-compliance component (operator); no effect for
-      checkpoint-placeholder or power-agent.
+      power-agent.
     required: false
     default: 'false'
   diff_event_context:
@@ -124,8 +124,7 @@ runs:
         # -${TARGETARCH}.cdx.json to subtract each arch's own floor.
         #
         # run_compliance gates the extract/upload steps: it is true only for the
-        # shipped, /legal-bearing stage. checkpoint-placeholder and power-agent
-        # have no baseline.
+        # shipped, /legal-bearing stage. power-agent has no baseline.
         BASELINE_STEM=""
         RUN_COMPLIANCE=""
         case "${{ inputs.component }}" in

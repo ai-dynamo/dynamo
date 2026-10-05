@@ -25,6 +25,7 @@ permissions:
 
 jobs:
   perf:
+    name: ${{ inputs.recipe }}
     runs-on: prod-deploy-tester-v1
     # Allow model loading and cleanup around each recipe's AIPerf run.
     timeout-minutes: ${{ inputs.recipe == 'kimi-k25-agg' && 180 || 960 }}
