@@ -36,7 +36,10 @@ root and is rewritten to a relative path at publish time.
 
 The diffusion overview's searchable, filterable card grid. Keep card markup, provider images, and
 the single native sidebar-page link per card in MDX so Fern can rewrite them. The component injects
-scoped styles on the server, including dark mode, keyboard focus, and reduced-motion support.
+scoped styles on the server, including dark mode, keyboard focus, and reduced-motion support. Its
+neutral panels, fields, and pill chips mirror the Reference palette (`ReferenceStyles`, the
+`CompatibilityHero` select, and the `.dynamo-chip-*` tints in `main.css`): modality is the only
+colored chip, experimental entries use the dashed-amber badge, and hover and focus states use green.
 `DiffusionCatalogControls` reads the rendered card metadata and chip labels for type, backend,
 provider, weight size, and experimental-status filters. Search includes card text, model IDs, and
 source paths; sorting supports names, chip values, and numeric weight sizes. It reorders the native
