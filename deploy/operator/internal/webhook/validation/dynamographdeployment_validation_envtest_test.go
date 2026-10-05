@@ -1296,6 +1296,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "role pod templates reject native sidecars in unsupported multinode layouts",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 4)
+				worker.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: initialSidecarImage,
+					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: Dynamo sidecar mode is not supported in multinode or LPX role pod templates`},
+		},
+		{
 			name: "role pod templates require a 1.6 or later Planner",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 4)

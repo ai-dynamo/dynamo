@@ -122,11 +122,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in
 	// podTemplate.spec.containers[name=main].image by default, or
 	// podTemplate.spec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present.
-	// DGD admission requires it when that image has no parseable semantic-version tag;
+	// With role PodTemplates, it applies to the main image in every selected template.
+	// DGD admission requires it when any selected runtime image has no parseable semantic-version tag;
 	// controller-generated DCDs may omit it.
 	// Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical
 	// MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to
-	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+	// version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
@@ -138,8 +139,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// podTemplate defines the complete Pod configuration shared by every role. It
-	// is mutually exclusive with roles[].podTemplate. Every component must
-	// include podTemplate.spec.containers[name=main] with a non-empty image.
+	// is mutually exclusive with roles[].podTemplate. New components using this template must
+	// include podTemplate.spec.containers[name=main] with a non-empty image. Existing components
+	// created without a podTemplate may remain unchanged.
 	// By default the operator merges Dynamo defaults into podTemplate.spec.containers[name=main].
 	// Declaring podTemplate.spec.initContainers[name=runtime] activates Dynamo sidecar mode:
 	// podTemplate.spec.containers[name=main] runs the user-configured engine, and

@@ -106,7 +106,7 @@ func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, context ComponentContex
 
 		// User configuration overrides defaults, including entire probe handlers.
 		base := dynamoSidecarBaseContainer(context)
-		if err := mergeContainerByName(&base, user, context.Annotations); err != nil {
+		if err := mergeContainerByName(&base, user); err != nil {
 			return fmt.Errorf("merge runtime init container %q: %w", name, err)
 		}
 		podSpec.InitContainers[i] = base

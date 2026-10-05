@@ -60,7 +60,6 @@ func NewDiscoveryContext(defaultBackend configv1alpha1.DiscoveryBackend, annotat
 }
 
 type ComponentContext struct {
-	Annotations                    map[string]string // Includes the authoritative operator origin for compatibility gates.
 	numberOfNodes                  int32
 	RuntimeContainerName           string // Resolved name of the container hosting this component's Dynamo runtime.
 	DynamoNamespace                string
@@ -100,8 +99,8 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	}
 
 	// Every Dynamo component receives infrastructure and transport defaults.
-	AddStandardEnvVars(&container, context.Infrastructure, context.Annotations)
-	AddTransportTLSEnvVars(&container, context.Infrastructure, context.Annotations)
+	AddStandardEnvVars(&container, context.Infrastructure)
+	AddTransportTLSEnvVars(&container, context.Infrastructure)
 
 	// Runtime identity is independent of the infrastructure configuration.
 	container.Env = append(container.Env, []corev1.EnvVar{
@@ -172,7 +171,7 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 // AddStandardEnvVars adds the standard environment variables that are common to
 // Dynamo component containers and the DGDR profiler Job.
 // container must not be nil; existing environment values take precedence.
-func AddStandardEnvVars(container *corev1.Container, infrastructure configv1alpha1.InfrastructureConfiguration, annotations map[string]string) {
+func AddStandardEnvVars(container *corev1.Container, infrastructure configv1alpha1.InfrastructureConfiguration) {
 	standardEnvVars := []corev1.EnvVar{}
 	if infrastructure.NATSAddress != "" {
 		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
@@ -201,7 +200,7 @@ func AddStandardEnvVars(container *corev1.Container, infrastructure configv1alph
 		})
 	}
 	// merge the env vars to allow users to override the standard env vars
-	container.Env = MergeEnvsForOrigin(annotations, standardEnvVars, container.Env)
+	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
 
 // AddTransportTLSEnvVars injects DYN_TCP_TLS_* and NATS_TLS_* certificate path
@@ -210,7 +209,7 @@ func AddStandardEnvVars(container *corev1.Container, infrastructure configv1alph
 // DGDR profiler Job — because the profiler does not run the TCP/NATS
 // transport and does not inherit DGD podTemplate certificate mounts.
 // container must not be nil; existing environment values take precedence.
-func AddTransportTLSEnvVars(container *corev1.Container, infrastructure configv1alpha1.InfrastructureConfiguration, annotations map[string]string) {
+func AddTransportTLSEnvVars(container *corev1.Container, infrastructure configv1alpha1.InfrastructureConfiguration) {
 	tlsEnvVars := []corev1.EnvVar{}
 	// Inject TLS certificate paths for inter-component encryption (DYN_TCP_TLS_* / NATS_TLS_*).
 	if infrastructure.NATSTLSCAPath != "" {
@@ -273,5 +272,5 @@ func AddTransportTLSEnvVars(container *corev1.Container, infrastructure configv1
 			Value: infrastructure.TCPTLSServerName,
 		})
 	}
-	container.Env = MergeEnvsForOrigin(annotations, tlsEnvVars, container.Env)
+	container.Env = MergeEnvs(tlsEnvVars, container.Env)
 }

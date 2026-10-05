@@ -327,6 +327,17 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1alpha1 role PodTemplates cannot bypass native sidecar restrictions",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				setAlphaExplicitMultinodeRoleTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
+				dcd.Spec.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: "runtime:1.5.0",
+					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}),
+			wantWebhookErrs: []string{`spec.roles[0].podTemplate.spec.initContainers[0].name: Forbidden: Dynamo sidecar mode is not supported in multinode or LPX role pod templates`},
+		},
+		{
 			name: "standalone v1alpha1 canonical lpx component is rejected",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = "lpx"

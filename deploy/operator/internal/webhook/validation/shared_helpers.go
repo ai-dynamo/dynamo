@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -95,7 +96,7 @@ func runtimeVersionImageAndPath(
 ) (string, *field.Path) {
 	// In sidecar mode the engine image says nothing about Dynamo compatibility.
 	if spec.PodTemplate != nil {
-		if index := containerIndexByName(spec.PodTemplate.Spec.InitContainers, consts.RuntimeContainerName); index >= 0 {
+		if index := slices.IndexFunc(spec.PodTemplate.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
 			return spec.PodTemplate.Spec.InitContainers[index].Image, fldPath.Child("podTemplate", "spec", "initContainers").Index(index).Child("image")
 		}
 	}
@@ -120,7 +121,7 @@ func runtimeVersionImageAndPathV1Alpha1(
 ) (string, *field.Path) {
 	// Alpha represents init containers directly, so live fields determine the mode.
 	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil {
-		if index := containerIndexByName(spec.ExtraPodSpec.PodSpec.InitContainers, consts.RuntimeContainerName); index >= 0 {
+		if index := slices.IndexFunc(spec.ExtraPodSpec.PodSpec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
 			return spec.ExtraPodSpec.PodSpec.InitContainers[index].Image, fldPath.Child("extraPodSpec", "initContainers").Index(index).Child("image")
 		}
 	}

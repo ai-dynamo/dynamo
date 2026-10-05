@@ -602,6 +602,18 @@ func (v *sharedValidation) validateComponentRoleSpec(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
+	// Role templates must not bypass the sidecar restrictions on multinode and LPX layouts.
+	if role.PodTemplate != nil {
+		for i, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == consts.RuntimeContainerName {
+				allErrs = append(allErrs, field.Forbidden(
+					fldPath.Child("podTemplate", "spec", "initContainers").Index(i).Child("name"),
+					"Dynamo sidecar mode is not supported in multinode or LPX role pod templates",
+				))
+			}
+		}
+	}
+
 	// LPX renders role templates directly and has no provider-override lowering.
 	if options.component != nil && options.component.IsLPX() {
 		if role.PodTemplate != nil {

@@ -1753,7 +1753,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	}
 
 	// Preserve legacy environment rendering before backend-specific additions.
-	container.Env = MergeEnvsForOrigin(annotations, nil, container.Env)
+	container.Env = MergeEnvs(nil, container.Env)
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
 	// Apply backend-specific container modifications
@@ -1920,7 +1920,7 @@ func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {
 	return nil
 }
 
-func mergeContainerByName(base *corev1.Container, override *corev1.Container, annotations map[string]string) error {
+func mergeContainerByName(base *corev1.Container, override *corev1.Container) error {
 	if override == nil {
 		return nil
 	}
@@ -1930,7 +1930,7 @@ func mergeContainerByName(base *corev1.Container, override *corev1.Container, an
 	if err := mergo.Merge(base, *user, mergo.WithOverride); err != nil {
 		return err
 	}
-	base.Env = MergeEnvsForOrigin(annotations, baseEnv, user.Env)
+	base.Env = MergeEnvs(baseEnv, user.Env)
 	if user.LivenessProbe != nil {
 		base.LivenessProbe = user.LivenessProbe.DeepCopy()
 	}
@@ -2079,7 +2079,6 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 
 		// Co-located frontend discovery uses its own identity in both worker layouts.
 		frontendContext := ComponentContext{
-			Annotations:                    parentContext.Annotations,
 			numberOfNodes:                  1,
 			RuntimeContainerName:           sidecarName,
 			ComponentType:                  commonconsts.ComponentTypeFrontend,
@@ -2101,7 +2100,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
-		base.Env = MergeEnvsForOrigin(parentContext.Annotations, baseEnv, user.Env)
+		base.Env = MergeEnvs(baseEnv, user.Env)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
 		return nil
@@ -2159,7 +2158,6 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 
 	// Main hosts the runtime unless the component selects a native Dynamo sidecar.
 	componentContext := ComponentContext{
-		Annotations:                    GetPodTemplateAnnotations(component),
 		numberOfNodes:                  numberOfNodes,
 		RuntimeContainerName:           commonconsts.MainContainerName,
 		ComponentType:                  string(component.ComponentType),

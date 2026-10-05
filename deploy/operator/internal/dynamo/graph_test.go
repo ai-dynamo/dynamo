@@ -1754,7 +1754,7 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 				},
 			}
 
-			AddStandardEnvVars(container, operatorConfig.Infrastructure, nil)
+			AddStandardEnvVars(container, operatorConfig.Infrastructure)
 			envByName := envVarsToMap(container.Env)
 
 			if tt.wantNATS {
@@ -1937,7 +1937,7 @@ func TestAddTransportTLSEnvVars(t *testing.T) {
 				Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 			}
 			tc.set(&operatorConfig.Infrastructure)
-			AddTransportTLSEnvVars(container, operatorConfig.Infrastructure, nil)
+			AddTransportTLSEnvVars(container, operatorConfig.Infrastructure)
 			envByName := envVarsToMap(container.Env)
 			assert.Equal(t, tc.want, envByName[tc.env])
 		})
@@ -1949,7 +1949,7 @@ func TestAddTransportTLSEnvVars(t *testing.T) {
 		operatorConfig := &configv1alpha1.OperatorConfiguration{
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 		}
-		AddTransportTLSEnvVars(container, operatorConfig.Infrastructure, nil)
+		AddTransportTLSEnvVars(container, operatorConfig.Infrastructure)
 		envByName := envVarsToMap(container.Env)
 		for _, tc := range tlsCases {
 			assert.NotContains(t, envByName, tc.env)

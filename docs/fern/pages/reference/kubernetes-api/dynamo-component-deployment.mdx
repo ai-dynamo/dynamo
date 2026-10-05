@@ -154,6 +154,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
+    An init container named `runtime` is rejected in role templates because Dynamo sidecar mode does not yet support multinode or LPX components.
+
     For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
 
     For LPX components, every declared role requires its own template. Agent and conductor templates are independent.
@@ -248,7 +250,7 @@ Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates Dynamo 
 
 The operator injects Dynamo environment variables, identity, transport TLS, system port, and startup, liveness, and readiness probes into `spec.podTemplate.spec.initContainers[name=runtime]`. The `spec.podTemplate.spec.containers[name=main]` container runs the engine with user-provided launch configuration and probes. Graph-level environment variables apply to both containers; compilation cache and shared-memory configuration remain on `spec.podTemplate.spec.containers[name=main]`. A separate `frontendSidecar` is supported.
 
-For DGDs created by operator 1.6.0 or later, both containers preserve [environment variable order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order): injected defaults come first, then graph-level variables, then the container's own variables. Duplicate names are preserved so later entries can reference or override earlier values. Older DGDs, including those without an operator-origin annotation, retain sorted and de-duplicated rendering.
+Both containers use the existing environment merge behavior: merged entries are sorted by name and de-duplicated, with container-level values overriding graph-level values and runtime defaults. The operator origin version does not change this behavior. Backend-specific additions retain their existing placement; for example, `VLLM_CACHE_ROOT` is appended to the engine environment after merging.
 
 This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
 
