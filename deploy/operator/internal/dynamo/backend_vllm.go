@@ -125,30 +125,6 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		}
 	}
 
-	// Set compilation cache environment variables for VLLM
-	cacheDir := ""
-	if component.CompilationCache != nil {
-		cacheDir = component.CompilationCache.MountPath
-	}
-
-	if cacheDir != "" {
-		// Set VLLM cache directory using the environment variable
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  "VLLM_CACHE_ROOT",
-			Value: cacheDir,
-		})
-
-		// Log confirmation that compilation cache is configured for VLLM
-		logger := log.Log.WithName("vllm-backend")
-		logger.Info("Compilation cache configured and enabled for VLLM backend",
-			"backend", "vllm",
-			"status", "fully-supported",
-			"cache-dir", cacheDir,
-			"use-as-compilation-cache", true,
-			"env-vars-set", true,
-			"env-vars", "VLLM_CACHE_ROOT")
-	}
-
 	return nil
 }
 
@@ -388,7 +364,14 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 	needsDistributed := needsTensorParallelMultinodeLaunch(args, containerGPUs)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
-		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
+		injectMpDistributedLaunchFlags(
+			container,
+			role,
+			serviceName,
+			multinodeDeployer,
+			numberOfNodes,
+			usesMultinodeTopologyAliases(annotations),
+		)
 	} else if needsDistributed {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
 	} else if args.IsElasticEPEnabled {
@@ -457,8 +440,20 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 // Worker: runs the same vLLM command with --headless, --node-rank <rank>, and the same
 // coordination flags. An init container (injected via UpdatePodSpec) handles waiting for
 // the leader's master port before the worker's main container starts.
-func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, numberOfNodes int32) {
+// New DGDs address both roles through the provider-independent topology aliases;
+// legacy DGDs retain their existing provider-specific command lines.
+func injectMpDistributedLaunchFlags(
+	container *corev1.Container,
+	role Role,
+	serviceName string,
+	multinodeDeployer MultinodeDeployer,
+	numberOfNodes int32,
+	useTopologyAliases bool,
+) {
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+	if useTopologyAliases {
+		leaderHostname = commonconsts.DynamoLeaderAddressEnvVarReference
+	}
 	mpFlags := fmt.Sprintf("%s mp --nnodes %d --master-addr %s --master-port %s",
 		distributedExecutorFlag,
 		numberOfNodes, leaderHostname, commonconsts.VLLMMpMasterPort)
@@ -467,10 +462,18 @@ func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serv
 
 	switch role {
 	case RoleLeader:
-		mpFlags += " --node-rank 0"
+		nodeRank := "0"
+		if useTopologyAliases {
+			nodeRank = commonconsts.DynamoRankEnvVarReference
+		}
+		mpFlags += fmt.Sprintf(" --node-rank %s", nodeRank)
 	case RoleWorker:
-		nodeRank, needsShellForRank := multinodeDeployer.GetNodeRank()
-		needsShell = needsShellForRank
+		nodeRank := commonconsts.DynamoRankEnvVarReference
+		if !useTopologyAliases {
+			var needsShellForRank bool
+			nodeRank, needsShellForRank = multinodeDeployer.GetNodeRank()
+			needsShell = needsShellForRank
+		}
 		mpFlags += fmt.Sprintf(" --node-rank %s --headless", nodeRank)
 	}
 

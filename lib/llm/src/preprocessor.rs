@@ -11102,6 +11102,7 @@ mod tests {
             nvext: None,
             metadata: None,
             return_tokens_as_token_ids: None,
+            no_stop_trim: None,
             unsupported_fields: Default::default(),
         };
         let next: Arc<
