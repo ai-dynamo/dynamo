@@ -242,7 +242,6 @@ class TestCheckpointVariant:
 
     @pytest.mark.parametrize("model", ["/data/database", "/models/base/export"])
     def test_unknown_variant_is_not_restricted(self, model):
-        # Neither "database" nor an ancestor named "base" makes a Base checkpoint.
         handler = self._handler(tts_model_type="other", model=model)
         handler._validate_tts_request(self._request("CustomVoice"))
 
@@ -763,10 +762,15 @@ class TestResolveRefAudio:
         data, _ = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
         assert len(data) == 30 * 8000
 
-    def test_rejects_a_clip_over_the_duration_limit(self):
+    @pytest.mark.parametrize(
+        "samples, rate",
+        [(30 * 8000 + 1, 8000), (30 * 48000 + 1, 384000)],
+        ids=["duration", "sample_count"],
+    )
+    def test_rejects_a_clip_over_the_decoded_limits(self, samples, rate):
         # The encoded size is fine; the decoded waveform is what costs memory.
         handler = _make_audio_handler()
-        wav = self._wav_bytes(samples=30 * 8000 + 1, rate=8000)
+        wav = self._wav_bytes(samples=samples, rate=rate)
         with pytest.raises(ValueError, match="too long"):
             asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
 

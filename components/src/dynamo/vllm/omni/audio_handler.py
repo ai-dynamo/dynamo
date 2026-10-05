@@ -53,6 +53,8 @@ _TTS_VARIANT_PATH_SUFFIX = re.compile(
 # Longest reference clip decoded. Mirrors vLLM-Omni's _REF_AUDIO_MAX_DURATION and
 # bounds what a client-supplied clip can claim in memory.
 _TTS_REF_AUDIO_MAX_SECONDS = 30
+# Frame cap independent of the client-declared sample rate.
+_TTS_REF_AUDIO_MAX_FRAMES = _TTS_REF_AUDIO_MAX_SECONDS * 48000
 
 # Fallback language set used when model config is unavailable.
 _TTS_LANGUAGES_FALLBACK = {
@@ -513,7 +515,9 @@ class AudioGenerationHandler:
         try:
             with sf.SoundFile(io.BytesIO(audio_bytes)) as audio:
                 sr = audio.samplerate
-                max_frames = int(sr * _TTS_REF_AUDIO_MAX_SECONDS)
+                max_frames = min(
+                    int(sr * _TTS_REF_AUDIO_MAX_SECONDS), _TTS_REF_AUDIO_MAX_FRAMES
+                )
                 # One frame past the cap, so an overlong clip is refused
                 # without decoding the rest of it.
                 wav_data = audio.read(max_frames + 1, dtype="float32", always_2d=True)
@@ -526,7 +530,8 @@ class AudioGenerationHandler:
             ) from exc
         if len(wav_data) > max_frames:
             raise ValueError(
-                f"ref_audio too long (max {_TTS_REF_AUDIO_MAX_SECONDS} seconds)"
+                f"ref_audio too long (max {_TTS_REF_AUDIO_MAX_SECONDS} seconds "
+                f"and {_TTS_REF_AUDIO_MAX_FRAMES} samples)"
             )
         # Qwen3-TTS takes a mono waveform. A plain list survives the trip to the
         # engine process; a NumPy array nested in the prompt arrives there as a
