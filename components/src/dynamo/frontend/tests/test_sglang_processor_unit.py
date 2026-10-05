@@ -69,6 +69,7 @@ from dynamo.frontend.utils import (
     random_uuid,
 )
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -161,15 +162,48 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["stop_conditions"]["max_thinking_tokens"] is None
         assert result["require_reasoning"] is False
 
-    def test_thinking_token_budget_rejects_disabled_reasoning(self):
-        with pytest.raises(InvalidArgument, match="requires reasoning to be enabled"):
-            _build_dynamo_preproc(
-                {"thinking_token_budget": 32},
-                [1],
-                "test",
-                None,
-                force_reasoning=False,
-            )
+    @pytest.mark.parametrize(
+        ("overrides", "error"),
+        [
+            ({}, None),
+            ({"enable_strict_thinking": False}, "--enable-strict-thinking"),
+            ({"skip_tokenizer_init": True}, "--skip-tokenizer-init"),
+        ],
+    )
+    def test_disabled_thinking_preserves_budget_for_backend_validation(
+        self, overrides, error
+    ):
+        result = _build_dynamo_preproc(
+            {"thinking_token_budget": 32}, [1], "test", None, force_reasoning=False
+        )
+        assert result["stop_conditions"]["max_thinking_tokens"] == 32
+        assert result["require_reasoning"] is False
+        server_args = types.SimpleNamespace(
+            **{
+                "enable_strict_thinking": True,
+                "reasoning_parser": "qwen3",
+                "skip_tokenizer_init": False,
+                **overrides,
+            }
+        )
+        if error is None:
+            assert apply_thinking_budget(result, {}, server_args) == {}
+        else:
+            with pytest.raises(InvalidArgument, match=error):
+                apply_thinking_budget(result, {}, server_args)
+
+    @pytest.mark.asyncio
+    async def test_disabled_thinking_budget_still_rejected_by_diffusion_worker(self):
+        from dynamo.sglang.request_handlers.llm.diffusion_handler import (
+            DiffusionWorkerHandler,
+        )
+
+        result = _build_dynamo_preproc(
+            {"thinking_token_budget": 32}, [1], "test", None, force_reasoning=False
+        )
+        handler = object.__new__(DiffusionWorkerHandler)
+        with pytest.raises(InvalidArgument, match="diffusion language model"):
+            await anext(handler.generate(result, None))
 
     @pytest.mark.multimodal
     def test_rejects_multimodal_cache_uuid(self):
@@ -3405,7 +3439,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
 
-    def test_qwen3_thinking_budget_is_unset_with_explicit_thinking_opt_out(self, tokenizer):
+    def test_qwen3_thinking_budget_is_ignored_with_explicit_thinking_opt_out(
+        self, tokenizer
+    ):
         request = {
             "model": MODEL,
             "messages": [{"role": "user", "content": "Hello"}],
@@ -3427,7 +3463,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             None,
             force_reasoning=pre.force_reasoning,
         )
-        assert result["stop_conditions"]["max_thinking_tokens"] is None
+        assert result["stop_conditions"]["max_thinking_tokens"] == 32
         assert result["require_reasoning"] is False
 
     # Only the explicit case is covered: with no `thinking` key we deliberately
