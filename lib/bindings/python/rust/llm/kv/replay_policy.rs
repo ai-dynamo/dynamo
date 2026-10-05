@@ -549,6 +549,9 @@ impl NativeReplayPolicy {
     }
 
     fn select(&mut self, request: Request) -> Result<Option<Placement>> {
+        let isl_blocks = (request.input_tokens / self.block_size as usize)
+            .try_into()
+            .context("input token count exceeds native policy block range")?;
         ensure!(
             !request.request_id.is_empty(),
             "request ID must not be empty"
@@ -679,7 +682,7 @@ impl NativeReplayPolicy {
             overlap_blocks: selected.response.target_cached_prefix_blocks,
             best_available_overlap_blocks: best_overlap,
             cached_tokens: selected.response.cached_tokens,
-            isl_blocks: (request.input_tokens / self.block_size as usize).try_into()?,
+            isl_blocks,
         }))
     }
 
