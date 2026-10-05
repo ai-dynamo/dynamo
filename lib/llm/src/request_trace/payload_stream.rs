@@ -12,9 +12,6 @@ use crate::protocols::openai::chat_completions::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta};
-use futures::StreamExt;
-
 type PayloadStream =
     Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>;
 
@@ -188,146 +185,6 @@ where
             }
         }),
     )
-}
-
-/// A well-formed response carrying no choices, sent to the client when aggregation
-/// failed so the HTTP response shape stays valid.
-fn empty_fallback_response() -> NvCreateChatCompletionResponse {
-    NvCreateChatCompletionResponse {
-        inner: dynamo_protocols::types::CreateChatCompletionResponse {
-            id: String::new(),
-            created: 0,
-            usage: None,
-            model: String::new(),
-            object: "chat.completion".to_string(),
-            system_fingerprint: None,
-            choices: vec![],
-            service_tier: None,
-        },
-        nvext: None,
-    }
-}
-
-/// Collect all chunks, aggregate them, then emit a single final chunk (for non-streaming)
-pub fn fold_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture)
-where
-    S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
-{
-    let (tx, rx) = oneshot::channel::<PayloadOutcome>();
-
-    let single_chunk_stream = async move {
-        let chunks: Vec<_> = stream.collect().await;
-        let parsing_options = ParsingOptions::default();
-        let outcome = aggregate_with_partial_recovery(chunks, parsing_options).await;
-
-        // A dropped outcome may still carry the pre-error prefix for the record, but the
-        // client gets the empty fallback either way: a truncated aggregation presented as
-        // the whole answer is worse than an empty one the caller can recognize as such.
-        let client_response = match (&outcome.drop_reason, &outcome.response) {
-            (None, Some(complete)) => complete.clone(),
-            _ => empty_fallback_response(),
-        };
-        let _ = tx.send(outcome);
-        final_response_to_one_chunk_stream(client_response)
-    };
-
-    let future = Box::pin(async move {
-        match rx.await {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                tracing::debug!(
-                    "request payload: fold response aggregation produced no outcome (stream dropped)"
-                );
-                PayloadOutcome::dropped(None, DROP_RESPONSE_STREAM_DROPPED)
-            }
-        }
-    });
-
-    (
-        Box::pin(futures::stream::once(single_chunk_stream).flatten()),
-        future,
-    )
-}
-
-/// Convert a final (non-streaming) response into a single "final chunk" stream.
-/// Put the entire final text/tool-calls into `delta` so downstream aggregate is a no-op.
-pub fn final_response_to_one_chunk_stream(
-    resp: NvCreateChatCompletionResponse,
-) -> std::pin::Pin<
-    Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
-> {
-    let mut choices: Vec<ChatChoiceStream> = Vec::with_capacity(resp.inner.choices.len());
-    for (idx, ch) in resp.inner.choices.iter().enumerate() {
-        // Convert FunctionCall to FunctionCallStream if present
-        #[allow(deprecated)]
-        let function_call = ch.message.function_call.as_ref().map(|fc| {
-            dynamo_protocols::types::ChatCompletionStreamResponseDeltaFunctionCall {
-                name: Some(fc.name.clone()),
-                arguments: Some(fc.arguments.clone()),
-            }
-        });
-
-        // Convert tool calls
-        let tool_calls = ch.message.tool_calls.as_ref().map(|calls| {
-            calls
-                .iter()
-                .enumerate()
-                .map(
-                    |(i, call)| dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
-                        index: i as u32,
-                        id: Some(call.id.clone()),
-                        r#type: Some(dynamo_protocols::types::FunctionType::Function),
-                        function: Some(dynamo_protocols::types::FunctionCallStream {
-                            name: Some(call.function.name.clone()),
-                            arguments: Some(call.function.arguments.clone()),
-                        }),
-                    },
-                )
-                .collect()
-        });
-
-        #[allow(deprecated)]
-        let delta = ChatCompletionStreamResponseDelta {
-            role: Some(ch.message.role),
-            content: ch.message.content.clone(),
-            tool_calls,
-            function_call,
-            refusal: ch.message.refusal.clone(),
-            reasoning_content: ch.message.reasoning_content.clone(),
-        };
-
-        let choice = ChatChoiceStream {
-            index: idx as u32,
-            delta,
-            finish_reason: ch.finish_reason,
-            logprobs: ch.logprobs.clone(),
-        };
-        choices.push(choice);
-    }
-
-    let chunk = NvCreateChatCompletionStreamResponse {
-        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
-            id: resp.inner.id.clone(),
-            object: "chat.completion.chunk".to_string(),
-            created: resp.inner.created,
-            model: resp.inner.model.clone(),
-            system_fingerprint: resp.inner.system_fingerprint.clone(),
-            service_tier: resp.inner.service_tier.clone(),
-            choices,
-            usage: resp.inner.usage.clone(),
-        },
-        nvext: resp.nvext.clone(),
-        llm_metrics: None,
-    };
-
-    let annotated = Annotated {
-        data: Some(chunk),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    };
-    Box::pin(futures::stream::once(async move { annotated }))
 }
 
 #[cfg(test)]
@@ -637,53 +494,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_final_response_to_one_chunk_preserves_reasoning_and_tool_calls() {
-        let response: NvCreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
-            "id": "chatcmpl-test",
-            "object": "chat.completion",
-            "created": 1234567890,
-            "model": "test-model",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "The weather is clear.",
-                    "reasoning_content": "I should inspect the weather.",
-                    "tool_calls": [{
-                        "id": "call_weather",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": "{\"city\":\"Tokyo\"}"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }]
-        }))
-        .expect("response parses");
-
-        let chunks: Vec<_> = final_response_to_one_chunk_stream(response).collect().await;
-        assert_eq!(chunks.len(), 1);
-        let delta = &chunks[0].data.as_ref().unwrap().inner.choices[0].delta;
-
-        assert_eq!(
-            delta.content.as_ref().unwrap(),
-            &ChatCompletionMessageContent::Text("The weather is clear.".to_string())
-        );
-        assert_eq!(
-            delta.reasoning_content.as_deref(),
-            Some("I should inspect the weather.")
-        );
-        let tool_call = &delta.tool_calls.as_ref().expect("tool calls preserved")[0];
-        assert_eq!(tool_call.id.as_deref(), Some("call_weather"));
-        assert_eq!(tool_call.r#type, Some(FunctionType::Function));
-        let function = tool_call.function.as_ref().expect("function preserved");
-        assert_eq!(function.name.as_deref(), Some("get_weather"));
-        assert_eq!(function.arguments.as_deref(), Some("{\"city\":\"Tokyo\"}"));
-    }
-
-    #[tokio::test]
     async fn test_empty_stream_handling() {
         // Empty stream: the aggregator has nothing to apply, so the outcome carries no
         // response, and names itself rather than looking like a dropped stream.
@@ -821,6 +631,9 @@ mod tests {
         let (passthrough, future) = scan_aggregate_with_future(stream::iter(chunks));
         let delivered: Vec<_> = passthrough.take(2).collect().await;
         assert_eq!(delivered.len(), 2);
+        // The error reaches the client unchanged; the handler surfaces it exactly
+        // as it does with capture off.
+        assert!(delivered[1].is_error());
 
         let outcome = future.await;
 
@@ -872,96 +685,6 @@ mod tests {
         assert!(
             reason.contains("backend unavailable"),
             "reason should name the underlying error, got {reason}"
-        );
-    }
-
-    #[tokio::test]
-    async fn fold_success_delivers_and_records_the_complete_response() {
-        let chunks = vec![
-            create_mock_chunk("Hello ".to_string(), 0),
-            create_mock_chunk("World".to_string(), 0),
-            create_final_chunk(0),
-        ];
-
-        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
-        let delivered: Vec<_> = folded.collect().await;
-        let outcome = future.await;
-
-        assert_eq!(delivered.len(), 1, "the fold path emits a single chunk");
-        assert_eq!(extract_content(&delivered[0]), "Hello World");
-        let client_response = delivered[0]
-            .data
-            .as_ref()
-            .expect("the successful chunk carries a body");
-        assert_eq!(client_response.inner.choices.len(), 1);
-        assert_eq!(
-            client_response.inner.choices[0].finish_reason,
-            Some(FinishReason::Stop)
-        );
-
-        assert!(
-            outcome.drop_reason.is_none(),
-            "a successful fold must not carry a drop reason"
-        );
-        let recorded = outcome
-            .response
-            .expect("the complete response must reach the record");
-        assert_eq!(recorded.inner.choices.len(), 1);
-        assert_eq!(
-            recorded.inner.choices[0].message.content.as_ref().unwrap(),
-            &ChatCompletionMessageContent::Text("Hello World".to_string())
-        );
-        assert_eq!(
-            recorded.inner.choices[0].finish_reason,
-            Some(FinishReason::Stop)
-        );
-    }
-
-    #[tokio::test]
-    async fn fold_error_after_content_records_the_prefix_and_sends_the_fallback() {
-        let chunks = vec![
-            create_mock_chunk("Hello ".to_string(), 0),
-            Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
-                "invalid sampling parameter",
-            ),
-        ];
-
-        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
-        let delivered: Vec<_> = folded.collect().await;
-        let outcome = future.await;
-
-        assert_eq!(delivered.len(), 1, "the fold path emits a single chunk");
-        assert!(
-            delivered[0]
-                .data
-                .as_ref()
-                .expect("the fallback chunk carries a body")
-                .inner
-                .choices
-                .is_empty(),
-            "the client gets the empty fallback, not the truncated aggregation"
-        );
-
-        let reason = outcome
-            .drop_reason
-            .as_deref()
-            .expect("an errored fold must carry a drop reason");
-        assert!(
-            reason.starts_with("aggregation_failed:"),
-            "reason should use the colon-delimited grammar, got {reason}"
-        );
-        assert!(
-            reason.contains("invalid sampling parameter"),
-            "reason should name the underlying error, got {reason}"
-        );
-
-        let partial = outcome
-            .response
-            .expect("content collected before the error must reach the record");
-        assert_eq!(
-            partial.inner.choices[0].message.content.as_ref().unwrap(),
-            &ChatCompletionMessageContent::Text("Hello ".to_string()),
-            "only the pre-error prefix should be aggregated"
         );
     }
 }

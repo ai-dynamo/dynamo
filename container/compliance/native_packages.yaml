@@ -64,7 +64,7 @@ packages:
   # no H.264 capability, then copied into the vLLM, SGLang, and TensorRT-LLM
   # runtimes for the VP9 video-encode path.
   - name: ffmpeg
-    version: "8.1.2"
+    version: "9.0.1"
     license: LGPL-2.1-or-later
     source: https://ffmpeg.org/
     images:
