@@ -47,6 +47,8 @@ use aisimulate_core::replay::{
 };
 
 mod composition;
+#[cfg(feature = "python-replay")]
+pub(in crate::replay) use composition::validate_affinity_router_config;
 pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayComposition};
 
 #[derive(Clone, Copy)]

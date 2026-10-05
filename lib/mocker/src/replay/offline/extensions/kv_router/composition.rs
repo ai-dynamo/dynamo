@@ -458,6 +458,28 @@ pub(in crate::replay) fn derive_decode_router_config(
     config
 }
 
+/// Reject every native configuration difference the affinity host cannot honor.
+/// Process-local fields skipped by Serde must be checked explicitly as well.
+#[cfg(feature = "python-replay")]
+pub(in crate::replay) fn validate_affinity_router_config(
+    config: Option<&KvRouterConfig>,
+) -> Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let defaults = KvRouterConfig::default();
+    anyhow::ensure!(
+        serde_json::to_value(config)? == serde_json::to_value(&defaults)?
+            && config.router_approximate_cache_policy == defaults.router_approximate_cache_policy
+            && config.router_prefill_policy.is_none()
+            && config.router_decode_policy.is_none()
+            && config.policy_model_name.is_none()
+            && config.policy_config_cache.get().is_none(),
+        "conversation affinity supports only the default native KV router configuration; queue, custom-policy, cache-tier, and prefill-load overrides require the ordinary non-affinity replay path"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +504,43 @@ mod tests {
             record_per_request: false,
             sla: Default::default(),
             requests: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "python-replay")]
+    #[test]
+    fn affinity_rejects_full_native_configuration_overrides() {
+        use super::validate_affinity_router_config;
+        use dynamo_kv_router::config::KvRouterConfig;
+        assert!(validate_affinity_router_config(None).is_ok());
+        assert!(validate_affinity_router_config(Some(&KvRouterConfig::default())).is_ok());
+        for config in [
+            KvRouterConfig {
+                router_queue_threshold: Some(0.5),
+                ..Default::default()
+            },
+            KvRouterConfig {
+                overlap_score_credit: 0.0,
+                ..Default::default()
+            },
+            KvRouterConfig {
+                router_policy_config: Some("policy.yaml".into()),
+                ..Default::default()
+            },
+            KvRouterConfig {
+                router_prefill_policy: Some("custom".into()),
+                ..Default::default()
+            },
+            KvRouterConfig {
+                router_decode_policy: Some("custom".into()),
+                ..Default::default()
+            },
+            KvRouterConfig {
+                router_prefill_load_model: dynamo_kv_router::config::RouterPrefillLoadModel::Ais,
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_affinity_router_config(Some(&config)).is_err());
         }
     }
 

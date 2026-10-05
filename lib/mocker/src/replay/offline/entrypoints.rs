@@ -54,7 +54,7 @@ pub fn run_canonical_replay_json(
         "conversation affinity requires static worker pools without a Planner"
     );
     if external_policy.is_some() {
-        validate_affinity_router_config(router_config.as_ref())?;
+        super::extensions::kv_router::validate_affinity_router_config(router_config.as_ref())?;
         anyhow::ensure!(
             prefill_load_estimator.is_none(),
             "conversation affinity does not support a custom or AIS router prefill-load estimator"
@@ -81,7 +81,7 @@ pub fn run_canonical_replay_json(
     );
     anyhow::ensure!(
         router_mode == ReplayRouterMode::KvRouter || requested_provider == Some("round_robin"),
-        "dynamo_kv_router placement requires router_mode='kv_router'"
+        "native KV placement requires router_mode='kv_router'"
     );
     *placement = serde_json::to_value(if external_policy.is_some() {
         ProviderSpec {
@@ -121,7 +121,8 @@ pub fn run_canonical_replay_json(
         || spec
             .get("record_per_request")
             .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+            // ReplaySpec v1 retains per-request records by default.
+            .unwrap_or(true);
     let payload = serde_json::to_string(&payload)?;
     let telemetry = telemetry.map(|options| (options.sample_interval_ms, options.observer));
     let evidence = external_policy.as_ref().map(|policy| policy.evidence());
@@ -160,26 +161,6 @@ pub fn run_canonical_replay_json(
             .insert("routing_policy".into(), evidence.snapshot()?);
     }
     result.into_json()
-}
-
-/// Reject every native configuration difference the affinity host cannot honor.
-/// Process-local fields skipped by Serde must be checked explicitly as well.
-#[cfg(feature = "python-replay")]
-fn validate_affinity_router_config(config: Option<&ReplayKvRouterConfig>) -> Result<()> {
-    let Some(config) = config else {
-        return Ok(());
-    };
-    let defaults = ReplayKvRouterConfig::default();
-    anyhow::ensure!(
-        serde_json::to_value(config)? == serde_json::to_value(&defaults)?
-            && config.router_approximate_cache_policy == defaults.router_approximate_cache_policy
-            && config.router_prefill_policy.is_none()
-            && config.router_decode_policy.is_none()
-            && config.policy_model_name.is_none()
-            && config.policy_config_cache.get().is_none(),
-        "conversation affinity supports only the default native KV router configuration; queue, custom-policy, cache-tier, and prefill-load overrides require the ordinary non-affinity replay path"
-    );
-    Ok(())
 }
 
 fn startup_delay_ms(args: &MockEngineArgs) -> f64 {
@@ -948,42 +929,6 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
 #[cfg(all(test, feature = "python-replay"))]
 mod canonical_tests {
     #[test]
-    fn affinity_rejects_full_native_configuration_overrides() {
-        use super::validate_affinity_router_config;
-        use dynamo_kv_router::config::KvRouterConfig;
-        assert!(validate_affinity_router_config(None).is_ok());
-        assert!(validate_affinity_router_config(Some(&KvRouterConfig::default())).is_ok());
-        for config in [
-            KvRouterConfig {
-                router_queue_threshold: Some(0.5),
-                ..Default::default()
-            },
-            KvRouterConfig {
-                overlap_score_credit: 0.0,
-                ..Default::default()
-            },
-            KvRouterConfig {
-                router_policy_config: Some("policy.yaml".into()),
-                ..Default::default()
-            },
-            KvRouterConfig {
-                router_prefill_policy: Some("custom".into()),
-                ..Default::default()
-            },
-            KvRouterConfig {
-                router_decode_policy: Some("custom".into()),
-                ..Default::default()
-            },
-            KvRouterConfig {
-                router_prefill_load_model: dynamo_kv_router::config::RouterPrefillLoadModel::Ais,
-                ..Default::default()
-            },
-        ] {
-            assert!(validate_affinity_router_config(Some(&config)).is_err());
-        }
-    }
-
-    #[test]
     fn serialized_replay_preserves_scaling_capture_and_optional_telemetry() {
         use crate::replay::{
             ReplayCaptureOptions, ReplayRouterMode, ReplayScalingDecision, ReplayScalingPolicy,
@@ -1026,54 +971,66 @@ mod canonical_tests {
             for mode in [ReplayRouterMode::RoundRobin, ReplayRouterMode::KvRouter] {
                 for capture in [false, true] {
                     for telemetry in [false, true] {
-                        let samples = Arc::new(Mutex::new(Vec::new()));
-                        let payload = json!({
-                            "version":1, "topology":topology,
-                            "engine":{"rank":{"block_size":16,"num_gpu_blocks":64,
-                                "timing_model":{"type":"fixed","prefill_ms":10.0,"decode_ms":1.0}}},
-                            "adapters":{"placement":{"provider":"round_robin"},"scaling":{"provider":"none"}},
-                            "requests":[{"id":"first","arrival_time_ms":0.0,"input_tokens":64,"output_tokens":2}]
-                        });
-                        let report: serde_json::Value = serde_json::from_str(
-                            &crate::replay::run_canonical_replay_json(
-                                &payload.to_string(),
-                                mode,
-                                None,
-                                None,
-                                None,
-                                ReplayCaptureOptions {
-                                    capture_per_request: capture,
-                                    capture_lifecycle_evidence: capture,
-                                    ..Default::default()
-                                },
-                                Some(Box::new(GrowOnce)),
-                                telemetry.then(|| ReplayTelemetryOptions {
-                                    sample_interval_ms: 3.0,
-                                    observer: Box::new(Samples(Arc::clone(&samples))),
-                                }),
+                        for authored_capture in [None, Some(false), Some(true)] {
+                            let samples = Arc::new(Mutex::new(Vec::new()));
+                            let mut payload = json!({
+                                "version":1, "topology":topology,
+                                "engine":{"rank":{"block_size":16,"num_gpu_blocks":64,
+                                    "timing_model":{"type":"fixed","prefill_ms":10.0,"decode_ms":1.0}}},
+                                "adapters":{"placement":{"provider":"round_robin"},"scaling":{"provider":"none"}},
+                                "requests":[{"id":"first","arrival_time_ms":0.0,"input_tokens":64,"output_tokens":2,"input_token_ids":vec![7;64]}]
+                            });
+                            if let Some(authored_capture) = authored_capture {
+                                payload["record_per_request"] = authored_capture.into();
+                            }
+                            let effective_capture = capture || authored_capture.unwrap_or(true);
+                            let report: serde_json::Value = serde_json::from_str(
+                                &crate::replay::run_canonical_replay_json(
+                                    &payload.to_string(),
+                                    mode,
+                                    None,
+                                    None,
+                                    None,
+                                    ReplayCaptureOptions {
+                                        capture_per_request: capture,
+                                        capture_lifecycle_evidence: capture,
+                                        ..Default::default()
+                                    },
+                                    Some(Box::new(GrowOnce)),
+                                    telemetry.then(|| ReplayTelemetryOptions {
+                                        sample_interval_ms: 3.0,
+                                        observer: Box::new(Samples(Arc::clone(&samples))),
+                                    }),
+                                )
+                                .unwrap(),
                             )
-                            .unwrap(),
-                        )
-                        .unwrap();
-                        assert_eq!(report["completed_requests"], 1);
-                        assert_eq!(report["coverage"]["capture_per_request"], capture);
-                        assert_eq!(report["coverage"]["capture_planner_details"], capture);
-                        assert_eq!(
-                            report["coverage"]["per_request_records"],
-                            usize::from(capture)
-                        );
-                        assert_eq!(
-                            report["lifecycle_operations"]
-                                .as_array()
-                                .unwrap()
-                                .is_empty(),
-                            !capture
-                        );
-                        let samples = samples.lock().unwrap();
-                        assert_eq!(samples.is_empty(), !telemetry);
-                        if telemetry {
-                            assert!(samples.len() >= 2);
-                            assert_eq!(samples[1].sampled_at_ms - samples[0].sampled_at_ms, 3.0);
+                            .unwrap();
+                            assert_eq!(report["completed_requests"], 1);
+                            assert_eq!(
+                                report["coverage"]["capture_per_request"],
+                                effective_capture
+                            );
+                            assert_eq!(report["coverage"]["capture_planner_details"], capture);
+                            assert_eq!(
+                                report["coverage"]["per_request_records"],
+                                usize::from(effective_capture)
+                            );
+                            assert_eq!(
+                                report["lifecycle_operations"]
+                                    .as_array()
+                                    .unwrap()
+                                    .is_empty(),
+                                !capture
+                            );
+                            let samples = samples.lock().unwrap();
+                            assert_eq!(samples.is_empty(), !telemetry);
+                            if telemetry {
+                                assert!(samples.len() >= 2);
+                                assert_eq!(
+                                    samples[1].sampled_at_ms - samples[0].sampled_at_ms,
+                                    3.0
+                                );
+                            }
                         }
                     }
                 }
