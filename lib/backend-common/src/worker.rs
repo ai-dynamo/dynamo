@@ -77,7 +77,7 @@ pub struct RuntimeConfig {
     #[arg(long, env = "DYN_DISCOVERY_BACKEND", value_parser = ["kubernetes", "etcd", "file", "mem"])]
     pub discovery_backend: Option<String>,
     /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
-    #[arg(long, env = "DYN_REQUEST_PLANE", value_parser = ["tcp", "nats"])]
+    #[arg(long, env = "DYN_REQUEST_PLANE", value_parser = ["tcp", "nats"], ignore_case = true)]
     pub request_plane: Option<String>,
     /// Response transport. Frontend and workers must use the same value.
     /// Maps to `DYN_RESPONSE_PLANE`.
@@ -85,7 +85,10 @@ pub struct RuntimeConfig {
     pub response_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
     /// uses its default transport. Maps to `DYN_EVENT_PLANE`.
-    #[arg(long, env = "DYN_EVENT_PLANE", value_parser = ["nats", "zmq"])]
+    #[arg(long, env = "DYN_EVENT_PLANE", value_parser = [
+        clap::builder::PossibleValue::new("nats"),
+        clap::builder::PossibleValue::new("zmq").alias(""),
+    ])]
     pub event_plane: Option<String>,
 }
 

@@ -133,6 +133,31 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn runtime_environment_values_remain_compatible() {
+        temp_env::with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", Some("mem")),
+                ("DYN_REQUEST_PLANE", Some("TCP")),
+                ("DYN_RESPONSE_PLANE", None),
+                ("DYN_EVENT_PLANE", Some("")),
+            ],
+            || {
+                let args = TestArgs::try_parse_from(["test"]).unwrap();
+                let config = args.common.runtime.to_distributed_config().unwrap();
+                assert_eq!(
+                    config.request_plane,
+                    dynamo_runtime::distributed::RequestPlaneMode::Tcp
+                );
+                assert_eq!(
+                    config.event_transport_kind,
+                    dynamo_runtime::discovery::EventTransportKind::Zmq
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn worker_suffix_is_applied_once_to_namespace() {
         for (namespace, suffix, argv, expected) in [
             (Some("dynamo"), Some("qa1"), &["test"][..], "dynamo-qa1"),
