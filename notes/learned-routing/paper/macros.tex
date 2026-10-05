@@ -38,6 +38,14 @@
 
 \newcommand{\draftbanner}{Draft: simulation results with a live GPU check of the ranking}
 
+% A21 (CR/CONTRACT.md): the lmetric port was fixed after the campaign froze. Used once, as a footnote
+% on the scoped headline in the introduction; sec:ports and the results state it in the body.
+\newcommand{\lmetricfix}{\footnote{After this study froze its results, the \policy{lmetric} port in
+  ai-dynamo/dynamo\#15450 was fixed to count the worker's queued prefill in its prefill factor, as
+  the LMetric paper defines that factor. Every \policy{lmetric} result in this paper, including the
+  \policy{lmetric} member of the baseline pool behind this claim, is from the port before that fix;
+  the fixed port was not evaluated (\cref{sec:ports}).}}
+
 % ---------------------------------------------------------------------------------------
 % Text names
 % ---------------------------------------------------------------------------------------

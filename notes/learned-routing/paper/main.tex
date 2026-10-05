@@ -5,6 +5,7 @@
 %
 % Build:   make            (latexmk + pdflatex + BibTeX; output in build/main.pdf)
 %          make tables     (regenerate generated/*.tex from the report's table fragments)
+%          make figures    (redraw generated/fig_*.tex from the report's data)
 %          make clean      (removes build/ only)
 %
 % Conventions for every writer:
@@ -23,7 +24,8 @@
 %      data and documentation the study runs on (each entry says which).
 %   6. Label every hypothesis as one. Keep "measured in replay" distinct from "expected live".
 %   7. Tables under generated/ are copied from the final report's table fragments by
-%      scripts/make_tables.py; never edit them by hand.
+%      scripts/make_tables.py, with reader-facing row labels (its RELABEL map); generated/fig_*.tex
+%      are drawn from the report's data by scripts/make_figures.py. Never edit them by hand.
 
 \documentclass[11pt]{article}
 
@@ -58,22 +60,22 @@
 \usepackage[colorlinks=true,linkcolor=MidnightBlue,citecolor=MidnightBlue,urlcolor=MidnightBlue]{hyperref}
 \usepackage[capitalise,noabbrev]{cleveref}
 
-\graphicspath{{fig/}}
-
 \input{macros}
 
-% Draft banner on every page, including the title page.
+% Plain "Draft" running header on every page, including the title page.
 \fancypagestyle{draft}{%
   \fancyhf{}%
-  \fancyhead[C]{\color{red}\sffamily\footnotesize\draftbanner}%
+  \fancyhead[C]{\sffamily\footnotesize Draft}%
   \fancyfoot[C]{\thepage}%
   \renewcommand{\headrulewidth}{0pt}}
 \fancypagestyle{plain}{%
   \fancyhf{}%
-  \fancyhead[C]{\color{red}\sffamily\footnotesize\draftbanner}%
+  \fancyhead[C]{\sffamily\footnotesize Draft}%
   \fancyfoot[C]{\thepage}%
   \renewcommand{\headrulewidth}{0pt}}
 \pagestyle{draft}
+% The table of contents lists sections and subsections only.
+\setcounter{tocdepth}{2}
 
 \setlist{itemsep=2pt,topsep=4pt}
 % Long typewriter identifiers cannot hyphenate; let TeX stretch lines instead of overflowing.
@@ -87,6 +89,12 @@
 \setcounter{topnumber}{3}
 \setcounter{bottomnumber}{2}
 \setcounter{totalnumber}{5}
+% Float-only pages stack their floats from the top with a fixed gap and leave any slack at the
+% bottom, instead of centring them vertically and spreading them apart.
+\makeatletter
+\setlength{\@fptop}{0pt}
+\setlength{\@fpsep}{12pt}
+\makeatother
 % Ragged-right paragraph columns for tables: Y (tabularx) and P{width}.
 \newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 \newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
@@ -96,24 +104,23 @@
   \large A simulation study on Qwen3-32B (vLLM, TP2, H100), aggregated serving}
 % Author list as the operator set it (CR/facts/PAPER_REQUESTS.md R3); add no affiliation or email.
 \author{Rudy Pei}
-% src: CR/facts/STATE.md (last stage line at the time of this draft)
-\newcommand{\snapshot}{2026-10-05; phase 2, the frozen test pass and the live GPU check complete}
-\date{Draft: \snapshot}
+% src: CR/facts/STATE.md (date of the last stage line at the time of this draft; the main tuning,
+%      the frozen test pass and the live GPU check are complete)
+\newcommand{\snapshot}{2026-10-05}
+% One neutral status line: the headline and every result outside sec:live come from AIS-timed
+% offline replay, not from GPUs; sec:live checks the ranking on GPUs.
+\date{\small Draft, \snapshot. Results are from AIS-timed simulation, with a live GPU check of
+  the ranking.}
 
 \begin{document}
 
 \maketitle
 \thispagestyle{plain}
 
-\begin{center}
-  \fcolorbox{red}{red!4}{\parbox{0.9\linewidth}{\centering\color{red}\sffamily
-    \textbf{\draftbanner.}\\[2pt]
-    \small The headline and every result outside \cref{sec:live} come from AISim offline replay,
-    not from GPUs; \cref{sec:live} checks the ranking on GPUs.}}
-\end{center}
-
 \input{sections/abstract}
 
+% The table of contents starts on its own page, not at the foot of the title page.
+\clearpage
 \tableofcontents
 
 \input{sections/intro}
@@ -135,8 +142,28 @@
 \bibliography{refs}
 
 \appendix
-\input{sections/appendix-tables}
+% Appendix references read "Appendix B.6", not "Section B.6": the kernel's cleveref first aid types
+% labels by counter, so alias the sectioning counters explicitly. The TOC lists appendices by title only.
+\crefalias{section}{appendix}
+\crefalias{subsection}{subappendix}
+\crefalias{subsubsection}{subsubappendix}
+\addtocontents{toc}{\protect\setcounter{tocdepth}{1}}
+% Appendix order (restructure plan, section 6): A notation, B API and ports, C caveats, D replay and
+% workloads, E policy details, F tuning details, G pilot, H protocol, I additional results, J AIS
+% league, K full tables, L live-run details, M reproducibility, N provenance.
+\input{sections/notation}
+\input{sections/appendix-api}
+\input{sections/appendix-caveats}
+\input{sections/appendix-workloads}
+\input{sections/appendix-policy}
+\input{sections/appendix-tuning}
 \input{sections/appendix-pilot}
+\input{sections/appendix-protocol}
+\input{sections/appendix-results}
+\input{sections/appendix-ais-league}
+\input{sections/appendix-tables}
+\input{sections/appendix-live}
 \input{sections/appendix-reproducibility}
+\input{sections/appendix-provenance}
 
 \end{document}

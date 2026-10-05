@@ -153,7 +153,7 @@ there are no paper-faithful variants, only a brief sanity check.
 | `round_robin` | floor |
 | `dynamo-default-cost-fn` | the reference (`default@defaults`). This branch adds an optional `seed` for deterministic tie-breaks. |
 | `dynamo-two-tier-cost-fn` | sgl-router `cache_aware_zmq` port. Valid in replay: device-tier overlap is in the base (A7 correction). |
-| `lmetric`, `ramjet`, `dualmap`, `chwbl`, `llm-d-precise-prefix` | ports from the operator's stack (#15450, #15453) |
+| `lmetric`, `ramjet`, `dualmap`, `chwbl`, `llm-d-precise-prefix` | ports from the operator's stack (#15450, #15453). The `lmetric` port was fixed after the campaign froze to count the worker's queued prefill in its P-token (ai-dynamo/dynamo#15450); the frozen results use the pre-fix port. |
 | `llm-d-optimized-baseline` | `ttft_source: throughput`. The `modeled` (AIS) variant is an AIS-coupled reference only. |
 | `sticky-session` (`mode: hard` or `bounded`) | new campaign policy that mirrors live `SessionAffinityMode`, because replay never sets `affinity_target` |
 | `thunderagent` (selection half) | replay can't run its classifier, so it is reported as such or skipped |
@@ -442,7 +442,7 @@ git commit -s -m "docs(learned-routing): sync campaign records"
   - `MAX_BYTES` is 5 MiB per file, also applied to gzipped `results.jsonl`. Larger files are
     skipped with a message.
   - `BUDGET_BYTES` is 25 MiB total, and only produces a warning.
-- The published mirror at this snapshot is 35,509,656 bytes in 592 files under `campaign/`,
+- The published mirror at this snapshot is 35,514,105 bytes in 592 files under `campaign/`,
   without the per-job compute records. Its largest file is `runs/phase2/local/stickyhard-s3/results.jsonl.gz` at
   4,405,645 bytes; the script skips any file over 5 MiB.
 - After a sync, update the Status section above if the newest `STATE.md` entry changed it.

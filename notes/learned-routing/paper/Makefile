@@ -5,6 +5,8 @@
 #   make          build the PDF
 #   make tables   regenerate generated/*.tex from the final report's table fragments
 #                 (CR=<campaign root> make tables; see scripts/make_tables.py)
+#   make figures  redraw the report's figures as generated/fig_*.tex (pgfplots) from the
+#                 report's data (CR=<campaign root> make figures; see scripts/make_figures.py)
 #   make check    build, then list undefined references/citations and overfull boxes
 #   make watch    rebuild on change
 #   make clean    remove build/ (nothing else)
@@ -13,7 +15,7 @@ PAPER_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 LATEXMK   ?= latexmk
 BUILD     := $(PAPER_DIR)/build
 
-.PHONY: all pdf tables check watch clean
+.PHONY: all pdf tables figures check watch clean
 
 all: pdf
 
@@ -24,6 +26,10 @@ PYTHON ?= python3
 tables:
 	@test -n "$(CR)" || { echo "set CR to the campaign root"; exit 1; }
 	cd $(PAPER_DIR) && $(PYTHON) scripts/make_tables.py --tables "$(CR)/report/data/tables" --out generated
+
+figures:
+	@test -n "$(CR)" || { echo "set CR to the campaign root"; exit 1; }
+	cd $(PAPER_DIR) && $(PYTHON) scripts/make_figures.py --cr "$(CR)" --out generated
 
 check: pdf
 	@cd $(PAPER_DIR) && { \

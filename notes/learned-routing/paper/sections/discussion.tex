@@ -6,14 +6,22 @@
 %   workload and objective validity, objective gaming, statistical validity, comparison validity,
 %   deployment scope. Each item gives the threat, its likely direction where known, the
 %   mitigation, and what stays open.
-% STATUS: final, including the live GPU check (sec:live).
+% STATUS: final, including the live GPU check (sec:live). Restructured 2026-10-05: duplicated detail
+%   (smoke run, lag patch, burst numbers, gap capping, ITL-alone fractions, per-port bullets, sanity
+%   check) left to its survivors with pointers; the gaming paragraph now names
+%   sacrifice as the first failure mode, matching CR/audits/phase2-mid/gaming-concentration.md.
+%   Round-1 fixes: evidence-level statements scoped to everything outside sec:live, and the live runs
+%   said not to isolate herding (E1); no \lmetricfix footnote (E9); the v2 home-key history left to
+%   app:policy (E2); "agentic lanes" and "other models" for AgentX (E7); one league name, the
+%   AIS-informed league (E5); P1's equal-budget wording (no baseline gained more than 0.078 of the MDE
+%   over its last validation interval); F7, F8; appendix floats cited with their appendix (V5).
 
 \section{Discussion, limitations and threats to validity}
 \label{sec:threats}
 
-Every claim this study makes is a claim about AIS-timed offline replay of one deployment. This
-section lists what could make the headline wrong inside that setting, or keep it from transferring to
-a live router, with what the campaign did about each and what stays open. \Cref{tab:threats}
+Apart from the live check of \cref{sec:live}, every claim this study makes is a claim about AIS-timed
+offline replay of one deployment. This section lists what could make the headline wrong inside that setting, or keep it from transferring to
+a live router, with what the study did about each and what stays open. \Cref{tab:threats}
 summarizes; the subsections give the evidence.
 
 \paragraph{What the results say.}
@@ -49,7 +57,7 @@ between policies (\cref{sec:live}).
     Router state perfectly fresh in replay & favors policies that lean on exact state & lag
       10--\SI{200}{ms} on test & ranking holds \\
     No host, disk or global KV tier & excludes tier-dependent wins & scope statement & inherent \\
-    AgentX recorded with another model, closed loop only & unknown & family reported separately &
+    AgentX recorded with other models, agentic lanes only & unknown & family reported separately &
       inherent \\
     SLOs and loads set with $\piref$ & unknown & SLO scale and definition re-scoring & sign holds;
       significance only at scales 1--3 \\
@@ -62,40 +70,43 @@ between policies (\cref{sec:live}).
     Ports differ from papers & inflates & stated per port; in-class diagnostic & headline scoped to
       the ports as evaluated; \policy{lmetric} since fixed, not re-run \\
     Equal budget, unequal search & unknown & equal $\budget$ and restarts; disclosed starts & no
-      baseline under-tuned \\
+      baseline gained more than 0.078 of the MDE over its last validation interval \\
     \bottomrule
   \end{tabularx}
 \end{table}
+% src (equal-budget status): CR/runs/phase2/checks/improving_at_cutoff_i6.json (llmdpp, ramjet,
+%      stickybounded, stickyhard selected at generation 25; policy_gain_over_mde at most 0.0777);
+%      CR/runs/phase2/checks/improving_at_cutoff_bc_i9.json (later baselines not selected at their last
+%      generation)
 
 % =====================================================================================
 \subsection{Simulator validity}
 \label{sec:threats-sim}
 
 \paragraph{Simulated timing only.}
-Every latency in this paper comes from \ais{}'s forward-pass model; none was measured on GPUs, and
-the study does not validate \ais{}'s absolute accuracy. What matters here is narrower: whether
+Every latency outside \cref{sec:live} comes from \ais{}'s forward-pass model, not from GPU
+measurement, and the study does not validate \ais{}'s absolute accuracy. What matters here is narrower: whether
 replay ranks policies as GPUs would. That is not implied by aggregate accuracy. In a study of
 learned routing for disaggregated serving, a simulator re-fitted to match measured goodput to a
 mean absolute residual of 0.068 still did not reproduce the measured winner on any workload
 \citep{tumkur2026calibrate}; that simulator was a hand-built discrete-event model, so how far the
 lesson carries to \ais{}-timed engine replay is an open question. Controllers trained in emulation
 have also lost to simple ones in the real world \citep{yan2020puffer}. Two features of this
-campaign raise the stakes. The calibrated loads sit in the default router's transition region,
+study raise the stakes. The calibrated loads sit in the default router's transition region,
 where performance-model errors grow fastest \citep{agrawal2024vidur}. And AgentX requests reach
 128K tokens, where \ais{}'s accuracy has not been checked against hardware; the setup only showed
 that replay's 120K-token prefill time equals an independent sum of \ais{}'s chunk estimates
 (\SI{17815.54}{ms}, about 64\% model FLOPs utilization), an internal-consistency check. No AgentX
-play fits a 32K context (caveat 10 of \cref{tab:caveats}), so this family cannot be moved to a
-better-validated range. What exists: engine speed scaled by 0.8 and 1.2 on test, four simulator-model
+play fits a 32K context (caveat 10 of \cref{tab:caveats} in \cref{app:caveats}), so this family
+cannot be moved to a better-validated range. What exists: engine speed scaled by 0.8 and 1.2 on test, four simulator-model
 counterfactuals that act on M1-v2's concentration mechanism (\cref{sec:res-robustness}), and one live
-smoke run of the default router on one cell, which matched replay's windowed goodput within 0.25\%
-while live prefill was slower and live decode faster than \ais{}'s, two errors that offset there
-(\cref{sec:live-lane}). The finalist comparison on GPUs compares rankings rather than absolute goodput
-(\cref{sec:live}). On six $\Nw = 4$ test cells the live ranking agrees with simulation and M1-v2 leads
-\policy{ramjet} wherever simulation predicts it, but the two errors no longer offset everywhere: live
-goodput ranges from 0.72 to 2.18 times the simulated value, differently for different policies in a
-cell, and 18 of the 30 live deltas against $\piref$ depart from simulation beyond live noise, in both
-directions. So replay's ranking held on hardware where it was checked, and its gap sizes did not.
+smoke run (\cref{sec:live-lane}). The finalist comparison on GPUs compares rankings rather than
+absolute goodput (\cref{sec:live}). On six $\Nw = 4$ test cells the live ranking agrees with
+simulation and M1-v2 leads \policy{ramjet} wherever simulation predicts it, but live goodput ranges
+from 0.72 to 2.18 times the simulated value, differently for different policies in a cell, and most
+live deltas against $\piref$ depart from simulation beyond live noise, in both directions
+(\cref{sec:live-results}). So replay's ranking held on hardware where it was checked, and its gap
+sizes did not.
 % src: CR/facts/live_results.json wording, primary.departures (vs_default 18 of 30); CR/report/LIVE.md 15.2
 % src: CR/facts/paper_draft.json derived_numbers.agentx_32k_fit; CR/facts/live_smoke.json verdict
 %      (ratio 0.9976), discrepancies_live D4; CR/audits/final/refute-headline-3.md (simulator variants)
@@ -113,14 +124,17 @@ deterministic argmax: routing to the least-loaded server on old information can 
 worse than a randomized choice \citep{mitzenmacher1998old}, and greedy dispatch on delayed state
 herds \citep{tahir2022meanfield}. The expected direction was that a policy leaning harder on exact
 overlap and on small load differences, as the learned arms do, would lose more of its replay
-advantage under lag than the baselines. Training never sees lag, by operator decision; the test stage
-re-ran 17 finalists at $\lag \in \{10, 50, 200\}$\,ms on a separate build that delays KV events,
-prefill completions and request completions by $\lag$ while keeping the router's own dispatch
-bookkeeping immediate. The expectation was not borne out: M1-v2 kept first place at every lag with
-its lead inside the nominal interval, and on validation at \SI{1000}{ms} the baselines lost more to
-staleness than M1-v2 did (\cref{sec:res-robustness}). Two limits remain. The lag model is uniform and
+advantage under lag than the baselines. Training never sees lag, by design; the robustness runs on
+the test cells re-ran 17 finalists at $\lag \in \{10, 50, 200\}$\,ms on a separate build that delays the router's
+view of worker state (\cref{sec:robustness}). The expectation was not borne out: M1-v2 kept first
+place at every lag with its lead inside the nominal interval, and on validation at \SI{1000}{ms}
+the baselines lost more to staleness than M1-v2 did (\cref{sec:res-robustness}). Two limits remain. The lag model is uniform and
 deterministic, while live staleness varies with load and with router replicas; and a concentrated
-policy is the kind most exposed to herding, which only the live runs can test.
+policy is the kind most exposed to herding, which the live runs did not isolate: they ran one router
+at its natural staleness and applied no controlled lag (\cref{sec:live-limits}).
+% src: sections/live.tex sec:live-limits ("Nothing here tests ... controlled router-state lag on
+%      hardware"); CR/facts/live_plan.json deployment.shape ("frontend with the embedded KV router", one
+%      node per job)
 % src: WT/lib/router-plugins/builtin/src/learned_choice/FEATURES.md "Information parity with the live router";
 %      CR/CONTRACT.md A5.1, A11.5; CR/facts/lag_patch.json semantics, proof_lag0_identical (64/64, 404,704 rows),
 %      proof_lag_changes_what_policies_see.goodput_level (min/max ratios), caveat;
@@ -141,34 +155,36 @@ the serving GPUs.
 %      (SMetric pdf p.6: 920 vs 1,437 TPS; pdf p.10 quote), "Risks the literature flags" 15
 
 \paragraph{Replay-specific inputs.}
-Two replay artifacts could leak into a policy and were checked. Replay fills a request's expected
-output length with the true one; \lc{} never reads that field, and a leakage audit confirmed it
-(\cref{sec:integration}). Replay also gives every request of a closed-loop flat trace a synthetic
-single-use session identifier that a live client would not send. For feature 6 this is harmless,
-since a single-use session never has a previous worker, but it made a session-keyed home feature
-of the optional set \code{v2} behave differently in open and closed loop until that feature was
-re-keyed on the prompt prefix. The upstream fix is not in the simulator version the campaign pins.
+Two replay artifacts could leak into a policy, and both were checked: replay fills a request's
+expected output length with the true one, which \lc{} never reads, as a leakage audit confirmed
+(\cref{sec:integration}); and it gives every request of a closed-loop flat trace a synthetic
+single-use session identifier that a live client would not send, which is harmless for feature 6,
+since a single-use session never has a previous worker, and the \code{v2} home indicator keys on the
+prompt prefix, not on the session identifier (\cref{sec:replay-gaps}; \cref{app:policy}).
 % src: FEATURES.md "Excluded inputs", "Feature set v2" (hash_home paragraph); CR/facts/UPSTREAM_FOLLOWUPS.md #6
 %      (fixed in aisimulate 1bf36cfb, not released into the pinned 0.13.0.dev202609300000000061)
+% prov: the re-keying history and the upstream fix's status are in app:policy ("The home indicator's
+%      key") and caveat 4 of tab:caveats (app:caveats), per round-1 finding E2.
 
 % =====================================================================================
 \subsection{Workload and objective validity}
 \label{sec:threats-workload}
 
-\paragraph{AgentX is another model's traffic.}
-The 82 AgentX plays were recorded with Opus, not Qwen3-32B, and are replayed as Qwen3-32B traffic
-at up to 128K tokens. Request lengths, tool-call gaps and the dependency structure between calls
-are the recorded ones, so the family has realistic agent structure but not Qwen3-32B's own output
-lengths or stopping behavior. Idle gaps longer than \SI{300}{s} are capped: 140 of the 2,666 gaps,
-in 56 of the 82 plays, exceed it, and uncapped the plays would span \SI{399658}{s} of simulated
-time instead of \SI{11942}{s}. Plays are recycled with disjoint hash ranges so that worker counts up
-to 32 stay loaded, which by construction rules out KV reuse across copies. AgentX runs only in
-closed-loop lanes (caveat 7 of \cref{tab:caveats}) and has no live load generator, so it is the one
-family the live check cannot cover. It is also the family on which the pilot M1 trailed and on which
-M1-v2 now leads on all four segments, so these choices bear directly on the headline.
+\paragraph{AgentX is other models' traffic.}
+The 82 AgentX plays were recorded with several Claude models, not Qwen3-32B, and are replayed as
+Qwen3-32B traffic at up to 128K tokens. Request lengths, tool-call gaps and the dependency structure between
+calls are the recorded ones, so the family has realistic agent structure but not Qwen3-32B's own
+output lengths or stopping behavior. Idle gaps longer than \SI{300}{s} are capped
+(\cref{app:workloads}). Plays are recycled with disjoint hash ranges so that worker counts up to 32
+stay loaded, which by construction rules out KV reuse across copies. AgentX runs only in agentic
+lanes (caveat 7 of \cref{tab:caveats} in \cref{app:caveats}) and has no live load generator, so it
+is the one family the live check cannot cover. It is also the family on which the pilot M1 trailed
+and on which M1-v2 now leads on all four segments, so these choices bear directly on the headline.
+% src: CR/traces/MANIFEST.json agentx (per-play stats.models: Claude models; selection.single_model_plays
+%      59 of 82; "several Claude models", as in sections/simulator.tex); sections/setup.tex sec:loadmodes (agentic lanes)
 % src: WT/notes/learned-routing/campaign/PLAN.md Workloads ("labeled as Opus-recorded agent traffic
-%      projected onto Qwen3-32B"); CR/facts/DEVIATIONS.md build B2 (300 s cap: 140 of 2,666 gaps, 56 of 82 plays,
-%      399,658 s vs 11,942 s); CR/CONTRACT.md A3 (recycling, disjoint hash ranges); CR/facts/gate.json
+%      projected onto Qwen3-32B"); CR/facts/DEVIATIONS.md build B2 (300 s cap; the gap counts are in
+%      app:workloads); CR/CONTRACT.md A3 (recycling, disjoint hash ranges); CR/facts/gate.json
 %      audit_flags_for_stage4 (M1 trails on all three AgentX segments)
 
 \paragraph{Generated and closely related traces.}
@@ -182,14 +198,11 @@ length skeleton of two Mooncake windows, so it adds cells, not independent workl
 %      CR/facts/HEADLINE_TEST.json test_set.segment_note
 
 \paragraph{Arrival burstiness is a modeling choice.}
-Mooncake and FAST25 conversation timestamps are logged on a grid of about \SI{3}{s} (the generated
-sessions on \SI{1}{s}), so a replay that keeps them puts whole bursts on one instant at any speed-up.
-Each replicate instead re-draws every session's first arrival uniformly inside its logging slot.
-The choice is large: at $\Nw = 2$ and light load, $\piref$'s 85th-percentile slowdown was 8.32 with
-the logged bursts and 1.46 with spreading. Absolute goodput levels therefore depend on this
-decision; paired comparisons on the same replicate are less exposed.
+Spreading logged arrivals inside their slot is a modeling choice that moves absolute goodput a lot
+(\cref{sec:replicates}); paired comparisons on one replicate are less exposed.
 % src: CR/facts/DEVIATIONS.md calibration "arrival spread replicates (protocol crn-spread-v1)";
-%      CR/facts/UPSTREAM_FOLLOWUPS.md #8
+%      CR/facts/UPSTREAM_FOLLOWUPS.md #8 (the 3 s / 1 s grids and 8.32 vs 1.46 are in sec:replicates
+%      and app:sim)
 
 \paragraph{Open-loop arrivals do not react.}
 In open-loop cells requests arrive on the trace's schedule whatever the latency, while a real
@@ -201,20 +214,20 @@ work causally and are reported separately.
 Each family's $(\Imax, \Smax)$ was fixed from $\piref$'s runs at $\Nw = 8$, and each cell's load
 is where $\piref$'s good fraction falls to 0.95, 0.85 or 0.65. That puts every cell in the default
 router's transition region, which is where routing matters, but the region is defined relative to
-one baseline, and every ratio is normalized by the same baseline. The SLOs also differ widely across families ($\Smax$ from 1.16 for
-AgentX to 3.47 for Mooncake), and the end-to-end slowdown clause does most of the work: the ITL
-clause alone fails 0.6--4.5\% of $\piref$'s requests at L2. The objective is therefore close to
-``finish near the uncontended latency'', and a different SLO could rank policies differently. The
+one baseline, and every ratio is normalized by the same baseline. The SLOs also differ widely
+across families ($\Smax$ from 1.16 for AgentX to 3.47 for Mooncake), and the end-to-end slowdown
+clause does most of the work (\cref{sec:objective}). The objective is therefore close to ``finish
+near the uncontended latency'', and a different SLO could rank policies differently. The
 re-scoring of the test records under four other definitions of a good request kept M1-v2 first
 under each of them; under scaled SLOs it stayed first among the router-observable policies at every
-scale, though at scales 2 and 3 the \ais{}-league M2-ais edged it overall. Significance holds only at
+scale, though at scales 2 and 3 M2-ais of the \ais{}-informed league edged it overall. Significance holds only at
 the calibrated scale and looser, and at a tighter SLO the session segments reverse
 (\cref{sec:res-robustness}).
 % src: CR/facts/test_results.json a14_sla_transfer.variants (rank_of_headline 1 for the four
 %      definitions and scales 0.5-1.5, 2 at scales 2.0 and 3.0; vs_default_cell_mean m2ais 0.0643 vs
 %      m1v2 0.0641 at 2.0, 0.0470 vs 0.0466 at 3.0); generated/robustness.tex (rank column)
-% src: CR/facts/calibration.json sla.<family>.e2e_slowdown, itl_only_fail_frac_default_at_L2
-%      (sessions 0.0063, AgentX 0.0178, Mooncake 0.0449); CR/CONTRACT.md A2.2, A14
+% src: CR/facts/calibration.json sla.<family>.e2e_slowdown; CR/CONTRACT.md A2.2, A14
+%      (the ITL-alone fail fractions, itl_only_fail_frac_default_at_L2, are stated in sec:objective)
 
 \paragraph{Worker counts are compared at matched stress.}
 Loads were matched to $\piref$'s knee at each $\Nw$, not to a fixed per-worker rate; across worker
@@ -239,14 +252,15 @@ segregating servers in ways that break under workload shift \citep{mao2019park}.
 clause bounds the second failure, but only weakly, because a mean ITL averages out a long stall
 \citep{wang2024slo}.
 
-The audit found the second reading, sacrifice, for the first tuned M1, and the sign constraint
+The audit found the first failure, sacrifice, for the first tuned M1, and the sign constraint
 removed its mechanism (\cref{sec:gaming}). What remains is segregation by request size, which the
 request-count objective rewards: M1-v2 packs short cached requests onto a hot worker and gives up some
 long-prompt goodput. Whether that is acceptable depends on what the deployment values. Under the
-operator's objective it is a legitimate win; under a size-aware objective it is partly a transfer,
-as the mixed token-weighted goodput shows (\cref{sec:a19}). Concentration also interacts with stale
-state: a policy that funnels traffic to a hot worker is the kind most exposed to herding, and only
-uniform, deterministic lag was tested (\cref{sec:threats-sim}).
+study's request-count objective it is a legitimate win; under a size-aware objective it is partly a
+transfer, as the mixed token-weighted goodput shows (\cref{sec:a19}). Concentration also interacts with stale
+state: a policy that funnels traffic to a hot worker is the kind most exposed to herding; replay
+tested only uniform, deterministic lag, and the live runs did not isolate herding
+(\cref{sec:threats-sim}).
 % src: CR/audits/phase2-mid/gaming-concentration.md F1, F2; CR/audits/phase2-mid/fix.md "Re-audit result";
 %      CR/CONTRACT.md A19 (operator decision)
 
@@ -266,21 +280,21 @@ re-draw a segment; they do not add independent segments.
 The headline effect, $+0.0316$ per segment, is below the minimum detectable effect of 0.038 that the
 pilot fixed, and below the 0.060 spread across timing perturbations. The test still rejects, because
 10 of 12 segments favor M1-v2 and the two that do not are ties at ceiling; but a significant small
-effect is not a measured size, so only the sign is claimed. The MDE is also measured in units of
-(ratio $-\,1$), while the headline statistic is a clipped log-ratio; at these sizes the two agree to
-within a few percent of the effect ($\log 1.038 = 0.0373$).
+effect is not a measured size, so only the sign is claimed.\footnote{The MDE rule's 1\% floor is
+  stated in ratio units; the binding $2\,\mathrm{SE}$ term, 0.038, is on the clipped-log-ratio scale of
+  the headline statistic. At these sizes the two scales agree to within a few percent of the effect
+  ($\log 1.038 = 0.0373$).}
 % src: CR/facts/test_results.json headline (segment_mean_vs_mde -0.0066); CR/facts/robustness.json
-%      lr14_summary (spread 0.060); CR/facts/pilot.json mde
+%      lr14_summary (spread 0.060); CR/facts/pilot.json mde (rule "max(1%, 2 x SE of the paired segment
+%      mean"; learned_vs_val_best_default_arm_heuristic segment_se 0.019075, mde 0.038150)
 
 \paragraph{Selection on validation.}
 Many configurations are compared on validation, and selection overfits what it selects on
-\citep{cawley2010overfitting}. Disjoint uses of data contain this (\cref{sec:hygiene}): each
-policy's configuration is chosen on validation replicates $\krep = 0,1,2$; the best baseline, and
-by the same rule the headline learned arm, are chosen on fresh validation replicates
-$\krep = 3,\dots,10$; and the test set is evaluated once. The cross-policy step reuses the same
-fresh replicates for both choices, which keeps the comparison symmetric but makes both selected
-validation scores optimistic; only the test numbers are clean. Every learned variant scored on validation is counted and reported
-\citep{dodge2019show}, and the 7 test cells at $\Nw = 6$, a worker count validation also used, are
+\citep{cawley2010overfitting}. Disjoint uses of data contain this (\cref{sec:hygiene}), and the
+test set is evaluated once. The cross-policy step reuses the same fresh validation replicates for
+both choices, of the best baseline and of the headline learned arm, which keeps the comparison
+symmetric but makes both selected validation scores optimistic; only the test numbers are clean.
+Every learned variant scored on validation is counted and reported \citep{dodge2019show}, and the 7 test cells at $\Nw = 6$, a worker count validation also used, are
 labeled selection-exposed. With 6 validation segments, selection itself is noisy: the choice of
 \policy{ramjet} over \policy{llm-d-precise-prefix} flipped between the cell and the segment mean, and
 on test \policy{llm-d-precise-prefix} was the stronger baseline. The learned side was also redesigned
@@ -295,53 +309,34 @@ not have passed.
 \label{sec:threats-fairness}
 
 \paragraph{Ports, not papers.}
-Baselines run as implemented on the campaign branch; by operator decision there are no
-paper-faithful variants, although different implementations of one method can perform
-materially differently \citep{henderson2018matters}. The known gaps and whether
-tuning can close them:
-\begin{itemize}
-  \item \policy{lmetric} scores uncached prompt tokens times active requests plus one, without the
-    queued-prefill term the paper credits for its advantage \citep{zhang2026lmetric}. Tuning cannot
-    add it: the port's tunable parameters are its hot-spot detector's, and at the largest
-    allowed step they change 0.06\% of decisions. The queued-prefill product is representable in
-    the learned model's feature set \code{v2}, which the headline arm uses; this asymmetry is why
-    the headline is scoped to the branch's ports: the default cost plus faithful LMetric carries most
-    of the validation margin, and faithful LMetric alone, untuned, beats every tuned baseline on
-    validation (\cref{sec:res-fairness}). This describes the port as evaluated. After the campaign
-    froze its results, the port in ai-dynamo/dynamo\#15450 was fixed to include the queued-prefill
-    term, so it now matches the paper's definition; every \policy{lmetric} number here is from the
-    port before the fix, the headline's scope refers to the ports as evaluated, and no equal-budget
-    comparison with the fixed port has been run.
-  \item \policy{dualmap} ships a pending-prefill budget of \num{65536} tokens and
-    \policy{llm-d-optimized-baseline} a peak prefill rate of \num{15928} tokens/s, both from other
-    deployments \citep{yuan2026dualmap}. Tuning reaches both: the budget is a free parameter, and
-    the rate is pinned only because its product with the free TTFT-penalty parameter is what
-    determines decisions.
-\end{itemize}
-A brief sanity check found that every port's decisions respond to its inputs in the documented
-direction; two of them (\policy{dualmap}, \policy{chwbl}) lost to the default router at shipped
-defaults on the pilot's train subset, plausibly because hash-pinned policies suffer when a few hot
-prefixes carry most of the traffic.
-% src: CR/CONTRACT.md A2.5; CR/literature/LESSONS.md LR-04 ([code] lmetric.rs:151-157, dualmap.rs:57,
-%      optimized_baseline.rs:79); CR/facts/phase2_prep.json spaces (lmetric free: class_prefix_blocks,
-%      window_requests; flip_at_sigma0 0.00058; dualmap free incl. pending_prefill_token_budget;
-%      llmd_optimized_baseline free incl. max_ttft_penalty_ms), decisions (gauge pins);
-%      CR/facts/pilot.json heuristic_screen_train_subset.sanity_note; FEATURES.md v2 representability
+Baselines run as implemented on the study's branch; by design there are no paper-faithful
+variants, although different implementations of one method can perform materially differently
+\citep{henderson2018matters}. The one structural gap tuning cannot close is the \policy{lmetric}
+port's missing queued-prefill term, which the learned feature set can represent, and this asymmetry
+is why the headline is scoped to the branch's ports (\cref{sec:ports,sec:res-fairness}).
+% prov: "by operator decision" (CR/CONTRACT.md A2.5). The base revision's per-port bullets, the A21
+%      sentences and the sanity check survive in sec:ports (baselines.tex), the results, the
+%      introduction's \lmetricfix footnote and app:ports (appendix-api.tex).
+% src: CR/CONTRACT.md A2.5; CR/literature/LESSONS.md LR-04 ([code] lmetric.rs:151-157);
+%      FEATURES.md v2 representability
 
 \paragraph{Equal budget, unequal search.}
 Every tuned policy gets $\budget = 400$ evaluations per restart and $\restarts = 3$ restarts, but
 the policies differ in what that budget can buy. The search spaces range from 2 free parameters
 (\policy{lmetric}, \policy{chwbl}) to 7 (M1) and 22 (M1-v2). Each space's initial step size was set so that one
-step changes about 15--20\% of routing decisions; five baselines cannot reach that even at the
-largest allowed step, where they change 0.06\% (\policy{lmetric}), 1.8\% (\policy{dualmap}), 3.4\%
-(\policy{llm-d-optimized-baseline}), 8.3\% (two-tier) and 13.3\% (\policy{ramjet}) of decisions.
-For those policies tuning cannot move far from the shipped behavior; that is a property of their
-parameterization, and a learned model with a richer one is expected to gain more from the same
-budget. The equal-budget rule fixes what each policy may spend, not how far each can get. The
-fairness audit's validation-oracle probes found no baseline that more search would have improved
-(\cref{sec:budget}).
+step changes about 15--20\% of routing decisions; five baselines cannot reach that and change at
+most 13.3\% of decisions even at the largest allowed step (\cref{tab:baseline-spaces} in
+\cref{app:spaces}). For those policies tuning cannot move far from the shipped behavior; that is a
+property of their parameterization, and a learned model with a richer one is expected to gain more
+from the same budget. The equal-budget rule fixes what each policy may spend, not how far each can
+get. No baseline gained more than 0.078 of the MDE over its last validation interval, and the
+fairness audit's validation-oracle probes of \policy{ramjet}, M0 and \policy{llm-d-precise-prefix}
+found no headroom (\cref{sec:budget}).
 % src: CR/facts/phase2_prep.json spaces.<name>.{dimension, sigma0, flip_calibration.flip_at_sigma0_interpolated,
 %      target_reached_by_0.3}; CR/facts/gate.json full_plan.budget
+% src: CR/runs/phase2/checks/improving_at_cutoff_i6.json (four first-round baselines selected at their last
+%      generation; policy_gain_over_mde at most 0.0777); CR/audits/final/refute-headline-2.md (val-oracle
+%      probes of ramjet, M0 and llmdpp only; all below their tuned values or within 0.0001)
 
 \paragraph{Initialization.}
 Baselines restart from their shipped defaults. The learned arms' second and third restarts start
@@ -355,12 +350,11 @@ nevertheless strong on its own, which is the scope issue of \cref{sec:res-fairne
 %      CR/facts/finalists.json headline.learned (m1v2-s1)
 
 \paragraph{Excluded and separated baselines.}
-ThunderAgent's routing half needs a request classifier that replay cannot run and is not
-evaluated \citep{kang2026thunderagent}. Policies that read \ais{} estimates at decision time,
-including llm-d's optimized baseline with modeled TTFT, compete in a separate, secondary league
-against the same normalizer (\cref{sec:res-ais}). SMetric and faithful LMetric were not tuned as
-baselines; an equal-budget comparison with them on fresh data is the open follow-up of
-\cref{sec:res-fairness}.
+ThunderAgent is not evaluated, because its routing half needs a request classifier that replay
+cannot run \citep{kang2026thunderagent}; policies that read \ais{} estimates at decision time compete
+in a separate, secondary league, the \ais{}-informed league (\cref{sec:excluded,sec:res-ais}); and SMetric and faithful LMetric
+were not tuned as baselines, so an equal-budget comparison with them on fresh data is the open
+follow-up of \cref{sec:res-fairness}.
 % src: CR/CONTRACT.md A16; WT/notes/learned-routing/campaign/PLAN.md Baselines
 
 % =====================================================================================
@@ -371,7 +365,7 @@ The study covers one model (Qwen3-32B), one engine (vLLM 0.24.0), one GPU type (
 tensor parallelism 2, aggregated serving, identical workers, and 2 to 32 workers. Disaggregated
 prefill and decode, other models and hardware, and heterogeneous workers are out of scope. The
 coefficients are specific to this deployment; moving to another means re-tuning, and the cost of
-doing so (\cref{tab:cost}) is part of what a team would weigh.
+doing so (\cref{tab:cost} in \cref{app:results}) is part of what a team would weigh.
 
 The headline policy reads only inputs the live router already computes, so its YAML runs in the
 live router unchanged; whether those inputs carry the same values and timing live is what the lag
@@ -380,12 +374,12 @@ threshold unset, so it never holds a request back; a randomized variant and a jo
 threshold were tested and added nothing. Shipping it needs four settings to match replay: the
 router's structural knobs (\code{router\_track\_prefill\_tokens}, \code{router\_assume\_kv\_reuse},
 \code{router\_track\_active\_blocks}) at their defaults, since they change what the features mean
-(caveat 3 of \cref{tab:caveats}); host session affinity off, or accepted as a replacement for
+(caveat 3 of \cref{tab:caveats} in \cref{app:caveats}); host session affinity off, or accepted as a replacement for
 $\theta_6$, since the policy asks the host to treat an affinity target as exclusive; no \code{seed},
 so that router replicas do not break ties in lockstep; and monitoring of the concentration guards
 of \cref{sec:gaming}, since the policy's expected behavior includes a hot worker at about twice the
 mean in-flight load. A live router's overlap estimate also blends host and disk tiers, which replay
-does not have. The simulator-informed league would need \ais{} estimates, or a closed form
+does not have. The \ais{}-informed league would need \ais{} estimates, or a closed form
 calibrated offline, inside the live router.
 % src: CR/report/REPORT.md section 12 (porting notes); CR/audits/build/leakage-features-r1.md F1, F4
 % src: CR/CONTRACT.md "Deployment (operator-fixed)", A5.2, A16.1 (info parity of AIS signals);

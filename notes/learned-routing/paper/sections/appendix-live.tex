@@ -1,0 +1,254 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: the details of the live GPU validation (sec:live) that support its verdicts but do not carry
+%   its argument: the load-generator audit in full, the smoke test, the parts of the registered plan
+%   the main text summarizes, what ran, per-cell noise and discordances, per-cell departures from
+%   simulation, the remaining secondaries, and the tables of paired deltas, goodput and engine
+%   descriptives. Moved here from sections/live.tex (base <commit-50>) by the clean-narrative
+%   restructure; every number and source comment travelled with its text.
+% EVIDENCE: CR/facts/{live,live_smoke,live_loadgen_parity,live_plan,live_results}.json; CR/report/LIVE.md
+%   (= REPORT section 15); CR/audits/live/{claims,fidelity,fix}.md; CR/facts/paper_final.json;
+%   CR/facts/DEVIATIONS.md (live-run relay, live analysis). Tables tab:live-* are copied from
+%   CR/report/data/tables/live_validation.md by scripts/make_tables.py.
+% PUBLIC-CONTENT RULE (A18): name no cluster, node, partition, account, queue or job; facts/live_results.json
+%   and facts/live.json hold job IDs and internal paths: never copy from them verbatim.
+
+\section{Live-run details}
+\label{app:live}
+
+This appendix gives the details behind \cref{sec:live}: the load-generator audit and the smoke test,
+the parts of the registered plan the main text summarizes, what ran, per-cell noise and
+discordances, the per-cell departures from simulation, the remaining registered secondaries, and
+the tables of paired deltas, goodput and engine descriptives.
+
+\subsection{Load-generator equivalence}
+
+The CPU-only audit of \cref{sec:live-lane} covered every family and load mode the generator
+supports: Mooncake, FAST25 conversation and synthetic, and generated sessions, each in open and
+closed loop. For each it found the same request set and order, bit-identical open-loop arrivals
+including the replicate re-draws and speedup, exact prompt and output lengths with output length
+forced, the same prefix-sharing structure (a one-to-one map between the KV blocks the router and
+vLLM see and those of replay), the same session membership and think delays, the same closed-loop
+admission rule, and the same warm-up and scoring window. Replaying replay's own per-request
+latencies through AIPerf and a stub server moved windowed goodput by at most 0.06\%. Two
+non-equivalences remain. AgentX has no live load generator, because its recycled lanes need
+dependency, join and recycling semantics that neither AIPerf nor its prior fork implements, so the
+live check covers Mooncake, FAST25 and sessions only. And live latency is measured at the client, so
+it includes frontend, transport and streaming overhead that replay and the reference latency
+$\Ezero$ do not; this biases every policy slightly toward ``not good'' at the slowdown boundary.
+% src: CR/facts/live_loadgen_parity.json verdict, method, static_all_exact true, coverage,
+%      stub_all_exact_delivery true, non_equivalences (NE1-agentx, NE2-latency-base: -0.05% in S4,
+%      "at most 0.06%" from verdict), pending_gpu_confirmation
+
+\subsection{The smoke test}
+
+One GPU smoke test ran $\piref$ on one Mooncake train cell, open loop at load L2 with four workers,
+on one 8$\times$H100 node, and compared it with the cached replay of the same cell and replicate.
+\begin{itemize}
+  \item \textbf{Fidelity of the workload.} All \num{4002} requests arrived with exact prompts, prompt
+    lengths and forced output lengths; AIPerf's dispatch was within \SI{2.5}{ms} of the schedule at
+    the 99th percentile, with no drift.
+  \item \textbf{What agreed.} Windowed goodput was 3.4454 live against 3.4535 in replay (ratio
+    0.9976; 2113 against 2118 good of 2376 in-window requests), the prefix-cache hit rate 0.360
+    against 0.359, and the end-to-end latency distributions differed by a Kolmogorov--Smirnov
+    statistic of 0.022.
+  \item \textbf{What differed, in offsetting directions.} Live TTFT was higher (p50 176 against
+    \SI{130}{ms}) and live decode faster (per-request ITL p50 22.9 against \SI{25.6}{ms}). Idle
+    single-request calibration on two nodes agreed within 2.2\%; in it, decode steps were 7 to 10\%
+    faster than \ais{}'s, and prefill 5 to 10\% slower above 4K tokens.
+\end{itemize}
+% src: CR/facts/live_smoke.json verdict, cell (mooncake-w2-base-n4-open-L2, train, N 4), fidelity
+%      (request_level: 4002 matched, 0 mismatches; schedule credit_issue_lateness_ms p99 2.499),
+%      latency_all_completed (ttft p50 175.95 vs 129.85; itl_mean p50 22.89 vs 25.57), ks_statistic_all
+%      e2e 0.0218, idle_e0.components_live_vs_ais (step_ratio 0.895-0.931; ttft_ratio 1.052-1.101 at
+%      ISL >= 4096), discrepancies_live D4; CR/facts/live.json status_reasons (idle E0 repeatable within
+%      2.2% across two nodes)
+
+\subsection{Further plan details}
+
+The registered plan of \cref{sec:live-plan} also fixed the following.
+% src: CR/facts/live_plan.json (deployment, run_order, scoring (validity: fidelity_ok and pair status ok),
+%      sim_counterparts, analysis)
+\begin{itemize}
+  \item \textbf{Deployment.} The deployment is the smoke test's. A second worker count was not
+    planned: the two-node path is scripted but untested and would double the cost of every run.
+  \item \textbf{Run order.} The order of the seven runs within a cell is randomized by a fixed seed.
+  \item \textbf{Validity.} A run counts only if every request matched its intended prompt, prompt
+    length and forced output length and the load generator exited cleanly.
+  \item \textbf{Secondaries.} The token-weighted goodput, goodput under a live-measured $\Ezero$,
+    and TTFT, ITL, prefix hits and worker shares.
+  \item \textbf{Simulated counterparts} are the frozen test pass's own records for the same cells,
+    policies and replicate; no test cell is replayed again. In those records M1-v2 minus
+    \policy{ramjet} is $+0.069$, $+0.122$, $+0.141$, $+0.470$, $+0.011$ and $-0.0004$ on the six cells
+    in the order of \cref{sec:live-plan}.
+\end{itemize}
+% src (sim counterparts): CR/facts/live_plan.json cells[*].sim_k0.m1v2_minus_ramjet (0.0685, 0.1220, 0.1412,
+%      0.4699, 0.0108, -0.0004); informative_for_sign_test (all but sessions-s6)
+
+\subsection{What ran}
+
+All 42 planned cell runs (six cells, seven runs each) and all four applicable idle calibration runs
+are valid, so no cell is short. Two cell runs failed the validity rule at their first attempt: after
+every request had completed, AIPerf exited non-zero in its shutdown phase, because a slow export to a
+shared file system tripped its heartbeat watchdog. Each was re-run once under the registered rule, and
+the rerun is used. The first attempts are descriptive only: $\piref$'s second run on FAST25
+conversation scored 0.886 good requests per second (0.893 in the rerun), and round-robin on Mooncake
+open L2 scored 3.085 (3.087). Jobs submitted after the first failure raised the watchdog's
+missed-heartbeat threshold from 3 to 60; the setting does not touch the request schedule, prompts,
+lengths, headers, timing or scoring.
+% src: CR/facts/live_results.json completeness (planned_cell_runs 42, valid_cell_runs_used 42,
+%      valid_idle_runs 4, shortfall none, invalid_attempts_descriptive_only 0.88624 and 3.08504);
+%      CR/report/LIVE.md 15.1 (reruns 0.893; 3.087); CR/facts/DEVIATIONS.md live-run relay 0 (2): AIPerf
+%      0.13.0 shutdown-phase exit, AIPERF_SERVICE_HEARTBEAT_MISSED_THRESHOLD=60 (default 3) on later packs
+Some comparisons span two jobs, and so two nodes: both noise pairs on FAST25 conversation and sessions,
+round-robin against $\piref$ and against \policy{ramjet} on Mooncake open L2, and M0 and round-robin
+against \policy{ramjet} on sessions. Every other comparison is within one job. Two jobs were scheduled
+through a different queue than planned, on the same node type and with the same inputs. Two
+properties of the workload carry over from replay unchanged: the closed-loop cell admits requests by
+concurrency, not by an arrival schedule, and in FAST25 synthetic seven groups of two requests share
+an arrival instant, whose order within the group the live load generator cannot enforce.
+% src: CR/report/LIVE.md 15.1 ("Comparisons across node allocations"); CR/facts/live_results.json
+%      live_noise.per_cell_r (conv and sessions "cross-node"); CR/facts/DEVIATIONS.md live-run relay 0 (1)
+%      (scheduling logistics; same pairs files, order, salts, inputs); CR/facts/live_plan.json cell_choice
+%      ("fast25_synthetic has 7 tie groups / 14 requests whose order live cannot enforce")
+
+\subsection{Live noise and ranking detail}
+
+The two runs of $\piref$ in each cell differ by a clipped log-ratio of $-0.010$, $-0.016$, $+0.023$,
+$+0.008$, $-0.004$ and $-0.006$ (cells in the order of \cref{tab:live-goodput}); these are the $r$ of
+$\sigma_{\mathrm{live}} = \sqrt{\overline{r^2}/2} = 0.0090$. On FAST25 conversation and sessions only
+one default ran in the same job as each policy, so there a delta against $\piref$ has the larger
+standard deviation, 0.013. The six live deltas against $\piref$ that do not exceed twice their
+standard deviation are round-robin on FAST25 conversation, M0 on FAST25 synthetic and the four tuned
+policies on sessions.
+% src: CR/report/LIVE.md 15.3 (r per cell, sigma 0.0090, sd 0.011/0.013/0.013, 24 of 30 and the 6
+%      exceptions); CR/facts/live_results.json live_noise (sigma_live 0.0090434, sd_delta_vs_default
+%      0.011075, sd_delta_vs_ramjet 0.012789)
+
+\Cref{tab:live-deltas} gives every paired delta, live and simulated, and \cref{tab:live-tau} the
+Kendall $\kendall$-b between them. Of the five per-cell discordances, three are within live noise
+($2\sqrt{2}\,\sigma_{\mathrm{live}}$); the other two put M1-v2 ahead of M1 live, on Mooncake open L3
+($+0.032$ live against $-0.001$ simulated) and on FAST25 conversation ($+0.062$ against $-0.011$).
+% src: CR/report/LIVE.md 15.4 "Where cells disagree"
+
+\begin{table}[tbp]
+  \centering
+  \caption{Live GPU validation: paired deltas, live (simulated at $\krep = 0$), as the clipped
+    log-ratio of the headline. Top: against $\piref$, the mean of its runs in the same job. Bottom:
+    against tuned \policy{ramjet}. One run per cell and policy; live noise $\sigma_{\mathrm{live}} =
+    0.0090$ per run.}
+  \label{tab:live-deltas}
+  \input{generated/live_vs_default}
+  \par\medskip
+  \input{generated/live_vs_ramjet}
+\end{table}
+% src: generated/live_vs_default.tex, generated/live_vs_ramjet.tex (copies of CR/report/data/tables/live_validation.md
+%      tables 2 and 3 = REPORT 15.3)
+
+\begin{table}[tbp]
+  \centering
+  \caption{Kendall $\kendall$-b between simulated and live deltas against $\piref$ per cell, at the
+    registered $\krep = 0$ and in the three registered sensitivities, and the discordant policy pairs.
+    ``Within noise'': the live difference is at most $2\sqrt{2}\,\sigma_{\mathrm{live}}$.}
+  \label{tab:live-tau}
+  \input{generated/live_tau}
+\end{table}
+% src: generated/live_tau.tex (CR/report/data/tables/live_validation.md table 5 = REPORT 15.4)
+
+\subsection{Where live and simulation differ, per cell}
+
+\Cref{tab:live-goodput} gives windowed goodput live and simulated, and \cref{tab:live-minus-sim} the
+live-minus-simulated difference of every paired delta, with the descriptive departure rule of
+\cref{sec:live-results} marked.
+\begin{itemize}
+  \item \textbf{FAST25 conversation.} $\piref$, \policy{ramjet}, M0 and round-robin reach 0.72 to
+    0.81 of their simulated goodput, M1 and M1-v2 0.91 to 0.98. Every gain over $\piref$ is larger
+    live (M1-v2 $+0.833$ against $+0.526$; \policy{ramjet} $+0.171$ against $+0.056$), which widens
+    M1-v2's lead over \policy{ramjet} ($+0.663$ against $+0.470$). It also nearly erases round-robin's
+    deficit against $\piref$ ($-0.010$ live against $-0.132$, within live noise), because $\piref$
+    loses the most live. vLLM preempted 18 to 24 requests per run under $\piref$, \policy{ramjet} and
+    M0 and 12 under round-robin, against 1 to 6 under M1 and M1-v2, and the non-learned policies'
+    median TTFT rose 1.43 to 1.76 times over simulation, the learned ones' 1.08 to 1.13 times.
+  \item \textbf{Sessions.} $\piref$ runs at 1.07 times its simulated goodput, the four tuned policies
+    at 0.997 to 1.000. Live, 97.8 to 98.4\% of $\piref$'s in-window requests are good, against 91.6\%
+    in simulation; the tuned policies serve 99.9 to 100\% in both, at ceiling. So every tuned policy's
+    simulated gain over $\piref$, $+0.084$ to $+0.086$, is only $+0.011$ to $+0.016$ live, inside
+    twice the standard deviation of a live delta (0.026): on this cell the simulated gain over
+    $\piref$ is not reproduced beyond live noise. The registration included this cell to check the
+    default and round-robin gaps live; the default half of that check fails. Round-robin reaches 2.18
+    times its simulated goodput; it is still last by far, but its deficit against $\piref$ shrinks
+    from $-1.099$ (the clip at $\ln 3$) to $-0.770$.
+    % prov: "The plan included this cell" (live_plan.json cell_choice)
+  \item \textbf{Mooncake and FAST25 synthetic.} Round-robin's deficit against $\piref$ is larger live on
+    all four cells, by 0.033 to 0.086. The eleven other departures on these cells are 0.023 to 0.082 in
+    size (\cref{tab:live-minus-sim}).
+\end{itemize}
+% src: CR/report/LIVE.md 15.2 bullets; CR/facts/live_results.json primary.per_cell[*] (live_over_sim,
+%      good_frac_window_live / _sim_k0, preemptions_live, delta_vs_default_live / _sim_k0);
+%      descriptive.per_cell_policy (TTFT p50 ratios); CR/facts/live_plan.json cell_choice (sessions-s6
+%      "checks the ceiling and the default and round-robin gaps live"); the 11 other starred Mooncake /
+%      FAST25-synthetic entries of generated/live_minus_sim.tex (4 vs default, 7 vs ramjet): 0.023-0.082
+
+\begin{table}[tbp]
+  \centering
+  \caption{Windowed goodput (good requests per second), live / simulated at $\krep = 0$. Live
+    $\piref$ is the mean of its two runs.}
+  \label{tab:live-goodput}
+  \input{generated/live_goodput}
+\end{table}
+% src: generated/live_goodput.tex (CR/report/data/tables/live_validation.md table 1 = REPORT 15.2)
+
+\begin{table}[tbp]
+  \centering
+  \caption{Live minus simulated paired delta, for every delta of \cref{tab:live-deltas}. $^{*}$: a
+    difference larger than twice the standard deviation of the live delta (a descriptive rule, not
+    registered).}
+  \label{tab:live-minus-sim}
+  \input{generated/live_minus_sim}
+\end{table}
+% src: generated/live_minus_sim.tex (CR/report/data/tables/live_validation.md table 4 = REPORT 15.3)
+
+\subsection{Other registered secondaries}
+
+\begin{itemize}
+  \item \textbf{Live reference latency.} Re-scoring every run against an $\Ezero$ fitted on the live
+    idle runs (72 requests from four jobs) instead of \ais{}'s gives a pooled $\kendall$-b of 1.00,
+    and M1-v2 minus \policy{ramjet} is positive on all five informative cells, mean $+0.241$. So the
+    ranking and the sign do not hinge on the simulator's $\Ezero$. The per-node fit has only two
+    complete cells, since only some jobs ran an idle calibration; there $\kendall$-b is 0.87 and the
+    sign holds on both.
+  \item \textbf{Engine timing} (\cref{tab:live-engine}). Live TTFT is longer than \ais{}'s (median
+    ratios over the cells 1.14 to 1.39 at p50, 1.09 to 1.22 at p90), and the median request decodes
+    faster (0.90 to 0.99; at p90 0.99 to 1.10), the offsetting pattern of the smoke test.
+  \item \textbf{Prefix-cache reuse.} Each successful request's usage record carries the server's
+    count of cached prompt tokens. The live hit rate computed from it (cached over prompt tokens)
+    differs from replay's reuse fraction by at most 0.015 in each of the 42 runs, and by at most 0.010
+    in 40, so routing reproduced replay's cache reuse on hardware for every policy and cell. The
+    registered descriptive used vLLM's own hit counter instead, which is comparable in only 14 runs,
+    all with little queueing; there it is within 0.009 of replay. By our reading of the vLLM 0.24.0
+    scheduler, the counter records a query each time a waiting request is retried, and preemption
+    re-queries too, so queueing inflates it.
+  \item \textbf{Load generation.} On the 35 open-loop runs, requests left at most \SI{2.6}{ms} late
+    at the 99th percentile (\SI{15.2}{ms} at most). In 16 runs, 18 requests failed in AIPerf because
+    an output of 1 to 3 tokens carried no text; the scorer counts them not good, as registered.
+\end{itemize}
+% src: CR/facts/live_results.json secondaries.live_idle_e0_pooled (fit_requests 72, fit_sources 4, tau_b 1.0,
+%      live_positive 5, mean 0.24076); secondaries.live_idle_e0_ownnode (complete_cells 2, tau_b 0.8667,
+%      live_positive 2 of 2); descriptive.by_policy (TTFT/ITL ratio medians, worker_share_max);
+%      descriptive.aiperf_errors (runs_with_error 16, total_errors 18); CR/report/LIVE.md 15.6 (lateness
+%      35 open-loop runs, p99 <= 2.6 ms, max 15.2 ms; counter comparable in 14 of 42, within 0.009);
+%      CR/facts/paper_final.json usage_prefix_hit (max_abs_diff 0.01519, runs_within_0p010 40 of 42) from
+%      CR/runs/audits/live-fidelity/prefix_out.txt; CR/audits/live/fidelity.md F1, claims.md F8;
+%      CR/facts/DEVIATIONS.md live analysis (4) (vLLM Scheduler.schedule / get_computed_blocks)
+
+\begin{table}[tbp]
+  \centering
+  \caption{Engine-level descriptives per policy: median over the six cells of the live / simulated
+    ratio of TTFT and of per-request mean ITL, and the largest per-worker request share over the
+    cells, live / simulated.}
+  \label{tab:live-engine}
+  \input{generated/live_engine}
+\end{table}
+% src: generated/live_engine.tex (CR/report/data/tables/live_validation.md table 7 = REPORT 15.6, without
+%      the vLLM-counter prefix column)

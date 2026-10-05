@@ -16,6 +16,12 @@
 % STATUS: final. Results of the runs are in sec:results; this section is method only.
 % LABEL NOTE: train-side pilot numbers carry "preliminary (pilot, train subset)" in words; the
 %   \prelim macro says "validation split", which would be false for them.
+% LAYOUT (2026-10-05 restructure): harness bookkeeping, the search-space details (tab:m1-space,
+%   tab:baseline-spaces, which absorbed the former tab:spaces, sigma0 calibration, step-size cap),
+%   the rank-stability diagnostic, alg:train, the initial-point fits, the other arms' spaces, the
+%   sign-constraint clamp, the drift check (sec:drift) and compute (sec:compute) live in
+%   sections/appendix-tuning.tex (app:tuning, app:spaces). "lr-train" is "the tuning harness" in
+%   reader-facing text (prov: lr-train); "phase 2" is "the main tuning".
 
 \section{Training method}
 \label{sec:training}
@@ -27,10 +33,11 @@ procedure scores a single routing decision: a decision changes the queues and ca
 requests see, so its effect is visible only in aggregate over a replay. Each policy
 configuration is therefore a black box that maps to one number, the objective below, and the
 search is derivative-free. The spaces are small (7 free coefficients for M1 and 22 for M1-v2, two
-to six parameters per baseline), and one tool, \code{lr-train}, tunes every policy, learned or
-heuristic, with the same settings (\cref{alg:train}). This section describes phase~2; the pilot
-used the same method on a 12-cell train subset, with 480 evaluations and two restarts per policy
-(\cref{sec:pilot}, in the appendix).
+to six parameters per baseline), and one tuning harness tunes every policy, learned or
+heuristic, with the same settings (\cref{alg:train} in \cref{app:tuning}). A smaller pilot with the
+same method preceded the main tuning that this section describes (\cref{sec:pilot}).
+% prov: lr-train; "This section describes phase 2". The pilot used a 12-cell train subset, 480
+%      evaluations and two restarts per policy (survives in appendix-pilot.tex).
 
 \subsection{Objective}
 \label{sec:train-objective}
@@ -49,44 +56,24 @@ replicates:
 \end{equation}
 with $|\Cset{train}| = 34$, $\Krep = 2$ and $\Kpool = 8$. Each term is a paired comparison: the
 candidate and $\piref$ replay the same cell on the same common-random-number (CRN) replicate with
-the same policy seed $\krep+1$ (\cref{sec:aisim}). Before scoring, \code{lr-train} checks that
-every returned record carries its task's cell, replicate and policy hash, and that candidate and
-reference cover the same (cell, replicate) set; a mismatch stops the run rather than producing an
-unpaired score. After its first replay, $\piref$'s record comes from the result cache.
+the same policy seed $\krep+1$ (\cref{sec:aisim}).
 
 The objective is episodic: one value per configuration and generation, aggregated over minutes of
 simulated traffic per cell, with no per-decision credit assignment. Every cell weighs the same
 whatever its absolute goodput. The clipped log-ratio was fixed before training and is the same
-per-cell statistic the headline test uses (\cref{sec:headline}); the contract's original form, the
-arithmetic mean of ratios, is reported but not optimized, because a few cells in which $\piref$
-nearly collapses dominate it (\cref{sec:objective}).
-
-% src: train.py Trainer.run ("worst = min(finite) - 1.0"), Trainer.score (reference error raises);
-%      CR/facts/gate.json criteria.1_error_rate.lr_train_candidate_failures = 0 (4 runs x 480 evals)
-A candidate whose replay fails on any cell receives the generation's lowest finite objective minus
-one, so CMA-ES ranks it last; a failed reference replay stops the generation, which is retried on
-the next call because errors are not cached. In the pilot no candidate failed in 4 runs of 480
-evaluations (\emph{preliminary (pilot, train subset)}).
-% src: 34 cells x 2 replicates x (16 candidates + reference) = 1,156 replays; re-evaluation
-%      34 x 2 x (2 + 1) = 204 (arithmetic; matches CR/facts/phase2_prep.json early_progress
-%      replays_fresh 1156 and tasks_requested 1360 at generation 1)
-% src: CR/facts/pilot.json measurements.seconds_per_evaluation.full_train_local
-%      replay_s_per_candidate_evaluation 700.895
-One generation replays 16 candidates and $\piref$ on 34 cells $\times$ 2 replicates, \num{1156}
-replays, plus 204 for the re-evaluation diagnostic below; a single candidate evaluation on the
-full train split costs about 700.9 replay-seconds, as measured in the pilot.
+per-cell statistic the headline test uses (\cref{sec:headline}); the arithmetic mean of ratios is
+reported but not optimized, because a few cells in which $\piref$ nearly collapses dominate it
+(\cref{sec:objective}). \Cref{app:tuning} describes how the harness checks the pairing, handles
+failed replays and what a generation costs.
+% prov: "the contract's original form, the arithmetic mean of ratios"
 
 \subsection{Search spaces}
 \label{sec:space}
 
 % src: WT/benchmarks/learned_routing/learned_routing/space.py (module docstring, Coord, cma_bounds);
 %      every CR/runs/phase2/spaces/*.yaml param has bounds (checked 2026-10-03)
-\paragraph{Internal coordinates.}
-Each policy's \code{space.yaml} lists its free parameters with bounds and a linear or log scale,
-its pinned parameters, and CMA-ES options. CMA-ES searches internal coordinates $\searchvec$: each
-bounded parameter maps to $[0,1]$, linearly or in log space, and integer parameters are rounded
-after decoding. pycma's boundary transform keeps every sample inside the box, so every candidate
-decodes to a valid policy file. Every phase-2 parameter is bounded.
+Every parameter is bounded and searched in internal coordinates in $[0,1]$, linear or
+logarithmic (\cref{app:spaces}).
 
 \paragraph{M1.}
 % src: CR/runs/phase2/spaces/m1_learned_v1.yaml (header comment); CR/facts/pilot.json decisions (M1 space);
@@ -102,167 +89,29 @@ scale pinned, $\temp > 0$ is a different, stochastic policy and is a separate va
 % src: CR/facts/pilot.json feature_scaling.pooled_within_set_sd (geomean over the 12 pilot-subset
 %      cells of each cell's mean within-set sd; CR/runs/pilot/screen/feature_scales.json "pooled");
 %      ratios = sd(f0)/sd(f): 25.6, 17.7, 5.33, 80.8, 109.6, 21.2, 3.22 (also flip_rate.json s_j);
-%      bounds from CR/runs/phase2/spaces/m1_learned_v1.yaml
-Raw coefficients have no common scale, because the features' spreads within a candidate set
-differ by two orders of magnitude (\cref{tab:m1-space}). We bound each free coefficient at about
-four times its \emph{scale ratio} $\mathrm{sd}(x_{\cdot,0}) / \mathrm{sd}(x_{\cdot,f})$, the
-coefficient at which feature $f$ varies across a candidate set as much as the anchor does; at its
-bound, a feature's term spreads four times as widely as the anchor's. The standard deviations are
-measured within candidate sets, as the geometric mean over the pilot's 12 train cells of each
-cell's mean, on candidate tables reconstructed from $\piref$'s per-request rows, because replay
-does not log candidate tables. The reconstruction is approximate (router load is rebuilt from
-arrivals, first tokens and completions, and overlap is exact only for the chosen worker and for
-earlier turns of the same session), so the ratios set scales, not policy inputs. The build
-stage's placeholder bounds of $\pm 8$ could not have let \code{kv\_load\_frac} or
-\code{active\_requests\_s} matter.
-
-% src: space.py (bounded linear: u = (x - low)/(high - low)); sigma0 0.004 -> physical std
-%      0.004 x 2 x bound = 0.032 x ratio (m1_learned_v1.yaml comment); LESSONS.md LR-05
+%      bounds from CR/runs/phase2/spaces/m1_learned_v1.yaml; LESSONS.md LR-05
 %      (Hansen tutorial App. A, pdf p.29; ARS sec. 3.2, pdf p.7-8)
-Because each bound is proportional to the feature's scale ratio, one internal unit moves every
-coefficient by the same multiple of its ratio, so the initial search distribution is isotropic in
-units of decision-relevant spread. This is the per-variable scaling \citet{hansen2016tutorial}
-recommends when initial ranges differ by orders of magnitude, and the analogue of the state
-normalization without which \citet{mania2018ars} could not train a linear policy on their
-hardest task.
-
-\begin{table}[tbp]
-  \centering\small
-  \caption{M1's search space and its three initial points. Within-set sd: geometric mean over the
-    pilot's 12 train cells of the mean within-candidate-set standard deviation, on reconstructed
-    tables. Ratio: $\mathrm{sd}(x_{\cdot,0})/\mathrm{sd}(x_{\cdot,f})$. The search box is
-    $|\theta_f| \le$ bound. Start s1 is $\theta = -\basis{0}$ (all free coefficients 0); s2 and s3
-    are described in \cref{sec:restarts}.}
-  \label{tab:m1-space}
-  % src: CR/facts/pilot.json feature_scaling.pooled_within_set_sd; CR/runs/pilot/screen/flip_rate.json s_j;
-  %      CR/runs/phase2/spaces/m1_learned_v1.yaml bounds; CR/facts/phase2_prep.json m1_inits.s2.theta,
-  %      m1_inits.s3.theta (s2 rounded to 3 significant digits)
-  \begin{tabular}{@{}rlrrrrr@{}}
-    \toprule
-    $f$ & Feature & Within-set sd & Ratio & Bound & s2 & s3 \\
-    \midrule
-    0 & \code{default\_logit\_scaled}     & 6.607   & 1     & pinned & $-1$     & $-1$ \\
-    1 & \code{overlap\_frac}              & 0.2585  & 25.6  & 100    & 63.9     & 76.8 \\
-    2 & \code{new\_prefill\_tokens\_k}    & 0.3742  & 17.7  & 70     & 4.18     & 0 \\
-    3 & \code{active\_prefill\_tokens\_k} & 1.239   & 5.33  & 21     & 1.28     & 0 \\
-    4 & \code{kv\_load\_frac}             & 0.08173 & 80.8  & 320    & 12.5     & 0 \\
-    5 & \code{active\_requests\_s}        & 0.06031 & 110   & 440    & $-138$   & 0 \\
-    6 & \code{session\_affinity}          & 0.3111  & 21.2  & 85     & $-0.324$ & 42.4 \\
-    7 & \code{isl\_x\_prefill\_load}      & 2.053   & 3.22  & 13     & $-0.196$ & 0 \\
-    \bottomrule
-  \end{tabular}
-\end{table}
+Raw coefficients have no common scale, because the features' spreads within a candidate set
+differ by two orders of magnitude. Each free coefficient is therefore bounded at about four times
+its \emph{scale ratio} $\mathrm{sd}(x_{\cdot,0})/\mathrm{sd}(x_{\cdot,f})$, measured within
+candidate sets on tables reconstructed from $\piref$'s pilot replays, so the initial search
+distribution is isotropic in units of decision-relevant spread: the per-variable scaling
+\citet{hansen2016tutorial} recommends, and the analogue of the state normalization of
+\citet{mania2018ars} (\cref{tab:m1-space} in \cref{app:spaces}).
 
 \paragraph{Baselines.}
 % src: CR/facts/phase2_prep.json decisions[1..3], spaces.*.free/fixed/base_parameters
-Each tuned baseline searches the parameters its catalog entry exposes (\cref{tab:spaces}),
-starting from its shipped defaults. Three rules shape these spaces.
-\begin{itemize}
-  \item \textbf{Gauge pins.} A parameter that only rescales another is fixed. These are the
-    affinity block size of \policy{ramjet} (512 tokens), the prefix weight of
-    \policy{llm-d-precise-prefix} (2), and the peak prefill rate of
-    \policy{llm-d-optimized-baseline} (\num{15928} tokens/s), whose product with
-    \code{max\_ttft\_penalty\_ms} is the only quantity that policy identifies.
-  \item \textbf{Structural parameters} keep their shipped values: \policy{lmetric}'s hot-spot
-    detection on, \policy{ramjet}'s relative basis, \policy{sticky-session}'s map of
-    \num{65536} sessions, \policy{llm-d-precise-prefix}'s empty class weights, and
-    \policy{llm-d-optimized-baseline}'s throughput-based TTFT source.
-  \item \textbf{Router knobs.} Of the baselines, only \policy{sticky-session} reads the default
-    cost's router-level knobs (for first turns and fallbacks), so both sticky variants also search
-    the five M0 knobs over M0's ranges. Sticky-session and M0 at the same knob values gave identical
-    results on a session-free Mooncake cell, both at the start point and at the upper corner of the
-    box. \code{router\_queue\_threshold} keeps its default for every policy (\cref{sec:ablations}).
-\end{itemize}
-% src: CR/runs/phase2/spaces/m0_default_tuned.yaml (comment, bounds, init); CR/facts/gate.json
-%      full_plan.search_spaces.M0; CR/facts/pilot.json measurements.cma_progress_curves ("prefill_load_scale
-%      moved to 17-25 of a 50 upper bound")
-M0's space is the pilot's, with the prefill-load scale $\bpf$ widened to $[0.05, 500]$ on a log
-scale because the pilot's tuned values (17 to 25) sat near the top of the old range $[0.05, 50]$.
-The decode request weight $\breq$ starts at 0.5, the bottom of its log range $[0.5, 4096]$, which
-stands in for the shipped value 0.
+Each tuned baseline searches the 2 to 6 numeric parameters its catalog entry exposes, starting from
+its shipped defaults, with parameters that only rescale others and structural choices pinned;
+\cref{app:spaces} lists every space (\cref{tab:baseline-spaces}).
 
 \paragraph{Initial step size.}
-% src: CR/runs/phase2/scripts/flipcal.py (docstring: SIGMAS, SAMPLES 8, TARGET 0.175, TV distance,
-%      stateful policies, clipping); CR/facts/phase2_prep.json flip_calibration (rule, cells = the 12
-%      pilot-subset cells, target 0.175); CR/facts/DEVIATIONS.md 2026-10-03 phase-2 prep "sigma0 for tuned baselines"
-Parameter units are not comparable across policies, so $\sigmazero$ is set in decision space.
-For a step size $\sigma$, we draw internal points from $\mathcal{N}(\searchvec_0, \sigma^2 I)$
-clipped to the box, decode them, and measure the share of routing decisions that differ from the
-policy's own decisions at its start $\searchvec_0$, as the total-variation distance between the
-two decision distributions. The decisions are one-step counterfactuals on the reconstructed
-candidate tables of the pilot's 12 train cells, with 8 draws per $\sigma$ and cell; stateful policies run
-their own state machine over each cell in arrival order. $\sigmazero$ is the $\sigma$,
-interpolated on a grid from 0.03 to 0.35, at which this flip rate reaches 17.5\%, so every policy
-starts with a comparable amount of exploration measured in decisions. The literature review's
-suggested band of 10--30\% is itself a hypothesis (LR-05).
-% src: CR/facts/pilot.json feature_scaling.m1_flip_frac_by_c (c = 0.03 -> 0.196, c = 0.05 -> 0.239;
-%      sigma0 0.004 corresponds to c = 0.032); CR/runs/phase2/spaces/m1_learned_v1.yaml comment ("~20%")
-For M1, $\sigmazero = 0.004$ internal units, a standard deviation of 0.032 scale ratios per
-coefficient, flips about 20\% of decisions relative to $\theta = -\basis{0}$.
-% src: CR/facts/phase2_prep.json spaces.<name>.flip_calibration.flip_at_sigma0_interpolated,
-%      target_reached_by_0.3; flip_calibration.rule (key depth: "flips 0.69 / 0.18 already at sigma 0.03")
-Five baselines cannot reach the target by $\sigma = 0.3$, the step-size cap below, and start at
-0.3. Around their shipped defaults their decisions barely respond to their parameters:
-\policy{lmetric}'s flip rate at $\sigma = 0.3$ is 0.06\%. For \policy{chwbl}'s and
-\policy{dualmap}'s hashed prefix depths, any change re-draws the whole prefix-to-worker map (flip
-rates of 0.69 and 0.18 already at $\sigma = 0.03$), so those two coordinates are held at their
-defaults during the measurement and share their space's $\sigmazero$.
-
-\begin{table}[tbp]
-  \centering\footnotesize
-  \caption{Search spaces of the tuned policies. Dim.: number of free coordinates.
-    Flips: share of one-step decisions that change at $\sigmazero$ relative to the start, on
-    reconstructed candidate tables; the calibration target is 0.175. $^{\dagger}$Hashed prefix
-    depth held at its default during the measurement. Every space starts at the policy's shipped
-    defaults, except M1, which has three starts (\cref{tab:m1-space}).}
-  \label{tab:spaces}
-  % src: CR/facts/phase2_prep.json spaces.<file>.{dimension,sigma0,free,fixed,base_parameters,
-  %      flip_calibration.flip_at_sigma0_interpolated}; M1 flips from CR/facts/pilot.json
-  %      feature_scaling.m1_flip_frac_by_c (measured against theta = -e0)
-  \begin{tabularx}{\linewidth}{@{}lYrrr@{}}
-    \toprule
-    Policy & Free parameters (pinned) & Dim. & $\sigmazero$ & Flips \\
-    \midrule
-    M1 (\lc{}, \code{v1}) & $\theta_1,\dots,\theta_7$ ($\theta_0 = -1$, $\temp = 0$) & 7 & 0.004 & $\approx 0.20$ \\
-    M0 (\defaultcf{}) & \code{overlap\_score\_credit}, \code{overlap\_score\_credit\_decay},
-      \code{prefill\_load\_scale}, \code{decode\_active\_request\_weight}, \code{router\_temperature} & 5 & 0.11 & 0.169 \\
-    \policy{sticky-session} (hard) & the five M0 knobs & 5 & 0.17 & 0.179 \\
-    \policy{sticky-session} (bounded) & \code{load\_factor} and the five M0 knobs & 6 & 0.067 & 0.175 \\
-    \policy{llm-d-precise-prefix} & \code{weights.queue}, \code{weights.kv\_cache\_utilization},
-      \code{prefix\_match\_length\_weight}, \code{prefix\_match\_length\_scale\_tokens}
-      (\code{weights.prefix} $= 2$) & 4 & 0.16 & 0.177 \\
-    \policy{chwbl} & \code{prefix\_tokens}, \code{load\_factor} & 2 & 0.16 & 0.173$^{\dagger}$ \\
-    \policy{ramjet} & \code{alpha}, \code{max\_affinity\_blocks}, \code{load\_unit\_tokens}
-      (\code{affinity\_block\_tokens} $= 512$) & 3 & 0.30 & 0.133 \\
-    \policy{dynamo-two-tier-cost-fn} & \code{cache\_threshold}, \code{balance\_abs\_threshold},
-      \code{balance\_rel\_threshold} & 3 & 0.30 & 0.083 \\
-    \policy{llm-d-optimized-baseline} & \code{affinity\_threshold}, \code{max\_ttft\_penalty\_ms},
-      \code{queue\_threshold\_tokens} (peak prefill rate $= \num{15928}$) & 3 & 0.30 & 0.034 \\
-    \policy{dualmap} & \code{hash\_prefix\_blocks}, \code{pending\_prefill\_token\_budget},
-      \code{window\_requests} & 3 & 0.30 & 0.018$^{\dagger}$ \\
-    \policy{lmetric} & \code{class\_prefix\_blocks}, \code{window\_requests} & 2 & 0.30 & 0.0006 \\
-    \bottomrule
-  \end{tabularx}
-\end{table}
-
-\paragraph{Step-size cap.}
-% src: CR/runs/phase2/spaces/*.yaml (cma maxstd 0.3 in every baseline space; absent in the three M1
-%      spaces); CR/facts/pilot.json measurements.cma_progress_curves ("seed 1's sigma then diverged
-%      (0.18 -> 10.8 internal units ...): flat directions in decode_active_request_weight/temperature"),
-%      recommendations_for_phase2[1]
-% src: cma 4.5.0 cma/options_parameters.py:84-85 (maxstd None, maxstd_boundrange 1/3) and
-%      cma/evolution_strategy.py:1179-1183, 1539-1564 (_stds_into_limits rescales sigma_vec, not sigma);
-%      checked 2026-10-03: CMAEvolutionStrategy with bounds [0,1]^7 has opts['maxstd'] = 1/3 per coordinate
-% check: whether the pilot's M0 seed-1 per-coordinate stds actually reached the 1/3 cap (history logs only sigma)
-Every baseline space caps pycma's per-coordinate standard deviation (\code{maxstd}) at 0.3 internal
-units. The pilot recommended the cap after M0's first run, whose global step size grew from 0.18 to
-10.8 internal units after its validation score had plateaued, along nearly flat directions in the
-decode request weight and the temperature (\emph{preliminary (pilot, train subset)}). M1's space,
-whose step size stayed small in the pilot, sets no explicit cap. Two details qualify the measure.
-pycma 4.5.0 already caps each bounded coordinate at one third of its range by default, so on these
-$[0,1]$ coordinates the explicit cap tightens the default from $1/3$ to 0.3, and the default
-applies to M1. The cap also limits the per-coordinate spread of the samples, not the global step
-size $\sigma$, which can still drift.
+% src: CR/runs/phase2/scripts/flipcal.py (TARGET 0.175); CR/facts/phase2_prep.json flip_calibration
+%      (rule, cells = the 12 pilot-subset cells, target 0.175); spaces.<name>.flip_calibration
+%      (target_reached_by_0.3)
+Because parameter units are not comparable across policies, each space's initial step size
+$\sigmazero$ is the step at which one CMA-ES step changes 17.5\% of routing decisions; five
+baselines cannot reach that rate by the step-size cap and start at the cap (\cref{app:spaces}).
 
 \subsection{CMA-ES and noise handling}
 \label{sec:noise}
@@ -273,134 +122,63 @@ size $\sigma$, which can still drift.
 %      4 + floor(3 ln n) = 6..9 for n = 2..7)
 We use CMA-ES \citep{hansen2016tutorial} from the \code{cma} package, version 4.5.0, with
 population size $\popsize = 16$, the package's default of 8 parents, and a budget of
-$\budget = 400$ objective evaluations per run, which is 25 generations. For the 2 to 7 free
-coordinates of these spaces the package's default population would be 6 to 9. Its function-value
-stopping rules are switched off, so a run normally ends when the budget is spent; the equal-budget
-check (\cref{sec:budget}) flags any finished run that did not spend exactly $\budget$.
+$\budget = 400$ objective evaluations per run, which is 25 generations.\footnote{For the 2 to 7
+  free coordinates of these spaces the package's default population would be 6 to 9.} Its
+function-value stopping rules are switched off, so a run normally ends when the budget is spent;
+the equal-budget check (\cref{sec:budget}) flags any finished run that did not spend exactly
+$\budget$.
 
 The objective is noisy in a specific way. Replay is deterministic, so a configuration scored on a
 given set of cells and replicates always gets the same value. What varies is which replicates a
 generation draws (\cref{sec:aisim}) and, behind that, which workloads the train split happens to
-contain. Four measures keep this noise from steering the search.
+contain. Three measures keep this noise from steering the search.
 \begin{enumerate}
   \item \textbf{Common random numbers within a generation.} All 16 candidates of generation $\gen$
-    and the reference $\piref$ replay the same cells and replicates $\Kset{\gen}$ with the same
-    policy seeds, so CMA-ES ranks paired differences rather than independent draws. Scoring every
-    candidate on the same fixed scenarios is the device of PEGASUS \citep{ng2000pegasus}. In a
-    two-server load-balancing example, conditioning on the exogenous input sequence lowered
-    policy-gradient variance 50-fold \citep{mao2019inputdriven}; for rank-based CMA-ES the analogue
-    is paired scoring on shared replicates. The \code{one\_draw} tie-break keeps the random stream
-    aligned across candidates whose decisions differ (\cref{sec:parity}).
+    and $\piref$ replay the same cells and replicates $\Kset{\gen}$ with the same policy seeds, so
+    CMA-ES ranks paired differences rather than independent draws, the fixed-scenario device of
+    PEGASUS \citep{ng2000pegasus}. Conditioning on the exogenous input sequence lowered
+    policy-gradient variance 50-fold in a two-server load-balancing example
+    \citep{mao2019inputdriven}; for rank-based CMA-ES the analogue is paired scoring on shared
+    replicates. The \code{one\_draw} tie-break keeps the random stream aligned across candidates
+    whose decisions differ (\cref{sec:utility}).
     % src: CR/literature/LESSONS.md LR-03 (Mao ICLR'19 pdf p.3, p.5: 50x lower gradient variance;
     %      PEGASUS pdf p.3-7)
-  \item \textbf{Rotating replicates.} $\Kset{\gen} = \{2\gen, 2\gen+1\} \bmod 8$: consecutive
-    generations see different replicates and each pair recurs every fourth generation, so the
-    CMA-ES distribution, which accumulates information over generations, is not fit to one draw.
+  \item \textbf{Rotating replicates.} $\Kset{\gen} = \{2\gen, 2\gen+1\} \bmod 8$, so consecutive
+    generations see different replicates, each pair recurs every fourth generation, and the CMA-ES
+    distribution, which accumulates information over generations, is not fit to one draw.
   \item \textbf{Population size.} $\popsize = 16$ is about twice the default. In the analysis
     behind UH-CMA-ES, raising the population size together with the number of parents, as the
     package does, is preferable to re-evaluating each candidate several times when step sizes adapt
     properly \citep{hansen2009uh}.
     % src: CR/literature/LESSONS.md LR-03 (UH-CMA-ES sec. II, pdf p.4)
-  \item \textbf{Rank-stability diagnostic.} After each update, the two best candidates are
-    re-scored on the same cells with the next generation's replicates $\Kset{\gen+1}$, and the
-    change in their order is logged. The re-scored share, $2/\popsize = 0.125$, equals
-    UH-CMA-ES's default rate $\max(0.1, 2/\popsize)$ \citep{hansen2009uh}, but unlike UH-CMA-ES
-    nothing reacts to the measurement: neither the step size nor the number of evaluations per
-    candidate changes. It runs identically for every policy, does not count against $\budget$,
-    and is skipped in a generation whose wall-clock chunk ends during it. In the pilot, the top two
-    candidates swapped in 7 to 11 of 30 generations per run (\emph{preliminary (pilot, train
-    subset)}).
-    % src: train.py Trainer._reeval (count = max(2, ceil(reeval_frac x popsize)); fresh_ks =
-    %      (g K + K + j) mod P; "diagnostic"); es.tell uses only the K = 2 training values;
-    %      CR/runs/phase2/MANIFEST.json args --reeval-frac 0.125; p2orch.py budget_report comment;
-    %      CR/literature/LESSONS.md LR-03 (UH-CMA-ES sec. IV, pdf p.8-9: r = max(0.1, 2/lambda));
-    %      CR/facts/pilot.json runs.{m0-s1,m0-s2,m1-s1,m1-s2}.uh_cmaes_top2_swaps (8, 11, 7, 11 of 30)
 \end{enumerate}
+A rank-stability diagnostic is logged but steers nothing (\cref{app:tuning}).
 
 % src: train.py Trainer._validate (best_so_far + xfavorite on val cells, ks = range(3)), run (val_due
 %      every --val-every 5 generations); CR/runs/phase2/MANIFEST.json args --val-every 5 --val-replicates 3
-Every 5 generations, \code{lr-train} scores two candidates on all 14 validation cells with
+Every 5 generations, the tuning harness scores two candidates on all 14 validation cells with
 replicates $\krep = 0,1,2$ ($\Kval = 3$): the best train sample so far and the mean of the CMA-ES
 distribution. The mean is included because it is not itself chosen by a noisy train score. The
 run keeps the higher-scoring validated candidate as its selection (\cref{sec:selection}).
-\Cref{alg:train} summarizes one run.
-
-\begin{algorithm}[t]
-\caption{Tuning one policy (\code{lr-train}, one restart). Every policy, learned or baseline, runs
-  this with the same $\budget$, $\popsize$, $\Krep$, cells, validation schedule and selection rule.}
-\label{alg:train}
-\begin{algorithmic}[1]
-\Require space (bounds, pins, $\sigmazero$, cap), start $\searchvec_0$, seed, cells $\Cset{train}$
-  and $\Cset{val}$
-\State initialize CMA-ES at $\searchvec_0$ with step size $\sigmazero$ and population $\popsize$
-\State $\textit{best} \gets \bot$; \quad $\textit{selected} \gets \bot$
-\For{$\gen = 0, 1, \dots, \budget/\popsize - 1$}
-  \State $\Kset{\gen} \gets \{(\gen\Krep + i) \bmod \Kpool : i < \Krep\}$
-  \State sample candidates $\searchvec_1,\dots,\searchvec_{\popsize}$; checkpoint \Comment{\code{ask}}
-  \State replay every candidate and $\piref$ on $\Cset{train} \times \Kset{\gen}$; check CRN coverage
-  \State compute $\Jobj$ per candidate (\cref{eq:objective}); a failed one gets the worst finite $\Jobj$ $-1$
-  \State update CMA-ES with fitness $-\Jobj$ \Comment{\code{tell}}
-  \State $\textit{best} \gets$ the candidate with the highest $\Jobj$ seen so far
-  \State re-score the top 2 on $\Cset{train} \times \Kset{\gen+1}$; log rank changes \Comment{diagnostic only}
-  \If{$(\gen + 1) \bmod 5 = 0$}
-    \State score \textit{best} and the CMA-ES mean on $\Cset{val} \times \{0,1,2\}$
-    \State $\textit{selected} \gets$ the validated candidate with the highest score so far
-  \EndIf
-  \State checkpoint (CMA-ES state and random state)
-\EndFor
-\State \Return \textit{selected}, and \textit{best} for reference
-\end{algorithmic}
-\end{algorithm}
+\Cref{alg:train} in \cref{app:tuning} summarizes one run.
+% prov: lr-train
 
 \subsection{Restarts and initial points}
 \label{sec:restarts}
 
-% src: CR/facts/phase2_prep.json decisions[0], m1_inits.restart_to_wave; CR/runs/phase2/MANIFEST.json
-%      (seed = restart, wave = restart for tier A); CR/facts/gate.json full_plan.scheduling
-Each tuned policy runs $\restarts = 3$ restarts with CMA-ES seeds 1, 2 and 3. Restart 1 of every
-policy runs in the first wave, restart 2 in the second and restart 3 in the third, so a compute cut
-at any point removes the same restart from every policy. Baselines start every restart at their shipped defaults; only the seed
-differs. M1's three restarts start from three different points, all computed from train-split
-data only (Amendment A11.1; \cref{tab:m1-space}).
+% src: CR/facts/phase2_prep.json decisions[0], m1_inits; CR/runs/phase2/MANIFEST.json (seed = restart)
+Each tuned policy runs $\restarts = 3$ restarts with CMA-ES seeds 1, 2 and 3. Baselines start
+every restart at their shipped defaults; only the seed differs. M1's three restarts start from
+three different points, all computed from train-split data only (\cref{tab:m1-space};
+\cref{app:tuning} gives the fits and their rationale).
+% prov: A11.1 (multi-start initialization); the wave schedule moved to app:tuning.
 \begin{description}
   \item[s1] $\theta = -\basis{0}$, the default router.
-  \item[s2] A behavior clone of \policy{llm-d-precise-prefix}, the best of the untuned heuristics
-    evaluated on validation in the pilot. It is the conditional-logit maximum-likelihood fit to that
-    heuristic's choices: with $\Pr[i \mid \cand] \propto \exp(\theta^{\top}\fvec_i)$ over
-    reconstructed candidate tables, it maximizes the mean over cells of the mean log-probability of
-    the worker the heuristic chose, with $\theta_0$ pinned at $-1$ and $\theta_1,\dots,\theta_7$ held
-    inside M1's box. The problem is convex and bounded and is solved by L-BFGS-B. The data are the
-    heuristic's own replays at shipped defaults on all 34 train cells, replicate 0: \num{144048}
-    decisions in a stride sample of each cell. The fit chooses the heuristic's worker on 0.875 of
-    these decisions (0.866 and 0.883 in a two-fold split by cell), against 0.512 for the default
-    rule $\theta = -\basis{0}$, and no coefficient sits at its bound.
-    % src: CR/runs/phase2/scripts/bc_fit.py (docstring: model, pinning, bounds, L-BFGS-B, equal cell
-    %      weights, stride sampling); CR/facts/phase2_prep.json m1_inits.s2_fit (decisions 144048, cells 34,
-    %      agreement_in_sample 0.8748, agreement_cv_2fold_by_cell 0.8659/0.8827, agreement_theta0_default_rule
-    %      0.5121, at_bound []); CR/facts/pilot.json mde.learned_vs_val_best_default_arm_heuristic.comparator
-  \item[s3] A cache-heavy point: $\theta_1 = 3 \times 25.6 = 76.8$ and $\theta_6 = 2 \times 21.2 =
-    42.4$, so that across a candidate set the overlap term spreads three times and the
-    session-affinity term twice as widely as the anchor, with all other free coefficients 0, so
-    load enters only through the anchor. It targets the agent workloads on which the pilot's M1
-    trailed the cache-aware heuristic (by $-0.019$ in mean clipped log-ratio on AgentX, \prelim).
-    It was preferred to a fit to the second-best heuristic family because \policy{lmetric}'s
-    product of uncached tokens and load is not representable with \code{v1} features, and a fit to
-    \policy{ramjet} would be another linear cache-minus-load score close to s2.
-    % src: CR/facts/phase2_prep.json m1_inits.s3 (theta, why), decisions[7]; CR/facts/pilot.json
-    %      validation_vs_best_heuristic.llm-d-precise-prefix.M1_tuned.by_family_mean_clipped_log_ratio.agentx
-    %      (-0.01898); CR/literature/LESSONS.md LR-07 action 3
+  \item[s2] A behavior clone of \policy{llm-d-precise-prefix}: the conditional-logit
+    maximum-likelihood fit to that heuristic's choices on train decisions.
+  \item[s3] A cache-heavy point aimed at the agent workloads (AgentX), on which the pilot's M1
+    trailed the cache-aware heuristic.
 \end{description}
-
-% src: CR/facts/phase2_prep.json m1_inits.{s2,s3}.one_step_flips_vs_theta0 (0.4645, 0.4198),
-%      s2_vs_s3_one_step_disagreement (0.1096), s3.agreement_with_precise_prefix (0.8722),
-%      s2_fit.caveat, s2_fit.sensitivity_hash_aware_overlap (agreement 0.7847, theta1 40.3),
-%      s2_agreement_by_family (agentx 0.797, mooncake 0.914, sessions 0.865)
-On one-step decisions, s2 and s3 differ from the default rule on 46\% and 42\% of requests and from
-each other on 11\%. The clone's agreement should be read with the reconstruction's bias in mind:
-overlap is exact only for the chosen worker, which favors overlap-heavy rules. With a hash-aware
-reconstruction the fit agrees on 0.785 of decisions and its overlap coefficient is 40 instead of
-64, and the hand-set point s3 agrees with the heuristic on 0.872, almost as often as the fit.
-Agreement is lowest on AgentX (0.797, against 0.914 on Mooncake and 0.865 on sessions).
 
 % src: CR/CONTRACT.md A11.1 ("Not extra budget"), A12; CR/facts/phase2_prep.json m1_inits.fairness,
 %      s2_fit.data ("22 fresh replays + 12 cached, 0 errors"); CR/literature/LESSONS.md LR-07
@@ -410,49 +188,21 @@ own train replays (22 fresh and 12 cached), not evaluations of M1, so every M1 r
 exactly $\budget$. Bootstrapping a policy search from existing policies is a known lever
 \citep{mao2019park}, as is initializing a richer choice model at a simpler model's maximum-likelihood
 fit \citep{seshadri2019cdm}. The starts still give M1 information that a baseline's restarts do
-not have, namely another policy's decisions. The operator approved them with disclosure
-(Amendment A12): the test also reports \emph{M1-default-init}, M1 selected over restart s1 alone
-(\cref{sec:secondary}).
+not have, namely another policy's decisions. We disclose this and also report M1 selected over its
+default-router start alone (\cref{sec:secondary}).
+% prov: A12 ("The operator approved them with disclosure (Amendment A12): the test also reports
+%      M1-default-init, M1 selected over restart s1 alone")
 
 \paragraph{Other learned arms.}
-% src: CR/runs/phase2/MANIFEST.json (m2r2-*, m1cont-* tier B: warm start (theta*_M1, p = 0), context
-%      CMA_stds about 0.3x theta's; budget 400, 3 seeds); CR/CONTRACT.md A15 (M1-noaff: theta_6 pinned 0,
-%      same multi-start inits, 3 restarts at B = 400, post-hoc theta_6 = 0 check on val k0-2), A16.2 (AIS
-%      league: 3 restarts at B = 400, selected on val k0-2), A17.1 (M1-v2 inits)
-\Cref{tab:ladder} lists the other learned arms. Each is trained like M1, with $\budget = 400$,
-three restarts, the same cells and the same selection rule; they differ in their spaces and starting
-points, and all of them ran to completion.
-\begin{itemize}
-  \item \textbf{M2 rank 2 and M1 continued.} M2 starts at the selected M1 coefficients with $p = 0$
-    and context step sizes 0.3 times $\theta$'s; its two named sources, \code{isl\_k} and
-    \code{mean\_active\_prefill\_tokens\_k}, were fixed before any M2 evaluation, and $\theta_7$ is
-    pinned at 0 because the (\code{isl\_k}, feature 3) context entry duplicates it. It is compared
-    with M1 continued from its selected point for the same added 400 evaluations (LR-15).
-  \item \textbf{M1-noaff.} M1's three starts with $\theta_6$ pinned at 0; a further check, without
-    retraining, zeroes $\theta_6$ in the selected M1 (Amendment A15).
-  \item \textbf{M1-v2.} Coefficients 0 to 7 keep M1's bounds, so M1-v2 nests M1; coefficients 8 to
-    22 are bounded at four times their scale ratio, measured on candidate tables reconstructed from
-    the default router's train replays. $\sigmazero = 0.0028$ flips 19.6\% of decisions at the s1
-    start, the rate M1's space has at its own $\sigmazero$. The starts are s1, $\theta = -\basis{0}$;
-    s2, the behavior clone of \policy{llm-d-precise-prefix} refit on \code{v2} features (with
-    \code{hash\_home} pinned at 0 in the fit, because its offline reconstruction is approximate);
-    and s3, \policy{lmetric}'s representable point
-    $\theta = -\basis{0} - 20.7\,(\basis{\text{\code{log\_ptok}}} + \basis{\text{\code{log\_bs}}})$,
-    90\% of the bound on those coordinates, which agrees with the pure LMetric rule on 0.924 of
-    reconstructed decisions (Amendment A17.1).
-  \item \textbf{M1 with a queue threshold} (ablation a). M1 continued's space plus
-    \code{router\_queue\_threshold} on a log scale from 0.25 to 256, starting at 32, a value that
-    replays identically to the unset knob on every train cell; its baseline counterpart tunes the
-    same knob on top of the best baseline's selected configuration.
-  \item \textbf{\ais{} league.} M1-ais and M2-ais on feature set \code{v3}, M0 with the \ais{}
-    prefill-load model, and \policy{llm-d-optimized-baseline} with modeled TTFT are trained the same
-    way on their own build and compete only in a secondary leaderboard (Amendment A16,
-    \cref{sec:res-ais}).
-\end{itemize}
-% src: CR/facts/tierBC.json decisions.m2_rank2 (sources, form, warm_start), m1_continue, m1_noaff,
-%      m1_v2 (bounds, sigma0 0.0028 = flip rate 0.196, inits; s3 "-e0 - 20.7 (e_log_ptok + e_log_bs),
-%      90% of bound_8 (agreement 0.924 with the pure LMetric rule)"), ablation_a (q log [0.25, 256],
-%      start 32, identity check), ais_league; counts "done 30"
+% src: CR/runs/phase2/MANIFEST.json (m2r2-*, m1cont-*, budget 400, 3 seeds); CR/facts/tierBC.json
+%      decisions.m1_v2 (s3 "-e0 - 20.7 (e_log_ptok + e_log_bs), 90% of bound_8 (agreement 0.924 with
+%      the pure LMetric rule)"); counts "done 30"; CR/CONTRACT.md A17.1 (M1-v2 inits)
+\Cref{tab:ladder}'s other arms are trained like M1, with the same budget, restarts, cells and
+selection rule; they differ in their spaces and starting points, and all of them ran to completion
+(\cref{app:tuning}). M1-v2's three starts are the default, a behavior clone refit on \code{v2}, and
+\policy{lmetric}'s representable point scaled to 90\% of the bound, which agrees with the pure
+LMetric rule on 0.924 of reconstructed decisions.
+% The AIS-league bullet (training 447-450 at the base revision) moved to appendix-ais-league.tex (W5).
 
 \subsection{Sign constraints on load coefficients}
 \label{sec:sign-constraint}
@@ -460,31 +210,18 @@ points, and all of them ran to completion.
 % src: CR/audits/phase2-mid/gaming-concentration.md F1; CR/audits/phase2-mid/fix.md ("Constraint",
 %      "How (a clamp, not a box bound)", "Inits", "Equal footing"); CR/facts/tierBC.json decisions
 %      (m1_v2 sign_rule, m2_rank2 sign_rule, ais_league sign_rule); CR/CONTRACT.md A11.2
-The midpoint audit found that the first tuned M1 gamed the objective by attracting long requests
-to a busy worker (\cref{sec:gaming}), which triggered a remedy registered in advance (Amendment
-A11.2): re-run the affected restarts with load coefficients constrained so that load cannot
-attract, at the same budget. With $\theta_0$ pinned at $-1$, the minimal such set for \code{v1} is
+An audit midway through tuning found that the first tuned M1 gamed the objective by attracting long
+requests to a busy worker (\cref{sec:gaming}), which triggered a remedy registered in advance:
+re-run the affected restarts with load coefficients constrained so that load cannot attract, at
+the same budget. With $\theta_0$ pinned at $-1$, the minimal such set for \code{v1} is
 $\theta_3, \theta_4, \theta_5, \theta_7 \le 0$ (active prefill, KV load, active requests and the
 prompt-length-by-prefill interaction), so that no load signal adds utility for any prompt length.
-\begin{itemize}
-  \item \textbf{A clamp, not a box bound.} The restarts s1 and s3 start with those coefficients at
-    0, which on a box bound of 0 would sit on the edge of pycma's boundary transform, where its
-    slope is zero and the first generation's steps on those coordinates shrink by about two orders
-    of magnitude. The space therefore keeps the original box and clamps the decoded value,
-    $x = \min(x, 0)$. CMA-ES searches the identical internal space, start, step size and seed as the
-    unconstrained run, and generation 0 asked the same internal points; only the decoded policies
-    differ.
-  \item \textbf{Starts.} s1 and s3 already satisfy the constraint. The behavior clone s2 did not
-    (its $\theta_3$ and $\theta_4$ were positive, so decode load attracted above about 24K tokens),
-    so it was projected onto the constraint; its agreement with the cloned heuristic stayed at 0.879.
-  \item \textbf{Later arms.} Every later learned arm uses the same rule: M1-v2 clamps every
-    load-ordered feature (3, 4, 5, 7, 8, 10 and 12 to 21), M2 also clamps the load columns of its
-    context directions so that every effective load weight stays non-positive, and the \ais{} league
-    clamps its load and backlog features.
-  \item \textbf{Equal footing.} The re-runs used the same seeds, budget, cells, replicates,
-    validation schedule and objective; the unconstrained runs are kept as a disclosed,
-    gaming-flagged secondary row.
-\end{itemize}
+% prov: "The midpoint audit" (phase-2 midpoint); Amendment A11.2
+Every later learned arm uses the same rule, extended to its own load features and context
+directions, and the constraint is a clamp on the decoded value rather than a box bound
+(\cref{app:tuning}). The re-runs used the same seeds, budget, cells, replicates, validation
+schedule and objective; the unconstrained runs are kept as a disclosed secondary row, flagged for
+gaming.
 
 \subsection{Selection}
 \label{sec:selection}
@@ -498,17 +235,20 @@ upward by the search itself by an amount comparable to the differences being mea
 \begin{enumerate}
   \item \textbf{Within a policy.} A policy's configuration is the validated candidate with the
     highest validation objective ($\krep = 0,1,2$) over its three restarts: two candidates at each
-    of five checkpoints per restart, up to 30 per policy. \code{best.json} keeps the best train
-    sample beside the selection, for reference only.
+    of five checkpoints per restart, up to 30 per policy. The best train sample is kept only for
+    reference (\cref{alg:train}).
+    % best.json is the file that keeps it (restructure round 1, E2: file name dropped from the text).
   \item \textbf{Across policies.} The best baseline $\pibase$ is the tuned baseline whose selected
     configuration has the highest mean clipped log-ratio against $\piref$ on \emph{fresh} validation
     replicates $\krep = 3,\dots,10$. The headline learned policy $\pilearn$ is chosen by the same
     rule among the router-observable learned arms (M1, M2, M1-noaff, M1-v2 and any later learned
-    arm; Amendment A17.2). No within-policy selection reads replicates 3 to 10, so the cross-policy
+    arm). No within-policy selection reads replicates 3 to 10, so the cross-policy
     choice is not made on the scores that picked each configuration.
+    % prov: Amendment A17.2 (the headline-arm rule)
 \end{enumerate}
 Every learned variant scored on validation is counted, and the number of learned arms compared is
-reported with the headline (LR-11).
+reported with the headline.
+% prov: LR-11
 
 \subsection{Equal budget}
 \label{sec:budget}
@@ -519,98 +259,39 @@ reported with the headline (LR-11).
 Every tuned policy, learned or baseline, gets the same resources: $\budget = 400$ objective
 evaluations per restart on all 34 train cells with $\Krep = 2$ replicates, $\popsize = 16$, three
 restarts, five validation checkpoints of two candidates on 14 cells with $\Kval = 3$, the same
-reference and objective, and the same selection rule. The orchestrator verifies that every finished
-run spent exactly 400 evaluations and five validation checkpoints; the re-evaluation diagnostic is
-outside this check because a wall-clock chunk can skip it. No run starts from the pilot's tuned
-configurations, which would give M0 and M1 the pilot's 480 evaluations on top of $\budget$.
+reference and objective, and the same selection rule. Every finished run was checked to have spent
+exactly 400 evaluations and five validation checkpoints; the rank-stability diagnostic is not
+counted (\cref{app:rank-diagnostic}). No run starts from the pilot's tuned configurations, which
+would give M0 and M1 the pilot's 480 evaluations on top of $\budget$.
+% The check is the orchestrator's budget_report; why the diagnostic is outside it (a wall-clock chunk
+% can skip it) is in app:rank-diagnostic (restructure round 1, E2).
 
 Equal budget fixes what each policy may spend, not how far it can get. The spaces differ in
-dimension (2 to 22) and in how strongly decisions respond to the parameters (\cref{tab:spaces}),
-and only the learned arms start from points derived from another policy (\cref{sec:restarts}).
-Which method wins can depend on the budget \citep{dodge2019show}, so two checks ask whether any
-policy was still improving at $\budget$. No tuned baseline of tiers B, C or the \ais{} league was
-selected at its last validated generation; the learned arms selected there had gained 0.0001 to
-0.0033 over the last validation interval, at most 0.09 of the MDE. And an auditor's validation-oracle
-probes, which deliberately favor the baselines, found no headroom: 38 \policy{ramjet} configurations
-around all three restarts' bases reached at most 0.1421 against the tuned 0.1420, and widened probes
-of M0 and \policy{llm-d-precise-prefix} stayed below their tuned values (0.1299 against 0.1334 and
-0.1202 against 0.1414), all far below M1-v2's 0.1767.
+dimension (2 to 22) and in how strongly decisions respond to the parameters
+(\cref{tab:baseline-spaces}), and only the learned arms start from points derived from another
+policy (\cref{sec:restarts}). Which method wins can depend on the budget \citep{dodge2019show}, so
+two checks ask whether any policy was still improving at $\budget$. In the first round of tuning,
+four baselines, \policy{llm-d-precise-prefix}, \policy{ramjet} and both \policy{sticky-session}
+variants, were selected at their last validated generation, having gained 0.0001 to 0.0030 over the
+last validation interval, at most 0.078 of the minimum detectable effect (MDE,
+\cref{sec:headline}).
+% src: CR/runs/phase2/checks/improving_at_cutoff_i6.json (selected_at_last_gen llmdpp, ramjet,
+%      stickybounded, stickyhard; policy_gain_last_interval 0.00203, 0.000128, 0.00296, 0.00223;
+%      policy_gain_over_mde 0.053, 0.0034, 0.078, 0.058; MDE 0.03815); restructure round 1, P1
+No baseline tuned after the first round (the queue-threshold ablation's baseline arm and the two
+baselines of the \ais{}-informed league) was selected at its last validated generation; the later
+learned arms selected there had gained 0.0001 to 0.0033 over the last validation interval, at most
+0.09 of the MDE. And an
+auditor's validation-oracle probes, which deliberately favor the baselines, found no headroom: 38
+\policy{ramjet} configurations around all three restarts' bases reached at most 0.1421 against the
+tuned 0.1420, and widened probes of M0 and \policy{llm-d-precise-prefix} stayed below their tuned
+values (0.1299 against 0.1334 and 0.1202 against 0.1414), all far below M1-v2's 0.1767.
+% prov: "No tuned baseline of tiers B, C or the AIS league" (tierBC.json improving_at_cutoff_i9:
+%      ablabase g5, M0-ais g20, llmdobm g15)
 % src: CR/facts/tierBC.json decisions.improving_at_cutoff_i9 (0.0001-0.0033, at most 0.086 x MDE);
 %      CR/audits/final/refute-headline-2.md ("baselines not under-tuned (val-oracle ceilings: ramjet 38
 %      configs incl. all 3 bases max 0.1421 vs tuned 0.1420; M0 20 widened configs max 0.1299 vs 0.1334;
 %      llmdpp 12 widened max 0.1202 vs 0.1414; all << M1-v2 0.1767)"), via CR/facts/STATE.md
 
-\subsection{Drift check before M2}
-\label{sec:drift}
-
-% src: CR/runs/phase2/MANIFEST.json drift-{l1,l3,n4,n8} (96 evals, --val-every 3, cell/val filters);
-%      CR/facts/DEVIATIONS.md 2026-10-03 "LR-15 drift runs use 96 evaluations"; p2orch.py drift_matrix
-%      (val k3-10, loss = matrix[b][b] - matrix[a][b], within_mde rule, mde 0.038);
-%      train subset sizes from CR/cells/train.jsonl (L1 6, L3 8, N4 18, N8 16 cells);
-%      CR/facts/gate.json full_plan.cut_order_if_over[4]; CR/CONTRACT.md A17.3; LESSONS.md LR-15
-A context term can help only if the best coefficients change with the regime (LR-15). Before M2,
-M1 is tuned at a quarter of the budget on each of four train subsets: L1 cells only (6 cells), L3
-only (8), $\Nw = 4$ only (18) and $\Nw = 8$ only (16). The quarter budget is 96 evaluations, six
-whole generations, because 100 is not a multiple of 16. Each run validates every 3 generations on
-the matching validation cells and selects on $\krep = 0,1,2$. Each selected model is then scored
-on every regime's validation cells with fresh replicates $\krep = 3,\dots,10$. The cross-play loss
-of the model tuned on regime $a$, evaluated on regime $b$, is the mean clipped log-ratio against
-$\piref$ of $b$'s own model on $b$'s validation cells minus that of $a$'s model; the pairs are L1
-and L3, and $\Nw = 4$ and $\Nw = 8$. The gate planned to deprioritize M2 if all four losses lay
-within the MDE of 0.038. Amendment A17 later made M2 at rank 2 mandatory, so the check no longer
-decides whether M2 trains; it is reported as evidence for or against context terms. It came out
-inconclusive, with no evidence of drift (\cref{sec:context}).
-
-\subsection{Compute and numerics}
-\label{sec:compute}
-
-% src: CR/CONTRACT.md A9, A10; CR/facts/phase2_prep.json targets_at_start (10 remote nodes plus the
-%      workstation); CR/facts/STATE.md phase2-prep (early generation walls on EPYC 9654P and EPYC 7702P
-%      nodes), tier-B/C relays i6-i9 (about 300 s and about 610-690 s per generation; ingest counts),
-%      phase2-mid fix (constrained M1 re-runs 4 h 24 min to 4 h 31 min); CR/audits/phase2-mid/fix.md
-Replays run on CPUs: locally through a pool of 20 slots, and on a pool of shared CPU nodes, one
-tuning run per node; the first wave started on 10 remote nodes and the workstation. A generation
-took 225 to \SI{333}{s} early in phase~2, and about \SI{300}{s} later, on a 96-core EPYC 9654P node,
-and 610 to \SI{690}{s} on a 64-core EPYC 7702P node; the three sign-constrained M1 re-runs took
-4\,h~24\,min to 4\,h~31\,min each on the latter. Phase 2 ran 66 restarts of 400 evaluations in
-total (tiers A and B, the ablation and the \ais{} league), and each run whose ingest the stage log
-records stored between \num{30199} and \num{30792} result records. The single test pass added
-\num{5220} records on the tuning build and 900 on the \ais{} build, and the robustness pass
-\num{23940} (\cref{sec:res-robustness}). Replay-seconds for phase 2 were not totaled.
-% src: CR/facts/test_results.json execution.evaluated_once (5,220 + 900); CR/facts/robustness.json
-%      execution.records (lag 10,800 + lag-0 900 + timing 4 x 3,060 = 23,940; coverage[*].records sum to the same)
-
-% src: CR/facts/remote.json summary, parity.totals (6,312 records, 48,901,384 rows), caveats[3]
-%      (numerics host-dependent; pins equal workstation defaults; 60/60 generations),
-%      parity.lr_train.numerics_check (EPYC 9654P default: first diff at generation index 0; pinned,
-%      and EPYC 7702P: 60/60 identical; fake objective, budget 720, popsize 12), parity.lr_train.pinned_on_epyc_9654p
-%      (best.json, best_policy.yaml, identity.json identical; history identical except gen_wall_s);
-%      environment.lr_train_numerics_pin; WT/benchmarks/learned_routing/remote/node_train.sh:73-76
-Runs move between machines, so a run must continue bit-exactly on any host. Two things depend on
-the host. Replay results depend on the operating system's math library, so every distinct node
-image was checked against the workstation before use: across \num{6312} remote records, every field
-matched, and \num{48901384} per-request rows matched byte for byte. CMA-ES's own linear algebra
-depends on numpy's and OpenBLAS's CPU dispatch. In a 60-generation \code{lr-train} run on a
-synthetic objective without replays, an EPYC 9654P node with default settings diverged from the
-workstation in the last bits from the first generation, and matched it in all 60 generations once
-three environment variables pinned OpenBLAS to a single thread and core type and disabled numpy's
-AVX-512 code paths; the pinned values equal the workstation's defaults. With the pins, two short
-real \code{lr-train} runs on that node reproduced the workstation's history (apart from wall-clock
-fields), \code{best.json} and \code{best\_policy.yaml} exactly.
-
-% src: train.py module docstring ("checkpoint.pkl is written twice per generation ... stores the pycma
-%      object and numpy's global RNG state"), Trainer._load_state (identity check); CR/facts/STATE.md
-%      audit(build/harness-robustness-splits r0) ("lr-train kill -9 x3 resume bit-identical (history,
-%      best, CMA state, continuation)")
-\code{lr-train} writes its checkpoint twice per generation, after sampling and after the update,
-including the CMA-ES object and numpy's random state, so a resumed run continues exactly as an
-uninterrupted one would; an audit killed a run three times and found its history, selection,
-CMA-ES state and continuation identical. A run refuses to resume if its space, cells, reference,
-objective or seeds have changed.
-
-% src: CR/facts/gate.json full_plan.cut_order_if_over[6]; CR/facts/pilot.json
-%      measurements.subset_vs_full_objective (spearman 0.947, 16 candidates)
-If compute ran short, the last resort in the gate's cut order is to score each generation on a
-rotating 12-cell subset of the train cells, for every policy of a wave alike. On the 16 candidates of
-one pilot generation, subset and full-train objectives had a Spearman correlation of 0.947
-(\emph{preliminary (pilot, train subset)}).
+The drift check that preceded M2, and the compute and numerics behind these runs, are in
+\cref{sec:drift,sec:compute}.

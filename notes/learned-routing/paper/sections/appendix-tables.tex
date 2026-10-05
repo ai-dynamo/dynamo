@@ -1,29 +1,55 @@
 % SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 % SPDX-License-Identifier: Apache-2.0
 %
-% ROLE: full generated tables that the body shows in part. Every table here is copied from the final
-%   report's fragments (CR/report/data/tables/*.md) by scripts/make_tables.py; nothing is computed here.
+% ROLE: full generated tables that the body shows in part, and the selected-row generated tables the
+%   body cites (tab:N-ramjet and tab:family-ramjet moved here from sec:results). Every table here is
+%   copied from the final report's fragments (CR/report/data/tables/*.md) by scripts/make_tables.py;
+%   nothing is computed here. Reader-facing provenance is stated once, in app:repro.
 
 \section{Full result tables}
 \label{app:tables}
 
-The tables in this appendix are generated from the final report's table fragments, like those in
-\cref{sec:results}. Intervals are 95\% segment-bootstrap intervals ($\dagger$: within-segment cell
-bootstrap for strata with fewer than three segments); only the headline row of
-\cref{tab:leaderboard-full} is a test.
+This appendix holds the full result tables that \cref{sec:results} shows in part.
+\Cref{tab:leaderboard-full} gives every test policy. For selected policies,
+\cref{tab:N-ramjet,tab:N-default} break the result down by worker count,
+\cref{tab:family-ramjet,tab:family-default} by family, \cref{tab:mode} by load mode and
+\cref{tab:holdout} by hold-out stratum. \Cref{tab:coef-v1} gives the coefficients of the
+\code{v1} learned arms, \cref{tab:secondary-full,tab:secondary-full-b} the secondary metrics of
+\cref{sec:gaming}, and \cref{fig:profiles} the performance profiles. Intervals are 95\%
+segment-bootstrap intervals ($\dagger$: within-segment cell bootstrap for strata with fewer than
+three segments); only the headline row of \cref{tab:leaderboard-full} is a test.
 
 \input{generated/leaderboard_full}
 
 \begin{table}[htbp]
   \centering
-  \caption{By worker count, against $\piref$ (generated; selected rows).}
+  \caption{By worker count, against tuned \policy{ramjet} (selected rows). Segment means
+    with 95\% intervals. Cells (segments) per $\Nw$: 2: 8 (6); 4: 13 (7); 6: 7 (6),
+    selection-exposed; 8: 17 (8); 16: 7 (6); 32: 8 (6). \Cref{tab:N-default} gives the same against
+    $\piref$.}
+  \label{tab:N-ramjet}
+  \input{generated/N_vs_ramjet}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{By worker count, against $\piref$ (selected rows).}
   \label{tab:N-default}
   \input{generated/N_vs_default}
 \end{table}
 
 \begin{table}[htbp]
   \centering
-  \caption{By family, against $\piref$ (generated; selected rows).}
+  \caption{By family, against tuned \policy{ramjet} (selected rows). Each family has 2 to
+    4 segments, so these are descriptive; $\dagger$ marks the within-segment cell bootstrap.
+    \Cref{tab:family-default} gives the same against $\piref$.}
+  \label{tab:family-ramjet}
+  \input{generated/family_vs_ramjet}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{By family, against $\piref$ (selected rows).}
   \label{tab:family-default}
   \input{generated/family_vs_default}
 \end{table}
@@ -31,7 +57,7 @@ bootstrap for strata with fewer than three segments); only the headline row of
 \begin{table}[htbp]
   \centering
   \caption{By load mode, against tuned \policy{ramjet} (top) and against $\piref$ (bottom)
-    (generated; selected rows).}
+    (selected rows).}
   \label{tab:mode}
   \input{generated/mode_vs_ramjet}
 
@@ -42,7 +68,7 @@ bootstrap for strata with fewer than three segments); only the headline row of
 \begin{table}[htbp]
   \centering
   \caption{Hold-out strata, against tuned \policy{ramjet} (top) and against $\piref$ (bottom)
-    (generated; selected rows).}
+    (selected rows).}
   \label{tab:holdout}
   \input{generated/holdout_vs_ramjet}
 
@@ -53,8 +79,8 @@ bootstrap for strata with fewer than three segments); only the headline row of
 \begin{table}[htbp]
   \centering
   \caption{Coefficients of the \code{v1} learned arms, $\theta_f$ (with $\theta_f\,\mathrm{sd}_f$ in
-    parentheses); $\theta_0 = -1$ throughout (generated). M2 rank 2 also has a context term, whose
-    directions are in the finalists file.}
+    parentheses); $\theta_0 = -1$ throughout. M2 rank 2 also has a context term, which the table
+    omits.}
   \label{tab:coef-v1}
   \input{generated/coef_v1}
 \end{table}
@@ -65,8 +91,10 @@ bootstrap for strata with fewer than three segments); only the headline row of
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=0.6\linewidth]{performance_profiles}
-  \caption{Performance profiles over the 60 test cells (copied from the final report): the fraction
+  \input{generated/fig_profiles}
+  % src: CR/report/data/report_data.json performance_profiles.<policy> (per-cell
+  %      scores), drawn by scripts/make_figures.py (formerly fig/performance_profiles.png, report F8)
+  \caption{Performance profiles over the 60 test cells: the fraction
     of cells on which a policy's clipped log-ratio against $\piref$ exceeds $\tau$. Cells are not
     independent, so the profiles are descriptive.}
   \label{fig:profiles}

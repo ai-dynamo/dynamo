@@ -1,0 +1,378 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: the implementation details of learned-choice that sec:model summarizes, so that sec:model
+%   plus this appendix let a router engineer reimplement the policy: provider, inputs and parsing
+%   (fig:yaml), cost per decision, the two leakage audits, porting notes, per-feature details and
+%   the hash_home key, the decision algorithm (alg:decide) and draw disciplines, the context
+%   sources (tab:sources) and the named-versus-pooled form, set-size and parity test details, the
+%   nested-logit option (sec:nested) and the sticky-session policies (sec:sticky).
+%   Moved here from sections/model.tex in the 2026-10-05 restructure; facts unchanged.
+% EVIDENCE: WT/lib/router-plugins/builtin/src/learned_choice/{FEATURES.md,features.rs,mod.rs,
+%   parameters.rs,tests.rs}; WT/lib/router-plugins/builtin/src/{choice.rs,session_map.rs,
+%   sticky_session.rs}; WT/lib/router-plugins/builtin/src/default/{scorer.rs,picker.rs};
+%   WT/lib/kv-router/src/plugins/worker_selection.rs; CR/facts/integration.json parity;
+%   CR/facts/build_rust.json (tests, smoke); CR/audits/build/leakage-features-r{0,1}.md;
+%   CR/CONTRACT.md (learned-choice, sticky-session); CR/literature/LESSONS.md LR-03, LR-05,
+%   LR-06, LR-15; CR/facts/pilot.json feature_scaling; WT/notes/learned-routing/campaign/PLAN.md
+%   "Learned model ladder".
+
+\section{Policy implementation details}
+\label{app:policy}
+
+This appendix collects the implementation details of \lc{} that \cref{sec:model} summarizes.
+Together with that section it specifies the policy completely enough to reimplement it; both follow
+the policy's normative specification, \file{FEATURES.md}.
+
+\subsection{Integration, inputs and parameters}
+
+% src: WT/lib/kv-router/src/plugins/worker_selection.rs (WorkerScorer, WorkerPicker, factory per
+%      partition); WT/lib/router-plugins/builtin/src/learned_choice/mod.rs (policy, provider, register)
+A provider deserializes and validates the parameters once at startup and returns a factory that
+builds one policy instance per routing partition and worker role; each instance owns its random
+generator and its session map.
+
+% src: learned_choice/mod.rs (required_worker_inputs = CACHE | LOAD); features.rs (accessors used)
+The picker declares the plugin inputs \code{CACHE} and \code{LOAD}. Per request it reads the
+prompt length $\ISL_j$, the request block count $\reqblocks_j$, the block size, the prefix block
+hashes (feature set \code{v2} only) and the session identifier, if any. Per candidate
+$i \in \cand$ it reads the router's cache estimate (overlap blocks $\ovl_i$ and estimated cached
+tokens $\hit_i$), the router's own load tracking (active prefill tokens $\Lpf_i$, decode cost
+blocks $\Ldec_i$ including this request's new blocks, active requests $\Lreq_i$) and the
+configured KV capacity $\capb_i$ in blocks. Host pins and eligibility always win: a pinned request
+goes to its pinned worker, and only eligible workers are candidates.
+
+% src: learned_choice/parameters.rs (deny_unknown_fields, validate); FEATURES.md "Parameters";
+%      CR/facts/build_rust.json tests.coverage_map (21 invalid, 5 valid specs);
+%      CR/facts/STATE.md audit(build/leakage-features r1) ("67 malformed specs rejected at resolution, 15 valid accepted")
+The coefficients are ordinary parameters in the policy YAML (\cref{fig:yaml}). Parsing is
+strict: unknown keys at any level, a vector of the wrong length, a non-finite coefficient, a
+negative or non-finite temperature, a context with both pooled and named forms, a context
+direction without either, an unknown or repeated context source, and \code{max\_sessions: 0} all
+fail at startup with a message naming the problem. The unit tests check 21 invalid and 5 valid
+specifications through the same registry path the Python bindings use, and an independent audit
+of the implementation checked 67 invalid and 15 valid ones.
+% prov: "the build audit" (CR/audits/build/)
+
+\begin{figure}[tbp]
+\small
+\begin{verbatim}
+worker_selection:
+  aggregated: candidate
+  instances:
+    - name: candidate
+      type: learned-choice
+      parameters:
+        feature_set: v1
+        theta: [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # = default router
+        temperature: 0.0
+        tie_break: one_draw
+        seed: 1              # replay sets k + 1; omit in production
+        # M2 adds a named context term:
+        # context:
+        #   sources: [<source 1>, <source 2>]
+        #   p: [[8 floats], [8 floats]]
+\end{verbatim}
+\caption{A \lc{} policy YAML at the parity anchor $\theta = -\basis{0}$ (restart s1). The same
+  file is a replay input and a live router configuration; unknown keys and wrong vector lengths
+  fail at startup. The selected M1-v2 file has 23 coefficients (\cref{sec:res-coefficients}).}
+\label{fig:yaml}
+\end{figure}
+% src: FEATURES.md "Parameters"; WT/benchmarks/learned_routing/learned_routing/replicates.py
+%      (policy_seed(k) = k + 1); runs/phase2/spaces/m1_learned_v1.yaml (base parameters)
+
+\subsection{Cost per decision}
+
+% src: learned_choice/mod.rs (decide: table.compute, effective_weights, dot per row);
+%      choice.rs (Chooser::begin sorts rows by worker); features.rs (set_relative sorts, hash_home);
+%      session_map.rs (HashMap + BTreeMap LRU); FEATURES.md "Utility and decision" ("O(N·d + r·d)")
+The picker fills an $|\cand| \times \dfeat$ feature table, folds the context into one effective
+weight vector ($\rank\dfeat$ operations), takes one dot product per candidate and makes one pass
+for the maximum. Before that it sorts the candidates by worker ID, which fixes the visiting order
+(\cref{sec:utility}). A decision therefore costs $O(\Nw\dfeat + \rank\dfeat)$ arithmetic plus an
+$O(\Nw\log\Nw)$ sort; feature set \code{v2} adds three more sorts and $\Nw$ rendezvous hashes.
+Feature 0 is the default scorer's output, which the default router computes anyway. Apart from
+scratch buffers that are reused across decisions, the only state is the session map: at most
+\code{max\_sessions} entries (default \num{65536}), updated in logarithmic time. This study did
+not measure the per-decision latency of the Rust policy against \defaultcf{}; the bound above is
+from the code.
+
+\subsection{Leakage audits}
+
+% src: FEATURES.md "Excluded inputs"; CR/CONTRACT.md "learned-choice policy" ("Never used")
+Two independent audits checked that the policy reads neither the request's expected output length
+nor any \ais{} estimate (\cref{sec:integration}).
+% src: CR/audits/build/leakage-features-r0.md §2 (first 2,000 Mooncake rows, N=4, open loop x1;
+%      T* = 57th arrival burst, 965 decisions at or before T*, 19 in the T* burst; variants B (OSL x4
+%      at/after T*) and C (rows after T* deleted): 0/965 for lc_v1_rich_ctx, lc_v1_pooled_softmax
+%      (tau 0.3), lc_v2_rich, default_seed1, sticky_bounded; control D (OSL x4 from 26 bursts
+%      earlier): 210, 214, 282, 286, 286 decisions changed)
+The first replayed the first 2,000 requests of a Mooncake trace at $\Nw = 4$ and, from a probe
+arrival burst onward, either multiplied every output length by four or deleted the requests.
+None of the 965 decisions made up to and including the probe burst changed, for three \lc{}
+configurations (\code{v1} with a named context, \code{v1} with a pooled context at $\temp = 0.3$,
+and \code{v2}) as well as for the default and sticky-session policies. The same perturbation
+started 26 bursts earlier, as a positive control, changed 210 to 286 of those decisions.
+% src: CR/facts/STATE.md audit(build/leakage-features r1); CR/audits/build/leakage-features-r1.md
+%      ("dense random theta x {none,pooled,sources} 18,000 trials 0 mismatches"; "power 30/31 mutants
+%      detected"; "excluded inputs ... 16,000 twin decisions 0 differ (controls move 272-744)")
+The second audit reimplemented the feature map from the specification and matched the policy's
+choice in all of \num{18000} random-coefficient trials across the three context forms, detected 30
+of 31 deliberately mis-specified feature maps, and found that \num{16000} pairs of decisions that
+differed only in excluded inputs never differed in outcome (positive controls changed 272 to 744).
+
+\subsection{Porting notes}
+
+% src: CR/audits/build/leakage-features-r1.md F4 (with_exclusive_affinity overrides theta6 live),
+%      F1 (structural knobs redefine features 0/3/4/7); learned_choice/mod.rs (.with_exclusive_affinity(true));
+%      choice.rs (Chooser::new: fresh entropy without seed); FEATURES.md "Information parity with the live router"
+Three properties matter when the YAML leaves replay; \cref{sec:threats-scope} turns them into the
+settings a deployment must match. First, like the default policy, \lc{} asks
+the host to treat an eligible session-affinity target as exclusive. Replay never sets such a
+target, but a live router with session affinity enabled pins every later turn of a session to
+its target, so the decision never reaches the picker and the learned session coefficient
+$\theta_6$ is replaced by hard stickiness. Shipping the learned behavior requires host session
+affinity to be off, or accepting hard stickiness in its place. Second, the router settings that
+track prefill tokens and assume KV reuse change what features 0, 3, 4 and 7 mean (and the
+\code{v2} prefix key), so the live router must keep the values used in training. Third, without a
+\code{seed} each policy instance draws fresh entropy, so router replicas do not break ties in
+lockstep. How replay's information differs from a live router's (fresher cache state, one cache
+tier) is discussed in \cref{sec:aisim}.
+
+\subsection{Feature details}
+
+\begin{itemize}
+  \item \textbf{Cache.} Features 1 and 2 come from the router's accounting estimate. In replay
+    the effective overlap equals the device-tier overlap and cached tokens are whole blocks.
+    Feature 1 is not clamped; it stays at most 1 whenever the estimate does not exceed the prompt.
+    % src: FEATURES.md "Feature set v1" preamble and row 1
+  \item \textbf{Load.} Features 3 to 5 come from the router's own request tracking. Feature 4
+    divides by the capacity a worker advertises, or by \num{65536} blocks when it advertises none;
+    replay advertises the engine's \num{18863} blocks, so the fallback is unused here.
+    % src: FEATURES.md row 4
+  \item \textbf{Session.} Feature 6 needs state. Replay never sets the router's own affinity
+    target, so the policy keeps a bounded LRU map from session identifier to the worker it last
+    chose for that session, pinned choices included. It is 0 for every candidate when the request
+    has no session or the session is new or evicted.
+    % src: FEATURES.md row 6; session_map.rs; tests.rs a_host_pin_wins_and_rebinds_the_session
+  \item \textbf{Scales.} The features are dimensionless, but they are not on a common scale. On
+    candidate tables reconstructed from the default router's train replays in the pilot, the
+    within-set standard deviation ranged from 0.060 (\code{active\_requests\_s}) to 6.6
+    (\code{default\_logit\_scaled}); the tables are approximate, because replay does not log
+    candidate tables. \Cref{tab:m1-space} gives every feature's value.
+    % src: CR/facts/pilot.json feature_scaling.pooled_within_set_sd (default_logit_scaled 6.6074,
+    %      active_requests_s 0.060309; caveat: tables reconstructed approximately from default@defaults
+    %      per-request rows on the pilot's train subset)
+\end{itemize}
+
+% src: FEATURES.md "Feature set v2" (hash_home paragraph: session key removed after build audit F1;
+%      "On Mooncake the key takes only 4 distinct values, with about 85% of rows on two of them");
+%      CR/audits/build/leakage-features-r0.md F1
+\paragraph{The home indicator's key.}
+The \code{v2} home indicator (feature 11) keys on the prompt prefix only. An earlier version keyed
+on the session identifier when one existed, but replay gives every request of a closed-loop flat
+trace a synthetic single-use session identifier that a live client would not send, so the feature
+meant different things in open and closed loop on the same trace; the implementation audit caught
+this. Session continuity is feature 6's job. On Mooncake the prefix key takes only four distinct
+values, with about 85\% of requests on two of them, so a large positive $\theta_{11}$
+concentrates load; the evaluation audits worker shares (\cref{sec:audits}).
+
+\subsection{The decision algorithm and its random draws}
+
+\Cref{alg:decide} gives one decision in full.
+
+\begin{algorithm}[tbp]
+\caption{One \lc{} decision. Before the call, the host has fixed the eligible set $\cand$ and
+  written each candidate's default cost $\cdef_i$ at default weights. The draw discipline is
+  \code{one\_draw}; under \code{reservoir} there is no up-front draw, a tie draws once per tied
+  candidate during the scan, a sample draws one uniform, and a pin draws nothing, as in
+  \defaultcf{}.}
+\label{alg:decide}
+% Unique hyperref anchors for this algorithm's line numbers (local to the float), so they do not
+% collide with alg:train's ALG@line anchors.
+\expandafter\def\csname theHALG@line\endcsname{decide.\arabic{ALG@line}}%
+\begin{algorithmic}[1]
+\Require parameters $\theta$, sources and directions $p_1,\dots,p_{\rank}$, temperature $\temp$;
+  per-instance random generator and session map
+\Require request $j$; candidates $\cand \ne \emptyset$ with their cache, load and capacity signals
+\State \textit{draw} $\gets$ next 64-bit value of the generator \Comment{exactly one per decision}
+\State sort $\cand$ by worker ID \Comment{all later loops and sums use this order}
+\If{the host pins $j$ to a worker}
+  \State $i^{\star} \gets$ the pinned worker
+\Else
+  \State \textit{prev} $\gets$ the worker the session map holds for $j$'s session, or none
+  \State compute $\fvec_i$ for every $i \in \cand$ (\cref{tab:features}); $x_{i,6} = 1$ iff $i = $ \textit{prev}
+  \State $\weff \gets \theta + \sum_{\cidx} \ctxv_{\cand,\cidx}\, p_{\cidx}$
+  \State $\util_i \gets \weff^{\top}\fvec_i$ for every $i \in \cand$; \textbf{fail} if any is not finite
+  \If{$\temp = 0$}
+    \State \textit{tied} $\gets \{i \in \cand : \util_i = \max_{i'} \util_{i'}\}$, in sorted order
+    \State $i^{\star} \gets$ \textit{tied}$\big[\lfloor \textit{draw} \cdot |\textit{tied}| / 2^{64} \rfloor\big]$
+  \Else
+    \State \textit{target} $\gets \lfloor \textit{draw}/2^{11} \rfloor\, 2^{-53} \cdot \sum_{i} e^{(\util_i - \max_{i'}\util_{i'})/\temp}$
+    \State $i^{\star} \gets$ first $i$ whose running sum of $e^{(\util_i - \max_{i'}\util_{i'})/\temp}$ exceeds \textit{target}
+  \EndIf
+\EndIf
+\If{$j$ has a session}
+  \State session map $\gets$ ($j$'s session $\mapsto i^{\star}$); evict the least recently used entry beyond \code{max\_sessions}
+\EndIf
+\State \Return $i^{\star}$
+\end{algorithmic}
+\end{algorithm}
+% src: choice.rs (Chooser::begin draws under one_draw before the pin check in mod.rs pick();
+%      index_below = (draw * n) >> 64; unit_interval = (draw >> 11) * 2^-53; lowest(); sample_utilities());
+%      mod.rs pick() (pin -> row_of; sessions.bind after every decision); session_map.rs (LRU eviction)
+
+% src: FEATURES.md "Determinism"; choice.rs module docs; CR/literature/LESSONS.md LR-03;
+%      tests.rs one_draw_per_decision_keeps_later_draws_aligned, fixed_seed_reproduces_sampled_decisions
+Candidates are visited in worker-ID order, never in the host's unspecified row order, and set
+means are summed in that order, so a seeded policy decides identically across processes. Each
+policy instance owns one random generator. Under the default discipline, \code{one\_draw}, every
+decision consumes exactly one 64-bit draw, whether it ends in a tie, a sample, a unique best or a
+pin. Two policies with the same seed therefore stay on the same random stream even after one early
+decision differs, which keeps common random numbers aligned across the CMA-ES candidates of a
+generation (\cref{sec:noise}); a unit test checks that two policies differing in their first
+decision break 40 later ties identically under \code{one\_draw} and not under \code{reservoir}.
+The \code{reservoir} discipline reproduces the seeded default picker draw for draw and exists for
+parity checks (\cref{sec:parity}). In replay, the harness sets the seed to $\krep + 1$ for
+replicate $\krep$ (\cref{tab:notation}).
+
+\subsection{Context sources and their form}
+
+\begin{table}[tbp]
+  \centering\small
+  \caption{Named context sources $\ctxv_{\cand,\cidx}$. Each is unchanged when the candidate set
+    is duplicated (\cref{sec:set-size}).}
+  \label{tab:sources}
+  \begin{tabularx}{\linewidth}{@{}lY@{}}
+    \toprule
+    Source & Value \\
+    \midrule
+    \code{mean\_kv\_load\_frac}            & $(\fbar)_4$, mean over $\cand$ of $x_{i,4}$ \\
+    \code{mean\_active\_prefill\_tokens\_k} & $(\fbar)_3$ \\
+    \code{mean\_active\_requests\_s}       & $(\fbar)_5$ \\
+    \code{max\_overlap\_frac}              & $\max_{i \in \cand} x_{i,1}$ \\
+    \code{isl\_k}                          & $\ISL_j / \Tch$ \\
+    \code{is\_first\_turn}                 & 1 if the policy remembers no previous worker for $j$'s
+      session (new, evicted or none), else 0 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+% src: FEATURES.md "Context sources"; features.rs ContextSource, FeatureTable::source
+
+\paragraph{Named rather than pooled.}
+% src: FEATURES.md "Context sources", "Guidance for search spaces"; CR/literature/LESSONS.md LR-05
+%      (Ko & Li eq. 3 gauge), LR-06 (one-hot pooling); CR/CONTRACT.md "learned-choice policy" (pooled form)
+% prov: the pooled form was the contract's original specification ("The original contract
+%      specified a pooled form").
+The policy also accepts a \emph{pooled} form, $\ctxv_{\cand,\cidx} = q_\cidx^{\top}\fbar$ with a
+free $q_\cidx$, but this study uses the \emph{named} form of \cref{tab:sources}, for two reasons.
+The pooled form has a gauge freedom ($p_\cidx \to c\,p_\cidx$, $q_\cidx \to q_\cidx/c$, including
+the sign), a flat direction in which CMA-ES spends budget for nothing; low-rank choice models have
+the same non-uniqueness \citep{ko2024attention}. The named form is linear in the free $p_\cidx$
+and has none. And mean-pooling a one-hot feature leaks the set size: the candidate mean of
+\code{session\_affinity} is $1/\Nw$ or 0. The named sources are chosen to avoid that
+(\cref{sec:set-size}). Two redundancies remain and are handled in the search space rather than in
+the policy: when \code{isl\_k} is a source, $\theta_7$ duplicates the (\code{isl\_k}, feature 3)
+entry of the context term and is frozen at 0; and on traffic without sessions
+\code{is\_first\_turn} is always 1, so its direction duplicates $\theta$. A unit test checks both
+context forms against the literal bilinear formula on 100 random tables.
+% src: tests.rs context_term_matches_the_bilinear_formula (100 trials, pooled and named)
+
+\subsection{Set-size invariance: counterexamples and test}
+
+% src: FEATURES.md "Context sources" (duplication paragraph); CR/literature/LESSONS.md LR-06; tests.rs
+%      duplicating_the_worker_set_keeps_features_sources_and_choice (50 random tables, v2, random theta,
+%      theta[hash_home] = 0, requests without a session)
+Under the duplication test of \cref{sec:set-size}, means and maxima are invariant, but several
+natural set statistics are not. Sums and counts grow with $\Nw$; a mean of a one-hot feature is
+$1/\Nw$; a z-score is $\pm 1$ at $\Nw = 2$ whatever the gap; and a leave-one-out rank fraction of
+1 at $\Nw = 2$ becomes $2/3$ after duplication. For that reason \code{v2}'s below-fraction counts
+strictly smaller loads over $|\cand|$, which keeps its value ($1/2$ in the same example). A unit
+test duplicates 50 random candidate tables under random \code{v2} coefficients and checks that
+features, sources and the chosen worker are unchanged. Two features are excluded from the property
+because they are relations to particular workers: \code{hash\_home} (its coefficient is zero in
+the test) and \code{session\_affinity}, since a copy of a session's previous worker did not serve
+the session (the test uses requests without a session).
+
+\subsection{Parity tests}
+
+% src: FEATURES.md "Parity anchor"; tests.rs theta0_picks_the_default_argmin (2,000 tables; shapes:
+%      full, no tier overlaps, no worker loads, prefill untracked; >= 1,500 tie-free; v1 and v2 via YAML),
+%      reservoir_tie_break_reproduces_the_seeded_default (500 tables, > 250 tied),
+%      feature_zero_ignores_the_hosts_score_weights (200 tables)
+Three unit tests check the parity of \cref{sec:parity} through the same YAML path a deployment
+uses. On 2,000 random candidate tables, spread over the four input situations the default scorer
+distinguishes (complete inputs, no per-tier cache matches, no load reports, prefill not tracked),
+\lc{} with \code{v1} and with \code{v2} picks the default's unique minimum on every table that has
+one (at least 1,500 are required). On 500 tables built to tie (more than 250 do), the
+\code{reservoir} discipline with the same seed picks exactly what the seeded default picks. And on
+200 tables, feature 0 stays at default weights when the host is configured with other score
+weights. The one known exception is two costs that differ by less than the rounding error of the
+division by $\reqblocks_j$.
+
+% src: CR/facts/integration.json parity (11 cells x 8 replicates = 88 pairs; reservoir: identical
+%      per_request sha256 88/88; one_draw: identical rows 0/88; max |cell delta| 0.00876938 < 3 x pooled
+%      sd 0.0102185; segment mean delta 0.000553786 < 2 x SE 0.00116769; 7 segments; caveat: sessions
+%      and AgentX cells near good fraction 1.0 at the provisional SLA, 7 Mooncake cells carry the test)
+In replay, on 11 cells with 8 replicates each, \lc{} at $-\basis{0}$ with \code{reservoir} ties
+produced per-request rows identical to \defaultcf{} on all 88 (cell, replicate) pairs. With the
+\code{one\_draw} discipline used in training, the rows differ on all 88, because tied decisions
+are broken by a different random draw, but goodput does not differ beyond replicate noise. The
+largest deviation of a cell's mean goodput ratio from 1 was 0.0088, below three times the pooled
+replicate standard deviation of the ratio (0.0102), and over 7 segments the mean deviation was
+0.00055, below twice its standard error (0.00117).
+% src: WT/benchmarks/learned_routing/learned_routing/noise.py (paired ratio vs reference; cell clause
+%      |mean_k r - 1| > 3 pooled_sd; segment clause |mean delta| > 2 SE)
+In this check the session and AgentX cells sat near a good fraction of 1.0 under the provisional
+SLO used at integration, so the Mooncake cells carry the goodput comparison.
+% src: CR/facts/build_rust.json smoke.notes ("same goodput (0.28109983761885743) but 733/1000
+%      differing assignments: per-worker request counts are a permutation of the default's")
+In an earlier smoke replay of 1,000 Mooncake requests at $\Nw = 4$, the two disciplines gave the
+same goodput with 733 of 1,000 assignments different, and the per-worker request counts were a
+permutation of each other: ties among idle workers at the start relabel the workers.
+
+\subsection{The nested-logit option}
+\label{sec:nested}
+
+% src: WT/notes/learned-routing/campaign/PLAN.md ladder (M3: "nested logit over node/DP groups,
+%      only if DP > 1 matters"); CR/literature/notes/dcm-context.md §1 (Train 2009 §4.2.1, §4.2.3);
+%      CR/literature/LESSONS.md LR-15 (nest parameters drop out of a deterministic argmax: "our corollary";
+%      action 4: build M3 from nest-level features); CR/CONTRACT.md "Deployment" (TP2, aggregated)
+% prov: "The plan's third rung, M3" (campaign PLAN.md ladder)
+A third rung, M3, is a nested logit over groups of candidates, such as the data-parallel
+ranks of one engine or the workers on one node. A nested logit lets unobserved utility be
+correlated within a nest, so IIA holds within each nest but not across nests, and the choice
+factors into a choice of nest, driven by the nest's inclusive value, times a logit within the nest
+\citep{train2009gev}. Two observations limit its value here. Every worker in this deployment is one
+engine with data-parallel size 1, so there are no nontrivial nests. And the nest parameters only
+shape the distribution of the unobserved utility; in the deterministic limit the choice is the
+argmax of the same systematic utilities, so at $\temp = 0$ they would not change a decision. This
+corollary is ours, not Train's. Where nests exist, the useful part of M3 at $\temp = 0$ is
+nest-level features, such as the aggregate load of a node or a data-parallel group, added to
+$\fvec_i$. M3 was not run.
+
+\subsection{Sticky-session policies}
+\label{sec:sticky}
+
+% src: WT/lib/router-plugins/builtin/src/sticky_session.rs (module docs, bound_row, default_choice,
+%      policy: cost_scorer(config, config, role) = host weights, with_exclusive_affinity(true));
+%      CR/CONTRACT.md "sticky-session policy"; sticky_session tests (reservoir == seeded default
+%      without sessions); CR/facts/STATE.md audit(build/leakage-features r1) ("sticky vs contract
+%      model 20,000 decisions 0 mismatches")
+Session affinity is the simplest alternative to learning a session coefficient, so this study
+added \policy{sticky-session} (\cref{sec:baseline-policies}), built from the same parts as \lc{}:
+the canonical-order chooser with both draw disciplines and the bounded LRU session map. A pinned
+request rebinds its session to the pinned worker. Without sessions, \policy{sticky-session} with
+\code{reservoir} ties picks exactly what the seeded default picks, and the implementation audit's
+independent model matched it on \num{20000} decisions. In this study both modes are tuned
+baselines (\cref{sec:baselines}), tuning the default cost's knobs as well.
+
+% src: CR/facts/build_rust.json smoke.checks (lc_affinity_sessions_on_one_worker, sticky_hard_sessions_on_one_worker,
+%      default_sessions_spread: 14/20, 54/60, 1/10); smoke.notes ("session_affinity weight 1e6")
+\lc{} can express hard stickiness: with $\theta = -\basis{0} + 10^{6}\basis{6}$ a session's later
+requests stay on its previous worker whenever that worker is a candidate, and otherwise feature 6
+is 0 for every candidate and the default cost decides. This matches \code{hard} mode with default
+weights. In a build smoke test, both kept every session on one worker on three session workloads
+with 20, 60 and 10 sessions, where the seeded default split 14, 54 and 1 of them across workers.
+The \code{bounded} rule is a threshold on relative load, which a linear utility can only
+approximate.

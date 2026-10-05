@@ -2,7 +2,10 @@
 % SPDX-License-Identifier: Apache-2.0
 %
 % ROLE: what an operator or router engineer should take away, and what comes next.
-% STATUS: final, including the live GPU check (sec:live).
+% STATUS: final, including the live GPU check (sec:live). Restructured 2026-10-05. Round-1 fixes: no
+%   \lmetricfix footnote (the "ports" wording carries the scope; the note is in sec:ports, the results
+%   and the introduction); all six held-out axes listed; the port name \policy{ramjet} throughout; the
+%   caution states both the 32K-64K TTFT result and the good-fraction loss at 32K and more.
 
 \section{Conclusion}
 \label{sec:conclusion}
@@ -13,12 +16,12 @@ made it possible to tune every rule with the same budget in AIS-timed replay, an
 generalization of them, a conditional-logit policy over the router's own signals that starts from the
 default router. In simulation, the learned policy M1-v2 beats the branch's ported heuristics, each
 tuned with an equal budget, on a test set that holds out time windows, agent plays, session seeds, a
-trace family and worker counts, and it stays first, ahead of Ramjet, under router-state lag, timing
-perturbations and alternative definitions of a good request. The effect is small, and only its sign
-is claimed; the per-axis results, such as those at unseen worker counts, are descriptive. A pre-registered
-check on H100 GPUs, on six of the test cells, found the same policy ranking and the same sign of
-M1-v2 against Ramjet as replay, while absolute goodput and the size of the gaps between policies
-departed from replay.
+trace family, transform ranges and worker counts, and it stays first, ahead of tuned
+\policy{ramjet}, under router-state lag, timing perturbations and alternative definitions of a good
+request. The effect is small, and only its sign is claimed; the per-axis results, such as those at
+unseen worker counts, are descriptive. A pre-registered check on H100 GPUs, on six of the test cells,
+found the same policy ranking and the same sign of M1-v2 against \policy{ramjet} as replay, while
+absolute goodput and the size of the gaps between policies departed from replay.
 % src: CR/facts/test_results.json headline, report_must_state; CR/facts/robustness.json;
 %      CR/facts/live_results.json wording; CR/report/LIVE.md 15.7
 
@@ -41,8 +44,13 @@ For a deployment, the evidence supports three practical statements and one cauti
     load coefficients removed it with no loss (the constrained M1 is $+0.004$ per test segment against
     the unconstrained one), and should be the default for any learned router of this kind; the
     remaining size segregation should be monitored with the window-basis guards.
-  \item \textbf{Caution.} Long prompts wait longer under M1-v2 than under \policy{ramjet}; a
-    deployment that values served tokens, or long-context latency, may prefer the heuristic.
+  \item \textbf{Caution.} Long prompts fare worse under M1-v2 than under \policy{ramjet}: those of
+    32K to 64K tokens wait longer for their first token, and those of 32K or more lose about 4 points
+    of good fraction. A deployment that values served tokens, or long-context latency, may prefer the
+    heuristic.
+    % src: CR/facts/test_results.json report_must_state MS-F1-ttft (32K-64K p90 +0.135, 11/12; the TTFT
+    %      statement stops at 64K), MS-F1-goodfrac-by-isl (32K-64K -3.8 pp, 5 of 10 segments higher;
+    %      >= 64K -3.7 pp, 4 of 8; descriptive), as in results limits item 4
 \end{itemize}
 % src: sec:res-leaderboard, sec:res-coefficients, sec:res-fairness, sec:gaming; generated/ladder_pairs.tex
 %      (M1 - M1 unconstrained +0.0039, 8/12)

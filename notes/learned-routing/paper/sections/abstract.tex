@@ -7,43 +7,58 @@
 %   (MS-RH2-F1-scope) allows: "beats the branch's ported heuristics, each tuned with an equal
 %   budget", not "beats every heuristic". Numbers: CR/facts/test_results.json headline.
 % STATUS: final, including the live GPU check (sec:live; CR/facts/live_results.json wording).
+%   Restructured 2026-10-05: the long-prompt qualification is narrowed to the supported 32K-64K TTFT
+%   claim (MS-F1-ttft stops at 64K); "branch" is glossed at first use; AISim and AIS are defined at
+%   first use as the two parts of AISimulate. Round-1 fixes: the A21 note (lmetric port fixed after the
+%   freeze) is no longer a footnote here (it is one footnote in the introduction and in the body of
+%   sec:ports and the results); "every evaluated heuristic" (ThunderAgent is not evaluated); the sign
+%   constraint is stated in the past tense, for the one tuned M1 it was found on.
 
 \begin{abstract}
 \noindent
 Dynamo's KV router sends each request to one of $\Nw$ workers by a fixed cost that weighs
 prefix-cache reuse against load. Published routers weigh the two differently, and which rule serves
 a workload best shows only under sustained load, which is costly to reproduce on GPUs for every
-rule and setting. We describe the router's worker-selection API, in which every routing rule is a
-composition of filters, scorers and a picker over declared inputs, and express Dynamo's default
-cost function and nine other catalog policy types, most of them ports of published routers, in it. Inside that API we learn a policy, \lc{}: a conditional-logit choice
-model whose utility is linear in signals the live router already computes and which contains the
-default router as one coefficient setting. We tune it with CMA-ES in \aisim{} offline replay, where
-Dynamo's router drives mock vLLM engines timed by AISimulate's performance model, on windowed
-goodput defined by inter-token latency and end-to-end slowdown, with common-random-number workload
-replicates. Every heuristic receives the same tuning budget, restarts and validation-based
+rule and setting. We describe the router's worker-selection API, in which every routing rule,
+including Dynamo's default cost function and the nine other catalog policy types that this study's
+router code branch implements, most of them ports of published routers, is a composition of filters,
+scorers and a picker over declared inputs. Inside that API we learn a policy, \lc{}: a
+conditional-logit choice model whose utility is linear in signals the live router already computes
+and which contains the default router as one coefficient setting. We tune it with CMA-ES on windowed
+goodput, defined by inter-token latency and end-to-end slowdown, in offline replay. AISimulate
+provides both the replay engine (\aisim{}), in which Dynamo's router drives mock vLLM engines, and the
+forward-pass performance model (\ais{}) that times those engines.
+% src: WT/lib/mocker/src/replay/offline/README.md (event loop and mock engine driver "live in
+%      aisimulate_core::replay"); CR/facts/setup.json engine.ais_selected_estimation_mode ("op_level")
+Every evaluated heuristic receives the same tuning budget, restarts and validation-based
 selection. The headline test, registered before training, is a one-sided Wilcoxon test over the 12
 independent segments of a frozen 60-cell test set that holds out time windows, agent plays, session
 seeds, a trace family, transform ranges and worker counts.
 % src: CR/facts/test_results.json headline (segment_mean 0.031555, segments_ahead 10, wilcoxon 0.001709),
 %      report_must_state MS-RH2-F1-scope; CR/facts/finalists.json headline (m1v2, ramjet)
-In AIS-timed simulation, the learned router M1-v2 beats the branch's ported heuristics, each tuned
-with an equal budget: against the validation-selected best of them, tuned Ramjet, it is ahead on
-10 of 12 segments with a segment-mean clipped log-ratio of goodput of $+0.0316$ (one-sided exact
+In AIS-timed simulation, the learned router M1-v2 (the conditional logit on an extended 23-feature
+set) beats the branch's ported heuristics, each tuned with an equal budget: against the
+validation-selected best of them, tuned Ramjet (a port of Helix's Ramjet load balancer), it is ahead
+on 10 of 12 segments with a segment-mean clipped log-ratio of goodput of $+0.0316$ (one-sided exact
 Wilcoxon $p = 0.0017$), and it stays first, ahead of Ramjet, under router-state lag of up to
-\SI{200}{ms} and under engine-timing perturbations.
+\SI{200}{ms} and under engine-timing perturbations. Its largest learned term makes uncached prefill
+more expensive on busier workers.
 % src: CR/facts/robustness.json lr14_summary (headline_rank 1 and sign_holds_in_all over lag 10/50/200 ms
 %      and the four timing conditions)
-The claim is scoped: the effect is below the
-pre-registered minimum detectable effect, so only its sign is claimed; the default cost plus a
-faithful LMetric term, which the learned model's class contains and the baseline pool lacks,
-reproduces most of the margin on validation; the gain is a request-count
+% src: CR/report/REPORT.md section 6 (largest term new_prefill x active_requests; results sec:res-coefficients)
+The claim is scoped: only its sign is claimed, because the effect is below the pre-registered
+minimum detectable effect; on validation, most of the margin is reproduced by the default cost plus
+a faithful LMetric term, which the learned class contains and the baseline pool lacks; the gain
+counts requests, and prompts of 32K to 64K tokens reach their first token later than under Ramjet;
+and a sign constraint on load coefficients removed a degenerate policy that unconstrained search
+found.
 % src: CR/facts/test_results.json report_must_state MS-RH2-F1-table (default + faithful LMetric 53-66% of
-%      the fresh-validation margin; faithful LMetric alone +0.0079 cell / +0.0110 segment over ramjet)
-property, with long prompts slower than under Ramjet; and black-box search first found a degenerate
-policy that a sign constraint on load coefficients removed. The headline is simulated. On six test
-cells served live on H100 GPUs, the policy ranking agrees with simulation and M1-v2 leads Ramjet in
-every cell where simulation predicts a lead; absolute goodput and the size of the gaps between
-policies are not validated.
+%      the fresh-validation margin; faithful LMetric alone +0.0079 cell / +0.0110 segment over ramjet),
+%      MS-F1-ttft (32K-64K p90 +0.135, 11/12; >= 64K filtered +0.021, 3/7, p 1.0, so the TTFT statement
+%      stops at 64K)
+The headline is simulated. On six test cells served live on H100 GPUs, the policy ranking agrees
+with simulation and M1-v2 leads Ramjet in every cell where simulation predicts a lead; absolute
+goodput and the size of the gaps between policies are not validated.
 % src: CR/facts/live_results.json wording (ranking_agrees, m1v2_gt_ramjet_holds_live), primary.kendall_tau.k0
 %      (pooled tau_b 1.0), primary.sign_agreement (5 of 5 informative cells); CR/report/LIVE.md 15.7
 \end{abstract}

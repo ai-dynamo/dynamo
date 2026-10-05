@@ -1,42 +1,40 @@
 % SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 % SPDX-License-Identifier: Apache-2.0
 %
-% The single notation table. Every section uses these symbols through the macros in
-% macros.tex. A new symbol needs a row here first.
+% ROLE: appendix A. The single notation table. Every section uses these symbols through the macros
+%   in macros.tex. A new symbol needs a row here first. main.tex inputs this file after \appendix.
+% EVIDENCE: the src comments on the table rows below.
 % Code names refer to WT/lib/router-plugins/builtin/src/learned_choice/ (Rust) and
 % WT/benchmarks/learned_routing/learned_routing/ (harness); contract names to CR/CONTRACT.md.
 
-\subsection{Notation}
-\label{sec:notation}
+\section{Notation}
+\label{app:notation}\label{sec:notation}
 
-\Cref{tab:notation} fixes the symbols used throughout. The campaign's contract, the policy's
-specification (\code{FEATURES.md}) and the harness each grew their own names, and several
-collide. We resolve the collisions as follows.
-
-\begin{itemize}
-  \item \textbf{The letter $S$.} $\cand$ is the set of eligible candidate workers for one request,
-    as in \code{FEATURES.md} ($\fbar$, $\ctxv_{\cand,\cidx}$). The contract's end-to-end
-    slowdown bound, also called $S$ there, is written $\Smax$ here. For symmetry the contract's
-    mean-ITL bound $I$ is written $\Imax$.
-  \item \textbf{The letter $k$.} $\krep$ indexes common-random-number (CRN) workload replicates,
-    as in the contract (Amendment A1) and the harness (\code{repeat}). \code{FEATURES.md} indexes
-    context terms by $k$; here they are indexed by $\cidx = 1,\dots,\rank$.
-  \item \textbf{The letter $B$.} $\budget$ is the CMA-ES evaluation budget per run. The
-    request's block count, which \code{FEATURES.md} calls $B$, is $\reqblocks_j$ here.
-  \item \textbf{The letter $T$.} \code{FEATURES.md}'s token normalizer $T = 8192$ is $\Tch$.
-    The plan's TTFT threshold $T$ no longer exists (Amendment A2 dropped the TTFT SLO).
-  \item \textbf{$e$ and $E$.} $\basis{f}$ (bold) is a standard basis vector, so the parity anchor
-    is $\theta = -\basis{0}$; $\Ezero$ is a latency.
-  \item \textbf{$\tau$.} $\temp$ is the policy temperature; Kendall's rank correlation is
-    $\kendall$.
-  \item \textbf{$\sigma$ and segments.} $\sigma$ belongs to CMA-ES (step size $\sigma$, initial
-    $\sigmazero$); workload segments are $\seg \in \Omega$. Ratios are $\ratio$, restarts $\restarts$.
-\end{itemize}
+% Name collisions resolved here (editor history; prov: CR/CONTRACT.md, FEATURES.md, harness names):
+% - S: FEATURES.md's candidate set S is \cand (as in FEATURES.md: \fbar, \ctxv_{S,l}); the contract's
+%   end-to-end slowdown bound, also S there, is \Smax; for symmetry the contract's mean-ITL bound I
+%   is \Imax.
+% - k: \krep indexes CRN workload replicates, as in the contract (Amendment A1) and the harness
+%   (repeat); FEATURES.md indexes context terms by k, here \cidx = 1..\rank.
+% - B: \budget is the CMA-ES evaluation budget per run; FEATURES.md's request block count B is
+%   \reqblocks_j.
+% - T: FEATURES.md's token normalizer T = 8192 is \Tch. The plan's TTFT threshold T no longer
+%   exists (Amendment A2 dropped the TTFT SLO).
+\Cref{tab:notation} fixes the symbols used throughout. A few are easily confused. $\cand$ is the
+set of eligible candidate workers for one request, while $\Smax$ is the end-to-end slowdown bound
+(and $\Imax$ the mean-ITL bound). $\krep$ indexes common-random-number (CRN) workload replicates,
+while $\cidx = 1,\dots,\rank$ indexes context terms. $\budget$ is the CMA-ES evaluation budget per
+run, while $\reqblocks_j$ is a request's block count. $\Tch = 8192$ is the token normalizer of the
+prefill features. Bold $\basis{f}$ is a standard basis vector, so the parity anchor is
+$\theta = -\basis{0}$, while $\Ezero$ is a latency. $\temp$ is the policy temperature, and
+$\kendall$ is Kendall's rank correlation. $\sigma$ belongs to CMA-ES (step size $\sigma$, initial
+$\sigmazero$), while workload segments are $\seg \in \Omega$, ratios $\ratio$ and restarts
+$\restarts$.
 
 {\small
 \setlength{\LTcapwidth}{\linewidth}
 \begin{longtable}{@{}P{0.17\linewidth}P{0.44\linewidth}P{0.33\linewidth}@{}}
-\caption{Notation. ``Value'' is the setting in this campaign; code and file names are in
+\caption{Notation. ``Value'' is the setting in this study; code and file names are in
   typewriter. Pilot values are \prelim.}
 \label{tab:notation}\\
 \toprule
@@ -58,19 +56,20 @@ $a_j$ & arrival time of request $j$ (simulated) & \\
 $\ISL_j$, $\OSL_j$ & prompt and output length (tokens) &
   \code{input\_length}, \code{output\_length} \\
 % src: WT/lib/router-plugins/builtin/src/learned_choice/FEATURES.md "Feature set v1"
-$\reqblocks_j$ & request blocks, $\max(\lceil \ISL_j / 16\rceil, 1)$ (\code{FEATURES.md}: $B$) &
-  KV block size 16; \code{request\_blocks} \\
+$\reqblocks_j$ & request blocks, $\max(\lceil \ISL_j / 16\rceil, 1)$ &
+  KV block size 16; \code{request\_blocks} \\ % prov: FEATURES.md calls it B
 $\TTFT_j$, $\EtoE_j$ & time to first token; end-to-end latency (simulated) & \code{per\_request} rows \\
 $\ITLbar_j$ & mean inter-token latency, $(\EtoE_j - \TTFT_j)/(\OSL_j - 1)$, for $\OSL_j > 1$ & \\
 % src: CR/CONTRACT.md A2.2; CR/facts/calibration.json (E0 method)
 $\Ezero(\ISL,\OSL)$ & uncontended no-reuse latency: the request alone on an idle worker, full
-  prefill, then $\OSL$ decode steps at batch 1, timed by \ais. Evaluation only; no policy sees it &
+  prefill, then $\OSL - 1$ decode steps at batch 1, timed by \ais. Evaluation only; no policy sees it &
   \code{ais-chunked-estimator-v2}; \code{learned\_routing/e0.py} \\
+% check: OSL - 1 decode steps per e0.py module docstring and setup.tex sec:objective (base text said OSL)
 % src: CR/facts/calibration.json sla.<family>.itl_ms
-$\Imax$ & mean-ITL bound of the SLO (contract: $I$) &
+$\Imax$ & mean-ITL bound of the SLO & % prov: contract I
   Mooncake and FAST25 \SI{252.117}{ms}; sessions \SI{46.0478}{ms}; AgentX \SI{38.6205}{ms} \\
 % src: CR/facts/calibration.json sla.<family>.e2e_slowdown
-$\Smax$ & end-to-end slowdown bound (contract: $S$) &
+$\Smax$ & end-to-end slowdown bound & % prov: contract S
   Mooncake and FAST25 3.46625; sessions 2.11784; AgentX 1.16134 \\
 $\good_j$ & good-request indicator, \cref{eq:good} & \code{learned\_routing/goodput.py} \\
 \midrule
@@ -81,9 +80,9 @@ $\fvec_i \in \mathbb{R}^{\dfeat}$ & feature vector of candidate $i$, fixed order
   $\dfeat = 8$ (\code{v1}) or 23 (\code{v2}); \code{feature\_set} \\
 $\fbar$ & candidate mean of $\fvec$ over $\cand$ & \\
 $\basis{f}$ & standard basis vector; $\theta = -\basis{0}$ reproduces the default router & \\
-$\Tch$ & token normalizer of the prefill features (\code{FEATURES.md}: $T$) & 8192 \\
+$\Tch$ & token normalizer of the prefill features & 8192 \\ % prov: FEATURES.md calls it T
 $\theta \in \mathbb{R}^{\dfeat}$ & linear coefficients & \code{parameters.theta}; $\theta_0 = -1$ pinned in training \\
-$\rank$, $\cidx$ & context rank; context-term index $\cidx = 1,\dots,\rank$ (\code{FEATURES.md}: $k$) &
+$\rank$, $\cidx$ & context rank; context-term index $\cidx = 1,\dots,\rank$ & % prov: FEATURES.md calls it k
   $\rank = 0$ (M1), $\rank = 2$ (M2); \code{len(context.p)} \\
 $p_{\cidx} \in \mathbb{R}^{\dfeat}$ & context direction of term $\cidx$ & \code{context.p} \\
 $\ctxv_{\cand,\cidx}$ & context value of term $\cidx$: a named source (\cref{tab:sources}) or, in the
@@ -131,14 +130,14 @@ $\searchvec$ & CMA-ES internal coordinates of the free parameters (bounded ones 
 $\gen$ & CMA-ES generation & $0,\dots,24$ \\
 % src: CR/facts/gate.json full_plan.budget
 $\popsize$ & population size & 16; \code{--popsize} \\
-$\budget$ & objective evaluations per run (\code{FEATURES.md}'s $B$ is $\reqblocks_j$) &
+$\budget$ & objective evaluations per run & % prov: FEATURES.md's B is \reqblocks_j
   $400 = 25 \times 16$; \code{--budget-evals} \\
 $\Krep$, $\Kpool$ & replicates per objective evaluation; the pool they rotate through &
   2 and 8; \code{--replicates}, \code{--replicate-pool} \\
 $\Kset{\gen}$ & replicates of generation $\gen$, $\{(\gen\Krep + i) \bmod \Kpool : i < \Krep\}$ &
   \code{Trainer.eval\_set} \\
 % src: CR/facts/gate.json full_plan.objective_cells_repeats; train.py TrainConfig
-$\Kval$ & replicates per validation score inside \code{lr-train} & 3 ($\krep = 0,1,2$) \\*
+$\Kval$ & replicates per validation score inside the tuning harness & 3 ($\krep = 0,1,2$) \\* % prov: lr-train
 $\sigmazero$ & initial CMA-ES step size, in internal units & per policy (\cref{sec:training}) \\*
 $\restarts$ & restarts per policy & 3 \\
 \end{longtable}

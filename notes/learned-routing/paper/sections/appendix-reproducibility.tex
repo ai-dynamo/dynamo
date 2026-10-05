@@ -43,19 +43,19 @@ The campaign's code and record live on three branches of the Dynamo repository.
   \item \code{rupei/learned-routing-lag}: the router-state lag knob for offline replay, built
     separately so that the tuning build and its result cache stay untouched.
   \item \code{rupei/learned-routing-ais}: feature set \code{v3} and the research input for a
-    request's modeled prefill time, also on its own build, for the \ais{} league.
+    request's modeled prefill time, also on its own build, for the \ais{}-informed league.
 \end{itemize}
 Every stage's facts file records the worktree head it ran at. Only the first branch is published,
 as the sanitized copy \code{rupei/learned-routing-public}, in which internal commits appear as
 position labels; the lag and \ais{} branches are not, so the lag part of the robustness pass
-and the \ais{} league can be checked against the mirrored facts but not yet rebuilt from public
+and the \ais{}-informed league can be checked against the mirrored facts but not yet rebuilt from public
 sources.
 % src: CR/CONTRACT.md A20 "Publication" (only the sanitized copy of the campaign branch is pushed);
 %      CR/facts/robustness.json execution (lag records on the lag build, timing records on the tuning build)
 \file{REPRODUCE.md} rebuilds the campaign to its calibrated, frozen cells. Its section~15 describes
-how the later stages ran (the pilot, phase 2, the test pass, the robustness pass and the live runs):
-the commands and frozen inputs each used, the facts file each wrote, and which of their records the
-mirror holds. Their numbers are re-derived from the records by the analysis scripts that the final
+how the later stages ran (the pilot, the main tuning, the test pass, the robustness pass and the
+live runs): the commands and frozen inputs each used, the facts file each wrote, and which of their
+records the mirror holds. Their numbers are re-derived from the records by the analysis scripts that the final
 report's reproduction section names; those scripts and the bulky records stay in the campaign root,
 and the mirrored facts carry every resulting number.
 % src: WT/notes/learned-routing/REPRODUCE.md section 15 "Later stages, as run"; CR/report/REPORT.md
@@ -123,7 +123,7 @@ while the notes were written, on the campaign host or in a fresh private root.
     12 & Replicates & the replicate protocols, policy seeds and the noise rule \\
     13 & Entry points & \code{lr-eval}, \code{lr-train}, \code{lr-report}; the remote bundle flow and
       the cluster CPU lane \\
-    14 & Gate and headline & the pilot gate and the pre-registered headline test \\
+    14 & Gate and headline & the pilot's review (its gate) and the pre-registered headline test \\
     15 & Later stages & listed as not yet run when the notes were written (see above) \\
     16--17 & Costs, mirrored files & measured costs; the small files that used to live only in the
       campaign root \\
@@ -144,8 +144,8 @@ while the notes were written, on the campaign host or in a fresh private root.
     also hashes the content of every test cell and all 39 test traces (\num{2130865265} bytes).
   \item Source traces, pinned by SHA-256 in \file{traces/MANIFEST.json} (\code{b2616d0d\ldots}).
   \item The headline test, pre-registered in \file{facts/HEADLINE_TEST.json} before any training.
-  \item Before the single test pass the test stage verified all 149 freeze hashes, and
-    \file{facts/finalists.json} was frozen (SHA-256 \code{e0bae29d\ldots}) before the first test record.
+  \item The single test pass first verified all 149 freeze hashes, and \file{facts/finalists.json}
+    was frozen (SHA-256 \code{e0bae29d\ldots}) before the first test record.
 \end{itemize}
 % src: CR/facts/test_results.json execution.evaluated_once (149/149; finalists.json sha256 e0bae29d)
 
@@ -210,9 +210,9 @@ workstation's.
     smoke runs wrote byte-identical histories, best points and policy files.
   \item \textbf{Test pass.} Tasks that ran twice, once in a first wave and again after a timeout
     fix, were bit-identical on different nodes in every field and per-request byte.
-  \item \textbf{Pilot and phase 2.} The 384 records of the pilot's 16 first-generation candidates on
-    the 12 subset cells were identical locally and on the cluster. A node image added during
-    phase 2 passed its smoke (28 of 28 records, \num{186548} rows) before it ran any tuning.
+  \item \textbf{Pilot and main tuning.} The 384 records of the pilot's 16 first-generation candidates
+    on the 12 subset cells were identical locally and on the cluster. A node image added during the
+    main tuning passed its smoke (28 of 28 records, \num{186548} rows) before it ran any tuning.
   \item \textbf{Lag build.} The separate lag-check build was validated on five node images before
     the robustness pass (the first: 192 of 192 records, \num{1214112} rows).
 \end{itemize}
@@ -237,9 +237,10 @@ from different builds or cell contents. Every long job is resumable and takes
 Each stage writes one facts file under \file{facts/} and one line in the append-only
 \file{facts/STATE.md}: setup, the three build stages and their fixes, AgentX lowering, noise,
 calibration and its fix, the test freeze, the pre-registered headline test, the cluster lane, the
-pilot, the gate, phase-2 preparation, the lag patch, the \ais{} features
-(\file{facts/ais\_features.json}), the tier-A and tier-B/C tuning (\file{facts/tierA.json},
-\file{facts/tierBC.json}) and the phase-2 midpoint fix (\file{facts/phase2\_mid\_fix.json}), the
+pilot, the gate, the preparation of the main tuning (\file{facts/phase2\_prep.json}), the lag
+patch, the \ais{} features (\file{facts/ais\_features.json}), the tuning waves
+(\file{facts/tierA.json}, \file{facts/tierBC.json}) and the mid-tuning fix
+(\file{facts/phase2\_mid\_fix.json}), the
 SLO-transfer constants (\file{facts/sla\_transfer\_spec.json}), the frozen finalists
 (\file{facts/finalists.json}), the single test pass (\file{facts/test\_results.json} with its
 \code{report\_must\_state} wording), the robustness pass (\file{facts/robustness.json}), the
@@ -265,9 +266,19 @@ Compute per stage is in \cref{tab:cost}.
 
 \subsection{Building this document}
 
+% src: Makefile (pdf, tables, figures targets); scripts/make_tables.py (RELABEL; cells copied, labels
+%      renamed); scripts/make_figures.py; CR/report/data/report_data.json method ("tables and figures from
+%      the campaign's existing records (no replays)"; reads the single test pass, the robustness records
+%      and facts/*.json); live tables: CR/facts/live_results.json reproduction (see the paragraph above)
+% prov: the results section's note that its tables are copied from the final report moved here
+
 The sources are in \file{notes/learned-routing/paper/}; \code{make} there runs \code{latexmk} with
-\code{pdflatex} and BibTeX and writes \file{build/main.pdf}, and \code{make tables}, given the
-campaign root, regenerates \file{generated/} from the final report's table fragments. The figures in
-\file{fig/} are copies of the final report's. Every number in the text carries a source comment
+\code{pdflatex} and BibTeX and writes \file{build/main.pdf}. Most result tables are not typed by
+hand. The campaign's final report builds its tables from records the study had already written (the
+single test pass, the robustness runs and the stages' facts files), without any new replay, and
+\code{make tables}, given the campaign root, copies
+their cells unchanged into \file{generated/}, with the row and column labels this paper uses
+(\cref{app:provenance}). \code{make figures} draws every results figure in \file{generated/} from
+the report's data, with the same labels as the tables. Every number in the text carries a source comment
 (\code{\% src:}) naming the campaign file it comes from. Items that were open while drafting
 carried a boxed \textsc{pending} tag; none remains.

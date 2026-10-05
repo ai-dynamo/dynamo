@@ -1,0 +1,100 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: the secondary AIS-informed league in one place: why it is separate, the v3 features, its
+%   baselines, how its arms were trained and compared, and its results and limits. The body keeps a
+%   two-sentence summary (sec:res-ais-summary). Assembled from the base revision's simulator
+%   (league clause), model (v3 features), training (league bullet), baselines (league baselines),
+%   evaluation (league secondary) and results (league results) text.
+% EVIDENCE: CR/CONTRACT.md A16; CR/config/engine.json; CR/facts/{ais_features,tierBC,test_results,
+%   robustness}.json; CR/facts/UPSTREAM_FOLLOWUPS.md #15, #16; generated/{ladder,ladder_pairs}.tex;
+%   CR/audits/final/completeness.md F2; llm_d/optimized_baseline.rs (TtftSource::Modeled).
+
+\section{The \ais{}-informed league}
+\label{app:ais-league}
+\label{sec:res-ais}
+
+% src: CR/config/engine.json replay_call (top_level_ais_perf_config null, router_prefill_load_model
+%      "none", note); CR/CONTRACT.md A16
+% prov: A16 ("a later operator decision", "a later amendment")
+In the main study \ais{} times the engines only. The router-side \ais{} estimator, which some router
+modes use to model prefill load, is off, so the policies under study see the same router state a
+live router without a performance model would see (\cref{sec:decision}). A separate, secondary
+league, the \ais{}-informed league, admits policies that may read \ais{}-derived estimates at
+runtime (\cref{sec:excluded}). It
+runs on its own build, with the router-side estimator on. Because these policies read estimates from the model that also times
+the simulation, the league is a secondary comparison and never enters the headline: its arms cannot
+become $\pilearn$, and they compete in a leaderboard of their own.
+
+\subsection{Features}
+
+% src: CR/CONTRACT.md A16 (feature set v3, AIS league, secondary); v3 lives on the separate AIS branch,
+%      not in this worktree (CR/facts/ais_features.json worktree)
+The league's learned arms use a third feature set, \code{v3}, built on a separate branch and build:
+the eight \code{v1} features plus five per-worker estimates from \ais{}, in seconds. They are this
+request's predicted prefill time for its uncached tokens on the worker (\code{est\_prefill\_ms\_s});
+the worker's remaining modeled prefill backlog, which counts only the unfinished part of
+in-progress prefills (\code{prefill\_backlog\_ms\_s}); their sum, an estimated TTFT
+(\code{est\_ttft\_ms\_s}); the decode-step time once the request joins
+(\code{est\_decode\_step\_ms\_s}); and the per-step increase the request imposes on the requests
+already on the worker (\code{itl\_externality\_ms\_s}). The backlog is the host's
+\code{PREFILL\_TIME} input, which a live router fills when it runs the \ais{} prefill-load model.
+The request's own prefill time needed a new research input that only offline replay fills; live, a
+closed form fitted to \ais{} offline stands in for it, at 6.6\% mean error on a grid up to 128K
+tokens. The decode terms use a closed form in the batch size and the router's decode blocks, which
+undercount context shared by co-resident requests (\cref{sec:features} defines the shared features).
+% src: CR/facts/ais_features.json feature_set_v3 (dim 13; features 8-12 definitions, sources,
+%      live_router notes), fit; CR/facts/UPSTREAM_FOLLOWUPS.md #15 (REQUEST_PREFILL_TIME, closed form
+%      6.6% mean, 20% max), #16 (no summed decode context)
+
+\subsection{Baselines}
+
+% src: CR/CONTRACT.md A16 (AIS league: M0-ais, llm-d-optimized-baseline ttft_source modeled with the AIS
+%      load model, each 3 restarts at B = 400; same normalizer default@defaults without AIS; headline
+%      unchanged); llm_d/optimized_baseline.rs (TtftSource::Modeled, worker without a prediction = slowest)
+The league's baselines are M0 run with the router's \ais{} prefill-load model
+(\code{router\_prefill\_load\_model: ais}) and the optimized baseline with
+\code{ttft\_source: modeled}, which estimates each worker's TTFT from that model's prefill backlog
+and counts a worker without an estimate as slowest. Both are tuned with the same budget and
+normalized by the same $\piref$ without \ais{}. Running the default cost with the \ais{} load model
+is not neutral: it changed the default router's own routing on 12 of 12 probe pairs, so M0-ais
+shows that effect explicitly.
+% src: CR/facts/ais_features.json ais_load_model_effect_on_default.decisions (pairs_routing_changed
+%      12/12)
+
+\subsection{Training and comparison}
+
+% src: CR/facts/tierBC.json decisions.ais_league, decisions.ais_final_i9 (all four arms complete);
+%      CR/CONTRACT.md A16.3-4
+The league has four arms: M1-ais and M2-ais on feature set \code{v3}, M0 with the \ais{}
+prefill-load model, and \policy{llm-d-optimized-baseline} with modeled TTFT. Each is trained like
+the main arms (\cref{sec:training}), with three restarts at the same budget, on the league's own
+build. The comparison, registered before the test pass as a secondary (\cref{sec:secondary}), sets
+the league's arms against the best \ais{}-informed baseline and against the best baseline
+overall. Every arm is normalized by the same $\piref$, which does not use \ais{}, so the two leagues
+share one scale and we can state how much the \ais{} estimates add.
+
+\subsection{Results}
+
+% src: CR/facts/test_results.json secondary.ais (m2ais_vs_m0ais +0.030526, p 0.001221; vs ramjet;
+%      vs m1v2); generated/ladder_pairs.tex (M2-ais - M1-v2 -0.0029, 3/12; M0-ais - M0 +0.0262);
+%      generated/ladder.tex (M0-ais vs ramjet -0.0019); CR/facts/robustness.json execution.ais_league;
+%      CR/audits/final/completeness.md F2; CR/facts/UPSTREAM_FOLLOWUPS.md #15
+% prov: LR-14 (the reading rule)
+The league's arms appear in \cref{tab:ladder-results,tab:ladder-pairs} and in the leaderboard
+(\cref{fig:leaderboard}).
+\begin{itemize}
+  \item \textbf{Against its own baseline and the overall best.} M2-ais, the league's selected
+    learned arm, beats M0-ais, the better \ais{}-informed baseline on validation, by $+0.0305$
+    ($p$ 0.0012), and tuned \policy{ramjet} by $+0.0286$ ($p$ 0.0005).
+  \item \textbf{\ais{} features add nothing at the learned level.} M2-ais minus M1-v2 is $-0.0029$,
+    ahead on 3 of 12 segments.
+  \item \textbf{The \ais{} load model helps the default cost function.} M0-ais beats M0 by $+0.026$
+    and roughly matches \policy{ramjet} ($-0.002$).
+  \item \textbf{No robustness evidence.} The league has no lag robustness, because the lag build
+    predates feature set \code{v3}, and no timing robustness, which was never registered; under the
+    reading rule of \cref{sec:robustness} even its direction is unverified under perturbation.
+  \item \textbf{Not portable as is.} M1-ais and M2-ais read a request's own modeled prefill time, a
+    research input only offline replay fills; live they would need the closed-form estimate (6.6\%
+    mean error).
+\end{itemize}

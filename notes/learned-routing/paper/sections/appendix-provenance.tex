@@ -1,0 +1,156 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: map every reader-facing name the paper uses for a registered decision, literature lesson,
+%   stage, run or table label to the identifier the campaign record uses (restructure plan, section 6
+%   row N; integrator decision 4). This appendix and appendix-reproducibility.tex are the only places
+%   where amendment and lesson identifiers appear in reader-facing text.
+% EVIDENCE: CR/CONTRACT.md (amendment headings A1-A21 and their numbered items),
+%   CR/literature/LESSONS.md (lesson headings LR-01 to LR-15), CR/facts/tierA.json and
+%   CR/facts/tierBC.json (runs and tuning rounds), CR/report/scripts/build_report_data.py (report row
+%   labels), scripts/make_tables.py RELABEL (the paper's relabeling of those rows).
+%   Public-content rule (A18): name no host, cluster, node, partition, account, job or internal URL.
+
+\section{Names used in this paper and the campaign record}
+\label{app:provenance}
+
+The study's campaign record (\cref{app:repro}) identifies its registered decisions, literature
+lessons, stages and runs by short labels. The paper uses descriptive names instead.
+\Cref{tab:provenance} maps each name to the record's label, so a reader can find the registration,
+lesson or run behind a statement. Amendments are the dated decisions recorded in the record's
+contract during the study; lessons are the ranked findings of the study's literature review. Rows whose last column is empty are not referred to in the text and are
+listed so that the numbering is complete.
+
+{\small
+\setlength{\LTcapwidth}{\linewidth}
+\begin{longtable}{@{}P{0.42\linewidth}P{0.27\linewidth}P{0.24\linewidth}@{}}
+\caption{Names used in this paper and the campaign record's identifiers. Amendments (A$n$) are in
+  the record's contract, lessons (LR-$nn$) in its literature review; a decimal marks an item of an
+  amendment.}\label{tab:provenance}\\
+\toprule
+Name in this paper & Record identifier & Where \\
+\midrule
+\endfirsthead
+\toprule
+Name in this paper & Record identifier & Where \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\multicolumn{3}{@{}l}{\textit{Registered decisions (amendments to the study's contract)}} \\*
+The replicate rule (paired workload replicates replace identical re-runs, which are deterministic)
+  and the pilot's two-clause noise rule & A1 & \cref{sec:replicates,sec:noise-floor,app:protocol} \\
+The comparison against the validation-selected best baseline & A2.1 & \cref{sec:eval} \\
+The service objective in this study (an ITL bound and an end-to-end slowdown bound against
+  $\Ezero$; no TTFT bound) & A2.2 & \cref{sec:objective} \\
+Windowed goodput & A2.3 & \cref{sec:objective} \\
+Baselines evaluated as implemented, by design, with a brief sanity check & A2.5 &
+  \cref{sec:baselines,app:ports} \\
+AgentX replay through the study's own lowering, with play recycling & A3 & \cref{sec:agentx} \\
+Duplicated trace copies & A4 & \cref{app:workloads} \\
+Router-state lag as a robustness check, re-run on the test cells & A5.1 & \cref{sec:robustness} \\
+Worker sets differ only in their count & A5.2 & \cref{sec:setup} \\
+How fixes found during the study reach the upstream repositories & A6 & \\
+Device-tier KV overlap passed to catalog policies in replay & A7 & \cref{tab:caveats,app:repro} \\
+The repository mirror of the campaign record & A8 & \cref{app:repro} \\
+The remote CPU lane and its cross-host parity & A9, A10 & \cref{app:parity} \\
+Informed starts for M1's restarts & A11.1 & \cref{sec:restarts,app:starts} \\
+The concentration audit, and the sign constraint registered in advance as its remedy & A11.2 &
+  \cref{sec:gaming,sec:sign-constraint} \\
+$\Nw = 6$ in both validation and test, reported as selection-exposed & A11.3 &
+  \cref{sec:splits,sec:res-n} \\
+Breadth-first scheduling of the main tuning on the remote lane; the lag patch in a separate build
+  & A11.4, A11.5 & \cref{app:repro,app:results} \\
+M1 restricted to its default-router start (a secondary test finalist) & A12 (``M1-default-init'')
+  & \cref{sec:secondary,sec:res-ladder} \\
+The live GPU check & A13 & \cref{sec:live} \\
+The alternative SLO definitions & A14 & \cref{sec:robustness,sec:res-robustness} \\
+M1-noaff (session coefficient pinned at 0) & A15 & \cref{sec:ladder} \\
+The secondary \ais{}-informed league & A16 & \cref{app:ais-league} \\
+The extended-feature arm M1-v2 & A17.1 & \cref{sec:ladder} \\
+The headline-arm rule (the learned arm with the best score on fresh validation replicates, the rule
+  that also picks the best baseline) & A17.2 & \cref{sec:selection} \\
+The order in which arms would have been cut had compute run short & A17.3 & \\
+The public-content rule (no internal infrastructure names in public material) & A18 & \\
+Token-weighted goodput (secondary) & A19 & \cref{sec:a19} \\
+The live finalists, registered before any finalist live job & A20 & \cref{sec:live-plan} \\
+The \policy{lmetric} port fixed after the study froze its results & A21 & \cref{sec:ports}; the
+  footnote at each headline statement \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Literature lessons}} \\*
+Windowed goodput scored by a clipped mean log-ratio & LR-01 & \cref{sec:objective} \\
+A noise floor from replicates and workload segments, not from repeats & LR-02 &
+  \cref{sec:replicates,sec:noise-floor} \\
+Common random numbers within each CMA-ES generation & LR-03 & \cref{sec:noise} \\
+Paper-faithful baselines (not adopted: the baselines are evaluated as implemented) & LR-04 &
+  \cref{sec:baselines} \\
+Search spaces without flat directions; a suggested band of 10--30\% of decisions changed by the
+  initial step; named context sources & LR-05 & \cref{sec:space,app:spaces} \\
+Context and set-relative features that stay stable across $\Nw$ & LR-06 & \cref{sec:features} \\
+The strongest heuristics inside M1's class, and restarts started from them & LR-07 &
+  \cref{sec:features,sec:restarts} \\
+SLO re-scoring at several scales (one TTFT threshold per family fails across 1K--128K prompts) &
+  LR-08 & \cref{sec:objective,sec:robustness} \\
+Sessions released causally; strata by load mode & LR-09 & \cref{sec:loadmodes,sec:strata} \\
+Selection on validation over restarts, the same for baselines & LR-10 & \cref{sec:selection} \\
+Segments as the unit of the pre-registered headline test; the intersection-union test; the
+  probability-of-improvement criterion; performance profiles & LR-11 &
+  \cref{sec:headline,fig:profiles} \\
+Calibration per worker count, and the cache-pressure analysis & LR-12 &
+  \cref{sec:calibration,fig:cache-pressure} \\
+The worker-share cap and the other concentration flags & LR-13 & \cref{sec:gaming,tab:lr13} \\
+The reading rule for the robustness checks (staleness and timing) & LR-14 & \cref{sec:robustness}
+  \\
+The drift check before M2, warm starts, and nest-level features for M3 & LR-15 &
+  \cref{sec:drift,sec:nested} \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Stages}} \\*
+The pilot & the pilot stage (\file{facts/pilot.json}) & \cref{sec:pilot} \\
+The pilot's review & the gate (\file{facts/gate.json}) & \cref{sec:pilot,app:audits} \\
+The main tuning & phase 2 & \cref{sec:training} \\
+The first round of tuning (the ported baselines, M0, and M1 with its sign-constrained re-run) &
+  tier A (\file{facts/tierA.json}) & \cref{sec:budget} \\
+Later rounds: M1 continued, M1-noaff, M1-v2 and M2 rank 2; both arms of the queue-threshold
+  ablation; the \ais{}-informed league & tier B; tier C; tier AIS (\file{facts/tierBC.json}) &
+  \cref{sec:budget} \\
+The first, unconstrained M1 & the tier-A M1 & \cref{sec:gaming} \\
+The audit and fix midway through tuning & the phase-2 midpoint (\code{phase2-mid}) &
+  \cref{sec:gaming,app:audits} \\
+The single test pass & the Select+Test stage (``test stage'') & \cref{sec:eval} \\
+The audit after the test pass (a completeness critic and three refuters) & the final audit
+  (\file{audits/final/}) & \cref{sec:audits,app:audits} \\
+The live GPU check & the live phase (A13, A20) & \cref{sec:live} \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Tools, cell set and runs}} \\*
+The frozen cell set & \code{lr-cells-v5} & \cref{sec:freeze,app:repro} \\
+The tuning harness; the evaluation and report tools & \code{lr-train}; \code{lr-eval},
+  \code{lr-report} (harness version \code{lrh-4}) & \cref{sec:training,app:repro} \\
+``restart $r$, gen.\ $g$, CMA-ES mean'' or ``\ldots, best-so-far sample'' & run key
+  \code{<run>-s<r> g<g> mean} or \code{best\_so\_far}, kept in a \code{\% run key:} comment on each
+  row of the generated tables & \cref{tab:leaderboard-full} \\
+Run prefixes of the learned arms & \code{m1c} (M1), \code{m1} (M1 unconstrained), \code{m1cont},
+  \code{m1noaff}, \code{m1v2}, \code{m2r2}, \code{m0} (M0) & \\
+Run prefixes of the ablation and the \ais{}-informed league & \code{ablam1}, \code{ablabase};
+  \code{m0ais}, \code{m1ais}, \code{m2ais}, \code{llmdobm} & \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Row labels in tables and figures}} \\*
+M1 & ``M1 (= A12 M1-default-init)'' & \cref{tab:ladder-results,fig:leaderboard} \\
+M1 unconstrained (flagged for gaming) & ``M1 unconstrained (gaming-flagged)'', ``(tier A,
+  gaming-flagged)'' & \cref{tab:ladder-results,tab:lr13} \\
+M1-noaff; M1-v2 & ``M1-noaff (A15)''; ``M1-v2 (A17.1)'' & \cref{tab:ladder-results} \\
+M1 or ramjet + queue threshold (ablation) & ``(abl.\ a)'', ``(ablation a)'' &
+  \cref{tab:ladder-results,fig:leaderboard} \\
+SLO: ITL bound only; SLO: slowdown bound only; SLO: ITL + length-scaled TTFT; SLO: ITL + absolute
+  E2E bound & ``A14 itl\_only'', ``A14 e2e\_only'', ``A14 ttft\_len\_itl'', ``A14 abs\_e2e\_itl'' &
+  \cref{tab:robustness,fig:robustness} \\
+Token-weighted goodput (secondary) & ``A19 good tokens (secondary)'' &
+  \cref{tab:robustness,fig:robustness} \\
+Worker with no good request & ``dump worker'' & \cref{tab:lr13} \\
+round-robin; \policy{lmetric}; sticky-session bounded@defaults, sticky-session hard@defaults;
+  llm-d-optimized-baseline@defaults (throughput) & ``round\_robin''; ``lmetric (port)'';
+  ``sticky-bounded@defaults'', ``sticky-hard@defaults''; ``llm-d-optimized-baseline@throughput'' &
+  \cref{fig:leaderboard,tab:leaderboard-full} \\
+Test segments, for example Mooncake w3, AgentX T1, FAST25 synth.\ x0, sessions s6 &
+  \code{mooncake:w3}, \code{agentx:T1}, \code{fast25\_synthetic:x0}, \code{sessions:s6} &
+  \cref{fig:headline} \\
+\end{longtable}}

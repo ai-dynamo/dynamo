@@ -1,0 +1,209 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: supporting results that the body (sec:results, sec:gaming) states in summary: the figures
+%   that duplicate a body table, the cache-pressure trend, the rung-to-rung comparisons, the
+%   robustness details (lag-0 identity, simulator-model counterfactuals), the herding guards, the
+%   prompt-length figure and the compute cost (sec:res-cost, tab:cost).
+% EVIDENCE: CR/report/REPORT.md and CR/report/data/ (the figures are drawn from report_data.json by
+%   scripts/make_figures.py; the generated tables under generated/ are copied by scripts/make_tables.py; provenance is
+%   stated once for readers in app:repro);
+%   CR/facts/{test_results,robustness,calibration,pilot,tierBC}.json; CR/facts/STATE.md;
+%   CR/audits/final/refute-headline-3.md.
+
+\section{Additional results}
+\label{app:results}
+
+This appendix holds the supporting figures and tables of \cref{sec:results,sec:gaming}. Like
+everything outside \cref{sec:live}, every number comes from AIS-timed offline replay; intervals are
+95\% segment-bootstrap intervals, as in \cref{sec:results}. \Cref{fig:headline} plots the
+per-segment statistics of \cref{tab:headline}, and \cref{fig:val-test} compares each test policy's
+validation score with its test score (\cref{sec:res-leaderboard}). \Cref{tab:ladder-pairs} gives
+every rung-to-rung comparison that \cref{sec:res-ladder} reads, and \cref{fig:ladder} shows each arm
+on the selection replicates, the fresh validation replicates and test. \Cref{fig:coef} plots the
+standardized coefficients of \cref{tab:coef-m1v2} (\cref{sec:res-coefficients}), and \cref{fig:isl}
+the prompt-length trade of \cref{tab:isl} (\cref{sec:gaming-isl}).
+% prov: the four one-sentence subsections (headline and validation-to-test figures, model ladder,
+%      coefficients, prompt-length breakdown) were merged into this lead paragraph
+
+\begin{figure}[tbp]
+  \centering
+  \input{generated/fig_headline_segments}
+  % src: CR/report/data/report_data.json comparisons.ramjet.m1v2.all.by_segment, drawn by
+  %      scripts/make_figures.py (formerly fig/headline_segments.png, report figure F1)
+  \caption{The headline per test segment, labelled by family and the segment names of
+    \cref{tab:headline}. The four session segments tie at ceiling;
+    every other segment favors M1-v2.}
+  \label{fig:headline}
+\end{figure}
+
+\begin{figure}[tbp]
+  \centering
+  \input{generated/fig_val_vs_test}
+  % src: CR/report/data/report_data.json val_k3_10.<policy> and
+  %      comparisons.default.<policy>.all.cell_mean, drawn by scripts/make_figures.py (formerly
+  %      fig/val_vs_test.png, report figure F7; the same ten policies are labelled)
+  \caption{Validation (fresh replicates) against test, mean over cells of the clipped log-ratio
+    against $\piref$. The two compare different cells, so the dashed line is a reference, not an
+    expectation.}
+  \label{fig:val-test}
+\end{figure}
+
+\begin{table}[tbp]
+  \centering
+  \caption{Rung-to-rung comparisons on test (descriptive).}
+  \label{tab:ladder-pairs}
+  \input{generated/ladder_pairs}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \input{generated/fig_ladder}
+  % src: CR/report/data/report_data.json val_k0_2.<arm>, val_k3_10.<arm> and
+  %      comparisons.default.<arm>.all.cell_mean (arms and tuned ramjet), drawn by
+  %      scripts/make_figures.py (formerly fig/ladder.png, report figure F4)
+  \caption{The model ladder on the selection replicates, the fresh validation replicates and test.
+    Left of the vertical rule: router-observable arms; right of it: the \ais{}-informed league. ``M1
+    cont.'' is M1 continued, ``M2 r2'' is M2 at rank 2 and ``M1+q'' is M1 with the queue threshold.}
+  \label{fig:ladder}
+\end{figure}
+
+\begin{figure}[tbp]
+  \centering
+  \input{generated/fig_coefficients}
+  % src: CR/report/data/report_data.json coefficients_m1v2 (index, feature,
+  %      theta_x_sd), drawn by scripts/make_figures.py (formerly fig/coefficients_m1v2.png, report F6)
+  \caption{M1-v2's nonzero coefficients, standardized, labelled with the feature index $f$ and name
+    of \cref{tab:coef-m1v2}. Positive attracts a worker, negative repels it; the default-cost
+    anchor is at $-6.51$.}
+  \label{fig:coef}
+\end{figure}
+
+\begin{figure}[tbp]
+  \centering
+  \input{generated/fig_isl}
+  % src: CR/report/data/report_data.json isl_buckets.<bucket> (good_ramjet_default,
+  %      good_m1v2_ramjet, ttft_m1v2_ramjet: segment_mean), drawn by scripts/make_figures.py
+  %      (formerly fig/isl_buckets.png, report figure F10)
+  \caption{Where M1-v2's gain comes from (segment means on test). Left: in-window good fraction by
+    prompt length in percentage points, \policy{ramjet} minus $\piref$ (orange) and M1-v2 minus
+    \policy{ramjet} (blue).
+    Right: TTFT p90 log-ratio of M1-v2 against \policy{ramjet}.}
+  \label{fig:isl}
+\end{figure}
+
+% =====================================================================================
+\subsection{Cache pressure}
+
+% src: CR/report/REPORT.md section 4 (Spearman 0.79, 0.71; 1.0-2.7); CR/facts/calibration.json
+%      cache_pressure_open_loop lessons ("no split has cells below 0.5")
+On the 22 open-loop Mooncake and FAST25 test cells, M1-v2's gain rises with cache pressure: Spearman
+$\rho$ 0.79 against $\piref$ and 0.71 against \policy{ramjet} (\cref{fig:cache-pressure}). Pressure
+ranges from 1.0 to 2.7, so no test cell has little cache pressure, a design gap calibration recorded
+(\cref{sec:calibration}).
+
+\begin{figure}[tbp]
+  \centering
+  \input{generated/fig_cache_pressure}
+  % src: CR/report/data/report_data.json cache_pressure.cells (pressure,
+  %      m1v2_vs_default, m1v2_vs_ramjet, family), drawn by scripts/make_figures.py (formerly
+  %      fig/cache_pressure.png, report figure F9)
+  \caption{Per-cell gain against cache pressure on the 22 open-loop Mooncake and FAST25 test cells.
+    Cache pressure is distinct prefix tokens per \SI{100}{s} over
+    the cluster's KV capacity. The trend is descriptive: pressure is confounded with load level, and
+    cells of one segment are not independent. Left: against $\piref$; right: against tuned
+    \policy{ramjet}; marker shape: family.}
+  \label{fig:cache-pressure}
+\end{figure}
+
+% =====================================================================================
+\subsection{Robustness details}
+
+\Cref{fig:robustness} plots \cref{tab:robustness}.
+
+\begin{figure}[tbp]
+  \centering
+  \input{generated/fig_robustness}
+  % src: CR/report/data/report_data.json robustness.<condition> (segment_mean, ci95,
+  %      wilcoxon_one_sided_p), drawn by scripts/make_figures.py with the table labels (formerly
+  %      fig/robustness.png, report figure F5)
+  \caption{The headline under perturbations and alternative SLOs (dashed: the MDE). The four
+    ``SLO:'' rows are the alternative SLO definitions, and the last row is the token-weighted
+    secondary metric.}
+  % prov: the report's labels were "A14 <variant>" and "A19 good tokens (secondary)"
+  \label{fig:robustness}
+\end{figure}
+
+\paragraph{Lag-0 identity.}
+% src: CR/facts/robustness.json lag0_identity_lag_build_vs_tuning_build; CR/audits/final/refute-headline-3.md
+%      (lag0 448/448)
+The lag build reproduces the tuning build at lag 0 per request: 180 of 180 test records for $\piref$
+and M1, and 448 of 448 validation records for M1-v2, \policy{ramjet}, \policy{llm-d-precise-prefix}
+and $\piref$ (\cref{sec:robustness}).
+
+\paragraph{Simulator-model counterfactuals.}
+% src: CR/audits/final/refute-headline-3.md (simulator model variants); CR/report/REPORT.md section 7.1
+On validation only, an audit-only build of the simulator changes how \ais{} prices mixed prefill
+and decode passes. Against $+0.0290$ on the unmodified simulator, M1-v2's lead over \policy{ramjet} is
+$+0.0274$ when mixed prefill passes are priced attention-equivalent, $+0.0291$ when priced as a
+per-request sum, $+0.0268$ with an extra \SI{0.1}{ms} of decode cost per running sequence, and
+$+0.0269$ when decode inside a prefill pass costs a quarter. These bracket fidelity errors that act
+on M1-v2's concentration mechanism; they are not measurements of reality, and FAST25, a test-only
+family, is not covered.
+
+% =====================================================================================
+\subsection{Herding guards}
+
+% src: generated/tau_hashhome.tex; CR/facts/robustness.json m1_lr14_variants; CR/report/REPORT.md section 7.2
+Two guards against herding were registered before M1-v2 won, so they ran as variants of M1
+(\cref{app:protocol}; \cref{tab:tau-hashhome}). A positive temperature does not help:
+$\temp = 0.747$ is within noise of M1, and $\temp = 2.75$ costs 0.028, more at $\Nw = 16$ and 32
+than at 2, as expected when the softmax mass on non-best workers grows with $\Nw$. Restricting
+candidates to the prefix's \code{hash\_home} pair is harmful at large $\Nw$ ($-0.57$ at 16 and
+$-0.68$ at 32); at $\Nw = 2$ every worker is home, so the variant is identical there. No herding
+failure of the argmax appeared under the tested lags in replay.
+
+\begin{table}[tbp]
+  \centering
+  \caption{Herding guards, as variants of M1 on the lag build at lag 0: segment-mean
+    clipped log-ratio against M1 with 95\% intervals, over all test cells and at the unseen worker
+    counts.}
+  \label{tab:tau-hashhome}
+  \input{generated/tau_hashhome}
+\end{table}
+
+% =====================================================================================
+\subsection{Cost}
+\label{sec:res-cost}
+
+\Cref{tab:cost} collects the compute. Replay-seconds sum the wall time of single-threaded replays, so
+they measure work, not elapsed time.
+
+\begin{table}[tbp]
+  \centering\footnotesize
+  \caption{Compute by stage. Every row is measured and comes from the stage facts, except where it
+    says otherwise.}
+  \label{tab:cost}
+  % prov: the "Tuning" row was "Phase 2"
+  \begin{tabularx}{\linewidth}{@{}lYl@{}}
+    \toprule
+    Stage & Value & Source \\
+    \midrule
+    Calibration, first pass & \num{13532} replays, \num{122436} replay-s, about 3.3\,h on the
+      workstation & \file{facts/calibration.json} \\
+    Calibration fix & \num{9792} replays, \num{112561} replay-s, 0 errors & \file{facts/STATE.md} \\
+    Pilot & \num{56552} fresh replays, 0 errors & \file{facts/pilot.json} \\
+    One evaluation, all 34 train cells, $\Krep = 2$ & 700.9 replay-s; 37.0\,s wall on the
+      20-slot workstation pool (pilot) & \file{facts/pilot.json} \\
+    Tuning & 66 restarts of 400 evaluations; about 30,000 result records per run; generations of
+      about 300\,s (EPYC 9654P) to 690\,s (EPYC 7702P); replay-seconds not totaled &
+      \file{facts/STATE.md} \\
+    Test pass & \num{5220} + 900 records, 0 errors & \file{facts/test\_results.json} \\
+    Robustness & \num{23940} records, 0 errors & \file{facts/robustness.json} \\
+    Per-decision policy latency & not measured & --- \\
+    \bottomrule
+  \end{tabularx}
+  % src: CR/facts/calibration.json summary; CR/facts/STATE.md fix(calibration r0), tier-B/C relays;
+  %      CR/facts/pilot.json measurements; CR/facts/test_results.json execution; CR/facts/robustness.json
+  %      execution
+\end{table}

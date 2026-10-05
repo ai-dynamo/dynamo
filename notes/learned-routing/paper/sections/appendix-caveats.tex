@@ -1,0 +1,143 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: the full list of major caveats the study uncovered, each with its evidence and status
+%   (operator request R1, CR/facts/PAPER_REQUESTS.md). Moved from background.tex (base <commit-50>,
+%   lines 469-598); sec:caveats in the background keeps a highlight paragraph that points here.
+%   Simulator, gaming and discussion refer to rows by number: do not renumber or reorder the rows.
+% EVIDENCE: CR/facts/{UPSTREAM_FOLLOWUPS.md,DEVIATIONS.md,setup.json,agentx_lowered.json,lag_patch.json,
+%   robustness.json,live_smoke.json}, CR/audits/{setup,build,phase2-mid,final}/; per-row sources in the
+%   comment block after the table.
+
+\section{Major caveats}
+\label{app:caveats}
+
+Building, calibrating and auditing the study surfaced a number of properties of the API, of the
+replay host and of the workloads that can change which policy wins. \Cref{tab:caveats} lists the
+major ones with their evidence and status: \emph{fixed} (a fix exists on the study's branch or
+upstream), \emph{follow-up} (recorded for an upstream change, worked around here), or
+\emph{inherent} (a property of the setting that this study can only scope). Several of them shape
+the results in later sections, which refer to them by row number; \cref{sec:caveats} highlights
+those.
+
+{\footnotesize
+\setlength{\LTcapwidth}{\linewidth}
+\begin{longtable}{@{}P{0.04\linewidth}P{0.26\linewidth}P{0.41\linewidth}P{0.2\linewidth}@{}}
+\caption{Major caveats this study uncovered. Evidence names the campaign record; ``status'' says
+  what was done.}
+\label{tab:caveats}\\
+\toprule
+\# & Caveat & Evidence and effect & Status \\
+\midrule
+\endfirsthead
+\toprule
+\# & Caveat & Evidence and effect & Status \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+1 & Replay's router state is perfectly fresh. &
+  Replay applies KV events, prefill completions and request completions to the router
+  synchronously, so policies always see exact overlap and load; a live router sees them late.
+  Policies that lean on exact state could lose their advantage live. &
+  Follow-up: a lag knob on a separate branch; M1-v2 stays first and ahead of \policy{ramjet} at
+  10--\SI{200}{ms} on test and ahead at \SI{1000}{ms} on validation (\cref{sec:res-robustness}),
+  and the live ranking agrees with replay's on six test cells (\cref{sec:live}). \\
+2 & \code{expected\_output\_tokens} equals the true output length in replay. &
+  The replay host fills the field from the trace's output length, a value no live router has.
+  A policy reading it would see the future. &
+  Inherent to replay; no learned feature reads it, and two leakage audits found no decision that
+  depends on it (\cref{sec:integration}). \\
+3 & Prefix hashes are unique per request when the host does not assume KV reuse. &
+  With \code{router\_assume\_kv\_reuse=false} the tracking hashes are random, so prefix-keyed
+  policies (\policy{chwbl}, \policy{dualmap}, \policy{lmetric}'s classes, \lc{}'s
+  \code{hash\_home}) lose their keys and decode-block accounting changes; turning off
+  \code{router\_track\_prefill\_tokens} zeroes the active-prefill features. &
+  Inherent to the API contract, documented in the policy stack; the learned policy must run with
+  the training-time host knobs (\cref{sec:integration}). \\
+4 & Synthesized closed-loop session IDs reach the router. &
+  For a flat trace in closed loop, replay gives every request a single-use session ID and passes
+  it to the router; the same trace in open loop, or a live client, sends none. A session-keyed
+  feature then behaved differently by load mode (2 against 8 workers per prefix key). &
+  Follow-up: a fix with a regression test is in AISimulate pull request \#378, and Dynamo needs a pin
+  bump after its release; the learned feature was re-keyed on the prompt prefix. \\
+5 & One public trace is a relabeled copy of another. &
+  The FAST'25 tool-agent trace matches Mooncake on all \num{23608} output lengths, maps one-to-one
+  onto its hash blocks and scales its timestamps by 0.9825. It would have put one workload in two
+  families and possibly two splits. & Fixed: excluded from every split (\cref{sec:workloads}). \\
+6 & The default router's tie-breaks are unseeded. &
+  Identical replays of one cell gave goodput 2.8934 and 2.8290 under the catalog default, so
+  re-runs could not be paired. &
+  Fixed on the study's branch (a \code{seed} parameter); follow-up for the policy stack. \\
+7 & Open-loop agent traffic has a load cliff. &
+  With Poisson play arrivals, between 0.002 and 0.0025 plays per second per worker the number of
+  plays in flight grows without bound at every $\Nw$, so no stationary open-loop load reaches the
+  heaviest calibration band. & Inherent: AgentX runs only in agentic lanes
+  (\cref{sec:agentx}). \\
+8 & The slowdown clause has a knife edge at slowdown 1, and drain-window scoring dilutes
+  differences. &
+  A request that ran alone has $\EtoE = \Ezero$ exactly; float noise and an off-by-one decode
+  context made it fail a strict comparison in a policy-dependent way (round-robin's ratio 0.57
+  instead of 0.88 on one cell). Scoring closed-loop windows through the end-of-run drain diluted
+  policy differences by 23--41\%, once flipping a sign. &
+  Fixed: $\Ezero$ aligned with replay's decode context plus a $10^{-6}$ relative tolerance; windows
+  end at full occupancy (\cref{sec:objective}). \\
+9 & Logged arrival timestamps are quantized. &
+  Mooncake's arrivals sit on a \SI{3053}{ms} grid, with up to 47 requests per instant, and replay
+  delivers each burst at once at any speedup. At $\Nw = 2$ the default's 85th-percentile slowdown
+  was 8.32 with bursts and 1.46 with arrivals spread inside their slot. &
+  Follow-up: the harness spreads arrivals per replicate (\cref{sec:replicates}). \\
+10 & No AgentX play fits a 32K context. &
+  Every one of the 82 plays that fits the \num{131072}-token context peaks at \num{44048} tokens or
+  more, so the deployment runs at 128K with YaRN, where \ais{}'s accuracy is least validated. &
+  Inherent; disclosed (\cref{sec:threats-sim}). \\
+11 & The per-request temperature override is ignored by the default policy. &
+  The plugin default picker reads only its own temperature; a documentation example still shows
+  the override. & Intentional upstream; documentation follow-up. \\
+12 & The policy file could change between hashing and use. &
+  A policy file edited during a replay benchmark run could be reported under a hash that does not
+  match the policy that ran. & Fixed in the policy-stack pull request
+  ai-dynamo/\allowbreak{}dynamo\#15450: the benchmark hashes the file once and rejects a change
+  before reporting. \\
+13 & \aisim{} prices a mixed prefill pass at the batch mean. &
+  Adding a short fresh prompt to a long-context chunk makes the pass cheaper than the chunk alone
+  (0.73--0.82$\times$ in four probes), a simulator artifact a search could exploit. &
+  Follow-up (not patched, it would change every cached result); the exploit check is negative for
+  the headline policy (\cref{sec:gaming}). \\
+14 & Catalog policies saw no device-tier overlap in replay on Dynamo's main branch. &
+  Replay left the device-tier overlap at zero, which reduces every cache-aware port to load-only
+  routing. & Fixed in the policy stack this study builds on, with a regression test. \\
+15 & A request-count objective can be gamed. &
+  The first tuned learned model kept one worker whose requests were all bad
+  (\cref{sec:gaming}). & Remedied by a sign constraint on load coefficients; the remaining
+  concentration is reported on every learned row. \\
+\end{longtable}
+}
+% src (rows):
+%  1: CR/facts/UPSTREAM_FOLLOWUPS.md #14; CR/facts/lag_patch.json; CR/facts/robustness.json conditions;
+%     CR/audits/final/refute-headline-3.md (lag 1000 ms val +0.0333 vs +0.0290)
+%  2: CR/facts/setup.json expected_output_tokens (populated_from_true_osl: true);
+%     CR/audits/build/leakage-features-r0.md section 2 (0/965), leakage-features-r1.md (16,000 twin decisions)
+%  3: WT/lib/kv-router/src/plugins/worker_selection/context.rs prefix_hashes doc ("When the host does not
+%     assume KV reuse ... every entry is unique to the request"); CR/audits/build/leakage-features-r1.md F1
+%     ("router_assume_kv_reuse=false makes the tracking hashes random"); policy-stack commit
+%     "docs(router): note where prefix-keyed policies lose affinity"
+%  4: CR/facts/UPSTREAM_FOLLOWUPS.md #6 and "Straight-main lane outcomes" #6; operator request R1
+%     names the AISimulate pull request (#378)
+%  5: CR/traces/MANIFEST.json toolagent role; CR/audits/setup/determinism-cost-context-r1.md F1
+%  6: CR/facts/UPSTREAM_FOLLOWUPS.md #1 (2.8934 vs 2.8290 catalog)
+%  7: CR/facts/agentx_lowered.json suggested_loads.open_mode.cliff
+%  8: CR/audits/build/goodput-normalization-r2.md F1 (round_robin 0.5672 harness vs 0.8812 tolerant at
+%     k3); goodput-normalization-r1.md (drain dilutes 23-41%, one sign flip)
+%  9: CR/facts/UPSTREAM_FOLLOWUPS.md #8; WT/benchmarks/learned_routing/learned_routing/replicates.py
+%     docstring ("3 s bursts of up to 47 rows")
+% 10: computed 2026-10-05 for this paper from CR/traces/agentx/plays/*.json (82 plays, 3,132 requests;
+%     smallest per-play max of in + max(out, 1) is 44,048; 0 plays at or below 32,768); recorded in
+%     CR/facts/paper_draft.json; CR/facts/build_workloads.json agentx.selection (82 plays fit 131,072;
+%     fallback_32k_needed false)
+% 11: CR/facts/UPSTREAM_FOLLOWUPS.md #4 and "Straight-main lane outcomes" #4
+% 12: base of the campaign branch: policy-stack commit "fix(router): address review on the ported
+%     policies and replay wiring" ("Bench: ... hash the file once and reject changes before reporting")
+% 13: CR/facts/UPSTREAM_FOLLOWUPS.md #17
+% 14: CR/CONTRACT.md A7 and "A7 correction" (regression test replay_passes_device_overlap_to_catalog_policies)
+% 15: CR/audits/phase2-mid/gaming-concentration.md F1; CR/audits/phase2-mid/fix.md

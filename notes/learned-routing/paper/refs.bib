@@ -741,29 +741,36 @@
 % Software, data and documentation the study runs on (not part of the literature review)
 % =========================================================================================
 
-% meta: repository named in the Dynamo repository's AGENTS.md and README.
+% meta: repository named in the Dynamo repository's AGENTS.md and README. Year: commit date of the
+%       revision the study set up on (CR/facts/setup.json head_sha <commit-01>, committed 2026-10-02 per
+%       the repository's git history).
 @misc{dynamo,
   title         = {{NVIDIA Dynamo}: a datacenter-scale distributed inference serving framework},
   author        = {{NVIDIA}},
   howpublished  = {Source repository},
+  year          = {2026},
   url           = {https://github.com/ai-dynamo/dynamo}
 }
 
 % meta: package named in the Dynamo repository's AGENTS.md (Ecosystem table); version used:
-%       CR/facts/setup.json (aisimulate 0.13.0.dev202609300000000061).
+%       CR/facts/setup.json versions.packages (aisimulate 0.13.0.dev202609300000000061). Year: PyPI
+%       release metadata of that version (wheels uploaded 2026-09-30).
 @misc{aisimulate,
   title         = {{AISimulate}: predicting serving behavior and searching deployment configurations offline},
   author        = {{NVIDIA}},
-  howpublished  = {Python package},
+  howpublished  = {Python package, version 0.13.0.dev202609300000000061},
+  year          = {2026},
   url           = {https://pypi.org/project/aisimulate/}
 }
 
 % meta: repository named in the Dynamo repository's AGENTS.md (Ecosystem table); version used:
-%       CR/facts/live.json loadgen.aiperf (0.13.0).
+%       CR/facts/live.json loadgen.aiperf (0.13.0, wheel sha256 a20100fd...). Year: PyPI release
+%       metadata of aiperf 0.13.0 (the wheel with that sha256, uploaded 2026-09-24).
 @misc{aiperf,
   title         = {{AIPerf}: benchmarking and load generation for generative {AI} serving},
   author        = {{NVIDIA}},
-  howpublished  = {Source repository},
+  howpublished  = {Source repository, version 0.13.0},
+  year          = {2026},
   url           = {https://github.com/ai-dynamo/aiperf}
 }
 

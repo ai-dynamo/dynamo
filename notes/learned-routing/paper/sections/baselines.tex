@@ -16,22 +16,34 @@
 %   CR/facts/gate.json full_plan; CR/facts/phase2_prep.json spaces, flip_calibration, decisions;
 %   CR/runs/phase2/spaces/*.yaml; CR/facts/pilot.json heuristic_screen_train_subset;
 %   CR/literature/LESSONS.md LR-04 (port gaps; its "make them faithful" action was overruled by A2.5).
-% STATUS: final. The policy rules themselves are described in sec:baseline-policies (background).
+% STATUS: final. The policy rules themselves are described in sec:baseline-policies (background) and
+%   app:ports. Restructured for a clean main text (plan base <commit-50>): tab:baselines, the sanity
+%   check and the port differences other than lmetric's moved to appendix-api.tex (app:ports); "What
+%   is tuned" (sec:baseline-spaces) and tab:baseline-spaces moved to app:spaces (appendix-tuning.tex);
+%   the AIS-league baselines moved to app:ais-league (appendix-ais-league.tex); the baseline seeding
+%   paragraph became a footnote.
 
 \section{Baselines}
 \label{sec:baselines}
 
 % src: CR/CONTRACT.md A2.1; CR/facts/gate.json full_plan.tiers.A_headline_core,
 %      full_plan.budget.equal_footing, full_plan.objective_cells_repeats.selection
-The headline compares the learned policy with the best heuristic an operator could deploy after
+The headline compares the learned policy with the best heuristic a deployment could use after
 tuning it on the same data. That heuristic is chosen from eleven tuned configurations, each tuned
 exactly like M1 (\cref{alg:train,sec:budget}): three restarts of $\budget = 400$ evaluations, the
-same objective, train cells, replicates and validation rule. Ten are the catalog policies of
-\cref{tab:baselines}; the eleventh is \policy{ramjet} with a jointly tuned router queue threshold,
-the baseline arm of ablation (a). Fresh validation replicates then pick $\pibase$ among the eleven
-selected configurations (\cref{sec:selection}); it was tuned \policy{ramjet}. Every heuristic is
-also evaluated untuned, at its shipped defaults, and round-robin is evaluated as a floor; these rows
-are reported for context.
+same objective, train cells, replicates and validation rule.\footnote{Only \defaultcf{} and
+  \policy{sticky-session} draw random numbers, for ties and softmax samples; the harness seeds them
+  with $\krep + 1$ on replicate $\krep$, as it seeds \lc{}. The other policies break ties by worker
+  ID or by a rotating counter, so every baseline replays identically on a given replicate.}
+% src (footnote): WT/notes/learned-routing/REPRODUCE.md "Policy seeds" (SEEDED_TYPES =
+%      dynamo-default-cost-fn, learned-choice, sticky-session; seed k + 1); tie-break code:
+%      two_tier_cost_fn.rs, lmetric.rs, dualmap.rs, chwbl.rs (lowest worker ID); ramjet.rs,
+%      llm_d/mod.rs (rotate_by_worker)
+Ten are the catalog policies of \cref{tab:baselines} in \cref{app:ports}; the eleventh is \policy{ramjet} with a jointly
+tuned router queue threshold, the baseline arm of the queue-threshold ablation (\cref{sec:ablations}).
+Fresh validation replicates then pick $\pibase$ among the eleven selected configurations
+(\cref{sec:selection}); it was tuned \policy{ramjet}. Every heuristic is also evaluated untuned, at
+its shipped defaults, and round-robin is evaluated as a floor; these rows are reported for context.
 % src: CR/facts/finalists.json rankings_val_k3_10.baseline_pool (11 tuned baselines incl. ablabase),
 %      headline.val_best_baseline (ramjet)
 
@@ -40,261 +52,59 @@ are reported for context.
 %      WT/notes/learned-routing/campaign/PLAN.md ("Your stack: rupei/router-policy-ports (#15450) and
 %      rupei/router-policy-aic-ttft (#15453)")
 All of them are catalog policies, selected by the same kind of policy YAML as \lc{}
-(\cref{fig:api}), and in the headline league every one reads only inputs the live router has. They are evaluated as implemented on the campaign branch: the default cost
-function and the two-tier policy as on Dynamo's main branch, the six ported policies as in the
-pull-request stack \#15450 and \#15453 at the commit the campaign branch starts from (the stack's
-\policy{lmetric} has changed since; \cref{sec:ports}), and \policy{sticky-session} as written for
-this campaign.
-\Cref{tab:baselines} summarizes their rules at shipped defaults, which
-\cref{sec:baseline-policies} describes in the API's terms; \cref{sec:baseline-spaces} gives what is
-tuned and \cref{sec:ports} how the ports differ from the methods they are named after.
+(\cref{fig:api}), and in the headline league every one reads only inputs the live router has. They
+are evaluated as implemented on the study's branch: the default cost function and the two-tier
+policy as on Dynamo's main branch, the six ported policies as in an unmerged pull-request stack
+(\cref{app:ports}; its \policy{lmetric} has changed since, \cref{sec:ports}), and
+\policy{sticky-session} as written for this study. \Cref{tab:api-policies} summarizes their
+composition and \cref{app:ports} their rules.
+% The stack's PR numbers (#15450, #15453) and "at the commit the study's branch starts from" moved
+% to app:ports (restructure round 1, E2).
 
-\begin{table}[tbp]
-  \centering\small
-  \caption{Baselines at their shipped defaults, as implemented on the campaign branch. Every policy
-    except round-robin is also tuned (\cref{tab:baseline-spaces}). $\ovl_i$: overlap blocks of
-    worker $i$; $\Lreq_i$: its active requests; one KV block is 16 tokens. ``Tie rotation'' is a
-    counter that rotates among tied workers.}
-  \label{tab:baselines}
-  % src: per-row rules from the module docs and pick/score functions of
-  %      WT/lib/router-plugins/builtin/src/{default/scorer.rs,two_tier_cost_fn.rs,lmetric.rs,ramjet.rs,
-  %      dualmap.rs,chwbl.rs,llm_d/precise_prefix.rs,llm_d/optimized_baseline.rs,sticky_session.rs};
-  %      default values from each Parameters::default()
-  \begin{tabularx}{\linewidth}{@{}lYP{0.2\linewidth}@{}}
-    \toprule
-    Policy & Rule at shipped defaults & State kept by the policy \\
-    \midrule
-    \policy{round\_robin} & requests go to the workers in turn; reads neither cache nor load
-      & position in the cycle \\
-    \defaultcf{} & $\argmin_i \cdef_i$ (\cref{eq:default-cost}): prefill blocks left after the
-      overlap credit, plus decode blocks & none; random tie-breaks \\
-    \policy{dynamo-two-tier-cost-fn} & fewest active requests; but while load is not badly
-      imbalanced (spread $\le 32$ or largest $\le 1.1\times$ smallest) and some worker caches more
-      than half the prompt, the least loaded of the best-cached workers & none \\
-    \policy{lmetric} & $\argmin_i\, \max(\ISL_j - 16\,\ovl_i,\ 1)\,(\Lreq_i + 1)$, with a hot-spot
-      filter for popular prefixes & class shares over the last 1000 requests \\
-    \policy{ramjet} & $\argmax_i$ of capped relative prefix affinity minus 4 times the worker's
-      load units & tie rotation \\
-    \policy{dualmap} & two hashed candidates per prefix; the warmer one unless its prefill backlog
-      would exceed \num{65536} tokens & prefix shares over the last 1000 requests \\
-    \policy{chwbl} & hashed owner of the prompt's first 256 tokens while its active requests stay
-      within 1.25 times the mean (counting this request); reads no cache & none \\
-    \policy{llm-d-precise-prefix} & $\argmax_i$ of prefix, queue and KV-utilization scores
-      weighted 2:1:1 & tie rotation \\
-    \policy{llm-d-optimized-baseline} & lowest prefill token load among workers caching at least
-      80\% of the prompt, unless their TTFT estimate trails by more than \SI{18}{s}
-      & tie rotation \\
-    \policy{sticky-session}, hard & the session's previous worker when eligible, otherwise the
-      default cost's choice & session map (\num{65536}) \\
-    \policy{sticky-session}, bounded & as hard, but leaves that worker when its active requests
-      exceed 1.25 times the candidate mean & session map (\num{65536}) \\
-    \bottomrule
-  \end{tabularx}
-\end{table}
-
-\subsection{What is tuned}
-\label{sec:baseline-spaces}
-
-% src: CR/runs/phase2/spaces/*.yaml (ranges, scales, inits, pins, sigma0, maxstd);
-%      CR/facts/phase2_prep.json spaces, decisions
-Each baseline searches its shipped numeric parameters over ranges set in the parameter's own
-units, log-scaled where a parameter spans orders of magnitude, starting from the shipped
-defaults (\cref{tab:baseline-spaces}); restarts 1, 2 and 3 use CMA-ES seeds 1, 2 and 3. Four
-kinds of parameter are pinned rather than searched.
-\begin{itemize}
-  \item \textbf{Rescalings.} A parameter that only rescales others adds a direction along which
-    decisions do not change, and CMA-ES's step size drifts along such directions
-    \citep{hansen2016tutorial}. Three are pinned. Multiplying \policy{ramjet}'s
-    \code{affinity\_block\_tokens} by some factor while dividing \code{max\_affinity\_blocks} and
-    \code{alpha} by the same factor leaves its decisions unchanged up to integer rounding; scaling
-    all three \policy{llm-d-precise-prefix} weights never changes its choice; and with the throughput
-    source, \policy{llm-d-optimized-baseline}'s gate compares a token difference divided by
-    \code{peak\_prefill\_tokens\_per\_second} with \code{max\_ttft\_penalty\_ms}, so only their
-    product matters.
-  \item \textbf{Categorical choices.} CMA-ES searches continuous coordinates, so
-    \policy{lmetric}'s hot-spot detector stays on, \policy{ramjet}'s affinity basis stays
-    \code{relative} and the optimized baseline's TTFT source stays \code{throughput}.
-  \item \textbf{Capacity.} The sticky-session map keeps its \num{65536}-session bound.
-  \item \textbf{Inputs replay does not supply.} \policy{llm-d-precise-prefix}'s per-class weights
-    stay empty, because replay sets no policy class.
-\end{itemize}
-% src: CR/facts/phase2_prep.json decisions ("only sticky-session reads the KvRouterConfig default-cost
-%      knobs ... verified: sticky@x0 == M0@x0 and sticky@hi == M0@hi on a session-free Mooncake cell;
-%      no other baseline reads a tunable KvRouterConfig knob; router_queue_threshold stays for ablation a")
-Both sticky variants also search the five default-cost knobs, with M0's ranges, because their
-first-turn and fallback choice is the default cost function. On a session-free Mooncake cell,
-the sticky policy matched M0 both at the starting point and at the upper corner of the space.
-No other baseline reads a
-tunable router-configuration knob, and the router's queue threshold is left to a separate
-ablation (\cref{sec:ablations}).
-
-% src: CR/facts/phase2_prep.json flip_calibration.rule, spaces.<name>.flip_calibration;
-%      CR/facts/STATE.md phase2-prep ("unreachable by 0.3 -> 0.3: two-tier 0.083, lmetric 0.0006,
-%      ramjet 0.133, dualmap 0.018, optimized-baseline 0.034")
-The initial step size $\sigmazero$ follows the rule in \cref{sec:space}: it is the step size at
-which one CMA-ES step changes 17.5\% of decisions on candidate tables reconstructed from the
-pilot's default-router replays. Five spaces do not reach that rate even at 0.3, the cap on the
-per-coordinate standard deviation, and start at 0.3: two-tier (0.083 of decisions change),
-\policy{lmetric} (0.0006), \policy{ramjet} (0.133), \policy{dualmap} (0.018) and the optimized
-baseline (0.034). For \policy{chwbl} and \policy{dualmap}, the hashed key depth was held at its
-default for this measurement. Any change of that depth redraws the prefix-to-worker map, so the
-objective is flat between block boundaries and jumps across them: 0.69 and 0.18 of decisions
-change already at a step of 0.03. \Cref{tab:leaderboard-full} in the appendix gives each tuned
-baseline's selected restart and checkpoint with its validation and test scores; the selected
-\policy{ramjet}, for instance, came from restart 3 at generation 25, with \code{alpha} 0.883,
-\code{max\_affinity\_blocks} 68 and \code{load\_unit\_tokens} 4552 (\cref{fig:api}).
-% src: CR/facts/finalists.json headline.val_best_baseline (ramjet@p2-ramjet-s3-g25-best_so_far);
-%      CR/report/REPORT.md section 3.1 "Selected config (val k0-2)" column
-
-\begin{table}[tbp]
-  \centering\footnotesize
-  \caption{Tuning spaces. Each searched parameter is listed with its range, ``log'' if it is
-    searched on a log scale, and its starting value, which is the shipped default except where
-    marked. $d$: free parameters. Flips: the share of decisions that one CMA-ES step of size
-    $\sigmazero$ changes, measured from the policy's defaults on candidate tables reconstructed
-    from the pilot's default-router replays of 12 train cells (target 0.175). Every space caps
-    the per-coordinate standard deviation at 0.3. M1's row is for comparison.}
-  \label{tab:baseline-spaces}
-  % src: CR/runs/phase2/spaces/{m0_default_tuned,two_tier,lmetric,ramjet,dualmap,chwbl,
-  %      llmd_precise_prefix,llmd_optimized_baseline,sticky_hard,sticky_bounded,m1_learned_v1}.yaml;
-  %      flips: CR/facts/phase2_prep.json spaces.<name>.flip_calibration.flip_at_sigma0_interpolated
-  %      (0.16938, 0.08297, 0.00058, 0.13332, 0.01828, 0.17260, 0.17698, 0.03404, 0.17908, 0.17460),
-  %      rounded to 3 places (lmetric to 1 significant digit); M1 flips: CR/facts/pilot.json decisions
-  %      ("sigma0 0.004 internal ... about 20% decision flips vs theta0")
-  \begin{tabularx}{\linewidth}{@{}P{0.17\linewidth}YP{0.2\linewidth}ccc@{}}
-    \toprule
-    Policy & Searched: range (scale), start & Pinned & $d$ & $\sigmazero$ & Flips \\
-    \midrule
-    default cost (M0)
-      & $\bov$ $[0, 4]$, 1;\newline $\bdecay$ $[0, 4]$, 0;\newline $\bpf$ $[0.05, 500]$ log, 1;\newline
-        $\breq$ $[0.5, 4096]$ log, 0.5\textsuperscript{a};\newline \code{router\_temperature} $[0, 1]$, 0
-      & --- & 5 & 0.11 & 0.169 \\
-    \addlinespace
-    two-tier
-      & \code{cache\_threshold} $[0, 1]$, 0.5;\newline \code{balance\_abs\_threshold} $[1, 1024]$ log, 32;\newline
-        \code{balance\_rel\_threshold} $[1, 8]$ log, 1.1
-      & --- & 3 & 0.3 & 0.083 \\
-    \addlinespace
-    LMetric
-      & \code{class\_prefix\_blocks} $[1, 64]$ log, 4;\newline \code{window\_requests} $[50, \num{50000}]$ log, 1000
-      & hot-spot detector on & 2 & 0.3 & 0.0006 \\
-    \addlinespace
-    Ramjet
-      & \code{alpha} $[0.1, 160]$ log, 4;\newline \code{max\_affinity\_blocks} $[1, 1024]$ log, 32;\newline
-        \code{load\_unit\_tokens} $[256, \num{262144}]$ log, 8192
-      & affinity block 512 tokens\textsuperscript{b};\newline basis \code{relative} & 3 & 0.3 & 0.133 \\
-    \addlinespace
-    DualMap
-      & \code{hash\_prefix\_blocks} $[1, 64]$ log, 4\textsuperscript{c};\newline
-        \code{pending\_prefill\_token\_budget} $[2048, \num{2097152}]$ log, \num{65536};\newline
-        \code{window\_requests} $[50, \num{50000}]$ log, 1000
-      & --- & 3 & 0.3 & 0.018\textsuperscript{c} \\
-    \addlinespace
-    CHWBL
-      & \code{prefix\_tokens} $[16, \num{16384}]$ log, 256\textsuperscript{c};\newline \code{load\_factor} $[1, 8]$ log, 1.25
-      & --- & 2 & 0.16 & 0.173\textsuperscript{c} \\
-    \addlinespace
-    llm-d precise prefix
-      & queue weight $[0.01, 100]$ log, 1;\newline KV-utilization weight $[0.01, 100]$ log, 1;\newline
-        \code{prefix\_match\_length\_weight} $[0, 1]$, 0;\newline
-        \code{prefix\_match\_length\_scale\_tokens} $[512, \num{131072}]$ log, 8192
-      & prefix weight 2\textsuperscript{b};\newline per-class weights empty & 4 & 0.16 & 0.177 \\
-    \addlinespace
-    llm-d optimized baseline
-      & \code{affinity\_threshold} $[0, 1]$, 0.8;\newline \code{max\_ttft\_penalty\_ms} $[100, \num{3240000}]$ log, \num{18000};\newline
-        \code{queue\_threshold\_tokens} $[\num{16384}, \num{1073741824}]$ log, \num{4194304}
-      & peak prefill rate \num{15928} tokens/s\textsuperscript{b};\newline TTFT source \code{throughput}
-      & 3 & 0.3 & 0.034 \\
-    \addlinespace
-    sticky, hard
-      & the five default-cost knobs, with M0's ranges and starts
-      & mode \code{hard};\newline \num{65536} sessions & 5 & 0.17 & 0.179 \\
-    \addlinespace
-    sticky, bounded
-      & \code{load\_factor} $[1, 8]$ log, 1.25;\newline the five default-cost knobs, as M0
-      & mode \code{bounded};\newline \num{65536} sessions & 6 & 0.067 & 0.175 \\
-    \midrule
-    learned (M1)
-      & $\theta_1,\dots,\theta_7$, bounds as in \cref{sec:space}
-      & $\theta_0 = -1$, $\temp = 0$ & 7 & 0.004 & about 0.20\textsuperscript{d} \\
-    \bottomrule
-  \end{tabularx}
-
-  \smallskip
-  \begin{minipage}{\linewidth}\footnotesize
-    \textsuperscript{a}\,The shipped value of $\breq$ is 0, which a log scale cannot reach; 0.5, at
-    most half a block per active request, stands in for it.
-    \textsuperscript{b}\,Pinned because it only rescales the other parameters.
-    \textsuperscript{c}\,Hashed key depth, held at its default when $\sigmazero$ was set: any
-    change of it redraws the prefix-to-worker map (0.69 of decisions change for \policy{chwbl} and
-    0.18 for \policy{dualmap} at a step of 0.03).
-    \textsuperscript{d}\,Measured in the pilot, from $\theta = -\basis{0}$.
-  \end{minipage}
-\end{table}
+% src: CR/runs/phase2/spaces/*.yaml (ranges, scales, inits, pins); CR/facts/phase2_prep.json spaces,
+%      decisions
+Each baseline searches its 2 to 6 numeric parameters, starting from their shipped defaults, with
+parameters that only rescale others, categorical choices, the session-map capacity and inputs replay does not
+supply pinned (\cref{app:spaces}).
+% The selected ramjet's restart and generation (s3, g25) are in app:spaces (appendix-tuning.tex).
 
 \subsection{Ports, not reproductions}
 \label{sec:ports}
 
 % src: CR/CONTRACT.md A2.5 ("Baselines are evaluated as implemented on this branch. Do not reproduce
 %      paper numbers."); CR/literature/LESSONS.md LR-04 (Henderson pdf p.5, VERIFIED)
-By operator decision, the ports are evaluated as implemented: we built no paper-faithful variants
-and did not try to reproduce published numbers. Implementations of the same baseline can differ
-materially \citep{henderson2018matters}, so beating \policy{lmetric} or \policy{dualmap} here
-means beating these ports in this simulator, at tuned and at shipped parameters, not the
-published systems.
-
-% src: CR/facts/pilot.json heuristic_screen_train_subset (replicates [0, 1], errors 0, ranking,
-%      mean_clipped_log_ratio: dualmap -0.15048, chwbl -0.21350, round_robin -0.48060; sanity_note);
-%      CR/facts/STATE.md audit(setup/ais-and-policy r0) ("chwbl, llm-d-precise-prefix, optimized-baseline,
-%      ramjet and dualmap plus their parameters change routing deterministically")
-The decision called for only a brief sanity check, that each port's decisions respond to its
-inputs in the documented direction. A setup audit confirmed that the parameters of
-\policy{chwbl}, \policy{dualmap}, \policy{ramjet} and both llm-d ports change their routing
-deterministically, and that \policy{lmetric} and two-tier replay identically across runs. In the
-pilot's screen of the nine untuned heuristics on 12 train
-cells with replicates 0 and 1, every port ran without error, none routed against its documented
-direction in aggregate, and seven beat $\piref$. \policy{dualmap} and \policy{chwbl} lost to it,
-with mean clipped log-ratios of $-0.150$ and $-0.214$, which the pilot attributed to hash-pinned
-placement on traffic with few hot prefixes; round-robin scored $-0.481$. These screen numbers are
-preliminary (pilot, train subset).
+% prov: A2.5 (operator decision: evaluate as implemented)
+By design, the ports are evaluated as implemented: we built no paper-faithful variants and did not
+try to reproduce published numbers. Implementations of the same baseline can differ materially
+\citep{henderson2018matters}, so beating \policy{lmetric} or \policy{dualmap} here means beating
+these ports in this simulator, at tuned and at shipped parameters, not the published systems. A
+brief sanity check (a setup audit and the pilot's screen of the untuned ports) found every port
+running without error and none routing against its documented direction in aggregate
+(\cref{app:ports}).
+% src: CR/facts/pilot.json heuristic_screen_train_subset (errors 0; sanity_note); CR/facts/STATE.md
+%      audit(setup/ais-and-policy r0)
 
 % src: code module docs of each port; CR/literature/LESSONS.md LR-04 (LMetric pdf p.2, p.8-9;
 %      DualMap pdf p.7; VERIFIED)
-The known differences between the ports and the published methods are these.
-\begin{itemize}
-  \item \policy{lmetric}, as evaluated, omits the prefill already queued on a worker from its
-    prefill factor. The paper credits that term for its advantage over a cache-hit-ratio indicator
-    \citep{zhang2026lmetric}. The port also counts its hot-spot window in decisions rather than
-    time. After the campaign froze its results, the port in ai-dynamo/dynamo\#15450 was fixed to
-    count the worker's queued prefill in the prefill factor, so it now matches the paper's
-    definition of that factor. The campaign branch keeps the port as evaluated: the
-    \policy{lmetric} baseline, its tuning and every \policy{lmetric} number in this paper are from
-    the port before the fix; this study did not evaluate the fixed port.
-    % src: CR/CONTRACT.md A21; policy-stack commit "fix(router-plugins): count queued prefill in
-    %      lmetric's P-token" (on #15450, after the campaign froze; not on the campaign branch)
-  \item \policy{dualmap}'s budget is a fixed default; the paper derives it as the prefill backlog
-    a GPU can clear within the TTFT SLO \citep{yuan2026dualmap}, and our SLO has no TTFT term.
-    The port uses rendezvous hashing in place of the paper's consistent-hash rings, and it omits
-    the paper's migration of queued requests between the two candidates, because Dynamo places
-    each request once.
-  \item \policy{ramjet} approximates Ramjet's per-request load units from per-worker load, reads
-    Dynamo's KV-event index instead of Ramjet's own approximate prefix index, and omits Ramjet's
-    lane that confines very long prompts to designated replicas.
-  \item \policy{llm-d-precise-prefix}'s queue score counts running as well as waiting requests,
-    where llm-d reads the engine's waiting queue.
-  \item \policy{llm-d-optimized-baseline}'s prefill rate is llm-d's hardware calibration for this
-    model, GPU and parallelism, while replay times prefill with \ais{}; the port also omits
-    llm-d's optional exploration probability.
-  \item Two-tier reads Dynamo's KV-event overlap instead of the SGLang router's approximate cache
-    history, and breaks ties by worker ID instead of the router's worker-list order.
-  \item \policy{chwbl} replaces the hash ring with rendezvous hashing.
-\end{itemize}
+The ports also differ from the published methods in known ways (\cref{app:ports}), and one of these
+differences bears on the headline's scope (\cref{sec:res-fairness}). \policy{lmetric}, as evaluated,
+omits the prefill already queued on a worker from its prefill factor, the term the paper credits
+for its advantage over a cache-hit-ratio indicator \citep{zhang2026lmetric}; the port also counts
+its hot-spot window in decisions rather than time. After this study froze its results, the port in
+ai-dynamo/dynamo\#15450 was fixed to count the worker's queued prefill in the prefill factor, so it
+now matches the paper's definition of that factor. The study's branch keeps the port as evaluated:
+the \policy{lmetric} baseline, its tuning and every \policy{lmetric} number in this paper are from
+the port before the fix, and this study did not evaluate the fixed port.
+% src: CR/CONTRACT.md A21; policy-stack commit "fix(router-plugins): count queued prefill in
+%      lmetric's P-token" (on #15450, after the campaign froze; not on the campaign branch)
+
 % src: CR/runs/phase2/spaces/{dualmap,llmd_optimized_baseline}.yaml (budget searched; peak pinned,
 %      penalty searched, "only their product matters")
-Tuning absorbs two of these: \policy{dualmap}'s budget is searched directly, and a miscalibrated
-prefill rate in the optimized baseline is equivalent to a different TTFT penalty, which is
-searched. The missing queued-prefill term in \policy{lmetric} as evaluated is structural, and no
-parameter setting adds it.
+Tuning absorbs two of the other differences: \policy{dualmap}'s prefill budget, a fixed default that
+its paper derives from a TTFT SLO our objective lacks, is searched directly, and a miscalibrated
+prefill rate in the optimized baseline, which uses llm-d's hardware calibration, is equivalent to a
+different TTFT penalty, which is searched. The missing queued-prefill term in \policy{lmetric} as
+evaluated is structural, and no parameter setting adds it.
 % src: FEATURES.md "Representability" (theta = -(e_log_ptok + e_log_bs) takes the argmin of
 %      (active_prefill + new_prefill) x (active_requests + 1)); CR/CONTRACT.md A17.1 (M1-v2, init s3)
 The learned family is not limited the same way. Feature set \code{v2} can express the paper's
@@ -305,57 +115,48 @@ for the headline learned model, uses \code{v2}, and one of its restarts starts n
 represent a variant of LMetric that the \policy{lmetric} baseline cannot. This asymmetry bounds the
 headline's scope (\cref{sec:res-fairness}).
 
-% src: WT/notes/learned-routing/REPRODUCE.md "Policy seeds" (SEEDED_TYPES = dynamo-default-cost-fn,
-%      learned-choice, sticky-session; seed k + 1); tie-break code: two_tier_cost_fn.rs, lmetric.rs,
-%      dualmap.rs, chwbl.rs (lowest worker ID); ramjet.rs, llm_d/mod.rs (rotate_by_worker)
-Only \defaultcf{} and \policy{sticky-session} draw random numbers, for ties and softmax samples;
-the harness seeds them with $\krep + 1$ on replicate $\krep$, as it seeds \lc{}. The other
-policies break ties by worker ID or by a rotating counter. Every baseline therefore replays
-identically on a given replicate.
-
 \subsection{Excluded and secondary baselines}
 \label{sec:excluded}
 
 % src: WT/docs/fern/.../configuration-and-tuning.md ("Offline replay runs the worker-selection policies
 %      above but not request classifiers"); CR/CONTRACT.md A2.5; LESSONS.md LR-04 action 4 and
 %      LR-07 (SMetric pdf p.6, p.10, VERIFIED)
+% prov: A2.5 ("the operator decision rules out building new implementations")
 ThunderAgent's worker selection \citep{kang2026thunderagent} follows the preference of a paired
 request classifier, and replay runs worker-selection policies but not classifiers, so it is not
-evaluated and lies outside every claim. SMetric \citep{wang2026smetric} is not in the router catalog, and the operator
-decision rules out building new implementations; its published advantage also assumes a global
-KV tier, which replay does not have.
+evaluated and lies outside every claim. SMetric \citep{wang2026smetric} is not in the router catalog,
+and this study builds no new implementations; its published advantage also assumes a global KV tier,
+which replay does not have.
 
 % src: CR/CONTRACT.md A16 (AIS league: M0-ais, llm-d-optimized-baseline ttft_source modeled with the AIS
-%      load model, each 3 restarts at B = 400; same normalizer default@defaults without AIS; headline
-%      unchanged); llm_d/optimized_baseline.rs (TtftSource::Modeled, worker without a prediction = slowest)
-A later amendment allows new arms to read signals from \ais{}, the performance model that times
-replay, in a separate league with its own leaderboard. Its baselines are M0 run with the router's
-\ais{} prefill-load model (\code{router\_prefill\_load\_model: ais}) and the optimized baseline with
-\code{ttft\_source: modeled}, which estimates each worker's TTFT from that model's prefill backlog
-and counts a worker without an estimate as slowest. Both are tuned with the same budget and
-normalized by the same $\piref$ without \ais{}. Because these policies read estimates from the
-model that also times the simulation, the league is a secondary comparison and never enters the
-headline. Running the default cost with the \ais{} load model is not neutral: it changed the default
-router's own routing on 12 of 12 probe pairs, so M0-ais shows that effect explicitly. All four arms
-of the league ran with three restarts at the same budget; results are in \cref{sec:res-ais}.
-% src: CR/facts/ais_features.json ais_load_model_effect_on_default.decisions (pairs_routing_changed
-%      12/12); CR/facts/tierBC.json decisions.ais_final_i9 (all four arms complete)
+%      load model, each 3 restarts at B = 400; headline unchanged); the league's baselines in full are in
+%      appendix-ais-league.tex (copied from base baselines.tex 328-342)
+Baselines that read \ais{} estimates (M0 with the \ais{} prefill-load model and the optimized
+baseline with modeled TTFT) are tuned with the same budget but compete only in the secondary
+\ais{}-informed league (\cref{sec:res-ais}).
 
 \paragraph{Fairness.}
 % src: tab:baseline-spaces sources; CR/runs/phase2/spaces/lmetric.yaml (comment: "the hot-spot detector
 %      rarely alarms because every worker holds the few hot class prefixes"); CR/CONTRACT.md A11.1, A12;
 %      CR/facts/phase2_prep.json m1_inits
-Equal budget does not mean equal search difficulty. The baseline spaces have 2 to 6 free
-parameters against M1's 7 and M1-v2's 22. In five of them a CMA-ES step changes few decisions even at the
-largest allowed step. \policy{lmetric}'s two parameters act only through its hot-spot detector,
-which on these workloads rarely alarms; the space's notes attribute this to every worker holding
-the few hot class prefixes, so tuned \policy{lmetric} should stay close to its defaults. The
-hashed key depths of \policy{chwbl} and \policy{dualmap} make their objectives jump. The
-equal-budget rule fixes what each policy may spend, not how far each can get. In the other
-direction, the learned arms' restarts start from the default router, a behavior clone of the
+% prov: A12 (M1-default-init)
+Equal budget is not equal search difficulty. The baseline spaces have 2 to 6 free parameters
+against M1's 7 and M1-v2's 22. In five of them a CMA-ES step changes few decisions even at the
+largest allowed step, and the hashed key depths of \policy{chwbl} and \policy{dualmap} make their
+objectives jump. \policy{lmetric}'s two parameters act only through its hot-spot detector, which on
+these workloads rarely alarms, which we attribute to every worker holding the few hot class
+prefixes, so tuned \policy{lmetric} should stay close to its defaults. In the other direction,
+the learned arms restart from informed points: the default router, a behavior clone of the
 strongest untuned heuristic in the pilot (\policy{llm-d-precise-prefix}) and a third informed point,
-for M1-v2 the faithful LMetric point (\cref{sec:restarts}), while every baseline restarts from its
-shipped defaults. These starting points cost no objective evaluations but carry information from
-heuristic decisions, so the test also reports M1 restricted to its default start (Amendment A12), and
+for M1-v2 the faithful LMetric point (\cref{sec:restarts}). These points cost no objective
+evaluations but carry information from heuristic decisions, while every baseline restarts from its
+shipped defaults. Three checks bound these effects: the test also reports M1 restricted to its
+default-router start,
 \cref{sec:res-fairness} shows how much of the learned margin the faithful LMetric point carries by
-itself. No baseline was still improving at the end of its budget (\cref{sec:budget}).
+itself, and no baseline gained more than 0.078 of the MDE over its last validation interval
+(\cref{sec:budget}).
+% src: CR/runs/phase2/checks/improving_at_cutoff_i6.json (first round: max policy_gain_over_mde 0.0777,
+%      stickybounded); CR/facts/tierBC.json decisions.improving_at_cutoff_i9 (no later baseline selected
+%      at its last validated generation). Replaces "no baseline was still improving at the end of its
+%      budget" (restructure round 1, P1).
+\Cref{sec:threats-fairness} weighs these asymmetries.

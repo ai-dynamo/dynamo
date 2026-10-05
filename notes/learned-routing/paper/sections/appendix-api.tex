@@ -1,0 +1,341 @@
+% SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+% SPDX-License-Identifier: Apache-2.0
+%
+% ROLE: the API and port details that the main text summarizes (operator request R1,
+%   CR/facts/PAPER_REQUESTS.md; split per the restructure plan): host eligibility and pins, declared
+%   inputs, request facts, catalog loading and the default picker's details (moved from
+%   background.tex, base <commit-50>), then every ported rule in full with tab:baselines, the setup
+%   sanity check and the port differences other than lmetric's (moved from background.tex 290-438
+%   and baselines.tex 52-93, 246-259, 275-290). The main text keeps the composition (sec:api-*),
+%   the default cost (sec:default-cost), tab:api-policies and the lmetric difference (sec:ports).
+% EVIDENCE: WT/lib/kv-router/src/plugins/worker_selection.rs and worker_selection/{context,inputs,
+%   config}.rs; WT/lib/kv-router/src/scheduling/{filter.rs,selector/policy.rs};
+%   WT/lib/router-plugins/builtin/src/{default/,default.rs,two_tier_cost_fn.rs,lmetric.rs,ramjet.rs,
+%   dualmap.rs,chwbl.rs,llm_d/,sticky_session.rs,session_map.rs,thunderagent/};
+%   CR/facts/{setup.json,UPSTREAM_FOLLOWUPS.md,pilot.json,STATE.md}; CR/literature/LESSONS.md LR-04.
+
+\section{The worker-selection API and the ported policies}
+\label{app:api}
+
+This appendix completes \cref{sec:background,sec:baselines}: how the host builds and fills the
+candidate table, how it loads a policy catalog, the default picker's remaining details, and every
+ported rule in full.
+
+\subsection{Eligibility and pins}
+
+For each request $j$ the host builds a \emph{candidate table}: one row per eligible worker (or
+worker and data-parallel rank). Eligibility is the host's: a worker must be in the request's
+allowed set, available, not marked overloaded by the host's busy thresholds, routable, and must
+satisfy the request's routing constraints. If the request is pinned to a worker, that worker is
+the only candidate, and a policy may also ask the host to treat a session-affinity target as
+exclusive, in which case an eligible target is pinned the same way. Pins and eligibility always
+win over a policy's preference.
+% src: WT/lib/kv-router/src/scheduling/filter.rs (RoutingEligibility: allowed_worker_ids,
+%      overloaded_worker_ids, available_worker_ids, pinned_worker, affinity_target,
+%      routing_constraints; WorkerEligibilityError variants); scheduling/selector/policy.rs
+%      (with_exclusive_affinity: "Explicit request pins remain mandatory regardless of this option")
+
+\subsection{Declared inputs}
+
+A component declares the optional worker signals it needs, as a set of \code{WorkerInputs}, and the
+host materializes only the union of what the policy's components declared. Each component then sees
+only its own declarations, even when another component of the same policy asked for more.
+\begin{description}
+  \item[\code{CACHE}] the accounting cache estimate (effective overlap blocks and estimated cached
+    tokens), the per-tier overlaps (device, host, disk) and shared-cache hits.
+  \item[\code{LOAD}] active prefill tokens, decode cost blocks and active requests, with a flag
+    that separates an unobserved worker from an idle one.
+  \item[\code{PREFILL\_TIME}] the host's modeled prefill backlog in milliseconds, available only when
+    the router runs a prefill-load model (\code{router\_prefill\_load\_model: ais}).
+  \item[\code{OCCUPANCY}] host-owned active-request counts.
+  \item[\code{PREFERRED\_TAINT}] a cost multiplier from the request's preferred routing constraints.
+\end{description}
+% src: worker_selection/inputs.rs (WorkerInputs::{CACHE, LOAD, PREFERRED_TAINT, PREFILL_TIME,
+%      OCCUPANCY}; WorkerCacheInput::accounting_cache_estimate, device/host/disk_overlap_blocks,
+%      shared_hits; WorkerLoadInput::{is_available, active_prefill_tokens, decode_cost_blocks,
+%      active_requests}; "Each scorer can access only its own declared optional inputs")
+No policy in this study declares \code{OCCUPANCY}, and only the \ais{}-informed variants read
+\code{PREFILL\_TIME} (\cref{sec:excluded}).
+
+\subsection{Request facts}
+
+Request-level values arrive through \code{WorkerSelectionContext}: the prompt length in tokens and
+in KV blocks and the block size; the \emph{prefix hashes}, chained hashes of the prompt's complete
+blocks, so that two requests share their first $i+1$ blocks exactly when their entry $i$ is equal;
+whether the request is tracked for prefill load; the session context; the session-affinity target
+the host resolved; the expected output length, if the request carries one; each worker's
+advertised KV capacity; the policy class; the request's priorities; and a per-request router
+temperature override. These are the only request facts a policy can use.
+% src: worker_selection/context.rs (prompt_tokens, request_blocks, block_size, prefix_hashes,
+%      tracks_prefill_tokens, session_context, affinity_target, expected_output_tokens,
+%      worker_capacity, policy_class, priority_jump, strict_priority, router_temperature_override,
+%      pinned_worker)
+
+\subsection{Catalog loading}
+
+A deployment's policy file names catalog types and their parameters (\cref{sec:api-components}). A
+registered provider for each type validates the parameters once, at startup, and returns a factory
+that builds one policy instance per routing partition and worker role, so every instance owns its
+state. Unknown types and malformed parameters fail at startup with a message naming the problem.
+The name \code{default} is reserved for the builtin selector.
+% src: worker_selection/config.rs (RawWorkerSelectionConfig: aggregated, prefill, decode, encode,
+%      instances; "parameters must be a YAML mapping"; "instance name 'default' is reserved");
+%      worker_selection.rs (WorkerSelectionPolicyFactory per routing partition);
+%      CR/facts/setup.json policy_selection_evidence (unknown type and parameter rejected)
+
+\subsection{Default picker details}
+
+The default picker (\cref{sec:default-cost}) breaks ties at random. On Dynamo's main branch the
+generator is unseeded, so identical replays of one cell differ, and this study added a \code{seed}
+parameter (caveat 6, \cref{app:caveats}). The picker deliberately ignores the per-request temperature
+override, and the default policy asks the host to treat an eligible session-affinity target as
+exclusive.
+% src: CR/facts/UPSTREAM_FOLLOWUPS.md #1 (seed), #4 and "Straight-main lane outcomes" #4 (override
+%      dropped on purpose, documented, enforced by a test); WT/lib/router-plugins/builtin/src/default.rs
+%      (with_exclusive_affinity(true))
+
+\subsection{The ported policies}
+\label{app:ports}
+
+We describe each rule in the router's terms. For request $j$ with candidates $\cand$, worker $i$
+has overlap $\ovl_i$ blocks, $\Lpf_i$ active prefill tokens, $\Ldec_i$ decode cost blocks, $\Lreq_i$
+active requests and a configured capacity of $\capb_i$ blocks; a KV block holds 16 tokens. The
+ports read the device-tier overlap, which in replay equals $\ovl_i$, so worker $i$'s uncached prompt
+is $\max(\ISL_j - 16\,\ovl_i, 0)$ tokens.
+% src: FEATURES.md "Feature set v1" ("In replay the effective overlap equals the device overlap and
+%      cached tokens are whole blocks"); WT/lib/router-plugins/builtin/src/signals.rs
+
+% src: git log of WT/lib/router-plugins/builtin/src/ (the six ports on the policy stack #15450, not on
+%      main); WT/notes/learned-routing/campaign/PLAN.md (stack #15450 and #15453); moved from
+%      baselines.tex in restructure round 1 (E2)
+The six ported policies are those of the pull-request stack ai-dynamo/dynamo\#15450 and \#15453 at
+the commit the study's branch starts from; the stack's \policy{lmetric} has changed since
+(\cref{sec:ports}).
+
+\Cref{tab:baselines} summarizes every baseline's rule at its shipped defaults, and
+\cref{tab:api-policies} gives each policy's composition; the default cost is
+\cref{eq:default-cost}, and the paragraphs below state each ported rule in full.
+
+\begin{table}[tbp]
+  \centering\small
+  \caption{Baselines at their shipped defaults, as implemented on the study's branch. Every policy
+    except round-robin is also tuned (\cref{tab:baseline-spaces}). $\ovl_i$: overlap blocks of
+    worker $i$; $\Lreq_i$: its active requests; one KV block is 16 tokens. ``Tie rotation'' is a
+    counter that rotates among tied workers.}
+  \label{tab:baselines}
+  % src: per-row rules from the module docs and pick/score functions of
+  %      WT/lib/router-plugins/builtin/src/{default/scorer.rs,two_tier_cost_fn.rs,lmetric.rs,ramjet.rs,
+  %      dualmap.rs,chwbl.rs,llm_d/precise_prefix.rs,llm_d/optimized_baseline.rs,sticky_session.rs};
+  %      default values from each Parameters::default()
+  \begin{tabularx}{\linewidth}{@{}lYP{0.2\linewidth}@{}}
+    \toprule
+    Policy & Rule at shipped defaults & State kept by the policy \\
+    \midrule
+    \policy{round\_robin} & requests go to the workers in turn; reads neither cache nor load
+      & position in the cycle \\
+    \defaultcf{} & $\argmin_i \cdef_i$ (\cref{eq:default-cost}): prefill blocks left after the
+      overlap credit, plus decode blocks & none; random tie-breaks \\
+    \policy{dynamo-two-tier-cost-fn} & fewest active requests; but while load is not badly
+      imbalanced (spread $\le 32$ or largest $\le 1.1\times$ smallest) and some worker caches more
+      than half the prompt, the least loaded of the best-cached workers & none \\
+    \policy{lmetric} & $\argmin_i\, \max(\ISL_j - 16\,\ovl_i,\ 1)\,(\Lreq_i + 1)$, with a hot-spot
+      filter for popular prefixes & class shares over the last 1000 requests \\
+    \policy{ramjet} & $\argmax_i$ of capped relative prefix affinity minus 4 times the worker's
+      load units & tie rotation \\
+    \policy{dualmap} & two hashed candidates per prefix; the warmer one unless its prefill backlog
+      would exceed \num{65536} tokens & prefix shares over the last 1000 requests \\
+    \policy{chwbl} & hashed owner of the prompt's first 256 tokens while its active requests stay
+      within 1.25 times the mean (counting this request); reads no cache & none \\
+    \policy{llm-d-precise-prefix} & $\argmax_i$ of prefix, queue and KV-utilization scores
+      weighted 2:1:1 & tie rotation \\
+    \policy{llm-d-optimized-baseline} & lowest prefill token load among workers caching at least
+      80\% of the prompt, unless their TTFT estimate trails by more than \SI{18}{s}
+      & tie rotation \\
+    \policy{sticky-session}, hard & the session's previous worker when eligible, otherwise the
+      default cost's choice & session map (\num{65536}) \\
+    \policy{sticky-session}, bounded & as hard, but leaves that worker when its active requests
+      exceed 1.25 times the candidate mean & session map (\num{65536}) \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsubsection{The rules in full}
+
+\paragraph{Two-tier.}
+% src: WT/lib/router-plugins/builtin/src/two_tier_cost_fn.rs (module doc, DEFAULT_* constants, select_row)
+\policy{dynamo-two-tier-cost-fn} ports the thresholds and selection order of the experimental SGLang
+router's \code{cache\_aware\_zmq} policy. Instead of one additive cost it applies the first of three
+rules that holds. (1)~If the spread of active requests across candidates exceeds
+\code{balance\_abs\_threshold} (default 32) and the largest count exceeds
+\code{balance\_rel\_threshold} (1.1) times the smallest, it takes the worker with the fewest active
+requests. (2)~Otherwise, if the largest overlap $\max_i \ovl_i$ exceeds \code{cache\_threshold}
+(0.5) times the request's $\reqblocks_j$ blocks, strictly, it takes the least-loaded worker among
+those holding that overlap. (3)~Otherwise it takes the least-loaded worker. Load means $\Lreq_i$
+alone, and ties go to the lowest worker ID. The port reads Dynamo's KV-event overlap where the
+SGLang router keeps its own approximate cache history.
+
+\paragraph{LMetric.}
+% src: WT/lib/router-plugins/builtin/src/lmetric.rs (module doc, Parameters::default, pick)
+Following \citet{zhang2026lmetric}, the \policy{lmetric} port routes to
+\begin{equation}
+  \label{eq:lmetric-port}
+  \argmin_{i\in\cand}\ \max(\ISL_j - 16\,\ovl_i,\ 1)\,(\Lreq_i + 1),
+\end{equation}
+the product of the worker's uncached prompt tokens and its batch size counting this request,
+with ties to the lowest worker ID. A product needs no weight between its factors: a weight on
+either one scales every candidate's score alike. A hot-spot detector handles a popular prefix
+that few workers hold. Requests sharing their first \code{class\_prefix\_blocks} (4) blocks form a
+class, and the workers whose overlap covers those blocks hold it. A class is alarmed when the
+odds of its share of the last \code{window\_requests} (1000) decisions exceed the ratio of
+holders to non-holders. While it is alarmed, once twice as many consecutive class requests as
+there are holders would have gone to a holder, later ones go to the best non-holder. The paper
+measures the window in time; the port counts decisions so that replay stays deterministic. The
+paper's prefill factor also counts the prefill already queued on the worker, $\Lpf_i$; the port as
+evaluated here omits that term, a gap that matters for the scope of the headline
+(\cref{sec:ports,sec:res-fairness}). After this study froze its results, the port in the policy-stack
+pull request (ai-dynamo/dynamo\#15450) was fixed to add $\Lpf_i$ to the prefill factor, as the paper
+defines it. Every \policy{lmetric} result in this paper is from the port before that fix.
+% src: CR/CONTRACT.md A21 (operator, 2026-10-05: lmetric P-token now includes active_prefill_tokens on
+%      #15450; the campaign's frozen lmetric baseline is the pre-fix port)
+
+\paragraph{Ramjet.}
+% src: WT/lib/router-plugins/builtin/src/ramjet.rs (module doc: Helix Ramjet src/router.rs;
+%      Parameters::default; credited_affinity; pick)
+The \policy{ramjet} port follows Helix's Ramjet load balancer \citep{ramjet}. Each worker scores
+its credited prefix affinity minus \code{alpha} (default 4) times its load units, and the highest
+score wins, then the deeper raw overlap, then a rotating tie-break. Affinity counts the cached
+prefix in 512-token blocks (\code{affinity\_block\_tokens}). With the default \code{relative} basis,
+which the port's documentation says Ramjet used in its published comparison with Dynamo, a worker is
+credited the warmest candidate's affinity capped at \code{max\_affinity\_blocks} (32), minus how far
+it trails that candidate, also capped; differences near the leader therefore survive the cap. A
+worker's load units are $\Lreq_i + \Lpf_i/8192$ (\code{load\_unit\_tokens}). Ramjet charges each
+in-flight request between 1 and 8 units according to its uncached prompt, but Dynamo exposes load
+per worker rather than per request, so the port approximates Ramjet's phase-aware mode.
+
+\paragraph{DualMap.}
+% src: WT/lib/router-plugins/builtin/src/dualmap.rs (module doc, Parameters::default, hash_key, pick)
+In the \policy{dualmap} port, following \citet{yuan2026dualmap}, two rendezvous hashes of a
+prompt-prefix key pick two distinct candidates, so requests that share a prefix share candidates.
+A candidate's backlog is $\Lpf_i + \max(\ISL_j - 16\,\ovl_i, 0)$, the prefill tokens it would carry
+after taking the request. The request goes to the candidate with more overlap unless that
+candidate's backlog would exceed \code{pending\_prefill\_token\_budget} (\num{65536} tokens); then,
+and whenever the two overlaps are equal, it goes to the candidate with the smaller backlog. The key
+hashes the first \code{hash\_prefix\_blocks} (4) blocks. A prefix is hot when its share of the last
+\code{window\_requests} (1000) requests exceeds $2/|\cand|$, and a hot prefix's key doubles in depth,
+up to seven times, which spreads its requests over more candidate pairs.
+
+\paragraph{CHWBL.}
+% src: WT/lib/router-plugins/builtin/src/chwbl.rs (module doc: KubeAI balance_chwbl.go, SGLang
+%      prefix_hash defaults, Mirrokni et al. SODA 2018; Parameters::default; pick)
+\policy{chwbl} is consistent hashing with bounded loads \citep{mirrokni2018chwbl}, ported from
+KubeAI's balancer with the defaults of SGLang's \code{prefix\_hash} gateway policy. The key is the
+prefix hash of the prompt's first 16 blocks (\code{prefix\_tokens}${}=256$), or of all its full
+blocks if the prompt is shorter. The worker with the highest rendezvous weight owns the key and takes
+the request while $\Lreq_i \le 1.25\,(1 + \sum_{i'\in\cand}\Lreq_{i'})/|\cand|$
+(\code{load\_factor}${}=1.25$); otherwise the request walks the other workers in hash order to the
+first one within that bound, and returns to the owner if none is. The policy reads no cache state,
+so it routes the same with or without KV events.
+
+\paragraph{llm-d precise prefix.}
+% src: WT/lib/router-plugins/builtin/src/llm_d/precise_prefix.rs (Weights::default 2:1:1;
+%      PrefixScorer, QueueScorer, KvCacheUtilizationScorer); llm_d/mod.rs (MaxScorePicker)
+\policy{llm-d-precise-prefix} ports the precise prefix-cache profile of llm-d's inference scheduler
+\citep{llmd2025kvcache}. It is the one policy here built from several scorers: a prefix scorer, a
+queue scorer and a KV-utilization scorer, weighted 2:1:1, with a picker that takes the highest
+total. At the shipped prefix-length weight of 0 it routes to
+\begin{equation}
+  \label{eq:precise-prefix}
+  \argmax_{i\in\cand}\ \
+    2\min\!\Big(1, \frac{\ovl_i}{\lfloor \ISL_j/16\rfloor}\Big)
+    + \frac{\max_{i'\in\cand}\Lreq_{i'} - \Lreq_i}{\max_{i'\in\cand}\Lreq_{i'} - \min_{i'\in\cand}\Lreq_{i'}}
+    + 1 - \min\!\Big(1, \frac{\Ldec_i}{\capb_i}\Big),
+\end{equation}
+where the queue term is 1 when every candidate has the same $\Lreq_i$, and ties rotate. A nonzero
+\code{prefix\_match\_length\_weight} blends the first term with the squared matched length relative
+to \code{prefix\_match\_length\_scale\_tokens} (8192), and per-class weights can follow the request's
+policy class, which replay never sets.
+
+\paragraph{llm-d optimized baseline.}
+% src: WT/lib/router-plugins/builtin/src/llm_d/optimized_baseline.rs (module doc; Parameters::default;
+%      TokenLoadScorer; AffinityPicker); docs table ("calibrated by llm-d for Qwen3-32B TP2 on H100")
+\policy{llm-d-optimized-baseline} ports llm-d's optimized-baseline profile, a prefix-cache affinity
+filter followed by a token-load scorer \citep{llmdsticky}. Workers whose overlap covers at least
+\code{affinity\_threshold} (0.8) of the prompt's complete blocks are sticky. Each worker's TTFT is
+estimated from its prefill backlog: with \code{ttft\_source: throughput} as
+$1000\,\Lpf_i/\num{15928}$\,ms, where \code{peak\_prefill\_tokens\_per\_second}${}=\num{15928}$ is
+llm-d's calibration for Qwen3-32B at TP2 on H100, and with \code{ttft\_source: modeled} from the
+host's \code{PREFILL\_TIME} backlog. If the best sticky estimate trails the best non-sticky one by
+more than \code{max\_ttft\_penalty\_ms} (\num{18000}), stickiness breaks and every worker stays in
+play; otherwise only the sticky workers do, or all workers if none is sticky. Among those, the
+request goes to the worker with the lowest token load $\Lpf_i + \max(\ISL_j - 16\,\ovl_i, 0)$ (scored
+as one minus that load over \code{queue\_threshold\_tokens}, \num{4194304}, capped at 1), and ties
+rotate. The port implements llm-d's filter inside its picker, since the API's filters cannot see
+the other candidates. The headline league uses the throughput source; the modeled source reads a
+performance-model estimate and belongs to the secondary \ais{}-informed league (\cref{sec:excluded}).
+
+\paragraph{Sticky sessions.}
+% src: WT/lib/router-plugins/builtin/src/sticky_session.rs (module doc, Parameters, bound_row, policy());
+%      session_map.rs (DEFAULT_MAX_SESSIONS = 65_536); CR/CONTRACT.md "sticky-session policy"
+Dynamo's live router can pin a session to a worker, but offline replay never sets the router's
+affinity target. This study therefore added \policy{sticky-session}, which keeps a bounded
+least-recently-used map of up to \num{65536} sessions, each mapped to the worker that served its last
+request. A request without a session, or the first of its session, takes the default cost
+function's choice, built from the router's configured default-cost knobs. In \code{hard} mode a
+later request goes to its session's worker whenever that worker is eligible; otherwise it takes the
+default choice and the session rebinds. In \code{bounded} mode it also leaves the session's worker
+when that worker's active requests exceed \code{load\_factor} (1.25) times the candidates' mean.
+The policy mirrors the intent of the live router's session affinity; it is not a port of a published
+method. On the flat traces (Mooncake and FAST25) open-loop requests carry no session and
+closed-loop requests carry a single-use one, so both modes make the default choice there, apart from
+tie-breaking.
+% src: FEATURES.md "hash_home" paragraph (closed-loop flat traces get synthetic single-use session IDs)
+
+\paragraph{ThunderAgent.}
+% src: WT/lib/router-plugins/builtin/src/thunderagent/{mod.rs, worker_selection/mod.rs}
+\policy{thunderagent}'s worker selection is a scorer of each worker's prefill tokens plus its decode
+blocks in tokens and a picker that follows the affinity target its paired request classifier sets,
+falling back to the lowest cost \citep{kang2026thunderagent}. Its program state lives in the
+classifier, a separate kind of plugin that runs before worker selection. Replay runs worker-selection
+policies but not request classifiers, so this policy was not evaluated (\cref{sec:excluded}).
+
+\subsubsection{Sanity check}
+
+% src: CR/facts/pilot.json heuristic_screen_train_subset (replicates [0, 1], errors 0, ranking,
+%      mean_clipped_log_ratio: dualmap -0.15048, chwbl -0.21350, round_robin -0.48060; sanity_note);
+%      CR/facts/STATE.md audit(setup/ais-and-policy r0) ("chwbl, llm-d-precise-prefix, optimized-baseline,
+%      ramjet and dualmap plus their parameters change routing deterministically")
+The decision to evaluate the ports as implemented (\cref{sec:ports}) called for only a brief sanity
+check, that each port's decisions respond to its inputs in the documented direction. A setup audit
+confirmed that the parameters of \policy{chwbl}, \policy{dualmap}, \policy{ramjet} and both llm-d
+ports change their routing deterministically, and that \policy{lmetric} and two-tier replay
+identically across runs. In the pilot's screen of the nine untuned heuristics on 12 train cells
+with replicates 0 and 1, every port ran without error, none routed against its documented
+direction in aggregate, and seven beat $\piref$. \policy{dualmap} and \policy{chwbl} lost to it,
+with mean clipped log-ratios of $-0.150$ and $-0.214$, which the pilot attributed to hash-pinned
+placement on traffic with few hot prefixes; round-robin scored $-0.481$. These screen numbers are
+preliminary (pilot, train subset).
+
+\subsubsection{Where the ports differ}
+
+% src: code module docs of each port; CR/literature/LESSONS.md LR-04 (DualMap pdf p.7; VERIFIED)
+Besides \policy{lmetric}'s, which \cref{sec:ports} states, the known differences between the ports
+and the published methods are these.
+\begin{itemize}
+  \item \policy{dualmap}'s budget is a fixed default; the paper derives it as the prefill backlog
+    a GPU can clear within the TTFT SLO \citep{yuan2026dualmap}, and our SLO has no TTFT term.
+    The port uses rendezvous hashing in place of the paper's consistent-hash rings, and it omits
+    the paper's migration of queued requests between the two candidates, because Dynamo places
+    each request once.
+  \item \policy{ramjet} approximates Ramjet's per-request load units from per-worker load, reads
+    Dynamo's KV-event index instead of Ramjet's own approximate prefix index, and omits Ramjet's
+    lane that confines very long prompts to designated replicas.
+  \item \policy{llm-d-precise-prefix}'s queue score counts running as well as waiting requests,
+    where llm-d reads the engine's waiting queue.
+  \item \policy{llm-d-optimized-baseline}'s prefill rate is llm-d's hardware calibration for this
+    model, GPU and parallelism, while replay times prefill with \ais{}; the port also omits
+    llm-d's optional exploration probability.
+  \item Two-tier reads Dynamo's KV-event overlap instead of the SGLang router's approximate cache
+    history, and breaks ties by worker ID instead of the router's worker-list order.
+  \item \policy{chwbl} replaces the hash ring with rendezvous hashing.
+\end{itemize}
+\Cref{sec:ports} notes the two of these that tuning absorbs.

@@ -10,7 +10,9 @@
 %   (read depth). Claims not in LESSONS.md were re-checked against CR/literature/txt/ or
 %   pdftotext of CR/literature/pdfs/ on 2026-10-03 (marked "re-checked" below). Sources read only as
 %   an abstract or web page are cited for what that abstract or page says, nothing more.
-% STATUS: final for this draft.
+% STATUS: final for this draft. Restructured 2026-10-05: Lodestar's 80% threshold moved here from the
+%   introduction; the set-dependent-models paragraph compressed with every citation kept. Round-1 fix
+%   (E1): "every result outside the live check is simulated".
 
 \section{Related work}
 \label{sec:related}
@@ -33,6 +35,10 @@ DualMap restricts each prefix to two hashed candidates; it argues that picking t
 workers amounts to a power-of-$\Nw$-choices rule that scatters shared prefixes, and that a
 per-request minimum-TTFT rule oscillates between cache-aware and load-aware decisions
 \citep{yuan2026dualmap}.
+% src: LESSONS.md LR-07 (Lodestar sec. 4.1: k = 2 consistent-hash filter when cluster memory utilization
+%      exceeds 80%, pdf p.6, VERIFIED)
+Lodestar applies a similar two-choice consistent-hash filter, but only while cluster memory
+utilization is above a threshold, 80\% in its evaluation \citep{lim2026lodestar}.
 % src: LESSONS.md LR-12 (CacheRoute Table 2, pdf p.4, VERIFIED); re-checked txt/llm-routing/cheng2026-cacheroute.txt
 %      l.579-586 ("A cache-hit increase is not enough; the plan is enabled only when p99 or capacity improves")
 CacheRoute periodically plans which replicas serve the most popular prefixes, and gates each plan
@@ -60,9 +66,10 @@ and tracked hit ratio, per-session replication and load imbalance \citep{nixon20
 These rules disagree about which signal should dominate. On an agentic workload without a global
 KV tier, which is the setting of our replay, SMetric measured LMetric serving 36\% less
 SLO-meeting throughput than a tuned linear cache-plus-load score, with prefix reuse of 45\%
-against 74\% \citep{wang2026smetric}. We do not propose another heuristic. We tune these rules
-on equal terms, and the learned policy's features draw on their signals: uncached prefill, active prefill, batch size, KV utilization and session affinity, and, in feature set
-\code{v2}, LMetric's log-product and a hashed home-worker indicator in the spirit of DualMap
+against 74\% \citep{wang2026smetric}. We do not propose another heuristic. We tune these rules on
+equal terms, and the learned policy's features draw on their signals: uncached prefill, active
+prefill, batch size, KV utilization and session affinity, and, in feature set \code{v2}, LMetric's
+log-product and a hashed home-worker indicator in the spirit of DualMap
 (\cref{tab:features,tab:features-v2}).
 % src: FEATURES.md "Feature set v2" (log_ptok, log_bs: LR-07 LMetric; hash_home: LR-07 Lodestar, DualMap)
 
@@ -201,19 +208,18 @@ selected M1 and is compared with M1 trained for the same added evaluations (\cre
 % src: LESSONS.md LR-05 (Seshadri pdf p.4, p.8; Rosenfeld Fig. 3, pdf p.7-8; Ko & Li eq. 3, pdf p.5),
 %      LR-06 (Pfannschmidt pdf p.7, p.11, p.22-23; Webb pdf p.26-30), LR-15 (Aouad pdf p.8; DeepHalo
 %      pdf p.5-6; Train pdf p.2-9); VERIFIED
-Other set-dependent models use pairwise context vectors summed over the set
-\citep{seshadri2019cdm}, set-dependent aggregation \citep{rosenfeld2020setdependent}, pooled set
-embeddings \citep{pfannschmidt2022context}, mixtures of random-utility networks
-\citep{aouad2023rumnet}, self-attention \citep{ko2024attention} and stacked interaction layers
-\citep{zhang2026deephalo}; divisive normalization fits human choices across set sizes from 2 to
-12 \citep{webb2021normalization} and inspired \code{v2}'s ratio features. Low-rank choice
-parameters are unique only up to a multiplicative factor unless a penalty fixes the scale
-\citep{ko2024attention}. M2's pooled form has the same freedom, since scaling $p_{\cidx}$ up and
-$q_{\cidx}$ down by one factor changes nothing, while the named-source form, which is linear in
-$p_{\cidx}$, has none. The nested logit groups alternatives whose unobserved utilities are
-correlated \citep{train2009gev}; under a deterministic argmax its nest parameters have no effect
-(our inference), so node structure would enter as nest-level features rather than as a GEV model
-(\cref{sec:nested}).
+Other set-dependent models sum pairwise context vectors over the set \citep{seshadri2019cdm} or
+use set-dependent aggregation \citep{rosenfeld2020setdependent}, pooled set embeddings
+\citep{pfannschmidt2022context}, mixtures of random-utility networks \citep{aouad2023rumnet},
+self-attention \citep{ko2024attention} or stacked interaction layers \citep{zhang2026deephalo};
+divisive normalization, which fits human choices across set sizes from 2 to 12
+\citep{webb2021normalization}, inspired \code{v2}'s ratio features. Low-rank choice parameters are
+unique only up to a multiplicative factor unless a penalty fixes the scale \citep{ko2024attention};
+M2's pooled form shares that freedom (scaling $p_{\cidx}$ up and $q_{\cidx}$ down by one factor
+changes nothing), while its named-source form, linear in $p_{\cidx}$, does not. A nested logit
+groups alternatives whose unobserved utilities are correlated \citep{train2009gev}, but under a
+deterministic argmax its nest parameters have no effect (our inference), so node structure would
+enter as nest-level features rather than as a GEV model (\cref{sec:nested}).
 % src: re-checked pdftotext CR/literature/pdfs/dcm-context/jain2020-generalization-new-actions.pdf
 %      (softmax over available actions; subsampled action sets; validation on held-out action sets,
 %      Alg. 1 l.17); LESSONS.md LR-10 (pdf p.4-5, p.8, VERIFIED); LR-06 (Deep Sets, corrected scope)
@@ -269,7 +275,8 @@ interaction between uncached prefill and load (\cref{sec:res-coefficients,sec:re
 supports LMetric's point that the two should interact, though here as a correction added to the
 default's additive cost rather than in place of it; and the first unconstrained
 search found the kind of objective gaming GORGO and Lehman et al.\ document, which a sign constraint
-on load coefficients removed (\cref{sec:gaming}). The price is that every result in this paper is
-simulated; as Calibrate-then-Route and Puffer show, a simulated ranking need not survive deployment.
+on load coefficients removed (\cref{sec:gaming}). The price is that every result outside the live
+check is simulated; as Calibrate-then-Route and Puffer show, a simulated ranking need not survive
+deployment.
 Our live check on six test cells found the simulated ranking intact on GPUs, but not the simulated
 gap sizes (\cref{sec:live}).

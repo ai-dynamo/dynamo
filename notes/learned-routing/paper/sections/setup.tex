@@ -26,10 +26,11 @@ score by which every policy, learned or heuristic, is compared.
 A deployment runs $\Nw$ identical aggregated workers, each a vLLM engine serving Qwen3-32B with
 tensor parallelism 2 on H100 SXM GPUs, so prefill and decode share a worker. Each worker holds
 \num{18863} KV blocks of 16 tokens, \num{301808} tokens in all. The study covers
-$\Nw \in \{2, 4, 6, 8, 16, 32\}$; heterogeneous worker sets are out of scope (Amendment A5.2).
-The router never holds a request back: \code{router\_queue\_threshold} is left unset, which
-disables router-side queueing; an ablation that tuned it jointly found no measurable gain
-(\cref{sec:res-ladder}).
+$\Nw \in \{2, 4, 6, 8, 16, 32\}$; heterogeneous worker sets are out of scope.
+% prov: A5.2
+The router never holds a request back.\footnote{\code{router\_queue\_threshold} is left unset, which
+  disables router-side queueing; an ablation that tuned it jointly found no measurable gain
+  (\cref{sec:res-ladder}).}
 % src: WT/lib/kv-router/src/scheduling/config.rs test queueing_enabled_reflects_synthetic_threshold
 %      ("With default config, queueing is disabled"); binding default router_queue_threshold=None
 %      (WT/lib/bindings/python/rust/llm/entrypoint.rs:134)
@@ -72,12 +73,14 @@ The learned policy reads nothing else. In particular it ignores the request's ex
 length, which offline replay fills with the true output length, and every performance-model
 estimate; engine-internal state such as waiting-queue length or KV usage is not available to it.
 Because it uses only these inputs, the artifact trained in replay is the one the live router runs
-(\cref{sec:integration}). Replay applies cache events to the
-router's index at once, while a live router sees them late; this difference is a robustness check
-(\cref{sec:robustness}), not part of the problem definition.
+(\cref{sec:integration}). Replay applies cache events to the router's index at once, while a live
+router sees them late; that difference is a robustness check (\cref{sec:robustness}), not part of
+the problem definition.
 
 \subsection{Load modes}
-\label{sec:loadmodes}
+\label{sec:loadmodes}\label{sec:load-modes}
+% sec:load-modes is the former simulator subsubsection's label (its unique facts moved to
+% appendix-workloads.tex, app:workloads "Load-mode details"); kept here so existing \cref's resolve.
 
 % src: CR/cells/{train,val,test}.jsonl load.mode by family (train: Mooncake 12 open + 6 closed,
 %      sessions 6 open + 2 closed, AgentX 8 lanes; test: 31 open, 15 closed, 14 lanes);
@@ -100,8 +103,11 @@ change.
     joins, tool delays), and a lane starts its next play when the previous one ends.
 \end{description}
 Mooncake, FAST25 and session cells run in open and closed loop, and AgentX cells in lanes;
-calibration sets each cell's load (\cref{sec:calibration}). Results are reported per mode, because
-open and closed systems respond to scheduling differently \citep{schroeder2006open}. Session and
+calibration sets each cell's load (\cref{sec:calibration}). Each family has a primary mode, used to
+set its service objective: open loop for Mooncake and sessions, lanes for AgentX.
+% src: CR/facts/calibration.json sla.<family>.anchor_mode
+Results are reported per mode, because open and closed systems respond to scheduling differently
+\citep{schroeder2006open}. Session and
 agentic work is released causally because replaying follow-up turns at their recorded timestamps
 would fix a release schedule, and cache state, that a different policy is supposed to change
 \citep{rajib2026agentservesim,alomar2023causalsim}.
@@ -114,9 +120,9 @@ would fix a release schedule, and cache state, that a different policy is suppos
 \paragraph{Good requests.}
 % src: CR/CONTRACT.md A2.2 (operator decision: no TTFT SLO); WT/benchmarks/learned_routing/
 %      learned_routing/goodput.py (a2_good, token_form_good, completed, E2E_REL_TOL = 1e-6)
-The deployment's service objective, set by the operator, concerns the pace of the token stream and
-the total request latency, not the time to first token. A request is \emph{good} iff it completes
-and
+The service objective in this study concerns the pace of the token stream and the total request
+latency, not the time to first token. A request is \emph{good} iff it completes and
+% prov: A2.2 (operator decision: no TTFT SLO)
 \begin{equation}
   \label{eq:good}
   \good_j = \mathbf{1}\!\left[\ITLbar_j \le \Imax\right]\cdot
@@ -125,19 +131,21 @@ and
 where $\ITLbar_j = (\EtoE_j - \TTFT_j)/(\OSL_j - 1)$ is the mean inter-token latency, the ITL
 clause is skipped when $\OSL_j \le 1$, and the slowdown clause allows a relative tolerance of
 $10^{-6}$ for floating-point rounding. Rejected, errored and incomplete requests are never good.
-$(\Imax, \Smax)$ is one pair per workload family (\cref{tab:notation}). $\TTFT_j$ is reported but
+$(\Imax, \Smax)$ is one pair per workload family (\cref{tab:calibration}). $\TTFT_j$ is reported but
 is not part of \cref{eq:good}; it enters only through $\EtoE_j$.
 
 \paragraph{The reference latency.}
-% src: WT/benchmarks/learned_routing/learned_routing/e0.py (method ais-chunked-estimator-v2;
-%      "matches 17,233 isolated single-request replays to within 2e-8 relative");
-%      CR/facts/STATE.md audit(calibration/independent-rerun r1) (own E0 == harness within
-%      1.11e-8 on 880,139 pairs); CR/CONTRACT.md A2.2
+% src: WT/benchmarks/learned_routing/learned_routing/e0.py (method ais-chunked-estimator-v2);
+%      CR/CONTRACT.md A2.2
 $\Ezero(\ISL,\OSL)$ is the request's latency alone on an idle worker with no prefix reuse: a full
 chunked prefill of $\ISL$ tokens followed by $\OSL - 1$ decode steps at batch size 1, timed by
-\ais{}. It depends only on $(\ISL, \OSL)$ and is cached per pair. It agrees with isolated
-single-request replays to within $2\times10^{-8}$ relative, and an independent audit's own
-computation matched it on \num{880139} pairs. $\Ezero$ is used only for scoring; no policy sees it.
+\ais{}.\footnote{$\Ezero$ agrees with isolated single-request replays to within $2\times10^{-8}$
+  relative, and an independent audit's own computation matched it on \num{880139} pairs.}
+% src: e0.py ("matches 17,233 isolated single-request replays to within 2e-8 relative");
+%      CR/facts/STATE.md audit(calibration/independent-rerun r1) (own E0 == harness within
+%      1.11e-8 on 880,139 pairs)
+It depends only on $(\ISL, \OSL)$ and is cached per pair. $\Ezero$ is used only for scoring; no
+policy sees it.
 
 \paragraph{Why a slowdown bound.}
 % src: CR/facts/setup.json long_context.evidence.single_request_ttft_ms_ais (1024: 55.49 ms,
@@ -167,7 +175,8 @@ The clauses catch different failures. For a long prompt, $\Smax\Ezero$ is domina
 time, so a slow token stream after a fast prefill can pass the slowdown clause; the ITL clause
 catches it. Conversely, a request that waits a long time and then streams at an ordinary pace
 passes the ITL clause and fails the slowdown clause. At the calibrated bounds the slowdown clause
-does most of the work: at the calibration load nearest L2 on $\Nw = 8$, the ITL clause alone fails
+does most of the work: at the calibration load nearest L2 (the load level at which $\piref$'s good
+fraction is 0.85; \cref{sec:calibration}) on $\Nw = 8$, the ITL clause alone fails
 0.6\% of $\piref$'s requests on sessions, 1.8\% on AgentX and 4.5\% on Mooncake, while 15\% of
 requests are not good at L2 by construction.
 % src: CR/facts/calibration.json sla.<family>.itl_only_fail_at_l2_grid.default
@@ -205,15 +214,10 @@ The window removes three distortions.
     flight, and in lane cells the lanes run out of plays at different times, so counting the tail
     would credit easy, under-loaded requests.
     % src: goodput.py module docstring "Completion-basis end rule (build audit r1 F1)"
-  \item \emph{Cold start.} Caches start empty and session populations ramp up, so the first minutes
-    of a replay are not the steady state the cell represents. The warm-up length matters: for
-    open-loop session cells, a first calibration with a \SI{180}{s} warm-up gave $\piref$ a good
-    fraction that moved by up to 0.353 when the warm-up history was doubled (9 of 12 cells beyond
-    3 standard errors); with the adopted warm-up of two session lifetimes, doubling moves it by at
-    most 0.014 (no cell beyond 3 standard errors).
-    % src: CR/facts/calibration.json session_open_warmup.doubled_warmup_check.summary
-    %      ("w180_vs_w2x|gf_default": max_abs_delta 0.3527, cells_abs_z_gt_3 9 of 12;
-    %       "w1x_vs_w2x|gf_default": max_abs_delta 0.0142, cells_abs_z_gt_3 0 of 12)
+  \item \emph{Cold start.} Caches start empty and session populations ramp up, so the window opens
+    after a warm-up long enough for the population to settle (\cref{app:calibration}).
+    % The warm-up numbers (180 s, 0.353, 9 of 12; two lifetimes, 0.014, 0 of 12) and their src
+    % comment moved to appendix-workloads.tex, app:calibration "The session warm-up fix".
   \item \emph{Deferral.} An objective that ignored requests finishing after the horizon would
     reward deferring work past it; Decima's learned scheduler did exactly this under a fixed
     horizon \citep{mao2019decima}. Counting in-window arrivals that finish late removes the
@@ -259,12 +263,15 @@ because a mean of raw ratios is dominated by the few cells where one policy coll
 \citep{agarwal2021precipice}, and such cells occur here. On all 9 open-loop session cells of the
 train and validation splits, round-robin's goodput is 0.111 to 0.425 times the default router's,
 and below 1/3 on 5 of them. A policy that far past its stability limit has no steady state, so the
-ratio is not a stable quantity: on one cell, doubling the warm-up history halved it, from 0.118 to
-0.055. The clip scores every ratio below 1/3 alike, so that unstable detail cannot drive training
+ratio is not a stable quantity.\footnote{On one such cell, doubling the warm-up history halved round
+  robin's ratio, from 0.118 to 0.055.}
+% src: CR/audits/calibration/independent-rerun-r1.md F1 (sessions-s1-base-n4-open-L3 0.118 -> 0.055
+%      with doubled history)
+The clip scores every ratio below 1/3 alike, so that unstable detail cannot drive training
 or the headline.
 % src: CR/audits/calibration/independent-rerun-r1.md F1 ("RR/default ratio is 0.111-0.425; 5 train/val
-%      cells are below 1/3"; sessions-s1-base-n4-open-L3 0.118 -> 0.055 with doubled history;
-%      "absorbs everything below 1/3"); Agarwal pdf p.2-3 (CR/literature/LESSONS.md LR-01, VERIFIED)
+%      cells are below 1/3"; "absorbs everything below 1/3"); Agarwal pdf p.2-3
+%      (CR/literature/LESSONS.md LR-01, VERIFIED)
 The clipped log-ratio was chosen over the mean of ratios at calibration, before any training.
 % src: CR/facts/HEADLINE_TEST.json (written "calibration stage, before any training");
 %      CR/facts/pilot.json decisions[1] (objective clipped_log_ratio, "pre-registered in HEADLINE_TEST.json")
@@ -281,6 +288,5 @@ frozen test set, by the pre-registered test of \cref{sec:headline}. Because the 
 a modeling choice, the same test records are also re-scored with scaled bounds and with
 alternative definitions of a good request: ITL alone, slowdown alone, and the ITL bound combined
 with either a length-scaled TTFT bound or an absolute latency bound. These secondary analyses never
-change the headline.
-
-\input{sections/notation}
+change the headline. \Cref{app:notation} collects the symbols.
+% Notation is now appendix A: main.tex inputs sections/notation after \appendix.

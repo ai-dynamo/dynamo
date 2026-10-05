@@ -3,7 +3,9 @@
 %
 % ROLE: the objective-gaming finding (phase-2 midpoint), its sign-constraint remedy and what remains:
 %   concentration of short requests, the long-prompt trade, the A19 token-weighted secondary metric
-%   and the other secondary metrics.
+%   and the other secondary metrics. Restructured (plan base <commit-50>): fig:isl moved to app:results
+%   (appendix-results.tex); tab:secondary dropped as a duplicate of tab:secondary-full in app:tables;
+%   engine-state detail moved to a footnote; amendment and stage labels kept as % prov comments.
 % EVIDENCE: CR/audits/phase2-mid/{gaming-concentration,sim-exploitation,fix}.md; CR/facts/
 %   {phase2_mid_fix,tierBC,test_results,secondary_metrics_test}.json; CR/report/REPORT.md sections
 %   10.1-10.3; generated/{lr13_flags,isl_buckets,secondary_vs_ramjet}.tex.
@@ -20,8 +22,9 @@ headline policy.
 \subsection{The finding: a sacrificial worker}
 \label{sec:gaming-finding}
 
-At the phase-2 midpoint an adversarial audit replayed the selected tier-A M1 (unconstrained) and
-every contender on the 14 validation cells with its own scorer, and examined each request.
+Midway through tuning, an adversarial audit replayed the first tuned M1, before any sign constraint,
+and every contender on the 14 validation cells with its own scorer, and examined each request.
+% prov: phase-2 midpoint audit; tier-A M1 (unconstrained)
 % src: CR/audits/phase2-mid/gaming-concentration.md (882 replays, 0 errors; own scorer matches the
 %      harness on 882/882; results tables)
 \begin{itemize}
@@ -54,8 +57,9 @@ every contender on the 14 validation cells with its own scorer, and examined eac
 %      0.90-0.99; group 14 shares 1 block; ISL >= 60K good 0.425 vs 1.000), "Mechanism" (0.580 vs 0.125;
 %      default 0.7-2.2%, ramjet 0-0.7%; threshold about 77K; theta7 = 0 -> 0.943, 1.000, 1.000),
 %      "No starvation" (median slowdown of a giant 1.13 S)
-The audit's verdict was objective gaming, which triggered the remedy registered in advance
-(Amendment A11.2). Black-box search exploiting a gap in its objective is a known pattern
+The audit's verdict was objective gaming, which triggered the remedy registered in advance.
+% prov: A11.2 (the registered remedy)
+Black-box search exploiting a gap in its objective is a known pattern
 \citep{lehman2020creativity}, and a binary per-request goodput invites exactly this trade
 \citep{wang2024slo}; a router tuned by an evolution strategy on tail TTFT alone sent all traffic to
 one replica \citep{toniolo2026gorgo}. A companion audit of simulator exploitation found the
@@ -91,11 +95,13 @@ with the unconstrained one.
 %      65-69% of good-to-bad in the top quartile)
 The sign constraint removed the pathological mechanism, a worker that collects long requests it
 cannot serve, but not the underlying trade: short cached requests are packed onto a hot worker and
-long prompts compete for the rest. By the outcome rule registered with the remedy, the flags are
-reported on every learned row and are never a reason to retune or reselect; retuning under a
-size-aware objective is a design decision for the operator. The operator kept the request-count
-objective, headline and selection unchanged and added one token-weighted secondary metric (Amendment
-A19, \cref{sec:a19}). The same re-audit on the later learned arms (M2, M1-v2, M1-noaff and M1
+long prompts compete for the rest. The flags are reported on every learned row and, by a rule
+registered with the remedy, never trigger retuning or reselection; the request-count objective, the
+headline and selection were kept, and one token-weighted secondary metric was added
+(\cref{sec:a19}).
+% prov: retuning under a size-aware objective was left as a design decision for the operator, who kept
+%      the objective and added A19 (CR/CONTRACT.md A19)
+The same re-audit on the later learned arms (M2, M1-v2, M1-noaff and M1
 continued) flagged each on 3 or 4 Mooncake validation cells, with no lost-requests worker for any.
 % src: CR/facts/phase2_mid_fix.json preregistration.gaming_reaudit (outcome rule); CR/CONTRACT.md A19;
 %      CR/facts/tierBC.json decisions.tier_b_reaudit_i9 (m2r2, m1v2, m1noaff flagged on 4 cells,
@@ -107,57 +113,57 @@ continued) flagged each on 3 or 4 Mooncake validation cells, with no lost-reques
 \Cref{tab:lr13} applies the window-basis guards to every test policy. Every learned arm concentrates
 and segregates by prompt length far more than the strong baselines: M1-v2 exceeds the share cap on 24
 of 60 test cells, against 5 for \policy{ramjet} and 0 for $\piref$, and its worker assignment carries
-information about prompt length on 19 cells, against 5. A worker with no good request (``dump
-worker'' in the table) appears on 5 of M1-v2's cells and 3 of \policy{ramjet}'s; the unconstrained M1
-has 9, and more long-request flags than M1-v2 (20, 20 and 15 cells against 11, 10 and 10).
+information about prompt length on 19 cells, against 5. A worker with no good request appears on 5
+of M1-v2's cells and 3 of \policy{ramjet}'s; the unconstrained M1 has 9, and more long-request flags
+than M1-v2 (20, 20 and 15 cells against 11, 10 and 10).
 % src: generated/lr13_flags.tex (from report/data/tables/lr13_flags.md; CR/facts/test_results.json lr13_flags)
 
 \begin{table}[tbp]
   \centering
-  \caption{Concentration and long-request flags on test, counts of the 60 test cells (generated).
+  \caption{Concentration and long-request flags on test, counts of the 60 test cells.
     Share $>$ cap: the window-basis largest worker request share exceeds
     $\min(2/\Nw, 1/\Nw + 0.25)$. NMI: normalized mutual information between worker and prompt-length
     quartile above 0.10. $\geq$32K, $\geq$64K, top decile: the good fraction of those prompts is more
-    than 0.05 below $\piref$'s. Dump worker: a worker with 0\% good in-window requests. Last column:
-    mean over cells of the smallest per-worker good fraction.}
+    than 0.05 below $\piref$'s. Worker with no good request: a worker with 0\% good in-window
+    requests. Last column: mean over cells of the smallest per-worker good fraction.}
   \label{tab:lr13}
   \input{generated/lr13_flags}
 \end{table}
 
-The engine state stays inside the simulator's measured range. On Mooncake, M1-v2's hottest worker
-carries 1.85 times the per-worker mean of in-flight requests (\policy{ramjet} 1.04, $\piref$ 1.18), and
-2.21 and 1.67 times on FAST25 conversation and synthetic. Peak in-flight requests are 59 and 65, inside
-\ais{}'s measured vLLM decode grid and far below \code{max\_num\_seqs}, so the concentration does not
-push the engine into the performance model's extrapolation. M1-v2 also shows no preference for pairing
+Despite the concentration, the engine stays inside the simulator's measured range: on Mooncake, M1-v2's
+hottest worker carries 1.85 times the per-worker mean of in-flight requests, and peak in-flight
+requests of 59 and 65 lie inside \ais{}'s measured vLLM decode grid, so the concentration does not
+push the engine into the performance model's extrapolation.\footnote{The hottest worker carries 1.04
+  times the mean under \policy{ramjet} and 1.18 times under $\piref$ on Mooncake, and 2.21 and 1.67
+  times under M1-v2 on FAST25 conversation and synthetic. Both peaks are far below
+  \code{max\_num\_seqs}, and M1-v2 has fewer requests without prefix reuse that finish below their
+  uncontended latency, the signature of the mixed-batch pricing discount, than \policy{ramjet} or
+  \policy{llm-d-precise-prefix}.} M1-v2 also shows no preference for pairing
 short prompts with long prefill chunks, the mixed-batch pricing artifact a search could exploit
-(caveat 13 in \cref{tab:caveats}), and has fewer requests that finish below their uncontended latency
-than \policy{ramjet} or \policy{llm-d-precise-prefix}.
+(caveat 13 of \cref{tab:caveats} in \cref{app:caveats}).
 % src: CR/report/REPORT.md section 10.1 "Engine state" (from CR/audits/final/refute-headline-3.md section 6:
 %      1.85x, 1.04, 1.18; 2.21x, 1.67x; peak 59 and 65; decode grid up to batch 2,048, context 131,071;
-%      max_num_seqs 1,024; fewer below-E0 rows; closes UPSTREAM_FOLLOWUPS #17's exploit check)
+%      max_num_seqs 1,024; fewer below-E0 rows; closes UPSTREAM_FOLLOWUPS #17's exploit check);
+%      CR/audits/final/refute-headline-3.md section 6 ("Sub-E0 rows ... completed zero-reuse requests
+%      that finish below their uncontended E0, the F4 discount signature"; AgentX 43 vs 90 and 214,
+%      FAST25 synthetic 28 vs 70 and 226, Mooncake and sessions 0 vs 2 and 3); restructure round 1, E10
 
 \subsection{Where the gain comes from: prompt length}
 \label{sec:gaming-isl}
 
 \begin{table}[tbp]
   \centering
-  \caption{Good fraction and TTFT by prompt length on test (generated; descriptive, computed after
-    the test pass from its records). Good-fraction differences in percentage points, with the number
+  \caption{Good fraction and TTFT by prompt length on test (descriptive, computed after the test
+    pass from its records). Good-fraction differences in percentage points, with the number
     of segments on which M1-v2 is higher; TTFT p90 as a segment-mean log-ratio.}
   \label{tab:isl}
   \input{generated/isl_buckets}
 \end{table}
 
-\begin{figure}[tbp]
-  \centering
-  \includegraphics[width=\linewidth]{isl_buckets}
-  \caption{Where M1-v2's gain comes from (copied from the final report). Left: in-window good fraction
-    by prompt length, \policy{ramjet} minus $\piref$ (orange) and M1-v2 minus \policy{ramjet} (blue).
-    Right: TTFT p90 log-ratio of M1-v2 against \policy{ramjet}.}
-  \label{fig:isl}
-\end{figure}
-
-\Cref{tab:isl,fig:isl} show the trade the request-count objective rewards.
+% fig:isl (fig/isl_buckets) moved to app:results (appendix-results.tex, copied there from base
+% gaming.tex 151-158).
+\Cref{tab:isl} shows the trade the request-count objective rewards; \cref{fig:isl} in
+\cref{app:results} plots it.
 \begin{itemize}
   \item \textbf{The gain sits in short and mid prompts.} M1-v2 gains 4.3 points of good fraction
     below 8K tokens and gives up 1.7 to 3.8 points at 8K and above.
@@ -171,10 +177,11 @@ than \policy{ramjet} or \policy{llm-d-precise-prefix}.
 % src: CR/facts/test_results.json report_must_state MS-F1-ttft (p50 +0.006, p90 -0.002, p99 -0.082;
 %      32K-64K +0.135, 11/12; filtered +0.169, 8/8; vs default -0.011; ramjet -0.180), MS-F1-goodfrac-by-isl
 
-\subsection{Token-weighted goodput (A19)}
+\subsection{Token-weighted goodput}
 \label{sec:a19}
 
-Amendment A19 added one secondary metric, registered before it was computed: the headline pipeline
+% prov: A19 (token-weighted secondary metric)
+A token-weighted secondary metric, registered before it was computed, re-runs the headline pipeline
 with each good in-window request weighted by its prompt plus output tokens, on exactly the requests
 and good rule that produce the headline's goodput. It never selects a policy or decides the headline.
 Against \policy{ramjet}, M1-v2's token-weighted goodput is mixed: segment mean $-0.0092$, interval
@@ -189,19 +196,13 @@ and $+0.02$ in tokens. The headline's magnitude is therefore partly a request-co
 
 \subsection{Other secondary metrics}
 
-\begin{table}[tbp]
-  \centering
-  \caption{Secondary metrics against tuned \policy{ramjet} on test (generated; selected rows and
-    columns; descriptive). Segment-mean log-ratio, with the number of segments on which the policy's
-    value is higher; lower is better for latencies, higher for prefix reuse.
-    \Cref{tab:secondary-full} in the appendix has every policy and metric.}
-  \label{tab:secondary}
-  \input{generated/secondary_vs_ramjet}
-\end{table}
-
-Against \policy{ramjet} (\cref{tab:secondary}), M1-v2's end-to-end p90 over the scored in-window
-requests is better ($-0.048$, higher on 3 of 12 segments), its prefix reuse lower ($-0.024$, higher on
-1 of 12) and its per-request ITL p90 on par ($+0.006$); AgentX trajectory latency is slightly better
-($-0.012$). Against $\piref$ it cuts TTFT p50 by 44\% ($-0.573$ log-ratio) and raises prefix reuse by
-27\% ($+0.238$).
+% tab:secondary (generated/secondary_vs_ramjet, selected rows and columns) was removed as a duplicate
+% of tab:secondary-full and tab:secondary-full-b in app:tables, which hold every row and column.
+Against \policy{ramjet}, in segment-mean log-ratios with the number of segments on which M1-v2's
+value is higher (\cref{tab:secondary-full,tab:secondary-full-b} in \cref{app:tables}), M1-v2's
+end-to-end p90 over the
+scored in-window requests is better ($-0.048$, higher on 3 of 12 segments), its prefix reuse lower
+($-0.024$, higher on 1 of 12) and its per-request ITL p90 on par ($+0.006$); AgentX trajectory
+latency is slightly better ($-0.012$). Against $\piref$ it cuts TTFT p50 by 44\% ($-0.573$
+log-ratio) and raises prefix reuse by 27\% ($+0.238$).
 % src: CR/facts/test_results.json report_must_state MS-F1-other-secondary; CR/report/REPORT.md section 10.3

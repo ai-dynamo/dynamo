@@ -101,3 +101,15 @@ Read this first after any compaction or restart. For full detail, see:
   4. Delete, top-level, by exact path, and log every path and size in the worklog.
   5. Independent verification.
 - **Keep:** the campaign root's facts, runs records, cache and anything the freeze pins; the main campaign worktree; every local branch (remove worktrees only).
+
+## Update 2026-10-05 ~11:55 PDT: gist (operator)
+
+- **Operator:** "maybe make that a github gist if that's sensible". On the follow-up questions they chose a SECRET gist, and to KEEP rupei/learned-routing-public as the artifact (code, raw records, LaTeX sources).
+- **Gist plan.** About 20-25 flat files taken from the SANITIZED publish output, never from the internal sources:
+  - an index README, REPORT.md, LIVE.md, the paper PDF and REPRODUCE.md;
+  - a sanitized campaign log built from the worklog worklog plus STATE.md;
+  - CONTRACT.md, DEVIATIONS.md, UPSTREAM_FOLLOWUPS.md, LESSONS.md and BIBLIOGRAPHY.md;
+  - key result JSON (HEADLINE_TEST, finalists, test_results, robustness, live_results).
+  REPORT image links are rewritten to the branch's raw URLs. The scan is fail-closed before `gh gist create` (secret). Record the gist URL in publish/REPORT.md and the worklog.
+- **Order:** after the fix round `<workflow-run>`, which pushes the branch. Then the gist, then the cleanup.
+- Operator 2026-10-05 ~12:00 PDT: the gist LINKS to the paper PDF and figures on the branch (GitHub renders PDFs inline); no PDF copy in the gist.

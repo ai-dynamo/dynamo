@@ -3,6 +3,8 @@
 %
 % ROLE: the pilot that gated phase 2, kept for the record. Every number is preliminary (pilot,
 %   validation split or train subset) and was superseded by the phase-2 tuning and the test pass.
+%   Reader-facing text calls phase 2 "the main tuning" and the phase-2 midpoint "mid-tuning"
+%   (restructure plan, section 2.17; app:provenance maps the names).
 % EVIDENCE: CR/facts/pilot.json, CR/facts/gate.json.
 % UNITS (read before editing): "segment mean" and the MDE are in units of the paired goodput
 %   ratio minus one, G(pi)/G(pi') - 1, without eps and unclipped (learned_routing/noise.py
@@ -14,21 +16,21 @@
 
 The pilot asked whether tuning moves any policy away from the default router by more than
 replicate noise, and how large the learned model's margin over the best heuristics might be,
-before the campaign committed to phase 2. Its numbers come from the validation split and from a
-smaller tuning setup than phase 2, so they are \prelim{} and were superseded by the phase-2 results
-of \cref{sec:results}. They are kept because they shaped phase 2: the budget, the step-size cap, the
-multi-start initialization, the extended feature set and the concentration audit all trace back to
-them.
+before the study committed to the main tuning. Its numbers come from the validation split and from
+a smaller tuning setup than the main tuning, so they are \prelim{} and were superseded by the results
+of the main tuning and the test pass (\cref{sec:results}). They are kept because they shaped the main
+tuning: the budget, the step-size cap, the multi-start initialization, the extended feature set and
+the concentration audit all trace back to them.
 % src: CR/facts/pilot.json decisions, train_subset, runs, selected; CR/facts/STATE.md pilot(phase3)
 
-The setup was smaller than phase 2's in four ways.
+The setup was smaller than the main tuning's in four ways.
 \begin{itemize}
   \item M0 (the default cost, tuned) and M1 (\lc{} on feature set \code{v1}) were tuned on 12 of
     the 34 train cells, chosen to cover every family, both train worker counts and every load
     mode, with 480 evaluations (30 generations of 16) per run.
   \item Each model was tuned twice with different CMA-ES seeds from the \emph{same} start
     (M1 from $\theta = -\basis{0}$, M0 from the shipped defaults). Below they are called seed 1
-    and seed 2; they are not phase 2's restarts s1--s3, which differ in their start.
+    and seed 2; they are not the main tuning's restarts 1 to 3, which differ in their start.
   \item The configuration of each model was selected on validation replicates $\krep = 0, 1, 2$
     over both seeds and their checkpoints: seed 1 at generation 25 for M0, seed 2 at generation
     30 for M1.
@@ -45,7 +47,7 @@ replicate. The pilot ran \num{56552} fresh replays with 0 errors, and an indepen
 working from the raw records without importing the harness, reproduced every comparison against
 $\piref$ and against the heuristics in \cref{tab:pilot,tab:pilot-h2h} to four decimals.
 
-``Beyond noise'' below is the campaign's two-clause rule (\cref{sec:noise-floor}): on some cell
+``Beyond noise'' below is the study's two-clause rule (\cref{sec:noise-floor}): on some cell
 the replicate-mean goodput ratio to the reference departs from 1 by more than three pooled
 replicate standard deviations, and over at least three independent segments the mean of the
 per-segment mean of (ratio $-\,1$) exceeds twice its standard error in absolute value. The rule
@@ -83,7 +85,7 @@ is two-sided, so a policy worse than the reference also passes it.
     \policy{lmetric}               & 0.133 & 0.116 & 0.208 & 0.060 & 1.150 & 14/14 & 0.132 (0.036) & 0 \\
     M0, seed 2                     & 0.129 & 0.129 & 0.194 & 0.047 & 1.145 & 14/14 & 0.124 (0.035) & 0 \\
     M0, seed 1 (selected)          & 0.128 & 0.128 & 0.198 & 0.041 & 1.144 & 14/14 & 0.121 (0.037) & 0 \\
-    \policy{round\_robin}          & $-0.577$ & $-0.273$ & $-0.892$ & $-0.562$ & 0.571 & 0/14 & $-0.473$ (0.066) & 0 \\
+    round-robin                    & $-0.577$ & $-0.273$ & $-0.892$ & $-0.562$ & 0.571 & 0/14 & $-0.473$ (0.066) & 0 \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -94,8 +96,8 @@ positive direction, overall and separately in each load mode; round-robin differ
 direction. The three cache-aware heuristics at shipped defaults already reached a mean per-cell
 goodput ratio over $\piref$ of 1.150--1.153, and M1 reached 1.191. M0 was the weakest of the tuned
 and heuristic policies: tuning the default cost's five knobs on 12 cells gained less than
-switching to an untuned cache-aware heuristic. The bar M1 had to clear in phase 2 was therefore set
-by those heuristics, after they got the same tuning budget, not by the default.
+switching to an untuned cache-aware heuristic. The bar M1 had to clear in the main tuning was
+therefore set by those heuristics, after they got the same tuning budget, not by the default.
 % src: CR/facts/gate.json criteria.3_differs_beyond_noise.per_mode_pass, policies_passing_per_mode;
 %      CR/facts/pilot.json gate.condition_3_differs_beyond_noise.note
 
@@ -106,7 +108,7 @@ $+0.030$ (mean ratio 1.032, 10 of 14 cells better). The pre-registered minimum d
 (MDE) is $\max(1\%,\ 2\,\mathrm{SE})$, where SE is the standard error of the paired segment mean
 on validation, in units of (ratio $-\,1$). At the pilot that SE was 0.019, so the MDE is 0.038.
 M1's segment mean was only $+0.009$: the Mooncake window that carried the gain is 5 of the 14
-cells but 1 of the 6 segments. Under the campaign's noise rule M1 did not differ from this
+cells but 1 of the 6 segments. Under the study's noise rule M1 did not differ from this
 heuristic, overall or in any single load mode. The same held against \policy{ramjet} and
 \policy{lmetric}, with one exception: M1's lead over \policy{ramjet} in closed loop ($+0.038$, SE
 0.013, over 3 segments) passed the rule.
@@ -151,7 +153,7 @@ segment, the mean of (ratio $-\,1$) was $+0.102$ on the Mooncake window w1 (5 ce
 $+0.001$ on the session seeds s4 and s5, and $-0.014$, $-0.025$ and $-0.012$ on the three AgentX
 play subsets V1--V3. On validation, then, M1 gained where requests share a few hot prefixes across
 users, and lost slightly, but on every segment, on long agent contexts. That AgentX deficit shaped
-phase 2: M1's second and third restarts started from a behavior clone of
+the main tuning: M1's second and third restarts started from a behavior clone of
 \policy{llm-d-precise-prefix} and from a cache-heavy point (\cref{sec:restarts}), and the 23-feature
 set \code{v2} became a mandatory arm, the one that won.
 % src: CR/facts/gate.json context_not_gate.m1_vs_llm_d_precise_prefix_segment_deltas;
@@ -160,7 +162,7 @@ set \code{v2} became a mandatory arm, the one that won.
 \paragraph{The lead came with concentration.}
 Over all validation records, the selected pilot M1 exceeded the share cap on 5 Mooncake cells (27
 of 112 cell-replicate records), with a largest share of 0.646 in one record;
-\policy{llm-d-precise-prefix} exceeded it on one cell. This flag became the phase-2 midpoint's
+\policy{llm-d-precise-prefix} exceeded it on one cell. This flag became the mid-tuning
 gaming audit (\cref{sec:gaming}).
 % src: CR/facts/gate.json context_not_gate.guards_worker_share["m1-s2@sel-g30"] (5 cells, 27 records,
 %      max 0.6465), guards_worker_share (llm-d-precise-prefix: 1 cell), audit_flags_for_stage4
@@ -201,7 +203,7 @@ within their own family: more overlap credit ($\bov = 1.62$ and 1.65, shipped 1)
 prefill-load scale ($\bpf = 24.8$ and 16.9, shipped 1) and a nonzero active-request weight
 ($\breq = 854$ and \num{1152}, shipped 0), so that each active request costs as much as 34 or 68
 prefill blocks. Two model classes tuned independently thus both added a request-count load term,
-the direction the phase-2 M1-v2 took further with its prefill-by-requests interaction
+the direction the main tuning's M1-v2 took further with its prefill-by-requests interaction
 (\cref{sec:res-coefficients}).
 % src: CR/facts/pilot.json selected.M0_tuned.values (m0-s1: credit 1.6176, decay 1.5253, prefill_load_scale 24.823,
 %      decode_active_request_weight 853.59, temperature 0.00197); runs.m0-s2.selected_by_val.values
@@ -212,11 +214,11 @@ M1's validation score (the CMA-ES mean, on $\krep = 0,1,2$) reached 0.163--0.165
 evaluations and then stayed within 0.005 of each run's maximum; the two seeds ended 0.0004 apart.
 M0 plateaued within 80--160 evaluations on train, but in one seed the CMA-ES step size then grew
 from 0.18 to 10.8 internal units and the generation mean fell to $-0.23$, a drift along
-near-flat directions of the default cost's knobs. Phase 2 therefore capped the per-coordinate
+near-flat directions of the default cost's knobs. The main tuning therefore capped the per-coordinate
 step size at 0.3 internal units and set the budget at 400 evaluations per run, the latest
 validation plateau among the four pilot runs (\cref{sec:space,sec:noise}). On 16 candidates, the
 objective on the 12-cell subset ranked candidates like the objective on all 34 train cells
-(Spearman 0.947); phase 2 nevertheless tuned on all 34.
+(Spearman 0.947); the main tuning nevertheless tuned on all 34.
 % src: CR/facts/pilot.json measurements.cma_progress_curves.summary; projection.inputs.plateau.runs.*.val_by_generation;
 %      measurements.subset_vs_full_objective (spearman 0.947, n 16); recommendations_for_phase2;
 %      CR/facts/gate.json full_plan.budget, objective_cells_repeats.cells ("all 34 train cells every evaluation")
