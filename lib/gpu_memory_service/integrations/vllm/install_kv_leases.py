@@ -34,6 +34,42 @@ class GMSKVLeaseUnavailable(ValueError):
     """Shared KV leases were temporarily unavailable for this allocation."""
 
 
+class GMSKVLeaseFenced(RuntimeError):
+    """This engine lost ownership of KV leases it is still using (fail-stop)."""
+
+
+def _seal_or_fail_stop(client, leases) -> None:
+    """Seal completed blocks, or stop this engine if it no longer owns them.
+
+    The lease ring's seal is all-or-nothing and fails only when a lease's
+    generation no longer matches, i.e. a successor adopted or reclaimed the
+    slot after presuming this engine dead. Those slots may already hold the
+    successor's KV, so this engine must not keep serving from them, return
+    them to its free queue, or release them (a release under a stale
+    generation would act on the successor's lease). Any other seal failure is
+    equally a broken ownership invariant. The only safe response is to stop:
+    raise out of the scheduler so EngineCore terminates and failover runs.
+
+    Directory publication failures are different and stay recoverable: they
+    happen after a successful seal, while this engine still owns the slots.
+    """
+    try:
+        client.seal(leases)
+    except Exception as exc:
+        logger.critical(
+            "[GMS-KVLease] vLLM lost ownership of %d sealed KV leases "
+            "(namespace=%s owner=%s); stopping this engine: %s",
+            len(leases),
+            getattr(client, "namespace", "?"),
+            getattr(client, "owner_id", "?"),
+            exc,
+        )
+        raise GMSKVLeaseFenced(
+            f"GMS KV lease seal failed for {len(leases)} leases; this engine "
+            "no longer owns them and must stop"
+        ) from exc
+
+
 _DIRECTORY_KEY_DOMAIN = b"dynamo:gms:vllm-native-hbm-v1\x00"
 
 
@@ -364,7 +400,7 @@ def _publish_hbm_blocks(self, blocks, *, active: bool) -> bool:
     if not pairs:
         return True
     leases = [lease for _block, lease in pairs]
-    client.seal(leases)
+    _seal_or_fail_stop(client, leases)
     if directory is None or not directory.enabled:
         return True
     try:
@@ -990,9 +1026,10 @@ def _free_blocks(self, ordered_blocks):
             _reserve_dormant_headroom(self, len(retained))
         else:
             # Publication is a recovery optimization, never a reason to kill
-            # EngineCore. If the authoritative directory cannot commit the
-            # sealed batch, make those blocks ordinary free slots again so no
-            # invisible lease or stale native prefix survives indefinitely.
+            # EngineCore (a lost lease is: see _seal_or_fail_stop). If the
+            # authoritative directory cannot commit the sealed batch, make
+            # those blocks ordinary free slots again so no invisible lease or
+            # stale native prefix survives indefinitely.
             for block in retained:
                 self._maybe_evict_cached_block(block)
                 lease = self._gms_kv_leases_by_block.pop(int(block.block_id), None)
