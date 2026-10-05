@@ -4,8 +4,9 @@
 //! Reverse proxy for operator-configured path prefixes (`--forward-route`, or
 //! `DYN_HTTP_FORWARD_ROUTES` when none is configured), for backend-specific
 //! HTTP APIs the frontend does not implement. Built-in routes always win: a request is forwarded only
-//! when no frontend route matched it. Protocol upgrades (e.g. WebSocket) are
-//! tunnelled: on the upstream's `101`, both connections are spliced together.
+//! when no frontend route matched it. WebSocket upgrades are tunnelled: on the
+//! upstream's `101`, both connections are spliced together. Other upgrade
+//! requests are forwarded as plain requests.
 
 use axum::body::{Body, HttpBody};
 use axum::extract::Request;
@@ -259,6 +260,11 @@ impl ForwardRoutes {
         };
         let status = upstream.status();
         let mut headers = strip_hop_by_hop(upstream.headers().clone());
+        // A chunked response is re-streamed; a Content-Length sent beside it
+        // would misframe that stream for the client.
+        if upstream.headers().contains_key(header::TRANSFER_ENCODING) {
+            headers.remove(header::CONTENT_LENGTH);
+        }
         let body = match upgrade {
             Some((_, client_upgrade)) if status == StatusCode::SWITCHING_PROTOCOLS => {
                 for name in [header::CONNECTION, header::UPGRADE] {
@@ -754,6 +760,42 @@ mod tests {
             assert_eq!(&body[..], format!("content-length: {}", 100 * 1024).as_bytes());
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn forward_drops_content_length_sent_beside_chunked_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A misbehaving upstream: both framings, and the chunked body is longer.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(conn.read_u8().await.unwrap());
+            }
+            conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\ntransfer-encoding: chunked\r\n\r\nb\r\nhello world\r\n0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let routes = ForwardRoutes::parse(&format!("/v1/custom=http://{addr}"))
+            .unwrap()
+            .unwrap();
+        let request = Request::builder()
+            .uri("/v1/custom/x")
+            .body(Body::empty())
+            .unwrap();
+        let response = routes
+            .forward(request, CancellationToken::new(), ())
+            .await
+            .ok()
+            .unwrap();
+        assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"hello world");
     }
 
     #[tokio::test]
