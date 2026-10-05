@@ -188,14 +188,20 @@ class DynamoReplayRunner:
         metrics, metadata = self._normalize_report(report, output_requirements)
         trace_format = spec.workload.get("trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
-        if trace_format in {"weka", "agentic_mooncake"} or (
-            trace_format == "dynamo" and agentic_lanes is not None
+        if (
+            trace_format in {"weka", "agentic_mooncake"}
+            or (trace_format == "dynamo" and agentic_lanes is not None)
+            or "agentic_graph" in metadata
         ):
             metadata.update(
                 agentic_qualification=self.capabilities.agentic_qualification,
                 agentic_input_format=trace_format,
                 agentic_lanes=agentic_lanes,
             )
+            if isinstance(metadata.get("native_report"), dict):
+                metadata["native_report"][
+                    "agentic_qualification"
+                ] = self.capabilities.agentic_qualification
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
 

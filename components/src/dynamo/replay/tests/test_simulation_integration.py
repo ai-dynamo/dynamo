@@ -511,6 +511,10 @@ def test_real_agentic_mtp_prices_full_bursts(
         assert result.metrics["incomplete_trajectories"] == 0
         assert result.metrics["duration_ms"] > 0
         assert result.metadata["agentic_qualification"] == "functional_only"
+        assert (
+            result.metadata["native_report"]["agentic_qualification"]
+            == "functional_only"
+        )
         records = result.metadata["native_report"]["per_request"]
         assert len(records) == 3
         assert all(record["output_length"] == 32 for record in records)
