@@ -88,6 +88,7 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
+  - lib/mocker/servers/trtllm/
   - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
@@ -190,6 +191,7 @@ areas:
   - benchmarks/omni/
   - components/src/dynamo/common/multimodal/
   - examples/custom_encoder/
+  - examples/nemotron_speech_cascaded_pipeline/
   - components/src/dynamo/trtllm/multimodal/
   - components/src/dynamo/vllm/multimodal_handlers/
   - components/src/dynamo/vllm/multimodal_utils/
@@ -241,6 +243,7 @@ areas:
   - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
   - lib/sidecar/common/
+  - lib/sidecar/testkit/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -424,13 +427,17 @@ areas:
   - deploy/utils/tests/
   - examples/deployments/
   - tests/deploy/
+- label: lpx
+  github_team: '@ai-dynamo/dynamo-lpx-codeowners'
+  path_globs:
+  - deploy/operator/internal/controller/lpx/
+  - deploy/operator/internal/dynamo/lpx/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
   - components/src/dynamo/common/tests/test_snapshot*
-  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/
   - lib/gpu_memory_service/
@@ -454,6 +461,7 @@ areas:
   path_globs:
   - components/src/dynamo/tokenspeed/
   - components/src/dynamo/tokenspeed/tests/
+  - examples/backends/tokenspeed/
 - label: rl
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
@@ -470,8 +478,7 @@ areas:
   - benchmarks/frontend/
   - benchmarks/incluster/
   - benchmarks/mocker/README.md
-  - benchmarks/mocker/bench_aic_concurrency.py
-  - benchmarks/mocker/bench_aic_rust_callback.py
+  - benchmarks/mocker/bench_ais_concurrency.py
   - benchmarks/nat_trace/
   - benchmarks/prefix_data_generator/
   - benchmarks/pyproject.toml
@@ -552,45 +559,18 @@ shared:
   owners:
   - ops
   - runtime
-# CODEOWNERS is a generated artifact, so co-ownership here is about who may
-# approve it, not who reviews its contents. Every area is listed because under
-# "any one approves" any single team satisfies the gate: without this, adding a
-# file in an uncovered location needs an areas.yaml edit (ops) AND the
-# regenerated CODEOWNERS (process), two approvals to land one file. The
-# artifact cannot drift from the reviewed source -- emit_codeowners.py is a
-# pure function of areas.yaml, and the workflow's regenerate-and-diff step
-# fails on any hand-edit -- so widening approval here costs no safety.
-- glob: CODEOWNERS
-  owners:
-  - process
-  - agents
-  - backend-sglang
-  - backend-trtllm
-  - backend-vllm
-  - diffusion
-  - docs
-  - epp
-  - fault-tolerance
-  - frontend
-  - gms
-  - kv-memory
-  - multimodal
-  - observability
-  - operator
-  - ops
-  - performance
-  - planner
-  - rl
-  - router
-  - runtime
-  - tokenspeed
-  - xpu
-# areas.yaml is the routing decision itself, not a generated artifact, so it
-# does not get the wide list above: nothing stops a rule here from re-routing
-# review authority away from a team, and the strict gate only proves coverage,
-# not that the owner is the right one. Ops and process both hold repo-wide
-# process authority, and under "any one approves" either can unblock a routing
-# change without a third team having to weigh in on paths it does not own.
+# CODEOWNERS stays on the process area alone. GitHub requests every team on
+# the matching line, even when one approval satisfies the gate, so listing
+# every area here pages every codeowner group for a generated-file edit.
+# areas.yaml is already shared by ops and process, so one process review
+# still covers the source and the artifact.
+# areas.yaml is the routing decision itself, not a generated artifact.
+# Nothing stops a rule here from re-routing review authority away from a
+# team, and the strict gate only proves coverage, not that the owner is the
+# right one. Ops and process both hold repo-wide process authority, but a
+# routing change also regenerates CODEOWNERS, which process owns alone, so a
+# process approval is required. No third team has to weigh in on paths it
+# does not own.
 - glob: .github/codeowners/areas.yaml
   owners:
   - ops
@@ -979,6 +959,16 @@ shared:
   owners:
   - operator
   - observability
+- glob: deploy/operator/internal/controller/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/operator/internal/dynamo/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/**/*lpx*
+  owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
   - operator
@@ -1084,10 +1074,22 @@ shared:
   owners:
   - performance
   - backend-sglang
+- glob: lib/mocker/servers/trtllm/
+  owners:
+  - performance
+  - backend-trtllm
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
   - performance
+- glob: lib/sidecar/testkit/tests/support/vllm.rs
+  owners:
+  - runtime
+  - backend-vllm
+- glob: lib/sidecar/testkit/tests/support/sglang.rs
+  owners:
+  - runtime
+  - backend-sglang
 - glob: tests/deploy/
   owners:
   - ops
