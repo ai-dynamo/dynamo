@@ -15,7 +15,7 @@ targets:
   recommended: false
   hardware:
     gpu: GB200
-    count: 8
+    count: 12
   runtime:
     framework: vllm
   topology: aggregated
@@ -30,8 +30,13 @@ targets:
     type: agentic
   deploy:
     asset: recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/minimax-m3/perf/perf.yaml
+    notes: Defaults to disaggregated serving; set INFERENCE_URL and pod affinity to the aggregated DGD as described in the benchmark README.
   expected_performance:
     available: false
+    summary: Historical synthetic-acceptance results are published on the recipe page; expected performance for the current image and real-verification default is not established.
 - id: vllm-disagg-gb200-agentic
   recommended: false
   hardware:
@@ -52,11 +57,15 @@ targets:
     type: agentic
   deploy:
     asset: recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/minimax-m3/perf/perf.yaml
   expected_performance:
     available: false
+    summary: Historical synthetic-acceptance results are published on the recipe page; expected performance for the current image and real-verification default is not established.
 related_benchmarks: []
 maintainer: null
 gaps:
 - The manifests require cluster-specific scheduling, networking, registry, and ComputeDomain substitutions before deployment.
 - The checked-in runtime image is not publicly accessible; no public replacement has been validated for these configurations.
-- No benchmark assets or expected-performance results are published.
+- AIPerf assets and historical synthetic-acceptance results are published, but the measured image and rendered configuration are not recorded with those results. The refreshed serving configurations require runtime and performance qualification.

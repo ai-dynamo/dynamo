@@ -15,6 +15,44 @@
 #
 # MiniMax M3 NVFP4 on vLLM, aggregated serving on GB200.
 # Topology: three independent TP4 replicas with KV-aware routing and CPU KV offload.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minimax-m3-agg-gb200-agentic-config
+data:
+  # Real EAGLE3 verification is the serving default.
+  speculative-config: |-
+    {
+      "method": "eagle3",
+      "model": "Inferact/MiniMax-M3-EAGLE3-GQA",
+      "revision": "96692486b5fd38ebf8fd2a5f6bb53427d30819a8",
+      "num_speculative_tokens": 3,
+      "attention_backend": "FLASH_ATTN",
+      "use_local_argmax_reduction": true
+    }
+  # Benchmark only: synthetic acceptance does not preserve model correctness.
+  speculative-config-synthetic: |-
+    {
+      "method": "eagle3",
+      "model": "Inferact/MiniMax-M3-EAGLE3-GQA",
+      "revision": "96692486b5fd38ebf8fd2a5f6bb53427d30819a8",
+      "num_speculative_tokens": 3,
+      "attention_backend": "FLASH_ATTN",
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": 2.89,
+      "use_local_argmax_reduction": true
+    }
+---
+# Logical NVLink channel; requires the ComputeDomain controller and DRA driver.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: minimax-m3-agg-gb200-agentic-cd
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: minimax-m3-agg-gb200-agentic-cd-channel
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -24,7 +62,6 @@ metadata:
     app.kubernetes.io/name: minimax-m3-agg-gb200-agentic
     app.kubernetes.io/part-of: dynamo
 spec:
-  priorityClassName: inference
   backendFramework: vllm
   components:
     - name: Frontend
@@ -33,23 +70,9 @@ spec:
       replicas: 1
       podTemplate:
         spec:
-          priorityClassName: inference
-          # The unified runtime image is already cached on this GB200 node;
-          # colocating the frontend avoids exhausting CPU-node image storage.
-          nodeSelector:
-            kubernetes.io/hostname: gke-brugdizq-dgxc-k8-customer-gpu-w0e-32ae6790-gtwc
-          tolerations:
-            - key: kubernetes.io/arch
-              operator: Equal
-              value: arm64
-              effect: NoSchedule
-            - key: nvidia.com/gpu
-              operator: Equal
-              value: present
-              effect: NoSchedule
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-bea41d1a13ed64666a3703aa48523f7e7b2c815b-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -82,7 +105,6 @@ spec:
     - name: Worker
       type: worker
       runtimeVersionOverride: "1.5.0"
-      # Three independent TP4 replicas; the frontend routes using KV events.
       replicas: 3
       sharedMemorySize: 448Gi
       podTemplate:
@@ -90,29 +112,12 @@ spec:
           annotations:
             nvidia.com/vllm-distributed-executor-backend: mp
         spec:
-          priorityClassName: inference
-          imagePullSecrets:
-            - name: acr-token-secret
-            - name: nvcr-pull
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-GB200
-          tolerations:
-            - key: kubernetes.io/arch
-              operator: Equal
-              value: arm64
-              effect: NoSchedule
-            - key: nvidia.com/gpu
-              operator: Equal
-              value: present
-              effect: NoSchedule
           resourceClaims:
             - name: compute-domain-channel
-              # Reuse the namespace's provisioned rack-scoped NVLink channel;
-              # this cluster identity cannot create ComputeDomain resources.
-              resourceClaimTemplateName: mm3-pb-k3-al289-cd-channel
+              resourceClaimTemplateName: minimax-m3-agg-gb200-agentic-cd-channel
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-bea41d1a13ed64666a3703aa48523f7e7b2c815b-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -125,7 +130,10 @@ spec:
                 - --served-model-name
                 - $(SERVED_MODEL_NAME)
                 - --trust-remote-code
-                - --language-model-only
+                - --enable-multimodal
+                - --mm-encoder-tp-mode
+                - data
+                - --skip-mm-profiling
                 - --tensor-parallel-size
                 - "4"
                 - --block-size
@@ -149,10 +157,7 @@ spec:
                 - --compilation-config
                 - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024,1536,2048,2560,3072,4096,6144,8192]}'
                 - --speculative-config
-                - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","rejection_sample_method":"synthetic","synthetic_acceptance_length":2.89,"use_local_argmax_reduction":true}'
-                # For performance analysis --
-                # - --speculative-config
-                # - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","rejection_sample_method":"synthetic","synthetic_acceptance_length":2.89,"use_local_argmax_reduction":true}'
+                - $(SPECULATIVE_CONFIG)
                 - --kv-transfer-config
                 - $(KV_TRANSFER_CONFIG)
                 - --dyn-tool-call-parser
@@ -171,6 +176,11 @@ spec:
               env:
                 - name: KV_TRANSFER_CONFIG
                   value: '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"spec_name":"CPUOffloadingSpec","cpu_bytes_to_use":400000000000,"block_size":128,"store_threshold":2,"self_describing_kv_events":true}}'
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: minimax-m3-agg-gb200-agentic-config
+                      key: speculative-config
                 - name: MODEL_NAME
                   value: nvidia/MiniMax-M3-NVFP4
                 - name: SERVED_MODEL_NAME
@@ -195,33 +205,6 @@ spec:
                   value: "1"
                 - name: NCCL_CUMEM_ENABLE
                   value: "1"
-              # Cold kernel compilation can exceed the operator's default
-              # startup budget for this one-million-token configuration.
-              startupProbe:
-                httpGet:
-                  path: /health
-                  port: 9090
-                periodSeconds: 15
-                timeoutSeconds: 5
-                failureThreshold: 720
-              # Large initial prefills can delay the health endpoint without an
-              # engine failure. Allow two minutes before restarting a worker.
-              livenessProbe:
-                httpGet:
-                  path: /live
-                  port: 9090
-                periodSeconds: 10
-                timeoutSeconds: 10
-                failureThreshold: 12
-              # Keep a busy worker discoverable long enough for liveness to
-              # distinguish compute pressure from an unhealthy process.
-              readinessProbe:
-                httpGet:
-                  path: /health
-                  port: 9090
-                periodSeconds: 10
-                timeoutSeconds: 10
-                failureThreshold: 18
               resources:
                 claims:
                   - name: compute-domain-channel

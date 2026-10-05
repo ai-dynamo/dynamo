@@ -13,11 +13,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# MiniMax M3 NVFP4 on vLLM, disaggregated prefill/decode on the DGXC GB200
-# cluster. Topology: 3 prefill replicas and 3 decode replicas, each using TP4
-# on one GB200 node. The manifest consumes a rack-scoped ComputeDomain claim
-# template for MNNVL communication. Update the site-specific scheduling,
-# networking, registry, and ComputeDomain values for the target cluster.
+# MiniMax M3 NVFP4 on vLLM, disaggregated serving on GB200.
+# Topology: three TP4 prefill replicas and three TP4 decode replicas.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minimax-m3-disagg-gb200-agentic-config
+data:
+  # Real EAGLE3 verification is the serving default.
+  speculative-config: |-
+    {
+      "method": "eagle3",
+      "model": "Inferact/MiniMax-M3-EAGLE3-GQA",
+      "revision": "96692486b5fd38ebf8fd2a5f6bb53427d30819a8",
+      "num_speculative_tokens": 3,
+      "attention_backend": "FLASH_ATTN",
+      "use_local_argmax_reduction": true
+    }
+  # Benchmark only: synthetic acceptance does not preserve model correctness.
+  speculative-config-synthetic: |-
+    {
+      "method": "eagle3",
+      "model": "Inferact/MiniMax-M3-EAGLE3-GQA",
+      "revision": "96692486b5fd38ebf8fd2a5f6bb53427d30819a8",
+      "num_speculative_tokens": 3,
+      "attention_backend": "FLASH_ATTN",
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": 2.89,
+      "use_local_argmax_reduction": true
+    }
+---
+# Logical NVLink channel; requires the ComputeDomain controller and DRA driver.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: minimax-m3-disagg-gb200-agentic-cd
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: minimax-m3-disagg-gb200-agentic-cd-channel
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -27,7 +62,6 @@ metadata:
     app.kubernetes.io/name: minimax-m3-disagg-gb200-agentic
     app.kubernetes.io/part-of: dynamo
 spec:
-  priorityClassName: inference
   backendFramework: vllm
   components:
     - name: Frontend
@@ -36,28 +70,10 @@ spec:
       replicas: 1
       podTemplate:
         spec:
-          priorityClassName: inference
-          nodeSelector:
-            kubernetes.io/hostname: gke-brugdizq-dgxc-k8-customer-gpu-w0e-32ae6790-24wk
-          tolerations:
-            - key: kubernetes.io/arch
-              operator: Equal
-              value: arm64
-              effect: NoSchedule
-            - key: nvidia.com/gpu
-              operator: Equal
-              value: present
-              effect: NoSchedule
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-bea41d1a13ed64666a3703aa48523f7e7b2c815b-vllm-runtime
               imagePullPolicy: IfNotPresent
-              startupProbe:
-                httpGet:
-                  path: /health
-                  port: 8000
-                periodSeconds: 15
-                failureThreshold: 400
               command: [python3]
               args:
                 - -m
@@ -81,10 +97,6 @@ spec:
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
                   value: "1"
-              securityContext:
-                runAsUser: 0
-                capabilities:
-                  add: [IPC_LOCK]
               resources:
                 requests:
                   cpu: "2"
@@ -104,32 +116,14 @@ spec:
         metadata:
           annotations:
             nvidia.com/vllm-distributed-executor-backend: mp
-            networking.gke.io/default-interface: eth0
-            networking.gke.io/interfaces: >-
-              [{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]
         spec:
-          priorityClassName: inference
-          imagePullSecrets:
-            - name: nvcr-pull
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-GB200
-            cloud.google.com/gce-topology-subblock: 3b54d5c731918dab3bbf86cce15021d2
-          tolerations:
-            - key: kubernetes.io/arch
-              operator: Equal
-              value: arm64
-              effect: NoSchedule
-            - key: nvidia.com/gpu
-              operator: Equal
-              value: present
-              effect: NoSchedule
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: mm3-d12-disagg-compute-domain-channel
+              resourceClaimTemplateName: minimax-m3-disagg-gb200-agentic-cd-channel
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-bea41d1a13ed64666a3703aa48523f7e7b2c815b-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -161,6 +155,9 @@ spec:
                 - --kv-cache-metrics
                 - --kv-cache-dtype
                 - fp8
+                - --enable-multimodal
+                - --mm-encoder-tp-mode
+                - data
                 - --skip-mm-profiling
                 - --enable-cumem-allocator
                 - --no-enable-flashinfer-autotune
@@ -170,7 +167,7 @@ spec:
                 - --compilation-config
                 - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":16384,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024,1536,2048,2560,3072,4096,6144,8192,12288,14336,16384]}'
                 - --speculative-config
-                - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","use_local_argmax_reduction":true}'
+                - $(SPECULATIVE_CONFIG)
                 - --disaggregation-mode
                 - prefill
                 - --kv-transfer-config
@@ -191,14 +188,19 @@ spec:
               env:
                 - name: KV_TRANSFER_CONFIG
                   value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: minimax-m3-disagg-gb200-agentic-config
+                      key: speculative-config
                 - name: MODEL_NAME
                   value: nvidia/MiniMax-M3-NVFP4
                 - name: SERVED_MODEL_NAME
                   value: nvidia/MiniMax-M3-NVFP4
                 - name: HF_HOME
-                  value: /model-cache
+                  value: /shared-model-cache
                 - name: FLASHINFER_WORKSPACE_BASE
-                  value: /model-cache/flashinfer-workspaces/fi-23945310-sm100-d07-prefill-v2
+                  value: /shared-model-cache/flashinfer-workspaces/fi-23945310-sm100-d07-prefill-v2
                 - name: HF_HUB_OFFLINE
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
@@ -219,14 +221,8 @@ spec:
                   value: "1"
                 - name: NCCL_P2P_LEVEL
                   value: NVL
-                - name: NCCL_SOCKET_IFNAME
-                  value: eth0
-                - name: GLOO_SOCKET_IFNAME
-                  value: eth0
                 - name: UCX_TLS
                   value: cuda_copy,cuda_ipc,tcp
-                - name: UCX_NET_DEVICES
-                  value: all
                 - name: UCX_CUDA_IPC_ENABLE_MNNVL
                   value: "y"
                 - name: ETCD_LEASE_TTL
@@ -239,24 +235,6 @@ spec:
                   value: "8"
                 - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
                   value: "0.65"
-              # Cold kernel compilation can exceed the operator's default
-              # startup budget for this one-million-token configuration.
-              startupProbe:
-                httpGet:
-                  path: /health
-                  port: 9090
-                periodSeconds: 15
-                timeoutSeconds: 5
-                failureThreshold: 720
-              # Long prefills can delay the generation canary. Retain the
-              # /live check while allowing a ten-minute grace window.
-              livenessProbe:
-                httpGet:
-                  path: /live
-                  port: 9090
-                periodSeconds: 5
-                timeoutSeconds: 4
-                failureThreshold: 120
               resources:
                 claims:
                   - name: compute-domain-channel
@@ -270,7 +248,7 @@ spec:
                   nvidia.com/gpu: "4"
               volumeMounts:
                 - name: shared-model-cache
-                  mountPath: /model-cache
+                  mountPath: /shared-model-cache
           volumes:
             - name: shared-model-cache
               persistentVolumeClaim:
@@ -285,32 +263,14 @@ spec:
         metadata:
           annotations:
             nvidia.com/vllm-distributed-executor-backend: mp
-            networking.gke.io/default-interface: eth0
-            networking.gke.io/interfaces: >-
-              [{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]
         spec:
-          priorityClassName: inference
-          imagePullSecrets:
-            - name: nvcr-pull
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-GB200
-            cloud.google.com/gce-topology-subblock: 3b54d5c731918dab3bbf86cce15021d2
-          tolerations:
-            - key: kubernetes.io/arch
-              operator: Equal
-              value: arm64
-              effect: NoSchedule
-            - key: nvidia.com/gpu
-              operator: Equal
-              value: present
-              effect: NoSchedule
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: mm3-d12-disagg-compute-domain-channel
+              resourceClaimTemplateName: minimax-m3-disagg-gb200-agentic-cd-channel
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-bea41d1a13ed64666a3703aa48523f7e7b2c815b-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -339,6 +299,9 @@ spec:
                 - --kv-cache-metrics
                 - --kv-cache-dtype
                 - fp8
+                - --enable-multimodal
+                - --mm-encoder-tp-mode
+                - data
                 - --skip-mm-profiling
                 - --enable-cumem-allocator
                 - --no-enable-flashinfer-autotune
@@ -348,7 +311,7 @@ spec:
                 - --compilation-config
                 - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024,1536,2048,2560,3072,4096,6144,8192]}'
                 - --speculative-config
-                - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","use_local_argmax_reduction":true}'
+                - $(SPECULATIVE_CONFIG)
                 - --disaggregation-mode
                 - decode
                 - --kv-transfer-config
@@ -369,14 +332,19 @@ spec:
               env:
                 - name: KV_TRANSFER_CONFIG
                   value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: minimax-m3-disagg-gb200-agentic-config
+                      key: speculative-config
                 - name: MODEL_NAME
                   value: nvidia/MiniMax-M3-NVFP4
                 - name: SERVED_MODEL_NAME
                   value: nvidia/MiniMax-M3-NVFP4
                 - name: HF_HOME
-                  value: /model-cache
+                  value: /shared-model-cache
                 - name: FLASHINFER_WORKSPACE_BASE
-                  value: /model-cache/flashinfer-workspaces/fi-23945310-sm100
+                  value: /shared-model-cache/flashinfer-workspaces/fi-23945310-sm100
                 - name: HF_HUB_OFFLINE
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
@@ -397,14 +365,8 @@ spec:
                   value: "1"
                 - name: NCCL_P2P_LEVEL
                   value: NVL
-                - name: NCCL_SOCKET_IFNAME
-                  value: eth0
-                - name: GLOO_SOCKET_IFNAME
-                  value: eth0
                 - name: UCX_TLS
                   value: cuda_copy,cuda_ipc,tcp
-                - name: UCX_NET_DEVICES
-                  value: all
                 - name: UCX_CUDA_IPC_ENABLE_MNNVL
                   value: "y"
                 - name: ETCD_LEASE_TTL
@@ -417,20 +379,6 @@ spec:
                   value: "8"
                 - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
                   value: "0.65"
-              startupProbe:
-                httpGet:
-                  path: /health
-                  port: 9090
-                periodSeconds: 15
-                timeoutSeconds: 5
-                failureThreshold: 720
-              livenessProbe:
-                httpGet:
-                  path: /live
-                  port: 9090
-                periodSeconds: 5
-                timeoutSeconds: 4
-                failureThreshold: 120
               resources:
                 claims:
                   - name: compute-domain-channel
@@ -444,7 +392,7 @@ spec:
                   nvidia.com/gpu: "4"
               volumeMounts:
                 - name: shared-model-cache
-                  mountPath: /model-cache
+                  mountPath: /shared-model-cache
           volumes:
             - name: shared-model-cache
               persistentVolumeClaim:

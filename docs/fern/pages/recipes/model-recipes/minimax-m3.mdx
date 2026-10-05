@@ -46,6 +46,8 @@ Both targets require:
 - GB200 GPU nodes: 12 GPUs for aggregated serving or 24 GPUs for disaggregated serving.
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `nvidia/MiniMax-M3-NVFP4` and `Inferact/MiniMax-M3-EAGLE3-GQA`.
+- Access to the private `dynamoci.azurecr.io` runtime registry. Configure namespace-local pull credentials in the private cluster Kustomization. If you substitute an accessible image, qualify its MiniMax M3 support separately.
+- Standalone Kustomize v5.8.1 and a private cluster Kustomization with registry credentials, GB200 placement, cache bindings, and networking appropriate to the cluster.
 - The disaggregated target requires network-interface annotations and UCX/NCCL interface settings that match the target cluster. It also requires all six workers to use a compatible rack-scoped ComputeDomain channel.
 
 Set the namespace and create the Hugging Face token secret:
@@ -58,8 +60,10 @@ kubectl create secret generic hf-token-secret \
   -n "${NAMESPACE}"
 ```
 
+If the namespace and Secret already exist, use them instead. Run the following commands from the Dynamo repository root.
+
 <Warning>
-If you use the `model-cache` PVC, edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. Review namespace, image tags, node selectors, and resource claims in the manifests as well.
+Both targets require a populated `shared-model-cache` PVC in the selected namespace unless the cluster binding coordinates a different claim for download and serving. Set `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it.
 </Warning>
 
 ## Deploy
@@ -73,27 +77,30 @@ kubectl wait --for=condition=complete job/minimax-m3-model-download \
   -n "${NAMESPACE}" --timeout=14400s
 ```
 
-Apply the selected deployment.
+Prepare a private cluster Kustomization for the selected deployment using the [beta cluster starter](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md). Keep filled site values outside the recipe contribution.
 
 <div data-variant="agg">
 
-```bash
-kubectl apply \
-  -f recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml \
-  -n "${NAMESPACE}"
-```
+Follow the [aggregated cluster setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/agg-gb200-agentic/README.md#cluster-setup). Point the private composition's `resources` at `recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml` and validate it with the command in that guide.
 
 </div>
 
 <div data-variant="disagg">
 
-```bash
-kubectl apply \
-  -f recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml \
-  -n "${NAMESPACE}"
-```
+Follow the [disaggregated cluster setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/README.md#cluster-setup). Point the private composition's `resources` at `recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml` and validate it with the command in that guide.
 
 </div>
+
+Set `CLUSTER_KUSTOMIZATION` to the filled private directory, then render and apply the validated composition with standalone Kustomize v5.8.1:
+
+```bash
+kustomize build --load-restrictor LoadRestrictionsNone "$CLUSTER_KUSTOMIZATION" | \
+  kubectl apply --dry-run=server -f - -n "$NAMESPACE"
+kustomize build --load-restrictor LoadRestrictionsNone "$CLUSTER_KUSTOMIZATION" | \
+  kubectl apply -f - -n "$NAMESPACE"
+```
+
+Use `LoadRestrictionsNone` only with reviewed paths. It allows the private composition to reference the portable recipe and generated schema.
 
 Monitor the deployment until the frontend and every worker report ready:
 
@@ -143,9 +150,15 @@ A successful smoke test returns an HTTP 200 response containing a chat completio
 
 See the MiniMax M3 benchmark [README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/README.md) for the full workflow—staging the trace on the PVC, running a concurrency sweep, and fetching artifacts—and use the checked-in [AIPerf Job](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/perf.yaml) to run the trace replay.
 
+Both serving manifests default to real EAGLE3 verification with three draft tokens. The benchmark Job does not change that setting. For synthetic-acceptance experiments, explicitly select the optional Component described in the [aggregated setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/agg-gb200-agentic/README.md#synthetic-acceptance-for-benchmarks) or [disaggregated setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/README.md#synthetic-acceptance-for-benchmarks). Both Components select an acceptance length of 2.89.
+
+<Warning>
+Synthetic acceptance bypasses real EAGLE3 verification. Use it only for controlled performance experiments, never production responses or accuracy evaluation.
+</Warning>
+
 ### Optimization Targets
 
-Recipes are optimized for the following agentic workload and target user interactivity:
+The intended agentic workload and interactivity targets are:
 
 | Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s | TTFT P50 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -155,7 +168,9 @@ The benchmark replays the Mooncake-format agentic trace described in the [benchm
 
 ### Performance Results
 
-Benchmarking uses a synthetic acceptance length with the SpeedBench coding AL.
+The previously published results below used synthetic acceptance with the SpeedBench coding acceptance length. They describe three aggregated TP4 workers (12 GPUs) and three prefill plus three decode TP4 workers (24 GPUs), respectively.
+
+The exact measured runtime image and rendered configuration are not recorded with these results. They do not establish expected performance for the current `bea41d1a13` image, its real-verification defaults, or its optional synthetic variant. Reproducing them requires the original run artifacts and configuration; selecting synthetic acceptance alone is insufficient.
 
 | Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
@@ -180,7 +195,8 @@ Both targets use vLLM, TP4 workers, FP8 KV cache, prefix caching, KV events, KV-
 ## Notes
 
 - Both manifests pin the model checkpoint and the EAGLE3 checkpoint to specific Hugging Face revisions.
-- The aggregated manifest fixes synthetic EAGLE acceptance length at 2.89 to reproduce the reported performance result.
+- Both manifests select real EAGLE3 verification by default; synthetic acceptance length 2.89 is an explicit benchmark-only option.
+- The refreshed three-replica aggregated and 3P3D disaggregated compositions have local validation only. See the [aggregated validation scope](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/agg-gb200-agentic/README.md#validation-scope) and [disaggregated validation scope](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/README.md#validation-scope) before interpreting the historical results.
 - The aggregated target uses vLLM's `OffloadingConnector` with `CPUOffloadingSpec` and sets `cpu_bytes_to_use` to `400000000000`.
 - The disaggregated target uses `NixlConnector` with `kv_role=kv_both` on prefill and decode workers.
 
