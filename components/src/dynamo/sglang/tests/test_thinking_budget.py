@@ -213,17 +213,39 @@ def test_apply_thinking_budget_rejects_non_object_custom_params():
         )
 
 
-def test_apply_thinking_budget_rejects_global_default_without_active_token_filter(
-    monkeypatch,
+@pytest.mark.parametrize("global_budget", [0, 32, -1])
+def test_apply_thinking_budget_matches_global_token_filter_activation(
+    monkeypatch, global_budget
 ):
-    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "32")
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", str(global_budget))
 
-    with pytest.raises(InvalidArgument, match="cannot enforce per-request"):
-        apply_thinking_budget(
+    def apply():
+        return apply_thinking_budget(
             {
-                "stop_conditions": {"max_thinking_tokens": 32},
+                "stop_conditions": {"max_thinking_tokens": 16},
                 "require_reasoning": True,
             },
             {},
             _server_args(reasoning_parser="deepseek-r1"),
         )
+
+    if global_budget >= 0:
+        assert apply() == {"custom_params": {"thinking_budget": 16}}
+    else:
+        with pytest.raises(InvalidArgument, match="cannot enforce per-request"):
+            apply()
+
+
+def test_global_token_filter_activation_is_not_cached(monkeypatch):
+    request = {
+        "stop_conditions": {"max_thinking_tokens": 16},
+        "require_reasoning": True,
+    }
+    args = _server_args(reasoning_parser="deepseek-r1")
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "-1")
+    with pytest.raises(InvalidArgument, match="cannot enforce per-request"):
+        apply_thinking_budget(request, {}, args)
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "32")
+    assert apply_thinking_budget(request, {}, args) == {
+        "custom_params": {"thinking_budget": 16}
+    }

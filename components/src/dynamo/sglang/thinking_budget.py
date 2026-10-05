@@ -82,7 +82,12 @@ def _validate_server_config(server_args: Any, engine: Any | None) -> None:
             "thinking_token_budget requires an enabled SGLang grammar backend"
         )
 
-    if _token_filter_is_active(reasoning_parser):
+    from sglang.srt.environ import envs
+
+    if (
+        _token_filter_is_active(reasoning_parser)
+        or envs.SGLANG_MAX_THINK_TOKENS.get() >= 0
+    ):
         return
 
     raise InvalidArgument(
@@ -94,11 +99,7 @@ def _validate_server_config(server_args: Any, engine: Any | None) -> None:
 
 @lru_cache(maxsize=None)
 def _token_filter_is_active(reasoning_parser: str) -> bool:
-    """Return whether SGLang's parser activates the per-request token filter.
-
-    ``SGLANG_MAX_THINK_TOKENS`` configures a default budget, but it does not
-    activate the filter for parsers without excluded reasoning tokens.
-    """
+    """Return whether the parser's excluded tokens activate its token filter."""
     try:
         parser = _create_reasoning_parser(reasoning_parser)
     except (TypeError, ValueError) as exc:
