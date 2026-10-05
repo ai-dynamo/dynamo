@@ -3539,7 +3539,7 @@ func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{"template-source": "leader"},
 								Annotations: map[string]string{
-									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 								},
 							},
 							Spec: corev1.PodSpec{
@@ -3551,8 +3551,8 @@ func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing
 									Args: []string{
 										"-m", "dynamo.sglang",
 										"--nnodes", "2",
-										"--node-rank", "$(DYNAMO_RANK)",
-										"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+										"--node-rank", commonconsts.DynamoRankEnvVarReference,
+										"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
 										"--user-owned-launch", "leader",
 									},
 									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
@@ -3566,7 +3566,7 @@ func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{"template-source": "worker"},
 								Annotations: map[string]string{
-									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 								},
 							},
 							Spec: corev1.PodSpec{
@@ -3578,8 +3578,8 @@ func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing
 									Args: []string{
 										"-m", "dynamo.sglang",
 										"--nnodes", "2",
-										"--node-rank", "$(DYNAMO_RANK)",
-										"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+										"--node-rank", commonconsts.DynamoRankEnvVarReference,
+										"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
 										"--user-owned-launch", "worker",
 									},
 									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
@@ -3603,17 +3603,25 @@ func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing
 	leader, worker, err := reconciler.workloadRenderer().renderMultinodePodTemplateSpecs(t.Context(), dcd)
 	require.NoError(t, err)
 
-	t.Log("Verify LWS receives each complete role template and preserves user-owned launch arguments")
+	t.Log("Verify LWS receives each complete role template with portable topology aliases")
 	assert.Equal(t, "sglang-leader:1.5.0", leader.Spec.Containers[0].Image)
 	assert.Equal(t, "leader", leader.Labels["template-source"])
 	assert.Equal(t, "leader-devices", *leader.Spec.ResourceClaims[0].ResourceClaimTemplateName)
 	assert.Equal(t, []string{
 		"-m", "dynamo.sglang",
 		"--nnodes", "2",
-		"--node-rank", "$(DYNAMO_RANK)",
-		"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+		"--node-rank", commonconsts.DynamoRankEnvVarReference,
+		"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
 		"--user-owned-launch", "leader",
 	}, leader.Spec.Containers[0].Args)
+	assert.Contains(t, leader.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  commonconsts.DynamoRankEnvVar,
+		Value: "$(LWS_WORKER_INDEX)",
+	})
+	assert.Contains(t, leader.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  commonconsts.DynamoLeaderAddressEnvVar,
+		Value: "$(LWS_LEADER_ADDRESS)",
+	})
 	assert.NotContains(t, strings.Join(leader.Spec.Containers[0].Args, " "), "LWS_")
 	assert.Equal(t, "sglang-worker:1.5.0", worker.Spec.Containers[0].Image)
 	assert.Equal(t, "worker", worker.Labels["template-source"])
@@ -3621,10 +3629,18 @@ func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing
 	assert.Equal(t, []string{
 		"-m", "dynamo.sglang",
 		"--nnodes", "2",
-		"--node-rank", "$(DYNAMO_RANK)",
-		"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+		"--node-rank", commonconsts.DynamoRankEnvVarReference,
+		"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
 		"--user-owned-launch", "worker",
 	}, worker.Spec.Containers[0].Args)
+	assert.Contains(t, worker.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  commonconsts.DynamoRankEnvVar,
+		Value: "$(LWS_WORKER_INDEX)",
+	})
+	assert.Contains(t, worker.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  commonconsts.DynamoLeaderAddressEnvVar,
+		Value: "$(LWS_LEADER_ADDRESS)",
+	})
 	assert.NotContains(t, strings.Join(worker.Spec.Containers[0].Args, " "), "LWS_")
 
 }

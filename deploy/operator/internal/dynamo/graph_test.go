@@ -4750,13 +4750,13 @@ func TestGenerateGrovePodCliqueSet_VLLMMultinodeDRA(t *testing.T) {
 }
 
 func TestGenerateGrovePodCliqueSet_UsesCompleteRolePodTemplates(t *testing.T) {
-	t.Log("Author distinct complete leader and worker templates with manual launch flags")
+	t.Log("Author distinct complete leader and worker templates with portable topology aliases")
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "role-templates",
 			Namespace: "default",
 			Annotations: map[string]string{
-				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 			},
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -4780,8 +4780,8 @@ func TestGenerateGrovePodCliqueSet_UsesCompleteRolePodTemplates(t *testing.T) {
 									Args: []string{
 										"-m", "dynamo.sglang",
 										"--nnodes", "2",
-										"--node-rank", "$(DYNAMO_RANK)",
-										"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+										"--node-rank", commonconsts.DynamoRankEnvVarReference,
+										"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
 										"--user-owned-launch", "leader",
 									},
 									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
@@ -4803,8 +4803,8 @@ func TestGenerateGrovePodCliqueSet_UsesCompleteRolePodTemplates(t *testing.T) {
 									Args: []string{
 										"-m", "dynamo.sglang",
 										"--nnodes", "2",
-										"--node-rank", "$(DYNAMO_RANK)",
-										"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+										"--node-rank", commonconsts.DynamoRankEnvVarReference,
+										"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
 										"--user-owned-launch", "worker",
 									},
 									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
@@ -4847,10 +4847,18 @@ func TestGenerateGrovePodCliqueSet_UsesCompleteRolePodTemplates(t *testing.T) {
 		assert.Equal(t, []string{
 			"-m", "dynamo.sglang",
 			"--nnodes", "2",
-			"--node-rank", "$(DYNAMO_RANK)",
-			"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+			"--node-rank", commonconsts.DynamoRankEnvVarReference,
+			"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
 			"--user-owned-launch", expectation.launchRole,
 		}, main.Args)
+		assert.Contains(t, main.Env, corev1.EnvVar{
+			Name:  commonconsts.DynamoRankEnvVar,
+			Value: "$(GROVE_PCSG_POD_INDEX)",
+		})
+		assert.Contains(t, main.Env, corev1.EnvVar{
+			Name:  commonconsts.DynamoLeaderAddressEnvVar,
+			Value: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-decode-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+		})
 		assert.NotContains(t, strings.Join(main.Args, " "), "GROVE_")
 	}
 	assert.Nil(t, cliques["decode-wkr"].Spec.PodSpec.Containers[0].LivenessProbe)
