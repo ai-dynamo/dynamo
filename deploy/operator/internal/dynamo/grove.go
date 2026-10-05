@@ -72,6 +72,17 @@ func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
 	return "$((GROVE_PCLQ_POD_INDEX + 1))", true
 }
 
+// GetPodRank returns the absolute engine rank for the current pod. Standard
+// layouts follow Grove's PCSG-wide pod order. Inter-pod GMS layouts contain
+// additional weight-server cliques, so they use the engine rank carried by
+// the role-specific deployer instead of Grove's flat pod index.
+func (d *GroveMultinodeDeployer) GetPodRank() string {
+	if d.IsInterPodGMS {
+		return fmt.Sprintf("%d", d.Rank)
+	}
+	return fmt.Sprintf("$(%s)", groveconstants.EnvVarPodCliqueScalingGroupPodIndex)
+}
+
 func (d *GroveMultinodeDeployer) NeedsDNSWait() bool {
 	return false
 }
