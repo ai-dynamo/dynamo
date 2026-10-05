@@ -9,7 +9,7 @@ For quick start instructions, see the [Router README](overview.md). This documen
 
 ## Using KvRouter Python API
 
-Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
+Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. Your application can then query worker selection, inspect worker loads, and route or track requests itself.
 
 <Warning>
 **Multiple Routers from the Same Runtime**: Do not create multiple independently managed `KvRouter` instances from the same `DistributedRuntime`. Routers created from endpoints owned by the same runtime share that runtime's primary cancellation token, so dropping one router can cancel background work used by the others. For one in-process frontend, use a single `KvRouter`; for independent router lifetimes, use separate frontend processes or create each router from a separate `DistributedRuntime`.
@@ -89,7 +89,7 @@ async def main():
     # Your input tokens
     token_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
-    # Generate with per-request routing override
+    # Route the request and stream the response
     stream = await router.generate(
         token_ids=token_ids,
         model="Qwen/Qwen3-0.6B",
@@ -101,10 +101,6 @@ async def main():
             "temperature": 0.7,
             "top_p": 0.9,
         },
-        router_config_override={
-            "overlap_score_credit": 1.0,    # Prioritize cache hits for this request
-            "router_temperature": 0.5,       # Add routing randomness
-        }
     )
 
     # Collect generated tokens
@@ -118,6 +114,32 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+### Per-Request Overrides
+
+`generate()` and `best_worker()` accept a `router_config_override` dictionary. With the default worker-selection policy, only its load-tracking fields take effect:
+
+| Field | Effect |
+|---|---|
+| `track_prefill_tokens` | Whether the request's prompt counts as prefill load, both when scoring workers and in the selected worker's tracked load. Set it to `False` when another worker already ran the prefill. |
+| `assume_kv_reuse` | Whether active-block tracking counts the request's prefix blocks once when the same blocks are already active on the worker. Set it to `False` when the worker does not deduplicate those blocks, such as KV blocks transferred from a prefill worker. |
+
+For example, to select a decode worker for a request whose prompt was prefilled elsewhere:
+
+```python
+worker_id, dp_rank, overlap = await router.best_worker(
+    token_ids,
+    request_id="req-456",
+    router_config_override={
+        "track_prefill_tokens": False,  # Don't charge prompt work to this worker
+        "assume_kv_reuse": False,       # Count transferred blocks as new on this worker
+    },
+)
+```
+
+Because this call passes `request_id`, manage the request lifecycle as described in [Manual State Management](#2-manual-state-management-advanced).
+
+The default policy ignores the scoring fields `overlap_score_credit`, `prefill_load_scale`, `shared_cache_multiplier`, and `router_temperature` in `router_config_override`, so they do not change which worker it selects. Set scoring weights and temperature as default-policy parameters in the YAML file passed to `--router-policy-config`, or to `KvRouterConfig(router_policy_config=...)` from Python; see [Configure the Default Policy](configuration-and-tuning.md#configure-the-default-policy). A [custom worker-selection policy](custom-worker-selection.mdx) can read a per-request temperature through `router_temperature_override()`.
 
 ## K8s Examples
 
@@ -255,7 +277,7 @@ stream = await router.generate(tokens, model="model-name", worker_id=best_worker
 - **Advantage**: Full control over worker selection logic
 - **See also**: Detailed example below in "Custom Routing Example: Minimizing TTFT"
 
-All patterns support `router_config_override` to adjust routing behavior per-request without recreating the router.
+In every pattern, `generate()` and `best_worker()` accept `router_config_override` to adjust a request's load tracking without recreating the router. Under the default policy, the override does not change scoring weights or temperature; see [Per-Request Overrides](#per-request-overrides).
 
 ## Custom Routing Example: Minimizing TTFT
 
