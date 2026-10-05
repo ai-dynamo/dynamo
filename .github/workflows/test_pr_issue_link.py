@@ -398,7 +398,7 @@ def test_a_verified_github_issue_is_named_with_its_title(
     )
     code, api = run(monkeypatch, api, PR_BODY="Fixes #123")
     assert code == 0
-    assert "- GitHub issue #123 - Fix router timeout" in capsys.readouterr().out
+    assert "- GitHub issue #123 - `Fix router timeout`" in capsys.readouterr().out
 
 
 def test_a_verified_github_issue_without_a_title_stays_bare(
@@ -420,14 +420,23 @@ def test_a_verified_linear_issue_stays_identifier_only(
     assert "- Linear issue DYN-1234\n" in capsys.readouterr().out
 
 
-def test_summary_title_is_flattened_bounded_and_escaped() -> None:
-    """Third-party text headed for a Markdown summary is treated as untrusted."""
-    assert pr_issue_link.summary_title("a <b>bold</b>\nline & more") == (
-        "a &lt;b&gt;bold&lt;/b&gt; line &amp; more"
+def test_summary_title_is_an_inert_code_span() -> None:
+    """Anyone can author an issue title, so it must not carry markup.
+
+    A code span is the one GitHub Markdown construct inside which links,
+    emphasis and HTML all render as literal text. A backtick in the title
+    would close the span early, so it becomes a straight quote first.
+    """
+    assert pr_issue_link.summary_title("see [here](https://evil.example)\nnow") == (
+        "`see [here](https://evil.example) now`"
+    )
+    assert pr_issue_link.summary_title("a <b>bold</b> & `code`") == (
+        "`a <b>bold</b> & 'code'`"
     )
     long = pr_issue_link.summary_title("x" * 500)
-    assert len(long) == pr_issue_link.MAX_TITLE_LEN
-    assert long.endswith("...")
+    assert len(long) == pr_issue_link.MAX_TITLE_LEN + 2
+    assert long.endswith("...`")
+    assert pr_issue_link.summary_title("   ") == ""
     assert pr_issue_link.summary_title(None) == ""
     assert pr_issue_link.summary_title(["not", "a", "string"]) == ""
 

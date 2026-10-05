@@ -36,7 +36,6 @@ outages are treated as unverified-but-present so that an upstream outage never
 fails anyone's PR (fail open).
 """
 
-import html
 import json
 import os
 import re
@@ -102,21 +101,25 @@ DEP_LABEL_PREFIX = "dep:"
 # can trigger.
 MAX_CANDIDATES = 10
 # A GitHub issue title is public already, so the summary names it next to the
-# reference. It is still third-party text headed for a Markdown summary, so
-# it is bounded, flattened to one line and HTML-escaped first. Linear titles
-# are not carried: the Actions summary on this repository is world-readable
-# and Linear content is internal, so Linear references stay identifier-only.
+# reference. It is still text anyone can author, headed for a Markdown summary
+# that anyone can read, so it is flattened to one line, bounded, and rendered
+# as a code span: inside one, GitHub Markdown treats links, emphasis and HTML
+# as literal text, where escaping the HTML alone left `[text](url)` clickable.
+# Linear titles are not carried: the summary is world-readable and Linear
+# content is internal, so Linear references stay identifier-only.
 MAX_TITLE_LEN = 120
 
 
 def summary_title(title: object) -> str:
-    """Flatten and escape an issue title for the step summary; empty if unusable."""
+    """Render an issue title as an inert code span for the summary; empty if unusable."""
     if not isinstance(title, str):
         return ""
-    flat = " ".join(title.split())
+    flat = " ".join(title.replace("`", "'").split())
+    if not flat:
+        return ""
     if len(flat) > MAX_TITLE_LEN:
         flat = flat[: MAX_TITLE_LEN - 3].rstrip() + "..."
-    return html.escape(flat, quote=False)
+    return f"`{flat}`"
 
 
 def http_json(
@@ -157,11 +160,12 @@ def verify_github_issue(
     if status == 200:
         names = [(label or {}).get("name") or "" for label in body.get("labels") or []]
         is_dep = any(name.startswith(DEP_LABEL_PREFIX) for name in names)
+        title = body.get("title")
         return (
             "pull_request" not in body,
             True,
             is_dep,
-            summary_title(body.get("title")),
+            title if isinstance(title, str) else "",
         )
     if status in (404, 410):
         return False, True, False, ""
@@ -305,7 +309,10 @@ def main() -> int:
             dep_refs.append(label)
             decided_github = True
         elif exists:
-            verified.append(f"GitHub issue {label}" + (f" - {title}" if title else ""))
+            # Sanitised here, where the summary line is built, so no path
+            # from a verifier to the summary can skip it.
+            shown = summary_title(title)
+            verified.append(f"GitHub issue {label}" + (f" - {shown}" if shown else ""))
         elif not api_ok:
             unverified.append(f"GitHub reference {label} (API unavailable)")
         elif ref_repo != repo:
