@@ -535,6 +535,8 @@ def test_disagg_model_projection_keeps_shared_validation(source_type, prefill_mo
         agg_engine_args=None,
         prefill_engine_args=_fixed_args(),
         decode_engine_args=_fixed_args(),
+        num_prefill_workers=1,
+        num_decode_workers=1,
         performance_model_metadata=metadata,
     )
     workload = {"trace_path": "legacy.jsonl", "trace_format": "agentic_mooncake"}
