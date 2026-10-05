@@ -21,7 +21,7 @@ mod support;
 
 use support::vllm as vllm_fixture;
 use support::{FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture};
-use support::{sglang, sglang_http as http};
+use support::{sglang as sglang_fixture, sglang_http as http};
 
 fn after_token_responses(count: usize, action: StreamAction) -> RequestPlan {
     RequestPlan {
@@ -785,7 +785,7 @@ async fn http_checkpoint(
 async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
     bounded("HTTP cancellation phases and recovery", async {
         let mut fixture =
-            sglang::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+            sglang_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
         let control = Controller::<http::Adapter>::default();
         let mut http = http::Fixture::start(control.clone()).await;
         fixture.override_discovery(
