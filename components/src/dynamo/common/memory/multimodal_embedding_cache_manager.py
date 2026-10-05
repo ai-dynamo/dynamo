@@ -167,10 +167,8 @@ class MultimodalEmbeddingCacheManager:
             self._current_bytes -= self._tensor_size(replaced_entry.tensor)
 
         removed_keys: list[str] = []
-        for candidate in list(self._cache.keys()):
-            if self._current_bytes + size_bytes <= self._capacity_bytes:
-                break
-            evicted_entry = self._cache.pop(candidate)
+        while self._current_bytes + size_bytes > self._capacity_bytes and self._cache:
+            candidate, evicted_entry = self._cache.popitem(last=False)
             evicted_size = self._tensor_size(evicted_entry.tensor)
             self._current_bytes -= evicted_size
             self._evictions += 1

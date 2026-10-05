@@ -222,6 +222,13 @@ def _runtime_config_parser_name(
     return value if isinstance(value, str) and value else None
 
 
+def _guided_json_is_content(preproc: dict[str, Any]) -> bool:
+    return (
+        "json" in (preproc["sampling_options"]["guided_decoding"] or {})
+        and not preproc["require_reasoning"]
+    )
+
+
 def _unsupported_n_message(n: int) -> str:
     return f"Unsupported value: 'n={n}'. " "This endpoint currently supports only n=1."
 
@@ -641,6 +648,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=pre.named_zero_arg_tool,
+            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
@@ -706,6 +714,9 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=preproc_result.named_zero_arg_tool,
+            guided_json_is_content=_guided_json_is_content(
+                preproc_result.dynamo_preproc
+            ),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
