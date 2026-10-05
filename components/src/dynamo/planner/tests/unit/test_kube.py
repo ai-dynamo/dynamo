@@ -461,6 +461,9 @@ def _stable_worker_dgd(
             "observedGeneration": observed_generation,
             "components": {
                 "decode": {
+                    "gpuPowerLimitWatts": decode_watts,
+                    "gpusPerEngine": 1,
+                    "gpusPerReplica": 1,
                     "readyReplicas": 2,
                     "updatedReplicas": 2,
                     "availableReplicas": 2,
@@ -591,7 +594,7 @@ def test_worker_pods_settled_all_match(k8s_api, mock_core_api):
         mock_core_api,
         [_make_pod("pod-0", annotation="300"), _make_pod("pod-1", annotation="300")],
     )
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is True
     assert pending == []
 
@@ -665,9 +668,7 @@ def test_worker_pods_settled_differing_prefill_decode_caps(k8s_api, mock_core_ap
         _make_pod("d-1", annotation="300", component="decode"),
     ]
     mock_core_api.list_namespaced_pod.return_value = result
-    settled, pending = k8s_api.worker_pods_settled(
-        dgd, {"prefill": "350", "decode": "300"}
-    )
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"prefill": 350, "decode": 300})
     assert settled is True
     assert pending == []
     mock_core_api.list_namespaced_pod.assert_called_once()
@@ -679,7 +680,7 @@ def test_worker_pods_settled_multi_gpu_replica_compares_per_gpu_annotation(
     """4-GPU replica at 300 W/GPU: pod annotation is "300", not "1200"."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="300")])
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is True
     assert pending == []
 
@@ -700,7 +701,7 @@ def test_worker_pods_settled_terminating_pod_stale_annotation_blocks(
         deletion_timestamp=sentinel.some_timestamp,
     )
     _mock_pod_list(mock_core_api, [terminating])
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is False
     assert any("pod-old" in msg and "terminating" in msg for msg in pending)
 
@@ -717,7 +718,7 @@ def test_worker_pods_settled_succeeded_pod_ignored(k8s_api, mock_core_api):
             ),  # stale but terminal
         ],
     )
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is True
     assert pending == []
 
@@ -727,7 +728,7 @@ def test_worker_pods_settled_zero_replicas_no_pods_is_settled(k8s_api, mock_core
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     dgd["spec"]["components"][0]["replicas"] = 0
     _mock_pod_list(mock_core_api, [])
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is True
     assert pending == []
 
@@ -738,7 +739,7 @@ def test_worker_pods_settled_nonzero_replicas_no_pods_is_pending(
     """Nonzero desired replicas but no pods yet: settlement must wait."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     _mock_pod_list(mock_core_api, [])
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is False
     assert any("no non-terminal pods" in msg for msg in pending)
 
@@ -749,7 +750,7 @@ def test_worker_pods_settled_missing_annotation_on_running_pod_blocks(
     """A running pod with no annotation must block settlement."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation=None)])
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is False
     assert any("pod-0" in msg for msg in pending)
 
@@ -760,26 +761,25 @@ def test_worker_pods_settled_inprogress_rollout_blocks_without_listing_pods(
     """InProgress DGD rollingUpdate phase blocks settlement before listing pods."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
     dgd["status"]["rollingUpdate"] = {"phase": "InProgress"}
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is False
     assert pending == ["rollingUpdate.phase=InProgress"]
     mock_core_api.list_namespaced_pod.assert_not_called()
 
 
-def test_worker_pods_settled_exact_string_comparison_whitespace(k8s_api, mock_core_api):
-    """Exact string comparison: DGD '300' must match pod '300' but not ' 300 '."""
+def test_worker_pods_settled_normalizes_annotation_whitespace(k8s_api, mock_core_api):
+    """Equivalent integer annotations settle despite formatting differences."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
 
     # Matching: both "300"
     _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="300")])
-    settled, _ = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, _ = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is True
 
-    # Mismatch: DGD "300", pod " 300 " (unexpected whitespace on pod side)
     _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation=" 300 ")])
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
-    assert settled is False
-    assert any("300" in msg for msg in pending)
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
+    assert settled is True
+    assert pending == []
 
 
 @pytest.mark.asyncio
@@ -826,16 +826,13 @@ async def test_wait_exclude_planner_rejects_inprogress_rollout(k8s_api, mock_cor
 
 @pytest.mark.asyncio
 async def test_wait_missing_dgd_annotation_raises_immediately(k8s_api, mock_core_api):
-    """A missing DGD power annotation is a config error, not rollout lag.
+    """A missing projected power limit is a config error, not rollout lag.
 
     It must raise PowerAnnotationMissingError immediately rather than timing
     out after 30 minutes — the pod list must not even be consulted.
     """
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
-    # Remove the annotation to simulate a misconfigured DGD.
-    del dgd["spec"]["components"][0]["podTemplate"]["metadata"]["annotations"][
-        "dynamo.nvidia.com/gpu-power-limit"
-    ]
+    del dgd["status"]["components"]["decode"]["gpuPowerLimitWatts"]
     with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
         with pytest.raises(PowerAnnotationMissingError):
             await k8s_api.wait_for_graph_deployment_ready(
@@ -1243,7 +1240,7 @@ def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(
         deletion_timestamp=sentinel.ts,
     )
     _mock_pod_list(mock_core_api, [terminating])
-    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": "300"})
+    settled, pending = k8s_api.worker_pods_settled(dgd, {"decode": 300})
     assert settled is False
     assert any("pod-old" in msg and "terminating" in msg for msg in pending)
 
@@ -1334,19 +1331,10 @@ async def test_wait_legacy_failed_rollout_does_not_raise(k8s_api, mock_core_api)
 
 
 @pytest.mark.asyncio
-async def test_wait_settlement_verbatim_annotation_propagation(k8s_api, mock_core_api):
-    """DGD annotation ' 350 ' propagates verbatim to Pods; settlement uses raw string.
-
-    The operator copies the raw DGD podTemplate annotation onto each Pod without
-    normalization, so expected_power stores the raw string ' 350 ' and the
-    settlement comparison succeeds only when the Pod carries that same raw value.
-
-    ' 350 ' (DGD) + ' 350 ' (Pod) → settles (operator verbatim copy).
-    ' 350 ' (DGD) + '350'   (Pod) → does NOT settle (canonical form differs).
-    """
+async def test_wait_settlement_uses_operator_projected_integer(k8s_api, mock_core_api):
+    """Status and live Pod annotations compare as normalized integer watts."""
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts=" 350 ")
 
-    # Verbatim match: pod carries the raw DGD annotation string.
     _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation=" 350 ")])
     with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
         got = await k8s_api.wait_for_graph_deployment_ready(
@@ -1360,16 +1348,15 @@ async def test_wait_settlement_verbatim_annotation_propagation(k8s_api, mock_cor
         )
     assert got is dgd
 
-    # Canonical form "350" does not match the raw DGD annotation " 350 ".
     _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="350")])
     with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
-        with pytest.raises(TimeoutError):
-            await k8s_api.wait_for_graph_deployment_ready(
-                "test-deployment",
-                include_planner=False,
-                require_backing_settled=True,
-                require_prefill=False,
-                require_decode=True,
-                max_attempts=3,
-                delay_seconds=0.01,
-            )
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment",
+            include_planner=False,
+            require_backing_settled=True,
+            require_prefill=False,
+            require_decode=True,
+            max_attempts=3,
+            delay_seconds=0.01,
+        )
+    assert got is dgd

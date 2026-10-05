@@ -2555,6 +2555,12 @@ async fn pool_uses_each_configured_connection() {
 
 #[tokio::test]
 async fn decode_cancellation_waits_for_submission_and_first_token() {
+    for is_cancelled_before_submission in [false, true] {
+        check_decode_cancellation(is_cancelled_before_submission).await;
+    }
+}
+
+async fn check_decode_cancellation(is_cancelled_before_submission: bool) {
     let service = FakeVllm::default();
     service.hang_before_headers.store(true, Ordering::SeqCst);
     service
@@ -2570,6 +2576,9 @@ async fn decode_cancellation_waits_for_submission_and_first_token() {
     engine.start(0).await.expect("start");
 
     let context = dynamo_backend_common::testing::mock_context();
+    if is_cancelled_before_submission {
+        context.stop_generating();
+    }
     let generate = engine.generate(
         decode_request(),
         GenerateContext::new(context.clone(), None),

@@ -537,10 +537,20 @@ jobs:
     secrets: inherit
 
   deepseek-v4-pro-agg-perf:
-    name: DeepSeek V4 Pro aggregated perf
+    name: Recipe tests
     needs: [compute-release-mode, resolve-source-sha, vllm-build, vllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/deepseek-v4-pro-nightly.yml
+    uses: ./.github/workflows/deepseek-v4-pro-agg-nightly.yml
+    with:
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+    secrets: inherit
+
+  deepseek-v4-pro-disagg-perf:
+    name: Recipe tests
+    needs: [compute-release-mode, resolve-source-sha, vllm-build, vllm-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/deepseek-v4-pro-disagg-nightly.yml
     with:
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
@@ -601,10 +611,10 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   kimi-k25-agg-perf:
-    name: Kimi K2.5 aggregated functional smoke
+    name: Recipe tests
     needs: [compute-release-mode, resolve-source-sha, trtllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: $/.github/workflows/kimi-k25-nightly.yml
+    uses: $/.github/workflows/kimi-k25-agg-nightly.yml
     with:
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
@@ -919,21 +929,10 @@ jobs:
   # TEST JOBS
   # ============================================================================
 
-  sidecar-native-build:
-    name: Build sidecar native tests
-    needs: [compute-release-mode]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: $/.github/workflows/shared-build-sidecar-tests.yml
-
   sidecar-vllm-test:
     name: sidecar-runtime
-    needs: [vllm-build, sidecar-build, sidecar-native-build, resolve-source-sha, compute-release-mode]
-    if: ${{ !cancelled()
-        && needs.vllm-build.result == 'success'
-        && needs.sidecar-build.result == 'success'
-        && needs.resolve-source-sha.result == 'success'
-        && needs.compute-release-mode.result == 'success'
-        && needs.compute-release-mode.outputs.run_tests == 'true' }}
+    needs: [vllm-build, sidecar-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -944,31 +943,24 @@ jobs:
       dd_flaky_retry_enabled: ${{ 'false' }}
       test_suite_name: vllm
       framework: vllm
-      test_type: ${{ format('vLLM Sidecar {0}-GPU Tests', matrix.gpu_count) }}
+      test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('sidecar and vllm and gpu_{0} and not sidecar_native and not k8s', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
-      sidecar_native_artifact: ${{ needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
-      sidecar_native_gpu_count: ${{ matrix.gpu_count }}
     secrets: inherit
 
   sidecar-sglang-test:
     name: sidecar-runtime
-    needs: [sglang-build, sidecar-build, sidecar-native-build, resolve-source-sha, compute-release-mode]
-    if: ${{ !cancelled()
-        && needs.sglang-build.result == 'success'
-        && needs.sidecar-build.result == 'success'
-        && needs.resolve-source-sha.result == 'success'
-        && needs.compute-release-mode.result == 'success'
-        && needs.compute-release-mode.outputs.run_tests == 'true' }}
+    needs: [sglang-build, sidecar-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -979,20 +971,18 @@ jobs:
       dd_flaky_retry_enabled: ${{ 'false' }}
       test_suite_name: sglang
       framework: sglang
-      test_type: ${{ format('SGLang Sidecar {0}-GPU Tests', matrix.gpu_count) }}
+      test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
       amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: ${{ format('sidecar and sglang and gpu_{0} and not sidecar_native and not k8s', matrix.gpu_count) }}
+      gpu_test_markers: ${{ format('sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
       sidecar_backend: sglang
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
-      sidecar_native_artifact: ${{ needs.sidecar-native-build.result == 'success' && needs.sidecar-native-build.outputs.binary_artifact || '' }}
-      sidecar_native_gpu_count: ${{ matrix.gpu_count }}
     secrets: inherit
 
   sidecar-trtllm-test:
@@ -1005,7 +995,7 @@ jobs:
       dd_flaky_retry_enabled: ${{ 'false' }}
       test_suite_name: trtllm
       framework: trtllm
-      test_type: Sidecar E2E Test
+      test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
       amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
@@ -1037,9 +1027,7 @@ jobs:
       enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: vllm and gpu_0
-      # not sidecar: sidecar-marked tests need the dynamo-vllm-sidecar binary
-      # installed (see pr.yaml's sidecar-vllm-test), which this plain
-      # vllm-runtime image doesn't have.
+      # Plain runtime images do not include sidecar binaries.
       # TODO: this ad-hoc exclusion is duplicated across pr.yaml, post-merge-ci.yml,
       # and nightly-ci.yml's gpu_test_markers; consolidate into shared-test.yml
       # once there's a second marker that needs the same treatment.
@@ -1720,7 +1708,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, deploy-cleanup, deepseek-v4-pro-agg-perf, rust-tests, kimi-k25-agg-perf]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, deploy-cleanup, deepseek-v4-pro-agg-perf, deepseek-v4-pro-disagg-perf, rust-tests, kimi-k25-agg-perf]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

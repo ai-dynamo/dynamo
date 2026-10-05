@@ -575,12 +575,23 @@ fn consume_redundant_nvext(
                 "extra_args.nvext.token_in must be true when present",
             ));
         }
-        // Worker attribution and timing are produced by the frontend.
+        // These response fields are assembled by the frontend.
         if let Some(fields) = nvext.get_mut("extra_fields") {
             let fields = fields.as_array_mut().ok_or_else(|| {
                 client::invalid_argument("extra_args.nvext.extra_fields must be an array")
             })?;
-            fields.retain(|field| !matches!(field.as_str(), Some("worker_id" | "timing")));
+            fields.retain(|field| {
+                !matches!(
+                    field.as_str(),
+                    Some(
+                        "worker_id"
+                            | "timing"
+                            | "completion_token_ids"
+                            | "prompt_token_ids"
+                            | "prompt_logprobs"
+                    )
+                )
+            });
             if fields.is_empty() {
                 nvext.remove("extra_fields");
             }

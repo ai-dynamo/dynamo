@@ -315,10 +315,24 @@ impl
                     }
 
                     // if we have a data field without an event, then we might need to update the data
-                    if let Some(data) = &output.data
+                    if let Some(data) = &mut output.data
                         && data.text.is_some()
                         && !state.validate_engine_decode
                     {
+                        if data.log_probs.is_some() && data.tokens.is_none() {
+                            data.tokens = Some(
+                                data.token_ids
+                                    .iter()
+                                    .map(|token_id| {
+                                        state
+                                            .tokenizer
+                                            .decode(&[*token_id], state.skip_special_tokens)
+                                            .ok()
+                                            .map(Into::into)
+                                    })
+                                    .collect(),
+                            );
+                        }
                         // Text already decoded; track finish for this choice
                         let choice_idx = data.index.unwrap_or(0);
                         let has_finish = data.finish_reason.is_some();
@@ -1251,10 +1265,9 @@ mod tests {
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
             let output = LLMEngineOutput {
                 token_ids: vec![101],
-                tokens: self
+                text: self
                     .engine_decodes_text
-                    .then(|| vec![Some("Okay".to_string())]),
-                text: self.engine_decodes_text.then(|| "Okay".to_string()),
+                    .then(|| "Engine-decoded text".to_string()),
                 log_probs: Some(vec![-0.125]),
                 top_logprobs: Some(vec![vec![
                     TopLogprob {
@@ -1345,6 +1358,15 @@ mod tests {
             .data
             .expect("response contains backend output");
 
+        assert_eq!(
+            output.text.as_deref(),
+            Some(if engine_decodes_text {
+                "Engine-decoded text"
+            } else {
+                "Okay"
+            })
+        );
+
         let options = DeltaGeneratorOptions::new(None, None, true, None);
         let mut generator = DeltaGenerator::new(
             "test-model".to_string(),
@@ -1361,6 +1383,11 @@ mod tests {
             .content
             .as_ref()
             .expect("client-visible logprob content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].token_id, Some(101));
+        assert_eq!(content[0].token, "Okay");
+        assert_eq!(content[0].bytes, Some(b"Okay".to_vec()));
+        assert_eq!(content[0].logprob, -0.125);
         let candidates = &content[0].top_logprobs;
 
         assert_eq!(candidates[0].token, "Okay");

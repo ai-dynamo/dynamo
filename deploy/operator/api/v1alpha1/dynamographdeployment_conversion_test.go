@@ -152,6 +152,39 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	}
 }
 
+func TestDGD_RoundTrip_RolePodTemplates(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name: v1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "leader:1.5.0",
+						}}}},
+					},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "worker:1.5.0",
+						}}}},
+					},
+				},
+			}},
+		},
+	}
+
+	got := roundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestDGD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "edit", Namespace: "ns"},
@@ -964,15 +997,18 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 			},
 			Components: map[string]v1beta1.ComponentReplicaStatus{
 				"worker": {
-					ComponentKind:     v1beta1.ComponentKindDeployment,
-					ComponentNames:    []string{"dgd-worker-0", "dgd-worker-1"},
-					RuntimeNamespace:  "ns-status-worker-abc123",
-					GPUsPerEngine:     ptr.To(int64(2)),
-					GPUsPerReplica:    ptr.To(int64(3)),
-					Replicas:          2,
-					UpdatedReplicas:   2,
-					ReadyReplicas:     ptr.To(int32(2)),
-					AvailableReplicas: ptr.To(int32(2)),
+					ComponentKind:        v1beta1.ComponentKindDeployment,
+					ComponentNames:       []string{"dgd-worker-0", "dgd-worker-1"},
+					RuntimeNamespace:     "ns-status-worker-abc123",
+					ServedModelName:      "Qwen/Qwen3-8B",
+					RuntimeComponentName: "custom-worker",
+					GPUPowerLimitWatts:   ptr.To(int64(300)),
+					GPUsPerEngine:        ptr.To(int64(2)),
+					GPUsPerReplica:       ptr.To(int64(3)),
+					Replicas:             2,
+					UpdatedReplicas:      2,
+					ReadyReplicas:        ptr.To(int32(2)),
+					AvailableReplicas:    ptr.To(int32(2)),
 				},
 			},
 			Restart: &v1beta1.RestartStatus{

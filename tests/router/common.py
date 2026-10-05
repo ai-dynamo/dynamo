@@ -559,8 +559,11 @@ def _test_frontend_kv_routing(
     model_name: str,
     block_size: int,
     dp_ranks: tuple[int, ...] = (0,),
+    is_disaggregated: bool = False,
+    transfer_total: Callable[[], float] | None = None,
 ) -> None:
     """Verify engine events drive HTTP routing to two independently warmed ranks."""
+    assert is_disaggregated == (transfer_total is not None)
     assert len(system_ports) * len(dp_ranks) == 2
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
     prompts = [
@@ -570,12 +573,23 @@ def _test_frontend_kv_routing(
 
     async def run_test() -> None:
         with managed_runtime() as runtime:
+            component = "prefill" if is_disaggregated else "backend"
             worker_ids = sorted(
                 await poll_for_worker_instances(
-                    runtime.endpoint(f"{namespace}.backend.generate"), len(system_ports)
+                    runtime.endpoint(f"{namespace}.{component}.generate"),
+                    len(system_ports),
                 )
             )
             assert len(worker_ids) == len(system_ports), worker_ids
+            decode_ids = (
+                await poll_for_worker_instances(
+                    runtime.endpoint(f"{namespace}.backend.generate"), 2
+                )
+                if is_disaggregated
+                else worker_ids
+            )
+            if is_disaggregated:
+                assert len(decode_ids) == 2 and set(worker_ids).isdisjoint(decode_ids)
             targets = [
                 (worker_id, rank) for worker_id in worker_ids for rank in dp_ranks
             ]
@@ -591,6 +605,11 @@ def _test_frontend_kv_routing(
                     target: tuple[int, int] | None = None,
                 ) -> tuple[tuple[int, int], float | None]:
                     """Send one request and return its selected target and KV hit rate."""
+                    if is_disaggregated:
+                        # Keep the cached prefix while forcing at least one fresh KV block.
+                        prompt += (
+                            f"\nRequest {uuid.uuid4()}. " + "Continue counting. " * 32
+                        )
                     payload = {
                         "model": model_name,
                         "messages": [{"role": "user", "content": prompt}],
@@ -604,12 +623,22 @@ def _test_frontend_kv_routing(
                             else [],
                         },
                     }
-                    headers = (
-                        {
-                            "x-dynamo-worker-instance-id": str(target[0]),
-                            "x-dynamo-dp-rank": str(target[1]),
-                        }
-                        if target is not None
+                    headers = None
+                    if target is not None:
+                        headers = (
+                            {
+                                "x-dynamo-prefill-instance-id": str(target[0]),
+                                "x-dynamo-prefill-dp-rank": str(target[1]),
+                            }
+                            if is_disaggregated
+                            else {
+                                "x-dynamo-worker-instance-id": str(target[0]),
+                                "x-dynamo-dp-rank": str(target[1]),
+                            }
+                        )
+                    before = (
+                        await asyncio.to_thread(transfer_total)
+                        if transfer_total is not None
                         else None
                     )
                     nvext, has_generated_text = await send_router_chat_request(
@@ -617,14 +646,25 @@ def _test_frontend_kv_routing(
                     )
                     selected = require_router_worker_id({"nvext": nvext})
                     selected_target = (
-                        selected["decode_worker_id"],
-                        selected["decode_dp_rank"],
-                    )
-                    assert selected_target in targets, selected
-                    assert (
                         selected["prefill_worker_id"],
                         selected["prefill_dp_rank"],
-                    ) == selected_target, selected
+                    )
+                    assert selected_target in targets, selected
+                    if is_disaggregated:
+                        assert selected["decode_worker_id"] in decode_ids, selected
+                    else:
+                        assert (
+                            selected["decode_worker_id"],
+                            selected["decode_dp_rank"],
+                        ) == selected_target, selected
+                    if transfer_total is not None:
+                        deadline = time.monotonic() + 10
+                        while await asyncio.to_thread(transfer_total) <= before:
+                            assert time.monotonic() < deadline, (
+                                "No completed KV transfer for routed request",
+                                selected,
+                            )
+                            await asyncio.sleep(0.05)
                     hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
                     if is_query_only:
                         assert not has_generated_text, nvext
@@ -641,8 +681,9 @@ def _test_frontend_kv_routing(
                     port: await get_stored_kv_event_counts(session, port)
                     for port in system_ports
                 }
-                for prompt in prompts:
-                    await send(prompt, is_query_only=True)
+                if not is_disaggregated:
+                    for prompt in prompts:
+                        await send(prompt, is_query_only=True)
                 for prompt, target in zip(prompts, targets):
                     selected, _ = await send(prompt, target=target)
                     assert selected == target, (selected, target)
@@ -680,9 +721,10 @@ def _test_frontend_kv_routing(
                         f"routing={observed}, Stored counters={counts}, baselines={baselines}"
                     )
 
-                for prompt, target in zip(prompts, targets):
-                    selected, _ = await send(prompt, is_query_only=True)
-                    assert selected == target, (selected, target)
+                if not is_disaggregated:
+                    for prompt, target in zip(prompts, targets):
+                        selected, _ = await send(prompt, is_query_only=True)
+                        assert selected == target, (selected, target)
 
                 for prompt_index in (0, 0, 1, 0, 1, 1):
                     selected, hit_rate = await send(prompts[prompt_index])
@@ -2409,6 +2451,7 @@ def _test_router_decisions_disagg(
     request_plane: str = "nats",
     router_ais_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
+    require_kv_hit: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -2431,6 +2474,10 @@ def _test_router_decisions_disagg(
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         router_ais_config: Optional AIS router perf-model config for frontend KV routing.
+        require_kv_hit: If True, also assert the router predicted a KV cache hit
+            (nvext.timing.kv_hit_rate > 0) for requests 2-4, which share a prefix
+            with the previous request. This catches worker/router block-hash
+            mismatches that routing to the same worker alone would not.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -2542,6 +2589,13 @@ def _test_router_decisions_disagg(
                             timing_info is not None
                         ), f"Request {i + 1}: Expected timing info in final chunk, got None"
                         verify_response_timing(timing_info, disagg=not enable_bootstrap)
+                        if require_kv_hit and i > 0:
+                            kv_hit_rate = timing_info.get("kv_hit_rate")
+                            assert kv_hit_rate is not None and kv_hit_rate > 0, (
+                                f"Request {i + 1}: expected kv_hit_rate > 0 on a shared "
+                                f"prefix, got {kv_hit_rate}; worker KV event hashes "
+                                f"may not match the router's"
+                            )
 
                     # Small delay between requests
                     await asyncio.sleep(1)

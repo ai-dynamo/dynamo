@@ -17,7 +17,7 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    pub async fn start(control: Controller<Adapter>, health_status: &'static str) -> Self {
+    pub async fn start(control: Controller<Adapter>) -> Self {
         let (abort_tx, aborted) = watch::channel(Vec::new());
         let server = TestServer::start(move |listener, _shutdown| async move {
             let mut connections = tokio::task::JoinSet::new();
@@ -25,7 +25,7 @@ impl Fixture {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let (socket, _) = accepted?;
-                        connections.spawn(serve(socket, control.clone(), health_status, abort_tx.clone()));
+                        connections.spawn(serve(socket, control.clone(), abort_tx.clone()));
                     }
                     result = connections.join_next(), if !connections.is_empty() => {
                         result.unwrap()??;
@@ -70,7 +70,6 @@ impl Fixture {
 async fn serve(
     socket: TcpStream,
     control: Controller<Adapter>,
-    health_status: &str,
     aborted: watch::Sender<Vec<String>>,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(socket);
@@ -101,12 +100,7 @@ async fn serve(
     }
     if is_health {
         reader
-            .write_all(
-                format!(
-                    "HTTP/1.1 {health_status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
-            )
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .await?;
         return Ok(());
     }
@@ -151,8 +145,8 @@ async fn serve(
 
 pub fn responses(request_id: &str) -> [Value; 2] {
     [
-        json!({"output_ids": [101], "text": "first", "meta_info": {"id": request_id, "finish_reason": null}, "future_field": {"opaque": [1, null]}}),
-        json!({"output_ids": [102], "text": "last", "meta_info": {"id": request_id, "finish_reason": {"type": "length"}, "output_token_logprobs": [[-0.5, 102, "last"]]}}),
+        json!({"output_ids": [101], "text": "first", "meta_info": {"id": request_id, "finish_reason": null}}),
+        json!({"output_ids": [102], "text": "last", "meta_info": {"id": request_id, "finish_reason": {"type": "length"}}}),
     ]
 }
 
@@ -182,5 +176,9 @@ impl Protocol for Adapter {
 
     fn injected_error(message: &'static str) -> io::Error {
         io::Error::other(message)
+    }
+
+    fn invalid_argument_error(message: &'static str) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidInput, message)
     }
 }

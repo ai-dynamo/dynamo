@@ -13,9 +13,9 @@ use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 
 pub mod sglang;
+pub mod sglang_http;
 pub mod vllm;
 
-#[derive(Clone)]
 pub struct FixtureConfig {
     pub model: String,
     pub connections: usize,
@@ -77,13 +77,13 @@ fn fast_engine_args(engine_type: EngineType) -> MockEngineArgs {
 
 pub trait ProcessFixture: WireFixture {
     fn endpoint(&self) -> String;
-    async fn restart(&mut self);
-    fn native_prompt(request: &<Self::Protocol as Protocol>::Request) -> Vec<u32>;
-    fn native_traceparent(request: &<Self::Protocol as Protocol>::Request) -> Option<&str>;
-    fn assert_text(actual: &str, tokens: &[u32]);
     fn command() -> Command;
     fn configure_request(request: &mut PreprocessedRequest);
     fn assert_registration(card: &ModelDeploymentCard);
+    fn set_served_model_name(&self, name: &str);
+    fn set_health(&self, is_healthy: Option<bool>);
+    async fn health_check_received(&self);
+    fn assert_unhealthy_startup(logs: &str);
 }
 
 pub trait HandoffFixture: ProcessFixture {

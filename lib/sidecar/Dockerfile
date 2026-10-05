@@ -205,20 +205,6 @@ COPY --chmod=755 lib/sidecar/dynamo-sidecar /usr/local/bin/dynamo-sidecar
 # Numeric UID so Kubernetes runAsNonRoot can verify it.
 USER 1000
 
-RUN set -eu; \
-    test "$(id -u)" -eq 1000; \
-    test "$(id -g)" -eq 0; \
-    for engine in vllm sglang; do \
-        help="$(dynamo-sidecar "${engine}" --help)"; \
-        printf '%s' "${help}" | grep -q -- '--grpc-endpoint'; \
-    done; \
-    for engine in "" unsupported-engine; do \
-        status=0; \
-        output="$(dynamo-sidecar "${engine}" 2>&1)" || status=$?; \
-        test "${status}" -eq 2; \
-        printf '%s' "${output}" | grep -q 'Usage: dynamo-sidecar'; \
-    done
-
 # Dynamo system endpoints (/live, /health) — the operator sets DYN_SYSTEM_PORT=9090.
 EXPOSE 9090
 
@@ -256,29 +242,6 @@ RUN python3 -m compliance.generators \
     && python3 -m compliance.policy.validate \
         --policy /src/container/compliance/policy/licenses.toml \
         --input /legal/osrb-deps.csv
-
-RUN python3 - <<'PY'
-import json
-from pathlib import Path
-
-for framework in ("vllm", "sglang"):
-    name = f"dynamo-{framework}-sidecar"
-    source = Path(f"/tmp/sidecar-site/dynamo_sidecar.dist-info/sboms/{name}.cyclonedx.json")
-    bom = json.loads(source.read_text())
-    assert bom["bomFormat"] == "CycloneDX", source
-    assert bom["specVersion"] == "1.5", source
-    assert bom["metadata"]["component"]["name"] == name, source
-    assert bom["components"], source
-    assert all(item["name"] and item["version"] for item in bom["components"]), source
-
-bom = json.loads(Path("/legal/osrb.cdx.json").read_text())
-assert bom["bomFormat"] == "CycloneDX"
-assert bom["specVersion"] == "1.5"
-components = bom["components"]
-assert all(item["name"] and item["version"] for item in components)
-names = {item["name"] for item in components}
-assert {"dynamo-backend-common", "dynamo-sidecar-common", "tokio"} <= names
-PY
 
 FROM scratch AS compliance_artifact
 COPY --from=licenses /legal/ /

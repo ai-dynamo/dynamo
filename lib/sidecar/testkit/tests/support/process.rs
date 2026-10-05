@@ -1,16 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{DisaggregationMode, LLMEngineOutput, PreprocessedRequest};
-use dynamo_llm::discovery::{ModelManager, ModelWatcher};
+use dynamo_llm::discovery::ModelWatcher;
 use dynamo_llm::entrypoint::RouterConfig;
-use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::namespace::NamespaceFilter;
 use dynamo_runtime::component::Endpoint;
@@ -34,7 +33,6 @@ use crate::support::ProcessFixture;
 
 pub struct Environment {
     root: TempDir,
-    next_child: AtomicUsize,
     pub model: String,
     pub namespace: String,
     pub runtime: DistributedRuntime,
@@ -45,19 +43,8 @@ impl Environment {
         let root = tempfile::tempdir().unwrap();
         let model = root.path().join("model");
         std::fs::create_dir(&model).unwrap();
-        std::fs::write(model.join("config.json"), r#"{"model_type":"llama","architectures":["LlamaForCausalLM"],"max_position_embeddings":4096,"vocab_size":32000,"bos_token_id":1,"eos_token_id":2}"#).unwrap();
-        let mut vocab = serde_json::Map::from_iter(
-            (0..32_000).map(|id| (format!("token{id}"), serde_json::json!(id))),
-        );
-        for (id, word) in [(0, "[UNK]"), (1, "hello"), (2, "world")] {
-            vocab.remove(&format!("token{id}"));
-            vocab.insert(word.into(), serde_json::json!(id));
-        }
-        std::fs::write(model.join("tokenizer.json"), serde_json::to_vec(&serde_json::json!({
-            "version": "1.0", "truncation": null, "padding": null, "added_tokens": [],
-            "normalizer": null, "pre_tokenizer": {"type": "Whitespace"}, "post_processor": null,
-            "decoder": null, "model": {"type": "WordLevel", "vocab": vocab, "unk_token": "[UNK]"}
-        })).unwrap()).unwrap();
+        std::fs::write(model.join("config.json"), r#"{"model_type":"llama","architectures":["LlamaForCausalLM"],"max_position_embeddings":4096,"vocab_size":256,"bos_token_id":1,"eos_token_id":2}"#).unwrap();
+        std::fs::write(model.join("tokenizer.json"), r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,"decoder":null,"model":{"type":"WordLevel","vocab":{"[UNK]":0,"hello":1,"world":2},"unk_token":"[UNK]"}}"#).unwrap();
         std::fs::write(model.join("tokenizer_config.json"), r#"{"tokenizer_class":"PreTrainedTokenizerFast","model_max_length":4096,"bos_token":"hello","eos_token":"world","chat_template":"{{ messages[0]['content'] }}"}"#).unwrap();
         let namespace = format!(
             "process-{}",
@@ -80,7 +67,6 @@ impl Environment {
         .unwrap();
         Self {
             root,
-            next_child: AtomicUsize::new(0),
             model: model.to_string_lossy().into_owned(),
             namespace,
             runtime,
@@ -169,7 +155,7 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0, None)
+        Process::spawn::<F>(self, endpoint, mode, deadline, false, 0)
     }
 
     pub fn spawn_with_grace<F: ProcessFixture>(
@@ -177,21 +163,7 @@ impl Environment {
         endpoint: &str,
         mode: DisaggregationMode,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, 1, None)
-    }
-
-    pub fn spawn_with_template<F: ProcessFixture>(&self, endpoint: &str) -> Process {
-        let template = self.root.path().join("custom.jinja");
-        std::fs::write(&template, "world {{ messages[0]['content'] }}").unwrap();
-        Process::spawn::<F>(
-            self,
-            endpoint,
-            DisaggregationMode::Aggregated,
-            5,
-            false,
-            0,
-            Some(&template),
-        )
+        Process::spawn::<F>(self, endpoint, mode, 5, false, 1)
     }
 
     pub fn spawn_env<F: ProcessFixture>(
@@ -200,13 +172,99 @@ impl Environment {
         mode: DisaggregationMode,
         deadline: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, deadline, true, 0, None)
+        Process::spawn::<F>(self, endpoint, mode, deadline, true, 0)
     }
 }
 
 impl Drop for Environment {
     fn drop(&mut self) {
         self.runtime.shutdown();
+    }
+}
+
+pub struct Frontend {
+    url: String,
+    client: reqwest::Client,
+    cancel: CancellationToken,
+    service: JoinHandle<anyhow::Result<()>>,
+    watcher: JoinHandle<()>,
+}
+
+impl Frontend {
+    pub async fn start(env: &Environment) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let service = HttpService::builder()
+            .host("127.0.0.1")
+            .port(address.port())
+            .enable_cmpl_endpoints(true)
+            .build()
+            .unwrap();
+        let watcher = Arc::new(ModelWatcher::new(
+            env.runtime.clone(),
+            service.state().manager_clone(),
+            RouterConfig {
+                router_mode: RouterMode::RoundRobin,
+                ..Default::default()
+            },
+            0,
+            None,
+            None,
+            None,
+            service.state().metrics_clone(),
+        ));
+        let discovery = env
+            .runtime
+            .discovery()
+            .list_and_watch(DiscoveryQuery::AllModels, Some(env.runtime.primary_token()))
+            .await
+            .unwrap();
+        let watched = watcher.clone();
+        let namespace = NamespaceFilter::Exact(env.namespace.clone());
+        let watcher_task = tokio::spawn(async move { watched.watch(discovery, namespace).await });
+        let cancel = CancellationToken::new();
+        let service = service.spawn_with_listener(cancel.clone(), listener).await;
+        bounded(
+            "HTTP frontend model discovery",
+            watcher.wait_for_chat_model(),
+        )
+        .await;
+        Self {
+            url: format!("http://{address}/v1/completions"),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            cancel,
+            service,
+            watcher: watcher_task,
+        }
+    }
+
+    pub fn generate(&self, model: &str, id: &str, is_streaming: bool) -> reqwest::RequestBuilder {
+        self.client
+            .post(&self.url)
+            .header("x-dynamo-request-id", id)
+            .json(&serde_json::json!({
+                "model": model, "prompt": "hello", "max_tokens": 3,
+                "stream": is_streaming, "temperature": 0, "ignore_eos": true,
+                "nvext": {"extra_fields": ["completion_token_ids"]},
+            }))
+    }
+
+    pub async fn shutdown(mut self) {
+        self.cancel.cancel();
+        bounded("HTTP frontend shutdown", &mut self.service)
+            .await
+            .unwrap()
+            .unwrap();
+        self.watcher.abort();
+        let _ = (&mut self.watcher).await;
+    }
+}
+
+impl Drop for Frontend {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.service.abort();
+        self.watcher.abort();
     }
 }
 
@@ -224,7 +282,6 @@ impl Process {
         deadline: u64,
         from_env: bool,
         grace_secs: u64,
-        template: Option<&Path>,
     ) -> Self {
         use std::os::unix::process::CommandExt;
         let role = match mode {
@@ -233,9 +290,8 @@ impl Process {
             DisaggregationMode::Decode => "decode",
             DisaggregationMode::Encode => "encode",
         };
-        let child_id = env.next_child.fetch_add(1, Ordering::Relaxed);
-        let stdout = env.root.path().join(format!("{role}-{child_id}.stdout"));
-        let stderr = env.root.path().join(format!("{role}-{child_id}.stderr"));
+        let stdout = env.root.path().join(format!("{role}.stdout"));
+        let stderr = env.root.path().join(format!("{role}.stderr"));
         let mut command = F::command();
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();
@@ -245,9 +301,6 @@ impl Process {
             {
                 command.env_remove(key);
             }
-        }
-        if let Some(template) = template {
-            command.arg("--custom-jinja-template").arg(template);
         }
         if from_env {
             command.env("DYN_SIDECAR_GRPC_ENDPOINT", endpoint);
@@ -334,41 +387,6 @@ impl Process {
         })
         .await
         .unwrap_or_else(|_| panic!("sidecar did not exit\n{}", self.logs()))
-    }
-
-    pub fn assert_json_logs(&self, request: Option<(&str, &str)>) {
-        let mut has_request = false;
-        let mut count = 0;
-        for path in [&self.stdout, &self.stderr] {
-            for line in std::fs::read_to_string(path)
-                .unwrap()
-                .lines()
-                .filter(|line| !line.is_empty())
-            {
-                let record: serde_json::Value =
-                    serde_json::from_str(line).expect("sidecar JSONL record");
-                for field in ["time", "level", "target", "message"] {
-                    assert!(record[field].is_string(), "missing {field}: {record}");
-                }
-                let is_matching_request = match request {
-                    Some((id, _)) => record["request_id"] == id,
-                    None => record["span_name"] == "handle_payload",
-                };
-                if is_matching_request {
-                    assert_eq!(record["trace_id"].as_str().unwrap().len(), 32);
-                    if let Some((_, expected)) = request {
-                        assert_eq!(record["trace_id"], expected);
-                    }
-                    assert_eq!(record["span_id"].as_str().unwrap().len(), 16);
-                    has_request = true;
-                }
-                count += 1;
-            }
-        }
-        assert!(
-            count > 0 && has_request,
-            "JSONL logs must include startup and the served request"
-        );
     }
 
     pub fn logs(&self) -> String {
@@ -490,147 +508,5 @@ impl Drop for Gate {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.task.abort();
-    }
-}
-
-pub struct Frontend {
-    pub url: String,
-    pub client: reqwest::Client,
-    pub metrics: Arc<Metrics>,
-    manager: Arc<ModelManager>,
-    cancel: CancellationToken,
-    service: JoinHandle<anyhow::Result<()>>,
-    watcher: JoinHandle<()>,
-}
-
-impl Frontend {
-    pub async fn start(env: &Environment, migration_limit: u32) -> Self {
-        Self::start_with_capabilities(env, migration_limit, Vec::new()).await
-    }
-
-    pub async fn start_with_capabilities(
-        env: &Environment,
-        migration_limit: u32,
-        capabilities: Vec<&'static str>,
-    ) -> Self {
-        use opentelemetry::trace::TracerProvider;
-        use tracing_subscriber::prelude::*;
-        static TRACING: std::sync::Once = std::sync::Once::new();
-        TRACING.call_once(|| {
-            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
-            let tracer = provider.tracer("sidecar-testkit");
-            opentelemetry::global::set_tracer_provider(provider);
-            tracing_subscriber::registry()
-                .with(tracing_opentelemetry::layer().with_tracer(tracer))
-                .with(dynamo_runtime::logging::DistributedTraceIdLayer)
-                .try_init()
-                .unwrap();
-        });
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let service = HttpService::builder()
-            .host("127.0.0.1")
-            .port(address.port())
-            .enable_chat_endpoints(true)
-            .enable_cmpl_endpoints(true)
-            .enable_engine_apis(!capabilities.is_empty())
-            .build()
-            .unwrap();
-        let metrics = service.state().metrics_clone();
-        let manager = service.state().manager_clone();
-        let mut watcher = ModelWatcher::new(
-            env.runtime.clone(),
-            manager.clone(),
-            RouterConfig {
-                router_mode: RouterMode::RoundRobin,
-                ..Default::default()
-            },
-            migration_limit,
-            None,
-            None,
-            None,
-            metrics.clone(),
-        );
-        watcher.set_generate_engine_capabilities(capabilities);
-        let watcher = Arc::new(watcher);
-        let discovery = env
-            .runtime
-            .discovery()
-            .list_and_watch(DiscoveryQuery::AllModels, Some(env.runtime.primary_token()))
-            .await
-            .unwrap();
-        let watched = watcher.clone();
-        let namespace = NamespaceFilter::Exact(env.namespace.clone());
-        let watcher_task = tokio::spawn(async move { watched.watch(discovery, namespace).await });
-        let cancel = CancellationToken::new();
-        let service = service.spawn_with_listener(cancel.clone(), listener).await;
-        bounded(
-            "HTTP frontend model discovery",
-            watcher.wait_for_chat_model(),
-        )
-        .await;
-        Self {
-            url: format!("http://{address}"),
-            client: reqwest::Client::builder().no_proxy().build().unwrap(),
-            metrics,
-            manager,
-            cancel,
-            service,
-            watcher: watcher_task,
-        }
-    }
-
-    pub async fn workers(&self, model: &str, expected: usize) {
-        bounded("HTTP frontend worker membership", async {
-            loop {
-                if self
-                    .manager
-                    .get_model(model)
-                    .is_some_and(|model| model.total_workers() == expected)
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
-    }
-
-    pub fn generate(&self, model: &str, id: &str, max_tokens: u32) -> reqwest::RequestBuilder {
-        self.client
-            .post(format!("{}/v1/completions", self.url))
-            .header("x-dynamo-request-id", id)
-            .json(&serde_json::json!({
-                "model": model, "prompt": "hello", "max_tokens": max_tokens,
-                "stream": true, "temperature": 0, "ignore_eos": true,
-            }))
-    }
-
-    pub fn chat(&self, model: &str, id: &str) -> reqwest::RequestBuilder {
-        self.client
-            .post(format!("{}/v1/chat/completions", self.url))
-            .header("x-dynamo-request-id", id)
-            .json(&serde_json::json!({
-                "model": model, "messages": [{"role": "user", "content": "hello"}],
-                "max_tokens": 2, "stream": true, "temperature": 0,
-            }))
-    }
-
-    pub async fn shutdown(mut self) {
-        self.cancel.cancel();
-        bounded("HTTP frontend shutdown", &mut self.service)
-            .await
-            .unwrap()
-            .unwrap();
-        self.watcher.abort();
-        let _ = (&mut self.watcher).await;
-    }
-}
-
-impl Drop for Frontend {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.service.abort();
-        self.watcher.abort();
     }
 }

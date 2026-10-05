@@ -51,7 +51,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc28",
+    "tensorrt-llm==1.3.0rc29",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -365,7 +365,6 @@ markers = [
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
-    "sidecar_native: direct sidecar integration against a real native engine; requires the native test artifact",
     "kvbm: marks tests for KV behavior and model determinism",
     "kvbm_consolidator: marks KVBM consolidator/router integration tests",
     "kvbm_determinism: marks KVBM model determinism tests",

@@ -314,14 +314,14 @@ class KubernetesConnector(PlannerConnector):
                     SubComponentType.PREFILL,
                     component_name=prefill_component_name,
                 )
-                prefill_model_name = prefill_service.get_model_name()
+                prefill_model_name = prefill_service.get_model_name(deployment)
             if require_decode:
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
                     component_name=decode_component_name,
                 )
-                decode_model_name = decode_service.get_model_name()
+                decode_model_name = decode_service.get_model_name(deployment)
 
             if prefill_model_name is None and decode_model_name is None:
                 raise ModelNameNotFoundError()
@@ -431,7 +431,7 @@ class KubernetesConnector(PlannerConnector):
         Raises:
             DeploymentValidationError: If GPU shapes cannot be determined from DGD
             GPUShapeUnavailableError: If an authoritative shape is stale, missing,
-                or explicitly zero for a required Planner worker
+                for a required Planner worker
         """
         prefill_gpu_shape = None
         decode_gpu_shape = None
@@ -443,9 +443,8 @@ class KubernetesConnector(PlannerConnector):
                     deployment,
                     SubComponentType.PREFILL,
                 )
-                prefill_gpu_shape = prefill_service.get_gpu_shape(deployment)
-                prefill_gpu_shape = self._validate_required_gpu_shape(
-                    prefill_service, prefill_gpu_shape
+                prefill_gpu_shape = self._planner_gpu_shape(
+                    prefill_service.get_gpu_shape(deployment)
                 )
             except GPUShapeUnavailableError:
                 raise
@@ -458,9 +457,8 @@ class KubernetesConnector(PlannerConnector):
                     deployment,
                     SubComponentType.DECODE,
                 )
-                decode_gpu_shape = decode_service.get_gpu_shape(deployment)
-                decode_gpu_shape = self._validate_required_gpu_shape(
-                    decode_service, decode_gpu_shape
+                decode_gpu_shape = self._planner_gpu_shape(
+                    decode_service.get_gpu_shape(deployment)
                 )
             except GPUShapeUnavailableError:
                 raise
@@ -473,24 +471,13 @@ class KubernetesConnector(PlannerConnector):
         return prefill_gpu_shape, decode_gpu_shape
 
     @staticmethod
-    def _validate_required_gpu_shape(
-        service: Service, shape: ComponentGPUShape
+    def _planner_gpu_shape(
+        shape: ComponentGPUShape,
     ) -> Optional[ComponentGPUShape]:
-        """Fail closed on zero physical GPUs except for simulated workers."""
-
-        if shape.gpus_per_replica != 0:
-            return shape
-        if service.is_mocker():
-            logger.info(
-                "Component %s runs Dynamo mocker with zero physical GPUs; "
-                "using the configured logical GPU shape",
-                service.name,
-            )
+        """Use configured logical width when the operator reports no physical GPUs."""
+        if shape == ComponentGPUShape(0, 0):
             return None
-        raise GPUShapeUnavailableError(
-            service.name,
-            "operator published an authoritative zero-GPU shape",
-        )
+        return shape
 
     def get_component_power_configs(
         self,
@@ -500,13 +487,11 @@ class KubernetesConnector(PlannerConnector):
         decode_component_name: Optional[str] = None,
         deployment: Optional[dict] = None,
     ) -> tuple[Optional[ComponentPowerConfig], Optional[ComponentPowerConfig]]:
-        """Resolve DGD-owned per-role power configs from worker podTemplate annotations.
+        """Resolve operator-projected per-role power configs from DGD status.
 
         One DGD GET unless ``deployment`` is provided (shared with
         ``get_gpu_shapes`` on the same tick). ``watts_per_replica`` on each
-        config uses the replica-wide GPU total (nodeCount × per-pod) via
-        ``Service.get_total_gpu_count()``. GPU-budget math independently uses
-        the operator-projected ``gpusPerReplica``.
+        config uses the operator-projected ``gpusPerReplica``.
 
         The typed parser errors (``PowerAnnotationMissingError`` /
         ``PowerAnnotationInvalidError`` / ``SubComponentNotFoundError`` /
@@ -715,7 +700,7 @@ class KubernetesConnector(PlannerConnector):
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             service = get_component_from_type_or_name(deployment, sub_component_type)
-            user_component = service.get_component_name_from_endpoint_arg()
+            user_component = service.get_runtime_component_name(deployment)
             if user_component:
                 expected_component = user_component
             return service.name, expected_component
@@ -746,7 +731,7 @@ class KubernetesConnector(PlannerConnector):
                 service = get_component_from_type_or_name(
                     deployment, sub_component_type
                 )
-                return service.get_model_name()
+                return service.get_model_name(deployment)
             except PlannerError:
                 return None
 
