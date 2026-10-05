@@ -1,0 +1,58 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Basic Serving Examples
+sidebar-title: Overview
+subtitle: Explore aggregated, disaggregated, multinode, parallel, and speculative serving examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose an example, then filter its available deployment platforms and inference backends.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="aggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="agg-with-config.yaml agg.sh agg.yaml agg_xpu.sh agg_xpu_dra.yaml">
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Aggregated Serving](aggregated.mdx)
+Frontend and workers that each perform prefill and decode.
+<div className="dynamo-example-badges"><span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="disaggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="disagg.sh disagg.yaml disagg_hetero_cpu_decode.sh disagg_hetero_xpu_prefill.sh disagg_xpu_dra.yaml">
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Disaggregated Serving](disaggregated.mdx)
+Dedicated prefill and decode workers with KV-cache transfer.
+<div className="dynamo-example-badges"><span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="single-gpu-disaggregation" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_same_gpu.sh">
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Single-GPU Disaggregation](single-gpu-disaggregation.mdx)
+Separate prefill and decode processes sharing one GPU.
+<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="multinode" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm" data-keywords="disagg-multinode.yaml">
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Multinode Disaggregation](multinode.mdx)
+Kubernetes deployments that distribute prefill and decode across nodes.
+<div className="dynamo-example-badges"><span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="parallelism" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="dep.sh disagg_dp_attn.sh dsr1_dep.sh gpt_oss_disagg.sh multi_node_tp.sh">
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Tensor and Expert Parallelism](parallelism.mdx)
+Tensor-parallel, expert-parallel, and data-parallel attention examples.
+<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="speculative-decoding" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:vllm" data-keywords="agg_spec_decoding.sh">
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Speculative Decoding](speculative-decoding.mdx)
+vLLM aggregated serving with EAGLE speculative decoding.
+<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+</div>
+
+</ExamplesCatalog>

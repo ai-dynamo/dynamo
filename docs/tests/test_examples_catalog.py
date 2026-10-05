@@ -15,7 +15,18 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 ROOT = Path(__file__).resolve().parents[2]
 FERN = ROOT / "docs/fern"
 EXAMPLES = FERN / "pages/recipes/examples"
-LANDING_PAGES = {"overview", "diffusion-overview"}
+SECTION_OVERVIEWS = {
+    "basic-serving-overview": "basic-serving",
+    "routing-overview": "routing",
+    "kv-cache-offloading-overview": "kv-cache-offloading",
+    "multimodal-serving-overview": "multimodal-serving",
+    "workloads-overview": "workloads",
+    "autoscaling-and-budgets-overview": "autoscaling-and-budgets",
+    "observability-and-recovery-overview": "observability-and-recovery",
+    "cloud-and-integrations-overview": "cloud-and-integrations",
+    "development-examples-overview": "development-examples",
+}
+LANDING_PAGES = {"overview", "diffusion-overview", *SECTION_OVERVIEWS}
 EMBED = re.compile(r'<Code\s+src="([^"]+)"')
 CARD = re.compile(r'<div className="dynamo-example-card" ([^>]+)>')
 ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
@@ -67,6 +78,79 @@ def test_catalog_pages_and_navigation_agree() -> None:
     assert not any(
         "cli-templates/" in path or "kubernetes-templates/" in path for path in paths
     )
+
+
+def test_subsection_overviews_mirror_the_main_catalog_cards() -> None:
+    def normalize(body: str) -> str:
+        return re.sub(r">\s+<", "><", " ".join(body.split()))
+
+    source = (EXAMPLES / "overview.mdx").read_text()
+    source_cards = {
+        attributes["data-example"]: (attributes, normalize(body))
+        for raw_attributes, body in re.findall(
+            r'<div className="dynamo-example-card" ([^>]+)>(.*?)</div>\s*</div>',
+            source,
+            re.DOTALL,
+        )
+        for attributes in [dict(ATTRIBUTE.findall(raw_attributes))]
+    }
+    assert set(source_cards) == set(cards())
+
+    nav = yaml.safe_load((FERN / "index.yml").read_text())
+    recipes = next(item for item in nav["navigation"] if item.get("tab") == "recipes")
+    examples = next(
+        item for item in recipes["layout"] if item.get("section") == "Examples"
+    )
+    sections = {
+        item["section"]: item
+        for item in examples["contents"]
+        if item.get("section") and item["section"] != "Diffusion"
+    }
+    assert len(sections) == len(SECTION_OVERVIEWS)
+
+    mirrored = set()
+    for page_name, topic in SECTION_OVERVIEWS.items():
+        page = EXAMPLES / f"{page_name}.mdx"
+        text = page.read_text()
+        assert text.count("<ExamplesCatalog>") == 1
+        entries = [
+            (dict(ATTRIBUTE.findall(raw_attributes)), normalize(body))
+            for raw_attributes, body in re.findall(
+                r'<div className="dynamo-example-card" ([^>]+)>(.*?)</div>\s*</div>',
+                text,
+                re.DOTALL,
+            )
+        ]
+        expected = {
+            name: card
+            for name, card in source_cards.items()
+            if card[0]["data-topic"] == topic
+        }
+        assert entries
+        assert {entry[0]["data-example"] for entry in entries} == set(expected)
+        for attributes, body in entries:
+            name = attributes["data-example"]
+            assert (attributes, body) == expected[name]
+            assert name not in mirrored
+            mirrored.add(name)
+
+        section = next(
+            section
+            for section in sections.values()
+            if section["contents"][0]["path"]
+            == f"pages/recipes/examples/{page_name}.mdx"
+        )
+        assert section["contents"][0] == {
+            "page": "Overview",
+            "path": f"pages/recipes/examples/{page_name}.mdx",
+            "slug": topic,
+        }
+
+    assert mirrored == {
+        name
+        for name, metadata in cards().items()
+        if metadata["data-topic"] != "diffusion"
+    }
 
 
 def variants(page: Path) -> list[dict[str, str]]:

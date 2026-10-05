@@ -1,0 +1,37 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Autoscaling and Budget Examples
+sidebar-title: Overview
+subtitle: Explore Planner, deployment request, and global GPU budget examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose an autoscaling or budget example, then filter its available inference backends.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="planner" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm" data-keywords="disagg_planner.yaml disagg_planner_xpu_dra.yaml">
+<span className="dynamo-example-eyebrow">Autoscaling and Budgets · Example</span>
+### [Planner Autoscaling](planner.mdx)
+Disaggregated serving with Dynamo Planner autoscaling.
+<div className="dynamo-example-badges"><span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="dgdr" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:vllm kubernetes:sglang" data-keywords="generated-dgd-override.yaml mocker.yaml model-cache.yaml moe-sglang.yaml planner.yaml profiling-artifacts.yaml rapid.yaml review-before-deploy.yaml thorough.yaml">
+<span className="dynamo-example-eyebrow">Autoscaling and Budgets · Example</span>
+### [Deployment Requests (DGDR)](dgdr.mdx)
+Generate and customize deployments with DynamoGraphDeploymentRequest.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM, SGLang</span></div>
+</div>
+
+<div className="dynamo-example-card" data-example="global-planner" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:vllm kubernetes:mocker" data-keywords="global-planner-gpu-budget.yaml global-planner-mocker-test.yaml global-planner-vllm-test-xpu-dra.yaml global-planner-vllm-test.yaml">
+<span className="dynamo-example-eyebrow">Autoscaling and Budgets · Example</span>
+### [Global Planner](global-planner.mdx)
+Multi-model GPU budgets and single-endpoint, multi-pool deployments.
+<div className="dynamo-example-badges"><span>Kubernetes: vLLM, Mocker</span></div>
+</div>
+
+</ExamplesCatalog>
