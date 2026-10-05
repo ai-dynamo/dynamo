@@ -717,11 +717,9 @@ class VllmMultimodalRequestProcessor:
 
             kwargs_items = []
             for payload in pickled_items:
-                # Deserialize with vLLM's typed msgpack decoder (pickle-free,
-                # type-restricted). The sender is Dynamo's internal frontend
-                # transfer service; external request payloads never supply these
-                # bytes, and the decoder refuses any pickle extension unless
-                # VLLM_ALLOW_INSECURE_SERIALIZATION is explicitly set.
+                # Decode with the typed msgpack decoder. It yields only
+                # MultiModalKwargsItem values and refuses the pickle extension
+                # codes, whatever VLLM_ALLOW_INSECURE_SERIALIZATION says.
                 item = decode_mm_kwargs_item(payload)
                 if not isinstance(item, MultiModalKwargsItem):
                     logger.warning(
