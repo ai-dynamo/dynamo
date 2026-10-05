@@ -280,12 +280,11 @@ class TestMmKwargsNixlSenderCleanup:
 
 # The SHM round-trip now serializes real vLLM MultiModalKwargsItem objects with
 # vLLM's msgpack serializer, so these tests require vLLM and run in the vllm
-# lane. The decoded aux tensors are read-only views over the received bytes, so
-# torch.frombuffer emits a one-time "buffer is not writable" UserWarning; it is
-# benign here (vLLM copies the tensor host-to-device before use) and the strict
-# warning filter would otherwise turn it into an error.
+# lane. The receiver returns writable buffers, so decoding builds no tensor over
+# a read-only buffer. PyTorch warns about a read-only buffer only once per
+# process, so test_decode_emits_no_read_only_warning checks it in a fresh
+# interpreter.
 @pytest.mark.vllm
-@pytest.mark.filterwarnings("ignore:The given buffer is not writable:UserWarning")
 class TestMmKwargsShmTransfer:
     """Tests for the SHM sender/receiver round-trip with the msgpack frame."""
 
@@ -372,6 +371,79 @@ class TestMmKwargsShmTransfer:
         assert decode_mm_kwargs_item(blob) == item
 
         await sender.cleanup(handles)
+
+    @pytest.mark.timeout(60)
+    def test_decode_emits_no_read_only_warning(self):
+        """Decoding a received large item builds no tensor on a read-only buffer.
+
+        PyTorch warns "The given buffer is not writable" only once per process,
+        so the check runs in a fresh interpreter. As a positive control, the
+        script then decodes an immutable copy, which must warn once.
+        """
+        import os
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            """
+            import asyncio
+            import warnings
+            from unittest.mock import MagicMock
+
+            import torch
+            from vllm.multimodal.inputs import (
+                MultiModalBatchedField,
+                MultiModalFieldElem,
+                MultiModalKwargsItem,
+            )
+
+            from dynamo.common.multimodal import mm_kwargs_transfer as m
+
+            elem = MultiModalFieldElem(
+                data=torch.arange(4096, dtype=torch.float32),
+                field=MultiModalBatchedField(),
+            )
+            item = MultiModalKwargsItem({"pixel_values": elem})
+
+            async def receive():
+                feat = MagicMock(data=item, mm_hash="h", modality="image")
+                sender = m.MmKwargsShmSender()
+                extra, handles = await sender.prepare([feat], modality="image")
+                meta = m.MmKwargsShmTransferMetadata.model_validate(
+                    extra["mm_kwargs_shm"]
+                )
+                try:
+                    results = await m.MmKwargsShmReceiver().receive(meta)
+                finally:
+                    await sender.cleanup(handles)
+                return results["__pickled_kwargs_item__"][0]
+
+            def read_only_warnings(buf):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    m.decode_mm_kwargs_item(buf)
+                return sum("not writable" in str(w.message) for w in caught)
+
+            blob = asyncio.run(receive())
+            print(m.__file__)
+            print(read_only_warnings(blob), read_only_warnings(bytes(blob)))
+            """
+        )
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=50,
+        )
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        module_file, counts = proc.stdout.strip().splitlines()[-2:]
+        # The subprocess must test the same code as this process.
+        assert module_file == mm_kwargs_transfer.__file__
+        # (received buffer, immutable copy): the copy proves the check works.
+        assert tuple(counts.split()) == ("0", "1")
 
     @pytest.mark.asyncio
     async def test_skips_none_data_features(self):
@@ -618,6 +690,29 @@ class TestMmKwargsNixlReceiverOrdering:
                 f"Item {i} is {raw!r}; results are in completion order "
                 f"instead of spec order"
             )
+            # The decoder builds tensors over this buffer, so it must be writable.
+            assert not memoryview(raw).readonly
+
+
+class TestMmKwargsShmReceiverBuffers:
+    """The SHM receiver returns writable buffers (no vLLM needed)."""
+
+    @pytest.mark.asyncio
+    async def test_shm_receiver_returns_writable_buffer(self):
+        sender = MmKwargsShmSender()
+        shm_item, handle = await sender._encode_item(0, b"serialized-item")
+        try:
+            metadata = MmKwargsShmTransferMetadata(
+                modality="image", items=[shm_item], mm_hashes=["h"]
+            )
+            results = await MmKwargsShmReceiver().receive(metadata)
+        finally:
+            await sender.cleanup([handle])
+
+        (blob,) = results["__pickled_kwargs_item__"]
+        assert blob == b"serialized-item"
+        # The decoder builds tensors over this buffer, so it must be writable.
+        assert not memoryview(blob).readonly
 
 
 class TestBufferFraming:

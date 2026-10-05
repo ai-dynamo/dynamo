@@ -498,7 +498,7 @@ class MmKwargsReceiver(ABC):
         """Fetch serialized mm_kwargs items using this transport.
 
         Returns a dict keyed by field name (typically a single key
-        ``"__pickled_kwargs_item__"`` → ``list[bytes]``).
+        ``"__pickled_kwargs_item__"`` → ``list[bytearray]``).
         """
         with _nvtx.annotate(self._nvtx_label, color=self._nvtx_color):
             return await self._receive(metadata)
@@ -524,7 +524,7 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
 
         receiver = MmKwargsNixlReceiver()
         mm_kwargs = await receiver.receive(transfer_metadata)
-        # mm_kwargs is a dict like {"__pickled_kwargs_item__": [bytes, ...]}
+        # mm_kwargs is a dict like {"__pickled_kwargs_item__": [bytearray, ...]}
     """
 
     _nvtx_label = "mm_backend:nixl_receiver_read"
@@ -647,9 +647,10 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
         results: dict[str, Any] = {}
         for idx, name, tensor_view, sz in task_meta:
             if name == "__pickled_kwargs_item__":
-                results.setdefault(name, []).append(
-                    bytes(tensor_view[:sz].numpy().tobytes())
-                )
+                # One copy into a writable buffer: the decoder builds tensors
+                # over it, and PyTorch does not support tensors over read-only
+                # memory.
+                results.setdefault(name, []).append(bytearray(tensor_view[:sz].numpy()))
             else:
                 results[name] = tensor_view[:sz]
 
@@ -734,17 +735,17 @@ class MmKwargsShmReceiver(MmKwargsReceiver):
 
         receiver = MmKwargsShmReceiver()
         result = await receiver.receive(shm_metadata)
-        # result is {"__pickled_kwargs_item__": [bytes, bytes, ...]}
+        # result is {"__pickled_kwargs_item__": [bytearray, bytearray, ...]}
     """
 
     _nvtx_label = "mm_backend:shm_receiver_read"
     _nvtx_color = "cyan"
 
     async def _receive(self, metadata: BaseModel) -> dict[str, Any]:
-        """Read from shared memory and return serialized bytes.
+        """Read from shared memory and return a writable copy of each item.
 
         Returns:
-            Dict with "__pickled_kwargs_item__" key mapping to list of bytes.
+            Dict with "__pickled_kwargs_item__" key mapping to list of bytearray.
         """
         assert isinstance(metadata, MmKwargsShmTransferMetadata)
         results: dict[str, Any] = {}
@@ -752,7 +753,8 @@ class MmKwargsShmReceiver(MmKwargsReceiver):
         for item in metadata.items:
             with _nvtx.annotate("mm_shm:open_and_read", color="cyan"):
                 sm = shm.SharedMemory(name=item.name, create=False)
-                data = bytes(sm.buf[: item.size])
+                # One copy into a writable buffer, as in the NIXL receiver.
+                data = bytearray(sm.buf[: item.size])
                 sm.close()
             results.setdefault("__pickled_kwargs_item__", []).append(data)
             logger.debug(
