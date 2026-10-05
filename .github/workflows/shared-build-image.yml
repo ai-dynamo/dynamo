@@ -677,6 +677,23 @@ jobs:
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE="${IMAGE_URI}" \
             "${TEST_TAG_ARGS[@]}" .
+
+          # The region experiment must test identical AMD64 image content.
+          if [[ "${{ inputs.framework }}" == "trtllm" && "${{ inputs.push_image }}" == "true" && "${{ inputs.platform }}" == *linux/amd64* ]]; then
+            amd64_digest() {
+              docker buildx imagetools inspect --raw "$1" | jq -er '
+                [.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")]
+                | if length == 1 then .[0].digest else error("expected one AMD64 manifest") end
+              '
+            }
+            west_digest=$(amd64_digest "$TEST_IMAGE_URI")
+            east_digest=$(amd64_digest "${TEST_IMAGE_URI/$ECR_REGISTRY/$ECR_REGISTRY_EAST}")
+            echo "Region experiment AMD64 test image: west=${west_digest} east=${east_digest}"
+            if [[ "$west_digest" != "$east_digest" ]]; then
+              echo "::error::East and west AMD64 test images differ."
+              exit 1
+            fi
+          fi
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}

@@ -938,6 +938,52 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  # Temporary region A/B jobs. Keep the west jobs above as the controls and
+  # leave these comparison jobs out of backend-status-check's dependencies.
+  trtllm-test-east:
+    name: trtllm-east-experiment
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      framework: trtllm
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      image_registry: 210086341041.dkr.ecr.us-east-1.amazonaws.com
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and trtllm and gpu_0
+      gpu_test_markers: pre_merge and trtllm and gpu_1 and not sidecar
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
+    secrets: inherit
+
+  trtllm-multi-gpu-test-east:
+    name: trtllm-east-experiment
+    needs: [changed-files, trtllm-build]
+    if: |
+      needs.changed-files.outputs.run_multigpu_tests == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      framework: trtllm
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      image_registry: 210086341041.dkr.ecr.us-east-1.amazonaws.com
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and trtllm and gpu_2
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
   triton-test:
     name: triton-runtime
     needs: [changed-files, triton-build]
