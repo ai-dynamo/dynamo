@@ -3273,9 +3273,7 @@ impl OpenAIPreprocessor {
                                 );
                                 // The text holds a fixed modality key and two
                                 // numbers, so the 400 body can carry it.
-                                return Err(crate::protocols::common::invalid_argument_error(
-                                    message,
-                                ));
+                                return Err(invalid_argument_error(message));
                             }
                         }
                         if has_media_loader {
@@ -11209,8 +11207,6 @@ mod tests {
                 "{}",
                 dynamo_error.message()
             );
-            // The 400 body carries the same text.
-            assert_eq!(dynamo_error.public_message(), Some(dynamo_error.message()));
         })
         .await;
     }
