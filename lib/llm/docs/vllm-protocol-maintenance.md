@@ -3,13 +3,15 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Maintaining the vLLM protocol inventory
+# Maintaining vLLM protocol compatibility
 
 The protocol inventory answers **which native-server fields Dynamo must recognize
 as meaningful**, not which fields Dynamo supports. A declaration, an unchanged
 source file, or a green inventory check is not evidence of runtime parity.
 
-This guide covers the implemented inventory and drift mechanism. The complete
+This guide covers runtime compatibility maintenance. The
+[consolidated assessment guide](https://github.com/ai-dynamo/dynamo/blob/codex/vllm-protocol-tooling/lib/llm/docs/dynamo-vllm-protocol-assessment.md)
+owns source-assessment commands, decisions, gates and CI operation. The complete
 contract, backend transport, response projection, and conformance requirements
 remain in the [compatibility design](https://github.com/ai-dynamo/dynamo/blob/da45b41777ec507974d3a6a41053a9e908e530d3/lib/llm/docs/frontend-protocol-framework-compatibility.md).
 The review branches implement a bounded subset; complete profile/schema alignment,
@@ -135,95 +137,33 @@ The descriptor is exposed through the
 per-field conformance catalog. It does not replace the remaining work to connect
 all field locations, lowering, fallback policies, and runtime evidence to profiles.
 
-1. Update the intended platform versions in `container/context.yaml` through the
-   normal framework-bump process.
-2. Resolve each upstream release tag to its full commit SHA. Update `vllm_pins.json`
-   in the same change. Keep other configured platforms covered.
-3. Fetch upstream source into a separate checkout. The tools use Git objects and
-   Python AST parsing; they never import or execute vLLM modules.
-4. Verify pins and regenerate both inventory outputs:
+For the source-assessment steps, follow the
+[framework-version bump procedure](https://github.com/ai-dynamo/dynamo/blob/codex/vllm-protocol-tooling/lib/llm/docs/dynamo-vllm-protocol-assessment.md#framework-version-bump-or-dynamo-only-change).
+It compares Dynamo directly with each selected native revision, including existing
+gaps, and retains selected upstream behavioral-change signals. One assessment
+registry records scoped findings and decisions; the experimental per-upstream-pair
+decision schema and `--require-triage` CLI are retired.
 
-   ```sh
-   python scripts/check_protocol_pins.py --upstream-repo /path/to/vllm
-   python scripts/generate_protocol_inventory.py --upstream-repo /path/to/vllm
-   python scripts/generate_protocol_inventory.py --upstream-repo /path/to/vllm --check
-   ```
+Run the commands from the consolidated B1 tooling checkout. While these PRs remain
+stacked, use `--dynamo-repo /path/to/runtime-checkout` and immutable commits to
+assess this branch's runtime code; an older checkout may still contain retired
+scripts. This does not require rebasing the runtime PRs merely to run assessment.
 
-5. Compare against the exact Dynamo commit before the bump. Use a new output
-   directory for every run; reports must not overwrite earlier evidence:
-
-   ```sh
-   python scripts/run_protocol_drift_check.py \
-     --upstream-repo /path/to/vllm \
-     --baseline-dynamo FULL_PRE_BUMP_DYNAMO_SHA \
-     --output-dir /path/to/new-report --require-triage
-   ```
-
-6. Review each candidate against the linked upstream source at the two immutable
-   commits. Determine whether it affects either endpoint. Review validation,
-   defaults after normalization, streaming, and response projection—not just field
-   names. Run native-server versus Dynamo probes where declarations cannot prove
-   the behavior.
-7. Commit a decision file under
-   `lib/llm/src/protocols/openai/compatibility/decisions/PREVIOUS_SHA-CANDIDATE_SHA.json`.
-   The top-level keys are `previous_upstream_commit`, `candidate_upstream_commit`,
-   and `changes`. `changes` maps each report change ID to its decision.
-8. Rerun the check. Review generated-file changes, implementation, regression tests,
-   and compatibility-reference updates together. A decision file is not approved
-   merely because its shape passes validation; the PR requires code review.
-
-Each material decision needs `status`, `owner`, `rationale`, and `next_step`, plus a
-`tracking_issue` or explicit no-action `decision`. Statuses are those defined by
-the design: Compatible, Upstream drift, Dynamo gap, Intentional divergence,
-Unsupported, and Unverified. Compatible requires `runtime_evidence`. Unresolved
-drift/gaps and Unverified entries require a tracking issue. Unsupported and
-intentional-divergence entries require `evidence` identifying implementation and
-tests. Intentional divergence also needs an approved rationale explaining why
-matching native behavior is harmful or incorrect; lack of implementation is a gap.
-
-A source-change candidate may instead be non-material for the declared endpoints,
-for example a newly added helper used only by the out-of-scope Responses API.
-Record `material: false`, `scope_endpoints` exactly matching the report's endpoint
-list, `owner`, `rationale`, `next_step`, an explicit no-action `decision`, and
-nonempty source `evidence`. Do not include `status` or `runtime_evidence`: this is
-a source-scope assessment, not another compatibility status or a parity claim.
-Omitting `material` retains the existing material-decision requirements. An
-expanded endpoint scope invalidates an earlier no-action assessment.
-
-The driver validates the entire decision file before annotating any candidate.
-Non-material candidates remain in the report with their original IDs, paths,
-and source changes, but without the initial placeholder compatibility status.
-They still count toward exact decision coverage. The checker verifies metadata,
-not the semantic truth of the scope assessment; reviewers must inspect the cited
-source and callers. Draft triage notes for seven additions are preserved on
-`codex/vllm-compatibility-deferred`; they are not approved compatibility decisions.
-
-The check rejects missing, extra, or stale change IDs, and decisions cannot
-overwrite source-change paths or payloads. Evidence references must be inspected
-by reviewers: the checker does not prove that a linked test actually establishes
-the stated compatibility claim.
+Review `report.md`, not a full generated inventory diff. A version bump must update
+the runtime image configuration, immutable source pins and compact vocabulary,
+review affected runtime selectors, disposition new or changed findings, and run
+targeted native-server/Dynamo probes for behavior that source analysis cannot
+establish. An accepted static decision is not proof of runtime parity or release
+approval. Generated inventories remain optional diagnostic artifacts.
 
 ### Report provenance
 
-The drift driver records the full current Dynamo commit and tracked-diff hash,
-plus a `provenance` object identifying the actual check inputs:
-
-- Python and PyYAML versions, because AST serialization and parsing depend on
-  the tooling environment;
-- SHA256 values for the extractor, driver, pin checker, and inventory helper;
-- SHA256 values for the current container configuration and pins, including
-  untracked pins during initial rollout;
-- the full baseline Dynamo commit and hashes of its configuration and pins;
-  a null baseline pin hash means that file did not exist at that commit; and
-- the repository-relative decision path and its content hash, including invalid
-  decision content. A null hash means no decision file existed.
-
-The driver parses the same current-input and decision bytes that it hashes.
-Standalone extraction records its own tool hash and Python version. These are
-tool/input identities, not proof that all Dynamo runtime source was clean or
-tested. Archive the full source patch and required untracked files with runtime
-evidence. Add new local helper dependencies to the tool list when the driver
-starts importing them. Reports do not expose absolute checkout paths.
+The consolidated report records exact Dynamo/native revisions, selected scope,
+input hashes and hashes of the nested implementation modules. Tool hashes follow
+the package structure automatically, excluding tests. Historical source snapshots,
+reports and evidence remain attributable to their original revisions; do not
+reinterpret experimental upstream-only decisions as current direct-assessment
+approvals. See the assessment guide for decision applicability and invalidation.
 
 ## Release-pinned adapter boundary checks
 
@@ -235,11 +175,11 @@ They also retain the Rust preprocessor's literal legacy passthrough vocabulary.
 Regenerate from the pinned Git objects, never by editing the JSON:
 
 ```sh
-python scripts/generate_protocol_release_fixtures.py
-python scripts/generate_protocol_release_fixtures.py --check
+python -m scripts.protocol_compatibility generate-release-fixtures --repo /path/to/runtime-checkout
+python -m scripts.protocol_compatibility generate-release-fixtures --repo /path/to/runtime-checkout --check
 ```
 
-The draft compatibility workflow checks fixture freshness. Runtime checks are a
+The generator supports `--check` for fixture freshness. Runtime checks are a
 separate matrix: run
 `components/src/dynamo/vllm/tests/test_vllm_protocol_release_boundary.py` with
 vLLM 0.26.0 (Dynamo 1.4), 0.28.0 (Dynamo 1.5), and the current 0.30.0 baseline.
@@ -440,73 +380,26 @@ stops them explicitly. An outer process kill can bypass teardown: inspect the
 recorded container names and stop only surviving containers owned by that run.
 Do not turn a timed-out or failed matrix into a pass by omitting its evidence.
 
-Decision metadata must use nonempty text; evidence is a nonempty string or a
-nonempty list of nonempty strings. Booleans or arbitrary objects do not count as
-evidence. Malformed JSON or decision structure fails the triage gate but still
-produces the source-change report and summary so the failure can be investigated.
-
 ## CI ownership and schedule
 
-The authored `protocol-compatibility.yml` workflow is preserved on
-`codex/vllm-compatibility-deferred`, not installed in these review branches.
-Its proposed triggers are framework-pin/protocol/tool changes, a Monday 08:23 UTC
-comparison with upstream HEAD, and manual dispatch. No scheduled execution or
-maintainer response SLA is established by this closeout. Activating it requires
-separate authorization and validation. The draft uses read-only repository
-permissions and records resolved candidate SHAs; it does not automatically
-adopt upstream behavior or update pins.
-
-Proposed ownership: frontend maintainers own semantic triage; CI maintainers own
-job availability. A failing scheduled check should receive review within five business
-days. The reviewer opens or links tracked follow-up for unresolved material
-changes and updates the affected version-scoped compatibility reference. Treat
-extraction failures as tooling failures, not as evidence of no drift.
-
-The draft job would publish a summary and a `vllm-protocol-drift` artifact containing
-full inventories and reports, with 30-day retention. Retain evidence that
-supports a lasting compatibility claim in a durable review/test artifact and link
-it from the decision. A zero-diff report records the source-check date, but does
-not advance a runtime-verified compatibility claim without conformance evidence.
+The consolidated B1 `protocol-assessment.yml` implements PR, manual and weekly
+candidate checks with read-only repository permissions. It does not automatically
+adopt pins or implement upstream changes. Its
+[ownership and escalation contract](https://github.com/ai-dynamo/dynamo/blob/codex/vllm-protocol-tooling/lib/llm/docs/dynamo-vllm-protocol-assessment.md#ci-periodic-ownership-and-escalation)
+is the single reference for triggers, platform selection, gates and artifact
+retention. The older deferred `protocol-compatibility.yml` draft is historical,
+not a second workflow to activate. Hosted scheduling and required checks are not
+established merely by authoring a workflow file.
 
 ### Recorded real version-bump exercise
 
-The driver was exercised on 2026-10-03 against the actual pre-bump commit for
-[Dynamo's vLLM 0.30.0 upgrade](https://github.com/ai-dynamo/dynamo/commit/8e5d7407dd352bd7f2ef49e571fcd8776f629e3d),
-not only the synthetic Git fixtures in the unit suite:
-
-| Input | Immutable identity |
-|---|---|
-| Pre-bump Dynamo baseline | `59ac36782c0f9662f1ab6123dce1559d1a3f377a` |
-| Dynamo checkout HEAD | `da45b41777ec507974d3a6a41053a9e908e530d3` plus recorded working changes |
-| Previous vLLM | `98dff2a81d747d1dba01a47f939f48c3526d4206` (0.29.0) |
-| Candidate vLLM | `ced6857afa0ea7b2e3f0846a62e1394e90f15607` (0.30.0) |
-| Extractor SHA256 | `6f94274c2b0509b38cacbd3586ac462605cefeaf8d374dd99936a5d39c10084d` |
-| Driver SHA256 | `07298399b7e6f6fd8cf861a30ed4fc2886ee33a5ad91e1125b39a468f0e19edd` |
-| Validation source-state SHA256 | `183e4b2a0b5bfb1080343f104346bf962d9e530100a5e77f36ecf4b56d0f7eeb` |
-
-Reproduce with the source/tool identities above, Python 3.12.3, PyYAML 6.0.2,
-and a Git object database containing both pinned vLLM releases:
-
-```sh
-python scripts/run_protocol_drift_check.py \
-  --upstream-repo /path/to/vllm \
-  --baseline-dynamo 59ac36782c0f9662f1ab6123dce1559d1a3f377a \
-  --output-dir /path/to/new-report --require-triage
-```
-
-The CUDA comparison produced 95 source-change candidates. CPU/XPU retained
-0.29.0 and produced no source changes. The command exited **1**, correctly
-requiring triage; all 95 candidates remain Unverified. The source report includes
-the added `watermarking` request fields, cache-salt validators, rendering changes,
-and validation-error handling changes. A candidate is not automatically a
-client-visible incompatibility.
-
-This is a recorded fail-closed mechanism exercise, not an approved bump or a
-fully classified example. The full generated inventories and reports are retained
-with the validation evidence. A reviewed, repository-shipped report with decisions
-for every material change, and actual execution of the authored GitHub workflow,
-remain required before initial delivery is complete. The unchanged-source report
-also makes no CPU/XPU runtime compatibility claim.
+The earlier upstream-only exercise detected 95 source-change candidates for
+vLLM 0.29.0 to 0.30.0 and exited 1 awaiting triage. Its immutable reports remain
+historical evidence, not a Dynamo/native parity assessment or approved decisions.
+Use the consolidated guide's
+[real-source version-bump rehearsal](https://github.com/ai-dynamo/dynamo/blob/codex/vllm-protocol-tooling/lib/llm/docs/dynamo-vllm-protocol-assessment.md#reproducible-real-source-version-bump-rehearsal)
+for current commands and exact Dynamo/native commits. Keep source assessment,
+synthetic tooling regressions and actual runtime conformance evidence distinct.
 
 ## Registered pipeline catalog
 
@@ -753,9 +646,9 @@ successful or leak-free.
 
 ## Extending to another target server
 
-`protocol_drift.snapshot` currently registers only vLLM. Add a target-specific
-source extractor and endpoint mapping that return the same versioned inventory
-shape. Preserve the separation between static candidates and runtime evidence.
+The consolidated tooling currently implements only vLLM. Add a target-specific
+extractor under `scripts/protocol_compatibility/extraction/` that returns the
+normalized contracts and explicit coverage diagnostics defined in `common/`. Preserve the separation between static candidates and runtime evidence.
 Add fixtures for declarations, aliases, validators, response/stream changes, and
 irrelevant formatting. Add that framework's configured-version checks, native
 conformance probes, ownership, and reference before advertising support.
