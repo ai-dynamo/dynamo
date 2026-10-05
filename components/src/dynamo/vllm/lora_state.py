@@ -23,13 +23,14 @@ class LoRAState:
             str, asyncio.Lock
         ] = weakref.WeakValueDictionary()
         self.lora_load_locks_guard = threading.Lock()
-        # Batches that resolved an adapter and are still submitting work to the
-        # engine. A pooling batch larger than max_num_seqs is admitted in waves,
-        # so it spans many event-loop turns and a lifecycle op can land midway.
-        # name -> number of in-flight batches holding that adapter.
-        self.active_batches: dict[str, int] = {}
-        # name -> event set when active_batches for that name reaches zero.
-        self.batch_drained: dict[str, asyncio.Event] = {}
+        # Requests and pooling batches that resolved an adapter and are still
+        # submitting work to the engine. A pooling batch larger than
+        # max_num_seqs is admitted in waves, so it spans many event-loop turns
+        # and a lifecycle op can land midway.
+        # name -> number of in-flight holders of that adapter.
+        self.active_requests: dict[str, int] = {}
+        # name -> event set when active_requests for that name reaches zero.
+        self.request_drained: dict[str, asyncio.Event] = {}
 
     def resolve_request(
         self,
@@ -83,44 +84,39 @@ class LoRAState:
                 self.lora_load_locks[lora_name] = lock
             return lock
 
-    def reserve_batch(self, lora_name: str) -> None:
-        """Record that a batch is using this adapter.
+    def begin_request(self, lora_name: str) -> None:
+        """Track a request or batch; every call must be paired with ``end_request``.
 
         Callers must hold the adapter's lock so a lifecycle op cannot slip
-        between the resolve and the reservation.
+        between the resolve and the registration.
         """
-        count = self.active_batches.get(lora_name, 0) + 1
-        self.active_batches[lora_name] = count
-        if count == 1:
-            event = self.batch_drained.get(lora_name)
-            if event is not None:
-                event.clear()
+        count = self.active_requests.get(lora_name, 0)
+        if count == 0:
+            self.request_drained[lora_name] = asyncio.Event()
+        self.active_requests[lora_name] = count + 1
 
-    def release_batch(self, lora_name: str) -> None:
-        """Release a batch reservation. Safe to call without the adapter lock."""
-        count = self.active_batches.get(lora_name, 0) - 1
-        if count > 0:
-            self.active_batches[lora_name] = count
+    def end_request(self, lora_name: str) -> None:
+        """Release one holder previously tracked by ``begin_request``.
+
+        Safe to call without the adapter lock.
+        """
+        count = self.active_requests[lora_name]
+        if count > 1:
+            self.active_requests[lora_name] = count - 1
             return
-        self.active_batches.pop(lora_name, None)
-        event = self.batch_drained.get(lora_name)
-        if event is not None:
-            event.set()
+        del self.active_requests[lora_name]
+        self.request_drained.pop(lora_name).set()
 
-    async def wait_for_batch_drain(self, lora_name: str) -> None:
-        """Block until no batch holds this adapter.
+    async def wait_until_idle(self, lora_name: str) -> None:
+        """Wait until all tracked requests for an adapter have ended.
 
-        Call while holding the adapter's lock: reservations are taken under the
-        same lock, so holding it blocks new batches and guarantees this drains
-        rather than chasing a moving target.
+        Call while holding the adapter's lock: registrations are taken under
+        the same lock, so holding it blocks new holders and guarantees this
+        drains rather than chasing a moving target.
         """
-        while self.active_batches.get(lora_name):
-            event = self.batch_drained.get(lora_name)
-            if event is None:
-                event = asyncio.Event()
-                self.batch_drained[lora_name] = event
-            await event.wait()
-        self.batch_drained.pop(lora_name, None)
+        drained = self.request_drained.get(lora_name)
+        if drained is not None:
+            await drained.wait()
 
     def list_lora_ids(self) -> dict[str, int]:
         """Return map of loaded LoRA names to integer IDs.

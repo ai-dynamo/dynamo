@@ -119,9 +119,13 @@ pub(crate) trait OpenAIStopConditionsProvider {
     }
 
     /// Get max_thinking_tokens from nvext
-    /// NOTE: This is currently a passthrough for future thinking budget implementation
+    /// NOTE: This is a legacy passthrough; prefer root-level `thinking_token_budget`.
     fn get_max_thinking_tokens(&self) -> Option<u32> {
         self.nvext().and_then(|nv| nv.max_thinking_tokens)
+    }
+
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        None
     }
 }
 
@@ -135,6 +139,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_formatted_prompt(&self) -> Option<bool>;
 
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        None
+    }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
         None
     }
 }
@@ -218,7 +226,9 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
         let stop_token_ids = self.get_stop_token_ids();
-        let max_thinking_tokens = self.get_max_thinking_tokens();
+        let max_thinking_tokens = self
+            .get_thinking_token_budget()
+            .or_else(|| self.get_max_thinking_tokens());
 
         if let Some(stop) = &stop
             && stop.len() > MAX_STOP_SEQUENCES
@@ -269,6 +279,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
             skip_special_tokens,
             formatted_prompt,
             return_tokens_as_token_ids,
+            no_stop_trim: self.get_no_stop_trim(),
         })
     }
 }

@@ -32,7 +32,7 @@ one or more sinks. For the capture and replay workflow, see
 | `DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS` | `10000` | Integer milliseconds | Periodic flush interval for the `s3` sink in milliseconds. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional PULL endpoint for harness tool events. Configure it on only one process. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame topic filter. |
-| `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset | Header names | Comma- or whitespace-separated allowlist captured only on `request_payload` rows. Values are unredacted. |
+| `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset | Header names | Comma- or whitespace-separated allowlist captured only on `request_payload` rows. Values are unredacted. Does not filter `agent_context.agent_headers` on `request_end` rows. |
 
 Legacy `jsonl` and `jsonl_gz` sink values, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
 `DYN_REQUEST_TRACE_JSONL_*` remain migration aliases. `DYN_AUDIT_*` variables are migration shims,
@@ -88,6 +88,8 @@ feature. Shipped Dynamo Python wheels enable it; local source builds pass
 ### `request_end`
 
 Contains compact replay metadata and, when available, per-request timing and KV-cache metrics. Session headers add session identity, finish metadata, and tool-call metadata. Session identity does not enable sticky routing.
+
+Requests with recognized session identity also include captured raw headers in `agent_context.agent_headers`. This map is emitted independently of `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` and does not require `request_payload` capture. Values are unredacted and may contain arbitrary client data; metadata-only tracing is not a content-sanitization guarantee. Do not send credentials, secrets, or prompt content in agent metadata headers. See [Agent Harnesses](../../use-cases/agents/agent-harnesses.mdx#agent-headers) for the captured header families, exclusions, and size limits.
 
 ### `request_payload`
 

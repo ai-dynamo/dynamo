@@ -174,12 +174,12 @@ class LoRAHandlerMixin:
             admitted = self._resolve_lora_request(lora_name)
             if admitted is None:
                 raise ValueError(f"unknown model or LoRA adapter: '{lora_name}'")
-            self._lora_state.reserve_batch(lora_name)
+            self._lora_state.begin_request(lora_name)
             self._track_lora_request_activation(admitted)
         try:
             yield admitted
         finally:
-            self._lora_state.release_batch(lora_name)
+            self._lora_state.end_request(lora_name)
 
     @staticmethod
     async def _settle(task: "asyncio.Future[Any]") -> BaseException | None:
@@ -243,6 +243,36 @@ class LoRAHandlerMixin:
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
         return self._lora_state.get_lock(lora_name)
+
+    def _engine_mutation_guard(self) -> contextlib.AbstractAsyncContextManager[Any]:
+        """Serialize an engine adapter mutation with pause/resume.
+
+        Generation hosts pause the engine under ``_pause_lock``, so an adapter
+        add, remove, or cache reset must not interleave with it. Pooling hosts
+        have no pause state and therefore no lock to take.
+        """
+        lock = getattr(self, "_pause_lock", None)
+        return lock if lock is not None else contextlib.nullcontext()
+
+    async def _await_adapter_idle(self, lora_name: str, action: str) -> str | None:
+        """Wait for in-flight requests and batches to release an adapter.
+
+        Returns an error message instead of waiting when generation is paused
+        with holders still registered: a paused engine cannot finish them, so
+        the wait would never end. Call with the adapter lock held, so no new
+        holder can register while this drains.
+        """
+        async with self._engine_mutation_guard():
+            if getattr(self, "_paused", False) and self._lora_state.active_requests.get(
+                lora_name, 0
+            ):
+                return (
+                    f"Cannot {action} LoRA '{lora_name}' while generation is "
+                    "paused with active requests; resume generation or abort "
+                    "the requests first"
+                )
+        await self._lora_state.wait_until_idle(lora_name)
+        return None
 
     def _parse_lora_unload_request(self, request: Any) -> str:
         """Parse and validate a LoRA unload request payload."""
@@ -446,11 +476,21 @@ class LoRAHandlerMixin:
                         return
 
                     if is_hot_swap:
-                        # A swap gives the adapter a new id. Batches that already
-                        # resolved the old one would otherwise keep submitting
-                        # against it mid-flight, so a single client batch would
-                        # span two adapter versions.
-                        await self._lora_state.wait_for_batch_drain(lora_name)
+                        # A swap gives the adapter a new id. Requests and batches
+                        # that already resolved the old one would otherwise keep
+                        # submitting against it mid-flight, so a single client
+                        # batch would span two adapter versions.
+                        if (
+                            busy := await self._await_adapter_idle(
+                                lora_name, "hot-swap"
+                            )
+                        ) is not None:
+                            yield {
+                                "status": "error",
+                                "message": busy,
+                                "lora_name": lora_name,
+                            }
+                            return
 
                     lora_capacity = getattr(self, "_lora_capacity", None)
                     # Guard capacity check: serialize new adapter loads to prevent two
@@ -484,12 +524,13 @@ class LoRAHandlerMixin:
                             # loaded_loras with a valid path, which is the same
                             # tracked-but-not-resident state prefill runs in, so
                             # a later request re-activates it lazily.
-                            await self._guarded(
-                                self.engine_client.remove_lora(old_info.id),
-                                on_committed=lambda: self._engine_loaded_loras.discard(
-                                    lora_name
-                                ),
-                            )
+                            async with self._engine_mutation_guard():
+                                await self._guarded(
+                                    self.engine_client.remove_lora(old_info.id),
+                                    on_committed=lambda: self._engine_loaded_loras.discard(
+                                        lora_name
+                                    ),
+                                )
                             self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
                             if capacity_reserved:
@@ -530,16 +571,17 @@ class LoRAHandlerMixin:
                             # retry do a full load.
 
                         try:
-                            await self._guarded(
-                                self.engine_client.add_lora(
-                                    LoRARequest(
-                                        lora_name=lora_name,
-                                        lora_int_id=lora_id,
-                                        lora_path=lora_path,
-                                    )
-                                ),
-                                on_committed=_new_adapter_is_live,
-                            )
+                            async with self._engine_mutation_guard():
+                                await self._guarded(
+                                    self.engine_client.add_lora(
+                                        LoRARequest(
+                                            lora_name=lora_name,
+                                            lora_int_id=lora_id,
+                                            lora_path=lora_path,
+                                        )
+                                    ),
+                                    on_committed=_new_adapter_is_live,
+                                )
                             self._engine_loaded_loras.add(lora_name)
                         except Exception as e:
                             if (
@@ -548,13 +590,14 @@ class LoRAHandlerMixin:
                                 and old_engine_loaded
                             ):
                                 try:
-                                    await self.engine_client.add_lora(
-                                        LoRARequest(
-                                            lora_name=lora_name,
-                                            lora_int_id=old_info.id,
-                                            lora_path=old_info.path,
+                                    async with self._engine_mutation_guard():
+                                        await self.engine_client.add_lora(
+                                            LoRARequest(
+                                                lora_name=lora_name,
+                                                lora_int_id=old_info.id,
+                                                lora_path=old_info.path,
+                                            )
                                         )
-                                    )
                                     self._engine_loaded_loras.add(lora_name)
                                 except Exception as rollback_error:
                                     self._lora_state.loaded_loras.pop(lora_name, None)
@@ -589,7 +632,10 @@ class LoRAHandlerMixin:
                             # Tracking already names the new adapter, which is
                             # what the engine holds, so a cancelled reset leaves
                             # nothing to reconcile locally.
-                            await self._guarded(self.engine_client.reset_prefix_cache())
+                            async with self._engine_mutation_guard():
+                                await self._guarded(
+                                    self.engine_client.reset_prefix_cache()
+                                )
                         except Exception as e:
                             # The new adapter is already active in the engine, but
                             # the prefix cache still holds entries computed under
@@ -602,16 +648,20 @@ class LoRAHandlerMixin:
                             if old_info is not None:
                                 try:
                                     if preload_into_engine:
-                                        await self.engine_client.remove_lora(lora_id)
+                                        async with self._engine_mutation_guard():
+                                            await self.engine_client.remove_lora(
+                                                lora_id
+                                            )
                                         self._engine_loaded_loras.discard(lora_name)
                                     if old_engine_loaded:
-                                        await self.engine_client.add_lora(
-                                            LoRARequest(
-                                                lora_name=lora_name,
-                                                lora_int_id=old_info.id,
-                                                lora_path=old_info.path,
+                                        async with self._engine_mutation_guard():
+                                            await self.engine_client.add_lora(
+                                                LoRARequest(
+                                                    lora_name=lora_name,
+                                                    lora_int_id=old_info.id,
+                                                    lora_path=old_info.path,
+                                                )
                                             )
-                                        )
                                         self._engine_loaded_loras.add(lora_name)
                                     self._lora_state.loaded_loras[lora_name] = old_info
                                     rolled_back = (
@@ -675,7 +725,8 @@ class LoRAHandlerMixin:
                                     logger.debug(
                                         f"Rolling back: removing LoRA '{lora_name}' from engine"
                                     )
-                                    await self.engine_client.remove_lora(lora_id)
+                                    async with self._engine_mutation_guard():
+                                        await self.engine_client.remove_lora(lora_id)
                                     self._engine_loaded_loras.discard(lora_name)
                                 logger.debug(
                                     f"Successfully rolled back LoRA '{lora_name}'"
@@ -760,11 +811,19 @@ class LoRAHandlerMixin:
                     logger.debug(f"Unloading LoRA adapter: {lora_name}")
                     lora_id = lora.id
 
-                    # Let batches that already resolved this adapter finish
-                    # submitting. Their reservations are taken under this same
-                    # lock, so holding it here means no new batch can start and
+                    # Let requests and batches that already resolved this
+                    # adapter finish submitting. They register under this same
+                    # lock, so holding it here means no new one can start and
                     # this drains instead of chasing a moving target.
-                    await self._lora_state.wait_for_batch_drain(lora_name)
+                    if (
+                        busy := await self._await_adapter_idle(lora_name, "unload")
+                    ) is not None:
+                        yield {
+                            "status": "error",
+                            "message": busy,
+                            "lora_name": lora_name,
+                        }
+                        return
 
                     discovery_withdrawn = False
 
@@ -829,27 +888,30 @@ class LoRAHandlerMixin:
                             # dropped the adapter would otherwise skip both
                             # state updates, leaving tracking and discovery
                             # advertising an adapter the engine no longer holds.
-                            removal = asyncio.ensure_future(
-                                self.engine_client.remove_lora(lora_id)
-                            )
-                            try:
-                                await asyncio.shield(removal)
-                            except asyncio.CancelledError:
-                                outcome = await self._settle(removal)
-                                if outcome is None or (
-                                    isinstance(outcome, Exception)
-                                    and self._is_lora_not_loaded_error(outcome)
-                                ):
-                                    # The unload did complete, so finish it
-                                    # rather than republishing an adapter the
-                                    # engine has already let go.
-                                    self._engine_loaded_loras.discard(lora_name)
-                                    self._lora_state.loaded_loras.pop(lora_name, None)
-                                    discovery_withdrawn = False
-                                raise
-                            except Exception as e:
-                                if not self._is_lora_not_loaded_error(e):
+                            async with self._engine_mutation_guard():
+                                removal = asyncio.ensure_future(
+                                    self.engine_client.remove_lora(lora_id)
+                                )
+                                try:
+                                    await asyncio.shield(removal)
+                                except asyncio.CancelledError:
+                                    outcome = await self._settle(removal)
+                                    if outcome is None or (
+                                        isinstance(outcome, Exception)
+                                        and self._is_lora_not_loaded_error(outcome)
+                                    ):
+                                        # The unload did complete, so finish it
+                                        # rather than republishing an adapter the
+                                        # engine has already let go.
+                                        self._engine_loaded_loras.discard(lora_name)
+                                        self._lora_state.loaded_loras.pop(
+                                            lora_name, None
+                                        )
+                                        discovery_withdrawn = False
                                     raise
+                                except Exception as e:
+                                    if not self._is_lora_not_loaded_error(e):
+                                        raise
                             self._engine_loaded_loras.discard(lora_name)
                         del self._lora_state.loaded_loras[lora_name]
                     except BaseException:

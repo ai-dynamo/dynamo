@@ -34,7 +34,11 @@ from tests.utils.constants import DefaultPort
 from tests.utils.http_checks import check_health_generate as check_health_generate
 from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
-from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
+from tests.utils.router_nvext import (
+    RouterNvextExpectation,
+    require_router_worker_id,
+    validate_router_nvext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +218,42 @@ class ChatPayload(BasePayload):
             f"Expected {self.expected_num_choices} choices, "
             f"got {len(choices)}: {result}"
         )
+
+
+class DisaggregatedChatPayload(ChatPayload):
+    """Require a completed chat request served by distinct prefill and decode workers."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        choices = result["choices"]
+        if len(choices) != 1:
+            raise AssertionError(f"Expected one completion, got {choices!r}")
+        if not isinstance(content, str) or not content.strip():
+            raise AssertionError("Completion is empty")
+        if choices[0].get("finish_reason") not in {"stop", "length"}:
+            raise AssertionError(f"Unexpected finish reason: {choices[0]!r}")
+
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            raise AssertionError(f"Missing usage: {result!r}")
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if type(prompt_tokens) is not int or prompt_tokens <= 0:
+            raise AssertionError(f"Expected positive prompt usage: {usage!r}")
+        if type(completion_tokens) is not int or completion_tokens <= 1:
+            raise AssertionError(
+                f"Expected decode to generate more than the prefill token: {usage!r}"
+            )
+
+        workers = require_router_worker_id(result, context=type(self).__name__)
+        for role in ("prefill_worker_id", "decode_worker_id"):
+            if type(workers.get(role)) is not int or workers[role] < 0:
+                raise AssertionError(f"Expected a valid {role}: {dict(workers)!r}")
+        if workers["prefill_worker_id"] == workers["decode_worker_id"]:
+            raise AssertionError(
+                f"Expected distinct prefill and decode workers: {dict(workers)!r}"
+            )
 
 
 class RouterNvextChatPayload(ChatPayload):
@@ -2216,6 +2256,46 @@ class SGLangMetricsPayload(MetricsPayload):
 
 
 @dataclass
+class SGLangSpecDecodeMetricsPayload(SGLangMetricsPayload):
+    """Metrics validation for an SGLang worker running speculative decoding.
+
+    Both checks use cumulative counters rather than the windowed
+    ``sglang:spec_accept_length`` gauge, which only refreshes on SGLang's decode
+    log interval and can be stale after short requests.
+    """
+
+    # Loose floor on tokens per verify step; a working EAGLE3 draft measures ~2.2.
+    min_tokens_per_verify: float = 1.2
+
+    @staticmethod
+    def _sum_counter(name: str, content: str) -> float:
+        values = find_metric_samples(content, name)
+        if not values:
+            raise AssertionError(f"Metric '{name}' not found in metrics output")
+        return sum(values)
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+
+        verify_calls = self._sum_counter("sglang:spec_verify_calls_total", content)
+        if verify_calls <= 0:
+            raise AssertionError(
+                "sglang:spec_verify_calls_total is 0; speculative decoding did not run"
+            )
+        logger.info(f"SUCCESS: sglang:spec_verify_calls_total = {verify_calls}")
+
+        generated = self._sum_counter("sglang:generation_tokens_total", content)
+        tokens_per_verify = generated / verify_calls
+        if tokens_per_verify <= self.min_tokens_per_verify:
+            raise AssertionError(
+                f"{generated} generated tokens over {verify_calls} verify calls is "
+                f"{tokens_per_verify:.2f} tokens/verify, expected > "
+                f"{self.min_tokens_per_verify}; draft tokens are not being accepted"
+            )
+        logger.info(f"SUCCESS: {tokens_per_verify:.2f} tokens per verify step")
+
+
+@dataclass
 class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
     """Metrics validation for SGLang disaggregated workers.
 
@@ -2314,6 +2394,9 @@ class TRTLLMMetricsPayload(MetricsPayload):
 
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
         """TRT-LLM-specific metric checks"""
+        component_prefix = prometheus_names.name_prefix.COMPONENT
+        total_blocks = f"{component_prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}"
+
         checks = [
             MetricCheck(
                 # Check: Minimum count of unique trtllm_* metrics
@@ -2329,7 +2412,54 @@ class TRTLLMMetricsPayload(MetricsPayload):
                     f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)"
                 ),
                 multiline=True,
-            )
+            ),
+            # The checks above and in the base class count metric *names* and
+            # accept a zero block count. Prometheus registers names when the
+            # collector is constructed, so both pass on a worker whose stats
+            # thread never published a sample and whose engine never recorded
+            # a request. The two checks below require an observation on each
+            # path, so one going dead cannot pass as the other still working.
+            MetricCheck(
+                # Stats path: the per-rank gauges are seeded at 0 by
+                # _init_publish_metrics_thread and only move when iteration
+                # stats arrive from the engine. Any rank reporting a positive
+                # block count proves the polling thread published.
+                name=f"{total_blocks} (positive on some rank)",
+                pattern=lambda name: (
+                    rf"{total_blocks}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+                ),
+                validator=lambda value: any(float(v) > 0 for v in value),
+                error_msg=lambda name, value: (
+                    f"{name}: every rank reported a non-positive block count "
+                    f"(values: {value}). The stats polling thread never "
+                    f"published iteration stats."
+                ),
+                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                multiline=True,
+            ),
+            MetricCheck(
+                # Request path: TRT-LLM's own per-request series, recorded by
+                # MetricsCollector as requests finish. Several names are
+                # matched because they come from tensorrt_llm.metrics and one
+                # upstream rename should not silently void the check.
+                name="trtllm_* per-request observations",
+                pattern=lambda name: (
+                    r"trtllm_(?:request_success_total"
+                    r"|e2e_request_latency_seconds_count"
+                    r"|time_to_first_token_seconds_count"
+                    r"|time_per_output_token_seconds_count"
+                    r"|request_queue_time_seconds_count)"
+                    r"(?:\{[^}]*\})?\s+([\d.eE+-]+)"
+                ),
+                validator=lambda value: any(float(v) > 0 for v in value),
+                error_msg=lambda name, value: (
+                    f"{name}: TRT-LLM recorded no per-request observations "
+                    f"(values: {value}). The engine's request metrics are not "
+                    f"reaching the collector."
+                ),
+                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                multiline=True,
+            ),
         ]
 
         # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend

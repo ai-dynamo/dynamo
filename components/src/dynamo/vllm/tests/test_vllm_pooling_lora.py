@@ -361,16 +361,16 @@ async def test_hot_swap_waits_for_an_in_flight_pooling_batch():
 
 
 @pytest.mark.asyncio
-async def test_batch_reservation_blocks_a_lifecycle_drain():
+async def test_active_request_blocks_a_lifecycle_drain():
     """The drain primitive the lifecycle ops rely on."""
     state = LoRAState()
-    state.reserve_batch(ADAPTER)
+    state.begin_request(ADAPTER)
 
-    drain = asyncio.create_task(state.wait_for_batch_drain(ADAPTER))
+    drain = asyncio.create_task(state.wait_until_idle(ADAPTER))
     await _settle()
     assert not drain.done()
 
-    state.release_batch(ADAPTER)
+    state.end_request(ADAPTER)
     await drain
 
 
