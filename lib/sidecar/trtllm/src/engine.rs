@@ -11,7 +11,7 @@ use dynamo_backend_common::{
     LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{
-    GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
@@ -84,7 +84,7 @@ impl TrtllmSidecarEngine {
     pub fn from_cli() -> Result<
         (
             RuntimeConfig,
-            impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
         ),
         DynamoError,
     > {
@@ -99,7 +99,7 @@ impl TrtllmSidecarEngine {
     ) -> Result<
         (
             RuntimeConfig,
-            impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
         ),
         SidecarStartupError,
     > {

@@ -14,7 +14,9 @@ use dynamo_backend_common::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
+use dynamo_sidecar_common::{
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+};
 use futures::stream::BoxStream;
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -76,7 +78,7 @@ impl SglangSidecarEngine {
     pub fn from_cli() -> Result<
         (
             RuntimeConfig,
-            impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
         ),
         DynamoError,
     > {
@@ -95,7 +97,7 @@ impl SglangSidecarEngine {
     ) -> Result<
         (
             RuntimeConfig,
-            impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
         ),
         SidecarStartupError,
     > {

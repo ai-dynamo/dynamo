@@ -10,6 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::SidecarStartupError;
 
+/// Result of discovering an engine and preparing its worker configuration.
+pub type EngineBootstrapResult<E> = Result<(E, WorkerConfig), DynamoError>;
+
 /// Start sidecar probes and runtime dependencies before discovering engine metadata.
 /// Runtime settings accompany the bootstrap future so they take effect before
 /// the first connection, including in embedded Python launchers.
@@ -18,7 +21,7 @@ use crate::SidecarStartupError;
 pub fn run<E: LLMEngine + 'static>(
     (runtime_config, bootstrap): (
         RuntimeConfig,
-        impl Future<Output = Result<(E, WorkerConfig), DynamoError>>,
+        impl Future<Output = EngineBootstrapResult<E>>,
     ),
 ) -> anyhow::Result<()> {
     run_task(|runtime, shutdown| async move {
@@ -63,7 +66,7 @@ where
 
 async fn run_until_shutdown<E: LLMEngine + 'static>(
     runtime_config: RuntimeConfig,
-    bootstrap: impl Future<Output = Result<(E, WorkerConfig), DynamoError>>,
+    bootstrap: impl Future<Output = EngineBootstrapResult<E>>,
     runtime: &Runtime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {

@@ -12,7 +12,9 @@ use dynamo_backend_common::{
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
+use dynamo_sidecar_common::{
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+};
 use futures::stream::BoxStream;
 use serde_json::{Map, Value, json};
 use tokio::sync::OnceCell;
@@ -99,7 +101,7 @@ impl VllmSidecarEngine {
     pub fn from_cli() -> Result<
         (
             RuntimeConfig,
-            impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
         ),
         DynamoError,
     > {
@@ -118,7 +120,7 @@ impl VllmSidecarEngine {
     ) -> Result<
         (
             RuntimeConfig,
-            impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
         ),
         SidecarStartupError,
     > {
