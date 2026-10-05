@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validate the DeepSeek V4.1 Flash vLLM runtime patch stack.
 
-The pinned nightly supplies #58215's DeepSelect sentinel bound. The installed
+The pinned v0.31.0 release supplies #58215's DeepSelect sentinel bound. The installed
 wheel must also contain the #57662 NIXL region geometry key, #58038 telemetry
 completion behavior, and #55374 piecewise-prefix load protocol. This deliberately
 inspects the installed wheel, not a source tree.

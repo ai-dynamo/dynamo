@@ -189,7 +189,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
-# Without Omni, preserve the nightly base's dependency pairing.
+# Without Omni, preserve the release base's dependency pairing.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
@@ -277,13 +277,13 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     fi
 
 {% if device == "cuda" %}
-# #58215's DSA sentinel bound is native to the pinned nightly. Carry only the
+# #58215's DSA sentinel bound is native to v0.31.0. Carry only the
 # remaining requested fixes: #58038 (optional telemetry), #57662 (region
 # geometry deduplication), and #55374 (piecewise-prefix loading).
 RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm-patches,readonly \
     --mount=type=bind,source=./container/deps/vllm/validate_patches_runtime.py,target=/tmp/validate_patches_runtime.py,readonly \
     set -eux; \
-    python3 -c 'import os, vllm; assert os.environ["VLLM_BUILD_COMMIT"] == "ac9126e58aa7bbab1856ba6593ba4d5003fea516"; assert "+gac9126e" in vllm.__version__, vllm.__version__'; \
+    python3 -c 'import os, vllm; assert os.environ["VLLM_BUILD_COMMIT"] == "db9527a46873454610df6dbedf79a36d6bf1a7f6"; assert vllm.__version__ == "0.31.0", vllm.__version__'; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
     site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
@@ -573,7 +573,7 @@ import importlib.metadata as md
 import sys
 
 # Importing Transformers also enforces its supported tokenizers range when
-# Omni is disabled and we retain the nightly's dependency pairing.
+# Omni is disabled and we retain the release base's dependency pairing.
 import transformers
 
 if sys.argv[1] == "true":

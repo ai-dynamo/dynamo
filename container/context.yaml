@@ -77,9 +77,9 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    # Latest multi-arch nightly published 2026-10-01; pin both source and manifest.
-    runtime_image_tag: nightly-ac9126e58aa7bbab1856ba6593ba4d5003fea516@sha256:17d08dc42a7b7a6a071ce52fb060e58ae3a242bdc8341961155413bf124118e6
-    # Preserve nightly's dependency solution for this text-only recipe.
+    # v0.31.0, source db9527a46873454610df6dbedf79a36d6bf1a7f6; multi-arch manifest.
+    runtime_image_tag: v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
+    # Preserve the release base's dependency solution for this text-only recipe.
     enable_vllm_omni: "false"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
