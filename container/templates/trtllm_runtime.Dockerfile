@@ -187,7 +187,7 @@ WORKDIR /workspace
 # Backport TRT-LLM PR #19303 (draft KV pool publish). tensorrt_llm comes from
 # the base runtime image and is never reinstalled here, so this can run before
 # the package layers; runtime_full's filesystem is overlaid into pre_runtime.
-# Rebased onto v1.3.0rc27 -- main has since restructured _joint_reuse_supported
+# Rebased onto v1.3.0rc29 -- main has since restructured _joint_reuse_supported
 # and the reuse_match_backoff block, so the upstream diff does not apply to this
 # tag. Drop once an rc ships the fix: --forward then exits non-zero and fails
 # this layer rather than silently shipping an unpatched image.
@@ -199,15 +199,6 @@ RUN --mount=type=bind,source=./container/deps/trtllm/trtllm-pr-19303-draft-kv-po
     set -eu; \
     pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("tensorrt_llm").origin).parent.parent)')"; \
     patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/trtllm-pr-19303.patch
-
-# Backport TRT-LLM PR #19558 (Nemotron-H quantized MTP head loading): the MTP
-# head is not given the per-layer quant_config, so a MIXED_PRECISION checkpoint
-# loads its pre-stitched head as bf16. Rebased onto v1.3.0rc27. Drop once an rc
-# ships the fix.
-RUN --mount=type=bind,source=./container/deps/trtllm/trtllm-pr-19558-quantized-mtp-head.patch,target=/tmp/trtllm-pr-19558.patch \
-    set -eu; \
-    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("tensorrt_llm").origin).parent.parent)')"; \
-    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/trtllm-pr-19558.patch
 
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
