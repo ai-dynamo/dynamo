@@ -5,7 +5,7 @@ Achieved versus offered throughput for global KV-cache event indexers, replaying
 ## Figures
 
 - `yoy.png` / `yoy.svg`: the Rust indexers built with mimalloc, plus llm-d.
-  - The Oct 2026 CRTC line is the CRTC stack with mimalloc from [ai-dynamo/dynamo#15606](https://github.com/ai-dynamo/dynamo/pull/15606).
+  - The Oct 2026 CRTC line is the top of the four-PR CRTC stack with mimalloc, [ai-dynamo/dynamo#15606](https://github.com/ai-dynamo/dynamo/pull/15606) through [ai-dynamo/dynamo#15611](https://github.com/ai-dynamo/dynamo/pull/15611).
 - `yoy_glibc.png` / `yoy_glibc.svg`: the same replay with every Rust indexer on glibc malloc.
   - The CRTC line there is `main` as of Oct 2026, which ships CRTC on glibc and hits glibc's arena-lock ceiling.
 
@@ -35,7 +35,7 @@ The left panel plots achieved against offered block ops/s on log-log axes; the d
 
 | Line | Version | Event workers | Notes |
 |---|---|---|---|
-| Concurrent Radix Tree Compressed | Dynamo, Oct 2026 ([#15606](https://github.com/ai-dynamo/dynamo/pull/15606) @ `ae71f77300`) | 64 | mimalloc |
+| Concurrent Radix Tree Compressed | Dynamo, Oct 2026 ([#15611](https://github.com/ai-dynamo/dynamo/pull/15611) @ `e234880162`) | 64 | mimalloc; top of the stack that starts at [#15606](https://github.com/ai-dynamo/dynamo/pull/15606) |
 | Concurrent Radix Tree | Dynamo, Feb 2026 (Flash Indexer blog, `222c2e85c8`) | 64 | Tree and thread pool from that commit, ported unchanged into the current harness |
 | SMG PositionalIndexer | SGLang Model Gateway `kv_index` @ `0f9f219` | 64 | Event-driven, sticky per-worker pool mirroring `KvEventMonitor`; built at opt-level 3 (SMG ships opt-level `z`) |
 | llm-d precise prefix index | llm-d-router v0.11.0 `InMemoryIndex` | 4 shards (default) | Go driver replaying the same corpus with sequence-hash keys |
