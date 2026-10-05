@@ -64,9 +64,9 @@ use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
-use crate::preprocessor::media::{
-    EncodedMediaData, MediaDecoder, MediaFetcher, MediaLoader, max_data_url_bytes,
-};
+#[cfg(feature = "mm-routing")]
+use crate::preprocessor::media::MediaFetcher;
+use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -1376,23 +1376,6 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
             .build_http_client()
             .expect("dim-fetch http client construction failed")
     });
-
-/// SSRF-aware fetcher + client for URL-passthrough http(s) -> data: rewrite
-/// so decode workers need not re-fetch remote images (#7827 / #15343).
-static IMAGE_URL_INLINE_FETCHER: std::sync::LazyLock<MediaFetcher> =
-    std::sync::LazyLock::new(MediaFetcher::from_env);
-
-static IMAGE_URL_INLINE_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
-    std::sync::LazyLock::new(|| {
-        IMAGE_URL_INLINE_FETCHER
-            .build_http_client()
-            .expect("image URL inline http client construction failed")
-    });
-
-/// Mirrors `dynamo_runtime::pipeline::network::DEFAULT_TCP_MAX_MESSAGE_SIZE`
-/// (pub(crate) there). Used to fail closed when inlined multi_modal_data
-/// would blow the request-plane frame.
-const DEFAULT_TCP_MAX_MESSAGE_SIZE_FOR_MM: usize = 32 * 1024 * 1024;
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
@@ -3335,139 +3318,6 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Read `DYN_TCP_MAX_MESSAGE_SIZE` the same way the request plane does
-    /// (default 32 MiB). Kept local because the runtime helper is `pub(crate)`.
-    fn tcp_max_message_size_for_mm() -> usize {
-        std::env::var(
-            dynamo_runtime::config::environment_names::request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
-        )
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_TCP_MAX_MESSAGE_SIZE_FOR_MM)
-    }
-
-    /// Guess an `image/*` MIME for a `data:` URL from magic bytes.
-    fn image_mime_from_bytes(bytes: &[u8]) -> &'static str {
-        match image::guess_format(bytes) {
-            Ok(image::ImageFormat::Png) => "image/png",
-            Ok(image::ImageFormat::Jpeg) => "image/jpeg",
-            Ok(image::ImageFormat::Gif) => "image/gif",
-            Ok(image::ImageFormat::WebP) => "image/webp",
-            Ok(image::ImageFormat::Bmp) => "image/bmp",
-            Ok(image::ImageFormat::Tiff) => "image/tiff",
-            // ImageLoader requires an image/* media type; prefer a common
-            // default over application/octet-stream when sniffing fails.
-            _ => "image/png",
-        }
-    }
-
-    /// Build `data:image/...;base64,...` from raw image bytes.
-    fn image_bytes_to_data_url(bytes: &[u8]) -> String {
-        use base64::Engine;
-        let mime = Self::image_mime_from_bytes(bytes);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        format!("data:{mime};base64,{encoded}")
-    }
-
-    /// Sum of URL string lengths in `multi_modal_data` (lower bound on the
-    /// request-plane contribution from inlined media).
-    fn multi_modal_url_payload_len(media_map: &MultimodalDataMap) -> usize {
-        media_map
-            .values()
-            .flat_map(|slots| slots.iter())
-            .map(|slot| match slot {
-                MultimodalData::Url(url) => url.as_str().len(),
-                MultimodalData::RawUrl(raw) => raw.len(),
-                MultimodalData::Decoded(_) | MultimodalData::UuidOnly(_) => 0,
-            })
-            .fold(0usize, usize::saturating_add)
-    }
-
-    /// Fail closed when inlined media would exceed the TCP request-plane cap.
-    fn ensure_multi_modal_within_tcp_limit(media_map: &MultimodalDataMap) -> Result<()> {
-        Self::ensure_multi_modal_within_limit(media_map, Self::tcp_max_message_size_for_mm())
-    }
-
-    /// Same payload cap as `ensure_multi_modal_within_tcp_limit`, with an
-    /// explicit `max` so tests can use a small limit.
-    fn ensure_multi_modal_within_limit(media_map: &MultimodalDataMap, max: usize) -> Result<()> {
-        let total = Self::multi_modal_url_payload_len(media_map);
-        if total > max {
-            return Err(invalid_argument_error(format!(
-                "multi_modal_data payload ({total} bytes) exceeds DYN_TCP_MAX_MESSAGE_SIZE ({max} bytes); reduce image size/count or use --frontend-decoding"
-            )));
-        }
-        Ok(())
-    }
-
-    /// URL-passthrough path: fetch http(s) image URLs and rewrite slots to
-    /// `data:` so decode workers load via ImageLoader without remote fetch
-    /// (#7827). Existing `data:` URLs are left alone. Video/audio URLs are
-    /// not rewritten (images-first for #15343). Frontend-decoding Decoded
-    /// slots are never passed here.
-    async fn rewrite_http_image_urls_to_data_with_fetcher(
-        media_map: &mut MultimodalDataMap,
-        fetcher: &MediaFetcher,
-        client: &reqwest::Client,
-    ) -> Result<()> {
-        let Some(slots) = media_map.get("image_url") else {
-            return Ok(());
-        };
-
-        // Collect owned URLs first so the parallel fetch futures do not
-        // borrow `media_map` across await points.
-        let to_rewrite: Vec<(usize, url::Url)> = slots
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, slot)| match slot {
-                MultimodalData::Url(url) if url.scheme() == "http" || url.scheme() == "https" => {
-                    Some((idx, url.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        if !to_rewrite.is_empty() {
-            let results =
-                futures::future::join_all(to_rewrite.into_iter().map(|(idx, url)| async move {
-                    fetcher.check_if_url_allowed_with_dns(&url).await?;
-                    let encoded = EncodedMediaData::from_url(&url, client)
-                        .await
-                        .map_err(MediaFetcher::map_fetch_error)?;
-                    let bytes = encoded.into_bytes()?;
-                    anyhow::ensure!(!bytes.is_empty(), "image URL returned empty body");
-                    let data_url = Self::image_bytes_to_data_url(&bytes);
-                    let parsed = url::Url::parse(&data_url)
-                        .map_err(|e| anyhow::anyhow!("failed to parse rewritten data URL: {e}"))?;
-                    Ok::<_, anyhow::Error>((idx, parsed))
-                }))
-                .await;
-
-            let slots = media_map
-                .get_mut("image_url")
-                .expect("image_url slots must still exist after rewrite fetch");
-            for result in results {
-                let (idx, data_url) = result?;
-                slots[idx] = MultimodalData::Url(data_url);
-            }
-        }
-
-        // Fail closed for both rewritten http(s) and client-supplied data:
-        // payloads that would blow the request-plane frame.
-        Self::ensure_multi_modal_within_tcp_limit(media_map)?;
-        Ok(())
-    }
-
-    /// Rewrite http(s) image URLs using the process-wide SSRF fetcher.
-    async fn rewrite_http_image_urls_to_data(media_map: &mut MultimodalDataMap) -> Result<()> {
-        Self::rewrite_http_image_urls_to_data_with_fetcher(
-            media_map,
-            &IMAGE_URL_INLINE_FETCHER,
-            &IMAGE_URL_INLINE_HTTP_CLIENT,
-        )
-        .await
-    }
-
     /// Replace inline `data:` URLs with empty strings in message content parts.
     /// Preserves HTTP(S) URLs, text content, and overall message structure.
     fn strip_inline_data_urls(messages: &mut serde_json::Value) {
@@ -3674,10 +3524,13 @@ impl OpenAIPreprocessor {
                                 slot_idx,
                                 content_part: content_part.as_user(),
                             });
+                        } else {
+                            #[cfg(feature = "mm-routing")]
+                            if type_str == "image_url" {
+                                let mm_hash = Self::hash_image_url(url.as_str());
+                                url_passthrough_images.push((mm_hash, url.as_str().to_string()));
+                            }
                         }
-                        // URL-passthrough http(s) images are rewritten to data:
-                        // below (before mm-routing dim fetch) so decode need
-                        // not re-fetch. Hash/dim collection happens after that.
                         slots.push(MultimodalData::Url(url));
                     }
                     (None, Some(uuid)) if type_str == "image_url" => {
@@ -3693,28 +3546,6 @@ impl OpenAIPreprocessor {
                             "{type_str} part has neither `url` nor `uuid`; at least one is required"
                         )));
                     }
-                }
-            }
-        }
-
-        // Default frontend (no media_loader): rewrite http(s) image URLs in
-        // multi_modal_data to data: so decode can load via ImageLoader without
-        // remote fetch (#7827 / #15343). Existing data: left alone. Decoded /
-        // NIXL path (has_media_loader) is unchanged. Images only; video/audio
-        // URLs stay as-is. Oversized inlined payload fails closed vs
-        // DYN_TCP_MAX_MESSAGE_SIZE.
-        if !has_media_loader {
-            Self::rewrite_http_image_urls_to_data(&mut media_map).await?;
-        }
-
-        // Collect URL-passthrough image hashes after rewrite so dim fetch can
-        // parse local data: URLs instead of issuing a second HTTP Range GET.
-        #[cfg(feature = "mm-routing")]
-        if !has_media_loader && let Some(slots) = media_map.get("image_url") {
-            for slot in slots {
-                if let MultimodalData::Url(url) = slot {
-                    let s = url.as_str();
-                    url_passthrough_images.push((Self::hash_image_url(s), s.to_string()));
                 }
             }
         }
@@ -8017,8 +7848,7 @@ mod extra_args_media_copy_tests {
         let preprocessor = test_preprocessor();
         let data_url = inline_data_url();
         let second_data_url = format!("{data_url}QQ");
-        // http(s) images are rewritten to data: on the URL-passthrough path;
-        // this test covers the already-data: case (strip from extra_args only).
+        let https_url = "https://example.com/img.png";
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "messages": [{
@@ -8026,7 +7856,8 @@ mod extra_args_media_copy_tests {
                 "content": [
                     {"type": "text", "text": "describe"},
                     {"type": "image_url", "image_url": {"url": data_url}},
-                    {"type": "image_url", "image_url": {"url": second_data_url}}
+                    {"type": "image_url", "image_url": {"url": second_data_url}},
+                    {"type": "image_url", "image_url": {"url": https_url}}
                 ]
             }],
             "max_tokens": 1
@@ -8043,7 +7874,7 @@ mod extra_args_media_copy_tests {
             .as_ref()
             .expect("single media copy lives in multi_modal_data");
         let images = media.get("image_url").expect("image_url slot");
-        assert_eq!(images.len(), 2);
+        assert_eq!(images.len(), 3);
         match &images[0] {
             MultimodalData::Url(url) => assert_eq!(url.as_str(), data_url),
             other => panic!("expected Url for inline image, got {other:?}"),
@@ -8051,6 +7882,10 @@ mod extra_args_media_copy_tests {
         match &images[1] {
             MultimodalData::Url(url) => assert_eq!(url.as_str(), second_data_url),
             other => panic!("expected Url for second inline image, got {other:?}"),
+        }
+        match &images[2] {
+            MultimodalData::Url(url) => assert_eq!(url.as_str(), https_url),
+            other => panic!("expected Url for HTTP image, got {other:?}"),
         }
 
         let extra_args = preprocessed
@@ -8063,175 +7898,10 @@ mod extra_args_media_copy_tests {
         assert_eq!(parts[0]["text"], "describe");
         assert_eq!(parts[1]["image_url"]["url"], "");
         assert_eq!(parts[2]["image_url"]["url"], "");
+        assert_eq!(parts[3]["image_url"]["url"], https_url);
         assert!(
             extra_args.get("formatted_prompt").is_some(),
             "LLaVA / TRT-LLM template path needs formatted_prompt"
-        );
-    }
-
-    #[test]
-    fn image_bytes_to_data_url_sniffs_png() {
-        use base64::Engine;
-        // 1x1 transparent PNG
-        let png = base64::engine::general_purpose::STANDARD
-            .decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-            )
-            .unwrap();
-        let data_url = OpenAIPreprocessor::image_bytes_to_data_url(&png);
-        assert!(
-            data_url.starts_with("data:image/png;base64,"),
-            "unexpected data URL: {data_url}"
-        );
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(data_url.strip_prefix("data:image/png;base64,").unwrap())
-            .unwrap();
-        assert_eq!(decoded, png);
-    }
-
-    #[test]
-    fn ensure_multi_modal_within_limit_fails_closed() {
-        let tiny = "data:image/png;base64,AA".to_string();
-        let mut map: MultimodalDataMap = std::collections::HashMap::new();
-        map.insert(
-            "image_url".to_string(),
-            vec![MultimodalData::Url(url::Url::parse(&tiny).unwrap())],
-        );
-        OpenAIPreprocessor::ensure_multi_modal_within_limit(&map, 1024).unwrap();
-
-        let oversize = format!("data:image/png;base64,{}", "A".repeat(64));
-        let mut big: MultimodalDataMap = std::collections::HashMap::new();
-        big.insert(
-            "image_url".to_string(),
-            vec![MultimodalData::Url(url::Url::parse(&oversize).unwrap())],
-        );
-        let err = OpenAIPreprocessor::ensure_multi_modal_within_limit(&big, 32)
-            .expect_err("oversize payload must fail closed");
-        assert!(
-            err.to_string().contains("DYN_TCP_MAX_MESSAGE_SIZE"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn http_image_url_rewritten_to_data_and_existing_data_preserved() {
-        use base64::Engine;
-        let png_bytes = include_bytes!("../tests/data/media/llm-optimize-deploy-graphic.png");
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/img.png")
-            .with_status(200)
-            .with_header("content-type", "image/png")
-            .with_body(&png_bytes[..])
-            .create_async()
-            .await;
-
-        let fetcher = MediaFetcher {
-            allow_direct_ip: true,
-            allow_direct_port: true,
-            allow_private_ips: true,
-            ..Default::default()
-        };
-        let client = fetcher.build_http_client().unwrap();
-
-        let http_url = format!("{}/img.png", server.url());
-        let existing_data = inline_data_url();
-        let mut media_map: MultimodalDataMap = std::collections::HashMap::new();
-        media_map.insert(
-            "image_url".to_string(),
-            vec![
-                MultimodalData::Url(url::Url::parse(&existing_data).unwrap()),
-                MultimodalData::Url(url::Url::parse(&http_url).unwrap()),
-            ],
-        );
-        // Video must stay as http (images-first scope).
-        media_map.insert(
-            "video_url".to_string(),
-            vec![MultimodalData::Url(
-                url::Url::parse(&format!("{}/video.mp4", server.url())).unwrap(),
-            )],
-        );
-
-        OpenAIPreprocessor::rewrite_http_image_urls_to_data_with_fetcher(
-            &mut media_map,
-            &fetcher,
-            &client,
-        )
-        .await
-        .unwrap();
-
-        let images = &media_map["image_url"];
-        match &images[0] {
-            MultimodalData::Url(url) => assert_eq!(url.as_str(), existing_data),
-            other => panic!("existing data: must be unchanged, got {other:?}"),
-        }
-        match &images[1] {
-            MultimodalData::Url(url) => {
-                let s = url.as_str();
-                assert!(
-                    s.starts_with("data:image/png;base64,"),
-                    "http image must become data: png, got {s}"
-                );
-                let b64 = s.strip_prefix("data:image/png;base64,").unwrap();
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(b64)
-                    .unwrap();
-                assert_eq!(decoded, png_bytes);
-            }
-            other => panic!("expected rewritten Url, got {other:?}"),
-        }
-        match &media_map["video_url"][0] {
-            MultimodalData::Url(url) => {
-                assert!(
-                    url.as_str().starts_with("http"),
-                    "video must not be rewritten"
-                );
-            }
-            other => panic!("expected video Url, got {other:?}"),
-        }
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn http_image_rewrite_then_limit_check_fails_closed() {
-        let png_bytes = include_bytes!("../tests/data/media/llm-optimize-deploy-graphic.png");
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/big.png")
-            .with_status(200)
-            .with_header("content-type", "image/png")
-            .with_body(&png_bytes[..])
-            .create_async()
-            .await;
-
-        let fetcher = MediaFetcher {
-            allow_direct_ip: true,
-            allow_direct_port: true,
-            allow_private_ips: true,
-            ..Default::default()
-        };
-        let client = fetcher.build_http_client().unwrap();
-        let http_url = format!("{}/big.png", server.url());
-        let mut media_map: MultimodalDataMap = std::collections::HashMap::new();
-        media_map.insert(
-            "image_url".to_string(),
-            vec![MultimodalData::Url(url::Url::parse(&http_url).unwrap())],
-        );
-
-        OpenAIPreprocessor::rewrite_http_image_urls_to_data_with_fetcher(
-            &mut media_map,
-            &fetcher,
-            &client,
-        )
-        .await
-        .unwrap();
-        mock.assert_async().await;
-
-        let err = OpenAIPreprocessor::ensure_multi_modal_within_limit(&media_map, 64)
-            .expect_err("inlined PNG must exceed a 64-byte ceiling");
-        assert!(
-            err.to_string().contains("DYN_TCP_MAX_MESSAGE_SIZE"),
-            "unexpected error: {err:#}"
         );
     }
 }

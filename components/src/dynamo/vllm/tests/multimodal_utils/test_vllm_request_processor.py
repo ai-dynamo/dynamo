@@ -1287,7 +1287,7 @@ async def test_non_qwen_decode_keeps_distinct_images_distinct():
 
 @pytest.mark.asyncio
 async def test_non_qwen_decode_awaits_image_loader_for_url():
-    """Non-Qwen decode loads Url media via ImageLoader (same as aggregated/prefill)."""
+    """Non-Qwen decode loads the original http(s) Url via ImageLoader, like prefill."""
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
     image = Image.new("RGB", (3, 3), color=(7, 8, 9))
     processor.image_loader.load_image_batch.return_value = [image]
@@ -1319,11 +1319,13 @@ async def test_non_qwen_decode_awaits_image_loader_for_url():
     processor.image_loader.load_image_batch.assert_awaited_once_with(
         image_items, cache_scope=None, preserve_uuid_slots=True
     )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == "https://example.com/a1b2c3d4e5f60718.png"
 
 
 @pytest.mark.asyncio
 async def test_non_qwen_decode_loads_data_url_via_image_loader():
-    """data: URLs are handed to ImageLoader (no separate http fetch in this layer)."""
+    """Client-supplied data: URLs are handed to ImageLoader unchanged."""
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
     image = Image.new("RGB", (2, 2), color=(11, 22, 33))
     processor.image_loader.load_image_batch.return_value = [image]
@@ -1353,9 +1355,8 @@ async def test_non_qwen_decode_loads_data_url_via_image_loader():
     processor.image_loader.load_image_batch.assert_awaited_once_with(
         image_items, cache_scope=None, preserve_uuid_slots=True
     )
-    # The Url handed to the loader is the data: URL, not an http rewrite.
     called_items = processor.image_loader.load_image_batch.call_args[0][0]
-    assert called_items[0]["Url"].startswith("data:")
+    assert called_items[0]["Url"] == data_url
 
 
 @pytest.mark.asyncio
