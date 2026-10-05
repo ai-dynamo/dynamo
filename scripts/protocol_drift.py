@@ -165,7 +165,15 @@ def vllm_source(path: str) -> bool:
     }
 
 
-def snapshot(repo: Path, revision: str, target: str) -> dict[str, Any]:
+def snapshot(
+    repo: Path, revision: str, target: str, *, require_protocol_roots: bool = True
+) -> dict[str, Any]:
+    """Read selected source and dependencies.
+
+    Legacy B1 generation requires all five roots. Direct assessment disables
+    this precondition and reports missing request roots as coverage findings;
+    response roots are outside its initial comparison scope.
+    """
     revision = commit(repo, revision)
     if target != "vllm":
         raise ValueError(f"no source extractor registered for {target!r}")
@@ -178,7 +186,9 @@ def snapshot(repo: Path, revision: str, target: str) -> dict[str, Any]:
             sources[path] = git(repo, "show", f"{revision}:{path}")
         return sources[path]
 
-    coverage = DependencyResolver(all_paths, read_source).collect(paths)
+    coverage = DependencyResolver(all_paths, read_source).collect(
+        paths, require_roots=require_protocol_roots
+    )
     paths = sorted(set(paths) | coverage["module_consumers"].keys())
     modules = {}
     for path in paths:
@@ -197,7 +207,7 @@ def snapshot(repo: Path, revision: str, target: str) -> dict[str, Any]:
         "CompletionResponse",
         "SamplingParams",
     }
-    if not required <= names:
+    if require_protocol_roots and not required <= names:
         raise ValueError(
             f"incomplete upstream extraction; missing {sorted(required - names)}"
         )

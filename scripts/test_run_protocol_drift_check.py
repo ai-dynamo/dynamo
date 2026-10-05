@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from protocol_test_utils import fixture_git as git
 from run_protocol_drift_check import OUTPUT, ROOT, apply_decisions, validate_decisions
 
 
@@ -195,25 +196,6 @@ class DriftDriverIntegrationTests(unittest.TestCase):
             root = Path(directory)
             upstream = root / "upstream"
             dynamo = root / "dynamo"
-
-            def git(repo, *args):
-                return subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        str(repo),
-                        "-c",
-                        "commit.gpgsign=false",
-                        "-c",
-                        "tag.gpgsign=false",
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        *args,
-                    ],
-                    check=True,
-                    text=True,
-                    capture_output=True,
-                ).stdout.strip()
 
             for repo in (upstream, dynamo):
                 repo.mkdir()

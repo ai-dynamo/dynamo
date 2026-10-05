@@ -5,9 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # vLLM protocol source tooling
 
+For the primary Dynamo-versus-vLLM compatibility assessment, version-bump review,
+decision lifecycle, and scheduled workflow, use
+[Assess Dynamo against vLLM serve](dynamo-vllm-protocol-assessment.md).
+This page documents the retained upstream-to-upstream supporting tools.
+
 These command-line tools inventory native-server declarations and report source
 changes for `/v1/chat/completions` and `/v1/completions`. They do not establish
-runtime parity, change request admission, or enable a CI/scheduled workflow.
+runtime parity or change request admission. Their CLI alone does not enable a
+CI/scheduled workflow; the direct-assessment guide describes the integration.
 
 ## Inputs and outputs
 

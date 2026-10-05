@@ -1,0 +1,6 @@
+{
+  "schema": "dynamo-native-support-policy/v1",
+  "owner": "@ai-dynamo/dynamo-frontend-codeowners",
+  "description": "Initial static gate: extraction and review must be complete. No additional field-specific release promises are inferred. Runtime release acceptance remains a separate maintainer decision.",
+  "required_findings_absent": []
+}

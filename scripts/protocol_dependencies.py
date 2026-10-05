@@ -296,7 +296,9 @@ class DependencyResolver:
             for child in ast.iter_child_nodes(node):
                 self.expression(module, child, root, seen, strings=strings)
 
-    def collect(self, selected: list[str]) -> dict[str, Any]:
+    def collect(
+        self, selected: list[str], *, require_roots: bool = True
+    ) -> dict[str, Any]:
         roots = []
         for path in selected:
             module = module_name(path)
@@ -320,7 +322,7 @@ class DependencyResolver:
                                 set(),
                             )
         missing = ROOT_CLASSES - {root.rpartition(":")[2] for root in roots}
-        if missing:
+        if missing and require_roots:
             raise ValueError(
                 f"incomplete upstream extraction; missing {sorted(missing)}"
             )
@@ -335,6 +337,7 @@ class DependencyResolver:
         ]
         return {
             "complete": not diagnostics,
+            "missing_roots": sorted(missing),
             "roots": roots,
             "module_consumers": {
                 path: sorted(consumers)

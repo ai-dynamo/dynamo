@@ -67,7 +67,12 @@ def wire_names(name: str, declaration: dict[str, Any]) -> list[str]:
     return sorted(names)
 
 
-def request_fields(inventory: dict[str, Any], class_name: str) -> dict[str, Any]:
+def request_fields(
+    inventory: dict[str, Any],
+    class_name: str,
+    *,
+    tolerate_unresolved_aliases: bool = False,
+) -> dict[str, Any]:
     """Resolve local upstream inheritance; fail on ambiguity or an unknown base.
 
     BaseModel is the sole external leaf. We do not pretend to evaluate arbitrary
@@ -115,7 +120,14 @@ def request_fields(inventory: dict[str, Any], class_name: str) -> dict[str, Any]
                 continue
             fields.update(collect(resolve(base, source), (*stack, key)))
         for field, declaration in contract["fields"].items():
-            names = wire_names(field, declaration)
+            try:
+                names = wire_names(field, declaration)
+            except ValueError:
+                if not tolerate_unresolved_aliases:
+                    raise
+                # The direct extractor retains this declaration and supplies a
+                # field-level diagnostic rather than dropping the whole request.
+                names = [field]
             if names:
                 fields[field] = {
                     **declaration,
