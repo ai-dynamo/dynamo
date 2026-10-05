@@ -743,14 +743,6 @@ class TestResolveRefAudio:
         data, rate = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
         assert len(data) == 1600 and rate == 16000
 
-    def test_returns_a_plain_list(self):
-        # A NumPy array nested in the prompt reaches the engine as a descriptor.
-        handler = _make_audio_handler()
-        data, _ = asyncio.run(
-            handler._resolve_ref_audio(self._data_uri(self._wav_bytes()))
-        )
-        assert type(data) is list and type(data[0]) is float
-
     def test_downmixes_multichannel_audio_to_mono(self):
         import io
 
@@ -761,7 +753,8 @@ class TestResolveRefAudio:
         wav = self._wav_bytes(channels=2)
         data, _ = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
         stereo, _ = sf.read(io.BytesIO(wav), dtype="float32")
-        assert type(data[0]) is float
+        # A NumPy array nested in the prompt reaches the engine as a descriptor.
+        assert type(data) is list and type(data[0]) is float
         np.testing.assert_allclose(data, stereo.mean(axis=1), rtol=1e-6)
 
     def test_accepts_a_clip_exactly_at_the_duration_limit(self):
