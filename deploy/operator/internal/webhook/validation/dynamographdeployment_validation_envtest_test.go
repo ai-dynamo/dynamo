@@ -896,6 +896,54 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(nil),
 		},
 		{
+			name: "v1beta1 frontend sidecar startup probe requires a handler",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.FrontendSidecar = k8sptr.To("frontend")
+				worker.PodTemplate.Spec.Containers = append(worker.PodTemplate.Spec.Containers, corev1.Container{
+					Name: "frontend", Image: frontendImage150, StartupProbe: &corev1.Probe{PeriodSeconds: 5},
+				})
+			}),
+			wantCELErr: "spec.components[1].podTemplate.spec.containers[1].startupProbe: Invalid value: startupProbe must define exactly one handler",
+		},
+		{
+			name:          "v1beta1 update rejects multiple startup probe handlers",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						Exec: &corev1.ExecAction{Command: []string{"true"}}, GRPC: &corev1.GRPCAction{Port: 8000},
+					},
+				}
+			}),
+			wantCELErr: "spec.components[1].podTemplate.spec.containers[0].startupProbe: Invalid value: startupProbe must define exactly one handler",
+		},
+		{
+			name: "v1alpha1 startup probe requires a handler",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["worker"].ExtraPodSpec.MainContainer.StartupProbe = &corev1.Probe{PeriodSeconds: 5}
+			}),
+			wantCELErr: "spec.services[worker].extraPodSpec.mainContainer.startupProbe: Invalid value: startupProbe must define exactly one handler",
+		},
+		{
+			name: "v1beta1 role startup probe requires a handler",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 2)
+				worker.Roles[1].PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{PeriodSeconds: 5}
+			}),
+			wantCELErr: "spec.components[1].roles[1].podTemplate.spec.containers[0].startupProbe: Invalid value: startupProbe must define exactly one handler",
+		},
+		{
+			name: "v1alpha1 role startup probe requires a handler",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				setAlphaExplicitMultinodeRoleTemplates(worker, 2)
+				worker.Roles[0].PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{PeriodSeconds: 5}
+			}),
+			wantCELErr: "spec.services[worker].roles[0].podTemplate.spec.containers[0].startupProbe: Invalid value: startupProbe must define exactly one handler",
+		},
+		{
 			name:          "valid v1beta1 update reaches the webhook",
 			oldDeployment: betaDGDForAdmission(nil),
 			deployment:    dgdAdmissionWithLabel(t, betaDGDForAdmission(nil)),

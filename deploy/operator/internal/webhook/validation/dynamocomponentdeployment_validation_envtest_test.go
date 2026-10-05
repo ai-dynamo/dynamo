@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -1566,6 +1567,68 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 
 		// Pair shared pod-template validation across both served source versions.
+		{
+			name: "v1beta1 frontend sidecar startup probe rejects multiple handlers",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.FrontendSidecar = k8sptr.To("frontend")
+				dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
+					Name: "frontend", Image: frontendImage150,
+					StartupProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+						Exec: &corev1.ExecAction{Command: []string{"true"}}, GRPC: &corev1.GRPCAction{Port: 8000},
+					}},
+				})
+			}),
+			wantCELErr: "spec.podTemplate.spec.containers[1].startupProbe: Invalid value: startupProbe must define exactly one handler",
+		},
+		{
+			name:          "v1beta1 update rejects a startup probe without a handler",
+			oldDeployment: betaDCDForAdmission(nil),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{PeriodSeconds: 5}
+			}),
+			wantCELErr: "spec.podTemplate.spec.containers[0].startupProbe: Invalid value: startupProbe must define exactly one handler",
+		},
+		{
+			name: "v1alpha1 startup probe rejects multiple handlers",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec.MainContainer.StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"true"}}, GRPC: &corev1.GRPCAction{Port: 8000},
+				}}
+			}),
+			wantCELErr: "spec.extraPodSpec.mainContainer.startupProbe: Invalid value: startupProbe must define exactly one handler",
+		},
+		{
+			name: "v1beta1 exec startup probe is accepted",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"true"}},
+				}}
+			}),
+		},
+		{
+			name: "v1beta1 HTTP startup probe is accepted",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromInt(8000)},
+				}}
+			}),
+		},
+		{
+			name: "v1alpha1 TCP startup probe is accepted",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec.MainContainer.StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)},
+				}}
+			}),
+		},
+		{
+			name: "v1alpha1 gRPC startup probe is accepted",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec.MainContainer.StartupProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					GRPC: &corev1.GRPCAction{Port: 8000},
+				}}
+			}),
+		},
 		{
 			name: "v1beta1 sidecar without image is rejected by CEL",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
