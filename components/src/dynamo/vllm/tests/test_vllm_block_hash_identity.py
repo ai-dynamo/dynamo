@@ -13,7 +13,7 @@ Each simulated worker runs ``init_none_hash`` afresh, as a new worker process do
 startup: ``NONE_HASH`` depends only on the seed it resolves (or on fresh random bytes), so a
 fresh call in one process derives what a separate process would. The Rust side, that equal
 engine hashes from two workers give one delegate key, is
-``lib/kv-router/src/indexer/ledger_key_tests.rs``.
+``lib/kv-router/src/indexer/delegate_tests.rs``.
 """
 
 import os
