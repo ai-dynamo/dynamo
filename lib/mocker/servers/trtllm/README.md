@@ -100,5 +100,7 @@ rather than truncated. Lower `--context-length` for small-KV experiments.
 
 `--extra-engine-args` takes inline JSON or a file path and is merged into
 `MockEngineArgs`. `engine_type` is forced to `trtllm`; passing anything else is
-an error. TensorRT-LLM requires `block_size >= 2` (default 32) and rejects
-`max_model_len` — use `--context-length` instead.
+an error. TensorRT-LLM requires `block_size >= 2` (default 32).
+The optional `max_model_len` caps the combined prompt and output length in the
+AISimulate engine. `--context-length` controls the sidecar's default output budget
+as described above.

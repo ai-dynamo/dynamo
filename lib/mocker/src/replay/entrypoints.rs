@@ -2481,6 +2481,46 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn context_length_limits_follow_aisimulate_for_every_backend() {
+        for backend in ["vllm", "sglang", "trtllm"] {
+            let args = MockEngineArgs::from_json_str(
+                &serde_json::json!({
+                    "engine_type": backend,
+                    "block_size": 4,
+                    "num_gpu_blocks": 128,
+                    "max_model_len": 8,
+                    "enable_prefix_caching": false,
+                    "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let requests = vec![
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: vec![2; 3],
+                    max_output_tokens: 10,
+                    arrival_timestamp_ms: Some(100.0),
+                    ..Default::default()
+                },
+            ];
+
+            let report = simulate_trace_requests(args, requests, 1, 1.0).unwrap();
+
+            // The full-length prompt is rejected; the valid follower completes
+            // with its output capped at max_model_len - prompt_length.
+            assert_eq!(report.request_counts.num_requests, 2, "{backend}");
+            assert_eq!(report.request_counts.completed_requests, 1, "{backend}");
+            assert_eq!(report.request_counts.total_output_tokens, 5, "{backend}");
+        }
+    }
+
     fn disagg_test_config() -> OfflineDisaggReplayConfig {
         OfflineDisaggReplayConfig {
             prefill_args: MockEngineArgs {

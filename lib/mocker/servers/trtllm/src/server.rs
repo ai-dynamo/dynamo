@@ -128,8 +128,7 @@ pub struct TrtllmMockerService {
 impl TrtllmMockerService {
     pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
         // Normalizing first is what applies the TensorRT-LLM rules: block-size
-        // floor and default, the max_model_len rejection, and the capacity
-        // scheduler policy check.
+        // floor and default, and the capacity scheduler policy check.
         let engine_args = engine_args.normalized()?;
         anyhow::ensure!(
             engine_args.engine_type == EngineType::Trtllm,

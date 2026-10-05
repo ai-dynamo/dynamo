@@ -210,7 +210,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-model-len",
         type=positive_int,
         default=None,
-        help="Maximum vLLM sequence length, including prompt and generated tokens. "
+        help="Maximum sequence length, including prompt and generated tokens. "
         "When omitted, no model-length limit is enforced.",
     )
     parser.add_argument(

@@ -524,7 +524,7 @@ pub struct MockEngineArgs {
     #[builder(default = "0")]
     pub block_size: usize,
 
-    /// Optional vLLM sequence-length limit, including prompt and generated
+    /// Optional sequence-length limit, including prompt and generated
     /// tokens. Requests with no room to generate are rejected before admission.
     #[builder(default = "None")]
     #[validate(range(min = 1))]
@@ -812,15 +812,6 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
-    if args.max_model_len.is_some() && args.engine_type != EngineType::Vllm {
-        return Err(mock_engine_args_validation_error(
-            "max_model_len_requires_vllm",
-            format!(
-                "max_model_len is supported only for engine_type=vllm, got engine_type={:?}",
-                args.engine_type
-            ),
-        ));
-    }
     if args.ais_nextn.is_some() && args.decode_speedup_ratio != 1.0 {
         return Err(mock_engine_args_validation_error(
             "mtp_decode_speedup_conflict",
@@ -1720,17 +1711,20 @@ mod tests {
 
     #[test]
     fn test_normalized_rejects_zero_max_model_len() {
-        let error = MockEngineArgs::builder()
-            .max_model_len(Some(0))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap_err();
+        for engine_type in [EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm] {
+            let error = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .max_model_len(Some(0))
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
 
-        assert!(
-            error.to_string().contains("max_model_len"),
-            "unexpected error: {error}",
-        );
+            assert!(
+                error.to_string().contains("max_model_len"),
+                "unexpected error for {engine_type:?}: {error}",
+            );
+        }
     }
 
     #[test]
