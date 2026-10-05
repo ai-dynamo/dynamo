@@ -75,15 +75,13 @@ spec:
                 --max-model-len "${MAX_MODEL_LEN}"
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
-          env: &vllmEnvironment
+          env:
             - name: MODEL_NAME
               value: Qwen/Qwen3-32B
             - name: SERVED_MODEL_NAME
               value: Qwen/Qwen3-32B
             - name: KV_TRANSFER_CONFIG
               value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["UCX"]}}'
-            - name: KV_TRANSFER_CONFIG_DECODE
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["UCX"]}}'
             - name: TENSOR_PARALLEL_SIZE
               value: "4"
             - name: GPU_MEMORY_UTILIZATION
@@ -136,7 +134,7 @@ spec:
                 --model "${MODEL_NAME}" \
                 --served-model-name "${SERVED_MODEL_NAME}" \
                 --disaggregation-mode decode \
-                --kv-transfer-config "${KV_TRANSFER_CONFIG_DECODE}" \
+                --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
                 --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
                 --no-enable-log-requests \
                 --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
@@ -147,7 +145,29 @@ spec:
                 --max-model-len "${MAX_MODEL_LEN}"
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
-          env: *vllmEnvironment
+          env:
+            - name: MODEL_NAME
+              value: Qwen/Qwen3-32B
+            - name: SERVED_MODEL_NAME
+              value: Qwen/Qwen3-32B
+            - name: KV_TRANSFER_CONFIG
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["UCX"]}}'
+            - name: TENSOR_PARALLEL_SIZE
+              value: "4"
+            - name: GPU_MEMORY_UTILIZATION
+              value: "0.90"
+            - name: BLOCK_SIZE
+              value: "64"
+            - name: HF_OVERRIDES
+              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+            - name: MAX_MODEL_LEN
+              value: "131072"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: HF_HOME
+              value: /model-cache
+            - name: VLLM_LOGGING_LEVEL
+              value: INFO
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache

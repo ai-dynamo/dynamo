@@ -406,40 +406,46 @@ def test_beta_workers_with_read_only_hf_home_use_writable_modules_cache() -> Non
 
 
 @pytest.mark.parametrize(
-    ("relative_path", "prefill_default"),
+    ("relative_path", "prefill_default", "decode_default"),
     (
         # Each template keeps the transfer settings of the recipe it was derived
         # from, so the hook defaults are not identical across the two API shapes.
         (
             "vllm/disagg/deploy-v1alpha1.template.yaml",
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
         ),
         (
             "vllm/disagg/deploy-v1beta1.template.yaml",
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer",'
             '"kv_buffer_device":"cuda"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer",'
+            '"kv_buffer_device":"cuda"}',
         ),
         (
             VLLM_COMPUTE_DOMAIN_TEMPLATE,
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
         ),
     ),
 )
 def test_vllm_disaggregated_transfer_uses_the_env_hook(
-    relative_path: str, prefill_default: str
+    relative_path: str, prefill_default: str, decode_default: str
 ) -> None:
     _, dgd = _load(relative_path)
+    expected_defaults = {
+        "PrefillWorker": prefill_default,
+        "DecodeWorker": decode_default,
+    }
 
     for name, worker in _roles(dgd):
         if name not in {"PrefillWorker", "DecodeWorker"}:
             continue
         main = _main_container(dgd, worker)
-        default = (
-            prefill_default
-            if name == "PrefillWorker"
-            else prefill_default.replace("kv_producer", "kv_consumer")
-        )
-        assert main["env"][0] == {"name": "KV_TRANSFER_CONFIG", "value": default}
+        assert main["env"][0] == {
+            "name": "KV_TRANSFER_CONFIG",
+            "value": expected_defaults[name],
+        }
         transfer_index = main["args"].index("--kv-transfer-config")
         assert main["args"][transfer_index + 1] == "$(KV_TRANSFER_CONFIG)"
 
@@ -550,9 +556,9 @@ def test_vllm_compute_domain_variant_preserves_the_dra_and_runtime_contract() ->
         assert env_names == tuple(expected_env)
         expected_values = dict(expected_env_values)
         if name == "DecodeWorker":
-            expected_values["KV_TRANSFER_CONFIG"] = (
-                '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
-            )
+            expected_values[
+                "KV_TRANSFER_CONFIG"
+            ] = '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
         if name == "PrefillWorker":
             expected_values.update(
                 {
