@@ -297,7 +297,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Enable structural tag guided decoding for tool calls when the configured "
             "parser and backend support it. Disabling this flag suppresses optional "
             "guidance; Rust retains native tags for Kimi K2 required/named and "
-            "Kimi K3 named tool choices. Python vLLM and SGLang respect the opt-out.",
+            "Kimi K3 named tool choices. Python vLLM and SGLang respect the opt-out. "
+            "Unsupported schema constructs can cause backend grammar compilation errors.",
         )
         add_argument(
             g,

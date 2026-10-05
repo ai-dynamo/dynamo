@@ -194,6 +194,16 @@ the strongest safe tool envelope and relaxes that argument section. If the
 builder cannot produce a structural tag at all, Dynamo uses the existing
 compatibility path rather than introducing a new request error; automatic tool
 choice may therefore remain unconstrained for that parser/schema combination.
+
+> [!WARNING]
+> Valid tool schemas containing constructs unsupported by the backend's
+> XGrammar version, such as regex lookahead, can cause request rejection.
+> Backend compilation errors do not trigger Dynamo's builder fallback.
+> With XGrammar 0.2.1 or 0.2.7 and schema mode `auto`, setting the tool
+> function's `strict: false` avoids this lookahead rejection by disabling
+> argument-schema enforcement. This workaround is not guaranteed on older
+> versions. The deployment opt-out still retains Rust Kimi K3 named-call tags.
+
 In vLLM 0.30.0, pinned by Dynamo's CUDA image, `tool_choice="auto"` returns no
 structural tag when every tool is explicitly `strict: false`. The `always`
 activation scope still attempts the tag, but cannot enforce the native tool
