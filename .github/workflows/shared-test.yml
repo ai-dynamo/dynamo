@@ -188,6 +188,8 @@ jobs:
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
+        # Replaced per-lane by the tagging step below; this is the
+        # fallback if that step does not run.
         DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
         DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
@@ -265,6 +267,41 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
+      # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow
+      # is the inner job id — "test" for every caller — so every test session
+      # lands under one job name and cannot be attributed to a CI lane.
+      # Measured: 105,505 Nightly test events on main over 14 days all under
+      # ci.job.name:test, against 69 distinct lane names on the pipeline side.
+      #
+      # Composed in a step rather than inline in DD_TAGS because DD_TAGS is
+      # comma-separated while lane names contain commas and spaces
+      # ("Test cuda13.0, amd64"), and GitHub expressions have no replace().
+      - name: Tag Datadog test sessions with the CI lane
+        shell: bash
+        env:
+          LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_TYPE: ${{ inputs.test_type }}
+          LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+          LANE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -uo pipefail
+          slug() {
+            local s
+            s="$(printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | tr -c 'a-z0-9._-' '-' \
+              | tr -s '-')" || return
+            s="${s#-}"
+            printf '%s' "${s%-}"
+          }
+          lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
+          echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
+          echo "Datadog lane tag: ${lane}"
+          # Agentless upload requires DD_API_KEY.
+          if [ -z "${DD_API_KEY:-}" ]; then
+            echo "::warning title=Datadog::DD_API_KEY is empty; test sessions will not upload."
+          fi
+
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
