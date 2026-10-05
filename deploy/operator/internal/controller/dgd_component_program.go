@@ -70,6 +70,7 @@ func (p *componentProgram) Reconcile(
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
 	clearComponentGPUShapes(programResult.Status.Components)
+	clearComponentRuntimeStatuses(programResult.Status.Components)
 
 	// Admission prevents this combination; guard previously stored or admission-bypassed objects.
 	for i := range req.DGD.Spec.Components {

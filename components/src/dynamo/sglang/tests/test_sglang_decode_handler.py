@@ -27,6 +27,7 @@ from dynamo.sglang.protocol import (
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
+    _kv_cache_hit_engine_data,
     _native_payload_is_batched,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
@@ -230,8 +231,10 @@ def _new_decode_handler(
     use_sglang_tokenizer: bool = False,
     skip_tokenizer_init: bool = False,
     enable_rl: bool = False,
+    serving_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
 ):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.serving_mode = serving_mode
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
     handler.config = SimpleNamespace(
@@ -1102,12 +1105,10 @@ def test_build_sampling_params_passes_n_for_token_requests():
 def test_ordered_cancellation_requires_stable_sglang_request_id(
     sampling_params, supported, expected
 ):
-    assert (
-        _ordered_cancellation_request_id(
-            "request-id", sampling_params, supported=supported
-        )
-        == expected
+    request_id = _ordered_cancellation_request_id(
+        "request-id", sampling_params, supported=supported
     )
+    assert request_id == expected
 
 
 @pytest.mark.parametrize(
@@ -1705,8 +1706,115 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
                 "completion_tokens": 3,
                 "total_tokens": 5,
             },
+            "engine_data": {"kv_cache_hit": {"prompt_tokens": 2, "reused_tokens": 0}},
         },
     ]
+
+
+def test_kv_cache_hit_engine_data_uses_cached_tokens():
+    assert _kv_cache_hit_engine_data({"prompt_tokens": 4, "cached_tokens": 3}) == {
+        "prompt_tokens": 4,
+        "reused_tokens": 3,
+    }
+
+
+def test_kv_cache_hit_engine_data_defaults_null_cached_tokens_to_zero():
+    assert _kv_cache_hit_engine_data({"prompt_tokens": 4, "cached_tokens": None}) == {
+        "prompt_tokens": 4,
+        "reused_tokens": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "meta_info", [{}, {"cached_tokens": 3}, {"prompt_tokens": None, "cached_tokens": 3}]
+)
+def test_kv_cache_hit_engine_data_omits_missing_prompt_tokens(meta_info):
+    assert _kv_cache_hit_engine_data(meta_info) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("serving_mode", "reports"),
+    [(DisaggregationMode.AGGREGATED, True), (DisaggregationMode.DECODE, False)],
+)
+async def test_process_token_stream_reports_kv_cache_hit_on_final_chunk_only(
+    serving_mode, reports
+):
+    handler = _new_decode_handler(serving_mode=serving_mode)
+    final_meta_info = {
+        "id": "sglang-1",
+        "finish_reason": {"type": "stop"},
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+        "cached_tokens": 3,
+    }
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": {
+                            "id": "sglang-1",
+                            "finish_reason": None,
+                            "prompt_tokens": 4,
+                            "cached_tokens": 3,
+                        },
+                    },
+                    {"index": 0, "output_ids": [102], "meta_info": final_meta_info},
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert len(chunks) == 2
+    assert "kv_cache_hit" not in chunks[0].get("engine_data", {})
+    # Disaggregated decode would only echo the prefill worker's hit.
+    expected = {"prompt_tokens": 4, "reused_tokens": 3} if reports else None
+    assert chunks[1].get("engine_data", {}).get("kv_cache_hit") == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("serving_mode", "reports"),
+    [(DisaggregationMode.AGGREGATED, True), (DisaggregationMode.DECODE, False)],
+)
+async def test_native_generate_stream_reports_kv_cache_hit_on_final_chunk(
+    serving_mode, reports
+):
+    responses = [
+        {"output_ids": [101], "meta_info": {"id": "request-1", "prompt_tokens": 4}},
+        {
+            "output_ids": [102],
+            "meta_info": {
+                "id": "request-1",
+                "finish_reason": {"type": "stop"},
+                "prompt_tokens": 4,
+                "cached_tokens": 3,
+            },
+        },
+    ]
+
+    chunks = await _collect(
+        _new_decode_handler(serving_mode=serving_mode)._process_native_generate_stream(
+            _stream(
+                [
+                    {"token_ids": [], "engine_data": {"sglang_response": response}}
+                    for response in responses
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks[0]["engine_data"] == {"sglang_response": responses[0]}
+    expected = {"sglang_response": responses[1]}
+    if reports:
+        expected["kv_cache_hit"] = {"prompt_tokens": 4, "reused_tokens": 3}
+    assert chunks[1]["engine_data"] == expected
 
 
 @pytest.mark.asyncio
@@ -1839,7 +1947,9 @@ async def test_process_token_stream_uploads_large_metadata(tmp_path):
     assert "log_probs" not in chunk
     assert "top_logprobs" not in chunk
     assert "disaggregated_params" not in chunk
-    assert "engine_data" not in chunk
+    assert chunk["engine_data"] == {
+        "kv_cache_hit": {"prompt_tokens": 2, "reused_tokens": 0}
+    }
     uploaded_path = tmp_path / "metadata/rollout-7/choice_0.msgpack.zst"
 
     payload = _read_zstd_payload(uploaded_path)
@@ -2301,6 +2411,50 @@ async def test_supported_sampling_reaches_engine(mode, n):
     assert [output["index"] for output in outputs] == list(range(n))
     assert handler.engine.async_generate.await_args.kwargs["sampling_params"]["n"] == n
     assert all(output["finish_reason"] for output in outputs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2])
+async def test_parallel_sampling_omits_kv_cache_hit(n):
+    """SGLang warms the prompt cache before n > 1 samples, so no sample reports."""
+    handler = _new_decode_handler()
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    chunks = [
+        {
+            "index": index,
+            "output_ids": [42],
+            "meta_info": {
+                "id": f"sample-{index}",
+                "finish_reason": {"type": "length"},
+                "prompt_tokens": 2,
+                "completion_tokens": 1,
+                "cached_tokens": 1,
+            },
+        }
+        for index in range(n)
+    ]
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream(chunks))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {"sampling_options": {"n": n}, "stop_conditions": {"max_tokens": 1}}
+
+    outputs = [output async for output in handler.generate(request, context)]
+
+    reports = [output.get("engine_data", {}).get("kv_cache_hit") for output in outputs]
+    expected = {"prompt_tokens": 2, "reused_tokens": 1} if n == 1 else None
+    assert reports == [expected] * n
 
 
 def test_prefill_dp_rank_kwargs_follows_engine_signature():

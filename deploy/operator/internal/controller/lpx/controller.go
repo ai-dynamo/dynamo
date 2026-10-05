@@ -22,6 +22,7 @@ import (
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -211,8 +212,8 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, err
 	}
 
-	// Immutable composition changes replace the PCS; replica-only changes patch live capacity.
-	if pcs != nil && pcs.Annotations[lpx.WorkloadDigestAnnotation] != desiredPCS.Annotations[lpx.WorkloadDigestAnnotation] {
+	// Grove rolls compatible layouts; immutable structure or OnDelete builds replace the PCS.
+	if pcs != nil && !podCliqueSetLayoutMatches(pcs, desiredPCS) {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
 		return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
 	}
@@ -244,12 +245,7 @@ func (r *graphReconciler) reconcileWorkloads(
 				}
 			}
 
-			desired, missing, intentChanged := resolvePipelineRequests(deployment, requests, workload, plan)
-
-			if intentChanged {
-				setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
-				return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
-			}
+			desired, missing := resolvePipelineRequests(deployment, requests, workload, plan)
 
 			maps.Copy(desiredRequests, desired)
 			missingRequests = append(missingRequests, missing...)
@@ -285,9 +281,9 @@ func (r *graphReconciler) reconcileWorkloads(
 		}
 	}
 
-	// Remove requests only after all scale-down writes have succeeded.
+	// Retire released requests after scale-down, keeping all removed names pending.
 	removed := pipelineRequestsPendingDeletion(requests, desiredRequests)
-	if err := r.deletePipelineRequests(ctx, removed); err != nil {
+	if err := r.deletePipelineRequests(ctx, slices.DeleteFunc(slices.Clone(removed), pipelineRequestCommitted)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -309,10 +305,8 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	acknowledgeSchedulingRetry(deployment)
 
-	// Terminating requests must settle before synchronization or scale-out.
-	if len(removed) > 0 {
-		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for removed LPX requests to finish deletion")
-		return ctrl.Result{}, nil
+	if err := r.reconcileRuntimeResources(ctx, deployment, resources); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	modified, _, err := commoncontroller.SyncObservedResource(ctx, r, deployment, pcs, desiredPCS, commoncontroller.WithPreservedListOrder())
@@ -325,10 +319,6 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileRuntimeResources(ctx, deployment, resources); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Observe the created or updated PCS before scaling or publishing requests.
 	if modified {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for Grove to observe the workload")
@@ -337,6 +327,9 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	// Scale-out proceeds after deleting old names, without waiting for Pods.
 	for _, groupName := range groupNames {
+		if len(removed) > 0 {
+			break
+		}
 		workload := workloads[groupName]
 		plan := plans[groupName]
 		pcsg := pcsgs[plan.LPXScalingGroup]
@@ -354,7 +347,12 @@ func (r *graphReconciler) reconcileWorkloads(
 	}
 
 	if len(missingRequests) > 0 {
-		return ctrl.Result{}, r.reconcilePipelineRequests(ctx, deployment, pcs, missingRequests)
+		return ctrl.Result{}, r.reconcilePipelineRequests(ctx, deployment, pcs, pcsgs, pclqs, requests, missingRequests)
+	}
+
+	if len(removed) > 0 {
+		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for removed LPX requests to finish deletion")
+		return ctrl.Result{}, nil
 	}
 
 	result = r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, pclqs, plans, desiredRequests)
@@ -519,4 +517,27 @@ func (r *graphReconciler) deleteUnusedConfigMaps(ctx context.Context, deployment
 		}
 	}
 	return nil
+}
+
+// podCliqueSetLayoutMatches compares the variable immutable fields emitted by LPX.
+// OnDelete also fixes the workload digests; the desired strategy governs transitions.
+func podCliqueSetLayoutMatches(observed, desired *grovev1alpha1.PodCliqueSet) bool {
+	onDelete := desired.Spec.UpdateStrategy != nil && desired.Spec.UpdateStrategy.Type == grovev1alpha1.OnDeleteStrategy
+	layout := func(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodCliqueSetTemplateSpec {
+		result := grovev1alpha1.PodCliqueSetTemplateSpec{TopologyConstraint: pcs.Spec.Template.TopologyConstraint}
+		for _, clique := range pcs.Spec.Template.Cliques {
+			result.Cliques = append(result.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
+				Name: clique.Name, TopologyConstraint: clique.TopologyConstraint,
+				Spec: grovev1alpha1.PodCliqueSpec{MinAvailable: clique.Spec.MinAvailable},
+			})
+		}
+		for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+			if !onDelete {
+				group.Annotations = nil
+			}
+			result.PodCliqueScalingGroupConfigs = append(result.PodCliqueScalingGroupConfigs, group)
+		}
+		return result
+	}
+	return apiequality.Semantic.DeepEqual(layout(observed), layout(desired))
 }
