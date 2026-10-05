@@ -99,7 +99,7 @@ static SHARED_GRAVEYARD: SegQueue<Grave> = SegQueue::new();
 const LOCAL_GRAVEYARD_CAP: usize = 4096;
 
 /// Graveyard work a lookup does after unpinning, before handing the rest to the lanes:
-/// graves opened plus nodes freed.
+/// graves opened plus node references dropped.
 const LOOKUP_GRAVEYARD_BUDGET: usize = 8;
 
 /// Moves `graves` to the shared graveyard. The lanes free them iteratively and release
@@ -345,8 +345,8 @@ impl NodeChildren {
     }
 
     /// Frees this thread's graveyard and the shared one, at most `budget` units of work
-    /// (graves opened plus nodes freed). Event lanes call this. Returns whether both are
-    /// empty.
+    /// (graves opened plus node references dropped). Event lanes call this. Returns
+    /// whether both are empty.
     pub(super) fn drain_graveyard(budget: usize) -> bool {
         Self::drain_graveyard_with(budget, true)
     }
@@ -381,9 +381,11 @@ impl NodeChildren {
                 }
                 continue;
             };
+            // Count references other holders keep too: a cleared sharded map can bury
+            // thousands in one grave.
+            work += 1;
             if let Some(node) = Arc::into_inner(node) {
                 stack.extend(node.into_child_arcs());
-                work += 1;
             }
         }
         if !retired.is_empty() {
@@ -1056,6 +1058,28 @@ mod tests {
         assert!(NodeChildren::drain_graveyard_with(usize::MAX, false));
         assert_eq!(Arc::strong_count(&leaf), 1);
         assert_eq!(leaf.retired_snapshot_refs_for_test(), 0);
+    }
+
+    #[test]
+    fn budgeted_drain_counts_references_it_cannot_free() {
+        let _draining = DrainScope::enter();
+        // Children of a cleared sharded map that worker lookups still hold.
+        let held: Vec<_> = (0..4 * LOOKUP_GRAVEYARD_BUDGET).map(|_| child()).collect();
+        bury(Grave::Nodes(held.clone()));
+
+        assert!(!NodeChildren::drain_graveyard_with(
+            LOOKUP_GRAVEYARD_BUDGET,
+            false
+        ));
+        // Opening the grave spends one unit and each dropped reference one more.
+        let dropped = held
+            .iter()
+            .filter(|node| Arc::strong_count(node) == 1)
+            .count();
+        assert_eq!(dropped, LOOKUP_GRAVEYARD_BUDGET - 1);
+
+        assert!(NodeChildren::drain_graveyard_with(usize::MAX, false));
+        assert!(held.iter().all(|node| Arc::strong_count(node) == 1));
     }
 
     #[test]
