@@ -126,6 +126,63 @@ to that port to trusted consumers because KV events contain request token IDs.
 
 Prefill and encode use their canonical one-token request and do not apply decode sampling controls.
 
+### Protocol compatibility and timeline
+
+As of 2026-10-05, Dynamo main pins `vllm-proto =0.3.0` in the workspace
+`Cargo.toml`; upstream has tagged protocol crate 0.4.0. These are
+schema versions, independent of both the vLLM Python package and Dynamo release
+numbers. See the [upstream protocol history](https://github.com/vllm-project/vllm/tree/main/rust/proto)
+for the canonical schemas and crate release process.
+
+The 0.2.0, 0.3.0, and 0.4.0 schemas retain the same fields and signatures for
+existing generation and discovery RPCs. A consumer compiled with 0.4.0 can use
+that shared API with a 0.2.0 server, provided it does not depend on newer fields
+or RPCs. Dynamo's current 0.3.0 consumer likewise handles older discovery
+responses through the fallback below. This describes wire and discovery
+compatibility, not a qualification of every model, feature, or runtime pair.
+
+| Server protocol | What the sidecar can infer | Limitations |
+| --- | --- | --- |
+| 0.2.0 | Existing generation and Control metadata, including global DP size and starting rank | No local-DP count. Missing `data_parallel_size_local` decodes as zero. Dynamo accepts this only with starting rank zero and assumes the frontend owns the complete group; multi-rank fallback logs a warning. A nonzero starting rank is rejected. Do not use this fallback for hybrid DP. |
+| 0.3.0 | Adds explicit local-DP count | Supports discovery of a frontend's local rank range when the server populates the field. Dynamo's corresponding support is [#14697](https://github.com/ai-dynamo/dynamo/pull/14697). |
+| 0.4.0 | Preserves the 0.3.0 discovery fields and adds KV hints, sampling masks, and `Control.Shutdown` | Dynamo's current 0.3.0 bindings do not expose those new interfaces. A client upgraded to 0.4.0 still cannot obtain those features from a 0.2.0 server: hints are not interpreted, masks are absent, and `Shutdown` is unimplemented. |
+
+For hybrid DP, require both vLLM's local-size producer
+([#57116](https://github.com/vllm-project/vllm/pull/57116)) and Dynamo's local-range
+consumer ([#14697](https://github.com/ai-dynamo/dynamo/pull/14697)), or equivalent
+backports. Upgrading client bindings alone cannot supply missing server metadata.
+Python-supervised Rust frontends also need
+[vLLM #59659](https://github.com/vllm-project/vllm/pull/59659) to accept `--grpc-port`.
+Standalone `vllm-rs serve` does not implement hybrid-DP startup.
+
+As of the date above, stock vLLM 0.31.0 includes local-DP metadata but lacks the
+Python gRPC-port addition, and stock Dynamo 1.5.0 lacks hybrid local-range
+ownership. Use builds containing the required changes; a later release date
+does not prove inclusion on a release branch. This restriction is specific to
+hybrid DP: a single frontend owning the full group can use the older discovery
+fallback.
+
+The following milestones track Dynamo's vLLM sidecar integration. Merge dates
+use America/Los_Angeles time; they are not package publication dates.
+
+| Merge date (2026) | Change | Compatibility or serving effect |
+| --- | --- | --- |
+| Aug 10 | [#12734](https://github.com/ai-dynamo/dynamo/pull/12734) | Adopts separate native `Inference` and `Control` services and engine discovery. |
+| Aug 11 | [#12735](https://github.com/ai-dynamo/dynamo/pull/12735), [#12736](https://github.com/ai-dynamo/dynamo/pull/12736) | Preserves selected DP ranks and per-rank KV routing; keeps decode handoff alive during cancellation. |
+| Aug 11 | [#12214](https://github.com/ai-dynamo/dynamo/pull/12214) | Adds multimodal sidecar requests. |
+| Aug 18 | [#13066](https://github.com/ai-dynamo/dynamo/pull/13066) | Routes capability-gated RL controls through native gRPC. |
+| Aug 27 | [#13923](https://github.com/ai-dynamo/dynamo/pull/13923) | Adds the wheel-installed `dynamo.vllm.sidecar` Python launcher. |
+| Sep 1–3 | [#13717](https://github.com/ai-dynamo/dynamo/pull/13717), [#13966](https://github.com/ai-dynamo/dynamo/pull/13966) | Adds audio/video inputs and encoder/prefill/decode topologies. |
+| Sep 10–14 | [#14362](https://github.com/ai-dynamo/dynamo/pull/14362), [#14731](https://github.com/ai-dynamo/dynamo/pull/14731) | Exposes the matching Rust executable on the runtime image's PATH and prevents incompatible Omni plugin auto-loading. |
+| Sep 11 | [#14398](https://github.com/ai-dynamo/dynamo/pull/14398), [#14699](https://github.com/ai-dynamo/dynamo/pull/14699) | Projects native generation controls and preserves buffered empty text deltas. |
+| Sep 14 | [#14738](https://github.com/ai-dynamo/dynamo/pull/14738) | Replaces copied schemas with the published `vllm-proto =0.1.0` crate. |
+| Sep 17–18 | [#13068](https://github.com/ai-dynamo/dynamo/pull/13068), [#14574](https://github.com/ai-dynamo/dynamo/pull/14574) | Adds LoRA lifecycle operations and local LoRA launchers. |
+| Sep 18 | [#14697](https://github.com/ai-dynamo/dynamo/pull/14697) | Pins `vllm-proto =0.3.0` and registers hybrid frontends' local DP ranges and capacity. |
+| Sep 22 | [#14673](https://github.com/ai-dynamo/dynamo/pull/14673), [#14244](https://github.com/ai-dynamo/dynamo/pull/14244) | Uses engine-reported KV block sizes and forwards preprocessed multimodal features. |
+| Sep 25 | [#13360](https://github.com/ai-dynamo/dynamo/pull/13360) | Adds multimodal-aware KV routing. |
+| Oct 1 | [#15539](https://github.com/ai-dynamo/dynamo/pull/15539) | Accepts Dynamo tool-call and reasoning-parser flags on the sidecar. |
+| Oct 5 | [#15287](https://github.com/ai-dynamo/dynamo/pull/15287) | Accepts video media in the sidecar encode role. |
+
 ### Runtime compatibility
 
 The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's `vllm-proto` dependency is pinned in the workspace `Cargo.toml`.
