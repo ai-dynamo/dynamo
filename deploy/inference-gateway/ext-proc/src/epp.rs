@@ -17,7 +17,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
-use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::discovery::{LoadThresholdConfig, ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -40,6 +40,10 @@ use crate::picker::{
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+// The Frontend reads the same variables for its `--active-*-threshold` flags.
+const DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD: &str = "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD";
+const DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD: &str = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD";
+const DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: &str = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC";
 
 /// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
 /// only one prompt of a multi-prompt text batch (routing-only, matching
@@ -79,6 +83,44 @@ fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
             "Invalid {DYN_KUBE_DISCOVERY_MODE} value {mode:?}; valid values are 'pod' and 'container'"
         ),
     }
+}
+
+/// The router's load thresholds from the environment. Each is opt-in; with none
+/// set, overload detection stays off. A set but invalid value fails startup
+/// rather than silently leaving shedding off.
+fn load_thresholds_from_env() -> Result<LoadThresholdConfig> {
+    load_thresholds_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn load_thresholds_from_lookup(
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<LoadThresholdConfig> {
+    fn parse<T: std::str::FromStr>(
+        get: &impl Fn(&str) -> Option<String>,
+        key: &str,
+    ) -> Result<Option<T>> {
+        let Some(raw) = get(key) else {
+            return Ok(None);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        raw.parse()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("invalid value for {key}: {raw:?}"))
+    }
+
+    let config = LoadThresholdConfig {
+        active_decode_blocks_threshold: parse(&get, DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD)?,
+        active_prefill_tokens_threshold: parse(&get, DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD)?,
+        active_prefill_tokens_threshold_frac: parse(
+            &get,
+            DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC,
+        )?,
+    };
+    config.validate().map_err(anyhow::Error::msg)?;
+    Ok(config)
 }
 
 fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
@@ -162,6 +204,7 @@ impl Router {
         // generation-suffixed worker namespace changes during a rolling update.
         let mut kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        let load_thresholds = load_thresholds_from_env()?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
@@ -183,6 +226,14 @@ impl Router {
                 enable_eagle,
             )
             .await?;
+        // The prefill router below shares this handle.
+        if load_thresholds.is_configured() {
+            decode_router
+                .load_context()
+                .load_thresholds()
+                .update(&load_thresholds);
+            tracing::info!(?load_thresholds, "Router load thresholds configured");
+        }
 
         // Wait for runtime config watch to populate
         {
@@ -1659,6 +1710,46 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thresholds(vars: &[(&str, &str)]) -> Result<LoadThresholdConfig> {
+        load_thresholds_from_lookup(|key| {
+            vars.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    #[test]
+    fn load_thresholds_parse_from_env() {
+        assert!(!thresholds(&[]).unwrap().is_configured());
+        assert!(
+            !thresholds(&[(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, " ")])
+                .unwrap()
+                .is_configured()
+        );
+
+        let config = thresholds(&[
+            (DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, "0.85"),
+            (DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD, "8192"),
+            (DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC, "1.5"),
+        ])
+        .unwrap();
+        assert_eq!(config.active_decode_blocks_threshold, Some(0.85));
+        assert_eq!(config.active_prefill_tokens_threshold, Some(8192));
+        assert_eq!(config.active_prefill_tokens_threshold_frac, Some(1.5));
+    }
+
+    #[test]
+    fn invalid_load_thresholds_fail_startup() {
+        for (key, value) in [
+            (DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, "0.85x"),
+            (DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, "1.5"),
+            (DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD, "-1"),
+            (DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC, "-0.5"),
+        ] {
+            assert!(thresholds(&[(key, value)]).is_err(), "{key}={value}");
+        }
+    }
     use k8s_openapi::api::core::v1::Pod;
 
     use std::sync::{Arc, atomic::Ordering};

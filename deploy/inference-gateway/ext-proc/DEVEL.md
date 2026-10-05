@@ -136,6 +136,9 @@ The common local environment variables are:
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
 | `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. `container` (intra-pod GMS failover) is supported under the default `DYN_EPP_MODE=dynamo`, which resolves per-container worker identities from reflected Pods. `DYN_EPP_MODE=standalone` rejects it at startup: standalone selects workers from the Pod's aggregate `Ready` condition, which a pod holding an intentionally-standby engine container never satisfies. Standalone support is planned rather than ruled out, tracked by [DEP #11661](https://github.com/ai-dynamo/dynamo/issues/11661) (EPP Embedded SelectionService Interface). |
+| `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | unset | Dynamo mode. KV-cache block utilization (`0.0`–`1.0`) above which a decode worker counts as overloaded. Same variable as the Frontend's `--active-decode-blocks-threshold`. |
+| `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | unset | Dynamo mode. Active prefill tokens above which a worker counts as overloaded. Same variable as the Frontend's `--active-prefill-tokens-threshold`. |
+| `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | unset | Dynamo mode. Prefill threshold as a fraction of the worker's `max_num_batched_tokens`. Same variable as the Frontend's `--active-prefill-tokens-threshold-frac`. |
 | `RUST_LOG` | `info` | Tracing log filter. |
 
 ## Cleaning
