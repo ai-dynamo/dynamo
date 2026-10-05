@@ -53,7 +53,7 @@ pub struct NvCreateCompletionRequest {
     #[serde(
         flatten,
         default,
-        skip_serializing,
+        serialize_with = "validate::serialize_passthrough_fields",
         deserialize_with = "validate::deserialize_extra_fields"
     )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
@@ -327,7 +327,7 @@ impl CommonExtProvider for NvCreateCompletionRequest {
         self.common.skip_special_tokens
     }
 
-    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+    fn get_prompt_logprobs_count(&self) -> Option<i64> {
         self.common.prompt_logprobs
     }
 }
@@ -510,7 +510,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
         self.inner.logprobs.map(|logprobs| logprobs as u32)
     }
 
-    fn get_prompt_logprobs(&self) -> Option<u32> {
+    fn get_prompt_logprobs(&self) -> Option<i64> {
         self.common.prompt_logprobs.or_else(|| {
             self.inner
                 .echo
@@ -535,8 +535,21 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        common::prompt_logprobs::public_count_to_wire(self.common.prompt_logprobs).map_err(
+            |error| {
+                super::compatibility::rejection::CompatibilityRejection::invalid_prompt_logprobs()
+                    .attach(error)
+            },
+        )?;
         validate::validate_chat_only_generation_flags(&self.unsupported_fields)?;
-        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_no_unsupported_fields_for_endpoint(
+            &self.unsupported_fields,
+            super::compatibility::profile::Endpoint::Completion,
+        )?;
+        validate::validate_logprob_token_selection(
+            &self.unsupported_fields,
+            self.inner.logprobs.is_some(),
+        )?;
         validate::validate_guided_decoding(self)?;
         validate::validate_model(&self.inner.model)?;
 

@@ -24,6 +24,10 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        engine_config.local_model().legacy_vllm_targets().is_empty(),
+        "legacy vLLM targets are currently supported only by the HTTP frontend"
+    );
     crate::kv_router::plugins::RouterPluginBuilder::default()
         .validate_config(&engine_config.local_model().router_config().kv_router_config)?;
 

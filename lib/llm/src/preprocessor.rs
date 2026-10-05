@@ -1659,6 +1659,7 @@ impl EmbeddingTokenizerState {
 }
 
 pub struct OpenAIPreprocessor {
+    legacy_vllm_target: Option<crate::protocols::common::legacy_vllm::LegacyVllmRelease>,
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
@@ -1945,7 +1946,9 @@ impl OpenAIPreprocessor {
         request: &R,
         reasoning_parser_configured: bool,
         reasoning_ended: Option<bool>,
-    ) -> Option<serde_json::Value> {
+        runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
+        legacy_vllm_target: Option<crate::protocols::common::legacy_vllm::LegacyVllmRelease>,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
         let mut extra_args = serde_json::Map::new();
 
         if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
@@ -1956,9 +1959,12 @@ impl OpenAIPreprocessor {
         }
 
         if let Some(sampling_passthrough) = Self::sampling_passthrough_args(request) {
-            extra_args.insert(
-                "sampling_options".to_string(),
-                serde_json::Value::Object(sampling_passthrough),
+            extra_args.extend(
+                crate::protocols::common::backend_extensions::lower_sampling_passthrough_for_target(
+                    sampling_passthrough,
+                    runtime_config,
+                    legacy_vllm_target,
+                )?,
             );
         }
 
@@ -1979,9 +1985,9 @@ impl OpenAIPreprocessor {
         }
 
         if extra_args.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some(serde_json::Value::Object(extra_args))
+            Ok(Some(serde_json::Value::Object(extra_args)))
         }
     }
 
@@ -2383,6 +2389,13 @@ impl OpenAIPreprocessor {
         }
     }
 
+    pub(crate) fn set_legacy_vllm_target(
+        &mut self,
+        target: Option<crate::protocols::common::legacy_vllm::LegacyVllmRelease>,
+    ) {
+        self.legacy_vllm_target = target;
+    }
+
     /// Build the preprocessor used by token-input embedding pipelines.
     pub fn new_for_embeddings(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         if !mdc.model_type.supports_embedding() {
@@ -2744,6 +2757,7 @@ impl OpenAIPreprocessor {
         };
 
         Ok(Arc::new(Self {
+            legacy_vllm_target: None,
             formatter,
             tokenizer,
             embedding_tokenizers,
@@ -3032,6 +3046,10 @@ impl OpenAIPreprocessor {
         // for parsers that need special tokens preserved, unless the caller
         // has explicitly set `skip_special_tokens`.
         let mut output_options = request.extract_output_options()?;
+        crate::protocols::common::prompt_logprobs::validate_full_vocab_count(
+            output_options.prompt_logprobs,
+            Some(&self.runtime_config),
+        )?;
         if output_options.skip_special_tokens.is_none()
             && Self::parser_requires_special_tokens(
                 self.tool_call_parser.as_deref(),
@@ -3104,7 +3122,9 @@ impl OpenAIPreprocessor {
             request,
             self.runtime_config.reasoning_parser.is_some(),
             None,
-        ) {
+            &self.runtime_config,
+            self.legacy_vllm_target,
+        )? {
             builder.extra_args(Some(extra_args));
         }
 
@@ -3793,7 +3813,9 @@ impl OpenAIPreprocessor {
                     self.runtime_config.reasoning_parser.as_deref(),
                     formatted_prompt,
                 ),
-            ) {
+                &self.runtime_config,
+                self.legacy_vllm_target,
+            )? {
                 let extra_args_obj = extra_args
                     .as_object_mut()
                     .expect("multimodal extra_args must be an object");
@@ -10141,7 +10163,17 @@ mod tests {
         }))
         .unwrap();
 
-        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false, None).unwrap();
+        let mut runtime = crate::local_model::runtime_config::ModelRuntimeConfig::default();
+        runtime
+            .set_engine_specific(
+                crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                true,
+            )
+            .unwrap();
+        let extra_args =
+            OpenAIPreprocessor::backend_extra_args(&request, false, None, &runtime, None)
+                .unwrap()
+                .unwrap();
 
         assert_eq!(extra_args["nvext"]["cache_salt"], "step_7");
         assert_eq!(
@@ -10361,8 +10393,15 @@ mod tests {
                 }))
                 .unwrap();
 
-            let extra_args =
-                OpenAIPreprocessor::backend_extra_args(&request, true, Some(false)).unwrap();
+            let extra_args = OpenAIPreprocessor::backend_extra_args(
+                &request,
+                true,
+                Some(false),
+                &Default::default(),
+                None,
+            )
+            .unwrap()
+            .unwrap();
 
             assert_eq!(
                 extra_args["reasoning_parser_kwargs"]["chat_template_kwargs"],
@@ -10388,8 +10427,15 @@ mod tests {
         }))
         .unwrap();
 
-        let extra_args =
-            OpenAIPreprocessor::backend_extra_args(&request, false, Some(false)).unwrap();
+        let extra_args = OpenAIPreprocessor::backend_extra_args(
+            &request,
+            false,
+            Some(false),
+            &Default::default(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(extra_args["sampling_options"]["detokenize"], false);
         assert!(extra_args.get("reasoning_parser_kwargs").is_none());
@@ -10405,7 +10451,43 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(OpenAIPreprocessor::backend_extra_args(&request, true, None).is_none());
+        assert!(
+            OpenAIPreprocessor::backend_extra_args(&request, true, None, &Default::default(), None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_backend_extra_args_uses_explicit_legacy_target_without_worker_capability() {
+        use crate::protocols::common::legacy_vllm::LegacyVllmRelease;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "allowed_token_ids": [0, 7]
+        }))
+        .unwrap();
+        let runtime = Default::default();
+        assert!(
+            OpenAIPreprocessor::backend_extra_args(&request, false, None, &runtime, None).is_err()
+        );
+        for release in [LegacyVllmRelease::Dynamo14, LegacyVllmRelease::Dynamo15] {
+            let args = OpenAIPreprocessor::backend_extra_args(
+                &request,
+                false,
+                None,
+                &runtime,
+                Some(release),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                args["sampling_options"]["allowed_token_ids"],
+                serde_json::json!([0, 7])
+            );
+            assert!(args.get("backend_extensions").is_none());
+        }
     }
 
     /// Verifies the SGLang reasoning gate covers forced tool JSON and

@@ -12,6 +12,7 @@ use crate::{
             timing::RequestTracker,
         },
         openai::{
+            compatibility::{profile::Endpoint, telemetry},
             convert_backend_top_logprobs,
             delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
         },
@@ -37,8 +38,11 @@ impl NvCreateChatCompletionRequest {
             self.nvext(),
         );
         let mut generator = DeltaGenerator::new(self.inner.model.clone(), options, request_id);
-        // Omitted top_logprobs means zero alternatives.
-        generator.top_logprobs_limit = Some(usize::from(self.inner.top_logprobs.unwrap_or(0)));
+        let explicit_token_selection = self.has_logprob_token_selection();
+        // Native vLLM returns all explicitly selected IDs (plus the sampled
+        // token); otherwise omitted top_logprobs means zero alternatives.
+        generator.top_logprobs_limit = (!explicit_token_selection)
+            .then_some(usize::from(self.inner.top_logprobs.unwrap_or(0)));
         generator.capture_prompt_logprobs = self.common.prompt_logprobs.is_some();
         generator
     }
@@ -311,7 +315,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let prompt_logprobs_payload = if self.capture_prompt_logprobs
             || self.state.options().response_fields.prompt_logprobs
         {
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+            telemetry::decode_prompt_logprobs(Endpoint::Chat, delta.engine_data.as_ref())?
         } else {
             None
         };
@@ -842,6 +846,58 @@ mod tests {
             serde_json::to_value(&content[0].top_logprobs).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
+    }
+
+    #[test]
+    fn test_chat_logprob_selection_overrides_top_count_only_when_nonempty() {
+        for selection in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([2]),
+        ] {
+            for requested_top in [None, Some(0), Some(1)] {
+                let mut request = create_test_request();
+                request.inner.logprobs = Some(true);
+                request.inner.top_logprobs = requested_top;
+                request
+                    .unsupported_fields
+                    .insert("logprob_token_ids".into(), selection.clone());
+                let generator = request.response_generator("selected-logprobs".into());
+                let alternatives = vec![common::llm_backend::TopLogprob {
+                    rank: 2,
+                    token_id: 2,
+                    token: Some("other".into()),
+                    logprob: -1.0,
+                    bytes: Some(b"other".to_vec()),
+                }];
+                let content = generator
+                    .create_logprobs(
+                        vec![Some("hello".into())],
+                        &[1],
+                        Some(vec![-0.5]),
+                        Some(vec![alternatives]),
+                    )
+                    .unwrap()
+                    .content
+                    .unwrap();
+                let selected = selection.as_array().is_some_and(|ids| !ids.is_empty());
+                let expected_len = if selected {
+                    2
+                } else {
+                    usize::from(requested_top.unwrap_or(0))
+                };
+                assert_eq!(
+                    content[0].top_logprobs.len(),
+                    expected_len,
+                    "selection={selection}, top={requested_top:?}"
+                );
+                assert_eq!(content[0].logprob, -0.5);
+                if selected {
+                    assert_eq!(content[0].top_logprobs[0].token, "other");
+                    assert_eq!(content[0].top_logprobs[1].token, "hello");
+                }
+            }
+        }
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {

@@ -3,13 +3,54 @@
 
 use dynamo_llm::protocols::common::extensions::NvExt;
 use dynamo_llm::protocols::{
-    common::StopConditionsProvider,
+    common::{OutputOptionsProvider, StopConditionsProvider},
     openai::{
         chat_completions::NvCreateChatCompletionRequest,
         common_ext::{CommonExt, CommonExtProvider},
         completions::NvCreateCompletionRequest,
     },
 };
+
+#[test]
+fn signed_prompt_logprobs_roundtrip_and_unsigned_wire_are_distinct() {
+    use dynamo_llm::engines::ValidateRequest;
+    for count in [-2_i64, -1, 0, 1, i64::from(u32::MAX)] {
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test", "messages":[{"role":"user","content":"hello"}], "prompt_logprobs":count,
+        }))
+        .unwrap();
+        let completion: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test", "prompt":"hello", "prompt_logprobs":count,
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&chat).unwrap()["prompt_logprobs"],
+            count
+        );
+        assert_eq!(
+            serde_json::to_value(&completion).unwrap()["prompt_logprobs"],
+            count
+        );
+        let valid = (-1..i64::from(u32::MAX)).contains(&count);
+        assert_eq!(ValidateRequest::validate(&chat).is_ok(), valid);
+        assert_eq!(ValidateRequest::validate(&completion).is_ok(), valid);
+        for output in [
+            chat.extract_output_options(),
+            completion.extract_output_options(),
+        ] {
+            assert_eq!(output.is_ok(), valid);
+            if valid {
+                let output = output.unwrap();
+                let wire = if count == -1 { u32::MAX } else { count as u32 };
+                assert_eq!(output.prompt_logprobs, Some(wire));
+                assert_eq!(
+                    serde_json::to_value(output).unwrap()["prompt_logprobs"],
+                    wire
+                );
+            }
+        }
+    }
+}
 
 #[test]
 fn test_chat_completions_ignore_eos_from_common() {

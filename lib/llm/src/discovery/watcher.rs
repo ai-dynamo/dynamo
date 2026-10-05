@@ -26,7 +26,7 @@ use dynamo_renderer::PromptFormatter;
 use crate::{
     backend::Backend,
     discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
-    entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
+    entrypoint::{self, ChatEngineFactory, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
@@ -47,6 +47,10 @@ use crate::{
                 NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             },
             classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
+            compatibility::{
+                admission::TargetAdmission,
+                profile::{CompatibilityProfile, Endpoint, PipelineContext},
+            },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
@@ -191,7 +195,7 @@ pub struct ModelWatcher {
     model_update_tx: Option<Sender<ModelUpdate>>,
     model_update_dispatch:
         parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModelUpdate>>>,
-    chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    chat_engine_factory: Option<ChatEngineFactory>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
     /// Frontend's `--model-path`. Threaded into `download_config` so
@@ -270,7 +274,7 @@ impl ModelWatcher {
         router_config: RouterConfig,
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
-        chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        chat_engine_factory: Option<ChatEngineFactory>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
@@ -294,7 +298,7 @@ impl ModelWatcher {
         router_config: RouterConfig,
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
-        chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        chat_engine_factory: Option<ChatEngineFactory>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
         plugins: RouterPluginBuilder,
@@ -676,6 +680,7 @@ impl ModelWatcher {
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
                         router_config.session_affinity_mode,
+                        self.manager.legacy_vllm_target(&client.endpoint.id(), card),
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -699,14 +704,20 @@ impl ModelWatcher {
                         )
                         .context("PreprocessedRouting::build_preprocessed_pipeline")?;
                     Some(
-                        factory(mcid.clone(), card.clone(), routed_engine)
+                        factory
+                            .create(mcid.clone(), card.clone(), routed_engine)
                             .await
                             .context("python chat_engine_factory")?,
                     )
                 } else if let Some(tk) = tokenizer.clone() {
                     // Only chat pipelines use speculative prefill.
-                    let preprocessor =
+                    let mut preprocessor =
                         worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?;
+                    Arc::get_mut(&mut preprocessor)
+                        .context("new chat preprocessor has one owner")?
+                        .set_legacy_vllm_target(
+                            self.manager.legacy_vllm_target(&client.endpoint.id(), card),
+                        );
                     Some(
                         routing
                             .build_pipeline::<
@@ -746,9 +757,14 @@ impl ModelWatcher {
                 if let Some(tk) = tokenizer {
                     let formatter = PromptFormatter::no_op();
                     let PromptFormatter::OAI(formatter) = formatter;
-                    let preprocessor =
+                    let mut preprocessor =
                         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
                             .context("OpenAIPreprocessor::new_with_parts")?;
+                    Arc::get_mut(&mut preprocessor)
+                        .context("new completion preprocessor has one owner")?
+                        .set_legacy_vllm_target(
+                            self.manager.legacy_vllm_target(&client.endpoint.id(), card),
+                        );
                     let routing = preprocessed_routing.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("completions pipeline requires preprocessed routing")
                     })?;
@@ -1009,6 +1025,40 @@ impl ModelWatcher {
                 card.model_input.as_str()
             );
         }
+
+        // Bind admission to this committed cohort's card, not a model-global
+        // guess. Apply before either Rust or Python preprocessing changes stream
+        // mode, and cover text-input workers as well as token-input workers.
+        let admission = TargetAdmission::from_runtime(&card.runtime_config);
+        let legacy_target = self
+            .manager
+            .legacy_vllm_target(&model_card_endpoint_id(mcid), card);
+        let pipeline_context = |endpoint| {
+            PipelineContext::from_pipeline(
+                endpoint,
+                card.model_input,
+                card.worker_type,
+                self.chat_engine_factory
+                    .as_ref()
+                    .map(ChatEngineFactory::identity),
+            )
+        };
+        worker_set.chat_engine = worker_set.chat_engine.take().map(|engine| {
+            let profile = CompatibilityProfile::new(
+                admission,
+                Endpoint::Chat,
+                pipeline_context(Endpoint::Chat),
+            );
+            profile.wrap(engine, &card.runtime_config, legacy_target)
+        });
+        worker_set.completions_engine = worker_set.completions_engine.take().map(|engine| {
+            let profile = CompatibilityProfile::new(
+                admission,
+                Endpoint::Completion,
+                pipeline_context(Endpoint::Completion),
+            );
+            profile.wrap(engine, &card.runtime_config, legacy_target)
+        });
 
         Ok(PreparedWorkerSet::new(worker_set, card.clone()))
     }

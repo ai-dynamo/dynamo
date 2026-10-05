@@ -66,6 +66,7 @@ use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+use crate::protocols::openai::compatibility::rejection::CompatibilityFailure;
 use crate::protocols::openai::{
     ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
@@ -187,7 +188,11 @@ fn completion_error_response((status, Json(mut error)): ErrorResponse) -> Respon
                 .and_then(dynamo_runtime::error::PublicParameter::new)
                 .map(|parameter| parameter.as_str().to_owned());
         }
-        None
+        (details["schema_version"] == 1
+            && (details["profile"].is_object()
+                || (details["stage"] == "request_validation" && details["profile"].is_null())))
+        .then(|| details["field"].as_str().map(str::to_owned))
+        .flatten()
     });
     if error
         .details
@@ -892,6 +897,25 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        // Frontend-local annotations are not transported as worker public details.
+        // Preserve canonical classification and sanitization before attaching them.
+        let compatibility = err
+            .downcast_ref::<CompatibilityFailure>()
+            .map(|failure| failure.details)
+            .filter(|_| {
+                find_canonical_error_in_chain(err.as_ref())
+                    .is_some_and(|error| error.class() == ErrorClass::InvalidRequest)
+            });
+        let mut response = Self::from_anyhow_inner(err, alt_msg);
+        if let Some(details) = compatibility
+            && response.0 == StatusCode::BAD_REQUEST
+        {
+            response.1.details = serde_json::to_value(details).ok().map(Box::new);
+        }
+        response
+    }
+
+    fn from_anyhow_inner(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
         if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
             let code = overload_status_code();
             record_local_failure(ErrorClass::CapacityExhausted);
@@ -6063,7 +6087,9 @@ mod tests {
                                 error_type: "Unprocessable Entity".into(),
                                 code: 422,
                                 details: Some(Box::new(serde_json::json!({
-                                    "validation_marker": "retained"
+                                    "schema_version": 1,
+                                    "profile": {"framework": "vllm"},
+                                    "field": "prompt_logprobs"
                                 }))),
                                 metric_error_type: None,
                             }),
@@ -6107,8 +6133,8 @@ mod tests {
                 assert_eq!(body["error"]["code"], 400);
                 assert_eq!(body["error"]["type"], "BadRequestError");
                 assert_eq!(body["error"]["message"], "safe validation message");
-                assert!(body["error"]["param"].is_null());
-                assert_eq!(body["error"]["details"]["validation_marker"], "retained");
+                assert_eq!(body["error"]["param"], "prompt_logprobs");
+                assert_eq!(body["error"]["details"]["schema_version"], 1);
             } else {
                 assert!(body.get("error").is_none());
                 assert_eq!(body["code"], 400);
@@ -6148,6 +6174,299 @@ mod tests {
             assert_eq!(body["error"]["code"], 400);
             assert!(body["error"].get("param").unwrap().is_null());
             assert!(body["error"].get("details").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn compatibility_rejection_details_reach_both_http_endpoints() {
+        use crate::local_model::runtime_config::ModelRuntimeConfig;
+        use crate::protocols::openai::compatibility::{
+            admission::TargetAdmission,
+            profile::{CompatibilityProfile, Endpoint as ProfileEndpoint, PipelineContext},
+        };
+        use dynamo_runtime::CancellationToken;
+        use serde_json::json;
+
+        let service = service_v2::HttpService::builder()
+            .enable_chat_endpoints(true)
+            .enable_cmpl_endpoints(true)
+            .build()
+            .unwrap();
+        let runtime = ModelRuntimeConfig::default();
+        let model = "private-model-name";
+        let profiles = [ProfileEndpoint::Chat, ProfileEndpoint::Completion].map(|endpoint| {
+            CompatibilityProfile::new(
+                TargetAdmission::Vllm030,
+                endpoint,
+                PipelineContext::from_pipeline(
+                    endpoint,
+                    crate::model_type::ModelInput::Tokens,
+                    Some(crate::worker_type::WorkerType::Aggregated),
+                    None,
+                ),
+            )
+        });
+        let echo = Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ));
+        service
+            .model_manager()
+            .add_chat_completions_model(
+                model,
+                "test",
+                profiles[0].wrap(echo.clone(), &runtime, None),
+            )
+            .unwrap();
+        service
+            .model_manager()
+            .add_completions_model(model, "test", profiles[1].wrap(echo, &runtime, None))
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let task = service.spawn_with_listener(cancel.clone(), listener).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+        for profile in profiles {
+            for (count, stream, kind, stage) in [
+                (-2, false, "invalid_value", "request_validation"),
+                (1, true, "unsafe_combination", "admission"),
+                (-1, true, "unsafe_combination", "admission"),
+                (-1, false, "unsupported_field", "backend_capability"),
+            ] {
+                let mut request = json!({"model":model,"stream":stream,"prompt_logprobs":count});
+                if profile.endpoint == ProfileEndpoint::Chat {
+                    request["messages"] = json!([{"role":"user","content":"private-prompt"}]);
+                } else {
+                    request["prompt"] = json!("private-prompt");
+                }
+                let url = format!("http://127.0.0.1:{port}{}", profile.endpoint.as_str());
+                let response = client.post(&url).json(&request).send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                assert!(
+                    response.headers()["content-type"]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("application/json")
+                );
+                let body: serde_json::Value = response.json().await.unwrap();
+                assert_eq!(body.as_object().unwrap().len(), 1);
+                let error = &body["error"];
+                assert_eq!(error["code"], 400);
+                assert_eq!(error["type"], "BadRequestError");
+                assert_eq!(error["param"], "prompt_logprobs");
+                assert_eq!(error["details"]["schema_version"], 1);
+                assert_eq!(error["details"]["field"], "prompt_logprobs");
+                assert_eq!(error["details"]["kind"], kind);
+                assert_eq!(error["details"]["stage"], stage);
+                assert_eq!(
+                    error["details"]["profile"],
+                    if stage == "request_validation" {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::to_value(profile).unwrap()
+                    }
+                );
+                assert!(
+                    !error["details"]["alternatives"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(!body.to_string().contains("private-"));
+
+                // Same registered pipeline works when the unsupported feature is omitted.
+                request.as_object_mut().unwrap().remove("prompt_logprobs");
+                request["stream"] = json!(false);
+                let response = client.post(url).json(&request).send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            for stream in [false, true] {
+                for (field, value, enable_logprobs, kind, stage) in [
+                    (
+                        "allowed_token_ids",
+                        json!(["private-value"]),
+                        true,
+                        "invalid_value",
+                        "request_validation",
+                    ),
+                    (
+                        "bad_words_token_ids",
+                        json!([31415]),
+                        true,
+                        "invalid_value",
+                        "request_validation",
+                    ),
+                    (
+                        "logprob_token_ids",
+                        json!([-31415]),
+                        true,
+                        "invalid_value",
+                        "request_validation",
+                    ),
+                    (
+                        "logprob_token_ids",
+                        json!([31415]),
+                        false,
+                        "unsafe_combination",
+                        "request_validation",
+                    ),
+                    (
+                        "watermarking",
+                        json!({"private-key":"private-value"}),
+                        true,
+                        "unsupported_field",
+                        "request_validation",
+                    ),
+                    (
+                        "allowed_token_ids",
+                        json!([31415]),
+                        true,
+                        "unsupported_field",
+                        "backend_capability",
+                    ),
+                    (
+                        "bad_words_token_ids",
+                        json!([[31415]]),
+                        true,
+                        "unsupported_field",
+                        "backend_capability",
+                    ),
+                    (
+                        "logprob_token_ids",
+                        json!([31415]),
+                        true,
+                        "unsupported_field",
+                        "backend_capability",
+                    ),
+                ] {
+                    let mut request = json!({"model":model, "stream":stream, field:value});
+                    if profile.endpoint == ProfileEndpoint::Chat {
+                        request["messages"] = json!([{"role":"user","content":"private-prompt"}]);
+                        request["logprobs"] = json!(enable_logprobs);
+                    } else {
+                        request["prompt"] = json!("private-prompt");
+                        if enable_logprobs {
+                            request["logprobs"] = json!(0);
+                        }
+                    }
+                    let response = client
+                        .post(format!(
+                            "http://127.0.0.1:{port}{}",
+                            profile.endpoint.as_str()
+                        ))
+                        .json(&request)
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::BAD_REQUEST,
+                        "{field}: {stage}"
+                    );
+                    let body: serde_json::Value = response.json().await.unwrap();
+                    assert_eq!(body["error"]["param"], field, "{body}");
+                    assert_eq!(body["error"]["details"]["field"], field, "{body}");
+                    assert_eq!(body["error"]["details"]["kind"], kind, "{body}");
+                    assert_eq!(body["error"]["details"]["stage"], stage, "{body}");
+                    assert_eq!(
+                        body["error"]["details"]["profile"],
+                        if stage == "request_validation" {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::to_value(profile).unwrap()
+                        }
+                    );
+                    assert!(!body.to_string().contains("private-"), "{body}");
+                    assert!(!body.to_string().contains("31415"), "{body}");
+                }
+            }
+            let response = client
+                .post(format!(
+                    "http://127.0.0.1:{port}{}",
+                    profile.endpoint.as_str()
+                ))
+                .header("content-type", "application/json")
+                .body("{")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(body.as_object().unwrap().len(), 1);
+            assert_eq!(body["error"]["type"], "BadRequestError");
+            assert_eq!(body["error"]["code"], 400);
+            assert!(body["error"].get("param").unwrap().is_null());
+        }
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/v1/models/missing"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], 404);
+        assert!(
+            body.get("error").is_none(),
+            "unrelated routes keep their contract"
+        );
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn compatibility_rejection_context_preserves_classification_and_privacy() {
+        use crate::protocols::openai::compatibility::{
+            admission::TargetAdmission,
+            profile::{CompatibilityProfile, Endpoint, PipelineContext},
+            rejection::{CompatibilityRejection, RejectionKind, RejectionStage},
+        };
+        let profile = CompatibilityProfile::new(
+            TargetAdmission::Unidentified,
+            Endpoint::Chat,
+            PipelineContext::from_pipeline(
+                Endpoint::Chat,
+                crate::model_type::ModelInput::Tokens,
+                None,
+                None,
+            ),
+        );
+        let details = CompatibilityRejection::prompt_logprobs(
+            profile,
+            RejectionKind::InvalidValue,
+            RejectionStage::Admission,
+            &["Use a valid count"],
+        );
+        for (error, expected_status) in [
+            (
+                crate::protocols::common::invalid_argument_error("safe field rejection"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                anyhow::anyhow!("private-worker-diagnostic"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let error = details.attach(error).context("private-outer-context");
+            let response = ErrorMessage::from_anyhow(error, "Request failed");
+            assert_eq!(response.0, expected_status);
+            let body = serde_json::to_value(response.1.0).unwrap();
+            assert!(!body.to_string().contains("private-"));
+            if expected_status == StatusCode::BAD_REQUEST {
+                assert_eq!(body["message"], "safe field rejection");
+                assert_eq!(body["details"]["kind"], "invalid_value");
+                assert_eq!(body["details"]["profile"]["target"], "unidentified");
+            } else {
+                assert!(body.get("details").is_none());
+            }
         }
     }
 
@@ -9084,7 +9403,8 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             let msg = &error_response.1.message;
-            assert!(msg.contains("Unsupported parameter"));
+            assert!(msg.contains("Unsupported native-server parameter(s)"));
+            assert!(msg.contains("cannot be ignored"));
             // Verify all fields appear in the error message
             assert!(msg.contains("add_special_tokens"));
             assert!(msg.contains("documents"));
@@ -9117,7 +9437,8 @@ mod tests {
         if let Err(error_response) = result {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             let msg = &error_response.1.message;
-            assert!(msg.contains("Unsupported parameter"));
+            assert!(msg.contains("Unsupported native-server parameter(s)"));
+            assert!(msg.contains("cannot be ignored"));
             // Verify both fields appear in error message
             assert!(msg.contains("add_special_tokens"));
             assert!(msg.contains("response_format"));

@@ -119,47 +119,51 @@ mod tests {
             Some(json!(0)),
             Some(json!(1)),
         ] {
-            let mut body = json!({
-                "model": "null-control", "messages": [], "logprobs": true,
-                "min_tokens": 0, "metadata": {"top_logprobs": null},
-                "nvext": {"extra_fields": ["prompt_logprobs"]},
-            });
-            if let Some(value) = &top {
-                body["top_logprobs"] = value.clone();
-            }
-            let expected = if top.as_ref().is_some_and(serde_json::Value::is_null) {
-                None
-            } else {
-                Some(
+            for selected in [false, true] {
+                let mut body = json!({
+                    "model": "null-control", "messages": [], "logprobs": true,
+                    "min_tokens": 0, "metadata": {"top_logprobs": null},
+                    "nvext": {"extra_fields": ["prompt_logprobs"]},
+                    "logprob_token_ids": if selected {vec![0]} else {vec![]},
+                });
+                if let Some(value) = &top {
+                    body["top_logprobs"] = value.clone();
+                }
+                let expected = if top.as_ref().is_some_and(serde_json::Value::is_null) && !selected
+                {
+                    None
+                } else {
+                    Some(
+                        top.as_ref()
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0) as u32,
+                    )
+                };
+                let request: NvCreateChatCompletionRequest =
+                    serde_json::from_str(&body.to_string()).unwrap();
+                assert_eq!(request.get_logprobs(), expected);
+                let serialized = serde_json::to_value(&request).unwrap();
+                assert_eq!(serialized.get("top_logprobs"), top.as_ref());
+                assert!(serialized.get("top_logprobs_explicit_null").is_none());
+                assert_eq!(serialized["min_tokens"], 0);
+                assert_eq!(serialized["nvext"], body["nvext"]);
+                assert_eq!(serialized["metadata"], body["metadata"]);
+                let unified = UnifiedRequest::from(request);
+                assert_eq!(unified.get_logprobs(), expected);
+                let restored = UnifiedRequest::from(
+                    serde_json::from_value::<NvCreateChatCompletionRequest>(
+                        serde_json::to_value(unified.inner).unwrap(),
+                    )
+                    .unwrap(),
+                );
+                assert_eq!(restored.get_logprobs(), expected);
+                assert_eq!(
+                    serde_json::to_value(restored.inner)
+                        .unwrap()
+                        .get("top_logprobs"),
                     top.as_ref()
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0) as u32,
-                )
-            };
-            let request: NvCreateChatCompletionRequest =
-                serde_json::from_str(&body.to_string()).unwrap();
-            assert_eq!(request.get_logprobs(), expected);
-            let serialized = serde_json::to_value(&request).unwrap();
-            assert_eq!(serialized.get("top_logprobs"), top.as_ref());
-            assert!(serialized.get("top_logprobs_explicit_null").is_none());
-            assert_eq!(serialized["min_tokens"], 0);
-            assert_eq!(serialized["nvext"], body["nvext"]);
-            assert_eq!(serialized["metadata"], body["metadata"]);
-            let unified = UnifiedRequest::from(request);
-            assert_eq!(unified.get_logprobs(), expected);
-            let restored = UnifiedRequest::from(
-                serde_json::from_value::<NvCreateChatCompletionRequest>(
-                    serde_json::to_value(unified.inner).unwrap(),
-                )
-                .unwrap(),
-            );
-            assert_eq!(restored.get_logprobs(), expected);
-            assert_eq!(
-                serde_json::to_value(restored.inner)
-                    .unwrap()
-                    .get("top_logprobs"),
-                top.as_ref()
-            );
+                );
+            }
         }
     }
 

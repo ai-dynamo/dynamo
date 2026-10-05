@@ -18,6 +18,7 @@ from vllm.v1.outputs import LogprobsLists
 def wants_sample_logprobs(request: dict[str, Any]) -> bool:
     return request.get("logprobs") is True and (
         request.get("top_logprobs", 0) is not None
+        or bool(request.get("logprob_token_ids"))
     )
 
 
@@ -100,6 +101,7 @@ def chat_logprob_content(
         raise ValueError("Misaligned generated logprobs from vLLM output processor")
     return_ids = bool(request.get("return_tokens_as_token_ids"))
     count = request.get("top_logprobs", 0)
+    return_all = bool(request.get("logprob_token_ids")) or count == -1
 
     def text_for(token_id, entry):
         if return_ids:
@@ -117,7 +119,7 @@ def chat_logprob_content(
         sampled = entries[token_id]
         alternatives = []
         for index, (candidate_id, entry) in enumerate(entries.items()):
-            if count is None or index >= count:
+            if not return_all and (count is None or index >= count):
                 break
             token = text_for(candidate_id, entry)
             alternatives.append(

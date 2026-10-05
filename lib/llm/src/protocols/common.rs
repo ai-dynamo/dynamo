@@ -55,12 +55,15 @@ pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Erro
         .into()
 }
 
+pub mod backend_extensions;
 pub mod extensions;
 pub mod input_trigger;
+pub mod legacy_vllm;
 pub mod llm_backend;
 pub mod metrics;
 pub mod postprocessor;
 pub mod preprocessor;
+pub mod prompt_logprobs;
 pub mod timing;
 
 /// SamplingOptionsProvider is a trait that allows the caller to extract the sampling options from

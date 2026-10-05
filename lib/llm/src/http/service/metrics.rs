@@ -52,14 +52,18 @@ fn new_failure_counter(metrics_prefix: Option<&str>) -> IntCounterVec {
 
 /// Process-wide because protocol error renderers can run without a request-scoped `Metrics`.
 static FAILURE_METRICS_PREFIX: OnceLock<String> = OnceLock::new();
-pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    let prefix = FAILURE_METRICS_PREFIX.get_or_init(|| {
+pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> =
+    LazyLock::new(|| new_failure_counter(Some(process_metrics_prefix())));
+
+/// Shared by process-wide protocol counters and terminal-failure counters.
+/// Explicit service configuration wins if supplied before either is initialized.
+pub(crate) fn process_metrics_prefix() -> &'static str {
+    FAILURE_METRICS_PREFIX.get_or_init(|| {
         let raw = std::env::var(env_metrics::DYN_METRICS_PREFIX)
             .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
         sanitize_frontend_prometheus_prefix(&raw)
-    });
-    new_failure_counter(Some(prefix.as_str()))
-});
+    })
+}
 
 fn record_failure_into(counter: &IntCounterVec, error: &DynamoError) {
     counter
@@ -1463,6 +1467,9 @@ impl Metrics {
         registry.register(Box::new(self.images_per_request.clone()))?;
         registry.register(Box::new(self.videos_per_request.clone()))?;
         registry.register(Box::new(DYNAM_FAILURES_TOTAL.clone()))?;
+        registry.register(Box::new(
+            crate::protocols::openai::compatibility::telemetry::PROTOCOL_DECISIONS.clone(),
+        ))?;
         registry.register(Box::new(self.audio_per_request.clone()))?;
         registry.register(Box::new(self.image_tokens_per_request.clone()))?;
 

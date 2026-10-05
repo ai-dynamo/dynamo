@@ -27,6 +27,7 @@ from dynamo.common.configuration.utils import (
     env_or_default,
     parse_bool,
 )
+from dynamo.common.legacy_vllm import LegacyVllmTargets
 
 from . import __version__
 
@@ -103,10 +104,21 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    legacy_vllm_targets: Optional[str] = None
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
+        if self.legacy_vllm_targets is not None:
+            targets = LegacyVllmTargets.from_json(self.legacy_vllm_targets)
+            if targets.declarations and (
+                self.interactive
+                or self.kserve_grpc_server
+                or self.chat_processor == "sglang"
+            ):
+                raise ValueError(
+                    "--legacy-vllm-targets requires the HTTP frontend with dynamo or vllm chat processing"
+                )
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_router_config()
@@ -632,6 +644,16 @@ class FrontendArgGroup(ArgGroup):
                 "parsing, and reasoning parsing."
             ),
             choices=["dynamo", "vllm", "sglang"],
+        )
+
+        g.add_argument(
+            "--legacy-vllm-targets",
+            default=None,
+            help=(
+                "JSON array of exact deployment scopes and pinned legacy Dynamo/vLLM releases. "
+                "Operator-declared fallback only; does not override worker capabilities. "
+                "Each entry requires namespace, component, endpoint, model, worker_type, dynamo_release."
+            ),
         )
 
         add_negatable_bool_argument(

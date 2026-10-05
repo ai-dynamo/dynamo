@@ -624,6 +624,9 @@ pub struct KvWorkerMonitor {
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
     start_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Share the already-owned discovery snapshot with dispatch capability checks.
+    /// This receiver does not create a second discovery task or extend its lifecycle.
+    runtime_configs: Arc<std::sync::OnceLock<super::RuntimeConfigWatch>>,
     lifecycle: Arc<MonitorLifecycle>,
 }
 
@@ -655,11 +658,16 @@ impl KvWorkerMonitor {
             thresholds,
             started: Arc::new(AtomicBool::new(false)),
             start_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_configs: Arc::new(std::sync::OnceLock::new()),
             lifecycle: Arc::new(MonitorLifecycle {
                 cancellation_token,
                 task_guard,
             }),
         }
+    }
+
+    pub(crate) fn runtime_configs(&self) -> Option<&super::RuntimeConfigWatch> {
+        self.runtime_configs.get()
     }
 
     /// Returns true iff the user explicitly configured at least one threshold.
@@ -782,6 +790,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let task_guard = self.lifecycle.task_guard.clone();
 
         // Spawn background monitoring task
+        self.runtime_configs
+            .set(runtime_configs_rx.clone())
+            .map_err(|_| anyhow::anyhow!("worker runtime-config watch already installed"))?;
         self.started.store(true, Ordering::Release);
         tokio::spawn(async move {
             let _task_guard = task_guard;

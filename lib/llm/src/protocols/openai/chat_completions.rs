@@ -152,13 +152,20 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(
         flatten,
         default,
-        skip_serializing,
+        serialize_with = "validate::serialize_passthrough_fields",
         deserialize_with = "validate::deserialize_extra_fields"
     )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl NvCreateChatCompletionRequest {
+    pub(crate) fn has_logprob_token_selection(&self) -> bool {
+        self.unsupported_fields
+            .get("logprob_token_ids")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|ids| !ids.is_empty())
+    }
+
     pub(crate) fn has_null_top_logprobs(&self) -> bool {
         self.top_logprobs_explicit_null && self.inner.top_logprobs.is_none()
     }
@@ -551,7 +558,7 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
         self.common.skip_special_tokens
     }
 
-    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+    fn get_prompt_logprobs_count(&self) -> Option<i64> {
         self.common.prompt_logprobs
     }
 }
@@ -617,7 +624,7 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
 
 impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     fn get_logprobs(&self) -> Option<u32> {
-        if self.has_null_top_logprobs() {
+        if self.has_null_top_logprobs() && !self.has_logprob_token_selection() {
             return None;
         }
         match self.inner.logprobs {
@@ -630,7 +637,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
         }
     }
 
-    fn get_prompt_logprobs(&self) -> Option<u32> {
+    fn get_prompt_logprobs(&self) -> Option<i64> {
         // Top-level `prompt_logprobs` is carried through CommonExt.
         self.common.prompt_logprobs
     }
@@ -652,7 +659,21 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
-        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        crate::protocols::common::prompt_logprobs::public_count_to_wire(
+            self.common.prompt_logprobs,
+        )
+        .map_err(|error| {
+            super::compatibility::rejection::CompatibilityRejection::invalid_prompt_logprobs()
+                .attach(error)
+        })?;
+        validate::validate_no_unsupported_fields_for_endpoint(
+            &self.unsupported_fields,
+            super::compatibility::profile::Endpoint::Chat,
+        )?;
+        validate::validate_logprob_token_selection(
+            &self.unsupported_fields,
+            self.inner.logprobs == Some(true),
+        )?;
         validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;

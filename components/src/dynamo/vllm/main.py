@@ -14,11 +14,13 @@ if TYPE_CHECKING:
     from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
+import vllm
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -51,6 +53,12 @@ from dynamo.llm import (
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.protocol_extensions import (
+    CAPABILITY_KEY,
+    PROMPT_LOGPROBS_CAPABILITY_KEY,
+    prompt_logprobs_capability,
+    protocol_capability,
+)
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -838,6 +846,17 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    # Resolved against the running engine's installed type, not static CLI policy.
+    # Older frontends ignore this additive metadata and keep their legacy writer.
+    runtime_config.set_engine_specific(
+        CAPABILITY_KEY,
+        json.dumps(protocol_capability(SamplingParams(), vllm.__version__)),
+    )
+    if not config.embedding_worker and worker_type != WorkerType.Encode:
+        runtime_config.set_engine_specific(
+            PROMPT_LOGPROBS_CAPABILITY_KEY,
+            json.dumps(prompt_logprobs_capability(vllm_config.model_config)),
+        )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)

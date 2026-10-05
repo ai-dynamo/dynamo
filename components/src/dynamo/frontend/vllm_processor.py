@@ -31,6 +31,7 @@ from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutp
 from vllm.v1.engine.parallel_sampling import ParentRequest
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.legacy_vllm import LegacyVllmRelease, LegacyVllmTargets
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsSender,
@@ -41,7 +42,15 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.errors import vllm_client_error_to_http_error
+from dynamo.vllm.protocol_extensions import (
+    SAMPLING_FIELDS,
+    ProtocolExtensionError,
+    lower_sampling_extensions,
+    prompt_logprobs_model_limit,
+    prompt_logprobs_to_wire,
+)
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
@@ -423,10 +432,14 @@ class VllmProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        backend_runtime_data: dict[str, Any] | None = None,
+        legacy_vllm_target: LegacyVllmRelease | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
         self.routed_engine = routed_engine
+        self.backend_runtime_data = backend_runtime_data or {}
+        self.legacy_vllm_target = legacy_vllm_target
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
@@ -637,6 +650,11 @@ class VllmProcessor:
             # with this hierarchy. Preserve vLLM's 400/404/422 distinction at
             # Dynamo's HTTP boundary.
             raise vllm_client_error_to_http_error(exc) from exc
+        except ProtocolExtensionError as error:
+            # This contract error contains only reviewed field names and static
+            # reasons, never request values. Mark it explicitly public; generic
+            # HttpError messages are intentionally sanitized at the HTTP boundary.
+            raise InvalidArgument(str(error)) from error
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
@@ -708,9 +726,15 @@ class VllmProcessor:
             if v is not None:
                 setattr(sampling_params, k, v)
         # Native chat converts the boolean request into a count, preserving
-        # explicit null and the omitted-count default of zero.
+        # explicit null. A nonempty selection instead derives its own width.
         sampling_params.logprobs = (
-            request_for_sampling.top_logprobs if request_for_sampling.logprobs else None
+            request_for_sampling.top_logprobs
+            if request_for_sampling.logprobs
+            and not request_for_sampling.logprob_token_ids
+            else None
+        )
+        sampling_params.logprob_token_ids = (
+            request_for_sampling.logprob_token_ids or None
         )
         # nvext.max_thinking_tokens is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
@@ -781,13 +805,22 @@ class VllmProcessor:
             },
             "output_options": {
                 "logprobs": sp.logprobs,
-                "prompt_logprobs": sp.prompt_logprobs,
+                "prompt_logprobs": prompt_logprobs_to_wire(
+                    sp.prompt_logprobs, self.backend_runtime_data
+                ),
                 "skip_special_tokens": sp.skip_special_tokens,
             },
             "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
             "routing": request.get("routing"),
         }
+        extension_args = lower_sampling_extensions(
+            {name: request[name] for name in SAMPLING_FIELDS if name in request},
+            self.backend_runtime_data,
+            legacy_target=self.legacy_vllm_target,
+        )
+        if extension_args:
+            dynamo_preproc["extra_args"] = extension_args
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         if reasoning_metadata.engine_reasoning_ended is not None:
@@ -1180,6 +1213,9 @@ class EngineFactory:
         flags: Namespace,
     ):
         self.config = config
+        self.legacy_vllm_targets = LegacyVllmTargets.from_json(
+            config.legacy_vllm_targets or "[]"
+        )
         self.flags = flags
         self.stream_interval = 20
         raw_stream_interval = os.getenv("DYN_VLLM_STREAM_INTERVAL")
@@ -1227,12 +1263,16 @@ class EngineFactory:
         trust_remote_code = self.config.trust_remote_code
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
+        backend_runtime_data = mdc.runtime_config().get("runtime_data", {})
         model_config_kwargs = {
             "model": local_dir,
             "tokenizer_mode": tokenizer_mode,
             "config_format": config_format,
             "trust_remote_code": trust_remote_code,
         }
+        worker_logprob_limit = prompt_logprobs_model_limit(backend_runtime_data)
+        if worker_logprob_limit is not None:
+            model_config_kwargs["max_logprobs"] = worker_logprob_limit
         context_length = _runtime_config_context_length(mdc)
         if context_length:
             os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
@@ -1347,6 +1387,10 @@ class EngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            backend_runtime_data=backend_runtime_data,
+            legacy_vllm_target=self.legacy_vllm_targets.resolve(
+                *instance_id.triple(), mdc.name(), mdc.worker_type(), mdc.model_input()
+            ),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

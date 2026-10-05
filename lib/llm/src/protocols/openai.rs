@@ -19,6 +19,7 @@ pub mod batches;
 pub mod chat_completions;
 pub mod classify;
 pub mod common_ext;
+pub(crate) mod compatibility;
 pub mod completions;
 pub(crate) mod delta_common;
 pub mod embeddings;
@@ -132,7 +133,7 @@ pub(crate) trait OpenAIStopConditionsProvider {
 pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_logprobs(&self) -> Option<u32>;
 
-    fn get_prompt_logprobs(&self) -> Option<u32>;
+    fn get_prompt_logprobs(&self) -> Option<i64>;
 
     fn get_skip_special_tokens(&self) -> Option<bool>;
 
@@ -264,7 +265,8 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
 impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
     fn extract_output_options(&self) -> Result<common::OutputOptions> {
         let logprobs = self.get_logprobs();
-        let prompt_logprobs = self.get_prompt_logprobs();
+        let prompt_logprobs =
+            common::prompt_logprobs::public_count_to_wire(self.get_prompt_logprobs())?;
         let skip_special_tokens = self.get_skip_special_tokens();
         let formatted_prompt = self.get_formatted_prompt();
         let return_tokens_as_token_ids = self.get_return_tokens_as_token_ids();

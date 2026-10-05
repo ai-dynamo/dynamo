@@ -95,6 +95,10 @@ from dynamo.vllm.kv_connector_protocols import (
     make_kv_connector_protocol,
 )
 from dynamo.vllm.kv_hints import _apply_kv_hint, publish_kv_hint_capabilities
+from dynamo.vllm.protocol_extensions import (
+    ProtocolExtensionError,
+    apply_sampling_extensions,
+)
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -846,6 +850,30 @@ def _serialize_routed_experts(
     }
 
 
+def _set_sampling_option_or_reject(
+    sampling_params: SamplingParams, key: str, value: Any
+) -> None:
+    """Preserve an explicit directive or reject it at the adapter boundary."""
+    if value is None:
+        return
+    if not hasattr(sampling_params, key):
+        # Typed public parsing does not prove engine support. Newer vLLM releases
+        # removed beam-search/best-of SamplingParams. False and zero are explicit
+        # directives too. Only echo bounded known names, never arbitrary wire keys.
+        field = (
+            key
+            if key
+            in {"best_of", "use_beam_search", "length_penalty", "thinking_token_budget"}
+            else "sampling_options"
+        )
+        raise InvalidArgument(
+            f"vLLM protocol field `{field}` rejected at adapter: "
+            "installed engine cannot preserve this sampling option. "
+            "Remove the field or use a compatible serving path."
+        )
+    setattr(sampling_params, key, value)
+
+
 def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
@@ -880,10 +908,6 @@ def build_sampling_params(
     # Handle guided_decoding - convert to StructuredOutputsParams
     sampling_options = dict(request.get("sampling_options") or {})
     extra_args = request.get("extra_args") or {}
-    if isinstance(extra_args, dict):
-        passthrough_sampling_options = extra_args.get("sampling_options")
-        if isinstance(passthrough_sampling_options, dict):
-            sampling_options.update(passthrough_sampling_options)
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         json_schema = guided_decoding.get("json")
@@ -917,8 +941,12 @@ def build_sampling_params(
                 )
             sampling_params._bad_words_token_ids = value
             continue
-        if value is not None and hasattr(sampling_params, key):
-            setattr(sampling_params, key, value)
+        _set_sampling_option_or_reject(sampling_params, key, value)
+
+    try:
+        apply_sampling_extensions(sampling_params, request)
+    except ProtocolExtensionError as error:
+        raise InvalidArgument(str(error)) from error
 
     # routed_experts_prompt_start (RL capture offset) must be a non-negative
     # int; reject bad client values so the worker emits a sane `start` instead
@@ -1070,6 +1098,7 @@ def build_sampling_params_openai(
     # Map common OpenAI parameters to SamplingParams
     openai_mapping = {
         "n": "n",
+        "best_of": "best_of",
         "temperature": "temperature",
         "top_p": "top_p",
         "presence_penalty": "presence_penalty",
@@ -1083,9 +1112,8 @@ def build_sampling_params_openai(
     }
 
     for req_key, param_key in openai_mapping.items():
-        if req_key in request and request[req_key] is not None:
-            if hasattr(sampling_params, param_key):
-                setattr(sampling_params, param_key, request[req_key])
+        if req_key in request:
+            _set_sampling_option_or_reject(sampling_params, param_key, request[req_key])
 
     # Handle max_tokens
     if "max_tokens" in request and request["max_tokens"] is not None:
@@ -1104,10 +1132,9 @@ def build_sampling_params_openai(
         sampling_params.min_tokens = request["min_tokens"]
 
     thinking_token_budget = resolve_thinking_token_budget(request)
-    if thinking_token_budget is not None and hasattr(
-        sampling_params, "thinking_token_budget"
-    ):
-        sampling_params.thinking_token_budget = thinking_token_budget
+    _set_sampling_option_or_reject(
+        sampling_params, "thinking_token_budget", thinking_token_budget
+    )
 
     return sampling_params
 

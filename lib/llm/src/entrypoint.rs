@@ -42,6 +42,72 @@ pub type ChatEngineFactoryCallback = Arc<
         + Sync,
 >;
 
+/// Identity declared by the frontend registering a chat processor, never by a
+/// worker card or inferred from a callback's name. This is not a capability grant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChatProcessorIdentity {
+    #[default]
+    Custom,
+    Vllm,
+    Sglang,
+}
+
+impl ChatProcessorIdentity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::Vllm => "vllm",
+            Self::Sglang => "sglang",
+        }
+    }
+}
+
+impl std::str::FromStr for ChatProcessorIdentity {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "custom" => Ok(Self::Custom),
+            "vllm" => Ok(Self::Vllm),
+            "sglang" => Ok(Self::Sglang),
+            _ => Err("chat_engine_factory_identity must be custom, vllm, or sglang"),
+        }
+    }
+}
+
+/// Keep the registration's identity attached to the callback across pipeline
+/// construction. Custom callbacks must not inherit a built-in processor profile.
+#[derive(Clone)]
+pub struct ChatEngineFactory {
+    callback: ChatEngineFactoryCallback,
+    identity: ChatProcessorIdentity,
+}
+
+impl ChatEngineFactory {
+    pub fn new(callback: ChatEngineFactoryCallback, identity: ChatProcessorIdentity) -> Self {
+        Self { callback, identity }
+    }
+
+    pub fn identity(&self) -> ChatProcessorIdentity {
+        self.identity
+    }
+
+    pub async fn create(
+        &self,
+        instance: ModelCardInstanceId,
+        card: ModelDeploymentCard,
+        routed_engine: PrefillRoutedEngine,
+    ) -> anyhow::Result<OpenAIChatCompletionsStreamingEngine> {
+        (self.callback)(instance, card, routed_engine).await
+    }
+}
+
+impl From<ChatEngineFactoryCallback> for ChatEngineFactory {
+    fn from(callback: ChatEngineFactoryCallback) -> Self {
+        Self::new(callback, ChatProcessorIdentity::Custom)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
@@ -93,7 +159,7 @@ pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
     Dynamic {
         model: Box<LocalModel>,
-        chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        chat_engine_factory: Option<ChatEngineFactory>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     },
 
@@ -124,7 +190,7 @@ impl EngineConfig {
         }
     }
 
-    pub fn chat_engine_factory(&self) -> Option<&ChatEngineFactoryCallback> {
+    pub fn chat_engine_factory(&self) -> Option<&ChatEngineFactory> {
         match self {
             EngineConfig::Dynamic {
                 chat_engine_factory,
