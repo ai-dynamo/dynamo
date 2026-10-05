@@ -176,15 +176,26 @@ def test_apply_thinking_budget_uses_runtime_parser_for_auto_config():
     assert actual == {"custom_params": {"thinking_budget": 32}}
 
 
-def test_apply_thinking_budget_rejects_custom_logit_processor():
+def test_apply_thinking_budget_ignores_unforwarded_custom_logit_processor():
     request = {
         "stop_conditions": {"max_thinking_tokens": 32},
         "custom_logit_processor": "serialized-processor",
         "require_reasoning": True,
     }
 
-    with pytest.raises(InvalidArgument, match="custom_logit_processor"):
-        apply_thinking_budget(request, {}, _server_args())
+    assert apply_thinking_budget(request, {}, _server_args()) == {
+        "custom_params": {"thinking_budget": 32}
+    }
+
+
+def test_apply_thinking_budget_accepts_null_forwarded_custom_params():
+    request = {
+        "stop_conditions": {"max_thinking_tokens": 32},
+        "require_reasoning": True,
+    }
+    assert apply_thinking_budget(request, {"custom_params": None}, _server_args()) == {
+        "custom_params": {"thinking_budget": 32}
+    }
 
 
 def test_apply_thinking_budget_rejects_sampling_param_custom_logit_processor():

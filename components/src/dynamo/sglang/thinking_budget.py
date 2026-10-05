@@ -109,22 +109,6 @@ def _token_filter_is_active(reasoning_parser: str) -> bool:
     return bool(parser.detector.think_excluded_tokens)
 
 
-def _reject_custom_logit_processor(
-    request: Mapping[str, Any], sampling_params: Mapping[str, Any]
-) -> None:
-    sampling_options = request.get("sampling_options")
-    custom_processor = sampling_params.get("custom_logit_processor")
-    if custom_processor is None:
-        custom_processor = request.get("custom_logit_processor")
-    if custom_processor is None and isinstance(sampling_options, Mapping):
-        custom_processor = sampling_options.get("custom_logit_processor")
-    if custom_processor is not None:
-        raise InvalidArgument(
-            "thinking_token_budget cannot be combined with custom_logit_processor "
-            "because SGLang applies custom processors after its reasoning-token mask"
-        )
-
-
 def apply_thinking_budget(
     request: Mapping[str, Any],
     sampling_params: Mapping[str, Any],
@@ -162,7 +146,12 @@ def apply_thinking_budget(
         )
 
     _validate_server_config(server_args, engine)
-    _reject_custom_logit_processor(request, result)
+    # Disaggregated multimodal requests can forward backend sampling parameters.
+    if result.get("custom_logit_processor") is not None:
+        raise InvalidArgument(
+            "thinking_token_budget cannot be combined with custom_logit_processor "
+            "because SGLang applies custom processors after its reasoning-token mask"
+        )
 
     custom_params = result.get("custom_params")
     if custom_params is None:
