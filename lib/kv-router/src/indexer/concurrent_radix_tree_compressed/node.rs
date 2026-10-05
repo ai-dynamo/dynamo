@@ -228,7 +228,6 @@ impl Node {
         self.children.get(&local_hash)
     }
 
-    /// Borrows a child for the life of `guard`; see [`NodeChildren::get_ref`].
     pub(super) fn child_ref<'g>(
         &'g self,
         local_hash: LocalBlockHash,
