@@ -136,6 +136,7 @@ def _utf8_bytes(token: str | None) -> list[int] | None:
 def _chat_choice_logprobs(
     records: list[dict[str, Any]],
     top_count: int | None,
+    return_tokens_as_token_ids: bool = False,
 ) -> dict[str, Any] | None:
     """Build OpenAI ``choices[].logprobs`` from normalized worker records.
 
@@ -144,6 +145,8 @@ def _chat_choice_logprobs(
     including the sampled token. The content entry keeps the sampled token.
     ``top_logprobs`` on the entry is the rank-sorted prefix of length
     ``top_count``. ``0`` is an empty list. ``token_id`` is omitted.
+    ``return_tokens_as_token_ids`` formats every token and its bytes as
+    ``token_id:<id>``.
     """
     if not records:
         return None
@@ -174,9 +177,21 @@ def _chat_choice_logprobs(
                 entry_logprob = float(raw_entry["logprob"])
             except (TypeError, ValueError):
                 continue
-            entry_bytes = raw_entry.get("bytes")
-            if not isinstance(entry_bytes, list):
+            raw_token_id = raw_entry.get("token_id")
+            entry_token_id = (
+                raw_token_id
+                if isinstance(raw_token_id, int) and not isinstance(raw_token_id, bool)
+                else None
+            )
+            if return_tokens_as_token_ids:
+                if entry_token_id is None:
+                    continue
+                token = f"token_id:{entry_token_id}"
                 entry_bytes = _utf8_bytes(token)
+            else:
+                entry_bytes = raw_entry.get("bytes")
+                if not isinstance(entry_bytes, list):
+                    entry_bytes = _utf8_bytes(token)
             if (
                 isinstance(top_count, int)
                 and not isinstance(top_count, bool)
@@ -190,15 +205,18 @@ def _chat_choice_logprobs(
                         "bytes": entry_bytes,
                     }
                 )
-            raw_token_id = raw_entry.get("token_id")
-            try:
-                matches_selected = int(raw_token_id) == int(token_id)
-            except (TypeError, ValueError):
-                matches_selected = False
-            if matches_selected and selected_token is None:
+            if (
+                not return_tokens_as_token_ids
+                and entry_token_id is not None
+                and entry_token_id == token_id
+                and selected_token is None
+            ):
                 selected_token = token
                 selected_bytes = entry_bytes
-        if selected_token is None:
+        if return_tokens_as_token_ids:
+            selected_token = f"token_id:{token_id}"
+            selected_bytes = _utf8_bytes(selected_token)
+        elif selected_token is None:
             selected_token = ""
             selected_bytes = None
         content.append(
@@ -271,6 +289,7 @@ def _apply_choice_logprobs(
     pending: list[dict[str, Any]],
     emitted_ids: list[int],
     top_count: int | None,
+    return_tokens_as_token_ids: bool = False,
 ) -> None:
     """Attach logprobs for the token ids this output processor yield exposed.
 
@@ -285,7 +304,7 @@ def _apply_choice_logprobs(
     chunk can align again. Hidden reasoning drops both buffers. An emitted
     choice with nothing to attach sets ``logprobs`` to None.
     """
-    if top_count is None or getattr(post, "_suppress_reasoning_output", False):
+    if top_count is None or post._suppress_reasoning_output:
         pending.clear()
         emitted_ids.clear()
         if choice is not None:
@@ -312,7 +331,11 @@ def _apply_choice_logprobs(
     if taken is None or not taken:
         choice["logprobs"] = None
         return
-    choice["logprobs"] = _chat_choice_logprobs(taken, top_count)
+    choice["logprobs"] = _chat_choice_logprobs(
+        taken,
+        top_count,
+        return_tokens_as_token_ids=return_tokens_as_token_ids,
+    )
 
 
 class _ReasoningUsageAnnotator:
@@ -1213,6 +1236,7 @@ class VllmProcessor:
             request.get("logprobs"),
             request.get("top_logprobs"),
         )
+        return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -1337,6 +1361,7 @@ class VllmProcessor:
                                 pending_choice_logprobs.setdefault(output.index, []),
                                 emitted_choice_tokens.setdefault(output.index, []),
                                 choice_top_logprobs,
+                                return_tokens_as_token_ids=return_tokens_as_token_ids,
                             )
                         if choice:
                             choices.append(choice)
