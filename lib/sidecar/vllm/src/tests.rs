@@ -214,7 +214,11 @@ impl pb::inference_server::Inference for FakeVllm {
             "remote_block_ids": [7, 8],
             "nested": {"flags": [true, null, "opaque"]},
         });
-        let encoder_handoff = encoder_handoff();
+        let has_media = |modality| request.media.iter().any(|item| item.modality() == modality);
+        let encoder_handoff = encoder_handoff_for(
+            has_media(pb::Modality::Image),
+            has_media(pb::Modality::Video),
+        );
         let encoder_response = self.encoder_response.load(Ordering::SeqCst);
         let omit_encoder_metadata = self.omit_encoder_metadata.load(Ordering::SeqCst);
         let hang = self.hang.load(Ordering::SeqCst);
@@ -1511,6 +1515,22 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
 
 #[tokio::test]
 async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_image_request()).await;
+}
+
+#[tokio::test]
+async fn video_encoder_cache_handoff_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_video_request()).await;
+    assert_encoder_cache_handoff(epd_image_video_request()).await;
+}
+
+async fn assert_encoder_cache_handoff(mut source_request: PreprocessedRequest) {
+    let expected_media = expected_wire_media(&source_request);
+    let has_media = |modality| expected_media.iter().any(|(kind, _, _)| *kind == modality);
+    let expected_ec = encoder_handoff_for(
+        has_media(pb::Modality::Image),
+        has_media(pb::Modality::Video),
+    );
     let service = FakeVllm::default();
     service.encoder_response.store(true, Ordering::SeqCst);
     let discovered = multimodal_model_info();
@@ -1524,7 +1544,6 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         discovered.clone(),
     );
     encoder.start(0).await.expect("start encoder");
-    let mut source_request = epd_image_request();
     source_request
         .routing
         .as_mut()
@@ -1539,7 +1558,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         .encoder_result
         .clone()
         .expect("encoder result");
-    assert_eq!(encoder_result, encoder_handoff());
+    assert_eq!(encoder_result, expected_ec);
     assert_eq!(
         server
             .service
@@ -1555,9 +1574,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
     {
         let requests = server.service.requests.lock().await;
         let encode_wire = requests.last().expect("encode request");
-        assert_eq!(encode_wire.media.len(), 2);
-        assert_eq!(encode_wire.media[0].uuid, "image-a");
-        assert_eq!(encode_wire.media[1].uuid, "image-b");
+        assert_eq!(wire_media(encode_wire), expected_media);
         assert!(
             encode_wire
                 .kv
@@ -1596,9 +1613,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             .last()
             .cloned()
             .expect("downstream request");
-        assert_eq!(downstream_wire.media.len(), 2, "{topology}");
-        assert_eq!(downstream_wire.media[0].uuid, "image-a", "{topology}");
-        assert_eq!(downstream_wire.media[1].uuid, "image-b", "{topology}");
+        assert_eq!(wire_media(&downstream_wire), expected_media, "{topology}");
         let forwarded_ec = struct_to_json_v14(
             downstream_wire
                 .kv
@@ -1609,7 +1624,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             "ec_transfer_params",
         )
         .expect("EC metadata JSON");
-        assert_eq!(forwarded_ec, encoder_handoff(), "{topology}");
+        assert_eq!(forwarded_ec, expected_ec, "{topology}");
 
         if mode.is_prefill() {
             let mut decode_request = downstream_request;
@@ -1642,9 +1657,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
                 .last()
                 .cloned()
                 .expect("decode request");
-            assert_eq!(decode_wire.media.len(), 2);
-            assert_eq!(decode_wire.media[0].uuid, "image-a");
-            assert_eq!(decode_wire.media[1].uuid, "image-b");
+            assert_eq!(wire_media(&decode_wire), expected_media);
             let decode_cache = decode_wire.kv.expect("decode cache parameters");
             assert!(decode_cache.kv_transfer_params.is_some());
             let decode_ec = struct_to_json_v14(
@@ -1653,7 +1666,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
                 "ec_transfer_params",
             )
             .expect("decode EC metadata JSON");
-            assert_eq!(decode_ec, encoder_handoff());
+            assert_eq!(decode_ec, expected_ec);
         }
     }
 }
