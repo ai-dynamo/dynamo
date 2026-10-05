@@ -22,6 +22,7 @@ from tests.utils.payloads import (
     ImageTokenMetricsPayload,
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
+    LoraEmbeddingPayload,
     LoraTestChatPayload,
     MetricsPayload,
     PoolingPayload,
@@ -154,6 +155,26 @@ def cached_tokens_chat_payload(
         or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
         min_cached_tokens=min_cached_tokens,
         router_nvext_expectation=router_nvext_expectation,
+    )
+
+
+def lora_embedding_payload(
+    lora_name: str,
+    s3_uri: str,
+    base_model: str,
+    input_data: str,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    repeat_count: int = 1,
+) -> LoraEmbeddingPayload:
+    """Embedding payload that loads a LoRA adapter, then embeds through it."""
+    return LoraEmbeddingPayload(
+        body={"model": lora_name, "input": input_data},
+        lora_name=lora_name,
+        s3_uri=s3_uri,
+        base_model=base_model,
+        system_port=system_port,
+        repeat_count=repeat_count,
+        expected_response=["Generated 1 embeddings"],
     )
 
 

@@ -24,6 +24,7 @@ import dynamo.vllm.handlers as mod
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.vllm.lora_state import LoRAState
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
@@ -2417,7 +2418,7 @@ class TestRLAdminRouteHardening:
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler._paused = False
-        handler._lora_state = mod.LoRAState()
+        handler._lora_state = LoRAState()
         handler.engine_client = MagicMock()
         handler.engine_client.pause_generation = AsyncMock()
         handler._lora_state.begin_request("adapterA")

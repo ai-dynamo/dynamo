@@ -57,6 +57,9 @@ def _make_config(**overrides) -> Mock:
         "gms_shadow_mode": False,
         "realtime": False,
         "classify_worker": False,
+        # An unconfigured Mock attribute is truthy, which would spuriously
+        # enable the LoRA lifecycle endpoints on every pooling worker test.
+        "engine_args": SimpleNamespace(enable_lora=False),
     }
     defaults.update(overrides)
     return Mock(**defaults)
@@ -1112,6 +1115,11 @@ class TestPrefillRegistrationContract:
         monkeypatch.setattr(
             "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
         )
+        # Prefill gates its lifecycle routes on the combined predicate, so the
+        # engine flag alone no longer registers them.
+        monkeypatch.setattr(
+            "dynamo.common.lora.manager.get_lora_manager", lambda: Mock()
+        )
 
         config = _make_config(
             disaggregation_mode=DisaggregationMode.PREFILL,
@@ -1158,12 +1166,25 @@ class TestPrefillRegistrationContract:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lora_enabled", [True, False])
+@pytest.mark.parametrize(
+    ("engine_lora_enabled", "manager_ready", "expect_endpoints"),
+    [
+        (True, True, True),
+        # The engine flag alone must fail closed: registering the routes would
+        # advertise adapter capacity this worker cannot honour, and an
+        # adapter-named request would be answered from the base weights.
+        (True, False, False),
+        (False, True, False),
+        (False, False, False),
+    ],
+)
 @pytest.mark.parametrize("snapshot_mode", [True, False])
 async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
-    lora_enabled: bool,
+    engine_lora_enabled: bool,
+    manager_ready: bool,
+    expect_endpoints: bool,
     snapshot_mode: bool,
 ) -> None:
     engine_client = Mock()
@@ -1212,6 +1233,10 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
         "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
     )
     monkeypatch.setattr(
+        "dynamo.common.lora.manager.get_lora_manager",
+        (lambda: Mock()) if manager_ready else (lambda: None),
+    )
+    monkeypatch.setattr(
         "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (3, 2)
     )
     stat_logger_factory = Mock(return_value=stat_logger)
@@ -1241,7 +1266,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
         frontend_decoding=False,
         enable_multimodal=False,
         enable_rl=False,
-        engine_args=SimpleNamespace(enable_lora=lora_enabled),
+        engine_args=SimpleNamespace(enable_lora=engine_lora_enabled),
     )
     shutdown_endpoints: list = []
 
@@ -1275,7 +1300,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
         "dyn.prefill.unload_lora",
         "dyn.prefill.list_loras",
     }
-    if lora_enabled:
+    if expect_endpoints:
         assert lifecycle_names <= endpoints.keys()
         for name in lifecycle_names:
             endpoints[name].serve_endpoint.assert_awaited_once()
