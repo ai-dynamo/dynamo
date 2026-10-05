@@ -7,7 +7,6 @@ use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 use serde::Serialize;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -22,7 +21,8 @@ use crate::sequences::{
 };
 
 use crate::services::common::replica_sync::{
-    ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher, setup_scoped_replica_sync,
+    ReplicaInbox, ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher,
+    setup_scoped_replica_sync,
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -94,9 +94,9 @@ pub enum RegistryError {
 
 struct TrackerEntry {
     tracker: Arc<ActiveSequencesMultiWorker<ScopedSequencePublisher>>,
-    pub block_size: u32,
+    block_size: u32,
     lifecycle_lock: Mutex<()>,
-    replica_tx: Option<mpsc::Sender<crate::protocols::ActiveSequenceEvent>>,
+    replica_inbox: Option<ReplicaInbox>,
     cancel_token: CancellationToken,
 }
 
@@ -118,16 +118,16 @@ impl TrackerEntry {
             "standalone",
             ReplicaWorkerPolicy::RequireRegistered,
         ));
-        let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
+        let replica_inbox = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
             tracker.start_replica_sync(subscriber, cancel_token.clone());
-            replica_tx
+            ReplicaInbox::new(replica_tx)
         });
         tracker.start_periodic_force_expiry_across_all_workers(cancel_token.clone());
         Arc::new(Self {
             tracker,
             block_size,
             lifecycle_lock: Mutex::new(()),
-            replica_tx,
+            replica_inbox,
             cancel_token,
         })
     }
@@ -312,15 +312,23 @@ impl SlotTrackerRegistry {
         request_id: &str,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
-        let request_id = request_id.to_string();
-        let worker = entry.tracker.request_worker(&request_id);
-        let outcome = entry
-            .tracker
-            .mark_prefill_completed(&request_id, Instant::now())?;
-        if worker.is_none() && !outcome.is_applied() {
-            return Err(SequenceError::RequestNotFound { request_id }.into());
+        let not_found = || SequenceError::RequestNotFound {
+            request_id: request_id.to_string(),
+        };
+        let Some(booking) = entry.tracker.request_booking(request_id) else {
+            return Err(not_found().into());
+        };
+        let outcome = entry.tracker.mark_prefill_completed_if_booking(
+            &booking.request_id,
+            booking.worker,
+            booking.attempt_id,
+            Instant::now(),
+        )?;
+        // Already marked: republish the completion while this attempt is still
+        // live so peers that missed the first event converge.
+        if !outcome.is_applied() && !entry.tracker.publish_prefill_completed_if_booking(&booking) {
+            return Err(not_found().into());
         }
-        entry.tracker.publish_prefill_completed(&request_id);
         Ok(())
     }
 
@@ -407,43 +415,11 @@ impl SlotTrackerRegistry {
             .get(&key)
             .map(|entry| Arc::clone(entry.value()))
         else {
-            tracing::trace!(
-                model_name = %key.model_name,
-                routing_group = %key.routing_group,
-                "Dropping replica event for unknown slot tracker"
-            );
+            tracing::trace!(%key, "Dropping replica event for unknown slot tracker");
             return;
         };
-        if entry.block_size != block_size {
-            tracing::debug!(
-                model_name = %key.model_name,
-                routing_group = %key.routing_group,
-                expected_block_size = entry.block_size,
-                received_block_size = block_size,
-                "Dropping replica event with mismatched block size"
-            );
-            return;
-        }
-        let Some(replica_tx) = &entry.replica_tx else {
-            return;
-        };
-        match replica_tx.try_send(event) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(event)) => {
-                tracing::trace!(
-                    model_name = %key.model_name,
-                    routing_group = %key.routing_group,
-                    request_id = %event.request_id,
-                    "Replica subscriber channel full; dropping event"
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!(
-                    model_name = %key.model_name,
-                    routing_group = %key.routing_group,
-                    "Replica subscriber channel closed; dropping event"
-                );
-            }
+        if let Some(inbox) = &entry.replica_inbox {
+            inbox.deliver(&key, entry.block_size, block_size, event);
         }
     }
 
@@ -513,6 +489,8 @@ fn matches_filters(
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
+
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 
@@ -730,6 +708,52 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefill_complete_publishes_only_for_the_live_booking() {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let registry = SlotTrackerRegistry::new_with_replica_sync(
+            cancel_token.clone(),
+            ReplicaSyncConfig::new(7, outbound_tx, cancel_token),
+        );
+        let key = key("default");
+        let worker = WorkerWithDpRank::new(1, 0);
+        registry.register(key.clone(), 1, 16, 0, 1).unwrap();
+        registry
+            .add_request(&key, "req-1".to_string(), worker, vec![1, 2], 8)
+            .unwrap();
+        let mut next_event = || outbound_rx.try_recv().expect("published event").event;
+        assert!(matches!(
+            next_event().data,
+            ActiveSequenceEventData::AddRequest { .. }
+        ));
+
+        // A repeated completion republishes so peers that missed the first converge.
+        registry.mark_prefill_completed(&key, "req-1").unwrap();
+        registry.mark_prefill_completed(&key, "req-1").unwrap();
+        for _ in 0..2 {
+            let event = next_event();
+            assert!(matches!(
+                event.data,
+                ActiveSequenceEventData::MarkPrefillCompleted
+            ));
+            assert_eq!(event.worker, worker);
+        }
+
+        registry.free(&key, "req-1").unwrap();
+        assert!(matches!(next_event().data, ActiveSequenceEventData::Free));
+        assert!(matches!(
+            registry.mark_prefill_completed(&key, "req-1"),
+            Err(ServiceError::Sequence(
+                SequenceError::RequestNotFound { .. }
+            ))
+        ));
+        assert!(
+            outbound_rx.try_recv().is_err(),
+            "a freed request must not publish a completion"
+        );
     }
 
     #[tokio::test]
