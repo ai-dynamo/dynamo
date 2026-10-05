@@ -9,6 +9,7 @@
 //! forwarding permission and does not claim parity with a native server.
 
 pub(crate) mod admission;
+pub(crate) mod catalog;
 pub(crate) mod profile;
 pub(crate) mod rejection;
 pub(crate) mod telemetry;

@@ -38,6 +38,7 @@ use utoipa::OpenApi;
 use utoipa::openapi::{PathItem, Paths, RefOr};
 
 use crate::http::service::RouteDoc;
+use crate::protocols::openai::compatibility::profile::Endpoint;
 
 /// OpenAPI documentation structure
 ///
@@ -60,7 +61,9 @@ use crate::http::service::RouteDoc;
             crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
             crate::protocols::openai::completions::NvCreateCompletionRequest,
             crate::protocols::openai::embeddings::NvCreateEmbeddingRequest,
-            crate::protocols::openai::responses::NvCreateResponse
+            crate::protocols::openai::responses::NvCreateResponse,
+            crate::protocols::openai::compatibility::catalog::ModelCompatibilityCatalog,
+            crate::http::service::openai::CompletionErrorResponse
         )
     )
 )]
@@ -78,21 +81,12 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
     let mut paths = Paths::new();
 
     for route in route_docs {
-        let path_str = route.to_string();
-        tracing::debug!("Adding route to OpenAPI spec: {}", path_str);
-
-        // Parse the route to extract method and path
-        let parts: Vec<&str> = path_str.split_whitespace().collect();
-        if parts.len() != 2 {
-            tracing::warn!("Invalid route format: {}", path_str);
-            continue;
-        }
-
-        let method = parts[0];
-        let path = parts[1];
+        tracing::debug!("Adding route to OpenAPI spec: {}", route);
+        let method = route.method().as_str();
+        let path = route.path();
 
         // Add operation based on method
-        let operation = create_operation_for_route(method, path);
+        let operation = create_operation_for_route(route);
 
         // Create PathItem with the operation
         use utoipa::openapi::HttpMethod;
@@ -126,26 +120,57 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
 }
 
 /// Create an OpenAPI operation for a specific route
-fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path::Operation {
+fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operation {
     use utoipa::openapi::ResponseBuilder;
     use utoipa::openapi::path::OperationBuilder;
+
+    let method = route.method().as_str();
+    let path = route.path();
+    let completion_endpoint = route
+        .completion_endpoint
+        .filter(|_| route.method() == axum::http::Method::POST);
+    let description_path = completion_endpoint.map(Endpoint::as_str).unwrap_or(path);
 
     let operation_id = format!(
         "{}_{}",
         method.to_lowercase(),
         path.replace('/', "_").trim_matches('_')
     );
-    let summary = generate_summary_for_path(path);
-    let description = generate_description_for_path(path);
+    let (summary, description) = if completion_endpoint.is_none()
+        && matches!(path, "/v1/chat/completions" | "/v1/completions")
+    {
+        (
+            format!("Endpoint: {path}"),
+            format!("Endpoint for path: {path}"),
+        )
+    } else {
+        (
+            generate_summary_for_path(description_path),
+            generate_description_for_path(description_path),
+        )
+    };
 
     let mut operation = OperationBuilder::new()
         .operation_id(Some(operation_id))
         .summary(Some(summary))
         .description(Some(description));
 
+    if path.split('/').any(|segment| segment == "{model_id}") {
+        operation = operation.parameter(
+            utoipa::openapi::path::ParameterBuilder::new()
+                .name("model_id")
+                .parameter_in(utoipa::openapi::path::ParameterIn::Path)
+                .required(utoipa::openapi::Required::True)
+                .description(Some("Registered model ID, which may contain slashes. Exact registered names take precedence over diagnostic suffixes."))
+                .schema(Some(utoipa::openapi::ObjectBuilder::new()
+                    .schema_type(utoipa::openapi::schema::Type::String)))
+                .build(),
+        );
+    }
+
     // Add request body for POST methods
     if method.to_uppercase() == "POST" {
-        operation = add_request_body_for_path(operation, path);
+        operation = add_request_body_for_path(operation, path, completion_endpoint);
     }
 
     // Add responses
@@ -162,6 +187,18 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
             .description("Bad request - invalid input")
             .build(),
     );
+
+    if method == "GET" && path.ends_with("/{model_id}/compatibility") {
+        operation = operation
+            .summary(Some("Inspect registered pipeline admission rules"))
+            .description(Some("Dynamo-specific diagnostic snapshot, not routing eligibility or end-to-end conformance. Unlisted fields are not catalogued. Exact model names take precedence over this suffix."))
+            .response("200", ResponseBuilder::new()
+                .description("Partial admission catalog for a committed model, including unready pipelines")
+                .content("application/json", utoipa::openapi::ContentBuilder::new()
+                    .schema(Some(utoipa::openapi::Ref::from_schema_name("ModelCompatibilityCatalog")))
+                    .build())
+                .build());
+    }
 
     operation = operation.response(
         "404",
@@ -184,6 +221,35 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
             .build(),
     );
 
+    if completion_endpoint.is_some() {
+        for (code, description) in [
+            ("400", "Invalid request"),
+            ("404", "Model not found"),
+            ("413", "Request body too large"),
+            ("415", "Unsupported media type"),
+            ("429", "Request deadline or rate limit"),
+            ("499", "Request cancelled"),
+            ("500", "Internal error"),
+            ("501", "Unsupported capability"),
+            ("503", "Service unavailable"),
+            ("529", "Service overloaded"),
+        ] {
+            operation = operation.response(
+                code,
+                ResponseBuilder::new()
+                    .description(description)
+                    .content(
+                        "application/json",
+                        utoipa::openapi::ContentBuilder::new()
+                            .schema(Some(utoipa::openapi::Ref::from_schema_name(
+                                "CompletionErrorResponse",
+                            )))
+                            .build(),
+                    )
+                    .build(),
+            );
+        }
+    }
     operation.build()
 }
 
@@ -191,27 +257,28 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
 fn add_request_body_for_path(
     operation: utoipa::openapi::path::OperationBuilder,
     path: &str,
+    completion_endpoint: Option<Endpoint>,
 ) -> utoipa::openapi::path::OperationBuilder {
     use utoipa::openapi::ContentBuilder;
     use utoipa::openapi::request_body::RequestBodyBuilder;
 
-    let (description, schema, example) = match path {
-        "/v1/chat/completions" => (
+    let (description, schema, example) = match (completion_endpoint, path) {
+        (Some(Endpoint::Chat), _) => (
             "Chat completion request with model, messages, and optional parameters",
             create_chat_completion_schema(),
             create_chat_completion_example(),
         ),
-        "/v1/completions" => (
+        (Some(Endpoint::Completion), _) => (
             "Text completion request with model, prompt, and optional parameters",
             create_completion_schema(),
             create_completion_example(),
         ),
-        "/v1/embeddings" => (
+        (None, "/v1/embeddings") => (
             "Embedding request with model and input text",
             create_embedding_schema(),
             create_embedding_example(),
         ),
-        "/v1/responses" => (
+        (None, "/v1/responses") => (
             "Response request with model and input",
             create_response_schema(),
             create_response_example(),
@@ -408,9 +475,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn completion_error_schema_is_nested_and_endpoint_scoped() {
+        let routes = [
+            RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions")
+                .with_completion_endpoint(Endpoint::Chat),
+            RouteDoc::new(axum::http::Method::POST, "/v1/completions")
+                .with_completion_endpoint(Endpoint::Completion),
+            RouteDoc::new(axum::http::Method::POST, "/v1/responses"),
+        ];
+        let document = serde_json::to_value(generate_openapi_spec(&routes)).unwrap();
+        for path in ["/v1/chat/completions", "/v1/completions"] {
+            assert_eq!(
+                document["paths"][path]["post"]["responses"]["400"]["content"]["application/json"]
+                    ["schema"]["$ref"],
+                "#/components/schemas/CompletionErrorResponse"
+            );
+        }
+        assert!(
+            document["paths"]["/v1/responses"]["post"]["responses"]["400"]
+                .get("content")
+                .is_none()
+        );
+        let schemas = &document["components"]["schemas"];
+        assert_eq!(
+            schemas["CompletionErrorResponse"]["properties"]["error"]["$ref"],
+            "#/components/schemas/CompletionErrorInfo"
+        );
+        for field in ["message", "type", "param", "code", "details"] {
+            assert!(
+                schemas["CompletionErrorInfo"]["properties"]
+                    .get(field)
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn chat_only_controls_belong_to_the_chat_endpoint_openapi_contract() {
+        use serde_json::Value;
+
+        fn has_property(document: &Value, schema: &Value, field: &str) -> bool {
+            if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+                let pointer = reference.strip_prefix('#').expect("local schema reference");
+                return has_property(document, document.pointer(pointer).unwrap(), field);
+            }
+            schema
+                .get("properties")
+                .is_some_and(|properties| properties.get(field).is_some())
+                || ["allOf", "anyOf", "oneOf"].iter().any(|composition| {
+                    schema
+                        .get(*composition)
+                        .and_then(Value::as_array)
+                        .is_some_and(|schemas| {
+                            schemas
+                                .iter()
+                                .any(|item| has_property(document, item, field))
+                        })
+                })
+        }
+
+        let routes = [
+            RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions")
+                .with_completion_endpoint(Endpoint::Chat),
+            RouteDoc::new(axum::http::Method::POST, "/v1/completions")
+                .with_completion_endpoint(Endpoint::Completion),
+        ];
+        // This is the same generator used by /openapi.json, including path-to-schema references.
+        let document = serde_json::to_value(generate_openapi_spec(&routes)).unwrap();
+        for (path, expected) in [("/v1/chat/completions", true), ("/v1/completions", false)] {
+            let schema = &document["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+                ["schema"];
+            assert!(!schema.is_null(), "missing request schema for {path}");
+            for field in ["add_generation_prompt", "continue_final_message"] {
+                assert_eq!(
+                    has_property(&document, schema, field),
+                    expected,
+                    "{path}: {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_generate_openapi_spec() {
         let routes = vec![
-            RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
+            RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions")
+                .with_completion_endpoint(Endpoint::Chat),
             RouteDoc::new(axum::http::Method::GET, "/v1/models"),
         ];
 
@@ -423,6 +573,125 @@ mod tests {
         // Verify paths were added
         assert!(spec.paths.paths.contains_key("/v1/chat/completions"));
         assert!(spec.paths.paths.contains_key("/v1/models"));
+    }
+
+    #[test]
+    fn completion_schemas_require_handler_identity_and_post_method() {
+        for path in [
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/other/chat/completions",
+        ] {
+            let routes = [
+                RouteDoc::new(axum::http::Method::POST, path),
+                // Even marked metadata cannot give a GET the POST handler's contract.
+                RouteDoc::new(axum::http::Method::GET, path)
+                    .with_completion_endpoint(Endpoint::Chat),
+            ];
+            let document = serde_json::to_value(generate_openapi_spec(&routes)).unwrap();
+            for method in ["get", "post"] {
+                let operation = &document["paths"][path][method];
+                assert!(
+                    operation["requestBody"]["content"]["application/json"]["schema"].is_null()
+                );
+                assert!(operation["responses"]["400"].get("content").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn served_completion_schemas_follow_registered_handlers_at_custom_paths() {
+        use crate::http::service::{openai, service_v2::HttpService};
+        use serde_json::{Value, json};
+
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let mut app = Router::new();
+        let mut docs = Vec::new();
+        let cases = [
+            (Endpoint::Chat, None),
+            (Endpoint::Completion, None),
+            (Endpoint::Chat, Some("/tenant/generate")),
+            // Deliberately resembles chat: the text-completion handler wins.
+            (Endpoint::Completion, Some("/tenant/chat/completions")),
+        ];
+        for (endpoint, path) in cases {
+            let (route_docs, router) = match endpoint {
+                Endpoint::Chat => {
+                    openai::chat_completions_router(state.clone(), None, path.map(str::to_owned))
+                }
+                Endpoint::Completion => {
+                    openai::completions_router(state.clone(), path.map(str::to_owned))
+                }
+            };
+            docs.extend(route_docs);
+            app = app.merge(router);
+        }
+        app = app.merge(openapi_router(docs, None).1);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let document: Value = client
+            .get(format!("http://{addr}/openapi.json"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let mut responses = Vec::new();
+        for (endpoint, path) in cases {
+            let path = path.unwrap_or(endpoint.as_str());
+            let mut payload = json!({"model":"missing", "prompt_logprobs":-2});
+            match endpoint {
+                Endpoint::Chat => payload["messages"] = json!([{"role":"user","content":"hello"}]),
+                Endpoint::Completion => payload["prompt"] = json!("hello"),
+            };
+            let response = client
+                .post(format!("http://{addr}{path}"))
+                .json(&payload)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            responses.push((
+                endpoint,
+                path,
+                status,
+                response.json::<Value>().await.unwrap(),
+            ));
+        }
+        task.abort();
+        let _ = task.await;
+
+        for (endpoint, path, status, response) in responses {
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], 400);
+            assert_eq!(response["error"]["param"], "prompt_logprobs");
+            let operation = &document["paths"][path]["post"];
+            let canonical = &document["paths"][endpoint.as_str()]["post"];
+            for field in ["requestBody", "responses", "summary", "description"] {
+                assert_eq!(operation[field], canonical[field], "{path}: {field}");
+            }
+            assert_eq!(
+                operation["summary"],
+                match endpoint {
+                    Endpoint::Chat => "Create chat completion",
+                    Endpoint::Completion => "Create text completion",
+                }
+            );
+            assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
+            assert_eq!(
+                operation["responses"]["400"]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/CompletionErrorResponse"
+            );
+            assert!(operation.get("parameters").is_none());
+        }
     }
 
     // Two methods on one path (e.g. built-in GET+POST /busy_threshold, or an

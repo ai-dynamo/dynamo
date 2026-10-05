@@ -166,6 +166,35 @@ impl Model {
         self.worker_sets.len()
     }
 
+    /// Diagnostic snapshot of committed pipeline rules, including currently
+    /// unready sets. Does not reserve a route or promise live worker capability.
+    pub(crate) fn protocol_compatibility(
+        &self,
+    ) -> crate::protocols::openai::compatibility::catalog::ModelCompatibilityCatalog {
+        use crate::protocols::openai::compatibility::{
+            catalog::{ModelCompatibilityCatalog, PipelineAdmissionCatalog},
+            profile::Endpoint,
+        };
+        let mut profiles = Vec::new();
+        for ws in self.worker_sets() {
+            for (endpoint, has_engine) in [
+                (Endpoint::Chat, ws.has_chat_engine()),
+                (Endpoint::Completion, ws.has_completions_engine()),
+            ] {
+                if has_engine {
+                    profiles.push(
+                        ws.protocol_profiles
+                            .iter()
+                            .find(|profile| profile.endpoint == endpoint)
+                            .cloned()
+                            .unwrap_or_else(|| PipelineAdmissionCatalog::unavailable(endpoint)),
+                    );
+                }
+            }
+        }
+        ModelCompatibilityCatalog::new(self.name.clone(), profiles)
+    }
+
     /// Snapshot all WorkerSets. Used by cross-role lifecycle coordination
     /// where storage keys include role/surface suffixes but deployment
     /// matching is based on `WorkerSet::namespace()`.
@@ -910,6 +939,118 @@ mod tests {
         assert_eq!(model.name(), "llama");
         assert!(model.is_empty());
         assert_eq!(model.worker_set_count(), 0);
+    }
+
+    #[test]
+    fn protocol_catalog_tracks_membership_without_unioning_or_guessing_rules() {
+        use crate::protocols::openai::compatibility::{
+            admission::TargetAdmission,
+            catalog::PipelineAdmissionCatalog,
+            profile::{CompatibilityProfile, Endpoint, PipelineContext},
+        };
+        let model = Model::new("catalog-model".into());
+        for (namespace, target) in [
+            ("private-a", TargetAdmission::Vllm029),
+            ("private-b", TargetAdmission::Vllm030),
+        ] {
+            let mut ws = WorkerSet::new(
+                namespace.into(),
+                "private-checksum".into(),
+                ModelDeploymentCard::default(),
+            );
+            ws.chat_engine = Some(make_test_chat_engine());
+            let profile = CompatibilityProfile::new(
+                target,
+                Endpoint::Chat,
+                PipelineContext::from_pipeline(
+                    Endpoint::Chat,
+                    crate::model_type::ModelInput::Tokens,
+                    None,
+                    None,
+                ),
+            );
+            ws.protocol_profiles.push(PipelineAdmissionCatalog::new(
+                profile,
+                &ws.card().runtime_config,
+                None,
+            ));
+            model.add_worker_set(namespace.into(), Arc::new(ws));
+        }
+        let before = model.snapshot();
+        assert_eq!(before.protocol_compatibility().profiles.len(), 2);
+        model.remove_worker_set("private-a");
+        assert_eq!(model.protocol_compatibility().profiles.len(), 1);
+        assert_eq!(
+            before.protocol_compatibility().profiles.len(),
+            2,
+            "published snapshots retain their own membership"
+        );
+        let mut replacement = WorkerSet::new(
+            "private-b".into(),
+            "other-checksum".into(),
+            ModelDeploymentCard::default(),
+        );
+        replacement.chat_engine = Some(make_test_chat_engine());
+        model.add_worker_set("private-b".into(), Arc::new(replacement));
+        let catalog = model.protocol_compatibility();
+        assert_eq!(catalog.profiles.len(), 1);
+        assert!(
+            catalog.profiles[0].admission.is_none(),
+            "custom replacement must not inherit retired metadata"
+        );
+        assert!(
+            !serde_json::to_string(&catalog)
+                .unwrap()
+                .contains("private-")
+        );
+        model.remove_worker_set("private-b");
+        assert!(model.protocol_compatibility().profiles.is_empty());
+    }
+
+    #[test]
+    fn protocol_catalog_adapter_inherits_engine_rules_not_adapter_card_guesses() {
+        use crate::protocols::openai::compatibility::{
+            admission::TargetAdmission,
+            catalog::PipelineAdmissionCatalog,
+            profile::{CompatibilityProfile, Endpoint, PipelineContext},
+        };
+        let mut base = WorkerSet::new(
+            "private-base".into(),
+            "base-checksum".into(),
+            ModelDeploymentCard::default(),
+        );
+        base.chat_engine = Some(make_test_chat_engine());
+        let profile = CompatibilityProfile::new(
+            TargetAdmission::Vllm030,
+            Endpoint::Chat,
+            PipelineContext::from_pipeline(
+                Endpoint::Chat,
+                crate::model_type::ModelInput::Tokens,
+                Some(crate::worker_type::WorkerType::Aggregated),
+                Some(crate::entrypoint::ChatProcessorIdentity::Vllm),
+            ),
+        );
+        base.protocol_profiles.push(PipelineAdmissionCatalog::new(
+            profile,
+            &base.card().runtime_config,
+            None,
+        ));
+        // Deliberately no framework metadata in the adapter card: it wraps the
+        // base's admitted pipeline rather than constructing a different one.
+        let mut card = ModelDeploymentCard::with_name_only("adapter");
+        card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter".into(),
+            max_gpu_lora_count: None,
+        });
+        let adapter = base.adapter_view(card);
+        let expected = base.protocol_profiles.clone();
+        let model = Model::new("adapter".into());
+        model.add_worker_set("private-base".into(), Arc::new(adapter));
+        let catalog = model.protocol_compatibility();
+        assert_eq!(catalog.model, "adapter");
+        assert_eq!(catalog.profiles, expected);
+        model.remove_worker_set("private-base");
+        assert!(model.protocol_compatibility().profiles.is_empty());
     }
 
     #[test]

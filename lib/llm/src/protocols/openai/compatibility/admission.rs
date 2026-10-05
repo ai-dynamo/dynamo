@@ -325,6 +325,7 @@ mod tests {
 
     #[test]
     fn full_vocab_admission_is_feature_scoped_and_precedes_inner_engine() {
+        use super::super::catalog::PipelineAdmissionCatalog;
         use crate::protocols::common::prompt_logprobs::VLLM_PROMPT_LOGPROBS_CAPABILITY;
         for limit in [None, Some(20), Some(-1), Some(32)] {
             let mut runtime = runtime("0.30.0");
@@ -339,6 +340,11 @@ mod tests {
                 context(Endpoint::Chat),
             );
             let admits = matches!(limit, Some(-1 | 32));
+            assert_eq!(
+                PipelineAdmissionCatalog::new(profile, &runtime, None)
+                    .full_vocab_prompt_logprobs_unary_admitted,
+                Some(admits)
+            );
             let engine = AdmissionEngine {
                 inner: Arc::new(Recorder(AtomicUsize::new(0)))
                     as ServerStreamingEngine<NvCreateChatCompletionRequest, ()>,

@@ -203,6 +203,10 @@ pub struct WorkerSet {
     /// The model deployment card used to build this set's pipeline
     card: ModelDeploymentCard,
 
+    /// Captured with these exact engines, not synthesized from discovery cards.
+    pub(crate) protocol_profiles:
+        Vec<crate::protocols::openai::compatibility::catalog::PipelineAdmissionCatalog>,
+
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
@@ -251,6 +255,7 @@ impl WorkerSet {
             topology_target: None,
             mdcsum,
             card,
+            protocol_profiles: Vec::new(),
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
@@ -500,6 +505,7 @@ impl WorkerSet {
             topology_target: self.topology_target.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
+            protocol_profiles: self.protocol_profiles.clone(),
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),

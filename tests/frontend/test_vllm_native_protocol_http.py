@@ -299,6 +299,69 @@ def test_native_vllm_prompt_count_contract(
         )
 
 
+def _capture_catalog(port, output_path):
+    """Retain diagnostic responses before any assertions, including HTTP errors."""
+    records = {}
+    for name, path in (
+        ("catalog", f"/v1/models/{MODEL}/compatibility"),
+        ("openapi", "/openapi.json"),
+    ):
+        with requests.get(f"http://127.0.0.1:{port}{path}", timeout=30) as response:
+            records[name] = {
+                "status": response.status_code,
+                "body": response.text,
+            }
+        output_path.write_text(json.dumps(records, indent=2))
+    return records
+
+
+def _assert_registered_catalog(
+    catalog, processor, engine_version, upstream_commit, *, full_vocab_admitted=False
+):
+    """Check pipeline facts, not an assertion of complete native conformance."""
+    assert catalog["schema_version"] == 1
+    assert catalog["scope"] == "registered_pipeline_admission"
+    assert catalog["model"] == MODEL
+    assert catalog["coverage_complete"] is False
+    assert catalog["unlisted_fields"] == "not_catalogued"
+    assert catalog["end_to_end_conformance"] == "unverified"
+    profiles = catalog["profiles"]
+    assert len(profiles) == 2, profiles
+    expected_processors = {
+        "/v1/chat/completions": "rust" if processor == "dynamo" else "vllm",
+        # Chat's Python factory must not change the Rust completion processor.
+        "/v1/completions": "rust",
+    }
+    assert {item["endpoint"] for item in profiles} == set(expected_processors)
+    for entry in profiles:
+        assert entry["full_vocab_prompt_logprobs_unary_admitted"] is full_vocab_admitted
+        admission = entry["admission"]
+        assert admission["descriptor_version"] == 1
+        assert admission["endpoint"] == entry["endpoint"]
+        assert admission["target"] == (
+            f"vllm/{engine_version}" if upstream_commit else "vllm/unverified"
+        )
+        assert admission["upstream_commit"] == upstream_commit
+        assert admission["prompt_logprobs_admission"] == (
+            "reject_positive_streaming" if upstream_commit else "unverified_target"
+        )
+        assert admission["pipeline"] == {
+            "processor": expected_processors[entry["endpoint"]],
+            "transport": "preprocessed_rpc",
+            "transport_protocol_version": None,
+            "deployment": "aggregated",
+        }
+        rules = entry["sampling_fields"]
+        assert len(rules) == 3
+        assert {rule["field"] for rule in rules} == {
+            "allowed_token_ids",
+            "bad_words_token_ids",
+            "logprob_token_ids",
+        }
+        assert all(rule["request_location"] == "root" for rule in rules)
+        assert all(rule["transport"] == "v1_with_legacy_copy" for rule in rules)
+
+
 def _decoded(record):
     if record["content_type"].startswith("text/event-stream"):
         data = [
@@ -521,7 +584,27 @@ def test_native_vllm_http_contract(
             log_dir=str(tmp_path / "worker"),
         ),
     ):
+        diagnostic = _capture_catalog(port, tmp_path / "dynamo-catalog.json")
         actual = _capture(port, cases, tmp_path / f"dynamo-responses{response_suffix}")
+
+    assert diagnostic["catalog"]["status"] == 200, diagnostic["catalog"]
+    catalog = json.loads(diagnostic["catalog"]["body"])
+    _assert_registered_catalog(
+        catalog,
+        processor,
+        engine_version,
+        upstream_commit,
+        full_vocab_admitted=full_vocab,
+    )
+    assert env["DYN_NAMESPACE"] not in diagnostic["catalog"]["body"]
+    assert diagnostic["openapi"]["status"] == 200, diagnostic["openapi"]
+    spec = json.loads(diagnostic["openapi"]["body"])
+    operation = spec["paths"]["/v1/models/{model_id}/compatibility"]["get"]
+    assert operation["parameters"][0]["name"] == "model_id"
+    assert operation["parameters"][0]["required"] is True
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ModelCompatibilityCatalog"
+    }
 
     mismatches = []
     for name, endpoint, payload in cases:

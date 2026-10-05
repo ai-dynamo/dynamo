@@ -49,6 +49,7 @@ use crate::{
             classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
             compatibility::{
                 admission::TargetAdmission,
+                catalog::PipelineAdmissionCatalog,
                 profile::{CompatibilityProfile, Endpoint, PipelineContext},
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -1049,6 +1050,13 @@ impl ModelWatcher {
                 Endpoint::Chat,
                 pipeline_context(Endpoint::Chat),
             );
+            worker_set
+                .protocol_profiles
+                .push(PipelineAdmissionCatalog::new(
+                    profile,
+                    &card.runtime_config,
+                    legacy_target,
+                ));
             profile.wrap(engine, &card.runtime_config, legacy_target)
         });
         worker_set.completions_engine = worker_set.completions_engine.take().map(|engine| {
@@ -1057,6 +1065,13 @@ impl ModelWatcher {
                 Endpoint::Completion,
                 pipeline_context(Endpoint::Completion),
             );
+            worker_set
+                .protocol_profiles
+                .push(PipelineAdmissionCatalog::new(
+                    profile,
+                    &card.runtime_config,
+                    legacy_target,
+                ));
             profile.wrap(engine, &card.runtime_config, legacy_target)
         });
 

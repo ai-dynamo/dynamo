@@ -93,6 +93,26 @@ mod tests {
     use crate::protocols::openai::GuidedToolConstraint;
     use serde_json::{Value, json};
 
+    #[test]
+    fn completion_documentation_preserves_route_conflict_identity() {
+        use crate::protocols::openai::compatibility::profile::Endpoint;
+        use std::collections::HashSet;
+
+        let plain = RouteDoc::new(axum::http::Method::POST, "/custom");
+        let chat = plain.clone().with_completion_endpoint(Endpoint::Chat);
+        let completion = plain.clone().with_completion_endpoint(Endpoint::Completion);
+        // Test both insertion orders: append_route_docs uses this set to reject
+        // conflicting registrations before Axum merges their handlers.
+        for first in [plain.clone(), chat.clone(), completion.clone()] {
+            let mut routes = HashSet::from([first]);
+            for duplicate in [plain.clone(), chat.clone(), completion.clone()] {
+                assert!(!routes.insert(duplicate));
+            }
+            assert!(routes.insert(RouteDoc::new(axum::http::Method::GET, "/custom")));
+            assert!(routes.insert(RouteDoc::new(axum::http::Method::POST, "/different")));
+        }
+    }
+
     fn request(tool_choice: Value) -> NvCreateChatCompletionRequest {
         let value = json!({
             "model": "test-model",
@@ -574,11 +594,30 @@ mod tests {
     }
 }
 
-/// Documentation for a route
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Documentation for a route.
+///
+/// Equality and hashing identify the registered method/path, not its descriptive
+/// metadata, so conflicting handlers still fail duplicate-route validation.
+#[derive(Debug, Clone)]
 pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
+    // Handler-owned identity, independent of configurable public path spelling.
+    completion_endpoint: Option<crate::protocols::openai::compatibility::profile::Endpoint>,
+}
+
+impl PartialEq for RouteDoc {
+    fn eq(&self, other: &Self) -> bool {
+        self.method == other.method && self.path == other.path
+    }
+}
+
+impl Eq for RouteDoc {}
+
+impl std::hash::Hash for RouteDoc {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&(&self.method, &self.path), state);
+    }
 }
 
 impl std::fmt::Display for RouteDoc {
@@ -592,7 +631,18 @@ impl RouteDoc {
         RouteDoc {
             method,
             path: path.into(),
+            completion_endpoint: None,
         }
+    }
+
+    /// Bind a completion handler's schemas to its actual registered path.
+    /// This is documentation metadata, not a backend compatibility claim.
+    pub(crate) fn with_completion_endpoint(
+        mut self,
+        endpoint: crate::protocols::openai::compatibility::profile::Endpoint,
+    ) -> Self {
+        self.completion_endpoint = Some(endpoint);
+        self
     }
 
     pub fn method(&self) -> &axum::http::Method {
