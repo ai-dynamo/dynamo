@@ -524,7 +524,7 @@ pub struct MockEngineArgs {
     #[builder(default = "0")]
     pub block_size: usize,
 
-    /// Optional vLLM sequence-length limit, including prompt and generated
+    /// Optional sequence-length limit, including prompt and generated
     /// tokens. Requests with no room to generate are rejected before admission.
     #[builder(default = "None")]
     #[validate(range(min = 1))]
@@ -812,15 +812,6 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
-    if args.max_model_len.is_some() && args.engine_type != EngineType::Vllm {
-        return Err(mock_engine_args_validation_error(
-            "max_model_len_requires_vllm",
-            format!(
-                "max_model_len is supported only for engine_type=vllm, got engine_type={:?}",
-                args.engine_type
-            ),
-        ));
-    }
     if args.ais_nextn.is_some() && args.decode_speedup_ratio != 1.0 {
         return Err(mock_engine_args_validation_error(
             "mtp_decode_speedup_conflict",
@@ -1186,6 +1177,14 @@ impl MockEngineArgs {
         );
         // The upstream schema owns required fields, enums, unknown-field
         // rejection and defaults. Validate before any legacy branch selection.
+        anyhow::ensure!(
+            canonical.speculation.is_none() || canonical.nextn == 0,
+            "canonical speculation cannot be combined with nextn"
+        );
+        let nextn = canonical
+            .speculation
+            .as_ref()
+            .map_or(canonical.nextn, |spec| spec.num_speculative_tokens());
         let config = serde_json::to_value(canonical)?;
         anyhow::ensure!(
             config
@@ -1253,13 +1252,23 @@ impl MockEngineArgs {
             );
             self.dp_size = u32::try_from(dp)?;
         }
-        if let Some(nextn) = config.get("nextn").and_then(serde_json::Value::as_u64) {
-            let nextn = usize::try_from(nextn)?;
+        let nextn = usize::try_from(nextn)?;
+        anyhow::ensure!(
+            self.ais_nextn.unwrap_or(0) == 0 || self.ais_nextn == Some(nextn),
+            "canonical nextn conflicts with scheduler ais_nextn"
+        );
+        self.ais_nextn = (nextn != 0).then_some(nextn);
+        if config
+            .pointer("/speculation/kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("mtp")
+        {
             anyhow::ensure!(
-                self.ais_nextn.unwrap_or(0) == 0 || self.ais_nextn == Some(nextn),
-                "canonical nextn conflicts with scheduler ais_nextn"
+                self.ais_nextn_accept_rates
+                    .as_deref()
+                    .is_some_and(|rates| !rates.trim().is_empty()),
+                "canonical MTP requires explicit ais_nextn_accept_rates; acceptance must be an authored assumption"
             );
-            self.ais_nextn = (nextn != 0).then_some(nextn);
         }
         Ok(())
     }
@@ -1616,6 +1625,101 @@ mod tests {
     }
 
     #[test]
+    fn canonical_mtp_materializes_scheduler_without_rewriting_cost() {
+        let args = MockEngineArgs::from_json_str(
+            &json!({
+                "ais_nextn_accept_rates": "1,1,0.4",
+                "ais_mtp_seed": 42,
+                "ais_perf_config": {
+                    "model": "model", "system": "h200_sxm", "backend": "vllm",
+                    "worker_type": "aggregated",
+                    "speculation": {"kind": "mtp", "params": {"num_speculative_tokens": 3}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(args.ais_nextn, Some(3));
+        assert_eq!(args.ais_nextn_accept_rates.as_deref(), Some("1,1,0.4"));
+        assert_eq!(args.ais_mtp_seed, 42);
+        let config = args.ais_perf_config.unwrap();
+        assert_eq!(config["speculation"]["kind"], "mtp");
+        assert!(config.get("nextn").is_none());
+    }
+
+    #[test]
+    fn canonical_mtp_rejects_conflicting_scheduler_depth() {
+        let error = MockEngineArgs::from_json_str(
+            &json!({
+                "ais_nextn": 2,
+                "ais_perf_config": {
+                    "model": "model", "system": "h200_sxm", "backend": "vllm",
+                    "worker_type": "aggregated",
+                    "speculation": {"kind": "mtp", "params": {"num_speculative_tokens": 3}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with scheduler ais_nextn")
+        );
+    }
+
+    #[test]
+    fn canonical_mtp_rejects_legacy_cost_depth() {
+        let error = MockEngineArgs::from_json_str(
+            &json!({"ais_perf_config": {
+                "model": "model", "system": "h200_sxm", "backend": "vllm",
+                "worker_type": "aggregated", "nextn": 3,
+                "speculation": {"kind": "mtp", "params": {"num_speculative_tokens": 3}}
+            }})
+            .to_string(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot be combined with nextn"));
+    }
+
+    #[test]
+    fn canonical_ngram_remains_unsupported() {
+        let error = MockEngineArgs::from_json_str(
+            &json!({"ais_perf_config": {
+                "model": "model", "system": "h200_sxm", "backend": "vllm",
+                "worker_type": "aggregated",
+                "speculation": {"kind": "ngram", "params": {"num_speculative_tokens": 3}}
+            }})
+            .to_string(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("does not implement ngram"));
+    }
+
+    #[test]
+    fn canonical_mtp_requires_authored_acceptance() {
+        let error = MockEngineArgs::from_json_str(
+            &json!({"ais_perf_config": {
+                "model": "model", "system": "h200_sxm", "backend": "vllm",
+                "worker_type": "aggregated",
+                "speculation": {"kind": "mtp", "params": {"num_speculative_tokens": 3}}
+            }})
+            .to_string(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires explicit ais_nextn_accept_rates")
+        );
+    }
+
+    #[test]
     fn test_mock_engine_args_json_rejects_unknown_and_invalid_types() {
         let unknown = MockEngineArgs::from_json_str(&json!({"unknown": true}).to_string())
             .expect_err("unknown fields should be rejected");
@@ -1720,17 +1824,106 @@ mod tests {
 
     #[test]
     fn test_normalized_rejects_zero_max_model_len() {
-        let error = MockEngineArgs::builder()
-            .max_model_len(Some(0))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap_err();
+        for engine_type in [EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm] {
+            let error = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .max_model_len(Some(0))
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
 
-        assert!(
-            error.to_string().contains("max_model_len"),
-            "unexpected error: {error}",
-        );
+            assert!(
+                error.to_string().contains("max_model_len"),
+                "unexpected error for {engine_type:?}: {error}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_sglang_factory_enforces_authored_max_model_len() {
+        use std::num::NonZeroU32;
+
+        use aisimulate_core::engine::generalized::{EngineIdentity, SchedulerCommand};
+        use aisimulate_core::engine::{Command, Request};
+
+        use crate::engine_adapter::{engine_components, engine_factory};
+
+        for nextn in [None, Some(2)] {
+            for prompt_len in [4, 8, 9] {
+                let args = MockEngineArgs::builder()
+                    .engine_type(EngineType::Sglang)
+                    .num_gpu_blocks(16)
+                    .block_size(4)
+                    .max_model_len(Some(8))
+                    .ais_nextn(nextn)
+                    .ais_nextn_accept_rates(nextn.map(|_| "1,1".to_string()))
+                    .perf_model(Arc::new(PerfModel::Fixed {
+                        prefill_ms: 1.0,
+                        decode_ms: 1.0,
+                    }))
+                    .build()
+                    .unwrap();
+                let components = engine_components(args, false, false).unwrap();
+                assert_eq!(components.rank.max_model_len, Some(8));
+                let mut engine = engine_factory(components.rank, components.timing)
+                    .unwrap()
+                    .build(EngineIdentity::new(0), NonZeroU32::new(1).unwrap())
+                    .unwrap();
+                let request_id = Uuid::from_u128(1);
+                engine
+                    .apply_command_effects(
+                        SchedulerCommand::new(
+                            0,
+                            Command::Submit(Request {
+                                request_id,
+                                tokens: (0..prompt_len).collect(),
+                                max_output_tokens: 10,
+                                output_token_ids: None,
+                            }),
+                        ),
+                        0.0,
+                    )
+                    .unwrap();
+                let mut outputs = Vec::new();
+                let mut now_ms = 0.0;
+                for _ in 0..16 {
+                    let Some(pass) = engine.execute_pass(now_ms).unwrap() else {
+                        break;
+                    };
+                    now_ms = pass.end_ms;
+                    let completed = engine.complete_pass(pass.pass_id, now_ms).unwrap();
+                    outputs.extend(
+                        completed
+                            .effects
+                            .by_rank
+                            .into_iter()
+                            .flat_map(|rank| rank.effects.outputs),
+                    );
+                }
+                assert!(
+                    engine.is_drained(),
+                    "prompt_len={prompt_len}, nextn={nextn:?}"
+                );
+                assert!(outputs.iter().all(|output| output.request_id == request_id));
+                if prompt_len >= 8 {
+                    assert_eq!(outputs.len(), 1);
+                    assert!(outputs[0].completed && outputs[0].rejected);
+                    assert_eq!(outputs[0].token_id, None);
+                } else {
+                    // Ten requested outputs are clipped to the four remaining
+                    // context tokens, including when a speculative burst crosses it.
+                    assert_eq!(outputs.len(), 4);
+                    assert!(
+                        outputs
+                            .iter()
+                            .all(|output| output.token_id.is_some() && !output.rejected)
+                    );
+                    assert_eq!(outputs.iter().filter(|output| output.completed).count(), 1);
+                    assert!(outputs.last().unwrap().completed);
+                }
+            }
+        }
     }
 
     #[test]

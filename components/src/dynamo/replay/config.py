@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from importlib import import_module
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Protocol
 
 from aisimulate.capacity import materialize_aic_num_gpu_blocks
@@ -21,6 +22,102 @@ from dynamo.mocker.args import (
 
 class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
+
+
+def speculation_api(*, required: bool = True) -> ModuleType | None:
+    """Load the paired SD contract without breaking older non-SD installs."""
+    try:
+        api = import_module("aisimulate.speculation")
+        if not all(
+            callable(getattr(api, name, None))
+            for name in (
+                "normalize_speculation_engine_args",
+                "speculation_report_metadata",
+            )
+        ):
+            raise ImportError("incomplete AISimulate speculation API")
+        return api
+    except ImportError as error:
+        if not required:
+            return None
+        raise RuntimeError(
+            "Dynamo speculative replay requires the matching AISimulate source "
+            "and native bindings. Install container/deps/requirements.aisimulate.txt "
+            "and rebuild ai-dynamo-runtime with --features ais-forward-pass; "
+            "the version label aisimulate==0.13.0 alone does not identify this API."
+        ) from error
+
+
+def _speculation_configs(rank: Mapping[str, Any]) -> tuple[Any, ...]:
+    timing = rank.get("timing_model")
+    timing_config = timing.get("config") if isinstance(timing, Mapping) else None
+    canonical = rank.get("ais_perf_config")
+    return (
+        rank.get("speculation"),
+        timing_config.get("speculation")
+        if isinstance(timing_config, Mapping)
+        else None,
+        canonical.get("speculation") if isinstance(canonical, Mapping) else None,
+    )
+
+
+def has_speculative_decoding(payload: Mapping[str, Any]) -> bool:
+    rank = payload.get("rank", payload)
+    if not isinstance(rank, Mapping):
+        return False
+    if any(chosen is not None for chosen in _speculation_configs(rank)):
+        return True
+    timing = rank.get("timing_model")
+    config = timing.get("config") if isinstance(timing, Mapping) else None
+    return any(
+        item.get(name) not in (None, 0)
+        for item in (rank, config, rank.get("ais_perf_config"))
+        if isinstance(item, Mapping)
+        for name in ("nextn", "aic_nextn", "ais_nextn")
+    )
+
+
+def validate_speculation_payload(payload: Mapping[str, Any]) -> None:
+    """Apply Dynamo's method boundary before either replay path executes."""
+    rank = payload.get("rank", payload)
+    if not isinstance(rank, Mapping):
+        return
+    for field in ("nextn", "nextn_accept_rates", "mtp_seed"):
+        native, upstream = "ais_" + field, "aic_" + field
+        if native in rank and upstream in rank and rank[native] != rank[upstream]:
+            raise ValueError(f"{native} conflicts with {upstream}")
+    if rank.get("speculation") is not None and rank.get("ais_perf_config") is not None:
+        raise ValueError(
+            "speculation cannot be combined with ais_perf_config; use one canonical "
+            "timing_model configuration with the public speculation controls"
+        )
+    choices = _speculation_configs(rank)
+    for chosen in choices:
+        if isinstance(chosen, Mapping) and chosen.get("kind") != "mtp":
+            raise ValueError(
+                "Dynamo replay supports only MTP; it does not support ngram draft scheduling"
+            )
+    if rank.get("speculation") is None and any(
+        isinstance(chosen, Mapping) and chosen.get("kind") == "mtp"
+        for chosen in choices[1:]
+    ):
+        has_mean = any(
+            rank.get(name) is not None
+            for name in ("aic_nextn_accepted", "nextn_accepted")
+        )
+        has_rates = any(
+            isinstance(rank.get(name), str) and rank[name].strip()
+            for name in (
+                "aic_nextn_accept_rates",
+                "nextn_accept_rates",
+                "ais_nextn_accept_rates",
+            )
+        )
+        if not (has_mean or has_rates):
+            raise ValueError(
+                "canonical MTP requires explicit acceptance; configure an expected "
+                "accepted-token count or conditional acceptance rates"
+            )
 
 
 def canonical_upstream_config(
@@ -111,9 +208,78 @@ def resolve_ais_num_gpu_blocks(raw: dict[str, Any]) -> None:
     raw.update(lowered)
 
 
+def reconcile_mtp_timing(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Align legacy scheduler depth with AIC cost identity before construction."""
+    raw = dict(payload)
+    timing = raw.get("timing_model")
+    depth = raw.get("aic_nextn", raw.get("nextn"))
+    if (
+        raw.get("speculation") is None
+        and (depth is None or type(depth) is int and depth == 0)
+        and isinstance(timing, Mapping)
+        and timing.get("provider") == "aic"
+    ):
+        config = timing.get("config", {})
+        chosen = config.get("speculation")
+        configured_depth = (
+            chosen.get("params", {}).get("num_speculative_tokens")
+            if isinstance(chosen, Mapping)
+            else config.get("nextn")
+        )
+        if type(configured_depth) is int and configured_depth > 0:
+            depth = configured_depth
+            raw.pop("nextn", None)
+            raw["aic_nextn"] = depth
+    if (
+        type(depth) is int
+        and depth > 0
+        and isinstance(timing, Mapping)
+        and timing.get("provider") == "aic"
+    ):
+        config = dict(timing.get("config", {}))
+        chosen = config.get("speculation")
+        if isinstance(chosen, Mapping):
+            if chosen.get("params", {}).get("num_speculative_tokens") != depth:
+                raise ValueError(
+                    "speculative depth conflicts with timing_model.config.speculation"
+                )
+        else:
+            if config.get("nextn") not in (None, 0, depth):
+                raise ValueError(
+                    "speculative depth conflicts with timing_model.config.nextn"
+                )
+            config["nextn"] = depth
+        raw["timing_model"] = {**timing, "config": config}
+    return raw
+
+
 def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Consume AISimulate's runner wire protocol at the Dynamo boundary."""
+    validate_speculation_payload(payload)
+    role = payload.get("worker_type") or (
+        "prefill"
+        if payload.get("is_prefill")
+        else "decode"
+        if payload.get("is_decode")
+        else "aggregated"
+    )
     raw = dict(payload)
+    canonical = raw.pop("ais_perf_config", None)
+    if canonical is not None:
+        if raw.get("timing_model") is not None:
+            raise ValueError("ais_perf_config cannot be combined with timing_model")
+        raw["timing_model"] = {
+            "type": "external",
+            "provider": "aic",
+            "config": canonical,
+        }
+    for field in ("nextn", "nextn_accept_rates", "mtp_seed"):
+        native, upstream = "ais_" + field, "aic_" + field
+        if native in raw:
+            raw.setdefault(upstream, raw.pop(native))
+    for name in ("aic_nextn", "nextn"):
+        if name in raw and raw[name] is not None and type(raw[name]) is not int:
+            raise ValueError(f"{name} must be an integer in 0..=5")
     timing = raw.get("timing_model")
     has_custom_timing = isinstance(timing, dict) and timing.get("type") in {
         "fixed",
@@ -134,10 +300,26 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
         raw["timing_model"] = {
             "type": "external",
             "provider": "aic",
-            "config": canonical_upstream_config(
-                identity, worker_type=raw.get("worker_type", "aggregated")
-            ),
+            "config": canonical_upstream_config(identity, worker_type=role),
         }
+    raw = reconcile_mtp_timing(raw)
+    if has_speculative_decoding(raw) or any(
+        raw.get(name) is not None
+        for name in (
+            "aic_nextn_accepted",
+            "nextn_accepted",
+            "aic_nextn_accept_rates",
+            "nextn_accept_rates",
+        )
+    ):
+        raw = speculation_api().normalize_speculation_engine_args(raw, role=role)
+    else:
+        # Explicit zero is the supported SD-off spelling, including when an
+        # older AISimulate installation has no public speculation helper.
+        for name in ("speculation", "aic_nextn", "nextn"):
+            if raw.get(name) in (None, 0):
+                raw.pop(name, None)
+    raw = reconcile_mtp_timing(raw)
     raw = _materialize_capacity(raw)
     raw.pop("cuda_graph_reserved_bytes", None)
     if identity.get("attention_dp_size") is not None:
@@ -149,9 +331,25 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
             value = raw.pop(name)
             if name in {"aic_nextn_accept_rates", "aic_mtp_seed"}:
                 raw["ais_" + name[4:]] = value
-            elif name == "aic_nextn" and "ais_perf_config" not in raw:
+            elif name == "aic_nextn":
                 raw["ais_nextn"] = value
     return raw
+
+
+def native_engine_args_payload(
+    lowered: Mapping[str, Any], *, authored: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Preserve capacity provenance through the native constructor boundary."""
+    native = dict(lowered)
+    native.pop("num_gpu_blocks_is_explicit", None)
+    if has_speculative_decoding(lowered) and not authored.get(
+        "num_gpu_blocks_is_explicit", bool(authored.get("num_gpu_blocks"))
+    ):
+        # The native loader may discover an Agentic trace after Python's
+        # preflight. Leave inferred capacity unauthored for that late gate;
+        # ordinary replay materializes the same AIC capacity natively.
+        native.pop("num_gpu_blocks", None)
+    return native
 
 
 def resolve_planner_profile_data(
@@ -174,6 +372,7 @@ def load_engine_args(
     raw = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
     if not isinstance(raw, dict):
         raise TypeError("engine arguments must contain a JSON object")
+    authored = dict(raw)
     worker_type = raw.pop("worker_type", None)
     if worker_type is not None:
         if "is_prefill" in raw or "is_decode" in raw:
@@ -197,4 +396,6 @@ def load_engine_args(
             else:
                 del raw["planner_profile_data"]
     resolve_ais_num_gpu_blocks(raw)
-    return MockEngineArgs.from_json(json.dumps(raw))
+    return MockEngineArgs.from_json(
+        json.dumps(native_engine_args_payload(raw, authored=authored))
+    )

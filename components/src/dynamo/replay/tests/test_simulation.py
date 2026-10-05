@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from dataclasses import replace
 
 import pytest
@@ -31,7 +33,9 @@ from dynamo.replay import (
     TelemetryOptions,
 )
 from dynamo.replay import api as replay_api
+from dynamo.replay import config as replay_config
 from dynamo.replay import run_trace_replay, simulation
+from dynamo.replay.config import lower_upstream_engine_args
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -44,6 +48,10 @@ pytestmark = [
 class _FakeEngineArgs:
     def __init__(self, payload: str):
         self.payload = payload
+        values = json.loads(payload)
+        self.ais_nextn = values.get("ais_nextn")
+        self.ais_nextn_accept_rates = values.get("ais_nextn_accept_rates")
+        self.ais_mtp_seed = values.get("ais_mtp_seed", 42)
 
     @classmethod
     def from_json(cls, payload: str):
@@ -268,6 +276,17 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
         pytest.param({"model_path": " target-model "}, {}, id="metadata-model-path"),
         pytest.param({"model": " target-model "}, {}, id="metadata-canonical-model"),
         pytest.param({}, {"aic_model_path": " target-model "}, id="engine-aic-path"),
+        pytest.param(
+            {},
+            {
+                "timing_model": {
+                    "type": "external",
+                    "provider": "aic",
+                    "config": {"model": " target-model "},
+                }
+            },
+            id="engine-canonical-timing",
+        ),
         pytest.param(
             {},
             {"ais_perf_config": {"model": " target-model "}},
@@ -665,7 +684,7 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             self.supported_backend_topologies = supported_backend_topologies
             self.supported_hooks = supported_hooks
 
-    monkeypatch.setattr(simulation, "RunnerCapabilities", SentinelCapabilities)
+    monkeypatch.setattr(simulation, "_DynamoRunnerCapabilities", SentinelCapabilities)
 
     simulation.DynamoReplayRunnerFactory().capabilities()
 
@@ -745,7 +764,7 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     ).backend_deployment
     args = simulation.DynamoReplayRunner._engine_args(deployment.agg_engine_args)
     metadata = deployment.performance_model_metadata["aggregated"]["config"]
-    assert "model_path" in metadata
+    assert metadata["model"] == raw["engine"]["model"]
     config = _ais_session_kwargs(metadata, args)["config"]
     assert config == args.ais_perf_config
     assert config["database_mode"] == "SOL"
@@ -824,3 +843,596 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     assert args.ais_perf_config is None
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
     assert report.metrics["completed_requests"] == raw["traffic"]["stop"]["requests"]
+
+
+def _mtp_timing():
+    return {
+        "type": "external",
+        "provider": "aic",
+        "config": {
+            "model": "test-model",
+            "system": "test-system",
+            "backend": "vllm",
+            "worker_type": "aggregated",
+            "estimation_mode": "op_level",
+        },
+    }
+
+
+@pytest.fixture
+def mtp_capacity_passthrough(monkeypatch):
+    monkeypatch.setattr(
+        replay_config, "materialize_aic_num_gpu_blocks", lambda raw: dict(raw)
+    )
+
+
+@pytest.mark.parametrize(
+    "speculative_args",
+    [
+        {
+            "speculation": {
+                "kind": "mtp",
+                "num_speculative_tokens": 3,
+                "expected_accepted_tokens": 2.4,
+                "seed": 42,
+            }
+        },
+        {"aic_nextn": 3, "aic_nextn_accepted": 2.4, "aic_mtp_seed": 42},
+        {"nextn": 3, "nextn_accepted": 2.4, "mtp_seed": 42},
+    ],
+)
+def test_lowering_preserves_mtp_expected_acceptance(
+    speculative_args, mtp_capacity_passthrough
+) -> None:
+    payload = {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 100,
+        "timing_model": _mtp_timing(),
+        **speculative_args,
+    }
+    original = json.loads(json.dumps(payload))
+
+    lowered = lower_upstream_engine_args(payload)
+
+    assert lowered["ais_nextn"] == 3
+    assert list(
+        map(float, lowered["ais_nextn_accept_rates"].split(","))
+    ) == pytest.approx([1.0, 1.0, 0.4])
+    assert lowered["ais_mtp_seed"] == 42
+    assert "speculation" not in lowered
+    assert "nextn_accepted" not in lowered
+    assert not any(key.startswith("aic_") for key in lowered)
+    assert payload == original
+    assert lower_upstream_engine_args(lowered) == lowered
+    if "speculation" not in speculative_args:
+        assert lowered["ais_perf_config"]["nextn"] == 3
+
+
+def test_lowering_rejects_conflicting_mtp_acceptance() -> None:
+    with pytest.raises(ValueError, match="both|combined|conflict"):
+        lower_upstream_engine_args(
+            {
+                "engine_type": "vllm",
+                "num_gpu_blocks": 100,
+                "aic_nextn": 3,
+                "aic_nextn_accepted": 2.4,
+                "aic_nextn_accept_rates": "1,1,1",
+            }
+        )
+
+
+@pytest.mark.parametrize("canonical_depth", [None, 2, 3])
+def test_public_mtp_rejects_direct_canonical_config(canonical_depth) -> None:
+    canonical = _mtp_timing()["config"]
+    if canonical_depth is not None:
+        canonical["speculation"] = {
+            "kind": "mtp",
+            "params": {"num_speculative_tokens": canonical_depth},
+        }
+    payload = {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 100,
+        "ais_perf_config": canonical,
+        "speculation": {
+            "kind": "mtp",
+            "num_speculative_tokens": 2,
+            "expected_accepted_tokens": 1.5,
+        },
+    }
+    with pytest.raises(
+        ValueError, match="speculation cannot be combined with ais_perf_config"
+    ):
+        lower_upstream_engine_args(payload)
+
+
+@pytest.mark.parametrize("alias", ["aic_nextn", "nextn"])
+@pytest.mark.parametrize("depth", [None, 0])
+def test_disabled_speculation_needs_no_new_ais_api(monkeypatch, alias, depth) -> None:
+    def unavailable(name):
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(replay_config, "import_module", unavailable)
+    payload = {"engine_type": "vllm", "timing_model": None, alias: depth}
+    assert lower_upstream_engine_args(payload) == {
+        "engine_type": "vllm",
+        "timing_model": None,
+    }
+    assert alias in payload
+
+
+@pytest.mark.parametrize("depth", [False, 0.0, "0", -1])
+def test_disabled_speculation_does_not_hide_invalid_depth(depth) -> None:
+    with pytest.raises(ValueError, match="integer|0..=5"):
+        lower_upstream_engine_args({"engine_type": "vllm", "aic_nextn": depth})
+
+
+def test_old_ais_exports_allow_import_and_non_speculative_replay() -> None:
+    code = """
+import sys
+import aisimulate.runner
+for name in ('normalize_mtp_engine_args', 'speculation_report_metadata'):
+    if hasattr(aisimulate.runner, name):
+        delattr(aisimulate.runner, name)
+sys.modules['aisimulate.speculation'] = None
+from dynamo.replay.config import lower_upstream_engine_args
+from dynamo.replay.simulation import DynamoReplayRunnerFactory
+from aisimulate.sweeper.replay import BackendDeploymentSpec, ReplaySpec
+spec = ReplaySpec(
+    backend_deployment=BackendDeploymentSpec(
+        deployment_mode='agg', backend='vllm', backend_version='current',
+        agg_engine_args={'engine_type':'vllm', 'num_gpu_blocks':64,
+                         'block_size':16, 'timing_model':None, 'aic_nextn':0},
+        num_workers=1),
+    workload={'isl':16, 'osl':8, 'request_count':2, 'concurrency':1}, goal={})
+runner = DynamoReplayRunnerFactory().create(0)
+try:
+    report = runner.run(spec)
+    assert report.metrics['completed_requests'] == 2
+    assert 'speculation' not in report.metadata
+finally:
+    runner.close()
+try:
+    lower_upstream_engine_args({'aic_nextn':2})
+except RuntimeError as error:
+    assert 'requirements.aisimulate.txt' in str(error)
+else:
+    raise AssertionError('active SD must require the matching source API')
+"""
+    subprocess.run(
+        [sys.executable, "-c", code], check=True, capture_output=True, text=True
+    )
+
+
+@pytest.mark.parametrize("location", ["public", "nested", "timing", "canonical"])
+@pytest.mark.parametrize("agentic", [False, True])
+def test_ngram_is_rejected_before_either_runner_path(location, agentic) -> None:
+    chosen = {
+        "kind": "ngram",
+        "num_speculative_tokens": 2,
+        "acceptance_rates": [1, 0.5],
+    }
+    args = {"engine_type": "vllm", "num_gpu_blocks": 100}
+    if location in {"public", "nested"}:
+        args["speculation"] = chosen
+        if location == "nested":
+            args = {"rank": args, "dp_size": 1}
+    else:
+        canonical = {
+            "speculation": {"kind": "ngram", "params": {"num_speculative_tokens": 2}}
+        }
+        if location == "timing":
+            args["timing_model"] = {
+                "type": "external",
+                "provider": "aic",
+                "config": canonical,
+            }
+        else:
+            args["ais_perf_config"] = canonical
+    spec = ReplaySpec(
+        backend_deployment=replace(_agg_deployment(), agg_engine_args=args),
+        workload={
+            "trace_path": "unused.jsonl",
+            "trace_format": "agentic_mooncake" if agentic else "mooncake",
+        },
+        goal={},
+    )
+    with pytest.raises(ValueError, match="only MTP"):
+        simulation.DynamoReplayRunnerFactory().capabilities().require_compatible(spec)
+
+
+def test_canonical_only_agentic_mtp_requires_authored_capacity() -> None:
+    config = _mtp_timing()["config"]
+    config["speculation"] = {"kind": "mtp", "params": {"num_speculative_tokens": 2}}
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(),
+            agg_engine_args={
+                "engine_type": "vllm",
+                "ais_perf_config": config,
+                "ais_nextn_accept_rates": "1,0.5",
+            },
+        ),
+        workload={"trace_path": "unused.jsonl", "trace_format": "agentic_mooncake"},
+        goal={},
+    )
+    with pytest.raises(ValueError, match="explicit fixed KV capacity"):
+        simulation.DynamoReplayRunnerFactory().capabilities().require_compatible(spec)
+
+
+def test_metadata_failure_precedes_native_execution(monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(
+        simulation, "run_synthetic_trace_replay", lambda **kwargs: called.append(kwargs)
+    )
+
+    def invalid_metadata(spec, *, resolved_role_args):
+        rank = resolved_role_args["aggregated"]["rank"]
+        assert rank["aic_nextn"] == 2
+        assert rank["aic_nextn_accept_rates"] == "1,0.5"
+        raise ValueError("metadata cannot be resolved")
+
+    monkeypatch.setattr(
+        replay_config.speculation_api(), "speculation_report_metadata", invalid_metadata
+    )
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(),
+            agg_engine_args={
+                "engine_type": "vllm",
+                "num_gpu_blocks": 100,
+                "aic_nextn": 2,
+                "aic_nextn_accepted": 1.5,
+                "timing_model": {"type": "fixed", "prefill_ms": 1, "decode_ms": 1},
+            },
+        ),
+        workload={"isl": 16, "osl": 8, "request_count": 2, "concurrency": 1},
+        goal={},
+    )
+    with pytest.raises(ValueError, match="metadata cannot be resolved"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    assert called == []
+
+
+def test_ordinary_legacy_sampler_retains_default_acceptance() -> None:
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(),
+            agg_engine_args={
+                "engine_type": "vllm",
+                "num_gpu_blocks": 100,
+                "aic_nextn": 2,
+                "timing_model": {"type": "fixed", "prefill_ms": 1, "decode_ms": 1},
+            },
+        ),
+        workload={"isl": 16, "osl": 8, "request_count": 2, "concurrency": 1},
+        goal={},
+    )
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+    try:
+        report = runner.run(spec)
+    finally:
+        runner.close()
+    assert report.metrics["completed_requests"] == 2
+    assumptions = report.metadata["speculation"]["aggregated"]
+    assert assumptions["expected_accepted_draft_tokens"] is None
+    assert assumptions["conditional_acceptance_rates"] == "0.85,0.3"
+    assert assumptions["cost_approximation"] == "fixed_timing"
+
+
+def test_lowering_rejects_ngram_with_fixed_timing() -> None:
+    with pytest.raises(ValueError, match="ngram draft scheduling"):
+        lower_upstream_engine_args(
+            {
+                "engine_type": "vllm",
+                "num_gpu_blocks": 100,
+                "timing_model": {
+                    "type": "fixed",
+                    "prefill_ms": 1.0,
+                    "decode_ms": 1.0,
+                },
+                "speculation": {
+                    "kind": "ngram",
+                    "num_speculative_tokens": 3,
+                    "acceptance_rates": [1.0, 0.5, 0.2],
+                },
+            }
+        )
+
+
+def test_lowering_keeps_mtp_cost_in_canonical_timing(mtp_capacity_passthrough) -> None:
+    payload = {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 100,
+        "timing_model": {
+            "type": "external",
+            "provider": "aic",
+            "config": {
+                "model": "test-model",
+                "system": "test-system",
+                "backend": "vllm",
+                "worker_type": "aggregated",
+            },
+        },
+        "speculation": {
+            "kind": "mtp",
+            "num_speculative_tokens": 3,
+            "expected_accepted_tokens": 2.4,
+            "seed": 42,
+        },
+    }
+
+    lowered = lower_upstream_engine_args(payload)
+
+    assert lowered["ais_perf_config"]["speculation"] == {
+        "kind": "mtp",
+        "params": {"num_speculative_tokens": 3},
+    }
+    assert lowered["ais_nextn"] == 3
+    assert list(
+        map(float, lowered["ais_nextn_accept_rates"].split(","))
+    ) == pytest.approx([1.0, 1.0, 0.4])
+    assert lowered["ais_mtp_seed"] == 42
+    assert "timing_model" not in lowered
+    assert "speculation" in payload
+
+
+def test_mtp_report_keeps_acceptance_and_assumptions(
+    monkeypatch, mtp_capacity_passthrough
+) -> None:
+    acceptance = {"sampled_draft_tokens": 24, "verification_steps": 10}
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(
+        simulation,
+        "run_trace_replay",
+        lambda **kwargs: _report(
+            {"completed_requests": 2, "speculative_acceptance": acceptance}
+        ),
+    )
+    deployment = replace(
+        _agg_deployment(),
+        agg_engine_args={
+            "engine_type": "vllm",
+            "num_gpu_blocks": 100,
+            "timing_model": _mtp_timing(),
+            "speculation": {
+                "kind": "mtp",
+                "num_speculative_tokens": 3,
+                "expected_accepted_tokens": 2.4,
+                "seed": 42,
+            },
+        },
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "tiny.jsonl", "trace_format": "agentic_mooncake"},
+        goal={"target": "throughput"},
+    )
+
+    report = (
+        simulation.DynamoReplayRunnerFactory()
+        .create(0)
+        .run(
+            spec, output_requirements=ReplayOutputRequirements(include_raw_report=True)
+        )
+    )
+
+    assert report.metadata["speculative_acceptance"] == acceptance
+    assumed = report.metadata["speculation"]["aggregated"]
+    assert assumed["resolved_method"] == "mtp"
+    assert assumed["expected_accepted_draft_tokens"] == 2.4
+    assert assumed["seed"] == 42
+    assert assumed["qualification"] == "functional_only"
+    assert report.metadata["native_report"]["speculation"]["aggregated"] == assumed
+    assert (
+        report.metadata["native_report"]["agentic_qualification"] == "functional_only"
+    )
+    assert (
+        report.metadata["native_report"]["agentic_input_format"] == "agentic_mooncake"
+    )
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_factory_owns_mtp_capabilities(monkeypatch, supported) -> None:
+    native = replace(
+        simulation.EngineReplayRunnerFactory().capabilities(),
+        supports_mtp_expected_acceptance=supported,
+        supports_agentic_speculative_decoding=supported,
+    )
+    monkeypatch.setattr(
+        simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
+    )
+
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+
+    assert capabilities.supports_mtp_expected_acceptance
+    assert capabilities.supports_agentic_speculative_decoding
+    assert capabilities.agentic_qualification == "functional_only"
+
+
+def test_factory_accepts_agentic_mtp() -> None:
+    deployment = replace(
+        _agg_deployment(),
+        agg_engine_args={
+            "engine_type": "vllm",
+            "num_gpu_blocks": 100,
+            "timing_model": _mtp_timing(),
+            "speculation": {
+                "kind": "mtp",
+                "num_speculative_tokens": 3,
+                "expected_accepted_tokens": 2.4,
+                "seed": 42,
+            },
+        },
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "tiny.jsonl", "trace_format": "agentic_mooncake"},
+        goal={"target": "throughput"},
+    )
+
+    simulation.DynamoReplayRunnerFactory().capabilities().require_compatible(spec)
+
+
+def test_factory_rejects_agentic_ngram() -> None:
+    deployment = replace(
+        _agg_deployment(),
+        agg_engine_args={
+            "engine_type": "vllm",
+            "num_gpu_blocks": 100,
+            "speculation": {
+                "kind": "ngram",
+                "num_speculative_tokens": 3,
+                "acceptance_rates": [1.0, 0.5, 0.2],
+            },
+        },
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "tiny.jsonl", "trace_format": "agentic_mooncake"},
+        goal={"target": "throughput"},
+    )
+
+    with pytest.raises(ValueError, match="ngram|MTP|mtp"):
+        simulation.DynamoReplayRunnerFactory().capabilities().require_compatible(spec)
+
+
+@pytest.mark.parametrize("canonical_mtp", [False, True])
+def test_lowering_derives_scheduler_depth_from_canonical_cost(
+    canonical_mtp, mtp_capacity_passthrough
+) -> None:
+    timing = _mtp_timing()
+    if canonical_mtp:
+        timing["config"]["speculation"] = {
+            "kind": "mtp",
+            "params": {"num_speculative_tokens": 2},
+        }
+    else:
+        timing["config"]["nextn"] = 2
+    lowered = lower_upstream_engine_args(
+        {
+            "engine_type": "vllm",
+            "num_gpu_blocks": 100,
+            "timing_model": timing,
+            "aic_nextn_accept_rates": "1,0.5",
+        }
+    )
+    assert lowered["ais_nextn"] == 2
+    assert lowered["ais_nextn_accept_rates"] == "1,0.5"
+    assert lowered["ais_perf_config"] == timing["config"]
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("rates", [None, ""])
+def test_canonical_mtp_requires_authored_acceptance_for_ordinary_replay(
+    direct, rates
+) -> None:
+    timing = _mtp_timing()
+    timing["config"]["speculation"] = {
+        "kind": "mtp",
+        "params": {"num_speculative_tokens": 2},
+    }
+    args = {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 100,
+        "ais_nextn_accept_rates": rates,
+    }
+    args["ais_perf_config" if direct else "timing_model"] = (
+        timing["config"] if direct else timing
+    )
+    spec = ReplaySpec(
+        backend_deployment=replace(_agg_deployment(), agg_engine_args=args),
+        workload={"isl": 16, "osl": 8, "request_count": 1, "concurrency": 1},
+        goal={},
+    )
+    with pytest.raises(ValueError, match="canonical MTP requires explicit acceptance"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    with pytest.raises(ValueError, match="canonical MTP requires explicit acceptance"):
+        lower_upstream_engine_args(args)
+
+
+def test_canonical_mtp_accepts_explicit_zero_mean(mtp_capacity_passthrough) -> None:
+    timing = _mtp_timing()
+    timing["config"]["speculation"] = {
+        "kind": "mtp",
+        "params": {"num_speculative_tokens": 2},
+    }
+    lowered = lower_upstream_engine_args(
+        {"timing_model": timing, "num_gpu_blocks": 100, "aic_nextn_accepted": 0}
+    )
+    assert lowered["ais_nextn"] == 2
+    assert list(map(float, lowered["ais_nextn_accept_rates"].split(","))) == [0, 0]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "field,authored,conflicting",
+    [
+        ("nextn", 2, 3),
+        ("nextn_accept_rates", "1,0.5", "1,1"),
+        ("mtp_seed", 42, 73),
+    ],
+)
+def test_conflicting_native_speculation_aliases_fail_before_execution(
+    nested, field, authored, conflicting
+):
+    rank = {
+        "engine_type": "vllm",
+        "ais_" + field: authored,
+        "aic_" + field: conflicting,
+    }
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(), agg_engine_args={"rank": rank} if nested else rank
+        ),
+        workload={},
+        goal={},
+    )
+    with pytest.raises(ValueError, match=f"ais_{field} conflicts with aic_{field}"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+
+@pytest.mark.parametrize("canonical_mtp", [False, True])
+@pytest.mark.parametrize("depth", [None, 0, 2, 3])
+def test_canonical_cost_derives_native_depth_without_losing_identity(
+    canonical_mtp, depth, mtp_capacity_passthrough
+):
+    config = _mtp_timing()["config"]
+    if canonical_mtp:
+        config["speculation"] = {"kind": "mtp", "params": {"num_speculative_tokens": 2}}
+    else:
+        config["nextn"] = 2
+    args = {
+        "engine_type": "vllm",
+        "num_gpu_blocks": 100,
+        "ais_perf_config": config,
+        "ais_nextn": depth,
+        "ais_nextn_accept_rates": "1,0.5",
+        "ais_mtp_seed": 73,
+    }
+    if depth == 3:
+        with pytest.raises(ValueError, match="speculative depth conflicts"):
+            lower_upstream_engine_args(args)
+    else:
+        lowered = lower_upstream_engine_args(args)
+        assert lowered["ais_nextn"] == 2
+        assert lowered["ais_perf_config"] == config
+        assert lowered["ais_nextn_accept_rates"] == "1,0.5"
+        assert lowered["ais_mtp_seed"] == 73
+    assert args["ais_nextn"] == depth
+
+
+def test_ordinary_report_preserves_agentic_completion_evidence():
+    evidence = {
+        "agentic_play_outcomes": [{"play_id": "one", "status": "completed"}],
+        "agentic_lifecycle_digest": "abc123",
+        "agentic_lifecycle_event_count": 4,
+        "agentic_graph": {"completed_requests": 2},
+        "agentic_model_projection": {"target_model": "model"},
+        "speculative_acceptance": {"decode_forwards": 5},
+    }
+    metrics, metadata = simulation.DynamoReplayRunner._normalize_report(
+        _report({"completed_requests": 2, **evidence}), ReplayOutputRequirements()
+    )
+    assert metadata == evidence
+    assert metrics["completed_requests"] == 2
