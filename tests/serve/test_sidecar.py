@@ -444,7 +444,7 @@ def test_sidecar_kv_routing(
             engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
             # KV publishers offset by rank; SGLang also derives communication ports.
             dep_ports = allocate_contiguous_ports(
-                1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
+                1, 14 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
             )
             request.addfinalizer(lambda: deallocate_ports(dep_ports))
             config.script_args += [
@@ -457,7 +457,10 @@ def test_sidecar_kv_routing(
                         **(
                             {"enable_kv_cache_events": True}
                             if backend == "vllm"
-                            else {}
+                            else {
+                                "replay_endpoint": f"tcp://*:{dep_ports[-3]}",
+                                "buffer_steps": 10000,
+                            }
                         ),
                     }
                 ),
@@ -507,6 +510,15 @@ def test_sidecar_kv_routing(
                 ]
         else:
             engine_env = _sidecar_worker_gpu_env(backend)
+            if backend == "sglang":
+                replay_ports = allocate_contiguous_ports(
+                    1, worker_count, DynamoPortRange.SERVE.value
+                )
+                request.addfinalizer(lambda: deallocate_ports(replay_ports))
+                for worker_index, port in enumerate(replay_ports):
+                    engine_env[f"SGLANG_WORKER{worker_index + 1}_KV_REPLAY_PORT"] = str(
+                        port
+                    )
             for worker_index in range(2):
                 prefix = f"{backend.upper()}_WORKER{worker_index + 1}"
                 engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[worker_index * 2])

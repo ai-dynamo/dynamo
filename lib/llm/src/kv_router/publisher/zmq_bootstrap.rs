@@ -115,7 +115,7 @@ pub enum BootstrapOutcome {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("missing KV sequence {expected}; replay starts at {got}")]
+#[error("missing KV sequence {expected}; next available sequence is {got}")]
 struct MissingHistory {
     expected: u64,
     got: u64,
@@ -152,6 +152,7 @@ pub(super) async fn bootstrap(
             tokio::time::timeout(INACTIVITY_TIMEOUT, replay.send(tmq::Multipart::from(vec![
                 Vec::new(), cursor.next().to_be_bytes().to_vec(),
             ]))).await??;
+            let mut replay_through = None;
             let mut deadline = tokio::time::Instant::now() + INACTIVITY_TIMEOUT;
             loop {
                 let (sequence, payload) = tokio::select! {
@@ -164,9 +165,7 @@ pub(super) async fn bootstrap(
                         match decode_replay(frames)? {
                             ReplayFrame::End => break,
                             ReplayFrame::Batch(sequence, payload) => {
-                                if sequence > cursor.next() {
-                                    return Err(anyhow::Error::new(MissingHistory { expected: cursor.next(), got: sequence }));
-                                }
+                                replay_through = Some(sequence);
                                 (sequence, payload)
                             }
                         }
@@ -180,7 +179,15 @@ pub(super) async fn bootstrap(
                 let (sequence, payload) = live_payload(message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??)?;
                 apply_batch(&mut cursor, sequence, payload, normalizer, tx, next_event_id, worker).await?;
             }
-            if cursor.gap().is_none() { return Ok(cursor.next()); }
+            if let Some((expected, got)) = cursor.gap() {
+                // Replay is ordered, but it is independent of the live socket.
+                // Only classify a replay hole after merging queued live events.
+                if replay_through.is_some_and(|sequence| sequence > expected) {
+                    return Err(anyhow::Error::new(MissingHistory { expected, got }));
+                }
+            } else {
+                return Ok(cursor.next());
+            }
         }
     }).await;
     match result {
@@ -423,15 +430,18 @@ mod socket_tests {
 
     #[tokio::test]
     async fn confirmed_missing_history_is_distinct_from_timeout() {
-        for missing in [true, false] {
+        for (send_batch, send_end) in [(true, true), (true, false), (false, false)] {
             let mut f = Fixture::new(Duration::from_secs(1));
             f.ack().await;
             let id = f.request(0).await;
-            if missing {
+            if send_batch {
                 f.send(&id, 500, payload(0)).await;
             }
+            if send_end {
+                f.send(&id, -1, vec![]).await;
+            }
             let result = f.result().await;
-            if missing {
+            if send_end {
                 assert_eq!(
                     result,
                     BootstrapOutcome::MissingHistory {
@@ -443,6 +453,41 @@ mod socket_tests {
             } else {
                 assert!(matches!(result, BootstrapOutcome::Uncertain { .. }));
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn live_fills_hole_observed_first_on_replay() {
+        // Exercise both missing initial history and a later replay hole.
+        for missing in [0_u64, 1] {
+            let mut f = Fixture::new(Duration::from_secs(5));
+            f.ack().await;
+            let id = f.request(0).await;
+            if missing == 1 {
+                f.send(&id, 0, payload(0)).await;
+                f.ack().await;
+            }
+            f.send(&id, (missing + 1) as i64, payload(0)).await;
+            // Let replay expose the hole before sending its live counterpart.
+            // The old implementation reports MissingHistory here.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut f.outcome)
+                    .await
+                    .is_err()
+            );
+            f.live
+                .send(Multipart::from(vec![
+                    vec![],
+                    missing.to_be_bytes().to_vec(),
+                    payload(0),
+                ]))
+                .await
+                .unwrap();
+            assert_eq!(f.ack().await[0].event.event_id, missing);
+            assert_eq!(f.ack().await[0].event.event_id, missing + 1);
+            f.send(&id, -1, vec![]).await;
+            assert_eq!(f.result().await, BootstrapOutcome::Success);
+            assert!(f.inputs.try_recv().is_err());
         }
     }
 

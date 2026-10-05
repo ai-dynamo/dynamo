@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -223,6 +223,9 @@ impl PublisherInput {
 /// supported. Future independent restart support must either emit an ordered rank-scoped
 /// `Cleared` event before the new stream or create a new Dynamo publisher ID.
 pub struct KvEventPublisher {
+    kv_block_size: u32,
+    /// Shared monotonic event ID counter for bindings and the ZMQ listener.
+    next_event_id: Arc<AtomicU64>,
     /// The source of KV events.
     /// Can be `None` if all events are provided through
     /// [`KvEventPublisher::publish`] or [`KvEventPublisher::publish_batch`].
@@ -368,7 +371,7 @@ impl KvEventPublisher {
                 config,
                 cancellation_token.clone(),
                 tx.clone(),
-                next_event_id,
+                next_event_id.clone(),
             )?);
         }
 
@@ -501,6 +504,8 @@ impl KvEventPublisher {
         });
 
         Ok(Self {
+            kv_block_size,
+            next_event_id,
             source,
             cancellation_token,
             worker_id,
@@ -601,6 +606,14 @@ impl KvEventPublisher {
                         .event,
                 )
             })
+    }
+
+    pub fn next_event_id(&self) -> u64 {
+        self.next_event_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn kv_block_size(&self) -> u32 {
+        self.kv_block_size
     }
 
     pub fn shutdown(&mut self) {

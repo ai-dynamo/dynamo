@@ -24,6 +24,8 @@ mod test_event_processing {
     fn test_publish_batch_ignores_empty_and_preserves_order() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
+            kv_block_size: 16,
+            next_event_id: Arc::new(AtomicU64::new(0)),
             source: None,
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
@@ -62,6 +64,8 @@ mod test_event_processing {
     fn test_publish_batch_closed_channel_returns_original_events_in_order() {
         let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
+            kv_block_size: 16,
+            next_event_id: Arc::new(AtomicU64::new(0)),
             source: None,
             cancellation_token: CancellationToken::new(),
             worker_id: 7,
@@ -95,6 +99,8 @@ mod test_event_processing {
     fn test_publish_wraps_events_in_batches() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
+            kv_block_size: 16,
+            next_event_id: Arc::new(AtomicU64::new(0)),
             source: None,
             cancellation_token: CancellationToken::new(),
             worker_id: 7,

@@ -2293,6 +2293,7 @@ dependencies = [
  "validator",
  "video-rs",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
@@ -2568,6 +2569,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
