@@ -367,6 +367,73 @@ def test_repeated_shared_claim_from_one_session_is_idempotent(gms):
     assert not gms._persistent.is_claimed("eng-X", "kv_pool")
 
 
+@pytest.mark.parametrize("shared", [False, True])
+def test_same_session_claim_is_idempotent_and_mode_change_is_fatal(gms, shared):
+    conn = _make_dummy_conn()
+
+    def claim(mode):
+        response, _, _ = asyncio.run(
+            gms.handle_request(
+                conn,
+                ClaimPersistentAllocationRequest("engine", "kv", 8192, mode),
+                lambda: True,
+            )
+        )
+        return response
+
+    first, second = claim(shared), claim(shared)
+    assert isinstance(second, ClaimPersistentAllocationResponse)
+    assert first.allocation_id == second.allocation_id
+    assert second.reattached
+    assert gms._persistent.shared_claim_count("engine", "kv") == int(shared)
+    conflict = claim(not shared)
+    assert isinstance(conflict, ErrorResponse)
+    assert conflict.code == 2  # Permanent incompatibility, not retryable contention.
+
+
+def test_release_refuses_a_stale_incarnation(gms):
+    """POOL-4: a releaser naming an earlier incarnation cannot destroy the key's
+    current, unclaimed (crash-survival) backing."""
+
+    def request(conn, message):
+        response, _, _ = asyncio.run(gms.handle_request(conn, message, lambda: True))
+        return response
+
+    first_owner, cleaner, second_owner = (_make_dummy_conn() for _ in range(3))
+    stale = request(first_owner, ClaimPersistentAllocationRequest("eng", "kv", 8192))
+    asyncio.run(gms.cleanup_connection(first_owner))
+    listed = request(cleaner, ListPersistentAllocationsRequest("eng", True))
+    assert [a.allocation_id for a in listed.allocations] == [stale.allocation_id]
+
+    # Between the cleaner's list and its release, another engine releases and
+    # recreates the key, then crashes: the new backing is unclaimed but retained.
+    assert request(
+        second_owner, ReleasePersistentAllocationRequest("eng", "kv")
+    ).released
+    current = request(second_owner, ClaimPersistentAllocationRequest("eng", "kv", 8192))
+    assert current.allocation_id != stale.allocation_id
+    asyncio.run(gms.cleanup_connection(second_owner))
+
+    refused = request(
+        cleaner,
+        ReleasePersistentAllocationRequest("eng", "kv", stale.allocation_id),
+    )
+    assert isinstance(refused, ErrorResponse)
+    assert refused.code == 6
+    assert gms._persistent.get("eng", "kv").allocation_id == current.allocation_id
+
+    released = request(
+        cleaner,
+        ReleasePersistentAllocationRequest("eng", "kv", current.allocation_id),
+    )
+    assert released.released is True
+    missing = request(
+        cleaner,
+        ReleasePersistentAllocationRequest("eng", "kv", current.allocation_id),
+    )
+    assert missing.released is False
+
+
 def test_unclaim_drops_only_calling_session_claim(gms):
     first = _make_dummy_conn()
     second = _make_dummy_conn()
@@ -478,15 +545,16 @@ def test_export_returns_fd_via_rpc(gms):
 
 
 def test_conflict_returns_error_response(gms):
-    conn = _make_dummy_conn()
+    owner, contender = _make_dummy_conn(), _make_dummy_conn()
     claim = ClaimPersistentAllocationRequest(
         engine_id="eng-X",
         tag="kv_pool",
         size=8192,
     )
-    asyncio.run(gms.handle_request(conn, claim, lambda: True))
-    resp, _, _ = asyncio.run(gms.handle_request(conn, claim, lambda: True))
+    asyncio.run(gms.handle_request(owner, claim, lambda: True))
+    resp, _, _ = asyncio.run(gms.handle_request(contender, claim, lambda: True))
     assert isinstance(resp, ErrorResponse)
+    assert resp.code == 1
     assert "already claimed" in resp.error
 
 

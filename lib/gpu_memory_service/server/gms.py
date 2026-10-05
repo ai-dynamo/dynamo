@@ -555,12 +555,19 @@ class GMS:
             )
             key = (msg.engine_id, msg.tag)
             try:
-                if key in claims and getattr(msg, "shared", False):
+                if key in claims:
+                    # A compatible repeat from the same session returns the
+                    # cached identity in either mode; it is not contention.
+                    was_shared = self._persistent.shared_claim_count(*key) > 0
+                    if was_shared != bool(getattr(msg, "shared", False)):
+                        raise ValueError(
+                            "persistent claim mode differs from this session's claim"
+                        )
                     alloc = self._persistent.get_compatible(
                         msg.engine_id,
                         msg.tag,
                         msg.size,
-                        shared=True,
+                        shared=was_shared,
                     )
                     reattached = True
                 else:
@@ -600,6 +607,32 @@ class GMS:
             return UnclaimPersistentAllocationResponse(unclaimed=unclaimed), -1, False
 
         if msg_type is ReleasePersistentAllocationRequest:
+            expected = getattr(msg, "allocation_id", None)
+            if expected is not None:
+                try:
+                    current = self._persistent.get(msg.engine_id, msg.tag).allocation_id
+                except PersistentNotFoundError:
+                    current = None
+                if current is None:
+                    return (
+                        ReleasePersistentAllocationResponse(released=False),
+                        -1,
+                        False,
+                    )
+                if current != expected:
+                    # The key was released and recreated after the caller
+                    # observed it. Never destroy an incarnation it did not name.
+                    return (
+                        ErrorResponse(
+                            error=(
+                                "persistent allocation identity mismatch: "
+                                f"expected {expected}, found {current}"
+                            ),
+                            code=6,
+                        ),
+                        -1,
+                        False,
+                    )
             if not self._has_persistent_claim(conn, msg.engine_id, msg.tag):
                 # Permit reclaiming a TRULY orphaned allocation (claimed by no
                 # live session) so a crashed engine's HBM can be GC'd without a
