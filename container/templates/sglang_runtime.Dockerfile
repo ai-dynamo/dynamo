@@ -209,6 +209,20 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     python3 -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
 {% endif %}
 
+# Kimi-K3: apply the pinned SGLang patches to the source tree in the upstream
+# image, then compare the patched files with the hashes that were benchmarked.
+# A different hash fails the build.
+{% if device == "cuda" %}
+RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/sglang_patches \
+    set -eu; \
+    SGLANG_DIR="/sgl-workspace/sglang"; \
+    python3 -c "import importlib.util, os; spec = importlib.util.find_spec('sglang'); assert spec and spec.origin; assert os.path.realpath(spec.origin).startswith('${SGLANG_DIR}/'), spec.origin"; \
+    patch_series="$(find /tmp/sglang_patches -maxdepth 1 -type f -name '*.patch' | sort)"; \
+    test -n "${patch_series}"; \
+    git -C "${SGLANG_DIR}" apply ${patch_series}; \
+    cd "${SGLANG_DIR}" && sha256sum -c /tmp/sglang_patches/patched-files.sha256
+{% endif %}
+
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image
 # (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the
 # VP9-only in-tree ffmpeg from wheel_builder below for the video-generation
