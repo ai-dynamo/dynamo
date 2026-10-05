@@ -60,8 +60,6 @@ use super::ais_callback::create_ais_prefill_load_estimator;
 use super::entrypoint::AisPerfConfig;
 
 mod demand_driven;
-mod replay_policy;
-pub(crate) use replay_policy::NativeReplayPolicy;
 
 const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
 

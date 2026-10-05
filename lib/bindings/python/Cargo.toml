@@ -83,7 +83,7 @@ serde = { version = "1" }
 serde_json = { version = "1.0.138" }
 serde-transcode = "1.1"
 thiserror = { version = "2.0" }
-tokio = { version = "1.46.0", features = ["full", "test-util"] }
+tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { version = "0" }

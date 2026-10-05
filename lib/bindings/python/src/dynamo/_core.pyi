@@ -737,59 +737,6 @@ class MultimodalEmbeddingCachePublisher:
         """
         ...
 
-class NativeReplayPolicy:
-    """Native KV/load selection and conversation affinity with explicit virtual time.
-
-    The caller serializes operations outside Tokio and supplies physical device KV events;
-    this API does not simulate engines or synthesize cache state. Worker membership
-    is fixed. Queue thresholds, authored DP pins, custom policy classes, length-only
-    prompts, offload, and selector seeds are not supported by this host.
-
-    JSON wire version 1: workers contain ``api_version: 1``, ``block_size``, ``total_kv_blocks``,
-    ``max_num_batched_tokens``, ``dp_size`` and ``workers: [{worker_id}]``;
-    optional ``host_offload``, ``g3_offload`` and ``capture_decisions`` are booleans.
-    Request fields are ``request_id``, ``input_tokens`` (length), ``output_tokens``,
-    ``local_block_hashes``, ``sequence_hashes``, ``prompt_token_source`` (materialized),
-    and optional priority, strict_priority, identity, authored_request_id, session_id.
-    Identity contains optional scope/session/root/parent and lineage_available.
-    Events are ``[{worker_id, event: {event_id, dp_rank, data, tier: "device"}}]``
-    using Dynamo's
-    existing native KV event data schema; omitted tier means device. Times are finite, nonnegative monotonic ms.
-
-    A placement contains request_id, worker_id, dp_rank, cached_tokens,
-    overlap_blocks, best_available_overlap_blocks and isl_blocks. The host maps
-    the native worker/DP pair to its executor. Commit dispatch only after successful
-    admission; on failure call dispatch_aborted. Completion/cancellation calls
-    request_terminal. After these callbacks, honor next_wakeup_ms and advance_clock
-    to release requests waiting for an affinity initializer. Active leases survive
-    TTL; idle TTL starts when the final request holding the binding terminates.
-    """
-
-    def __init__(
-        self, role: str, router_config_json: str, workers_json: str
-    ) -> None: ...
-    @staticmethod
-    def contract() -> dict[str, Any]:
-        """Wire api_version, package dynamo_version, optional build dynamo_revision."""
-        ...
-    def place(self, request_json: str, now_ms: float) -> str:
-        """JSON {decision: placement or null, released: []}; null means queued."""
-        ...
-    def observe(self, events_json: str, now_ms: float) -> str: ...
-    def advance_clock(self, now_ms: float) -> str:
-        """JSON placement list released at this time."""
-        ...
-    def next_wakeup_ms(self) -> Optional[float]: ...
-    def pending_count(self) -> int: ...
-    def cancel_pending(self, request_id: str) -> bool: ...
-    def dispatch_committed(self, request_id: str, now_ms: float) -> None: ...
-    def dispatch_aborted(self, request_id: str, now_ms: float) -> None: ...
-    def prefill_completed(self, request_id: str, now_ms: float) -> str: ...
-    def request_terminal(self, request_id: str, now_ms: float) -> str: ...
-    def evidence(self) -> str:
-        """JSON counters and optional captured decisions from the native selector."""
-        ...
-
 class SelectionCacheConfig:
     """
     Bounds for the in-flight selection cache. Each field defaults to the
