@@ -14,7 +14,7 @@ import json
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from aisimulate.runner import (
     EngineReplayRunner,
@@ -53,6 +53,7 @@ _ROUTER_HOOK = HookCapability(
     api_version=1,
 )
 _REPLAY_SPEC_API_VERSION = 1
+_RouterMode = Literal["round_robin", "kv_router"]
 
 
 @dataclass(frozen=True)
@@ -222,13 +223,13 @@ class DynamoReplayRunner:
         hooks: tuple[RuntimeHookSpec, ...],
     ) -> tuple[
         dict[str, JSONValue] | None,
-        str,
+        _RouterMode,
         KvRouterConfig | None,
         AisPerfConfig | None,
         dict[str, JSONValue] | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
-        router_mode = "round_robin"
+        router_mode: _RouterMode = "round_robin"
         router_config: KvRouterConfig | None = None
         ais_perf_config: AisPerfConfig | None = None
         affinity: dict[str, JSONValue] | None = None
@@ -254,7 +255,15 @@ class DynamoReplayRunner:
                         "ReplaySpec contains multiple Router placement hooks"
                     )
                 router_seen = True
-                router_mode = str(hook.config.get("router_mode", "kv_router"))
+                raw_mode = str(hook.config.get("router_mode", "kv_router"))
+                if raw_mode == "round_robin":
+                    router_mode = "round_robin"
+                elif raw_mode == "kv_router":
+                    router_mode = "kv_router"
+                else:
+                    raise ValueError(
+                        "Dynamo Router hook router_mode must be 'round_robin' or 'kv_router'"
+                    )
                 raw_config = hook.config.get("router_config")
                 if not isinstance(raw_config, dict):
                     raise TypeError(
@@ -385,7 +394,7 @@ class _DynamoReplayRuntime:
     """Supply Dynamo policies and optional observers to the shared executor."""
 
     spec: ReplaySpec
-    router_mode: str
+    router_mode: _RouterMode
     router_config: KvRouterConfig | None
     ais_perf_config: AisPerfConfig | None
     affinity: dict[str, JSONValue] | None

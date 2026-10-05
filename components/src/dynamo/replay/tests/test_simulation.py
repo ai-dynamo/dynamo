@@ -329,6 +329,24 @@ def test_dynamo_runner_defers_target_model_validation_until_trace_load(
     assert "execution_model" not in seen["payload"]["traffic"]
 
 
+@pytest.mark.parametrize("router_mode", ["unsupported", None, 1])
+def test_runner_rejects_invalid_router_mode_before_native_execution(
+    monkeypatch, router_mode
+) -> None:
+    seen = _capture_native(monkeypatch, {"completed_requests": 1})
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "unused.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+        adapters={"dynamo.router": _router_adapter(router_mode=router_mode)},
+    )
+    with pytest.raises(
+        ValueError, match="router_mode must be 'round_robin' or 'kv_router'"
+    ):
+        simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    assert not seen
+
+
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
 def test_runner_forwards_and_retains_requested_telemetry(
     monkeypatch, router_mode
