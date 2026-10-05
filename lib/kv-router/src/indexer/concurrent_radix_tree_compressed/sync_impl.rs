@@ -182,7 +182,6 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     let _ = resp.send(resident);
                 }
                 WorkerTask::Flush(sender) => {
-                    // Hand off retired child snapshots so their memory is reclaimed promptly.
                     NodeChildren::flush_retired();
                     NodeChildren::drain_graveyard(usize::MAX);
                     let _ = sender.send(());
