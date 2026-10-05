@@ -55,7 +55,15 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::WorkerUnavailable,
     ];
     // Pre-stream request rejections can carry an outer CannotConnect wrapper.
-    match_error_chain(err, INHIBITED, &[ErrorType::InvalidRequest])
+    match_error_chain(
+        err,
+        INHIBITED,
+        &[
+            ErrorType::InvalidRequest,
+            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
+        ],
+    )
 }
 
 /// Read the backend response inactivity timeout from the environment.
@@ -2520,10 +2528,12 @@ mod tests {
             StreamPrologueError, egress::addressed_router::pre_stream_failure_error,
         };
 
-        for error_type in [
-            ErrorType::InvalidRequest,
-            ErrorType::CannotConnect,
-            ErrorType::Unavailable,
+        for (error_type, is_worker_fault) in [
+            (ErrorType::InvalidRequest, false),
+            (ErrorType::InvalidArgument, false),
+            (ErrorType::Backend(BackendError::InvalidArgument), false),
+            (ErrorType::CannotConnect, true),
+            (ErrorType::Unavailable, true),
         ] {
             let rejection = DynamoError::builder()
                 .error_type(error_type)
@@ -2532,11 +2542,7 @@ mod tests {
             let error =
                 pre_stream_failure_error(StreamPrologueError::new("Generate Error", rejection));
             assert_eq!(error.error_type(), ErrorType::CannotConnect);
-            assert_eq!(
-                is_inhibited(&error),
-                error_type != ErrorType::InvalidRequest,
-                "{error_type:?}"
-            );
+            assert_eq!(is_inhibited(&error), is_worker_fault, "{error_type:?}");
         }
     }
 
