@@ -299,7 +299,6 @@ impl NodeChildren {
         f(self.load(&guard))
     }
 
-    /// Publishes `next` unconditionally and retires the previous snapshot.
     fn replace(&self, next: ChildrenState, guard: &Guard) {
         let previous = self.state.swap(Owned::new(next), Ordering::AcqRel, guard);
         // SAFETY: the swap unlinked `previous`.
