@@ -9,6 +9,13 @@ from gpu_memory_service.integrations.vllm.install_kv_leases import (
     install_gms_engine_core_sleep,
 )
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_0,
+]
+
 
 def test_sleep_utility_is_visible_on_spawned_engine_core_proc():
     from vllm.v1.engine.core import EngineCore, EngineCoreProc
