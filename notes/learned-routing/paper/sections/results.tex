@@ -486,10 +486,11 @@ overlap credit ($\theta_1\,\mathrm{sd}_1$ of $+4.2$ to $+4.9$) and a strong pena
     length-scaled TTFT plus ITL $+0.013$ ($p$ 0.0105), absolute end-to-end plus ITL $+0.019$
     ($p$ 0.0061).
     % prov: A14
-  \item \textbf{Simulator model.} On validation, four audit-only changes to \ais{}'s pricing of
+  \item \textbf{Simulator model.} On validation, four audit-only changes to \aisim{}'s pricing of
     mixed prefill and decode passes, which act on M1-v2's concentration mechanism, keep the lead
     between $+0.0268$ and $+0.0291$ against $+0.0290$; they bracket fidelity errors, are not
     measurements of reality and do not cover FAST25, a test-only family (\cref{app:results}).
+    % src (pricing owner): CR/facts/UPSTREAM_FOLLOWUPS.md #17; appendix-caveats.tex row 13
   \item \textbf{Herding guards.} Run as variants of M1 (they were registered before M1-v2 won),
     neither a positive temperature nor restricting candidates to the prefix's hash-home pair helps,
     and no herding failure of the argmax appeared under the tested lags in replay

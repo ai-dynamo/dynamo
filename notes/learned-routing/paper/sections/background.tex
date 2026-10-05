@@ -298,10 +298,12 @@ policies lose their keys, and the learned policy must run with its training-time
 per replicate (caveat 9; \cref{sec:replicates}). No AgentX play (one recorded agent run;
 \cref{sec:workloads}) fits a 32K context, so the deployment runs at 128K with YaRN context extension
 (a factor of 4 over the model's original \num{32768} tokens), where \ais{}'s accuracy is least
-validated, and \ais{} prices a mixed prefill
+validated, and \aisim{} prices a mixed prefill
 pass at the batch mean, an artifact a search could exploit (caveats 10 and 13;
 \cref{sec:threats-sim,sec:gaming}). Finally, the request-count objective can be gamed (caveat 15;
 \cref{sec:gaming}). \Cref{app:caveats} lists all 15 with their evidence and status (fixed, follow-up,
 inherent).
 % src (YaRN gloss): CR/facts/live.json ("--max-model-len 131072 with YaRN (factor 4, original 32768)");
 %      CR/config/engine.json max_model_len note ("131072 per operator (YaRN)"); restructure round 1, E4
+% src (mixed prefill pricing): CR/facts/UPSTREAM_FOLLOWUPS.md #17
+%      (AISim, the replay engine, prices a mixed prefill pass; it calls AIS predict_prefill on batch means)

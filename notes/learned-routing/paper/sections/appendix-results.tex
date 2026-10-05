@@ -31,7 +31,7 @@ the prompt-length trade of \cref{tab:isl} (\cref{sec:gaming-isl}).
   \input{generated/fig_headline_segments}
   % src: CR/report/data/report_data.json comparisons.ramjet.m1v2.all.by_segment, drawn by
   %      scripts/make_figures.py (formerly fig/headline_segments.png, report figure F1)
-  \caption{The headline per test segment, labelled by family and the segment names of
+  \caption{The headline per test segment, labeled by family and the segment names of
     \cref{tab:headline}. The four session segments tie at ceiling;
     every other segment favors M1-v2.}
   \label{fig:headline}
@@ -42,7 +42,7 @@ the prompt-length trade of \cref{tab:isl} (\cref{sec:gaming-isl}).
   \input{generated/fig_val_vs_test}
   % src: CR/report/data/report_data.json val_k3_10.<policy> and
   %      comparisons.default.<policy>.all.cell_mean, drawn by scripts/make_figures.py (formerly
-  %      fig/val_vs_test.png, report figure F7; the same ten policies are labelled)
+  %      fig/val_vs_test.png, report figure F7; the same ten policies are labeled)
   \caption{Validation (fresh replicates) against test, mean over cells of the clipped log-ratio
     against $\piref$. The two compare different cells, so the dashed line is a reference, not an
     expectation.}
@@ -73,7 +73,7 @@ the prompt-length trade of \cref{tab:isl} (\cref{sec:gaming-isl}).
   \input{generated/fig_coefficients}
   % src: CR/report/data/report_data.json coefficients_m1v2 (index, feature,
   %      theta_x_sd), drawn by scripts/make_figures.py (formerly fig/coefficients_m1v2.png, report F6)
-  \caption{M1-v2's nonzero coefficients, standardized, labelled with the feature index $f$ and name
+  \caption{M1-v2's nonzero coefficients, standardized, labeled with the feature index $f$ and name
     of \cref{tab:coef-m1v2}. Positive attracts a worker, negative repels it; the default-cost
     anchor is at $-6.51$.}
   \label{fig:coef}
@@ -142,8 +142,10 @@ and M1, and 448 of 448 validation records for M1-v2, \policy{ramjet}, \policy{ll
 and $\piref$ (\cref{sec:robustness}).
 
 \paragraph{Simulator-model counterfactuals.}
-% src: CR/audits/final/refute-headline-3.md (simulator model variants); CR/report/REPORT.md section 7.1
-On validation only, an audit-only build of the simulator changes how \ais{} prices mixed prefill
+% src: CR/audits/final/refute-headline-3.md (simulator model variants); CR/report/REPORT.md section 7.1;
+%      CR/facts/UPSTREAM_FOLLOWUPS.md #17
+%      (AISim, the replay engine, prices a mixed prefill pass; it calls AIS predict_prefill on batch means)
+On validation only, an audit-only \aisim{} build changes how the simulator prices mixed prefill
 and decode passes. Against $+0.0290$ on the unmodified simulator, M1-v2's lead over \policy{ramjet} is
 $+0.0274$ when mixed prefill passes are priced attention-equivalent, $+0.0291$ when priced as a
 per-request sum, $+0.0268$ with an extra \SI{0.1}{ms} of decode cost per running sequence, and

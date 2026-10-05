@@ -165,6 +165,7 @@ def emit(
     colsep: str | None = None,
     stack: int | None = None,
     shrink: bool = True,
+    cell_replace: dict[str, str] | None = None,
 ) -> None:
     """Write generated/<target>.tex: the chosen columns (source header -> printed header) and rows.
 
@@ -176,6 +177,9 @@ def emit(
     font size. The last block may be narrower. ``colspec`` then describes the first block.
     ``shrink`` (default) wraps a non-long table in adjustbox, which shrinks it only when it is wider
     than the text block; ``False`` sets it at ``size`` exactly (the layout must fit the width).
+    ``cell_replace`` maps substrings of the rendered (LaTeX) cells to replacements, for typesetting
+    fixes such as a non-breaking hyphen; it never touches a number.
+    A longtable ends its second-to-last row with ``\\*``, so its last row never sits alone on a page.
     """
     header, body = read_md(tables / source, table)
     # A repeated header name is addressed as "name#2", "name#3", ... in the order it appears.
@@ -227,6 +231,8 @@ def emit(
                     keys.append(value.strip())
                 else:
                     cells.append(tex(relabel(value)))
+            for old, new in (cell_replace or {}).items():
+                cells = [cell.replace(old, new) for cell in cells]
             line = " & ".join(cells) + " \\\\"
             if keys:
                 line += " % run key: " + "; ".join(keys)
@@ -284,10 +290,21 @@ def emit(
             "\\endhead",
             "\\bottomrule",
             "\\endfoot",
-            *rendered,
+            *keep_last_row(rendered),
             "\\end{longtable}}",
         ]
     (out / f"{target}.tex").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def keep_last_row(rows: list[str]) -> list[str]:
+    """End the second-to-last longtable row with \\* so the last row cannot open a page alone."""
+    if len(rows) < 2:
+        return rows
+    # The row end is the last " \\"; a "% run key:" comment may follow it.
+    head, sep, tail = rows[-2].rpartition(" \\\\")
+    if not sep:
+        raise SystemExit(f"row without a row end: {rows[-2]}")
+    return [*rows[:-2], head + " \\\\*" + tail, rows[-1]]
 
 
 KEY_ROWS = [
@@ -474,6 +491,14 @@ def main() -> None:
             ("segments higher#2", "\\shortstack[r]{Seg.\\\\higher}"),
         ],
         "@{}lrrrrr@{}",
+        # Ranges take an en dash, as in the ISL figure; the open bucket reads "at least".
+        rename_rows={
+            "0-2048": "0--2048",
+            "2048-8192": "2048--8192",
+            "8192-32768": "8192--32768",
+            "32768-65536": "32768--65536",
+            "65536-": "$\\geq$\\,65536",
+        },
         size="\\footnotesize",
         shrink=False,
     )
@@ -768,6 +793,8 @@ def live_tables(t: Path, o: Path) -> None:
             "τ_b, sim lag 50 ms": "$\\kendall$-b, sim lag \\SI{50}{ms}",
             "Discordant pairs (k = 0)": "Discordant pairs ($\\krep = 0$)",
         },
+        # The narrow paragraph columns would otherwise break "M1-v2" after its hyphen.
+        cell_replace={"M1-v2": "M1\\nobreakdash-v2"},
         table=4,
     )
     emit(

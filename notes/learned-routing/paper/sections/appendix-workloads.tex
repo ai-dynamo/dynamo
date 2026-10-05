@@ -406,8 +406,8 @@ up to L3 and cross just below it.
       \begin{axis}[simcurve, title={Mooncake, open loop},
           xlabel={input tok/s/worker ($\times 10^3$)}, ylabel={good fraction},
           xmin=2.5, xmax=16.5,
-          legend pos=south west, legend cell align=left,
-          legend style={fill=white, fill opacity=0.9, text opacity=1}]
+          % The legend is typeset in the empty sixth slot, where it covers no marker.
+          legend to name=simloadlegend, legend cell align=left]
         \addplot[simpi] coordinates {(3,0.993) (4,0.984) (5.5,0.961) (7,0.924) (8,0.888)
           (9,0.841) (10,0.763) (11,0.679) (12,0.479) (13,0.259) (14,0.086) (16,0.003)};
         \addplot[simrr] coordinates {(3,0.969) (4,0.948) (5.5,0.907) (7,0.845) (8,0.781)
@@ -470,7 +470,10 @@ up to L3 and cross just below it.
         \simLevelLines{28.9944}{33.1229}{37.4591}
       \end{axis}
     \end{tikzpicture}
-  \end{minipage}\hfill\null
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.325\linewidth}
+    \centering\raisebox{0.45\linewidth}{\pgfplotslegendfromname{simloadlegend}}
+  \end{minipage}
   \caption{Calibration load curves at $\Nw = 8$ on train segments: the fraction of in-window
     requests that are good (\cref{eq:good}) under the family's final SLO, for $\piref$
     (blue, solid) and round robin (orange, dashed), averaged over segments and two replicates

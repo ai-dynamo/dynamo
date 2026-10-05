@@ -21,6 +21,15 @@ lesson or run behind a statement. Amendments are the dated decisions recorded in
 contract during the study; lessons are the ranked findings of the study's literature review. Rows whose last column is empty are not referred to in the text and are
 listed so that the numbering is complete.
 
+% A group rule of \midrule weight and spacing with no legal page break on either side. booktabs'
+% \midrule in a longtable allows a break after the rule, so a group rule could end a page and double
+% the \endfoot rule. With the \\* after each group heading, the rule, the heading and the group's first
+% row stay on the page of the row before them, and a group rule never ends a page.
+\newcommand{\LTgrouprule}{%
+  \noalign{\nobreak\vskip\aboverulesep}%
+  \multispan{3}\leaders\hrule height \lightrulewidth\hfill\cr
+  \noalign{\nobreak\vskip\belowrulesep}}
+
 {\small
 \setlength{\LTcapwidth}{\linewidth}
 \begin{longtable}{@{}P{0.42\linewidth}P{0.27\linewidth}P{0.24\linewidth}@{}}
@@ -75,8 +84,8 @@ The public-content rule (no internal infrastructure names in public material) & 
 Token-weighted goodput (secondary) & A19 & \cref{sec:a19} \\
 The live finalists, registered before any finalist live job & A20 & \cref{sec:live-plan} \\
 The \policy{lmetric} port fixed after the study froze its results & A21 & \cref{sec:ports}; the
-  footnote at each headline statement \\
-\midrule
+  footnote in the introduction \\
+\LTgrouprule
 \multicolumn{3}{@{}l}{\textit{Literature lessons}} \\*
 Windowed goodput scored by a clipped mean log-ratio & LR-01 & \cref{sec:objective} \\
 A noise floor from replicates and workload segments, not from repeats & LR-02 &
@@ -103,7 +112,7 @@ The reading rule for the robustness checks (staleness and timing) & LR-14 & \cre
   \\
 The drift check before M2, warm starts, and nest-level features for M3 & LR-15 &
   \cref{sec:drift,sec:nested} \\
-\midrule
+\LTgrouprule
 \multicolumn{3}{@{}l}{\textit{Stages}} \\*
 The pilot & the pilot stage (\file{facts/pilot.json}) & \cref{sec:pilot} \\
 The pilot's review & the gate (\file{facts/gate.json}) & \cref{sec:pilot,app:audits} \\
@@ -120,7 +129,7 @@ The single test pass & the Select+Test stage (``test stage'') & \cref{sec:eval} 
 The audit after the test pass (a completeness critic and three refuters) & the final audit
   (\file{audits/final/}) & \cref{sec:audits,app:audits} \\
 The live GPU check & the live phase (A13, A20) & \cref{sec:live} \\
-\midrule
+\LTgrouprule
 \multicolumn{3}{@{}l}{\textit{Tools, cell set and runs}} \\*
 The frozen cell set & \code{lr-cells-v5} & \cref{sec:freeze,app:repro} \\
 The tuning harness; the evaluation and report tools & \code{lr-train}; \code{lr-eval},
@@ -132,7 +141,7 @@ Run prefixes of the learned arms & \code{m1c} (M1), \code{m1} (M1 unconstrained)
   \code{m1noaff}, \code{m1v2}, \code{m2r2}, \code{m0} (M0) & \\
 Run prefixes of the ablation and the \ais{}-informed league & \code{ablam1}, \code{ablabase};
   \code{m0ais}, \code{m1ais}, \code{m2ais}, \code{llmdobm} & \\
-\midrule
+\LTgrouprule
 \multicolumn{3}{@{}l}{\textit{Row labels in tables and figures}} \\*
 M1 & ``M1 (= A12 M1-default-init)'' & \cref{tab:ladder-results,fig:leaderboard} \\
 M1 unconstrained (flagged for gaming) & ``M1 unconstrained (gaming-flagged)'', ``(tier A,

@@ -602,7 +602,7 @@ def fig_headline_segments(data: dict) -> Picture:
 
 
 def fig_val_vs_test(data: dict) -> Picture:
-    """F7: fresh-validation score against test, per policy; selected policies labelled in a column."""
+    """F7: fresh-validation score against test, per policy; selected policies labeled in a column."""
     comp, val = data["comparisons"][REF], data["val_k3_10"]
     ymin, ymax, height_cm = -0.02, 0.2, 7.0
     pic = Picture()

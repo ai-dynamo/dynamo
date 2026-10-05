@@ -336,6 +336,7 @@ report stage's `report/scripts/build_report_data.py` in the campaign root):
 | `campaign/runs/` | decision tables and load curves of calibration r0 and every fix r0 round; gzipped `results.jsonl` of small runs, including the step-4 references `calibrate/step4_r4/` and `calibrate-fix-r0/step4_r6/`; `lr-train` smoke outputs; the CPU-cluster lane's evidence (`remote-lane/`, `remote/returned/`); both `cells_validation.json`; `policies.tar.gz` |
 | `campaign/scripts/` | calibration drivers: `calibrate/` (r0, 21 files, 100,614 bytes) and `calibrate-fix-r0/` (29 files, 152,857 bytes); `setup/write_engine_config.py` (3,801 bytes); sizes of the published, path-redacted copies |
 | `campaign/literature/` | `LESSONS.md` (LR-01 to LR-15), `BIBLIOGRAPHY.md` and `notes/` (four scout notes) |
+| `campaign/WORKLOG.md` | the campaign worklog: the operator's decisions, workflow launches, incidents and status notes in time order, redacted like the rest of the mirror |
 | `benchmarks/learned_routing/` | the harness package `learned_routing`: `lr-eval`, `lr-train`, `lr-report`, `workloads/`, `spaces/`, `tests/`, and the Rust helper `tools/agentx_lower` |
 | `benchmarks/learned_routing/remote/` | the A9 CPU-cluster lane: `submit_eval.sh`, `submit_train.sh`, `fetch_ingest.sh`, `common.sh`, node scripts, helpers, the phase-2 orchestrator `p2orch.py` and its own `README.md` (REPRODUCE section 13). |
 | `benchmarks/learned_routing/live/` | the A13 live GPU lane: AIPerf inputs, the live scorer and the deployment recipe under `deploy/`, each with its own `README.md` |
@@ -442,7 +443,7 @@ git commit -s -m "docs(learned-routing): sync campaign records"
   - `MAX_BYTES` is 5 MiB per file, also applied to gzipped `results.jsonl`. Larger files are
     skipped with a message.
   - `BUDGET_BYTES` is 25 MiB total, and only produces a warning.
-- The published mirror at this snapshot is 35,514,105 bytes in 592 files under `campaign/`,
+- The published mirror at this snapshot is 35,558,687 bytes in 593 files under `campaign/`,
   without the per-job compute records. Its largest file is `runs/phase2/local/stickyhard-s3/results.jsonl.gz` at
   4,405,645 bytes; the script skips any file over 5 MiB.
 - After a sync, update the Status section above if the newest `STATE.md` entry changed it.

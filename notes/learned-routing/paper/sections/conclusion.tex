@@ -46,7 +46,7 @@ For a deployment, the evidence supports three practical statements and one cauti
     remaining size segregation should be monitored with the window-basis guards.
   \item \textbf{Caution.} Long prompts fare worse under M1-v2 than under \policy{ramjet}: those of
     32K to 64K tokens wait longer for their first token, and those of 32K or more lose about 4 points
-    of good fraction. A deployment that values served tokens, or long-context latency, may prefer the
+    of good fraction on average. A deployment that values served tokens, or long-context latency, may prefer the
     heuristic.
     % src: CR/facts/test_results.json report_must_state MS-F1-ttft (32K-64K p90 +0.135, 11/12; the TTFT
     %      statement stops at 64K), MS-F1-goodfrac-by-isl (32K-64K -3.8 pp, 5 of 10 segments higher;

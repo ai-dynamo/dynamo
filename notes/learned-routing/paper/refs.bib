@@ -14,7 +14,8 @@
 % marked "no PDF" and carry only what BIBLIOGRAPHY.md records (often "First author and others").
 % Excluded on purpose: Berger 1982 (BIBLIOGRAPHY.md: "from memory; not read") and
 % Heidrich-Meisner & Igel 2009 (download failed, not read).
-% `eprint` is kept for a later switch to biblatex; plainnat prints `note` and `url`.
+% `eprint` is kept for a later switch to biblatex; plainnat prints `note` and `url`. An entry with a
+% venue carries its arXiv identifier only in `url`, so the identifier prints once.
 
 % =========================================================================================
 % Discrete choice and context effects (CR/literature/pdfs/dcm-context/)
@@ -28,7 +29,6 @@
   year          = {2021},
   eprint        = {2009.03417},
   archiveprefix = {arXiv},
-  note          = {arXiv:2009.03417},
   url           = {https://arxiv.org/abs/2009.03417}
 }
 
@@ -227,7 +227,6 @@
   year          = {2026},
   eprint        = {2603.15202},
   archiveprefix = {arXiv},
-  note          = {arXiv:2603.15202},
   url           = {https://arxiv.org/abs/2603.15202}
 }
 
@@ -261,7 +260,6 @@
   year          = {2026},
   eprint        = {2601.18999},
   archiveprefix = {arXiv},
-  note          = {arXiv:2601.18999},
   url           = {https://arxiv.org/abs/2601.18999}
 }
 
@@ -284,7 +282,6 @@
   year          = {2026},
   eprint        = {2602.06502},
   archiveprefix = {arXiv},
-  note          = {arXiv:2602.06502},
   url           = {https://arxiv.org/abs/2602.06502}
 }
 
@@ -296,7 +293,6 @@
   year          = {2025},
   eprint        = {2407.00023},
   archiveprefix = {arXiv},
-  note          = {arXiv:2407.00023},
   url           = {https://arxiv.org/abs/2407.00023}
 }
 
@@ -308,7 +304,6 @@
   year          = {2026},
   eprint        = {2602.13692},
   archiveprefix = {arXiv},
-  note          = {arXiv:2602.13692},
   url           = {https://arxiv.org/abs/2602.13692}
 }
 
@@ -388,7 +383,7 @@
 
 % no PDF; BIBLIOGRAPHY.md: "Not a paper; it is the basis of the campaign's ramjet port".
 @misc{ramjet,
-  title         = {Ramjet (Helix load balancer)},
+  title         = {Ramjet ({Helix} load balancer)},
   author        = {{Helix}},
   howpublished  = {Source repository},
   url           = {https://github.com/helixml/ramjet}
@@ -431,7 +426,7 @@
 
 % meta: title, authors, venue (SIGCOMM '17) from PDF p.1.
 @inproceedings{mao2017pensieve,
-  title         = {Neural Adaptive Video Streaming with Pensieve},
+  title         = {Neural Adaptive Video Streaming with {Pensieve}},
   author        = {Mao, Hongzi and Netravali, Ravi and Alizadeh, Mohammad},
   booktitle     = {Proceedings of ACM SIGCOMM},
   year          = {2017},
