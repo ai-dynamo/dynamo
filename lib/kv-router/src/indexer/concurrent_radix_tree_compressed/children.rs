@@ -351,6 +351,18 @@ impl NodeChildren {
         Self::drain_graveyard_with(budget, true)
     }
 
+    /// Frees graveyard garbage in `chunk`-unit budgets while `idle` holds, so work that
+    /// arrives mid-drain waits for at most one chunk. Returns whether both graveyards
+    /// emptied.
+    pub(super) fn drain_graveyard_while(chunk: usize, mut idle: impl FnMut() -> bool) -> bool {
+        while idle() {
+            if Self::drain_graveyard(chunk) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Frees graveyard garbage iteratively, so deep detached subtrees cannot overflow the
     /// stack. Leftovers are buried again.
     fn drain_graveyard_with(budget: usize, include_shared: bool) -> bool {
@@ -1078,6 +1090,26 @@ mod tests {
         assert_eq!(dropped, LOOKUP_GRAVEYARD_BUDGET - 1);
 
         assert!(NodeChildren::drain_graveyard_with(usize::MAX, false));
+        assert!(held.iter().all(|node| Arc::strong_count(node) == 1));
+    }
+
+    #[test]
+    fn idle_drain_yields_between_chunks() {
+        let _draining = DrainScope::enter();
+        let held: Vec<_> = (0..64).map(|_| child()).collect();
+        for node in &held {
+            bury(Grave::Nodes(vec![node.clone()]));
+        }
+
+        // Work arrives after the first chunk: the drain stops with garbage left.
+        let mut checks = 0;
+        assert!(!NodeChildren::drain_graveyard_while(8, || {
+            checks += 1;
+            checks == 1
+        }));
+        assert!(held.iter().any(|node| Arc::strong_count(node) == 2));
+
+        assert!(NodeChildren::drain_graveyard_while(8, || true));
         assert!(held.iter().all(|node| Arc::strong_count(node) == 1));
     }
 

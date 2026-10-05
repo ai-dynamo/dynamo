@@ -32,10 +32,12 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
 
         loop {
             if event_receiver.is_empty() {
-                // Going idle: hand off this thread's retired child snapshots and free any
-                // expired epoch garbage before blocking.
+                // Going idle: hand off this thread's retired child snapshots and free
+                // expired epoch garbage in chunks until an event arrives.
                 NodeChildren::flush_retired();
-                NodeChildren::drain_graveyard(usize::MAX);
+                NodeChildren::drain_graveyard_while(GRAVEYARD_NODES_PER_TASK, || {
+                    event_receiver.is_empty()
+                });
             } else {
                 NodeChildren::drain_graveyard(GRAVEYARD_NODES_PER_TASK);
             }
