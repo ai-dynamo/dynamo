@@ -21,6 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from protocol_dependencies import DependencyResolver
+from protocol_review_report import render_review
+
 FORMAT_VERSION = 1
 VLLM_ENDPOINTS = ("/v1/chat/completions", "/v1/completions")
 
@@ -166,14 +169,20 @@ def snapshot(repo: Path, revision: str, target: str) -> dict[str, Any]:
     revision = commit(repo, revision)
     if target != "vllm":
         raise ValueError(f"no source extractor registered for {target!r}")
-    paths = sorted(
-        path
-        for path in git(repo, "ls-tree", "-r", "--name-only", revision).splitlines()
-        if vllm_source(path)
-    )
+    all_paths = git(repo, "ls-tree", "-r", "--name-only", revision).splitlines()
+    paths = sorted(path for path in all_paths if vllm_source(path))
+    sources = {}
+
+    def read_source(path: str) -> str:
+        if path not in sources:
+            sources[path] = git(repo, "show", f"{revision}:{path}")
+        return sources[path]
+
+    coverage = DependencyResolver(all_paths, read_source).collect(paths)
+    paths = sorted(set(paths) | coverage["module_consumers"].keys())
     modules = {}
     for path in paths:
-        source = git(repo, "show", f"{revision}:{path}")
+        source = read_source(path)
         modules[path] = {
             "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
             "contract": module_contract(source),
@@ -198,10 +207,12 @@ def snapshot(repo: Path, revision: str, target: str) -> dict[str, Any]:
         "upstream_commit": revision,
         "endpoints": list(VLLM_ENDPOINTS),
         "modules": modules,
+        "dependency_coverage": coverage,
         "limitations": [
             "Static declarations and source changes do not establish runtime behavior.",
-            "Inherited/imported types are references, not evaluated JSON Schema.",
-            "Engine/tokenizer/model dependencies outside the listed modules need runtime probes.",
+            "Repository-local type dependencies are followed statically, not evaluated as JSON Schema.",
+            "Unresolved/dynamic/external dependencies are listed explicitly; primitive library implementations remain outside scope.",
+            "Engine/tokenizer/model behavior needs runtime probes.",
         ],
     }
 
@@ -244,6 +255,17 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any
             "next_step"
         ] = "Review upstream semantics and run affected conformance probes."
         item["runtime_evidence"] = []
+        consumers = set()
+        for inventory in (before, after):
+            coverage = inventory.get("dependency_coverage", {})
+            path = item["path"]
+            if len(path) >= 3 and path[1] in {"classes", "functions"}:
+                consumers.update(
+                    coverage.get("symbol_consumers", {}).get(f"{path[0]}:{path[2]}", [])
+                )
+            else:
+                consumers.update(coverage.get("module_consumers", {}).get(path[0], []))
+        item["reachable_consumers"] = sorted(consumers)
     return result
 
 
@@ -264,6 +286,10 @@ def build_report(
         "candidate_inventory_sha256": digest(after),
         "changes": compare(before, after),
         "limitations": after["limitations"],
+        "dependency_coverage": {
+            "before": before.get("dependency_coverage"),
+            "after": after.get("dependency_coverage"),
+        },
     }
 
 
@@ -283,6 +309,11 @@ def main() -> int:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--fail-on-drift", action="store_true")
+    parser.add_argument(
+        "--require-complete-coverage",
+        action="store_true",
+        help="fail if either source snapshot has unresolved type dependencies",
+    )
     args = parser.parse_args()
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error("output directory must be empty; preserve previous reports")
@@ -298,14 +329,31 @@ def main() -> int:
     report["dynamo_tracked_diff_sha256"] = hashlib.sha256(
         git(args.dynamo_repo, "diff", "--binary", "HEAD", "--").encode()
     ).hexdigest()
-    report["provenance"] = tool_provenance("protocol_drift.py")
+    report["provenance"] = tool_provenance(
+        "protocol_drift.py", "protocol_dependencies.py", "protocol_review_report.py"
+    )
+    report["require_complete_coverage"] = args.require_complete_coverage
     write_json(args.output_dir / "previous.json", before)
     write_json(args.output_dir / "candidate.json", after)
     write_json(args.output_dir / "report.json", report)
+    (args.output_dir / "summary.md").write_text(
+        render_review(
+            [("report.json", report)], "drift" if args.fail_on_drift else "none"
+        )
+    )
     print(
         f"{len(report['changes'])} review candidates; report: {args.output_dir / 'report.json'}"
     )
-    return 1 if args.fail_on_drift and report["changes"] else 0
+    print(f"Developer review: {args.output_dir / 'summary.md'}")
+    incomplete = not all(
+        value["complete"] for value in report["dependency_coverage"].values()
+    )
+    return (
+        1
+        if (args.fail_on_drift and report["changes"])
+        or (args.require_complete_coverage and incomplete)
+        else 0
+    )
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ from protocol_drift import (
     tool_provenance,
     write_json,
 )
+from protocol_review_report import render_review
 
 STATUSES = {
     "Compatible",
@@ -158,6 +159,11 @@ def main() -> int:
         "--upstream-candidate", help="immutable upstream candidate for periodic checks"
     )
     parser.add_argument("--require-triage", action="store_true")
+    parser.add_argument(
+        "--require-complete-coverage",
+        action="store_true",
+        help="fail if either source snapshot has unresolved type dependencies",
+    )
     args = parser.parse_args()
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error("output directory must be empty; preserve previous reports")
@@ -175,6 +181,8 @@ def main() -> int:
             "run_protocol_drift_check.py",
             "check_protocol_pins.py",
             "generate_protocol_inventory.py",
+            "protocol_review_report.py",
+            "protocol_dependencies.py",
         ),
         "pyyaml_version": yaml.__version__,
         "current_inputs_sha256": {
@@ -264,7 +272,9 @@ def main() -> int:
 
     cache = {}
     needs_review = False
+    incomplete_coverage = False
     summaries = []
+    reviews = []
     dynamo_sha = git(args.dynamo_repo, "rev-parse", "HEAD").strip()
     extractor_sha = hashlib.sha256(
         (Path(__file__).with_name("protocol_drift.py")).read_bytes()
@@ -280,6 +290,10 @@ def main() -> int:
             cache[previous], cache[candidate], dynamo_sha, extractor_sha
         )
         report["platforms"] = platforms
+        report["require_complete_coverage"] = args.require_complete_coverage
+        incomplete_coverage |= not all(
+            value["complete"] for value in report["dependency_coverage"].values()
+        )
         report["check_driver_sha256"] = hashlib.sha256(
             Path(__file__).read_bytes()
         ).hexdigest()
@@ -305,6 +319,7 @@ def main() -> int:
             },
         }
         if report["changes"]:
+            report["triage_complete"] = False
             if decision_source is not None:
                 try:
                     decisions = json.loads(decision_source)
@@ -313,6 +328,7 @@ def main() -> int:
                     needs_review = True
                     report["triage"] = f"invalid decision file: {error}"
                 else:
+                    report["triage_complete"] = True
                     report[
                         "triage"
                     ] = "reviewed decision file (approval requires code review)"
@@ -322,20 +338,28 @@ def main() -> int:
                     "triage"
                 ] = "missing: review candidates and commit a decision file"
         else:
+            report["triage_complete"] = True
             report[
                 "triage"
             ] = "no source changes; runtime compatibility is not inferred"
         name = f"{previous}-{candidate}.json"
         write_json(args.output_dir / name, report)
+        reviews.append((name, report))
         summaries.append(
             f"- {', '.join(platforms)}: `{previous}` → `{candidate}`; {len(report['changes'])} candidates; {report['triage']}; report `{name}`."
         )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "summary.md").write_text(
-        "# vLLM protocol drift review\n\n" + "\n".join(summaries) + "\n"
+        render_review(reviews, "triage" if args.require_triage else "none")
     )
     print("\n".join(summaries))
-    return 1 if needs_review and args.require_triage else 0
+    print(f"Developer review: {args.output_dir / 'summary.md'}")
+    return (
+        1
+        if (needs_review and args.require_triage)
+        or (incomplete_coverage and args.require_complete_coverage)
+        else 0
+    )
 
 
 if __name__ == "__main__":

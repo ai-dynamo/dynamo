@@ -4,6 +4,8 @@
 import copy
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -251,13 +253,16 @@ class DriftDriverIntegrationTests(unittest.TestCase):
             pins.write_text(
                 json.dumps(
                     {
+                        "format_version": 1,
+                        "target": "vllm",
+                        "repository": "https://github.com/vllm-project/vllm",
                         "versions": [
                             {
                                 "version": "0.30.0",
                                 "commit": candidate,
                                 "platforms": ["cpu"],
                             }
-                        ]
+                        ],
                     }
                 )
             )
@@ -313,8 +318,17 @@ class DriftDriverIntegrationTests(unittest.TestCase):
                 "scripts/run_protocol_drift_check.py",
                 "scripts/check_protocol_pins.py",
                 "scripts/generate_protocol_inventory.py",
+                "scripts/protocol_review_report.py",
+                "scripts/protocol_dependencies.py",
             }
             self.assertEqual(set(provenance["tools_sha256"]), tool_paths)
+            markdown = (report_dir / "summary.md").read_text()
+            self.assertIn("Command gate: FAIL", markdown)
+            self.assertIn(
+                "classes / ChatCompletionRequest / fields / value / default", markdown
+            )
+            self.assertIn('```json\n"0"\n```', markdown)
+            self.assertIn('```json\n"1"\n```', markdown)
             for path in tool_paths:
                 self.assertEqual(
                     provenance["tools_sha256"][path],
@@ -347,6 +361,11 @@ class DriftDriverIntegrationTests(unittest.TestCase):
             reviewed = json.loads(
                 (root / "reviewed" / f"{previous}-{candidate}.json").read_text()
             )
+            markdown = (root / "reviewed/summary.md").read_text()
+            self.assertIn("Command gate: PASS", markdown)
+            self.assertIn("Owner: frontend", markdown)
+            self.assertIn("Rationale: Default changed", markdown)
+            self.assertIn("Next action: Run probe", markdown)
             self.assertEqual(
                 reviewed["provenance"]["decision_input"],
                 {
@@ -375,6 +394,10 @@ class DriftDriverIntegrationTests(unittest.TestCase):
                     hashlib.sha256(malformed.encode()).hexdigest(),
                 )
                 self.assertTrue((output / "summary.md").exists())
+                self.assertIn("Command gate: FAIL", (output / "summary.md").read_text())
+                self.assertIn(
+                    "invalid decision file", (output / "summary.md").read_text()
+                )
                 self.assertNotIn("Traceback", result.stderr)
 
             # Periodic checks and zero-diff reports need the same input identity.
@@ -448,12 +471,167 @@ class DriftDriverIntegrationTests(unittest.TestCase):
                 {
                     "python_version": sys.version.split()[0],
                     "tools_sha256": {
-                        "scripts/protocol_drift.py": provenance["tools_sha256"][
-                            "scripts/protocol_drift.py"
-                        ]
+                        path: provenance["tools_sha256"][path]
+                        for path in (
+                            "scripts/protocol_drift.py",
+                            "scripts/protocol_dependencies.py",
+                            "scripts/protocol_review_report.py",
+                        )
                     },
                 },
             )
+            self.assertIn("Developer review:", result.stdout)
+            self.assertTrue((root / "standalone/summary.md").exists())
+
+            # Detailed inventory is optional; checking the committed Rust
+            # vocabulary neither needs nor recreates a JSON snapshot.
+            generated = root / "generated"
+            generator = [
+                sys.executable,
+                str(ROOT / "scripts/generate_protocol_inventory.py"),
+                "--upstream-repo",
+                str(upstream),
+                "--pins",
+                str(pins),
+                "--output-dir",
+                str(generated),
+            ]
+            for suffix in ([], ["--check"]):
+                result = subprocess.run(
+                    generator + suffix, capture_output=True, text=True, timeout=30
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((generated / "vllm_fields.rs").exists())
+                self.assertFalse((generated / "vllm_inventory.json").exists())
+            detailed = root / "on-demand/inventory.json"
+            for suffix in ([], ["--check"]):
+                result = subprocess.run(
+                    generator + ["--inventory-output", str(detailed)] + suffix,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("profiles", json.loads(detailed.read_text()))
+            detailed.write_text("{}")
+            result = subprocess.run(
+                generator + ["--inventory-output", str(detailed), "--check"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Stale generated inventory", result.stderr)
+
+            # Exercise the real CLI across an unchanged importing declaration:
+            # a changed alias and a new nested field outside the seed allowlist.
+            protocol.write_text(
+                "from vllm.payload import Payload\n"
+                + source.replace("value: int = 0", "value: Payload", 1)
+            )
+            dependency = upstream / "vllm/payload.py"
+            dependency.write_text(
+                "from typing import Literal\nChoice = Literal['auto']\nclass Payload:\n    choice: Choice\n"
+            )
+            git(upstream, "add", ".")
+            git(upstream, "commit", "-m", "fixture nested model baseline")
+            nested_before = git(upstream, "rev-parse", "HEAD")
+            dependency.write_text(
+                "from typing import Literal\nChoice = Literal['auto', 'none']\nclass Payload:\n    choice: Choice\n    added: bool\n"
+            )
+            git(upstream, "commit", "-am", "fixture alias and nested field drift")
+            nested_after = git(upstream, "rev-parse", "HEAD")
+            standalone_command = [
+                sys.executable,
+                str(ROOT / "scripts/protocol_drift.py"),
+                "--upstream-repo",
+                str(upstream),
+                "--dynamo-repo",
+                str(dynamo),
+                "--previous",
+                nested_before,
+                "--candidate",
+                nested_after,
+                "--require-complete-coverage",
+            ]
+            result = subprocess.run(
+                standalone_command
+                + ["--output-dir", str(root / "nested"), "--fail-on-drift"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            nested = json.loads((root / "nested/report.json").read_text())
+            self.assertEqual(len(nested["changes"]), 2)
+            self.assertTrue(
+                all(
+                    change["path"][0] == "vllm/payload.py"
+                    for change in nested["changes"]
+                )
+            )
+            self.assertTrue(nested["dependency_coverage"]["after"]["complete"])
+            self.assertIn(
+                "Static dependency coverage: complete within stated scope",
+                (root / "nested/summary.md").read_text(),
+            )
+
+            protocol.write_text(
+                "from missing_sdk import Payload\n"
+                + source.replace("value: int = 0", "value: Payload", 1)
+            )
+            git(upstream, "commit", "-am", "fixture external dependency")
+            external = git(upstream, "rev-parse", "HEAD")
+            strict = standalone_command.copy()
+            strict[strict.index("--previous") + 1] = external
+            strict[strict.index("--candidate") + 1] = external
+            result = subprocess.run(
+                strict + ["--output-dir", str(root / "incomplete")],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            incomplete = json.loads((root / "incomplete/report.json").read_text())
+            self.assertEqual(incomplete["changes"], [])
+            self.assertIn(
+                "Command gate: FAIL", (root / "incomplete/summary.md").read_text()
+            )
+            self.assertIn(
+                "missing\\_sdk.Payload", (root / "incomplete/summary.md").read_text()
+            )
+
+            updated_pins = json.loads(pins.read_text())
+            updated_pins["versions"][0]["commit"] = external
+            pins.write_text(json.dumps(updated_pins))
+            driver_strict = periodic.copy()
+            driver_strict[driver_strict.index("--upstream-candidate") + 1] = external
+            result = subprocess.run(
+                driver_strict
+                + [
+                    "--require-complete-coverage",
+                    "--output-dir",
+                    str(root / "driver-incomplete"),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(
+                "Triage coverage: complete",
+                (root / "driver-incomplete/summary.md").read_text(),
+            )
+            self.assertIn(
+                "Command gate: FAIL",
+                (root / "driver-incomplete/summary.md").read_text(),
+            )
+
+            # Optional, explicit evidence export for an E2E demonstration. The
+            # destination must be new; ordinary unittest runs retain nothing.
+            retained = os.environ.get("DYNAMO_PROTOCOL_TEST_ARTIFACTS")
+            if retained:
+                shutil.copytree(root, Path(retained) / "synthetic-version-bump")
 
 
 if __name__ == "__main__":

@@ -80,6 +80,13 @@ def request_fields(inventory: dict[str, Any], class_name: str) -> dict[str, Any]
     }
 
     def resolve(name: str, preferred: str | None = None) -> tuple[str, str]:
+        binding = (
+            inventory.get("dependency_coverage", {})
+            .get("class_bindings", {})
+            .get(f"{preferred}:{name}")
+        )
+        if binding and binding["source"] is not None:
+            return binding["source"], binding["name"]
         if preferred is not None and (preferred, name) in classes:
             return preferred, name
         matches = [key for key in classes if key[1] == name]
@@ -96,7 +103,15 @@ def request_fields(inventory: dict[str, Any], class_name: str) -> dict[str, Any]
         contract = classes[key]
         fields = {}
         for base in reversed(contract["bases"]):
-            if base == "BaseModel":
+            binding = (
+                inventory.get("dependency_coverage", {})
+                .get("class_bindings", {})
+                .get(f"{source}:{base}")
+            )
+            if (base == "BaseModel" and binding is None) or binding == {
+                "source": None,
+                "name": "BaseModel",
+            }:
                 continue
             fields.update(collect(resolve(base, source), (*stack, key)))
         for field, declaration in contract["fields"].items():
@@ -173,13 +188,21 @@ def main() -> int:
     parser.add_argument("--upstream-repo", type=Path, required=True)
     parser.add_argument("--pins", type=Path, default=OUTPUT / "vllm_pins.json")
     parser.add_argument("--output-dir", type=Path, default=OUTPUT)
+    parser.add_argument(
+        "--inventory-output",
+        type=Path,
+        help="optionally write/check the detailed JSON at this path; not required in Git",
+    )
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     inventory = build_inventory(args.upstream_repo, json.loads(args.pins.read_text()))
     outputs = {
-        "vllm_inventory.json": json.dumps(inventory, indent=2, sort_keys=True) + "\n",
         "vllm_fields.rs": rust_vocabulary(inventory),
     }
+    if args.inventory_output:
+        outputs[str(args.inventory_output.resolve())] = (
+            json.dumps(inventory, indent=2, sort_keys=True) + "\n"
+        )
     stale = []
     for name, contents in outputs.items():
         path = args.output_dir / name
