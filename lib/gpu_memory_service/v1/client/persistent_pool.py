@@ -79,5 +79,11 @@ class V1PersistentPoolBackend:
             for item in response.allocations
         ]
 
-    def destroy(self, key: PersistentPoolKey) -> bool:
+    def destroy(self, key: PersistentPoolKey, allocation_id: str | None = None) -> bool:
+        if allocation_id is not None:
+            # The v1 destroy request names only the key. Refuse rather than
+            # silently destroying an incarnation the caller did not observe.
+            raise NotImplementedError(
+                "v1 persistent pools cannot verify an allocation_id on destroy"
+            )
         return self._session.destroy_persistent(key.engine_id, key.tag)

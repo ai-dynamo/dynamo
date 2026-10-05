@@ -237,6 +237,9 @@ def test_repeated_claim_and_permanent_conflicts_do_not_retry(
         assert backend.unclaim(key)
         assert not backend.unclaim(key)
         assert manager.persistent.active_claim_count == 0
+        # v1 cannot verify an incarnation, so it must not pretend to.
+        with pytest.raises(NotImplementedError):
+            backend.destroy(key, allocation_id=first.allocation_id)
         assert backend.destroy(key)
     finally:
         session.close()
