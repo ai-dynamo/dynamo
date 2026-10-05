@@ -1521,7 +1521,8 @@ impl HttpServiceConfigBuilder {
 
         // Return protocol-compatible JSON errors for unmatched routes. Register this router
         // outside `track_inflight_inference` so unmatched requests do not acquire an
-        // inference permit or return `503` while the service is draining.
+        // inference permit or return `503` while the service is draining; requests a
+        // forward route covers do their own admission in `unmatched_route_fallback`.
         let unmatched_router = axum::Router::new()
             .fallback(unmatched_route_fallback)
             .with_state(UnmatchedRouteState {

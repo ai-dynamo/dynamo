@@ -41,7 +41,7 @@ struct ForwardRoute {
 }
 
 /// Path prefixes forwarded to an upstream HTTP server with the request's
-/// method, path, query, end-to-end headers and streamed body.
+/// method, path, query, end-to-end headers and body.
 pub(crate) struct ForwardRoutes {
     routes: Vec<ForwardRoute>,
     client: reqwest::Client,
@@ -183,15 +183,26 @@ impl ForwardRoutes {
         }
         // A known length is enforced by the server, so that body streams. An
         // unknown one is read within the limit first, so the upstream never
-        // sees a partial body or answers before the limit is decided.
+        // sees a partial body or answers before the limit is decided; a stalled
+        // upload must not outlive the drain window either.
         let body = match exact {
             Some(0) => None,
             Some(_) => Some(reqwest::Body::wrap_stream(body.into_data_stream())),
             None => {
-                match http_body_util::BodyExt::collect(http_body_util::Limited::new(body, limit))
-                    .await
-                {
-                    Ok(collected) => Some(reqwest::Body::from(collected.to_bytes())),
+                let collected = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Ok(super::openai::ErrorMessage::_service_unavailable().into_response());
+                    }
+                    collected = http_body_util::BodyExt::collect(http_body_util::Limited::new(body, limit)) => collected,
+                };
+                match collected {
+                    Ok(collected) => {
+                        // The length now comes from the bytes read, not from a
+                        // Content-Length that disagreed with the chunked framing.
+                        parts.headers.remove(header::CONTENT_LENGTH);
+                        Some(reqwest::Body::from(collected.to_bytes()))
+                    }
                     Err(err) if err.is::<http_body_util::LengthLimitError>() => {
                         return Ok(super::openai::payload_too_large_error().into_response());
                     }
@@ -203,10 +214,13 @@ impl ForwardRoutes {
                 }
             }
         };
-        // Offer an upgrade upstream only when this connection can be spliced.
+        // Tunnel WebSocket only, and only when this connection can be spliced:
+        // another protocol (e.g. `h2c`) would reach upstream paths unchecked.
+        // Any other upgrade request is forwarded as a plain request.
         let upgrade = parts
             .headers
             .get(header::UPGRADE)
+            .filter(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
             .cloned()
             .and_then(|upgrade| {
                 let client = parts.extensions.remove::<hyper::upgrade::OnUpgrade>()?;
@@ -320,9 +334,8 @@ fn strip_hop_by_hop(mut headers: HeaderMap) -> HeaderMap {
     let nominated: Vec<header::HeaderName> = headers
         .get_all(header::CONNECTION)
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .filter_map(|token| header::HeaderName::from_bytes(token.trim().as_bytes()).ok())
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .filter_map(|token| header::HeaderName::from_bytes(token.trim_ascii()).ok())
         .collect();
     for name in &nominated {
         headers.remove(name);
@@ -486,9 +499,11 @@ mod tests {
                     }
                     let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
                     assert!(head.starts_with("get /v1/custom/s1/ws "), "{head}");
-                    assert!(head.contains("upgrade: echo") && head.contains("connection: upgrade"));
+                    assert!(
+                        head.contains("upgrade: websocket") && head.contains("connection: upgrade")
+                    );
                     conn.write_all(
-                        b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n",
+                        b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: websocket\r\n\r\n",
                     )
                     .await
                     .unwrap();
@@ -528,7 +543,7 @@ mod tests {
         let open_tunnel = || async {
             let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
             client
-                .write_all(b"GET /v1/custom/s1/ws HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: echo\r\n\r\n")
+                .write_all(b"GET /v1/custom/s1/ws HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: websocket\r\n\r\n")
                 .await
                 .unwrap();
             let mut head = Vec::new();
@@ -537,7 +552,7 @@ mod tests {
             }
             let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
             assert!(head.starts_with("http/1.1 101"), "{head}");
-            assert!(head.contains("upgrade: echo") && head.contains("connection: upgrade"));
+            assert!(head.contains("upgrade: websocket") && head.contains("connection: upgrade"));
             client.write_all(b"ping").await.unwrap();
             let mut echoed = [0u8; 4];
             client.read_exact(&mut echoed).await.unwrap();
@@ -608,7 +623,7 @@ mod tests {
             .unwrap();
             assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-            // Chunked: cut off while streaming.
+            // Unknown length: refused once more than the limit has been read.
             let chunks = oversized
                 .chunks(64 * 1024)
                 .map(|c| Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(c)))
@@ -721,9 +736,14 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-            // Within the limit, the whole body is sent with its length.
+            // Within the limit, the whole body is sent with its real length,
+            // even when the client also sent a Content-Length that disagrees.
+            let mut stale = chunked(100 * 1024);
+            stale
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, header::HeaderValue::from_static("5"));
             let response = routes
-                .forward(chunked(100 * 1024), CancellationToken::new(), ())
+                .forward(stale, CancellationToken::new(), ())
                 .await
                 .ok()
                 .unwrap();
@@ -734,6 +754,89 @@ mod tests {
             assert_eq!(&body[..], format!("content-length: {}", 100 * 1024).as_bytes());
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn forward_stalled_upload_ends_when_cancelled() {
+        let routes = ForwardRoutes::parse("/v1/custom=http://127.0.0.1:1")
+            .unwrap()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                cancel.cancel();
+            }
+        });
+        // Unknown length, one chunk, then nothing more.
+        let first = futures::stream::once(async {
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"partial"))
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/custom/push")
+            .body(Body::from_stream(first.chain(futures::stream::pending())))
+            .unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_secs(5), routes.forward(request, cancel, ()))
+                .await
+                .expect("a stalled upload must not outlive cancellation")
+                .ok()
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn forward_does_not_tunnel_non_websocket_upgrades() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let upstream = axum::Router::new().route(
+            "/v1/custom/x",
+            axum::routing::get(|headers: HeaderMap| async move {
+                let seen = ["upgrade", "http2-settings"]
+                    .map(|name| format!("{name}={}", headers.contains_key(name)));
+                seen.join(";")
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let routes = std::sync::Arc::new(
+            ForwardRoutes::parse(&format!("/v1/custom=http://{upstream_addr}"))
+                .unwrap()
+                .unwrap(),
+        );
+        let frontend = axum::Router::new().fallback(move |request: Request| {
+            let routes = routes.clone();
+            async move {
+                routes
+                    .forward(request, CancellationToken::new(), ())
+                    .await
+                    .unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, frontend).await.unwrap() });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /v1/custom/x HTTP/1.1\r\nhost: x\r\nconnection: Upgrade, HTTP2-Settings\r\nupgrade: h2c\r\nhttp2-settings: AAMAAABkAAQAAP__\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = vec![0u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        let response = String::from_utf8_lossy(&response[..n]).to_ascii_lowercase();
+        assert!(response.starts_with("http/1.1 200"), "{response}");
+        assert!(
+            response.ends_with("upgrade=false;http2-settings=false"),
+            "{response}"
+        );
     }
 
     #[tokio::test]
@@ -780,8 +883,17 @@ mod tests {
         );
         headers.insert("x-internal", "secret".parse().unwrap());
         headers.insert(header::AUTHORIZATION, "Bearer k".parse().unwrap());
+        headers.append(
+            header::CONNECTION,
+            header::HeaderValue::from_bytes(b"x-other, \x80").unwrap(),
+        );
+        headers.insert("x-other", "secret".parse().unwrap());
         let headers = strip_hop_by_hop(headers);
         assert!(!headers.contains_key("x-internal"));
+        assert!(
+            !headers.contains_key("x-other"),
+            "non-ASCII bytes must not hide a token"
+        );
         assert!(!headers.contains_key(header::CONNECTION));
         assert!(headers.contains_key(header::AUTHORIZATION));
     }
