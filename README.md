@@ -247,11 +247,14 @@ uv pip install -e lib/gpu_memory_service
 uv pip install -r container/deps/requirements.aisimulate.txt -e .
 ```
 
-The source requirements build the existing AISimulate package from the same
-immutable commit as the Rust dependency. Its matching `0.13.0` release is not
-yet available on PyPI, so retain `-r` when installing this checkout on Python
-3.11–3.13. This uses normal dependency resolution and needs the Rust build
-tools above; it does not require a container or a prebuilt local wheelhouse.
+For AISimulate offline replay, add `--features ais-forward-pass` to the
+`maturin develop --uv` command above.
+
+The source requirements build AISimulate from the same immutable commit as the
+Rust dependency on Python 3.11–3.13, using the Rust tools above. This development
+checkout reports version `0.13.0`. Retain `-r` until a published Python wheel and
+Rust crate contain the required replay APIs at the same exact version, then
+update all pins together. A container or prebuilt local wheelhouse is optional.
 
 > VSCode/Cursor users: see the [`.devcontainer`](.devcontainer/README.md) for a pre-configured dev environment.
 

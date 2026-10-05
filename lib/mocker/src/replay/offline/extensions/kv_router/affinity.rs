@@ -243,9 +243,14 @@ impl ReplayAffinity {
             .lock()
             .map_err(|_| anyhow!("routing evidence lock poisoned"))?;
         let evidence = &mut evidence[self.role];
-        evidence["decision_count"] = json!(evidence["decision_count"].as_u64().unwrap() + 1);
+        evidence["decision_count"] = json!(
+            evidence["decision_count"]
+                .as_u64()
+                .context("routing evidence decision_count must be an integer")?
+                + 1
+        );
         if self.capture {
-            evidence["decisions"].as_array_mut().unwrap().push(json!({"request_id": id, "role": self.role, "native_policy": "dynamo.DefaultWorkerSelector", "worker_id": target.worker_id, "dp_rank": target.dp_rank, "group_key": group, "binding_reused": reused, "overlap_blocks": overlap_blocks, "best_available_overlap_blocks": best_available_overlap_blocks}));
+            evidence["decisions"].as_array_mut().context("routing evidence decisions must be an array")?.push(json!({"request_id": id, "role": self.role, "native_policy": "dynamo.DefaultWorkerSelector", "worker_id": target.worker_id, "dp_rank": target.dp_rank, "group_key": group, "binding_reused": reused, "overlap_blocks": overlap_blocks, "best_available_overlap_blocks": best_available_overlap_blocks}));
         }
         Ok(())
     }
@@ -259,7 +264,12 @@ impl ReplayAffinity {
             .lock()
             .map_err(|_| anyhow!("routing evidence lock poisoned"))?;
         let counter = &mut evidence[self.role][field];
-        *counter = json!(counter.as_u64().unwrap() + count);
+        *counter = json!(
+            counter
+                .as_u64()
+                .context("routing evidence counter must be an integer")?
+                + count
+        );
         Ok(())
     }
     pub fn commit(&mut self, id: Uuid) -> Result<()> {

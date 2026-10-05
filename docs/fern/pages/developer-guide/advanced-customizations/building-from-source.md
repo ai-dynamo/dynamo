@@ -64,6 +64,9 @@ cd lib/bindings/python
 maturin develop --uv
 ```
 
+For AISimulate offline replay, use `maturin develop --uv --features ais-forward-pass`
+in this step.
+
 ## 6. Install GPU Memory Service
 
 ```bash
@@ -82,11 +85,11 @@ uv pip install -r container/deps/requirements.aisimulate.txt -e .
 ```
 
 The source requirements build AISimulate from the same immutable public commit
-as Dynamo's Rust dependency and enforce its exact version. The matching
-`0.13.0` release is not on PyPI yet; retain `-r` for source installs on Python
-3.11–3.13. The Rust toolchain above is required. This command does not need a
-container or prebuilt AISimulate wheelhouse. A published matching package is
-still required before an index-only installation can provide this source pair.
+as Dynamo's Rust dependency and enforce its exact version on Python 3.11–3.13.
+This development checkout reports version `0.13.0` and requires the Rust
+toolchain above. Retain `-r` until a published Python wheel and Rust crate
+contain the required replay APIs at the same exact version, then update all
+pins together. A container or prebuilt AISimulate wheelhouse is optional.
 
 > [!NOTE]
 > The base installation provides the Dynamo runtime and frontend. A backend extra (`[vllm]`, or `[sglang]`) will install the relevant framework dependencies to run an inference worker; retain the source requirements when adding an extra. For the TensorRT-LLM backend, use the `tensorrtllm-runtime` container instead of installing via `uv pip` to ensure the right dependencies are installed. See [Local Installation](../../cli/installation/install-dynamo.mdx) for more details.

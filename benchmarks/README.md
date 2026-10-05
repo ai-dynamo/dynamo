@@ -30,9 +30,10 @@ uv pip install -r container/deps/requirements.aisimulate.txt -e benchmarks
 ```
 
 The requirements supply the public, immutable AISimulate revision used by
-Dynamo's Rust dependency and enforce its exact version. The matching `0.13.0`
-release is not on PyPI yet; this command builds it without a container or local
-wheelhouse. Keep `-r` until that matching release is available.
+Dynamo's Rust dependency and enforce its exact version. This command builds
+that development source without a container or local wheelhouse. Keep `-r`
+until a published Python wheel and Rust crate contain the required replay APIs
+at the same exact version, then update all pins together.
 
 ### Benchmark a Dynamo Deployment
 First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx), then:

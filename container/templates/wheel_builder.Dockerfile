@@ -658,8 +658,9 @@ COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/side
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
 # Build the existing AISimulate wheel from the same immutable source as the Rust
-# core. The matching duration/conversation release is not published yet; neither
-# an older published wheel nor a same-series nightly provides this contract.
+# core. Keep this development pair until published Python and Rust packages
+# contain the required duration and replay APIs at the same exact version.
+# A nightly from another source revision is not interchangeable.
 # Every image that ships ai-dynamo needs this wheel in its local wheelhouse,
 # including frontend and standalone wheel-builder targets.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
