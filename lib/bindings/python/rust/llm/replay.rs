@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, MockEngineArgs as RsMockEngineArgs, ReasoningConfig as RsReasoningConfig,
-    SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs, WorkerType as RsWorkerType,
+    DirectRequest, MockerConfig, ReasoningConfig as RsReasoningConfig,
 };
 use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
@@ -143,10 +142,6 @@ fn replay_summary_to_python(
     Ok(summary.unbind())
 }
 
-fn parse_worker_type(worker_type: &str) -> PyResult<RsWorkerType> {
-    worker_type.parse().map_err(PyValueError::new_err)
-}
-
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct ReasoningConfig {
@@ -173,594 +168,6 @@ impl ReasoningConfig {
             thinking_ratio,
         };
         Ok(Self { inner })
-    }
-}
-
-#[pyclass]
-#[derive(Clone, Debug, Default)]
-pub struct SglangArgs {
-    inner: RsSglangArgs,
-}
-
-impl SglangArgs {
-    pub fn inner(&self) -> RsSglangArgs {
-        self.inner.clone()
-    }
-}
-
-#[pymethods]
-impl SglangArgs {
-    #[new]
-    #[pyo3(signature = (schedule_policy=None, page_size=None, max_prefill_tokens=None, chunked_prefill_size=None, clip_max_new_tokens=None, schedule_conservativeness=None))]
-    fn new(
-        schedule_policy: Option<String>,
-        page_size: Option<usize>,
-        max_prefill_tokens: Option<usize>,
-        chunked_prefill_size: Option<usize>,
-        clip_max_new_tokens: Option<usize>,
-        schedule_conservativeness: Option<f64>,
-    ) -> PyResult<Self> {
-        let inner = RsSglangArgs {
-            schedule_policy,
-            page_size,
-            max_prefill_tokens,
-            chunked_prefill_size,
-            clip_max_new_tokens,
-            schedule_conservativeness,
-        };
-        Ok(Self { inner })
-    }
-}
-
-#[pyclass]
-#[derive(Clone, Debug, Default)]
-pub struct TrtllmArgs {
-    inner: RsTrtllmArgs,
-}
-
-impl TrtllmArgs {
-    pub fn inner(&self) -> RsTrtllmArgs {
-        self.inner.clone()
-    }
-}
-
-#[pymethods]
-impl TrtllmArgs {
-    #[new]
-    #[pyo3(signature = (capacity_scheduler_policy=None))]
-    fn new(capacity_scheduler_policy: Option<String>) -> PyResult<Self> {
-        let inner = RsTrtllmArgs {
-            capacity_scheduler_policy,
-        };
-        Ok(Self { inner })
-    }
-}
-
-#[pyclass]
-#[derive(Clone, Debug, Default)]
-pub struct MockEngineArgs {
-    inner: RsMockEngineArgs,
-    num_gpu_blocks_explicit: bool,
-}
-
-impl MockEngineArgs {
-    pub fn inner(&self) -> RsMockEngineArgs {
-        self.inner.clone()
-    }
-
-    pub(crate) fn num_gpu_blocks_explicit(&self) -> bool {
-        self.num_gpu_blocks_explicit
-    }
-}
-
-#[pymethods]
-impl MockEngineArgs {
-    /// Compatibility constructor. Omitted values are defaulted by AISimulate;
-    /// canonical engine fields are accepted without a Dynamo schema copy.
-    #[new]
-    #[pyo3(signature = (*args, **kwargs))]
-    fn new(
-        py: Python<'_>,
-        args: &Bound<'_, pyo3::types::PyTuple>,
-        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<Self> {
-        // Preserve the historical positional ABI, without repeating its defaults.
-        const POSITIONAL: &[&str] = &[
-            "engine_type",
-            "num_gpu_blocks",
-            "block_size",
-            "max_num_seqs",
-            "max_num_batched_tokens",
-            "enable_prefix_caching",
-            "enable_chunked_prefill",
-            "speedup_ratio",
-            "decode_speedup_ratio",
-            "dp_size",
-            "startup_time",
-            "worker_type",
-            "planner_profile_data",
-            "ais_nextn",
-            "ais_nextn_accept_rates",
-            "ais_mtp_seed",
-            "gpu_memory_utilization",
-            "mem_fraction_static",
-            "free_gpu_memory_fraction",
-            "enable_local_indexer",
-            "bootstrap_port",
-            "handoff_session_timeout_ms",
-            "kv_bytes_per_token",
-            "kv_transfer_bandwidth",
-            "kv_transfer_timing_mode",
-            "reasoning",
-            "response_replay_trace_path",
-            "zmq_kv_events_port",
-            "zmq_replay_port",
-            "preemption_mode",
-            "router_queue_policy",
-            "sglang",
-            "trtllm",
-            "max_model_len",
-            "ais_perf_config",
-        ];
-        if args.len() > POSITIONAL.len() {
-            return Err(PyTypeError::new_err(
-                "too many positional MockEngineArgs arguments",
-            ));
-        }
-        let fields = pyo3::types::PyDict::new(py);
-        for (key, value) in POSITIONAL.iter().zip(args.iter()) {
-            fields.set_item(key, value)?;
-        }
-        if let Some(kwargs) = kwargs {
-            for (key, value) in kwargs.iter() {
-                if fields.contains(&key)? {
-                    return Err(PyTypeError::new_err(format!("duplicate argument {key}")));
-                }
-                fields.set_item(key, value)?;
-            }
-        }
-        let json_module = py.import("json")?;
-        let json_options = pyo3::types::PyDict::new(py);
-        json_options.set_item("allow_nan", false)?;
-        // Preserve non-finite numbers until strict JSON conversion can reject them.
-        let input_value = |value: &Bound<'_, PyAny>| -> PyResult<serde_json::Value> {
-            let serialized: String = json_module
-                .call_method("dumps", (value,), Some(&json_options))?
-                .extract()?;
-            serde_json::from_str(&serialized).map_err(to_pyerr)
-        };
-        let mut config = serde_json::Map::new();
-        for (key, value) in fields.iter() {
-            let key: String = key.extract()?;
-            if key == "ais_mtp_seed" && value.is_none() {
-                continue;
-            }
-            let value = if key == "ais_perf_config" && !value.is_none() {
-                normalize_ais_perf_config(py, &value)?
-            } else if let Ok(config) = value.extract::<PyRef<'_, ReasoningConfig>>() {
-                input_value(&pythonize(py, &config.inner())?)?
-            } else if let Ok(config) = value.extract::<PyRef<'_, SglangArgs>>() {
-                input_value(&pythonize(py, &config.inner())?)?
-            } else if let Ok(config) = value.extract::<PyRef<'_, TrtllmArgs>>() {
-                input_value(&pythonize(py, &config.inner())?)?
-            } else if value.hasattr("__fspath__")? {
-                json!(value.call_method0("__fspath__")?.extract::<String>()?)
-            } else {
-                input_value(&value)?
-            };
-            config.insert(key, value);
-        }
-        Self::from_json(py, &serde_json::to_string(&config).map_err(to_pyerr)?)
-    }
-
-    #[staticmethod]
-    pub(super) fn from_json(py: Python<'_>, config_json: &str) -> PyResult<Self> {
-        let mut config: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
-            PyValueError::new_err(format!("Failed to parse MockEngineArgs JSON: {e}"))
-        })?;
-        let num_gpu_blocks_explicit = config
-            .get("num_gpu_blocks")
-            .or_else(|| config.pointer("/engine/num_gpu_blocks"))
-            .and_then(serde_json::Value::as_u64)
-            .is_some();
-        if let Some(perf_config) = config.get_mut("ais_perf_config")
-            && !perf_config.is_null()
-        {
-            *perf_config = normalize_ais_perf_config(py, &pythonize(py, perf_config)?)?;
-        }
-        if let Some(timing) = config.get_mut("timing_model")
-            && timing["type"] == "external"
-            && matches!(timing["provider"].as_str(), Some("aic" | "ais"))
-            && let Some(perf_config) = timing.get_mut("config")
-        {
-            *perf_config = normalize_ais_perf_config(py, &pythonize(py, perf_config)?)?;
-        }
-        if let Some(timing) = config.pointer_mut("/engine/timing_model")
-            && timing["type"] == "external"
-            && matches!(timing["provider"].as_str(), Some("aic" | "ais"))
-            && let Some(perf_config) = timing.get_mut("config")
-        {
-            *perf_config = normalize_ais_perf_config(py, &pythonize(py, perf_config)?)?;
-        }
-        let config_json = serde_json::to_string(&config).map_err(to_pyerr)?;
-        RsMockEngineArgs::from_json_str(&config_json)
-            .map(|inner| Self {
-                inner,
-                num_gpu_blocks_explicit,
-            })
-            .map_err(|e| PyValueError::new_err(format!("Failed to parse MockEngineArgs JSON: {e}")))
-    }
-
-    fn to_json(&self) -> PyResult<String> {
-        serde_json::to_string(&self.inner).map_err(to_pyerr)
-    }
-
-    fn copy(&self) -> Self {
-        self.clone()
-    }
-
-    #[getter]
-    fn block_size(&self) -> usize {
-        self.inner.block_size
-    }
-
-    #[getter]
-    fn num_gpu_blocks(&self) -> usize {
-        self.inner.num_gpu_blocks
-    }
-
-    #[getter]
-    fn max_model_len(&self) -> Option<usize> {
-        self.inner.max_model_len
-    }
-
-    #[getter]
-    fn max_num_seqs(&self) -> Option<usize> {
-        (self.inner.max_num_seqs != usize::MAX).then_some(self.inner.max_num_seqs)
-    }
-
-    #[getter]
-    fn max_num_batched_tokens(&self) -> Option<usize> {
-        (self.inner.max_num_batched_tokens != usize::MAX)
-            .then_some(self.inner.max_num_batched_tokens)
-    }
-
-    #[getter]
-    fn enable_prefix_caching(&self) -> bool {
-        self.inner.enable_prefix_caching
-    }
-
-    #[setter]
-    fn set_enable_prefix_caching(&mut self, value: bool) {
-        self.inner.enable_prefix_caching = value;
-    }
-
-    #[getter]
-    fn enable_local_indexer(&self) -> bool {
-        self.inner.runtime.enable_local_indexer
-    }
-
-    #[getter]
-    fn dp_size(&self) -> u32 {
-        self.inner.dp_size
-    }
-
-    #[getter]
-    fn bootstrap_port(&self) -> Option<u16> {
-        self.inner.runtime.bootstrap_port
-    }
-
-    #[getter]
-    fn handoff_session_timeout_ms(&self) -> u64 {
-        self.inner.runtime.handoff_session_timeout_ms
-    }
-
-    #[getter]
-    fn kv_transfer_timing_mode(&self) -> &'static str {
-        match self.inner.kv_transfer_timing_mode {
-            dynamo_mocker::common::protocols::KvTransferTimingMode::FullPrompt => "full_prompt",
-            dynamo_mocker::common::protocols::KvTransferTimingMode::DestinationMissing => {
-                "destination_missing"
-            }
-        }
-    }
-
-    #[getter]
-    fn engine_type(&self) -> &'static str {
-        match self.inner.backend {
-            dynamo_mocker::common::protocols::EngineType::Vllm => "vllm",
-            dynamo_mocker::common::protocols::EngineType::Sglang => "sglang",
-            dynamo_mocker::common::protocols::EngineType::Trtllm => "trtllm",
-        }
-    }
-
-    #[getter]
-    fn kv_bytes_per_token(&self) -> Option<usize> {
-        self.inner.kv_transfer_bytes_per_token
-    }
-
-    #[getter]
-    fn response_replay_trace_path(&self) -> Option<PathBuf> {
-        self.inner.runtime.response_replay_trace_path.clone()
-    }
-
-    #[getter]
-    fn ais_perf_config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(pythonize(py, &self.inner.ais_perf_config())?.unbind())
-    }
-
-    #[getter]
-    fn ais_backend(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("backend")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_system(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("system")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_backend_version(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("backend_version")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_tp_size(&self) -> Option<usize> {
-        self.inner
-            .ais_perf_config()?
-            .get("tp")?
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-    }
-
-    #[getter]
-    fn ais_model_path(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("model")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_moe_tp_size(&self) -> Option<usize> {
-        self.inner
-            .ais_perf_config()?
-            .get("moe_tp_size")?
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-    }
-
-    #[getter]
-    fn ais_moe_ep_size(&self) -> Option<usize> {
-        self.inner
-            .ais_perf_config()?
-            .get("moe_ep_size")?
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-    }
-
-    #[getter]
-    fn ais_attention_dp_size(&self) -> Option<usize> {
-        self.inner
-            .ais_perf_config()?
-            .get("attention_dp")?
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-    }
-
-    #[getter]
-    fn ais_gemm_dtype(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("gemm_quant_mode")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_moe_dtype(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("moe_quant_mode")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_fmha_dtype(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("fmha_quant_mode")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_kv_cache_dtype(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("kvcache_quant_mode")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_comm_dtype(&self) -> Option<String> {
-        self.inner
-            .ais_perf_config()?
-            .get("comm_quant_mode")?
-            .as_str()
-            .map(str::to_owned)
-    }
-
-    #[getter]
-    fn ais_nextn(&self) -> Option<usize> {
-        self.inner.aic_nextn
-    }
-
-    #[getter]
-    fn ais_nextn_accept_rates(&self) -> Option<String> {
-        self.inner.aic_nextn_accept_rates.clone()
-    }
-
-    #[getter]
-    fn ais_mtp_seed(&self) -> u64 {
-        self.inner.aic_mtp_seed
-    }
-
-    #[getter]
-    fn gpu_memory_utilization(&self) -> Option<f64> {
-        self.inner.gpu_memory_utilization
-    }
-
-    #[setter]
-    fn set_gpu_memory_utilization(&mut self, value: Option<f64>) -> PyResult<()> {
-        let mut engine = self.inner.engine.clone();
-        engine.gpu_memory_utilization = value;
-        engine.validate().map_err(to_pyerr)?;
-        self.inner.engine = engine;
-        Ok(())
-    }
-
-    #[getter]
-    fn mem_fraction_static(&self) -> Option<f64> {
-        self.inner.mem_fraction_static
-    }
-
-    #[setter]
-    fn set_mem_fraction_static(&mut self, value: Option<f64>) -> PyResult<()> {
-        let mut engine = self.inner.engine.clone();
-        engine.mem_fraction_static = value;
-        engine.validate().map_err(to_pyerr)?;
-        self.inner.engine = engine;
-        Ok(())
-    }
-
-    #[getter]
-    fn free_gpu_memory_fraction(&self) -> Option<f64> {
-        self.inner.free_gpu_memory_fraction
-    }
-
-    #[setter]
-    fn set_free_gpu_memory_fraction(&mut self, value: Option<f64>) -> PyResult<()> {
-        let mut engine = self.inner.engine.clone();
-        engine.free_gpu_memory_fraction = value;
-        engine.validate().map_err(to_pyerr)?;
-        self.inner.engine = engine;
-        Ok(())
-    }
-
-    #[getter]
-    fn worker_type(&self) -> &'static str {
-        match self.inner.worker_type {
-            RsWorkerType::Aggregated => "aggregated",
-            RsWorkerType::Prefill => "prefill",
-            RsWorkerType::Decode => "decode",
-        }
-    }
-
-    #[setter]
-    fn set_worker_type(&mut self, value: &str) -> PyResult<()> {
-        self.inner.worker_type = parse_worker_type(value)?;
-        Ok(())
-    }
-
-    #[setter]
-    fn set_num_gpu_blocks(&mut self, value: usize) {
-        self.inner.num_gpu_blocks = value;
-        self.num_gpu_blocks_explicit = true;
-    }
-
-    fn is_prefill(&self) -> bool {
-        self.inner.is_prefill()
-    }
-
-    fn is_decode(&self) -> bool {
-        self.inner.is_decode()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
-    fn with_overrides(
-        &self,
-        bootstrap_port: Option<u16>,
-        zmq_kv_events_port: Option<u16>,
-        zmq_replay_port: Option<u16>,
-        kv_bytes_per_token: Option<usize>,
-        num_gpu_blocks: Option<usize>,
-        ais_nextn: Option<usize>,
-        ais_nextn_accept_rates: Option<String>,
-        ais_mtp_seed: Option<u64>,
-        gpu_memory_utilization: Option<f64>,
-        mem_fraction_static: Option<f64>,
-        free_gpu_memory_fraction: Option<f64>,
-        enable_prefix_caching: Option<bool>,
-        worker_type: Option<String>,
-    ) -> PyResult<Self> {
-        let mut inner = self.inner.clone();
-        let mut num_gpu_blocks_explicit = self.num_gpu_blocks_explicit;
-        if let Some(port) = bootstrap_port {
-            inner.runtime.bootstrap_port = Some(port);
-        }
-        if let Some(port) = zmq_kv_events_port {
-            inner.runtime.zmq_kv_events_port = Some(port);
-        }
-        if let Some(port) = zmq_replay_port {
-            inner.runtime.zmq_replay_port = Some(port);
-        }
-        if let Some(bytes_per_token) = kv_bytes_per_token {
-            inner.kv_transfer_bytes_per_token = Some(bytes_per_token);
-        }
-        if let Some(blocks) = num_gpu_blocks {
-            inner.num_gpu_blocks = blocks;
-            num_gpu_blocks_explicit = true;
-        }
-        if let Some(nextn) = ais_nextn {
-            inner.aic_nextn = Some(nextn);
-        }
-        if let Some(rates) = ais_nextn_accept_rates {
-            inner.aic_nextn_accept_rates = Some(rates);
-        }
-        if let Some(seed) = ais_mtp_seed {
-            inner.aic_mtp_seed = seed;
-        }
-        if let Some(gpu_memory_utilization) = gpu_memory_utilization {
-            inner.gpu_memory_utilization = Some(gpu_memory_utilization);
-        }
-        if let Some(mem_fraction_static) = mem_fraction_static {
-            inner.mem_fraction_static = Some(mem_fraction_static);
-        }
-        if let Some(free_gpu_memory_fraction) = free_gpu_memory_fraction {
-            inner.free_gpu_memory_fraction = Some(free_gpu_memory_fraction);
-        }
-        if let Some(enable_prefix_caching) = enable_prefix_caching {
-            inner.enable_prefix_caching = enable_prefix_caching;
-        }
-        if let Some(worker_type) = worker_type {
-            inner.worker_type = parse_worker_type(&worker_type)?;
-        }
-        inner
-            .normalized()
-            .map(|inner| Self {
-                inner,
-                num_gpu_blocks_explicit,
-            })
-            .map_err(|e| {
-                PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))
-            })
     }
 }
 
@@ -814,9 +221,9 @@ fn replay_paths_equal(left: &Path, right: &Path) -> bool {
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
     trace_files: Vec<PathBuf>,
-    extra_engine_args: Option<MockEngineArgs>,
-    prefill_engine_args: Option<MockEngineArgs>,
-    decode_engine_args: Option<MockEngineArgs>,
+    extra_engine_args: Option<&Bound<'_, PyAny>>,
+    prefill_engine_args: Option<&Bound<'_, PyAny>>,
+    decode_engine_args: Option<&Bound<'_, PyAny>>,
     router_config: Option<KvRouterConfig>,
     ais_perf_config: Option<&AisPerfConfig>,
     num_workers: usize,
@@ -1402,9 +809,9 @@ pub fn run_mocker_synthetic_trace_replay(
     input_tokens: usize,
     output_tokens: usize,
     request_count: usize,
-    extra_engine_args: Option<MockEngineArgs>,
-    prefill_engine_args: Option<MockEngineArgs>,
-    decode_engine_args: Option<MockEngineArgs>,
+    extra_engine_args: Option<&Bound<'_, PyAny>>,
+    prefill_engine_args: Option<&Bound<'_, PyAny>>,
+    decode_engine_args: Option<&Bound<'_, PyAny>>,
     router_config: Option<KvRouterConfig>,
     ais_perf_config: Option<&AisPerfConfig>,
     num_workers: usize,
@@ -1784,15 +1191,15 @@ pub fn run_mocker_synthetic_trace_replay(
 }
 
 enum ReplayArgsSelection {
-    Aggregated(Box<RsMockEngineArgs>),
+    Aggregated(Box<MockerConfig>),
     Disagg(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>),
 }
 
 enum ReplayDispatch {
-    AggregatedOfflineConcurrency(Box<RsMockEngineArgs>, usize),
-    AggregatedOffline(Box<RsMockEngineArgs>),
-    AggregatedOnlineConcurrency(Box<RsMockEngineArgs>, usize),
-    AggregatedOnline(Box<RsMockEngineArgs>),
+    AggregatedOfflineConcurrency(Box<MockerConfig>, usize),
+    AggregatedOffline(Box<MockerConfig>),
+    AggregatedOnlineConcurrency(Box<MockerConfig>, usize),
+    AggregatedOnline(Box<MockerConfig>),
     DisaggOfflineConcurrency(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>, usize),
     DisaggOffline(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>),
 }
@@ -1919,9 +1326,9 @@ mod tests {
 
 fn load_replay_args_selection(
     py: Python<'_>,
-    extra_engine_args: Option<MockEngineArgs>,
-    prefill_engine_args: Option<MockEngineArgs>,
-    decode_engine_args: Option<MockEngineArgs>,
+    extra_engine_args: Option<&Bound<'_, PyAny>>,
+    prefill_engine_args: Option<&Bound<'_, PyAny>>,
+    decode_engine_args: Option<&Bound<'_, PyAny>>,
     num_workers: usize,
     num_prefill_workers: usize,
     num_decode_workers: usize,
@@ -1957,44 +1364,85 @@ fn load_replay_args_selection(
 
 fn load_optional_replay_mocker_args(
     py: Python<'_>,
-    extra_engine_args: Option<MockEngineArgs>,
-) -> PyResult<Option<RsMockEngineArgs>> {
+    extra_engine_args: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<MockerConfig>> {
     extra_engine_args
         .map(|extra_args| materialize_replay_mocker_args(py, extra_args))
         .transpose()
 }
 
+pub(super) fn mocker_config_from_python(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<MockerConfig> {
+    let json: String = if let Ok(json) = value.extract::<String>() {
+        json
+    } else {
+        let options = pyo3::types::PyDict::new(py);
+        options.set_item("allow_nan", false)?;
+        py.import("json")?
+            .call_method("dumps", (value,), Some(&options))?
+            .extract()?
+    };
+    mocker_config_from_json(py, &json)
+}
+
+pub(super) fn mocker_config_from_json(py: Python<'_>, json: &str) -> PyResult<MockerConfig> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| PyValueError::new_err(error.to_string()))?;
+    if let Some(timing) = value.pointer_mut("/engine/timing_model")
+        && timing["type"] == "external"
+        && matches!(timing["provider"].as_str(), Some("aic" | "ais"))
+        && let Some(config) = timing.get_mut("config")
+    {
+        *config = normalize_ais_perf_config(py, &pythonize(py, config)?)?;
+    }
+    MockerConfig::from_value(value).map_err(|error| PyValueError::new_err(format!("{error:#}")))
+}
+
+fn resolve_mocker_capacity(py: Python<'_>, args: &mut MockerConfig) -> PyResult<()> {
+    if let Some(config) = args.ais_perf_config()
+        && !args.num_gpu_blocks_is_explicit
+    {
+        let options = pythonize(py, &args.engine.capacity_estimation_options())?;
+        let blocks = py
+            .import("dynamo._internal.ais")?
+            .call_method(
+                "estimate_canonical_num_gpu_blocks",
+                (pythonize(py, config)?,),
+                Some(options.downcast::<pyo3::types::PyDict>()?),
+            )?
+            .extract()?;
+        args.num_gpu_blocks = blocks;
+    }
+    args.engine
+        .validate()
+        .map_err(|error| PyValueError::new_err(format!("{error:#}")))
+}
+
+#[pyfunction]
+pub fn _normalize_mocker_config(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+    let mut args = mocker_config_from_python(py, config)?;
+    resolve_mocker_capacity(py, &mut args)?;
+    pythonize(py, &args).map(Bound::unbind).map_err(to_pyerr)
+}
+
 fn materialize_replay_mocker_args(
     py: Python<'_>,
-    extra_args: MockEngineArgs,
-) -> PyResult<RsMockEngineArgs> {
-    let mut args = extra_args.inner();
-    if let Some(config) = args.ais_perf_config().cloned().as_ref() {
-        if !extra_args.num_gpu_blocks_explicit() {
-            let kwargs = pyo3::types::PyDict::new(py);
-            kwargs.set_item("block_size", args.block_size)?;
-            kwargs.set_item("max_num_batched_tokens", args.max_num_batched_tokens)?;
-            kwargs.set_item("max_num_seqs", args.max_num_seqs)?;
-            for (key, value) in [
-                ("gpu_memory_utilization", args.gpu_memory_utilization),
-                ("mem_fraction_static", args.mem_fraction_static),
-                ("free_gpu_memory_fraction", args.free_gpu_memory_fraction),
-            ] {
-                if let Some(value) = value {
-                    kwargs.set_item(key, value)?;
-                }
-            }
-            args.num_gpu_blocks = py
-                .import("dynamo._internal.ais")?
-                .call_method(
-                    "estimate_canonical_num_gpu_blocks",
-                    (pythonize(py, config)?,),
-                    Some(&kwargs),
-                )?
-                .extract()?;
-        }
-        let callback = create_ais_callback(py, config)?;
-        args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
+    config: &Bound<'_, PyAny>,
+) -> PyResult<MockerConfig> {
+    materialize_mocker_config(py, mocker_config_from_python(py, config)?)
+}
+
+pub(super) fn materialize_mocker_config(
+    py: Python<'_>,
+    mut args: MockerConfig,
+) -> PyResult<MockerConfig> {
+    resolve_mocker_capacity(py, &mut args)?;
+    if let Some(config) = args.ais_perf_config() {
+        args.perf_model = Arc::new(PerfModel::from_ais_callback(create_ais_callback(
+            py, config,
+        )?));
     }
     Ok(args)
 }

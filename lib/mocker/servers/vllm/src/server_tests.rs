@@ -13,14 +13,7 @@ use std::collections::BTreeMap;
 /// Engine arguments with ample capacity and instant simulated timing, for
 /// tests that need requests to be admitted and run to completion quickly.
 fn admitting_args() -> MockerConfig {
-    MockerConfig::builder()
-        .block_size(4)
-        .enable_prefix_caching(false)
-        .num_gpu_blocks(4096)
-        .max_num_seqs(Some(64))
-        .max_num_batched_tokens(Some(1024))
-        .speedup_ratio(0.0)
-        .build()
+    MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"enable_prefix_caching":false,"num_gpu_blocks":4096,"max_num_seqs":64,"max_num_batched_tokens":1024,"speedup_ratio":0.0}}))
         .unwrap()
 }
 
@@ -169,10 +162,9 @@ fn text_prompts_fail_with_an_actionable_status() {
 
 #[tokio::test]
 async fn service_rejects_non_vllm_or_multi_rank_engines() {
-    let mut sglang = MockerConfig::builder()
-        .engine_type(EngineType::Sglang)
-        .build()
-        .unwrap();
+    let mut sglang =
+        MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Sglang}}))
+            .unwrap();
     // Service-specific errors must take priority over general validation.
     sglang.num_gpu_blocks = 0;
     assert!(
@@ -183,7 +175,7 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("engine_type")
     );
 
-    let mut multi_rank = MockerConfig::builder().dp_size(2).build().unwrap();
+    let mut multi_rank = MockerConfig::from_value(serde_json::json!({"dp_size":2})).unwrap();
     multi_rank.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), multi_rank)
@@ -193,10 +185,9 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("dp_size")
     );
 
-    let mut disaggregated = MockerConfig::builder()
-        .worker_type(WorkerType::Prefill)
-        .build()
-        .unwrap();
+    let mut disaggregated =
+        MockerConfig::from_value(serde_json::json!({"engine":{"worker_type":WorkerType::Prefill}}))
+            .unwrap();
     disaggregated.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), disaggregated)
@@ -258,14 +249,7 @@ async fn unsupported_rl_control_reports_unimplemented() {
 
 #[tokio::test]
 async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
-    let args = MockerConfig::builder()
-        .block_size(4)
-        .enable_prefix_caching(false)
-        .num_gpu_blocks(1)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(0.0)
-        .build()
+    let args = MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"enable_prefix_caching":false,"num_gpu_blocks":1,"max_num_seqs":8,"max_num_batched_tokens":64,"speedup_ratio":0.0}}))
         .unwrap();
     let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     let mut oversized = request("oversized");
@@ -281,13 +265,7 @@ async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
 
 #[tokio::test]
 async fn concurrent_request_limit_rejects_a_stalled_stream() {
-    let args = MockerConfig::builder()
-        .block_size(4)
-        .enable_prefix_caching(false)
-        .num_gpu_blocks(128)
-        .max_num_seqs(Some(1))
-        .speedup_ratio(0.01)
-        .build()
+    let args = MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"enable_prefix_caching":false,"num_gpu_blocks":128,"max_num_seqs":1,"speedup_ratio":0.01}}))
         .unwrap();
     let service = VllmMockerService::new(
         MockerServerConfig {
@@ -409,14 +387,7 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
     // Same undersized KV cache as the unary case, but exercised through the
     // streaming RPC the production sidecar uses: the call opens successfully and
     // the rejection arrives as a later stream item after prompt info.
-    let args = MockerConfig::builder()
-        .block_size(4)
-        .enable_prefix_caching(false)
-        .num_gpu_blocks(1)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(0.0)
-        .build()
+    let args = MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"enable_prefix_caching":false,"num_gpu_blocks":1,"max_num_seqs":8,"max_num_batched_tokens":64,"speedup_ratio":0.0}}))
         .unwrap();
     let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     let mut oversized = request("oversized-stream");

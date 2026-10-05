@@ -1150,19 +1150,17 @@ mod tests {
     }
 
     fn replay_args() -> MockerConfig {
-        MockerConfig::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(256))
-            .build()
-            .unwrap()
+        MockerConfig::from_value(
+            serde_json::json!({"engine":{"block_size":64,"max_num_batched_tokens":256}}),
+        )
+        .unwrap()
     }
 
     fn queueing_args() -> MockerConfig {
-        MockerConfig::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap()
+        MockerConfig::from_value(
+            serde_json::json!({"engine":{"block_size":64,"max_num_batched_tokens":64}}),
+        )
+        .unwrap()
     }
 
     fn router_config() -> KvRouterConfig {

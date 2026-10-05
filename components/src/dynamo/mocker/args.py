@@ -2,7 +2,6 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import json
 import logging
 import os
 import tempfile
@@ -153,9 +152,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     Returns:
         argparse.Namespace: Parsed command-line arguments.
     """
-    from dynamo.mocker import MockEngineArgs
+    from dynamo.mocker.config import normalize_mocker_config
 
-    engine_defaults = json.loads(MockEngineArgs().to_json())["engine"]
+    engine_defaults = normalize_mocker_config()["engine"]
     parser = argparse.ArgumentParser(
         description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -183,11 +182,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Model name for API responses (default: derived from model-path)",
     )
 
-    # MockEngineArgs parameters (similar to vLLM style)
+    # Engine CLI options (lowered to the AISimulate configuration)
     parser.add_argument(
         "--num-gpu-blocks-override",
         type=int,
-        dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
+        dest="num_gpu_blocks",
         default=None,
         help="Explicit usable GPU-block capacity per data-parallel rank for the mock "
         "KV cache. When unset, AIS-backed mocker estimates the value; non-AIS "
@@ -460,13 +459,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sglang-schedule-policy",
         type=str,
         default=None,
-        help="SGLang scheduling policy: 'fifo'/'fcfs' (default) or 'lpm' (longest prefix match).",
-    )
-    parser.add_argument(
-        "--sglang-page-size",
-        type=int,
-        default=None,
-        help="SGLang radix cache page size in tokens (default: 1).",
+        help="SGLang scheduling policy: 'fifo' (default) or 'lpm' (longest prefix match).",
     )
     parser.add_argument(
         "--sglang-max-prefill-tokens",

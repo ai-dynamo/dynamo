@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn vllm_defaults_materialize_once_at_the_shared_boundary() {
-        let mut args = MockerConfig::builder().build().unwrap();
+        let mut args = MockerConfig::from_value(serde_json::json!({})).unwrap();
         args.kv_transfer_bytes_per_token = Some(4096);
         args.kv_cache_bytes_per_token = Some(1024);
         let components = engine_components(args, true, true).unwrap();
@@ -232,10 +232,10 @@ mod tests {
 
     #[test]
     fn replay_json_keeps_transfer_and_cache_geometry_independent() {
-        let args: MockerConfig = serde_json::from_value(serde_json::json!({
+        let args: MockerConfig = serde_json::from_value(serde_json::json!({"engine": {
             "kv_transfer_bytes_per_token": 4096,
             "kv_cache_bytes_per_token": 1024,
-        }))
+        }}))
         .unwrap();
         let components = engine_components(args, false, false).unwrap();
         assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
@@ -245,13 +245,7 @@ mod tests {
     #[test]
     fn backend_specific_fields_match_the_engine_contract() {
         let sglang = MockerConfig::from_json_str(
-            r#"{
-            "engine_type":"sglang", "sglang":{
-                "schedule_policy":"lpm", "page_size":8, "max_prefill_tokens":512,
-                "chunked_prefill_size":256,"clip_max_new_tokens":128,
-                "schedule_conservativeness":0.5
-            }
-        }"#,
+            r#"{"engine": {"sglang": {"schedule_policy": "lpm", "max_prefill_tokens": 512, "chunked_prefill_size": 256, "clip_max_new_tokens": 128, "schedule_conservativeness": 0.5}, "backend": "sglang", "block_size": 8}}"#,
         )
         .unwrap();
         let components = engine_components(sglang, false, false).unwrap();
@@ -263,7 +257,7 @@ mod tests {
         );
         assert_eq!(components.rank.sglang.chunked_prefill_size, 256);
 
-        let trtllm = MockerConfig::from_json_str(r#"{"engine_type":"trtllm"}"#).unwrap();
+        let trtllm = MockerConfig::from_json_str(r#"{"engine": {"backend": "trtllm"}}"#).unwrap();
         let components = engine_components(trtllm, false, false).unwrap();
         assert_eq!(components.rank.backend, Backend::Trtllm);
         assert_eq!(components.rank.block_size, 32);
@@ -271,7 +265,7 @@ mod tests {
 
     #[test]
     fn polynomial_builds_replay_and_live_engines_without_an_external_provider() {
-        let args = MockerConfig::builder().build().unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({})).unwrap();
         let components = engine_components(args.clone(), false, false).unwrap();
         assert_eq!(components.rank.timing_model, TimingModelConfig::Polynomial);
         assert!(components.timing.is_none());
@@ -293,7 +287,7 @@ mod tests {
     #[test]
     fn public_fixed_timing_materializes_as_builtin_engine_timing() {
         let args = MockerConfig::from_json_str(
-            r#"{"timing_model":{"type":"fixed","prefill_ms":2.5,"decode_ms":0.5}}"#,
+            r#"{"engine": {"timing_model": {"type": "fixed", "prefill_ms": 2.5, "decode_ms": 0.5}, "backend": "vllm"}}"#,
         )
         .unwrap();
         let components = engine_components(args, false, false).unwrap();
@@ -319,7 +313,7 @@ mod tests {
         ];
 
         for model in models {
-            let mut args = MockerConfig::builder().build().unwrap();
+            let mut args = MockerConfig::from_value(serde_json::json!({})).unwrap();
             args.perf_model = Arc::new(model);
             let components = engine_components(args, false, false).unwrap();
 
@@ -339,8 +333,8 @@ mod tests {
 
     #[test]
     fn disaggregated_roles_resolve_builtin_and_external_timing_independently() {
-        let prefill_args = MockerConfig::builder().build().unwrap();
-        let mut decode_args = MockerConfig::builder().build().unwrap();
+        let prefill_args = MockerConfig::from_value(serde_json::json!({})).unwrap();
+        let mut decode_args = MockerConfig::from_value(serde_json::json!({})).unwrap();
         decode_args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(EchoAis)));
 
         let (config, factory) = disaggregated_replay_setup(&prefill_args, &decode_args).unwrap();

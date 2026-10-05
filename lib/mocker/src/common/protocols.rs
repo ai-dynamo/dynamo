@@ -202,13 +202,10 @@ pub struct OutputSignal {
     pub cached_tokens: Option<usize>,
 }
 
-pub use crate::config::{MockerConfig, MockerConfigBuilder};
+pub use crate::config::MockerConfig;
 pub use aisimulate_core::engine::{
-    Backend as EngineType, PreemptionMode, SglangOverrides as SglangArgs,
-    TransferTimingMode as KvTransferTimingMode, TrtllmOverrides as TrtllmArgs, WorkerType,
+    Backend as EngineType, PreemptionMode, TransferTimingMode as KvTransferTimingMode, WorkerType,
 };
-/// Compatibility name for Dynamo callers; engine configuration is owned by AISimulate.
-pub type MockEngineArgs = MockerConfig;
 
 /// Configuration for reasoning/thinking token output in the mocker.
 ///

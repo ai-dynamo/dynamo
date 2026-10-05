@@ -21,7 +21,7 @@ use super::extensions::kv_router::{
 };
 use super::normalize_trace_requests;
 use crate::common::handoff::NormalizedHandoffConformance;
-use crate::common::protocols::{DirectRequest, EngineType, MockerConfig, SglangArgs, WorkerType};
+use crate::common::protocols::{DirectRequest, EngineType, MockerConfig, WorkerType};
 use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
@@ -342,25 +342,13 @@ pub fn run_offline_handoff_conformance(
     transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
 ) -> Result<NormalizedHandoffConformance> {
     let build_args = |worker_type| {
-        let mut builder = MockerConfig::builder()
-            .engine_type(engine_type)
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .max_num_seqs(Some(2))
-            .worker_type(worker_type)
-            .speedup_ratio(1000.0)
-            .decode_speedup_ratio(1000.0)
-            .kv_transfer_bandwidth(Some(1.0))
-            .kv_bytes_per_token(Some(1_000_000))
-            .kv_transfer_timing_mode(transfer_timing_mode);
-        if engine_type == EngineType::Sglang {
-            builder = builder.sglang(Some(SglangArgs {
-                page_size: Some(4),
-                ..Default::default()
-            }));
-        }
-        builder.build()
+        MockerConfig::from_value(serde_json::json!({"engine": {
+            "backend":engine_type,"worker_type":worker_type,"block_size":4,
+            "num_gpu_blocks":64,"max_num_batched_tokens":64,"max_num_seqs":2,
+            "speedup_ratio":1000.0,"decode_speedup_ratio":1000.0,
+            "kv_transfer_bandwidth":1.0,"kv_transfer_bytes_per_token":1_000_000,
+            "kv_transfer_timing_mode":transfer_timing_mode
+        }}))
     };
     let prefill_args = build_args(WorkerType::Prefill)?;
     let decode_args = build_args(WorkerType::Decode)?;

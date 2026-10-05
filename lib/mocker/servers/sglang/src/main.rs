@@ -73,22 +73,17 @@ fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockerConfig> {
         .context("--extra-engine-args must be a JSON object")?,
     };
 
-    // Select this server's scheduler only when the caller omitted it.
-    let rank = if object.contains_key("engine") {
-        object
-            .get_mut("engine")
-            .and_then(Value::as_object_mut)
-            .context("engine must be a JSON object")?
-    } else {
-        &mut object
-    };
-    if !rank.contains_key("engine_type") && !rank.contains_key("backend") {
-        rank.insert("backend".to_owned(), Value::String("sglang".to_owned()));
-    }
+    let rank = object
+        .entry("engine")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("engine must be a JSON object")?;
+    rank.entry("backend")
+        .or_insert_with(|| Value::String("sglang".to_owned()));
     let args = MockerConfig::from_value(Value::Object(object))
         .context("invalid Mocker engine arguments")?;
     if args.backend != EngineType::Sglang {
-        bail!("--extra-engine-args engine_type must be sglang");
+        bail!("--extra-engine-args backend must be sglang");
     }
     Ok(args)
 }
@@ -138,7 +133,7 @@ mod tests {
 
     #[test]
     fn engine_loader_defaults_to_sglang() {
-        let args = load_engine_args(Some(r#"{"block_size":4}"#)).unwrap();
+        let args = load_engine_args(Some(r#"{"engine":{"block_size":4}}"#)).unwrap();
         assert_eq!(args.backend, EngineType::Sglang);
         assert_eq!(args.block_size, 4);
     }

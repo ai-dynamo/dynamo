@@ -592,11 +592,10 @@ mod tests {
 
     #[tokio::test]
     async fn kv_router_preserves_selected_attention_dp_rank() {
-        let mut args = MockerConfig::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap();
+        let mut args = MockerConfig::from_value(
+            serde_json::json!({"engine":{"block_size":64,"max_num_batched_tokens":64}}),
+        )
+        .unwrap();
         args.dp_size = 2;
         let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 1).unwrap();
         let request = priority_request(100, 0, 0);
@@ -625,11 +624,10 @@ mod tests {
 
     #[tokio::test]
     async fn online_replay_forwards_priorities_to_scheduler_queue() {
-        let args = MockerConfig::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(
+            serde_json::json!({"engine":{"block_size":64,"max_num_batched_tokens":64}}),
+        )
+        .unwrap();
         let config = KvRouterConfig {
             router_queue_threshold: Some(0.5),
             router_queue_policy: RouterQueuePolicy::Fcfs,
@@ -685,11 +683,10 @@ mod tests {
 
     #[tokio::test]
     async fn free_clears_prefill_load_without_first_token() {
-        let args = MockerConfig::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(
+            serde_json::json!({"engine":{"block_size":64,"max_num_batched_tokens":64}}),
+        )
+        .unwrap();
         let router = ReplayRouter::new(
             ReplayRouterMode::KvRouter,
             &args,
@@ -723,11 +720,10 @@ mod tests {
 
     #[tokio::test]
     async fn online_replay_forwards_policy_class_and_returns_config_errors() {
-        let args = MockerConfig::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(
+            serde_json::json!({"engine":{"block_size":64,"max_num_batched_tokens":64}}),
+        )
+        .unwrap();
         let missing = KvRouterConfig {
             router_policy_config: Some("/definitely/missing/router-policy.yaml".to_string()),
             ..KvRouterConfig::default()

@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.6.0",
-    "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@a0132af8bc29bbb3f9ea2a64da779133ead08f5d#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@74f558c7c6fcaa6a55ecd6a19e7f9d17bbc11564#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",

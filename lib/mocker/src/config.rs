@@ -11,14 +11,11 @@ use aisimulate_core::engine::{EngineLaunchConfig, TimingModelConfig};
 use anyhow::{Result, ensure};
 use dynamo_kv_router::config::RouterQueuePolicy;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use validator::Validate;
 
 use crate::common::perf_model::PerfModel;
-use crate::common::protocols::{
-    EngineType, KvTransferTimingMode, PreemptionMode, ReasoningConfig, SglangArgs, TrtllmArgs,
-    WorkerType,
-};
+use crate::common::protocols::ReasoningConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -31,7 +28,6 @@ pub struct MockerRuntimeOptions {
     pub zmq_kv_events_port: Option<u16>,
     pub zmq_replay_port: Option<u16>,
     pub router_queue_policy: Option<RouterQueuePolicy>,
-    pub planner_profile_data: Option<PathBuf>,
 }
 
 impl Default for MockerRuntimeOptions {
@@ -45,7 +41,6 @@ impl Default for MockerRuntimeOptions {
             zmq_kv_events_port: None,
             zmq_replay_port: None,
             router_queue_policy: None,
-            planner_profile_data: None,
         }
     }
 }
@@ -93,47 +88,17 @@ impl<'de> Deserialize<'de> for MockerConfig {
 }
 
 impl MockerConfig {
-    pub fn builder() -> MockerConfigBuilder {
-        MockerConfigBuilder::default()
-    }
-
     pub fn from_value(value: Value) -> Result<Self> {
         let Value::Object(mut engine) = value else {
             anyhow::bail!("Mocker config must be an object");
         };
-        let mut options = match engine.remove("dynamo") {
-            Some(Value::Object(options)) => options,
-            None => Map::new(),
-            Some(_) => anyhow::bail!("dynamo options must be an object"),
+        let runtime: MockerRuntimeOptions = match engine.remove("dynamo") {
+            Some(options) => serde_path_to_error::deserialize(options)?,
+            None => MockerRuntimeOptions::default(),
         };
-        for key in [
-            "enable_local_indexer",
-            "bootstrap_port",
-            "handoff_session_timeout_ms",
-            "reasoning",
-            "response_replay_trace_path",
-            "zmq_kv_events_port",
-            "zmq_replay_port",
-            "router_queue_policy",
-            "planner_profile_data",
-        ] {
-            if let Some(value) = engine.remove(key) {
-                if let Some(existing) = options.get(key) {
-                    ensure!(*existing == value, "conflicting Dynamo option {key}");
-                } else {
-                    options.insert(key.to_owned(), value);
-                }
-            }
-        }
-        // Historical serialized output includes this derived informational field.
-        engine.remove("has_perf_model");
-        let runtime: MockerRuntimeOptions = serde_json::from_value(Value::Object(options))?;
         let engine = EngineLaunchConfig::from_value(Value::Object(engine))?;
         let perf_model = match &engine.timing_model {
-            TimingModelConfig::Polynomial => match runtime.planner_profile_data.as_ref() {
-                Some(path) => Arc::new(PerfModel::from_npz(path)?),
-                None => Arc::new(PerfModel::default()),
-            },
+            TimingModelConfig::Polynomial => Arc::new(PerfModel::default()),
             TimingModelConfig::Fixed {
                 prefill_ms,
                 decode_ms,
@@ -141,6 +106,15 @@ impl MockerConfig {
                 prefill_ms: *prefill_ms,
                 decode_ms: *decode_ms,
             }),
+            TimingModelConfig::External { provider, config } if provider == "dynamo_profile" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Profile {
+                    path: PathBuf,
+                }
+                let profile: Profile = serde_path_to_error::deserialize(config.clone())?;
+                Arc::new(PerfModel::from_npz(&profile.path)?)
+            }
             TimingModelConfig::External { provider, .. } => {
                 ensure!(
                     matches!(provider.as_str(), "ais" | "aic"),
@@ -209,73 +183,10 @@ impl MockerConfig {
     }
 }
 
-/// Convenience builder. AISimulate parses engine overrides; new callers can
-/// supply its canonical configuration through `engine`.
-#[derive(Default)]
-pub struct MockerConfigBuilder {
-    fields: Map<String, Value>,
-    perf_model: Option<Arc<PerfModel>>,
-    engine: Option<EngineLaunchConfig>,
-}
-
-macro_rules! setters {
-    ($($name:ident : $ty:ty),* $(,)?) => {$(
-        pub fn $name(mut self, value: $ty) -> Self {
-            self.fields.insert(stringify!($name).into(), json!(value));
-            self
-        }
-    )*};
-}
-
-impl MockerConfigBuilder {
-    pub fn engine(mut self, engine: EngineLaunchConfig) -> Self {
-        self.engine = Some(engine);
-        self
-    }
-    pub fn perf_model(mut self, model: Arc<PerfModel>) -> Self {
-        self.perf_model = Some(model);
-        self
-    }
-    setters! {
-        engine_type: EngineType, num_gpu_blocks: usize, block_size: usize,
-        max_model_len: Option<usize>, max_num_seqs: Option<usize>, max_num_batched_tokens: Option<usize>,
-        enable_prefix_caching: bool, enable_chunked_prefill: bool, speedup_ratio: f64,
-        decode_speedup_ratio: f64, dp_size: u32, tensor_parallel_size: usize, worker_type: WorkerType,
-        planner_profile_data: Option<PathBuf>, ais_perf_config: Option<Value>,
-        prefill_schedule_interval: usize, prefill_decode_interval: usize,
-        ais_nextn: Option<usize>, ais_nextn_accept_rates: Option<String>, ais_mtp_seed: u64,
-        enable_local_indexer: bool, bootstrap_port: Option<u16>, handoff_session_timeout_ms: u64,
-        kv_bytes_per_token: Option<usize>, kv_cache_bytes_per_token: Option<usize>, kv_transfer_bandwidth: Option<f64>,
-        kv_transfer_timing_mode: KvTransferTimingMode, reasoning: Option<ReasoningConfig>,
-        response_replay_trace_path: Option<PathBuf>, zmq_kv_events_port: Option<u16>, zmq_replay_port: Option<u16>,
-        preemption_mode: PreemptionMode, router_queue_policy: Option<RouterQueuePolicy>,
-        sglang: Option<SglangArgs>, trtllm: Option<TrtllmArgs>,
-    }
-    pub fn build(mut self) -> Result<MockerConfig> {
-        if let Some(engine) = self.engine {
-            engine.validate()?;
-            let Value::Object(canonical) = serde_json::to_value(engine)? else {
-                anyhow::bail!("engine config must be an object")
-            };
-            for (key, value) in canonical {
-                ensure!(
-                    !self.fields.contains_key(&key),
-                    "duplicate canonical engine field {key}"
-                );
-                self.fields.insert(key, value);
-            }
-        }
-        let mut config = MockerConfig::from_value(Value::Object(self.fields))?;
-        if let Some(model) = self.perf_model {
-            config.perf_model = model;
-        }
-        Ok(config)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn canonical_fields_and_dynamo_options_round_trip_without_reconstruction() {
@@ -302,16 +213,19 @@ mod tests {
     fn boundary_rejects_unknown_runtime_options_and_conflicting_sources() {
         for input in [
             json!({"dynamo":{"bootstrap_prot":9001}}),
-            json!({"bootstrap_port":9001,"dynamo":{"bootstrap_port":9002}}),
-            json!({"handoff_session_timeout_ms":0}),
+            json!({"bootstrap_port":9001}),
+            json!({"dynamo":{"handoff_session_timeout_ms":0}}),
         ] {
             assert!(MockerConfig::from_value(input).is_err());
         }
-        let args =
-            MockerConfig::from_value(json!({"max_num_seqs":null,"num_gpu_blocks":16})).unwrap();
+        let args = MockerConfig::from_value(
+            json!({"engine":{"max_num_seqs":usize::MAX,"num_gpu_blocks":16}}),
+        )
+        .unwrap();
         assert_eq!(args.effective_handoff_capacity(), 16);
         let args =
-            MockerConfig::from_value(json!({"max_num_seqs":32,"num_gpu_blocks":16})).unwrap();
+            MockerConfig::from_value(json!({"engine":{"max_num_seqs":32,"num_gpu_blocks":16}}))
+                .unwrap();
         assert_eq!(args.effective_handoff_capacity(), 32);
     }
 }

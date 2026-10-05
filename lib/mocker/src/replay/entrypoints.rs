@@ -2455,7 +2455,7 @@ pub fn simulate_concurrency_live_workload_with_router_mode_and_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
+    use crate::common::protocols::{EngineType, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use crate::replay::ReplayRuntimeObservers;
     use aisimulate_core::replay::{
@@ -2471,28 +2471,20 @@ mod tests {
     use uuid::Uuid;
 
     fn replay_test_args() -> MockerConfig {
-        MockerConfig::builder()
-            .block_size(4)
-            .num_gpu_blocks(128)
-            .max_num_batched_tokens(Some(64))
-            .max_num_seqs(Some(8))
-            .speedup_ratio(1000.0)
-            .build()
+        MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"num_gpu_blocks":128,"max_num_batched_tokens":64,"max_num_seqs":8,"speedup_ratio":1000.0}}))
             .unwrap()
     }
 
     fn disagg_test_config() -> OfflineDisaggReplayConfig {
         OfflineDisaggReplayConfig {
-            prefill_args: MockerConfig::builder()
-                .worker_type(WorkerType::Prefill)
-                .block_size(4)
-                .build()
-                .unwrap(),
-            decode_args: MockerConfig::builder()
-                .worker_type(WorkerType::Decode)
-                .block_size(4)
-                .build()
-                .unwrap(),
+            prefill_args: MockerConfig::from_value(
+                serde_json::json!({"engine":{"worker_type":WorkerType::Prefill,"block_size":4}}),
+            )
+            .unwrap(),
+            decode_args: MockerConfig::from_value(
+                serde_json::json!({"engine":{"worker_type":WorkerType::Decode,"block_size":4}}),
+            )
+            .unwrap(),
             num_prefill_workers: 1,
             num_decode_workers: 1,
         }
@@ -2774,14 +2766,7 @@ mod tests {
         decode_engine: EngineType,
     ) -> OfflineDisaggReplayConfig {
         let role_args = |engine_type, worker_type: WorkerType, dp_size: u32| {
-            MockerConfig::builder()
-                .engine_type(engine_type)
-                .worker_type(worker_type)
-                .dp_size(dp_size)
-                .block_size(4)
-                .num_gpu_blocks(64)
-                .speedup_ratio(1000.0)
-                .build()
+            MockerConfig::from_value(serde_json::json!({"dp_size":dp_size,"engine":{"backend":engine_type,"worker_type":worker_type,"block_size":4,"num_gpu_blocks":64,"speedup_ratio":1000.0}}))
                 .unwrap()
         };
         OfflineDisaggReplayConfig {
@@ -2969,16 +2954,7 @@ mod tests {
     #[case::vllm(EngineType::Vllm)]
     #[case::trtllm(EngineType::Trtllm)]
     fn native_g1_runs_through_offline_replay_entrypoint(#[case] engine_type: EngineType) {
-        let args = MockerConfig::builder()
-            .engine_type(engine_type)
-            .block_size(4)
-            .num_gpu_blocks(16)
-            .max_num_batched_tokens(Some(16))
-            .max_num_seqs(Some(2))
-            .enable_prefix_caching(true)
-            .enable_chunked_prefill(true)
-            .speedup_ratio(1000.0)
-            .build()
+        let args = MockerConfig::from_value(serde_json::json!({"engine":{"backend":engine_type,"block_size":4,"num_gpu_blocks":16,"max_num_batched_tokens":16,"max_num_seqs":2,"enable_prefix_caching":true,"enable_chunked_prefill":true,"speedup_ratio":1000.0}}))
             .unwrap();
         let requests = [11_u128, 22]
             .into_iter()
@@ -3009,17 +2985,7 @@ mod tests {
 
     #[test]
     fn one_worker_sglang_impossible_request_returns_dead_end_error() {
-        let args = MockerConfig::builder()
-            .engine_type(EngineType::Sglang)
-            .block_size(4)
-            .num_gpu_blocks(1)
-            .speedup_ratio(1000.0)
-            .sglang(Some(SglangArgs {
-                page_size: Some(4),
-                chunked_prefill_size: Some(8),
-                ..Default::default()
-            }))
-            .build()
+        let args = MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Sglang,"block_size":4,"num_gpu_blocks":1,"speedup_ratio":1000.0,"sglang":{"chunked_prefill_size":8}}}))
             .unwrap();
         let request = DirectRequest {
             tokens: vec![1; 8],

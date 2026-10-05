@@ -30,7 +30,7 @@ use dynamo_backend_common::{
     PreprocessedRequest, SnapshotPublisher, TopLogprob, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
-    DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+    DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockerConfig, OutputSignal,
 };
 use dynamo_mocker::engine::create_engine;
 use dynamo_mocker::scheduler::SchedulerHandle;
@@ -127,16 +127,8 @@ struct Args {
     context_length: u32,
 }
 
-fn build_engine_args(args: &Args) -> Result<MockEngineArgs, DynamoError> {
-    let built = MockEngineArgs::builder()
-        .engine_type(EngineType::Vllm)
-        .block_size(args.block_size)
-        .num_gpu_blocks(args.num_gpu_blocks)
-        .max_num_seqs(Some(args.max_num_seqs))
-        .max_num_batched_tokens(Some(args.max_num_batched_tokens))
-        .speedup_ratio(args.speedup_ratio)
-        .dp_size(1)
-        .build()
+fn build_engine_args(args: &Args) -> Result<MockerConfig, DynamoError> {
+    let built = MockerConfig::from_value(serde_json::json!({"dp_size":1,"engine":{"backend":EngineType::Vllm,"block_size":args.block_size,"num_gpu_blocks":args.num_gpu_blocks,"max_num_seqs":args.max_num_seqs,"max_num_batched_tokens":args.max_num_batched_tokens,"speedup_ratio":args.speedup_ratio}}))
         .map_err(|e| invalid_arg(format!("mocker args: {e}")))?;
     built
         .normalized()
@@ -206,7 +198,7 @@ fn spawn_mocker_snapshot_loop(
 pub struct MockerBackend {
     model_name: String,
     context_length: u32,
-    engine_args: MockEngineArgs,
+    engine_args: MockerConfig,
     /// Disaggregation role, observed in `generate()` to switch between the
     /// aggregated path and the simulated prefill / decode handshake.
     disaggregation_mode: DisaggregationMode,
@@ -228,7 +220,7 @@ impl MockerBackend {
     fn new(
         model_name: String,
         context_length: u32,
-        engine_args: MockEngineArgs,
+        engine_args: MockerConfig,
         disaggregation_mode: DisaggregationMode,
     ) -> Self {
         MockerBackend {

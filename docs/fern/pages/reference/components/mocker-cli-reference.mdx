@@ -47,7 +47,9 @@ mode.
 </ParamField>
 
 <ParamField path="--extra-engine-args" type="path" default="null">
-  Path to a JSON file with mocker configuration. Overrides individual CLI arguments.
+  Path to a JSON file with canonical AISimulate launch configuration and optional `dynamo` runtime options.
+  Engine fields belong under `engine`. This file overrides individual CLI arguments; see
+  [Canonical Python Engine Configuration](dynosim-replay-cli-reference.mdx#canonical-python-engine-configuration).
 </ParamField>
 
 ## KV cache
@@ -246,7 +248,7 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
   Comma-separated rendezvous base ports, one per worker in disaggregated mode.
 </ParamField>
 
-<ParamField path="--kv-transfer-bandwidth" type="float" default="64.0">
+<ParamField path="--kv-transfer-bandwidth" type="float" default="null">
   KV cache transfer bandwidth in GB/s. Set to `0` to disable.
 </ParamField>
 
@@ -287,18 +289,15 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 
 ## SGLang-specific
 
-Apply only when `--engine-type sglang`.
+Apply only when `--engine-type sglang`. Set the radix-cache page size with `--block-size`.
 
-<ParamField path="--sglang-schedule-policy" type="string" default="fifo / fcfs">
-  SGLang scheduling policy. `fifo`/`fcfs` is the default; `lpm` is longest prefix match.
+<ParamField path="--sglang-schedule-policy" type="string" default="fifo">
+  SGLang scheduling policy. `fifo` is the default; `lpm` is longest prefix match.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fifo</Badge> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>lpm</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fifo</Badge> <Badge intent="note" minimal>lpm</Badge></span>
 </ParamField>
 
-<ParamField path="--sglang-page-size" type="integer" default="1">
-  SGLang radix-cache page size in tokens. Also becomes the effective block size when
-  `--engine-type sglang` and `--block-size` is omitted.
-</ParamField>
+
 
 <ParamField path="--sglang-max-prefill-tokens" type="integer" default="16384">
   SGLang max prefill-token budget per batch.

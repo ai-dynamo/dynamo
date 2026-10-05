@@ -2,4 +2,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Draft source pin: replace with the matching published Python/Rust nightly pair.
-aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@a0132af8bc29bbb3f9ea2a64da779133ead08f5d#subdirectory=python/aisimulate
+aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@74f558c7c6fcaa6a55ecd6a19e7f9d17bbc11564#subdirectory=python/aisimulate

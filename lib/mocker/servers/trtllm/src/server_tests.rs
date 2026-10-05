@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_mocker::common::protocols::MockerConfigBuilder;
 use dynamo_trtllm_sidecar::disagg::context_only_extra;
 use futures::StreamExt;
 use pb::control_server::Control;
@@ -21,12 +20,7 @@ mod disagg;
 mod serving;
 
 fn admitting_args() -> MockerConfig {
-    MockerConfigBuilder::default()
-        .engine_type(EngineType::Trtllm)
-        .num_gpu_blocks(4_096usize)
-        .block_size(4usize)
-        .speedup_ratio(0.0)
-        .build()
+    MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Trtllm,"num_gpu_blocks":4_096usize,"block_size":4usize,"speedup_ratio":0.0}}))
         .unwrap()
 }
 
@@ -41,12 +35,7 @@ fn config() -> MockerServerConfig {
 /// something else to it -- aborting it, racing a second request, filling the
 /// concurrency limit.
 fn slow_args() -> MockerConfig {
-    MockerConfigBuilder::default()
-        .engine_type(EngineType::Trtllm)
-        .num_gpu_blocks(4_096usize)
-        .block_size(4usize)
-        .speedup_ratio(0.01)
-        .build()
+    MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Trtllm,"num_gpu_blocks":4_096usize,"block_size":4usize,"speedup_ratio":0.01}}))
         .unwrap()
 }
 

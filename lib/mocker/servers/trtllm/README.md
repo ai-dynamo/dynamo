@@ -99,6 +99,7 @@ rather than truncated. Lower `--context-length` for small-KV experiments.
 ## Engine arguments
 
 `--extra-engine-args` takes inline JSON or a file path and is merged into
-`MockEngineArgs`. `engine_type` is forced to `trtllm`; passing anything else is
-an error. TensorRT-LLM requires `block_size >= 2` (default 32) and rejects
-`max_model_len` — use `--context-length` instead.
+the canonical AISimulate launch configuration. `engine.backend` defaults to `trtllm`;
+passing another backend is an error. Put scheduler settings such as `block_size`
+and `max_model_len` under `engine`. `--context-length` controls the context
+length advertised by the gRPC mock server.

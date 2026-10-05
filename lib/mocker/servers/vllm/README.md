@@ -28,8 +28,8 @@ cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
 ```
 
 `--extra-engine-args` accepts inline JSON or a JSON file path. The values use
-`MockEngineArgs`; `engine_type=vllm`, `dp_size=1`, and
-`worker_type=aggregated` are required. Use `--seed` to change the deterministic
+the canonical launch shape: `engine.backend=vllm`, `dp_size=1`, and
+`engine.worker_type=aggregated` are required. Use `--seed` to change the deterministic
 synthetic token stream. `--max-concurrent-requests` bounds admitted RPCs
 (default `256`) independently of the scheduler's `max_num_seqs`, so accepted
 requests can still exercise Mocker queueing.

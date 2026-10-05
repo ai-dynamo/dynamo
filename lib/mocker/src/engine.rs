@@ -95,7 +95,7 @@ mod tests {
 
     #[tokio::test]
     async fn compatibility_entrypoint_rejects_attention_dp() {
-        let args = MockerConfig::builder().dp_size(4).build().unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":4})).unwrap();
         let cancel = CancellationToken::new();
 
         let result = create_engine(

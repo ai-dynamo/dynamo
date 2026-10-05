@@ -69,7 +69,7 @@ impl AisCallback for SlowDecode {
 }
 
 fn args(dp_size: u32) -> MockerConfig {
-    let mut args = MockerConfig::builder().build().unwrap();
+    let mut args = MockerConfig::from_value(serde_json::json!({})).unwrap();
     args.dp_size = dp_size;
     args.block_size = 4;
     args.num_gpu_blocks = 128;

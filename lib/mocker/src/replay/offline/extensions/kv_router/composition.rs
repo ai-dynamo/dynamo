@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn runtime_topology_must_match_dynamo_dp_and_worker_shape() {
-        let args = MockerConfig::builder().dp_size(2).build().unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":2})).unwrap();
         let error = validate_runtime_topology(
             "aggregated",
             &args,
@@ -427,13 +427,7 @@ mod tests {
 
     #[test]
     fn native_vllm_kv_router_does_not_observe_blocks_before_pass_completion() {
-        let args = MockerConfig::builder()
-            .block_size(64)
-            .num_gpu_blocks(64)
-            .max_num_seqs(Some(4))
-            .max_num_batched_tokens(Some(256))
-            .speedup_ratio(0.001)
-            .build()
+        let args = MockerConfig::from_value(serde_json::json!({"engine":{"block_size":64,"num_gpu_blocks":64,"max_num_seqs":4,"max_num_batched_tokens":256,"speedup_ratio":0.001}}))
             .unwrap();
         let router_config = KvRouterConfig {
             // If the first pass were published at pass start, this deliberately
