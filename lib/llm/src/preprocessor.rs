@@ -2809,12 +2809,6 @@ impl OpenAIPreprocessor {
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
-        // Where the rendered prompt leaves the assistant relative to its
-        // reasoning block: inside an opened `<think>`/`<mm:think>` (the
-        // completion starts mid-reasoning), after an empty closed block (the
-        // template disabled thinking), or no claim. The renderer reports this
-        // for HF chat templates; native formatters fall back to the
-        // parser-keyed suffix check.
         let prompt_reasoning_state = Self::prompt_reasoning_state(
             self.runtime_config.reasoning_parser.as_deref(),
             formatted_prompt.as_ref(),
@@ -10059,7 +10053,6 @@ mod tests {
             None,
             "Kimi K3 suffix inference only knows its own opener"
         );
-        // A renderer claim wins over suffix inference.
         assert_eq!(
             OpenAIPreprocessor::prompt_reasoning_state(
                 Some("minimax_m2"),
@@ -10072,7 +10065,6 @@ mod tests {
             Some(Open)
         );
 
-        // Closed blocks flip the backend override only for MiniMax M2.
         for (parser, expected) in [
             (Some("minimax_m2"), Some(true)),
             (Some("minimax_m3"), None),
@@ -11014,18 +11006,11 @@ mod tests {
         }
     }
 
-    // --- MiniMax M2 `thinking=false` -----------------------------------------
-    //
-    // The stock MiniMax M2 template always opens `<think>` in the generation
-    // prompt. The renderer closes that empty block when the request disables
-    // thinking and reports `PromptReasoningState::Closed`; Dynamo forwards
-    // `reasoning_ended: true` so the backend's guided-decoding gate follows the
-    // prompt, and the named tool call comes back as a tool call, not as content.
-    //
-    // The tests use a minimal M2-style template rather than MiniMax's file,
-    // which is under the vendor's own license. It ends with the stock
-    // generation block the renderer adapts; the renderer's own tests pin that
-    // block, and the tail assertions below fail if the two ever disagree.
+    // MiniMax M2 disabled-thinking integration with the renderer's prompt state.
+    // The synthetic template independently spells out the stock generation block.
+
+    const MINIMAX_OPEN_TAIL: &str = "]~b]ai\n<think>\n";
+    const MINIMAX_CLOSED_TAIL: &str = "]~b]ai\n<think>\n</think>\n";
 
     const MINIMAX_M2_STYLE_TEMPLATE: &str = r"<minimax:tool_call>
 {%- for message in messages -%}
@@ -11092,7 +11077,7 @@ mod tests {
 
                 let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
                 assert!(
-                    prompt.as_str().ends_with("]~b]ai\n<think>\n</think>\n"),
+                    prompt.as_str().ends_with(MINIMAX_CLOSED_TAIL),
                     "{key}/{choice:?}: disabled thinking must close the empty block: {:?}",
                     prompt.as_str()
                 );
@@ -11109,14 +11094,12 @@ mod tests {
                     extra_args["reasoning_parser_kwargs"]["chat_template_kwargs"]["thinking"],
                     false
                 );
-                // Dynamo's own reasoning parser is off for this request, which
-                // is now consistent with a prompt that carries no open block.
                 assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
                     Some("minimax_m2"),
                     request.chat_template_args.as_ref(),
                 ));
 
-                let forced = matches!(choice, Some(c) if c.is_object() || c == "required");
+                let forced = choice.is_some();
                 let constraint = preprocessor
                     .apply_tool_choice_guided_decoding(&request, &mut prepared, injected)
                     .unwrap();
@@ -11145,7 +11128,7 @@ mod tests {
             let request = minimax_m2_request(args.clone(), Some(minimax_m2_named_choice()));
             let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
             assert!(
-                prompt.as_str().ends_with("]~b]ai\n<think>\n"),
+                prompt.as_str().ends_with(MINIMAX_OPEN_TAIL),
                 "{args}: {:?}",
                 prompt.as_str()
             );
@@ -11171,10 +11154,7 @@ mod tests {
 
     #[tokio::test]
     async fn minimax_m2_closed_prompt_override_is_parser_specific() {
-        // The template closure is renderer-owned and parser-agnostic; only the
-        // `minimax_m2` deployment forwards the closed state to the backend. The
-        // per-parser matrix is covered by
-        // test_prompt_reasoning_state_prefers_renderer_claim_then_parser_suffix.
+        // Only MiniMax M2 forwards the closed prompt state to the backend.
         let preprocessor = minimax_m2_test_preprocessor("qwen3");
         let request = minimax_m2_request(
             serde_json::json!({"thinking": false}),
@@ -11199,11 +11179,8 @@ mod tests {
 
     #[tokio::test]
     async fn minimax_m2_disabled_named_json_returns_tool_call() {
-        // With the prompt closed and `reasoning_ended: true`, vLLM emits the
-        // guided JSON from the first token. Dynamo's reasoning parser is off
-        // (`thinking=false`), so the postprocessor must turn that bare JSON
-        // into the named tool call with `finish_reason: tool_calls`, whole or
-        // fragmented across deltas.
+        // Bare JSON becomes a named tool call with thinking disabled,
+        // both whole and fragmented across deltas.
         let preprocessor = minimax_m2_test_preprocessor("minimax_m2");
         for fragmented in [false, true] {
             let request = minimax_m2_request(
