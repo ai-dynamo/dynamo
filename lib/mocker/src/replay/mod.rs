@@ -8,7 +8,6 @@ mod online;
 mod router_shared;
 mod validate;
 
-pub use offline::extensions::kv_router::{ReplayAffinityConfig, ReplayAffinityMode};
 #[cfg(feature = "python-replay")]
 pub use offline::run_canonical_replay_json;
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
@@ -17,6 +18,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+from aisimulate import _runtime
 from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     BackendDeploymentSpec,
@@ -24,14 +26,10 @@ from aisimulate.sweeper.replay import (
     ReplaySpec,
 )
 
-from dynamo.replay import (
-    PlannerReplayDetails,
-    ReplayReport,
-    ReplayTelemetryDetails,
-    TelemetryOptions,
-)
+from dynamo.replay import PlannerReplayDetails, TelemetryOptions
 from dynamo.replay import api as replay_api
 from dynamo.replay import run_trace_replay, simulation
+from dynamo.replay.config import lower_upstream_engine_args
 from dynamo.router.simulation.config import RouterPredictionConfig
 
 pytestmark = [
@@ -57,25 +55,57 @@ class _FakeRouterConfig:
         return json.loads(payload)
 
 
-def _report(summary: dict, *, total_ticks: int | None = None) -> ReplayReport:
-    planner = (
-        None if total_ticks is None else PlannerReplayDetails(total_ticks=total_ticks)
-    )
-    return ReplayReport(
-        summary=summary,
-        per_request=None,
-        coverage={},
-        planner=planner,
+def _fixed_args(backend="vllm", role="aggregated"):
+    return {
+        "engine_type": backend,
+        "worker_type": role,
+        "max_num_seqs": 256,
+        "block_size": 16,
+        "num_gpu_blocks": 4096,
+        "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+    }
+
+
+def _engine_args(payload):
+    return simulation.MockEngineArgs.from_json(
+        json.dumps(lower_upstream_engine_args(payload))
     )
 
 
-def _detailed_report(summary: dict) -> ReplayReport:
-    return ReplayReport(
-        summary=summary,
-        per_request=[{"request_id": "request-1", "ttft_ms": 4.0}],
-        coverage={"captured_request_count": 1},
-        planner=None,
+def _router_adapter(router_mode="kv_router", affinity=None, **config):
+    return AdapterReplaySpec(
+        runtime_hooks=(
+            RuntimeHookSpec(
+                "dynamo.router",
+                "placement_policy",
+                1,
+                {
+                    "router_mode": router_mode,
+                    "router_config": config,
+                    **({"affinity": affinity} if affinity is not None else {}),
+                },
+            ),
+        )
     )
+
+
+def _capture_native(monkeypatch, report):
+    seen = {}
+
+    def run_native(_trace_files, **kwargs):
+        seen.update(kwargs)
+        seen["payload"] = json.loads(kwargs["replay_spec_json"])
+        return json.dumps({"lifecycle_operations": [], **report})
+
+    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", run_native)
+    monkeypatch.setattr(
+        replay_api._core, "AISIMULATE_CORE_VERSION", "0.13.0", raising=False
+    )
+    monkeypatch.setattr(
+        replay_api._core, "AISIMULATE_REPLAY_API_VERSION", 2, raising=False
+    )
+    monkeypatch.setattr(replay_api, "version", lambda name: "0.13.0")
+    return seen
 
 
 def _agg_deployment() -> BackendDeploymentSpec:
@@ -83,7 +113,7 @@ def _agg_deployment() -> BackendDeploymentSpec:
         deployment_mode="agg",
         backend="vllm",
         backend_version="0.11.0",
-        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        agg_engine_args=_fixed_args(),
         num_workers=3,
         performance_model_metadata={
             "aggregated": {"config": {"model_path": "target-model"}}
@@ -92,21 +122,25 @@ def _agg_deployment() -> BackendDeploymentSpec:
 
 
 def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
-    seen = {}
+    seen = _capture_native(
+        monkeypatch,
+        {"output_throughput_tok_s": 42.0, "goodput_output_throughput_tok_s": 40.0},
+    )
+    planner_calls = {}
 
-    def fake_run_trace_replay(**kwargs):
-        seen.update(kwargs)
-        return _report(
-            {
-                "output_throughput_tok_s": 42.0,
-                "goodput_output_throughput_tok_s": 40.0,
-            },
-            total_ticks=7,
-        )
+    class Planner:
+        def finalize(self, lifecycle):
+            planner_calls["lifecycle"] = lifecycle
+            return PlannerReplayDetails(total_ticks=7)
 
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(simulation, "KvRouterConfig", _FakeRouterConfig)
-    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    planner = Planner()
+
+    @contextmanager
+    def scope(**kwargs):
+        planner_calls.update(kwargs)
+        yield planner
+
+    monkeypatch.setattr(simulation, "_planner_replay_adapter", lambda: scope)
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={
@@ -123,62 +157,39 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
             "dynamo.planner": AdapterReplaySpec(
                 runtime_hooks=(
                     RuntimeHookSpec(
-                        provider="dynamo.planner",
-                        kind="scaling_policy",
-                        api_version=1,
-                        config={"planner_config": {"mode": "agg"}},
+                        "dynamo.planner",
+                        "scaling_policy",
+                        1,
+                        {"planner_config": {"mode": "agg"}},
                     ),
                 )
             ),
-            "dynamo.router": AdapterReplaySpec(
-                runtime_hooks=(
-                    RuntimeHookSpec(
-                        provider="dynamo.router",
-                        kind="placement_policy",
-                        api_version=1,
-                        config={
-                            "router_mode": "kv_router",
-                            "router_config": {
-                                "overlap_score_credit": 0.5,
-                                "prefill_load_scale": 1.0,
-                                "router_temperature": 0.0,
-                            },
-                        },
-                    ),
-                )
-            ),
+            "dynamo.router": _router_adapter(overlap_score_credit=0.5),
         },
     )
-
     report = simulation.DynamoReplayRunnerFactory().create(2).run(spec)
-
-    assert seen["trace_files"] == "tiny.jsonl"
-    assert seen["trace_format"] == "dynamo"
-    assert seen["num_workers"] == 3
+    payload = seen["payload"]
+    assert payload["traffic"]["trace_path"] == "tiny.jsonl"
+    assert payload["traffic"]["trace_format"] == "dynamo"
+    assert payload["traffic"]["arrival_speedup_ratio"] == 2.0
+    assert payload["traffic"]["replay_concurrency"] == 8
+    assert "trace_block_size" not in payload["traffic"]
+    assert payload["spec"]["topology"]["workers"]["initial_workers"] == 3
+    assert payload["spec"]["sla"] == {"ttft_ms": 100.0, "itl_ms": 20.0}
+    assert payload["spec"]["record_per_request"] is False
     assert seen["router_mode"] == "kv_router"
-    assert seen["planner_config"] == {"mode": "agg"}
-    assert seen["arrival_speedup_ratio"] == 2.0
-    assert seen["replay_concurrency"] == 8
-    assert seen["trace_block_size"] is None
-    assert seen["benchmark_granularity"] == 8
-    assert seen["capture_per_request"] is False
-    assert seen["capture_planner_details"] is False
-    assert seen["sla_ttft_ms"] == 100.0
-    assert seen["sla_itl_ms"] == 20.0
-    assert seen["sla_e2e_ms"] is None
+    assert seen["router_config"].overlap_score_credit == 0.5
+    assert seen["scaling_policy"] is planner
+    assert planner_calls["planner_config_arg"] == '{"mode": "agg"}'
+    assert planner_calls["benchmark_granularity"] == 8
+    assert planner_calls["capture_details"] is False
+    assert planner_calls["lifecycle"] == []
     assert report.metrics["planner_total_ticks"] == 7.0
     assert report.metadata["planner_total_ticks"] == 7
 
 
 def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
-    seen = {}
-
-    def fake_run_trace_replay(**kwargs):
-        seen.update(kwargs)
-        return _report({"completed_requests": 2})
-
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    seen = _capture_native(monkeypatch, {"completed_requests": 2})
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={
@@ -189,12 +200,11 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
         },
         goal={"target": "throughput"},
     )
-
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
-
-    assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
-    assert seen["arrival_speedup_ratio"] == 2.0
-    assert seen["agentic_lanes"] == 4
+    assert seen["payload"]["traffic"]["trace_paths"] == ["first.jsonl", "second.jsonl"]
+    assert seen["payload"]["traffic"]["arrival_speedup_ratio"] == 2.0
+    assert seen["payload"]["traffic"]["agentic_lanes"] == 4
+    assert seen["payload"]["traffic"]["source_type"] == "trace"
     assert report.metrics["completed_requests"] == 2.0
 
 
@@ -209,26 +219,16 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
     ],
 )
 def test_weka_runner_delegates_without_inventing_a_source_block_size(
-    monkeypatch,
-    nested_timestamp_basis,
-    resolved_timestamp_basis,
+    monkeypatch, nested_timestamp_basis, resolved_timestamp_basis
 ) -> None:
-    seen = {}
-
-    def fake_native_replay(_trace_files, **kwargs):
-        seen.update(kwargs)
-        return _report(
-            {
-                "completed_requests": 2,
-                "agentic_graph": {
-                    "source_models": ["source-a", "source-b"],
-                },
-                "weka_nested_timestamp_basis": resolved_timestamp_basis,
-            }
-        )
-
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", fake_native_replay)
+    seen = _capture_native(
+        monkeypatch,
+        {
+            "completed_requests": 2,
+            "agentic_graph": {"source_models": ["source-a", "source-b"]},
+            "weka_nested_timestamp_basis": resolved_timestamp_basis,
+        },
+    )
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={
@@ -239,26 +239,20 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
         },
         goal={"target": "throughput"},
     )
-
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
-
-    assert seen["trace_block_size"] is None
-    assert seen["agentic_lanes"] == 1
-    assert seen["execution_model"] == "target-model"
-    assert seen["weka_nested_timestamp_basis"] == nested_timestamp_basis
-    assert report.metadata == {
-        "agentic_qualification": "functional_only",
-        "agentic_input_format": "weka",
-        "agentic_lanes": 1,
-        "weka_nested_timestamp_basis": resolved_timestamp_basis,
-        "agentic_graph": {
-            "source_models": ["source-a", "source-b"],
-        },
-        "agentic_model_projection": {
-            "policy": "project_to_configured_target",
-            "source_models": ["source-a", "source-b"],
-            "target_model": "target-model",
-        },
+    traffic = seen["payload"]["traffic"]
+    assert "trace_block_size" not in traffic
+    assert traffic["agentic_lanes"] == 1
+    assert traffic["execution_model"] == "target-model"
+    assert traffic.get("weka_nested_timestamp_basis") == nested_timestamp_basis
+    assert report.metadata["weka_nested_timestamp_basis"] == resolved_timestamp_basis
+    assert report.metadata["agentic_graph"] == {
+        "source_models": ["source-a", "source-b"]
+    }
+    assert report.metadata["agentic_model_projection"] == {
+        "policy": "project_to_configured_target",
+        "source_models": ["source-a", "source-b"],
+        "target_model": "target-model",
     }
     assert "native_report" not in report.metadata
 
@@ -277,13 +271,17 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
     ],
 )
 def test_weka_runner_resolves_each_execution_target_model_source(
-    metadata_config, engine_args
+    monkeypatch, metadata_config, engine_args
 ) -> None:
+    seen = _capture_native(monkeypatch, {"completed_requests": 1})
+    args = {**_fixed_args(), **engine_args}
+    if "ais_perf_config" in args:
+        args.pop("timing_model")
     deployment = BackendDeploymentSpec(
         deployment_mode="agg",
         backend="vllm",
         backend_version="0.11.0",
-        agg_engine_args={"engine_type": "vllm", **engine_args},
+        agg_engine_args=args,
         num_workers=1,
         performance_model_metadata={"aggregated": {"config": metadata_config}},
     )
@@ -292,10 +290,8 @@ def test_weka_runner_resolves_each_execution_target_model_source(
         workload={"trace_path": "published-weka", "trace_format": "weka"},
         goal={"target": "throughput"},
     )
-
-    assert simulation.DynamoReplayRunner._execution_target_model(spec) == (
-        "target-model"
-    )
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    assert seen["payload"]["traffic"]["execution_model"] == "target-model"
 
 
 def test_weka_runner_requires_a_configured_execution_target_model() -> None:
@@ -303,7 +299,7 @@ def test_weka_runner_requires_a_configured_execution_target_model() -> None:
         deployment_mode="agg",
         backend="vllm",
         backend_version="0.11.0",
-        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        agg_engine_args=_fixed_args(),
         num_workers=3,
     )
     spec = ReplaySpec(
@@ -322,92 +318,49 @@ def test_weka_runner_requires_a_configured_execution_target_model() -> None:
 def test_dynamo_runner_defers_target_model_validation_until_trace_load(
     monkeypatch,
 ) -> None:
-    seen = {}
-
-    def fake_run_trace_replay(**kwargs):
-        seen.update(kwargs)
-        return _report({"completed_requests": 1})
-
-    deployment = BackendDeploymentSpec(
-        deployment_mode="agg",
-        backend="vllm",
-        backend_version="0.11.0",
-        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
-        num_workers=1,
-    )
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    seen = _capture_native(monkeypatch, {"completed_requests": 1})
+    deployment = replace(_agg_deployment(), performance_model_metadata={})
     spec = ReplaySpec(
         backend_deployment=deployment,
         workload={"trace_path": "standard.jsonl", "trace_format": "dynamo"},
         goal={"target": "throughput"},
     )
-
     simulation.DynamoReplayRunnerFactory().create(0).run(spec)
-
-    assert seen["execution_model"] is None
+    assert "execution_model" not in seen["payload"]["traffic"]
 
 
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
 def test_runner_forwards_and_retains_requested_telemetry(
     monkeypatch, router_mode
 ) -> None:
-    seen = {}
-    sample = {"sample_ordinal": 0, "kind": "baseline", "sampled_at_ms": 0.0}
-
-    def fake_run_trace_replay(**kwargs):
-        seen.update(kwargs)
-        return ReplayReport(
-            summary={"completed_requests": 1},
-            per_request=None,
-            coverage={},
-            planner=None,
-            telemetry=ReplayTelemetryDetails(
-                sample_interval_ms=2_500.0,
-                samples=[sample],
-            ),
-        )
-
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(simulation, "KvRouterConfig", _FakeRouterConfig)
-    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    telemetry = {
+        "sample_interval_ms": 2500.0,
+        "samples": [{"sample_ordinal": 0, "kind": "baseline", "sampled_at_ms": 0.0}],
+    }
+    seen = _capture_native(
+        monkeypatch, {"completed_requests": 1, "telemetry": telemetry}
+    )
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
         goal={"target": "throughput"},
-        adapters={
-            "dynamo.router": AdapterReplaySpec(
-                runtime_hooks=(
-                    RuntimeHookSpec(
-                        provider="dynamo.router",
-                        kind="placement_policy",
-                        api_version=1,
-                        config={"router_mode": router_mode, "router_config": {}},
-                    ),
-                )
-            ),
-        },
+        adapters={"dynamo.router": _router_adapter(router_mode=router_mode)},
     )
-
     report = (
         simulation.DynamoReplayRunnerFactory()
         .create(2)
         .run(
             spec,
             output_requirements=ReplayOutputRequirements(
-                capture_telemetry=True,
-                telemetry_sample_interval_ms=2_500.0,
+                capture_telemetry=True, telemetry_sample_interval_ms=2500.0
             ),
         )
     )
-
     assert seen["router_mode"] == router_mode
-    assert seen["telemetry_options"] == TelemetryOptions(sample_interval_ms=2_500.0)
+    assert seen["capture_telemetry"] is True
+    assert seen["telemetry_sample_interval_ms"] == 2500.0
+    assert report.metadata["telemetry"] == telemetry
     assert "native_report" not in report.metadata
-    assert report.metadata["telemetry"] == {
-        "sample_interval_ms": 2_500.0,
-        "samples": [sample],
-    }
 
 
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
@@ -416,57 +369,160 @@ def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
 
 
 def test_runner_captures_per_request_output_when_requested(monkeypatch) -> None:
-    seen = {}
-
-    def fake_run_trace_replay(**kwargs):
-        seen.update(kwargs)
-        return _detailed_report({"completed_requests": 1})
-
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    records = [{"request_id": "request-1", "ttft_ms": 4.0}]
+    seen = _capture_native(
+        monkeypatch, {"completed_requests": 1, "per_request": records}
+    )
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
         goal={"target": "throughput"},
     )
-
     report = (
         simulation.DynamoReplayRunnerFactory()
         .create(0)
         .run(
             spec,
             output_requirements=ReplayOutputRequirements(
-                include_raw_report=True,
-                capture_per_request=True,
+                include_raw_report=True, capture_per_request=True
             ),
         )
     )
+    assert seen["payload"]["spec"]["record_per_request"] is True
+    assert report.metadata["native_report"]["per_request"] == records
 
-    assert seen["capture_per_request"] is True
-    assert report.metadata["native_report"]["per_request"] == [
-        {"request_id": "request-1", "ttft_ms": 4.0}
-    ]
+
+@pytest.mark.parametrize("mode", ["session", "sibling_group"])
+@pytest.mark.parametrize("capture_telemetry", [False, True])
+@pytest.mark.parametrize("capture_per_request", [False, True])
+def test_affinity_changes_composition_without_changing_shared_pipeline(
+    monkeypatch, mode, capture_telemetry, capture_per_request
+):
+    evidence = {"roles": {"aggregated": {"native_policy": "dynamo.SelectionCore"}}}
+    telemetry = {"sample_interval_ms": 1000.0, "samples": []}
+    seen = _capture_native(
+        monkeypatch,
+        {"completed_requests": 1, "routing_policy": evidence, "telemetry": telemetry},
+    )
+    base = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "trace.jsonl", "trace_format": "dynamo"},
+        goal={},
+        adapters={"dynamo.router": _router_adapter()},
+    )
+    requirements = ReplayOutputRequirements(
+        capture_telemetry=capture_telemetry,
+        capture_per_request=capture_per_request,
+    )
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+    runner.run(base, output_requirements=requirements)
+    payload_without_affinity = seen["payload"]
+    assert seen["affinity_json"] is None
+    affinity = {"mode": mode, "ttl_seconds": 3600}
+    report = runner.run(
+        replace(base, adapters={"dynamo.router": _router_adapter(affinity=affinity)}),
+        output_requirements=requirements,
+    )
+    assert seen["payload"] == payload_without_affinity
+    assert json.loads(seen["affinity_json"]) == affinity
+    assert seen.get("capture_telemetry", False) is capture_telemetry
+    assert seen["payload"]["spec"]["record_per_request"] is capture_per_request
+    assert report.metadata["routing_policy"] == evidence
+    if capture_telemetry:
+        assert report.metadata["telemetry"] == telemetry
+    else:
+        assert "telemetry" not in report.metadata
+    if capture_per_request:
+        assert report.metadata["native_report"]["routing_policy"] == evidence
+
+
+@pytest.mark.parametrize(
+    "trace_format",
+    [
+        "mooncake",
+        "mooncake-delta",
+        "agentic_mooncake",
+        "applied_compute_agentic",
+        "dynamo",
+        "weka",
+    ],
+)
+def test_legacy_trace_formats_use_the_shared_traffic_driver(monkeypatch, trace_format):
+    seen = _capture_native(monkeypatch, {"completed_requests": 1})
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "trace.jsonl", "trace_format": trace_format},
+        goal={},
+    )
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    traffic = seen["payload"]["traffic"]
+    assert traffic["source_type"] == "trace"
+    assert traffic["load_type"] == "trace_timestamps"
+    assert traffic["trace_format"] == trace_format
+    assert seen["payload"]["spec"]["requests"] == []
+    assert "source_type" not in spec.workload
+
+
+def test_legacy_identity_normalization_preserves_config_and_rejects_conflicts():
+    identity = {
+        "model": "target-model",
+        "worker_type": "aggregated",
+        "estimator_config": {"correction": {"enabled": False}},
+    }
+    deployment = replace(
+        _agg_deployment(), agg_engine_args={"ais_perf_config": identity}
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment, workload={"isl": 8, "osl": 2}, goal={}
+    )
+    normalized = simulation._normalize_legacy_spec(spec)
+    assert normalized.backend_deployment.agg_engine_args["timing_model"] == {
+        "type": "external",
+        "provider": "aic",
+        "config": identity,
+    }
+    assert spec.backend_deployment.agg_engine_args == {"ais_perf_config": identity}
+    conflicting = replace(
+        deployment,
+        agg_engine_args={
+            "ais_perf_config": identity,
+            "timing_model": {"type": "fixed"},
+        },
+    )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        simulation._normalize_legacy_spec(replace(spec, backend_deployment=conflicting))
+
+
+def test_canonical_affinity_forwards_optional_telemetry_sinks(monkeypatch, tmp_path):
+    seen = _capture_native(monkeypatch, {"completed_requests": 1})
+
+    def callback(sample):
+        return None
+
+    path = tmp_path / "telemetry.jsonl"
+    payload = '{"spec":{"version":1,"record_per_request":true}}'
+    result = run_trace_replay(
+        [],
+        router_mode="kv_router",
+        replay_spec_json=payload,
+        affinity={"mode": "session"},
+        telemetry_options=TelemetryOptions(callback=callback, jsonl_path=path),
+    )
+    assert json.loads(result)["completed_requests"] == 1
+    assert seen["replay_spec_json"] == payload
+    assert seen["capture_telemetry"] is False
+    assert seen["telemetry_callback"] is callback
+    assert seen["telemetry_jsonl_path"] == path
 
 
 def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
-    seen = {}
-
-    def fake_run_synthetic_trace_replay(**kwargs):
-        seen.update(kwargs)
-        return _report({"output_throughput_tok_s": 99.0})
-
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(
-        simulation,
-        "run_synthetic_trace_replay",
-        fake_run_synthetic_trace_replay,
-    )
+    seen = _capture_native(monkeypatch, {"output_throughput_tok_s": 99.0})
     deployment = BackendDeploymentSpec(
         deployment_mode="disagg",
         backend="sglang",
         backend_version="0.5.6",
-        prefill_engine_args={"worker_type": "prefill"},
-        decode_engine_args={"worker_type": "decode"},
+        prefill_engine_args=_fixed_args("sglang", "prefill"),
+        decode_engine_args=_fixed_args("sglang", "decode"),
         num_prefill_workers=2,
         num_decode_workers=4,
     )
@@ -487,97 +543,80 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
         goal={"target": "throughput"},
         concurrency=32,
     )
-
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
-
-    assert seen["input_tokens"] == 512
-    assert seen["output_tokens"] == 128
-    assert seen["request_count"] == 320
-    assert seen["replay_concurrency"] == 32
-    # Replay requires exactly one load controller. Closed-loop mode uses only
-    # replay_concurrency; an arrival interval would make the request ambiguous.
-    assert seen["arrival_interval_ms"] is None
-    assert seen["num_prefill_workers"] == 2
-    assert seen["num_decode_workers"] == 4
-    assert seen["capture_per_request"] is False
-    assert seen["capture_planner_details"] is False
-    assert report.metrics == {
-        "output_throughput_tok_s": 99.0,
-        "power_w": None,
-        "power_coverage": None,
-    }
+    traffic = seen["payload"]["traffic"]
+    assert traffic["source_type"] == "synthetic-session"
+    assert traffic["load_type"] == "concurrency"
+    assert traffic["isl"] == 512 and traffic["osl"] == 128
+    assert traffic["concurrency"] == 32 and traffic["num_request_ratio"] == 10.0
+    assert "arrival_interval_ms" not in traffic and "request_rate" not in traffic
+    assert traffic["turns_per_session"] == 2
+    assert traffic["shared_prefix_ratio"] == 0.5 and traffic["num_prefix_groups"] == 4
+    assert traffic["inter_turn_delay_ms"] == 12.0
+    topology = seen["payload"]["spec"]["topology"]
+    assert topology["prefill"]["initial_workers"] == 2
+    assert topology["decode"]["initial_workers"] == 4
+    assert report.metrics["output_throughput_tok_s"] == 99.0
 
 
 def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
-    seen = {}
-
-    def fake_run_synthetic_trace_replay(**kwargs):
-        seen.update(kwargs)
-        return _report({"output_throughput_tok_s": 99.0})
-
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(
-        simulation,
-        "run_synthetic_trace_replay",
-        fake_run_synthetic_trace_replay,
-    )
+    seen = _capture_native(monkeypatch, {"output_throughput_tok_s": 99.0})
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={
-            "trace_path": None,
             "isl": 512,
             "osl": 128,
             "num_request_ratio": 10.0,
-            "concurrency": None,
             "request_rate": 20.0,
         },
         goal={"target": "throughput"},
     )
-
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
-
-    assert seen["request_count"] == 200
-    assert seen["replay_concurrency"] is None
-    assert seen["arrival_interval_ms"] == 50.0
-    assert report.metrics == {
-        "output_throughput_tok_s": 99.0,
-        "power_w": None,
-        "power_coverage": None,
-    }
+    traffic = seen["payload"]["traffic"]
+    assert traffic["request_rate"] == 20.0 and traffic["num_request_ratio"] == 10.0
+    assert traffic["load_type"] == "constant_rate"
+    assert traffic.get("concurrency") is None
+    assert seen["payload"]["spec"]["max_in_flight"] is None
+    assert report.metrics["output_throughput_tok_s"] == 99.0
 
 
 @pytest.mark.parametrize("request_rate", [0.0, -1.0])
-def test_synthetic_request_rate_must_be_positive(request_rate: float) -> None:
+def test_synthetic_request_rate_must_be_positive(
+    monkeypatch, request_rate: float
+) -> None:
+    monkeypatch.setattr(
+        simulation._DynamoReplayRuntime,
+        "run_replay_json",
+        lambda self, payload: _runtime.run_replay_json(payload),
+    )
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={
-            "trace_path": None,
             "isl": 512,
             "osl": 128,
             "num_request_ratio": 10.0,
-            "concurrency": None,
             "request_rate": request_rate,
         },
         goal={"target": "throughput"},
     )
-
-    with pytest.raises(ValueError, match="positive request_rate"):
+    with pytest.raises(
+        (ValueError, RuntimeError), match="request_rate must be positive"
+    ):
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
 
 def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
-    class CapacityArgs:
-        num_gpu_blocks = 100
-        block_size = 16
-        dp_size = 1
-
     monkeypatch.setattr(
-        simulation.DynamoReplayRunner,
-        "_engine_args",
-        staticmethod(lambda _payload: CapacityArgs()),
+        simulation._DynamoReplayRuntime,
+        "run_replay_json",
+        lambda self, payload: _runtime.run_replay_json(payload),
+    )
+    deployment = replace(
+        _agg_deployment(),
+        agg_engine_args={**_fixed_args(), "num_gpu_blocks": 100, "block_size": 16},
     )
     spec = ReplaySpec(
-        backend_deployment=_agg_deployment(),
+        backend_deployment=deployment,
         workload={
             "isl": 100,
             "osl": 20,
@@ -586,15 +625,13 @@ def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
         },
         goal={"target": "throughput"},
     )
-
-    runner = simulation.DynamoReplayRunnerFactory().create(0)
-    assert runner._effective_in_flight_cap(spec) == 21
-    assert runner._synthetic_kwargs(spec)["request_count"] == 210
+    report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    assert report.metrics["completed_requests"] == 210
 
 
 def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> None:
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    engine_args = simulation.DynamoReplayRunner._engine_args(
+    engine_args = _engine_args(
         {
             "engine_type": "vllm",
             "aic_backend": "vllm",
@@ -693,21 +730,12 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(
-        simulation,
-        "run_trace_replay",
-        lambda **kwargs: _report({"output_throughput_tok_s": 42.0}),
-    )
+    _capture_native(monkeypatch, {"output_throughput_tok_s": 42.0})
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={"trace_path": "tiny.jsonl"},
-        goal={
-            "target": "goodput_per_gpu",
-            "sla": {"ttft_ms": 100.0, "itl_ms": 20.0},
-        },
+        goal={"target": "goodput_per_gpu", "sla": {"ttft_ms": 100.0, "itl_ms": 20.0}},
     )
-
     with pytest.raises(RuntimeError, match="did not emit goodput"):
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
@@ -761,7 +789,7 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     deployment = prediction_to_replay_spec(
         CorePredictionConfig.model_validate(raw)
     ).backend_deployment
-    args = simulation.DynamoReplayRunner._engine_args(deployment.agg_engine_args)
+    args = _engine_args(deployment.agg_engine_args)
     metadata = deployment.performance_model_metadata["aggregated"]["config"]
     assert metadata["model"] == raw["engine"]["model"]
     config = _ais_session_kwargs(metadata, args)["config"]
@@ -789,7 +817,7 @@ def test_custom_timing_without_capacity_does_not_resolve_unused_model(
     monkeypatch.setattr(
         aisimulate.capacity, "estimate_num_gpu_blocks", unexpected_capacity_lookup
     )
-    args = simulation.DynamoReplayRunner._engine_args(
+    args = _engine_args(
         {
             "engine_type": "vllm",
             "aic_backend": "vllm",
@@ -837,7 +865,7 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     payload = spec.backend_deployment.agg_engine_args
     assert payload["cuda_graph_reserved_bytes"] == 4096
     assert payload["num_gpu_blocks"] > 0
-    args = simulation.DynamoReplayRunner._engine_args(payload)
+    args = _engine_args(payload)
     assert args.num_gpu_blocks == payload["num_gpu_blocks"]
     assert args.ais_perf_config is None
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
@@ -881,7 +909,6 @@ def test_affinity_rejects_round_robin() -> None:
         {"capture_per_request": True},
         {"execution_model": "example/model"},
         {"weka_nested_timestamp_basis": "relative"},
-        {"telemetry_options": TelemetryOptions()},
     ],
 )
 def test_canonical_entry_rejects_conflicting_legacy_arguments(extra) -> None:
@@ -906,7 +933,7 @@ def test_canonical_entry_preserves_payload_and_native_resource_error(
         replay_api._core, "AISIMULATE_CORE_VERSION", "0.13.0", raising=False
     )
     monkeypatch.setattr(
-        replay_api._core, "AISIMULATE_REPLAY_API_VERSION", 1, raising=False
+        replay_api._core, "AISIMULATE_REPLAY_API_VERSION", 2, raising=False
     )
     monkeypatch.setattr(replay_api, "version", lambda name: "0.13.0")
     with pytest.raises(MemoryError, match="native report storage"):
@@ -944,7 +971,7 @@ def test_canonical_entry_accepts_equivalent_dev_version_spelling(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(
-        replay_api._core, "AISIMULATE_REPLAY_API_VERSION", 1, raising=False
+        replay_api._core, "AISIMULATE_REPLAY_API_VERSION", 2, raising=False
     )
     monkeypatch.setattr(replay_api, "version", lambda name: "0.13.0.dev20260923")
     monkeypatch.setattr(
@@ -953,11 +980,23 @@ def test_canonical_entry_accepts_equivalent_dev_version_spelling(monkeypatch):
     assert run_trace_replay([], router_mode="kv_router", replay_spec_json="{}") == "{}"
 
 
-def test_explicit_empty_profile_uses_canonical_path():
+def test_explicit_empty_profile_keeps_the_shared_pipeline(monkeypatch):
+    seen = _capture_native(monkeypatch, {"completed_requests": 1})
     spec = ReplaySpec(
-        backend_deployment=_agg_deployment(), workload={"agentic_profile": {}}, goal={}
+        backend_deployment=_agg_deployment(),
+        workload={
+            "source_type": "trace",
+            "load_type": "trace_timestamps",
+            "trace_path": "unused.jsonl",
+            "trace_format": "weka",
+            "agentic_lanes": 1,
+            "agentic_snapshot": {"seed": 42},
+            "agentic_profile": {},
+        },
+        goal={},
     )
-    assert simulation.DynamoReplayRunner._requires_canonical_replay(spec, None)
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    assert seen["payload"]["traffic"]["agentic_profile"] == {}
 
 
 @pytest.mark.parametrize("include_raw_report", [False, True])
@@ -977,7 +1016,7 @@ def test_canonical_runner_enforces_goodput_contract(
         def run(self, spec, *, output_requirements):
             return simulation.ReplayReport(
                 metrics=metrics,
-                metadata={"native_report": {}} if include_raw_report else {},
+                metadata={"native_report": {}},
             )
 
         def close(self):

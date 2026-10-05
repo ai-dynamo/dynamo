@@ -562,8 +562,7 @@ impl<T> PolicyQueue<T> {
         }
     }
 
-    /// Recheck blocked worker lanes after capacity or placement state changes.
-    pub fn recheck_all_workers(&mut self) {
+    pub(crate) fn recheck_all_workers(&mut self) {
         for class in &mut self.classes {
             class.recheck_all_workers();
         }
@@ -575,16 +574,6 @@ impl<T> PolicyQueue<T> {
 
     pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
         self.classes.iter().flat_map(PolicyClassQueue::entries)
-    }
-
-    /// Remove matching entries without dispatching or spending DRR credit.
-    /// Retained entries keep their keys, deadlines, and relative ordering.
-    pub fn take_if(&mut self, mut predicate: impl FnMut(&T) -> bool) -> Vec<PolicyQueueEntry<T>> {
-        let mut removed = Vec::new();
-        for class_index in 0..self.classes.len() {
-            removed.extend(self.take_if_in_class(class_index, &mut predicate).0);
-        }
-        removed
     }
 
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
@@ -1040,55 +1029,6 @@ policy_classes:
         // regress heavily past 64 bytes (see QueueEntrySnapshot).
         assert!(std::mem::size_of::<PolicyQueueEntry<()>>() <= 64);
         assert!(std::mem::size_of::<WorkerLaneHead>() <= 48);
-    }
-
-    #[test]
-    fn taking_entries_preserves_retained_order_deadlines_and_credit() {
-        let mut queue = PolicyQueue::new(admission_profile());
-        let due = Instant::now() + std::time::Duration::from_secs(1);
-        for request in 0..4 {
-            queue
-                .enqueue_with_due_at(
-                    QueueMetadata {
-                        class_index: 0,
-                        snapshot: QueueSnapshot::new(10, 4),
-                        due_at: Some(due),
-                        arrival_offset_secs: 0.0,
-                    },
-                    2,
-                    0.0,
-                    0,
-                    if request == 0 {
-                        WorkerPlacement::Any
-                    } else {
-                        WorkerPlacement::Exact(WorkerWithDpRank::new(0, request % 2))
-                    },
-                    request,
-                )
-                .unwrap();
-        }
-        assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 0);
-        let deficit = queue.classes[0].deficit;
-        assert_eq!(deficit, 4);
-        let removed = queue.take_if(|request| *request == 2);
-        assert_eq!(removed.len(), 1);
-        assert_eq!(*removed[0].payload(), 2);
-        assert_eq!(queue.classes[0].deficit, deficit);
-        assert_eq!(
-            queue.class_stats(0),
-            PolicyQueueStats {
-                requests: 2,
-                raw_isl_tokens: 20,
-                cached_tokens: 8
-            }
-        );
-        assert_eq!(queue.due_entries.len(), 2);
-        assert_eq!(queue.next_due_at(), Some(due));
-        assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 1);
-        assert_eq!(queue.pop_next(|_, _, _| true).unwrap().into_payload(), 3);
-        assert_eq!(queue.pending_count(), 0);
-        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
-        assert_eq!(queue.next_due_at(), None);
     }
 
     #[test]

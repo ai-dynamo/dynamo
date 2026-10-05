@@ -205,6 +205,7 @@ def run_trace_replay(
     *,
     replay_spec_json: str,
     affinity: dict[str, Any] | None = None,
+    scaling_policy: Any = None,
     **kwargs: Unpack[_TraceReplayOptions],
 ) -> str:
     ...
@@ -276,6 +277,7 @@ def run_trace_replay(
     telemetry_options=None,
     replay_spec_json=None,
     affinity=None,
+    scaling_policy=None,
 ) -> ReplayReport | dict[str, Any] | str:
     """Run trace replay.
 
@@ -283,9 +285,10 @@ def run_trace_replay(
     and execution. Planner creation and bootstrap happen before that boundary.
 
     ``replay_spec_json`` accepts the canonical AISimulate execution payload for
-    static KV-router replay and returns canonical report JSON. The existing
-    Dynamo runner uses this path for conversation affinity and AgentX profiles;
-    traffic, engine and capture controls come exclusively from that payload.
+    offline RR/KV replay and returns canonical report JSON. Every supported
+    Dynamo runner workload uses this shared execution path. Traffic and engine
+    controls come exclusively from that payload; scaling and telemetry are
+    optional caller-owned components, independent of conversation affinity.
     ``weka_nested_timestamp_basis`` overrides Weka nested timestamp interpretation;
     omitting it retains AISimulate's automatic selection.
 
@@ -301,8 +304,10 @@ def run_trace_replay(
     if replay_spec_json is not None:
         if not isinstance(replay_spec_json, str):
             raise TypeError("replay_spec_json must be a JSON string")
-        if replay_mode != "offline" or router_mode != "kv_router":
-            raise ValueError("canonical replay requires offline kv_router mode")
+        if replay_mode != "offline" or router_mode not in {"round_robin", "kv_router"}:
+            raise ValueError(
+                "shared replay requires offline round_robin or kv_router mode"
+            )
         if (
             _normalize_trace_files(trace_files)
             or any(
@@ -324,7 +329,6 @@ def run_trace_replay(
                     performance_model_metadata,
                     execution_model,
                     weka_nested_timestamp_basis,
-                    telemetry_options,
                 )
             )
             or (
@@ -336,13 +340,12 @@ def run_trace_replay(
                 or trace_shared_prefix_ratio != 0.0
                 or trace_num_prefix_groups != 0
                 or capture_per_request
-                or not capture_planner_details
                 or benchmark_granularity != 8
             )
         ):
             raise ValueError(
                 "replay_spec_json owns traffic, engines and capture; legacy "
-                "replay arguments and Planner scaling cannot be combined with it"
+                "replay arguments and planner_config cannot be combined with it"
             )
         compiled_version = getattr(_core, "AISIMULATE_CORE_VERSION", None)
         replay_api_version = getattr(_core, "AISIMULATE_REPLAY_API_VERSION", None)
@@ -361,11 +364,11 @@ def run_trace_replay(
         if (
             not versions_match
             or type(replay_api_version) is not int
-            or replay_api_version != 1
+            or replay_api_version != 2
         ):
             raise ValueError(
                 "Dynamo canonical replay requires matching AISimulate Python and "
-                "compiled core versions and native replay API 1; "
+                "compiled core versions and native replay API 2; "
                 f"installed={installed_version}, compiled={compiled_version}, "
                 f"native_api={replay_api_version}. Install the matching Dynamo "
                 "runtime built with --features ais-forward-pass."
@@ -379,12 +382,15 @@ def run_trace_replay(
             affinity_json=(
                 json.dumps(affinity, allow_nan=False) if affinity is not None else None
             ),
+            scaling_policy=scaling_policy,
+            capture_planner_details=capture_planner_details,
+            **_telemetry_kwargs(telemetry_options),
         )
         if not isinstance(canonical_report, str):
             raise TypeError("canonical Dynamo replay must return report JSON")
         return canonical_report
-    if affinity is not None:
-        raise ValueError("affinity requires a canonical replay_spec_json payload")
+    if affinity is not None or scaling_policy is not None:
+        raise ValueError("affinity/scaling_policy require a replay_spec_json payload")
     if isinstance(agentic_lanes, bool) or (
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
     ):

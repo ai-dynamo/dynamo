@@ -333,7 +333,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "ais-forward-pass")]
     {
         m.add("AISIMULATE_CORE_VERSION", aisimulate_core::CORE_VERSION)?;
-        m.add("AISIMULATE_REPLAY_API_VERSION", 1_u32)?;
+        m.add("AISIMULATE_REPLAY_API_VERSION", 2_u32)?;
     }
     m.add_function(wrap_pyfunction!(
         llm::replay::run_mocker_synthetic_trace_replay,

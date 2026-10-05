@@ -15,7 +15,7 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use super::{KvReplayMetadata, KvRouterPlacement, ReplayAffinityConfig, SharedRouterEvidence};
+use super::{KvReplayMetadata, KvRouterPlacement};
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
@@ -82,7 +82,7 @@ enum KvTopologyConfig {
     /// The shared executor has already resolved timing and capacity before
     /// validate_spec supplies the engine contract to this existing adapter.
     #[cfg(feature = "python-replay")]
-    Canonical(Box<RefCell<Option<ReplayEngineConfig>>>),
+    FromReplaySpec(Box<RefCell<Option<ReplayEngineConfig>>>),
     Aggregated {
         args: Box<MockEngineArgs>,
         num_workers: usize,
@@ -103,26 +103,21 @@ pub(in crate::replay) struct KvReplayComposition {
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
     determinism: ReplayDeterminism,
-    affinity: Option<ReplayAffinityConfig>,
-    evidence: Option<SharedRouterEvidence>,
 }
 
 impl KvReplayComposition {
     #[cfg(feature = "python-replay")]
-    pub(in crate::replay) fn canonical(
+    pub(in crate::replay) fn from_spec(
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-        affinity: Option<ReplayAffinityConfig>,
-        evidence: SharedRouterEvidence,
+        scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     ) -> Self {
         Self {
-            topology: KvTopologyConfig::Canonical(Box::new(RefCell::new(None))),
+            topology: KvTopologyConfig::FromReplaySpec(Box::new(RefCell::new(None))),
             router_config,
             prefill_load_estimator,
-            affinity,
-            evidence: Some(evidence),
-            scaling_policy: None,
-            scaling_enabled: false,
+            scaling_enabled: scaling_policy.is_some(),
+            scaling_policy,
             determinism: ReplayDeterminism::Random,
         }
     }
@@ -144,8 +139,6 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
-            affinity: None,
-            evidence: None,
         }
     }
 
@@ -171,8 +164,6 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
-            affinity: None,
-            evidence: None,
         }
     }
 }
@@ -192,7 +183,7 @@ impl ReplayComposition for KvReplayComposition {
         }
         validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)?;
         #[cfg(feature = "python-replay")]
-        if let KvTopologyConfig::Canonical(engine) = &self.topology {
+        if let KvTopologyConfig::FromReplaySpec(engine) = &self.topology {
             *engine.borrow_mut() = Some(if spec.engine.is_null() {
                 ReplayEngineConfig::default()
             } else {
@@ -200,16 +191,6 @@ impl ReplayComposition for KvReplayComposition {
                     aisimulate_core::replay::ReplayError::InvalidSpec(error.to_string())
                 })?
             });
-        }
-        if let Some(evidence) = &self.evidence {
-            evidence
-                .lock()
-                .map_err(|_| {
-                    aisimulate_core::replay::ReplayError::InvalidSpec(
-                        "routing evidence lock poisoned".into(),
-                    )
-                })?
-                .capture_decisions = spec.record_per_request;
         }
         Ok(())
     }
@@ -224,7 +205,7 @@ impl ReplayComposition for KvReplayComposition {
         let (args, num_workers) = match &self.topology {
             KvTopologyConfig::Aggregated { args, num_workers } => (args.as_ref(), *num_workers),
             #[cfg(feature = "python-replay")]
-            KvTopologyConfig::Canonical(engine) => {
+            KvTopologyConfig::FromReplaySpec(engine) => {
                 let engine = engine.borrow();
                 let engine = engine
                     .as_ref()
@@ -241,11 +222,6 @@ impl ReplayComposition for KvReplayComposition {
             self.prefill_load_estimator.take(),
             topology.len(),
             self.determinism.selector_seed(),
-        )?
-        .with_affinity_and_evidence(
-            self.affinity.clone(),
-            self.evidence.clone(),
-            "aggregated",
         )
     }
 
@@ -272,7 +248,7 @@ impl ReplayComposition for KvReplayComposition {
                     *num_decode_workers,
                 ),
                 #[cfg(feature = "python-replay")]
-                KvTopologyConfig::Canonical(engine) => {
+                KvTopologyConfig::FromReplaySpec(engine) => {
                     let engine = engine.borrow();
                     let engine = engine
                         .as_ref()
@@ -323,12 +299,7 @@ impl ReplayComposition for KvReplayComposition {
             prefill_topology.len(),
             self.determinism.selector_seed(),
         )
-        .context("constructing prefill KV Router placement")?
-        .with_affinity_and_evidence(
-            self.affinity.clone(),
-            self.evidence.clone(),
-            "prefill",
-        )?;
+        .context("constructing prefill KV Router placement")?;
         let decode = KvRouterPlacement::new_with_selector_seed(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
@@ -336,12 +307,7 @@ impl ReplayComposition for KvReplayComposition {
             decode_topology.len(),
             self.determinism.selector_seed(),
         )
-        .context("constructing decode KV Router placement")?
-        .with_affinity_and_evidence(
-            self.affinity.clone(),
-            self.evidence.clone(),
-            "decode",
-        )?;
+        .context("constructing decode KV Router placement")?;
         Ok((prefill, decode))
     }
 
