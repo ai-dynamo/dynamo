@@ -242,13 +242,20 @@ class _GMSClientSession:
             UnclaimPersistentAllocationResponse,
         ).unclaimed
 
-    def release_persistent(self, engine_id: str, tag: str) -> bool:
+    def release_persistent(
+        self, engine_id: str, tag: str, allocation_id: Optional[str] = None
+    ) -> bool:
         """Explicitly destroy a persistent allocation. Returns True iff
-        an allocation existed and was freed."""
+        an allocation existed and was freed.
+
+        Pass the ``allocation_id`` you observed when acting on an earlier
+        listing; the server then refuses (``GMS_ERR_IDENTITY_MISMATCH``) to
+        destroy a newer incarnation of the same key."""
         return self._transport.request(
             ReleasePersistentAllocationRequest(
                 engine_id=engine_id,
                 tag=tag,
+                allocation_id=allocation_id,
             ),
             ReleasePersistentAllocationResponse,
         ).released

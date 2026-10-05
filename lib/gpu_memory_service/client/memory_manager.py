@@ -421,9 +421,12 @@ class GMSClientMemoryManager:
             )
         return self._client_rpc.unclaim_persistent(engine_id=engine_id, tag=tag)
 
-    def release_persistent(self, engine_id: str, tag: str) -> bool:
+    def release_persistent(
+        self, engine_id: str, tag: str, allocation_id: Optional[str] = None
+    ) -> bool:
         """Explicitly destroy a persistent allocation. Returns True iff
-        the allocation existed and was freed."""
+        the allocation existed and was freed. ``allocation_id`` guards
+        against destroying a newer incarnation of the key."""
         if self._client is None:
             raise RuntimeError(
                 "Memory manager must be connected before release_persistent",
@@ -431,6 +434,7 @@ class GMSClientMemoryManager:
         return self._client_rpc.release_persistent(
             engine_id=engine_id,
             tag=tag,
+            allocation_id=allocation_id,
         )
 
     def export_persistent_handle(self, engine_id: str, tag: str) -> int:
