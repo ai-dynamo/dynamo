@@ -41,7 +41,7 @@ class ServicePorts:
 
     frontend_port: int
     system_ports: list[int]
-    kv_event_port: int = 0
+    kv_event_ports: list[int] = field(default_factory=list)
     fpm_port: int = 0
     # Per-worker VLLM_NIXL_SIDE_CHANNEL_PORT values; unique per deployment so
     # parallel (xdist) deployments on one host don't collide.

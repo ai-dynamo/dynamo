@@ -777,7 +777,7 @@ class TestConsolidatorRouterE2E:
             g1_gpu_blocks = 10  # Very small GPU cache to force evictions
             g2_cpu_blocks = 5  # Smaller than GPU but large enough to retain blocks
             g3_disk_blocks = 5  # Smaller than GPU but large enough to retain blocks
-            max_model_len = g1_gpu_blocks * block_size
+            max_model_len = (g1_gpu_blocks - 1) * block_size
 
             # Compute optimal test parameters for this configuration
             test_params = compute_deduplication_test_params(

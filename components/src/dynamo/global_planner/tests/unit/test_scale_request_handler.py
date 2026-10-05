@@ -342,6 +342,23 @@ def _component(name, replicas, gpu, ctype, node_count=None):
     return component
 
 
+def _with_operator_gpu_status(components):
+    statuses = {}
+    for component in components:
+        main = component["podTemplate"]["spec"]["containers"][0]
+        gpu = main["resources"]["limits"]["nvidia.com/gpu"]
+        total_gpu = int(gpu) * component.get("multinode", {}).get("nodeCount", 1)
+        statuses[component["name"]] = {
+            "gpusPerEngine": total_gpu,
+            "gpusPerReplica": total_gpu,
+        }
+    return {
+        "metadata": {"generation": 1},
+        "spec": {"components": components},
+        "status": {"observedGeneration": 1, "components": statuses},
+    }
+
+
 def _dgd_spec(
     prefill_replicas,
     decode_replicas,
@@ -351,26 +368,24 @@ def _dgd_spec(
     decode_node_count=None,
 ):
     """Build a v1beta1 DGD spec with prefill and decode components."""
-    return {
-        "spec": {
-            "components": [
-                _component(
-                    "prefill-svc",
-                    prefill_replicas,
-                    prefill_gpu,
-                    "prefill",
-                    prefill_node_count,
-                ),
-                _component(
-                    "decode-svc",
-                    decode_replicas,
-                    decode_gpu,
-                    "decode",
-                    decode_node_count,
-                ),
-            ]
-        }
-    }
+    return _with_operator_gpu_status(
+        [
+            _component(
+                "prefill-svc",
+                prefill_replicas,
+                prefill_gpu,
+                "prefill",
+                prefill_node_count,
+            ),
+            _component(
+                "decode-svc",
+                decode_replicas,
+                decode_gpu,
+                "decode",
+                decode_node_count,
+            ),
+        ]
+    )
 
 
 def _worker_dgd_spec(
@@ -390,7 +405,7 @@ def _worker_dgd_spec(
     }
     if component_type is not None:
         component["type"] = component_type
-    return {"spec": {"components": [component]}}
+    return _with_operator_gpu_status([component])
 
 
 def _two_worker_dgd_spec(replicas=1, gpu=1):
@@ -401,7 +416,7 @@ def _two_worker_dgd_spec(replicas=1, gpu=1):
             "components"
         ]
     )
-    return deployment
+    return _with_operator_gpu_status(deployment["spec"]["components"])
 
 
 def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"):
@@ -418,11 +433,12 @@ def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"
 
 def _install_real_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"):
     """Attach a real KubernetesConnector backed by a mocked Kubernetes API."""
-    connector = KubernetesConnector.__new__(KubernetesConnector)
-    connector.parent_dgd_name = parent_dgd_name
-    connector.graph_deployment_name = parent_dgd_name
-    connector.raise_not_ready = True
-    connector.kube_api = MagicMock()
+    with patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"):
+        connector = KubernetesConnector(
+            dynamo_namespace="test",
+            parent_dgd_name=parent_dgd_name,
+            raise_not_ready=True,
+        )
     connector.kube_api.get_graph_deployment.return_value = dgd_spec_dict
     connector.kube_api.is_deployment_ready.return_value = True
     connector.kube_api.wait_for_graph_deployment_ready = AsyncMock()

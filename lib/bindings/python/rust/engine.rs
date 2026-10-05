@@ -30,7 +30,7 @@ use crate::PyAsyncRequestStream;
 use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
-use super::errors::{extract_http_like_error, py_exception_to_backend_error};
+use super::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
 use crate::python_payload::{PythonPayload, PythonResponseItem};
 
 /// Add bindings from this crate to the provided module
@@ -383,27 +383,17 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
         error.display(py);
 
         if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
-            return DynamoError::builder()
+            let mut builder = DynamoError::builder()
                 .error_type(ErrorType::Backend(backend_err))
-                .message(message)
-                .build();
+                .message(message.clone());
+            if backend_err == BackendError::InvalidArgument {
+                builder = builder.public_message(message);
+            }
+            return builder.build();
         }
 
-        if let Some((code, message)) = extract_http_like_error(py, &error) {
-            let backend_err = if (400..500).contains(&code) {
-                BackendError::InvalidArgument
-            } else {
-                BackendError::Unknown
-            };
-            let json_msg = serde_json::json!({
-                "message": message,
-                "code": code,
-            })
-            .to_string();
-            return DynamoError::builder()
-                .error_type(ErrorType::Backend(backend_err))
-                .message(json_msg)
-                .build();
+        if let Some(error) = http_like_error_to_dynamo(py, &error) {
+            return error;
         }
 
         if error.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
@@ -742,5 +732,38 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
 
         let response_stream = unbuffered_python_response_stream(stream, ctx.clone(), request_id);
         Ok(ResponseStream::new(response_stream, ctx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::errors::error_class_for_http_status;
+    use dynamo_runtime::error::ErrorClass;
+
+    #[test]
+    fn http_statuses_map_to_semantic_classes() {
+        assert_eq!(error_class_for_http_status(400), ErrorClass::InvalidRequest);
+        assert_eq!(
+            error_class_for_http_status(415),
+            ErrorClass::UnsupportedMedia
+        );
+        assert_eq!(error_class_for_http_status(429), ErrorClass::RateLimited);
+        assert_eq!(error_class_for_http_status(499), ErrorClass::Cancelled);
+        assert_eq!(error_class_for_http_status(418), ErrorClass::InvalidRequest);
+        assert_eq!(error_class_for_http_status(501), ErrorClass::NotImplemented);
+        assert_eq!(
+            error_class_for_http_status(502),
+            ErrorClass::BackendProtocol
+        );
+        assert_eq!(error_class_for_http_status(503), ErrorClass::Unavailable);
+        assert_eq!(
+            error_class_for_http_status(504),
+            ErrorClass::DeadlineExceeded
+        );
+        assert_eq!(
+            error_class_for_http_status(529),
+            ErrorClass::CapacityExhausted
+        );
+        assert_eq!(error_class_for_http_status(500), ErrorClass::Internal);
     }
 }

@@ -52,6 +52,7 @@ JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 # Stable labels the operator stamps on every worker Pod.
 DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
+GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
 
 
 def get_current_k8s_namespace() -> str:
@@ -152,6 +153,26 @@ class KubernetesAPI:
                 self._update_dgd_replicas(graph_deployment_name, service_name, replicas)
             else:
                 raise
+
+    def get_service_replica_target(
+        self, graph_deployment_name: str, service_name: str
+    ) -> int:
+        """Read the authoritative scale target, including an unapplied DGDSA write."""
+        try:
+            scale = self.custom_api.get_namespaced_custom_object_scale(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGDSA_PLURAL,
+                name=f"{graph_deployment_name}-{service_name.lower()}",
+            )
+            return int(scale["spec"]["replicas"])
+        except client.ApiException as e:
+            if e.status != 404:
+                raise
+        deployment = self.get_graph_deployment(graph_deployment_name)
+        component = get_components_by_name(deployment)[service_name]
+        return Service(name=service_name, service=component).number_replicas()
 
     def _update_dgd_replicas(
         self, graph_deployment_name: str, service_name: str, replicas: int
@@ -325,6 +346,99 @@ class KubernetesAPI:
 
         return traffic_serving_replicas, is_stable
 
+    def pending_startup_replicas(self, deployment: dict, pods: list) -> dict[str, int]:
+        """Identify startup-only scaling; an empty result never authorizes a write.
+
+        A Ready deficit alone is ambiguous: it also occurs during drain, rollout,
+        and stale status. Require observed spec, current worker revisions, and
+        no terminating/failed Pods before exposing pending startup capacity.
+        """
+        if not self.is_spec_generation_observed(deployment):
+            return {}
+        phase = (deployment.get("status", {}).get("rollingUpdate") or {}).get("phase")
+        if phase not in (None, "", "Completed"):
+            return {}
+        pods = self.exclude_checkpoint_capture_pods(pods)
+        if not pods or any(
+            pod.metadata.deletion_timestamp is not None
+            or pod.status is None
+            or pod.status.phase not in ("Pending", "Running")
+            for pod in pods
+        ):
+            return {}
+        if not self.pcsg_pods_within_desired_replicas(deployment, pods):
+            return {}
+        pending: dict[str, int] = {}
+        statuses = deployment.get("status", {}).get("components", {})
+        for name, spec in get_components_by_name(deployment).items():
+            if get_component_type(spec) == "planner":
+                continue
+            status = statuses.get(name, {})
+            desired = Service(name=name, service=spec).number_replicas()
+            ready, stable = self.get_service_replica_status(deployment, name)
+            replicas = status.get("replicas")
+            updated = status.get("updatedReplicas")
+            if (
+                replicas is None
+                or updated is None
+                or not (0 <= ready <= replicas <= desired)
+            ):
+                return {}
+            # Grove PCSG counts a replica as updated only once it is available;
+            # PodClique/Deployment updated counts include unready new Pods.
+            is_pcsg = status.get("componentKind") == "PodCliqueScalingGroup"
+            if updated != (ready if is_pcsg else replicas):
+                return {}
+            if not stable:
+                if get_component_type(spec) not in ("prefill", "decode", "worker"):
+                    return {}
+                if desired <= ready:
+                    return {}
+                pending[name] = desired - ready
+        return pending
+
+    @staticmethod
+    def exclude_checkpoint_capture_pods(pods: list) -> list:
+        """Capture Jobs inherit worker labels but do not serve inference traffic."""
+        return [
+            pod
+            for pod in pods
+            if not (
+                (pod.metadata.labels or {}).get("nvidia.com/snapshot-job-uid")
+                and any(
+                    owner.controller
+                    and owner.api_version == "batch/v1"
+                    and owner.kind == "Job"
+                    and owner.name
+                    == (pod.metadata.labels or {}).get("nvidia.com/snapshot-job")
+                    for owner in (pod.metadata.owner_references or [])
+                )
+            )
+        ]
+
+    def pcsg_pods_within_desired_replicas(self, deployment: dict, pods: list) -> bool:
+        """Reject excess PCSG groups hidden by its spec-derived replica count."""
+        components = get_components_by_name(deployment)
+        pods_by_component = self.partition_pods_by_component(pods)
+        for name, status in deployment.get("status", {}).get("components", {}).items():
+            if status.get("componentKind") != "PodCliqueScalingGroup":
+                continue
+            desired = Service(
+                name=name, service=components.get(name, {})
+            ).number_replicas()
+            for pod in pods_by_component.get(name, []):
+                replica_index = (pod.metadata.labels or {}).get(
+                    GROVE_PCSG_REPLICA_INDEX_LABEL
+                )
+                if replica_index is None:
+                    return False
+                try:
+                    if not 0 <= int(replica_index) < desired:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+        return True
+
     def non_planner_components_stable(self, deployment: dict) -> tuple[bool, list[str]]:
         """Return ``(all_stable, unstable_names)`` for non-planner components."""
         components = get_components_by_name(deployment)
@@ -378,13 +492,12 @@ class KubernetesAPI:
     def worker_pods_settled(
         self,
         deployment: dict,
-        expected_power_by_component: Mapping[str, str],
+        expected_power_by_component: Mapping[str, int],
     ) -> tuple[bool, list[str]]:
         """True when all non-terminal pods carry the expected per-GPU annotation.
 
         ``expected_power_by_component`` maps each power-relevant component name
-        to the raw ``dynamo.nvidia.com/gpu-power-limit`` string from the DGD
-        snapshot (verbatim, for exact propagation verification).
+        to the operator-projected per-GPU power limit.
 
         Terminal means phase Succeeded or Failed. Terminating pods
         (DeletionTimestamp set) in Running/Pending/Unknown are non-terminal:
@@ -405,7 +518,7 @@ class KubernetesAPI:
             self.list_pods_for_graph(dgd_name)
         )
 
-        for component_name, expected_raw in expected_power_by_component.items():
+        for component_name, expected_watts in expected_power_by_component.items():
             all_pods = pods_by_component.get(component_name, [])
             non_terminal = [
                 p
@@ -436,13 +549,17 @@ class KubernetesAPI:
                         f" (phase={phase}, terminating): waiting for pod to disappear"
                     )
                     continue
-                actual = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
-                if actual != expected_raw:
+                actual_raw = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
+                try:
+                    actual_watts = int(str(actual_raw).strip())
+                except (TypeError, ValueError):
+                    actual_watts = None
+                if actual_watts != expected_watts:
                     phase = (pod.status.phase if pod.status else None) or "?"
                     pending.append(
                         f"{component_name}/{pod.metadata.name}"
                         f" (phase={phase}):"
-                        f" annotation {actual!r} != {expected_raw!r}"
+                        f" annotation {actual_raw!r} != {expected_watts!r}"
                     )
 
         return not pending, pending
@@ -567,19 +684,14 @@ class KubernetesAPI:
                 decode_name=decode_component_name,
             )
 
-            # Build per-component expected annotation strings from the same
-            # DGD snapshot. A missing or malformed annotation is invalid
-            # configuration — raise immediately rather than retrying.
-            # Use the raw DGD annotation string: the operator copies it verbatim
-            # onto Pod annotations, so the settlement comparison must use the
-            # same raw value to get an exact match.
+            # Build per-component expected limits from operator-owned status.
+            # A missing or malformed value is invalid configuration — raise
+            # immediately rather than retrying.
             components_map = get_components_by_name(graph_deployment)
-            expected_power: dict[str, str] = {}
+            expected_power: dict[str, int] = {}
             for name in power_names:
                 svc = Service(name=name, service=components_map.get(name, {}))
-                # Raises PowerAnnotationMissingError / PowerAnnotationInvalidError
-                # on bad config; let those propagate as a fail-fast startup error.
-                expected_power[name] = svc.get_gpu_power_limit_annotation()
+                expected_power[name] = svc.get_gpu_power_limit_watts(graph_deployment)
 
             pods_ok, pods_pending = self.worker_pods_settled(
                 graph_deployment, expected_power
