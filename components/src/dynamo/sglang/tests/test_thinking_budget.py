@@ -121,7 +121,6 @@ def test_apply_thinking_budget_rejects_forwarded_budget_without_canonical_value(
         ({"enable_strict_thinking": False}, "--enable-strict-thinking"),
         ({"reasoning_parser": None}, "--reasoning-parser"),
         ({"skip_tokenizer_init": True}, "--skip-tokenizer-init"),
-        ({"grammar_backend": "none"}, "grammar backend"),
     ],
 )
 def test_apply_thinking_budget_rejects_unsupported_server_config(overrides, message):

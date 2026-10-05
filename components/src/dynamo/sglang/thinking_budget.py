@@ -77,11 +77,6 @@ def _validate_server_config(server_args: Any, engine: Any | None) -> None:
             "thinking_token_budget is unavailable with --skip-tokenizer-init"
         )
 
-    if getattr(server_args, "grammar_backend", None) == "none":
-        raise InvalidArgument(
-            "thinking_token_budget requires an enabled SGLang grammar backend"
-        )
-
     from sglang.srt.environ import envs
 
     if (
