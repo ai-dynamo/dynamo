@@ -608,7 +608,6 @@ mod tests {
 
     #[test]
     fn routed_address_is_preferred_over_earlier_interfaces() {
-        // A node-local BMC interface enumerates before the cluster interface.
         let mut resolver = StubResolver::new(Found("10.3.10.72"), Found("2001:db8::72"));
         resolver.interfaces = vec![
             ("lo", ip("127.0.0.1")),
