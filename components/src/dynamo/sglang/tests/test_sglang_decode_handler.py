@@ -111,6 +111,8 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
     )
 
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
     handler._generate_bootstrap_room = lambda: "room"

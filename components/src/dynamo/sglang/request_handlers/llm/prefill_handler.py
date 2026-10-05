@@ -127,12 +127,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         has_thinking_budget = False
         if native_payload is None:
             has_thinking_budget = thinking_budget_requested(inner_request)
-            config = getattr(self, "config", None)
             sampling_params = apply_thinking_budget(
                 inner_request,
                 sampling_params,
-                getattr(config, "server_args", None),
-                engine=getattr(self, "engine", None),
+                self.config.server_args,
+                engine=self.engine,
             )
             sampling_params["n"] = 1
             sampling_params["max_new_tokens"] = 1

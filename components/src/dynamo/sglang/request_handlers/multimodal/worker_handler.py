@@ -923,14 +923,12 @@ class MultimodalPrefillWorkerHandler(
         # Get the SglangMultimodalRequest from the DisaggSglangMultimodalRequest
         request = disagg_request.request
         input_ids = request.request.token_ids
-        model_dump = getattr(request.request, "model_dump", None)
-        request_data = model_dump() if callable(model_dump) else vars(request.request)
+        request_data = request.request.model_dump()
         has_thinking_budget = thinking_budget_requested(request_data)
-        config = getattr(self, "config", None)
         sampling_params = apply_thinking_budget(
             request_data,
             disagg_request.sampling_params,
-            getattr(config, "server_args", None),
+            self.config.server_args,
             engine=self.engine,
         )
         tensor_id: int | None = None

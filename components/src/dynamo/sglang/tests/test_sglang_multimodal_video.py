@@ -304,10 +304,17 @@ async def test_multimodal_prefill_releases_embeddings_when_submission_fails(
             raise RuntimeError("submission failed")
 
     handler.engine = FailingEngine()
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
     monkeypatch.setattr(worker_handler, "_build_mm_items", build_mm_items)
 
-    request = SimpleNamespace(
-        request=SimpleNamespace(request=SimpleNamespace(token_ids=[1, 2, 3])),
+    request = DisaggSglangMultimodalRequest(
+        request=SglangMultimodalRequest(
+            request=PreprocessedRequest(
+                token_ids=[1, 2, 3],
+                stop_conditions=StopConditions(),
+                sampling_options=SamplingOptions(),
+            )
+        ),
         sampling_params={"max_new_tokens": 1},
     )
 
