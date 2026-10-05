@@ -138,8 +138,13 @@ impl SessionAffinityConfig {
     }
 }
 
+struct ManualClock {
+    now: Instant,
+    next_reap: Instant,
+}
+
 struct Inner {
-    manual_now: Option<std::sync::Mutex<Instant>>,
+    manual_now: Option<std::sync::Mutex<ManualClock>>,
     entries: DashMap<String, AffinityEntry>,
     ttl: Duration,
     mode: SessionAffinityMode,
@@ -254,7 +259,12 @@ impl SessionAffinity {
             Self::validate_manual_deadline(now, config.ttl)?;
         }
         let inner = Arc::new(Inner {
-            manual_now: manual_now.map(std::sync::Mutex::new),
+            manual_now: manual_now.map(|now| {
+                std::sync::Mutex::new(ManualClock {
+                    now,
+                    next_reap: now + config.ttl.min(Duration::from_secs(30)),
+                })
+            }),
             entries: DashMap::new(),
             ttl: config.ttl,
             mode: config.mode,
@@ -288,13 +298,14 @@ impl SessionAffinity {
         Ok(Self { inner })
     }
 
-    /// Advance a manual table and collect idle bindings whose TTL has expired.
+    /// Advance a manual table and run its native idle reaper when due.
     ///
     /// Active leases remain bound. Equal timestamps are allowed; backwards time,
     /// deadline overflow, and use with a runtime-clock table fail without changing
     /// its clock. Hosts serialize advancement with their lifecycle operations.
-    /// A later timestamp scans the table for idle entries; equal timestamps are
-    /// a no-op so multiple lifecycle callbacks at one instant do not rescan it.
+    /// Lookup and acquisition observe the new time immediately. Full-table idle
+    /// collection uses the runtime reaper's `min(ttl, 30s)` cadence, so individual
+    /// request events do not each scan every binding. Equal timestamps are a no-op.
     pub fn advance_clock(&self, now: Instant) -> Result<(), AffinityError> {
         let Some(clock) = &self.inner.manual_now else {
             return Err(AffinityError::InvalidArgument(
@@ -302,18 +313,24 @@ impl SessionAffinity {
             ));
         };
         let mut current = clock.lock().expect("affinity clock poisoned");
-        if now < *current {
+        if now < current.now {
             return Err(AffinityError::InvalidArgument(
                 "affinity clock cannot move backwards".into(),
             ));
         }
-        if now == *current {
+        if now == current.now {
             return Ok(());
         }
         Self::validate_manual_deadline(now, self.inner.ttl)?;
-        *current = now;
+        current.now = now;
+        let reap = now >= current.next_reap;
+        if reap {
+            current.next_reap = now + self.inner.ttl.min(Duration::from_secs(30));
+        }
         drop(current);
-        self.inner.expire_idle(now);
+        if reap {
+            self.inner.expire_idle(now);
+        }
         Ok(())
     }
 
@@ -670,7 +687,7 @@ impl SessionAffinity {
 impl Inner {
     fn now(&self) -> Instant {
         self.manual_now.as_ref().map_or_else(Instant::now, |clock| {
-            *clock.lock().expect("affinity clock poisoned")
+            clock.lock().expect("affinity clock poisoned").now
         })
     }
 
@@ -1143,6 +1160,36 @@ mod tests {
         assert_eq!(table.query_target("s", None).unwrap(), Some(target));
         table.advance_clock(epoch + TTL * 3).unwrap();
         assert_eq!(table.query_target("s", None).unwrap(), None);
+        assert_eq!(table.entry_count(), 0);
+    }
+
+    /// Lookup/reacquisition expires at the exact TTL even between full-table reaps.
+    #[test]
+    fn manual_clock_uses_native_reaper_cadence_without_delaying_expiry() {
+        let epoch = Instant::now();
+        let ttl = Duration::from_secs(60);
+        let table =
+            SessionAffinity::with_manual_clock(SessionAffinityConfig::new(ttl), epoch).unwrap();
+        table.advance_clock(epoch + Duration::from_secs(1)).unwrap();
+        drop(
+            initialize(&table)
+                .commit(AffinityTarget::new(7, Some(5)))
+                .unwrap(),
+        );
+        table.advance_clock(epoch + ttl).unwrap();
+        assert_eq!(table.entry_count(), 1);
+        table
+            .advance_clock(epoch + ttl + Duration::from_secs(1))
+            .unwrap();
+        // No full-table collection before the next native reaper interval.
+        assert_eq!(table.entry_count(), 1);
+        assert_eq!(table.query_target("s", None).unwrap(), None);
+        let target = AffinityTarget::new(8, Some(6));
+        drop(initialize(&table).commit(target).unwrap());
+        assert_eq!(table.query_target("s", None).unwrap(), Some(target));
+        table
+            .advance_clock(epoch + ttl * 2 + Duration::from_secs(1))
+            .unwrap();
         assert_eq!(table.entry_count(), 0);
     }
 

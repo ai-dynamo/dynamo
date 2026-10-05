@@ -54,6 +54,18 @@ def request(request_id, session="child", parent="parent", scope="play-a", **fiel
     )
 
 
+def test_invalid_input_size_leaves_no_native_booking_or_affinity_hold():
+    host = policy()
+    with pytest.raises(
+        ValueError, match="input token count exceeds native policy block range"
+    ):
+        host.place(request("same-id", input_tokens=(1 << 32) * 4), 0)
+    assert json.loads(host.evidence())["decision_count"] == 0
+    assert host.pending_count() == 0
+    assert json.loads(host.place(request("same-id"), 0))["decision"] is not None
+    host.dispatch_aborted("same-id", 0)
+
+
 def cache_event(event_id=1, removed=False, worker_id=9, dp_rank=1):
     data = (
         {"removed": {"block_hashes": [201, 202]}}
