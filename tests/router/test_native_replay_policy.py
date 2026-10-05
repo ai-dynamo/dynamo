@@ -54,7 +54,7 @@ def request(request_id, session="child", parent="parent", scope="play-a", **fiel
     )
 
 
-def cache_event(event_id=1, removed=False):
+def cache_event(event_id=1, removed=False, worker_id=9, dp_rank=1):
     data = (
         {"removed": {"block_hashes": [201, 202]}}
         if removed
@@ -70,7 +70,12 @@ def cache_event(event_id=1, removed=False):
         }
     )
     return json.dumps(
-        [{"worker_id": 9, "event": {"event_id": event_id, "dp_rank": 1, "data": data}}]
+        [
+            {
+                "worker_id": worker_id,
+                "event": {"event_id": event_id, "dp_rank": dp_rank, "data": data},
+            }
+        ]
     )
 
 
@@ -81,9 +86,17 @@ def test_physical_cache_and_sibling_dispatch_binding(role):
     assert NativeReplayPolicy.contract()["api_version"] == 1
     assert json.loads(host.observe(cache_event(), 0)) == []
     first = json.loads(host.place(request("first"), 0))["decision"]
-    assert (first["worker_id"], first["dp_rank"]) == (9, 1)
-    assert first["overlap_blocks"] == first["best_available_overlap_blocks"] == 2
-    assert first["cached_tokens"] == 8
+    target = (first["worker_id"], first["dp_rank"])
+    assert first["best_available_overlap_blocks"] == 2
+    if role == "decode":
+        # Production plain decode is load-only (DefaultScorer::prepare), so its
+        # first choice need not follow cache. Publish physical KV at that actual
+        # choice to test cache evidence and affinity on the next selection.
+        host.observe(cache_event(event_id=2, worker_id=target[0], dp_rank=target[1]), 0)
+    else:
+        assert target == (9, 1)
+        assert first["overlap_blocks"] == 2
+        assert first["cached_tokens"] == 8
     assert (
         json.loads(host.place(request("second", session="sibling"), 0))["decision"]
         is None
@@ -93,11 +106,13 @@ def test_physical_cache_and_sibling_dispatch_binding(role):
     host.dispatch_committed("first", 0)
     assert host.next_wakeup_ms() == 0
     (second,) = json.loads(host.advance_clock(0))
-    assert (second["worker_id"], second["dp_rank"]) == (9, 1)
+    assert (second["worker_id"], second["dp_rank"]) == target
+    assert second["overlap_blocks"] == 2
+    assert second["cached_tokens"] == 8
     host.dispatch_committed("second", 0)
     assert host.pending_count() == 0
     evidence = json.loads(host.evidence())
-    assert evidence["physical_kv_events"] == 1
+    assert evidence["physical_kv_events"] == (2 if role == "decode" else 1)
     assert evidence["decision_count"] == 2
     assert (
         evidence["decisions"][0]["group_key"] == evidence["decisions"][1]["group_key"]
@@ -106,10 +121,12 @@ def test_physical_cache_and_sibling_dispatch_binding(role):
     host.prefill_completed("first", 1)
     host.request_terminal("first", 2)
     host.request_terminal("second", 2)
-    host.observe(cache_event(event_id=2, removed=True), 3)
+    host.observe(
+        cache_event(event_id=3, removed=True, worker_id=target[0], dp_rank=target[1]), 3
+    )
     after_remove = json.loads(host.place(request("third"), 3))["decision"]
     assert after_remove["overlap_blocks"] == after_remove["cached_tokens"] == 0
-    assert (after_remove["worker_id"], after_remove["dp_rank"]) == (9, 1)
+    assert (after_remove["worker_id"], after_remove["dp_rank"]) == target
     host.dispatch_aborted("third", 3)
 
 
