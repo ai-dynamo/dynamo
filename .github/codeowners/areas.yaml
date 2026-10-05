@@ -542,13 +542,7 @@ required_owners:
 - glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:
   - operator
-- glob: deploy/operator/internal/checkpoint/
-  owners:
-  - operator
-- glob: deploy/operator/internal/gms/
-  owners:
-  - operator
-- glob: deploy/operator/internal/observability/
+- glob: deploy/operator/
   owners:
   - operator
 shared:
@@ -965,15 +959,15 @@ shared:
   owners:
   - operator
   - observability
-- glob: deploy/helm/**/*lpx*
-  owners: [operator, lpx]
-- glob: deploy/operator/api/**/*lpx*
-  owners: [operator, lpx]
-- glob: deploy/operator/config/**/*lpx*
-  owners: [operator, lpx]
-- glob: deploy/operator/internal/*/*lpx*
-  owners: [operator, lpx]
-- glob: deploy/operator/internal/webhook/**/*lpx*
+- glob: deploy/operator/internal/controller/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/operator/internal/dynamo/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/**/*lpx*
   owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
