@@ -5180,14 +5180,19 @@ pub fn responses_router(
     let record_path = format!("{}/{{response_id}}", path.trim_end_matches('/'));
     let get_doc = RouteDoc::new(Method::GET, &record_path);
     let delete_doc = RouteDoc::new(Method::DELETE, &record_path);
-    let router = Router::new()
+    let mut router = Router::new()
         .route(&path, post(handler_responses))
-        .route(&input_tokens_path, post(handler_responses_input_tokens))
-        .route(&record_path, get(retrieve_response).delete(delete_response))
+        .route(&input_tokens_path, post(handler_responses_input_tokens));
+    let mut docs = vec![doc, input_tokens_doc];
+    if state.response_storage().is_some() {
+        router = router.route(&record_path, get(retrieve_response).delete(delete_response));
+        docs.extend([get_doc, delete_doc]);
+    }
+    let router = router
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc, input_tokens_doc, get_doc, delete_doc], router)
+    (docs, router)
 }
 
 async fn images(
