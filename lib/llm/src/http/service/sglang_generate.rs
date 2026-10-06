@@ -387,6 +387,8 @@ async fn dispatch(
         true,
         &request_id,
     );
+    let tracked = inflight_guard.tracked_request().clone();
+    tracked.add_input_tokens(context.content().token_ids.len());
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -458,6 +460,11 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
+    let stream = stream.inspect(move |delta| {
+        if let Some(output) = &delta.data {
+            tracked.add_output_tokens(output.token_ids.len());
+        }
+    });
     let stream = SglangGenerateStream::from_annotated_stream(stream).map(|result| {
         result
             .map(|value| Event::default().data(value.to_string()))

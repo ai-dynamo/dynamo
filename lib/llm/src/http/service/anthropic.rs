@@ -611,7 +611,7 @@ async fn anthropic_messages(
             .or_insert(serde_json::Value::Bool(false));
     }
 
-    let request = context.map(|_req| chat_request);
+    let mut request = context.map(|_req| chat_request);
 
     // Anthropic requests are converted to the same chat request contract. Keep
     // parser activation identical to the OpenAI Chat Completions and Responses
@@ -641,7 +641,8 @@ async fn anthropic_messages(
             request.chat_template_args.as_ref(),
         );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.tracked_request().attach_to(&mut request);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 

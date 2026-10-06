@@ -712,6 +712,14 @@ pub struct HttpService {
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
+    frontend_load_publisher: Option<FrontendLoadPublisher>,
+}
+
+/// Where this service publishes frontend load.
+#[derive(Clone)]
+struct FrontendLoadPublisher {
+    runtime: Arc<DistributedRuntime>,
+    namespace: String,
 }
 
 #[derive(Clone, Builder)]
@@ -812,9 +820,15 @@ pub struct HttpServiceConfig {
     #[builder(default = "default_rl_port()")]
     rl_port: u16,
 
-    /// Distributed runtime used by the RL worker discovery API.
+    /// Distributed runtime used by the RL worker discovery API and to publish
+    /// frontend load to the KV DC Relay.
     #[builder(default = "None")]
     runtime: Option<Arc<DistributedRuntime>>,
+
+    /// Exact Dynamo namespace the frontend was configured with (`--namespace`).
+    /// See [`frontend_load_namespace`](crate::frontend_load::frontend_load_namespace).
+    #[builder(default = "None")]
+    namespace: Option<String>,
 
     /// Interval for SSE comment frames while a streaming response is idle.
     /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
@@ -977,6 +991,7 @@ impl HttpService {
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+            self.start_frontend_load_publisher(&cancel_token);
 
             tokio::select! {
                 result = server => {
@@ -1034,6 +1049,7 @@ impl HttpService {
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+            self.start_frontend_load_publisher(&cancel_token);
 
             let state = self.state.clone();
             axum::serve(listener, router)
@@ -1062,6 +1078,21 @@ impl HttpService {
         }
 
         Ok(())
+    }
+
+    fn start_frontend_load_publisher(&self, cancel_token: &CancellationToken) {
+        let Some(publisher) = &self.frontend_load_publisher else {
+            return;
+        };
+        let observer = self.state.service_observer();
+        crate::frontend_load::start_frontend_load_publisher(
+            publisher.runtime.clone(),
+            publisher.namespace.clone(),
+            self.state.manager_clone(),
+            self.state.metrics_clone().frontend_load().clone(),
+            move || observer.is_ready(),
+            cancel_token.child_token(),
+        );
     }
 
     async fn spawn_rl_listener_if_configured(
@@ -1537,6 +1568,10 @@ impl HttpServiceConfigBuilder {
             generate_engine_capabilities,
             rl_router,
             rl_port: config.rl_port,
+            frontend_load_publisher: config.runtime.map(|runtime| FrontendLoadPublisher {
+                runtime,
+                namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
+            }),
         })
     }
 

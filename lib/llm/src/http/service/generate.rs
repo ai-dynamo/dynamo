@@ -745,14 +745,22 @@ impl GenerateMetricLifecycle {
         input_tokens: usize,
     ) -> Self {
         let metrics = state.metrics_clone();
+        let inflight = metrics.clone().create_inflight_guard(
+            &metric_model,
+            super::metrics::Endpoint::Generate,
+            false,
+            request_id,
+        );
+        // The prompt is already tokenized, so report its size before any output.
+        inflight.tracked_request().add_input_tokens(input_tokens);
         Self {
-            inflight: metrics.clone().create_inflight_guard(
-                &metric_model,
-                super::metrics::Endpoint::Generate,
-                false,
-                request_id,
+            collector: GenerateMetricCollector::new(
+                inflight.response_collector(),
+                metrics.create_http_queue_guard(&metric_model),
+                tracker,
+                input_tokens,
             ),
-            collector: GenerateMetricCollector::new(metrics, &metric_model, tracker, input_tokens),
+            inflight,
             metric_model,
         }
     }
@@ -764,14 +772,14 @@ impl GenerateMetricLifecycle {
 
 impl GenerateMetricCollector {
     fn new(
-        metrics: Arc<super::metrics::Metrics>,
-        model: &str,
+        response: ResponseMetricCollector,
+        http_queue: HttpQueueGuard,
         tracker: Arc<RequestTracker>,
         input_tokens: usize,
     ) -> Self {
         Self {
-            response: metrics.clone().create_response_collector(model),
-            http_queue: Some(metrics.create_http_queue_guard(model)),
+            response,
+            http_queue: Some(http_queue),
             tracker,
             input_tokens,
             output_tokens: 0,
@@ -3163,8 +3171,18 @@ pub(crate) mod tests {
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
         let metric_model = state.manager().metric_model_for(MODEL).to_string();
-        let mut collector =
-            GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+        let inflight = state.metrics_clone().create_inflight_guard(
+            &metric_model,
+            Endpoint::Generate,
+            false,
+            "generate-worker-metadata-test",
+        );
+        let mut collector = GenerateMetricCollector::new(
+            inflight.response_collector(),
+            state.metrics_clone().create_http_queue_guard(&metric_model),
+            tracker,
+            3,
+        );
         let mut first = Annotated::from_data(LLMEngineOutput {
             token_ids: vec![10],
             index: Some(0),
@@ -3229,8 +3247,18 @@ pub(crate) mod tests {
         state.metrics_clone().register(&registry).unwrap();
 
         {
-            let mut collector =
-                GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, 3);
+            let inflight = state.metrics_clone().create_inflight_guard(
+                &metric_model,
+                Endpoint::Generate,
+                false,
+                "generate-cache-metric-test",
+            );
+            let mut collector = GenerateMetricCollector::new(
+                inflight.response_collector(),
+                state.metrics_clone().create_http_queue_guard(&metric_model),
+                tracker,
+                3,
+            );
             let mut annotated = Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![10],
                 index: Some(0),
