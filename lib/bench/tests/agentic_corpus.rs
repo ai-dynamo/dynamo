@@ -155,20 +155,89 @@ async fn prepare(
     pool: &Path,
     config: &AgenticCorpusConfig,
 ) -> (PreparedMooncakeBenchmark, AgenticPrepReport) {
-    let (prepared, _, report) = prepare_agentic_benchmark(
+    prepare_with(
         pool,
-        None,
         config,
         AgenticEngine {
             num_gpu_blocks: 48,
             block_size: ENGINE_BLOCK,
             speedup_ratio: 1.0,
+            sglang: false,
         },
-        10_000,
     )
     .await
-    .unwrap();
+}
+
+async fn prepare_with(
+    pool: &Path,
+    config: &AgenticCorpusConfig,
+    engine: AgenticEngine,
+) -> (PreparedMooncakeBenchmark, AgenticPrepReport) {
+    let (prepared, _, report) = prepare_agentic_benchmark(pool, None, config, engine, 10_000)
+        .await
+        .unwrap();
     (prepared, report)
+}
+
+/// SGLang radix-cache engine at page size 1 with a small token capacity, so it evicts.
+const SGLANG_PAGE1: AgenticEngine = AgenticEngine {
+    num_gpu_blocks: 48 * ENGINE_BLOCK as usize,
+    block_size: 1,
+    speedup_ratio: 1.0,
+    sglang: true,
+};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sglang_warmup_prefix_conserves_events_and_keeps_scores_exact() {
+    let pool = PoolFile::new("warmup");
+    let (full, full_report) = prepare_with(&pool.0, &config(), SGLANG_PAGE1).await;
+    assert_eq!(full_report.engine_type, "sglang");
+    assert!(full.warmup_events.is_empty());
+    assert!(full.totals.removed_blocks > 0, "the small cache must evict");
+
+    let warm_config = AgenticCorpusConfig {
+        warmup_sim_ms: 10_000,
+        ..config()
+    };
+    let (warm, warm_report) = prepare_with(&pool.0, &warm_config, SGLANG_PAGE1).await;
+    assert!(warm_report.warmup_events > 0);
+    assert!(warm_report.warmup_requests_dropped > 0);
+    assert!(warm.totals.requests > 0);
+
+    // The cut moves events into the prefix and drops earlier lookups; nothing else changes.
+    assert_eq!(warm.warmup_events.len() as u64, warm_report.warmup_events);
+    assert_eq!(
+        warm.totals.requests as u64 + warm_report.warmup_requests_dropped,
+        full.totals.requests as u64
+    );
+    assert_eq!(
+        warm.totals.stored_blocks as u64 + warm_report.warmup_stored_blocks,
+        full.totals.stored_blocks as u64
+    );
+    assert_eq!(
+        warm.totals.removed_blocks as u64 + warm_report.warmup_removed_blocks,
+        full.totals.removed_blocks as u64
+    );
+    // Per worker, the prefix keeps source order (event IDs ascend).
+    let mut last_id = [None; WORKERS];
+    for warmup in &warm.warmup_events {
+        let id = warmup.event.event_id;
+        assert!(last_id[warmup.worker].is_none_or(|last| last < id));
+        last_id[warmup.worker] = Some(id);
+    }
+
+    let crtc = Arc::new(ThreadPoolIndexer::new(
+        ConcurrentRadixTreeCompressed::new(),
+        2,
+        1,
+    ));
+    let corpus = prepare_mooncake_corpus(warm, 1).unwrap();
+    let report = run_correctness_check("crtc", crtc, corpus, 100_000, true)
+        .await
+        .unwrap();
+    assert!(report.pass, "{report:?}");
+    assert_eq!(report.checked_queries, report.total_queries);
+    assert!(report.checked_matched_ranks.mean > 0.5);
 }
 
 #[tokio::test(flavor = "multi_thread")]
