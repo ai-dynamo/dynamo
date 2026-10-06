@@ -60,9 +60,9 @@ multiturn = [
   "dep:rand",
 ]
 offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
-# Router benches link mimalloc as the global allocator, matching the Python
+# Router benches link jemalloc as the global allocator, matching the Python
 # extension that runs the router in production (`lib/bindings/python`).
-router-bench = ["dynamo-kv-router/bench", "dep:mimalloc", "dep:libmimalloc-sys"]
+router-bench = ["dynamo-kv-router/bench", "dep:tikv-jemallocator", "dep:tikv-jemalloc-sys"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
   "router-bench",
@@ -164,8 +164,6 @@ flate2 = { version = "1", optional = true }
 futures-util = { workspace = true, optional = true }
 hf-hub = { workspace = true, features = ["ureq"], optional = true }
 indicatif = { version = "0.18", optional = true }
-mimalloc = { version = "0.1.52", default-features = false, features = ["local_dynamic_tls"], optional = true }
-libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"], optional = true }
 rand = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 rustc-hash = { version = "2", optional = true }
@@ -173,6 +171,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { version = "0.10", optional = true }
 tempfile = { workspace = true, optional = true }
+# Same build as the Python extension's allocator (`lib/bindings/python/Cargo.toml`).
+tikv-jemalloc-sys = { version = "0.7.1", optional = true }
+tikv-jemallocator = { version = "0.7.0", features = ["disable_initial_exec_tls"], optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, optional = true }
 tokenizers = { version = "0.21.4", default-features = false, features = [
@@ -188,3 +189,6 @@ dynamo-kv-router = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true, optional = true }
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+tikv-jemallocator = { version = "0.7.0", features = ["background_threads"], optional = true }

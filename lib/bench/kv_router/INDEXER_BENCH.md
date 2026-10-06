@@ -27,12 +27,12 @@ application.
 Preparation consumes and releases the parsed trace, generated replay artifacts,
 worker timelines, and intermediate payload owners. The timed process retains
 only the prepared schedule, one flattened query-hash slab, and backend state.
-On Linux, the benchmark returns free preparation pages with `malloc_trim` and
-`mi_collect` and waits a fixed five seconds before constructing backend workers. It then
-page-touches the schedule once and performs the fixed lookup warm-up before
-timing. This explicit quiescence prevents the parallel event-generation phase
-and released allocator arenas from affecting the timed backend drain; JSON
-records it as `pre_run_quiescence_ms=5000`.
+On Linux, the benchmark returns free preparation pages with `malloc_trim` and a
+purge of all jemalloc arenas and waits a fixed five seconds before constructing
+backend workers. It then page-touches the schedule once and performs the fixed
+lookup warm-up before timing. This explicit quiescence prevents the parallel
+event-generation phase and released allocator arenas from affecting the timed
+backend drain; JSON records it as `pre_run_quiescence_ms=5000`.
 
 Outside timing:
 
@@ -90,10 +90,13 @@ Linux uses absolute `CLOCK_MONOTONIC` sleeps followed by the configured spin.
 macOS uses a portable sleep-plus-spin timer for correctness tests only.
 
 The router benches (`mooncake_bench`, `active_sequences_bench`,
-`approximate_lru_bench`) use mimalloc as the global allocator, matching the
-Python extension that runs the router in production (`lib/bindings/python`).
-They keep mimalloc's default transparent-huge-page advice; the extension turns
-it off unless `MIMALLOC_ALLOW_THP=1` is set.
+`approximate_lru_bench`) use jemalloc as the global allocator, built and
+configured like the Python extension that runs the router in production
+(`lib/bindings/python`): prefixed symbols and, on Linux,
+`background_thread:true`, which `_RJEM_MALLOC_CONF` overrides. One difference
+remains: the linker relaxes jemalloc's thread-local storage accesses in the
+bench executables to the local-exec model, while the extension keeps the slower
+global-dynamic model so that Python can `dlopen` it.
 The allocator is part of the measured system. Under glibc malloc, CRTC event
 workers serialize on arena locks: write capacity stops rising after about 16
 event workers and falls beyond that. Compare allocators or event-worker counts

@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Match the production allocator: the router runs inside the Python extension,
-// which routes Rust allocations through mimalloc (`lib/bindings/python`).
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+#[path = "jemalloc.rs"]
+mod jemalloc;
 
 #[path = "mooncake_open_loop.rs"]
 mod mooncake_open_loop;
@@ -310,8 +308,8 @@ fn quiesce_prepared_heap() {
     // Return their free pages and let reclamation settle before backend workers start.
     unsafe {
         libc::malloc_trim(0);
-        libmimalloc_sys::mi_collect(true);
     }
+    jemalloc::purge();
     std::thread::sleep(std::time::Duration::from_millis(PRE_RUN_QUIESCENCE_MS));
 }
 
