@@ -481,6 +481,16 @@ pub mod llm {
     /// within this many seconds. Acts as a circuit breaker for zombie workers
     /// that hold a live TCP connection but never produce output.
     ///
+    /// The same limit bounds unary dispatch to a selected worker, from sending
+    /// the request until the worker's response stream is established. This includes
+    /// time the worker spends queuing and setting up the request, as well as a
+    /// worker that accepts a request but never connects back. On expiry the
+    /// request fails with a response timeout (or migrates when migration is
+    /// enabled) and the worker is quarantined for
+    /// `DYN_RUNTIME_INHIBITED_DURATION_SECS` (default 5s), after which it is
+    /// routable again. Routers without fault detection and bidirectional
+    /// (streaming-input) requests do not apply this bound.
+    ///
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 

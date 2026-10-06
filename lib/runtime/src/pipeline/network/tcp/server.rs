@@ -1144,7 +1144,8 @@ async fn tcp_listener(
         // the [`Prologue`]
         // there must be a second control message it indicate the other segment's generate method was successful
         // No timeout here: the worker sends the prologue only after generate() setup completes,
-        // which can take arbitrarily long (model load, queue delay, cold start).
+        // which can take arbitrarily long (model load, queue delay, cold start). When
+        // DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS is set, PushRouter bounds this wait instead.
         let prologue = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
