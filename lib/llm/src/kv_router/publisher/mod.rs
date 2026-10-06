@@ -35,7 +35,11 @@ mod state_agent_host;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
+mod zmq_bootstrap;
 mod zmq_listener;
+pub use zmq_bootstrap::{
+    BootstrapOutcome, KvStreamCommand, KvStreamStatus, ZmqBootstrapConfig, ZmqRecoveryControl,
+};
 
 pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
@@ -77,13 +81,15 @@ pub enum KvEventSourceConfig {
         /// Model video-placeholder token id. `None` leaves video runs on the
         /// engine's native hashing path.
         video_token_id: Option<u32>,
+        /// Optional one-time replay before ordinary live consumption.
+        bootstrap: Option<ZmqBootstrapConfig>,
     },
 }
 
 enum KvEventSource {
     Zmq {
         listener_abort_handle: tokio::task::AbortHandle,
-        supervisor_handle: tokio::task::JoinHandle<bool>,
+        supervisor_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<bool>>>,
     },
 }
 
@@ -126,7 +132,7 @@ impl KvEventSource {
         kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
-        tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
+        tx: mpsc::UnboundedSender<PublisherInput>,
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
@@ -135,6 +141,7 @@ impl KvEventSource {
                 topic,
                 image_token_id,
                 video_token_id,
+                bootstrap,
             } => {
                 let listener_handle =
                     component
@@ -151,6 +158,7 @@ impl KvEventSource {
                             next_event_id,
                             image_token_id,
                             video_token_id,
+                            bootstrap,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =
@@ -167,7 +175,7 @@ impl KvEventSource {
 
                 Ok(KvEventSource::Zmq {
                     listener_abort_handle,
-                    supervisor_handle,
+                    supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
                 })
             }
         }
@@ -177,11 +185,48 @@ impl KvEventSource {
         match self {
             KvEventSource::Zmq {
                 listener_abort_handle,
-                supervisor_handle,
+                ..
             } => {
                 listener_abort_handle.abort();
-                supervisor_handle.abort();
             }
+        }
+    }
+
+    async fn stop_and_wait(&self) -> Result<()> {
+        self.shutdown();
+        match self {
+            Self::Zmq {
+                supervisor_handle, ..
+            } => {
+                if let Some(handle) = supervisor_handle.lock().await.take() {
+                    handle.await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum PublisherInput {
+    Events(Vec<PlacementEvent>),
+    Recovery(
+        Vec<PlacementEvent>,
+        tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    ),
+}
+
+impl From<Vec<PlacementEvent>> for PublisherInput {
+    fn from(events: Vec<PlacementEvent>) -> Self {
+        Self::Events(events)
+    }
+}
+
+impl PublisherInput {
+    fn into_events(self) -> Vec<PlacementEvent> {
+        match self {
+            Self::Events(events) => events,
+            Self::Recovery(..) => unreachable!("event send returned a recovery batch"),
         }
     }
 }
@@ -193,8 +238,9 @@ impl KvEventSource {
 /// supported. Future independent restart support must either emit an ordered rank-scoped
 /// `Cleared` event before the new stream or create a new Dynamo publisher ID.
 pub struct KvEventPublisher {
-    /// The size of the KV block.
     kv_block_size: u32,
+    /// Shared monotonic event ID counter for bindings and the ZMQ listener.
+    next_event_id: Arc<AtomicU64>,
     /// The source of KV events.
     /// Can be `None` if all events are provided through
     /// [`KvEventPublisher::publish`] or [`KvEventPublisher::publish_batch`].
@@ -204,9 +250,8 @@ pub struct KvEventPublisher {
     /// The ID of the local worker emitting placement events.
     worker_id: WorkerId,
     /// The channel to send events to.
-    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
-    /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
-    next_event_id: Arc<AtomicU64>,
+    tx: mpsc::UnboundedSender<PublisherInput>,
+    processor_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>,
 }
 
 impl KvEventPublisher {
@@ -314,7 +359,7 @@ impl KvEventPublisher {
             })
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
-        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
         let _ = KvPublisherMetrics::from_component(&component);
@@ -363,7 +408,7 @@ impl KvEventPublisher {
 
         tracing::info!("Using event plane for KV event publishing");
         let endpoint_clone = endpoint.clone();
-        component.drt().runtime().secondary().spawn(async move {
+        let processor_handle = component.drt().runtime().secondary().spawn(async move {
             let event_publisher =
                 match dynamo_runtime::transports::event_plane::EventPublisher::for_endpoint_id(
                     endpoint_clone.drt(),
@@ -375,7 +420,7 @@ impl KvEventPublisher {
                     Ok(publisher) => publisher,
                     Err(e) => {
                         tracing::error!("Failed to create event publisher: {}", e);
-                        return;
+                        return Err(e);
                     }
                 };
             let publisher_id = event_publisher.publisher_id();
@@ -410,7 +455,7 @@ impl KvEventPublisher {
                 if let Some(endpoint) = recovery_endpoint {
                     let _ = endpoint.shutdown().await;
                 }
-                return;
+                return Ok(());
             }
 
             let source = DiscoveredKvEventSource {
@@ -434,7 +479,7 @@ impl KvEventPublisher {
                         if let Some(endpoint) = recovery_endpoint {
                             let _ = endpoint.shutdown().await;
                         }
-                        return;
+                        return Err(error.into());
                     }
                 },
             };
@@ -445,7 +490,7 @@ impl KvEventPublisher {
                     if let Some(endpoint) = recovery_endpoint {
                         let _ = endpoint.shutdown().await;
                     }
-                    return;
+                    return Err(error);
                 }
             };
 
@@ -459,28 +504,35 @@ impl KvEventPublisher {
             )
             .await;
 
-            if let Err(error) = component
+            let unregister_result = component
                 .drt()
                 .discovery()
                 .unregister(source_instance)
-                .await
-            {
+                .await;
+            if let Err(error) = &unregister_result {
                 tracing::warn!(%error, publisher_id, "Failed to unregister KV event source");
             }
-            if let Some(endpoint) = recovery_endpoint
-                && let Err(error) = endpoint.shutdown().await
-            {
+            let shutdown_result = if let Some(endpoint) = recovery_endpoint {
+                endpoint.shutdown().await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = &shutdown_result {
                 tracing::warn!(%error, publisher_id, "Failed to stop KV recovery endpoint");
             }
+            unregister_result?;
+            shutdown_result?;
+            Ok(())
         });
 
         Ok(Self {
             kv_block_size,
+            next_event_id,
             source,
             cancellation_token,
             worker_id,
             tx,
-            next_event_id,
+            processor_handle: tokio::sync::Mutex::new(Some(processor_handle)),
         })
     }
 
@@ -506,9 +558,17 @@ impl KvEventPublisher {
             .into_iter()
             .map(|event| PlacementEvent::local_gpu(self.worker_id, event))
             .collect();
-        self.tx.send(placement_events).map_err(|err| {
-            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
-        })
+        self.tx
+            .send(PublisherInput::Events(placement_events))
+            .map_err(|err| {
+                mpsc::error::SendError(
+                    err.0
+                        .into_events()
+                        .into_iter()
+                        .map(|event| event.event)
+                        .collect(),
+                )
+            })
     }
 
     pub fn publish_with_storage_tier(
@@ -542,8 +602,14 @@ impl KvEventPublisher {
             })
             .collect();
 
-        self.tx.send(events).map_err(|err| {
-            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
+        self.tx.send(PublisherInput::Events(events)).map_err(|err| {
+            mpsc::error::SendError(
+                err.0
+                    .into_events()
+                    .into_iter()
+                    .map(|event| event.event)
+                    .collect(),
+            )
         })
     }
 
@@ -551,15 +617,18 @@ impl KvEventPublisher {
         &self,
         event: PlacementEvent,
     ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        self.tx.send(vec![event]).map_err(|err| {
-            mpsc::error::SendError(
-                err.0
-                    .into_iter()
-                    .next()
-                    .expect("singleton publish returned an empty failed batch")
-                    .event,
-            )
-        })
+        self.tx
+            .send(PublisherInput::Events(vec![event]))
+            .map_err(|err| {
+                mpsc::error::SendError(
+                    err.0
+                        .into_events()
+                        .into_iter()
+                        .next()
+                        .expect("singleton publish returned an empty failed batch")
+                        .event,
+                )
+            })
     }
 
     pub fn next_event_id(&self) -> u64 {
@@ -578,6 +647,18 @@ impl KvEventPublisher {
         if let Some(source) = self.source.take() {
             source.shutdown();
         }
+    }
+
+    /// Retire the source before attaching a replacement engine's publishers.
+    pub async fn stop_and_wait(&self) -> Result<()> {
+        self.cancellation_token.cancel();
+        if let Some(source) = &self.source {
+            source.stop_and_wait().await?;
+        }
+        if let Some(handle) = self.processor_handle.lock().await.take() {
+            handle.await??;
+        }
+        Ok(())
     }
 }
 

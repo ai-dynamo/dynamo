@@ -261,6 +261,14 @@ impl ZmqKvEventSink {
         self.replay_endpoint.as_deref()
     }
 
+    pub fn replay_buffer_capacity(&self) -> usize {
+        if self.replay_endpoint.is_some() {
+            REPLAY_BUFFER_CAPACITY
+        } else {
+            0
+        }
+    }
+
     fn enqueue(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
         if events.is_empty() {
             return Ok(());

@@ -281,7 +281,7 @@ def test_serve_deployment(
             "DYN_NAMESPACE": f"sidecar-disagg-{generate_random_suffix()}",
             "MODEL": config.model,
         }
-        num_engine_ports = {"vllm": 4, "sglang": 5, "trtllm": 2}[backend]
+        num_engine_ports = {"vllm": 5, "sglang": 5, "trtllm": 2}[backend]
         with reserved_ports(
             num_engine_ports, start_port=DynamoPortRange.SERVE.value
         ) as engine_ports:
@@ -301,6 +301,7 @@ def test_serve_deployment(
                 engine_env["VLLM_PREFILL_KV_EVENT_PORT"] = str(
                     dynamo_dynamic_ports.kv_event_ports[1]
                 )
+                engine_env["VLLM_PREFILL_KV_REPLAY_PORT"] = str(engine_ports[4])
             elif backend == "sglang":
                 engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"] = str(
                     engine_ports[4]
@@ -430,8 +431,11 @@ def test_sidecar_kv_routing(
             "SGLANG_PAGE_SIZE": str(block_size),
         },
     )
+    num_engine_ports = worker_count * 2
+    if backend == "vllm" and not dep:
+        num_engine_ports += worker_count
     with reserved_ports(
-        worker_count * 2, start_port=DynamoPortRange.SERVE.value
+        num_engine_ports, start_port=DynamoPortRange.SERVE.value
     ) as engine_ports:
         if dep:
             devices = map_cuda_visible_devices(
@@ -443,7 +447,7 @@ def test_sidecar_kv_routing(
             engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
             # KV publishers offset by rank; SGLang also derives communication ports.
             dep_ports = allocate_contiguous_ports(
-                1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
+                1, 12 if backend == "sglang" else 4, DynamoPortRange.SERVE.value
             )
             request.addfinalizer(lambda: deallocate_ports(dep_ports))
             config.script_args += [
@@ -454,7 +458,11 @@ def test_sidecar_kv_routing(
                         "topic": "kv-events",
                         "endpoint": f"tcp://*:{dep_ports[0]}",
                         **(
-                            {"enable_kv_cache_events": True}
+                            {
+                                "enable_kv_cache_events": True,
+                                "replay_endpoint": f"tcp://*:{dep_ports[2]}",
+                                "buffer_steps": 10000,
+                            }
                             if backend == "vllm"
                             else {}
                         ),
@@ -515,6 +523,10 @@ def test_sidecar_kv_routing(
                 engine_env[f"{prefix}_KV_EVENT_PORT"] = str(
                     dynamo_dynamic_ports.kv_event_ports[worker_index]
                 )
+                if backend == "vllm":
+                    engine_env[f"{prefix}_KV_REPLAY_PORT"] = str(
+                        engine_ports[worker_count * 2 + worker_index]
+                    )
         run_serve_deployment(
             config,
             request,

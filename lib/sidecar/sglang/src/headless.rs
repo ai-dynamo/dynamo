@@ -278,6 +278,7 @@ fn start_publishers(
                     // Same SGLang normalization contract as the full worker relay.
                     image_token_id: None,
                     video_token_id: None,
+                    bootstrap: None,
                 }),
                 config.enable_local_indexer,
                 source.dp_rank,

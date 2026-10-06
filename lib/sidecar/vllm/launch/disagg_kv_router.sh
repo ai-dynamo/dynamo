@@ -91,10 +91,12 @@ VLLM_PREFILL1_HTTP_PORT="${VLLM_PREFILL1_HTTP_PORT:-8120}"
 VLLM_PREFILL1_GRPC_PORT="${VLLM_PREFILL1_GRPC_PORT:-50053}"
 VLLM_PREFILL1_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL1_NIXL_SIDE_CHANNEL_PORT:-20098}"
 VLLM_PREFILL1_KV_EVENT_PORT="${VLLM_PREFILL1_KV_EVENT_PORT:-20082}"
+VLLM_PREFILL1_KV_REPLAY_PORT="${VLLM_PREFILL1_KV_REPLAY_PORT:-$(( VLLM_PREFILL1_KV_EVENT_PORT + 100 ))}"
 VLLM_PREFILL2_HTTP_PORT="${VLLM_PREFILL2_HTTP_PORT:-8130}"
 VLLM_PREFILL2_GRPC_PORT="${VLLM_PREFILL2_GRPC_PORT:-50054}"
 VLLM_PREFILL2_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL2_NIXL_SIDE_CHANNEL_PORT:-20099}"
 VLLM_PREFILL2_KV_EVENT_PORT="${VLLM_PREFILL2_KV_EVENT_PORT:-20083}"
+VLLM_PREFILL2_KV_REPLAY_PORT="${VLLM_PREFILL2_KV_REPLAY_PORT:-$(( VLLM_PREFILL2_KV_EVENT_PORT + 100 ))}"
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
@@ -110,8 +112,8 @@ fi
 
 KV_PRODUCER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
 KV_CONSUMER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
-KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL1_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
-KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL2_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
+KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL1_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_PREFILL1_KV_REPLAY_PORT}\",\"buffer_steps\":${VLLM_KV_EVENT_BUFFER_STEPS:-10000},\"enable_kv_cache_events\":true}"
+KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL2_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_PREFILL2_KV_REPLAY_PORT}\",\"buffer_steps\":${VLLM_KV_EVENT_BUFFER_STEPS:-10000},\"enable_kv_cache_events\":true}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching vLLM Native-gRPC Sidecars with Disaggregated KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT" \
