@@ -402,6 +402,8 @@ class TrtllmConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
+        *,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         cfg = Config.model_validate(config)
 
@@ -412,7 +414,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         )
 
         # Set up resources
-        setup_worker_component_resources(worker_service, tp_size)
+        setup_worker_component_resources(worker_service, tp_size, num_gpus_per_node)
 
         # Validate and get args
         args = validate_and_get_worker_args(worker_service, backend="trtllm")
@@ -562,8 +564,9 @@ class TrtllmConfigModifier(BaseConfigModifier):
         cls,
         config: dict,
         block_size: int,
-        memory_fraction: float,
+        memory_fraction: float | None,
         prefix_caching: bool,
+        num_gpu_blocks: int | None = None,
         component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         """Apply KV-cache block size, memory budget, and prefix-caching policy.
@@ -577,6 +580,10 @@ class TrtllmConfigModifier(BaseConfigModifier):
         construction) rather than appending flags, so this needs no manual
         remove-then-append step.
         """
+        if memory_fraction is None:
+            raise ValueError(
+                "TensorRT-LLM direct rendering does not support fixed KV-cache blocks"
+            )
         cfg = Config.model_validate(config)
         worker_service = get_worker_component_from_config(
             cfg, backend="trtllm", sub_component_type=component_type

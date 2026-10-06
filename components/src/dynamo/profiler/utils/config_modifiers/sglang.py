@@ -316,6 +316,8 @@ class SGLangConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
+        *,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_component_from_config(
@@ -323,7 +325,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         )
 
         # Set up resources
-        setup_worker_component_resources(worker_service, tp_size)
+        setup_worker_component_resources(worker_service, tp_size, num_gpus_per_node)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -527,8 +529,9 @@ class SGLangConfigModifier(BaseConfigModifier):
         cls,
         config: dict,
         block_size: int,
-        memory_fraction: float,
+        memory_fraction: float | None,
         prefix_caching: bool,
+        num_gpu_blocks: int | None = None,
         component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         """Apply KV-cache block size, memory budget, and prefix-caching policy.
@@ -548,6 +551,10 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="sglang")
         args = break_arguments(args)
 
+        if memory_fraction is None:
+            raise ValueError(
+                "SGLang direct rendering does not support fixed KV-cache blocks"
+            )
         args = set_argument_value(args, "--page-size", str(block_size))
         args = set_argument_value(args, "--mem-fraction-static", str(memory_fraction))
 

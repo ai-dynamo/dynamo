@@ -39,6 +39,7 @@ _AGG_KEYS = {
     "moe_ep": "moe_ep",
     "block_size": "agg_block_size",
     "gpu_memory_utilization": "agg_gpu_memory_utilization",
+    "num_gpu_blocks": "agg_num_gpu_blocks",
     "enable_prefix_caching": "agg_enable_prefix_caching",
     "max_num_seqs": "agg_max_num_seqs",
     "max_num_batched_tokens": "agg_max_num_batched_tokens",
@@ -55,6 +56,7 @@ def _role_keys(role: str) -> dict[str, str]:
         "moe_ep": f"{role}_moe_ep",
         "block_size": f"{role}_block_size",
         "gpu_memory_utilization": f"{role}_gpu_memory_utilization",
+        "num_gpu_blocks": f"{role}_num_gpu_blocks",
         "enable_prefix_caching": f"{role}_enable_prefix_caching",
         "max_num_seqs": f"{role}_max_num_seqs",
         "max_num_batched_tokens": f"{role}_max_num_batched_tokens",
@@ -75,7 +77,6 @@ EVALUATION_CONTEXT_FIELDS = frozenset(
         "hardware_sku",
         "gpu_budget",
         "min_gpu_budget",
-        "context_length",
         "startup_time",
         "aic_nextn",
     }
@@ -116,11 +117,16 @@ def _materialize_worker(
     setter = getattr(modifier, setter_name)
 
     if strategy == "tp":
-        config = setter(config, candidate_config[keys["tp"]], component_type)
+        config = setter(
+            config,
+            candidate_config[keys["tp"]],
+            num_gpus_per_node=num_gpus_per_node,
+            component_type=component_type,
+        )
     else:
         # TEP/DEP setters need the physical node boundary in addition to
         # the parallel shape carried by the Candidate.
-        tp_or_ep_key = keys["moe_tp"] if strategy == "tep" else keys["moe_ep"]
+        tp_or_ep_key = keys["tp"] if strategy == "tep" else keys["moe_ep"]
         config = setter(
             config,
             candidate_config[tp_or_ep_key],
@@ -128,11 +134,18 @@ def _materialize_worker(
             component_type=component_type,
         )
 
+    memory_fraction = candidate_config[keys["gpu_memory_utilization"]]
+    num_gpu_blocks = candidate_config.get(keys["num_gpu_blocks"])
+    if (memory_fraction is None) == (num_gpu_blocks is None):
+        raise ValueError(
+            "candidate must set exactly one of GPU memory utilization and GPU blocks"
+        )
     config = modifier.set_config_kv_cache(
         config,
         block_size=candidate_config[keys["block_size"]],
-        memory_fraction=candidate_config[keys["gpu_memory_utilization"]],
+        memory_fraction=memory_fraction,
         prefix_caching=candidate_config[keys["enable_prefix_caching"]],
+        num_gpu_blocks=num_gpu_blocks,
         component_type=component_type,
     )
     config = modifier.set_prefill_config(

@@ -139,7 +139,7 @@ def test_adapter_matches_aisimulate_contract_and_defaults() -> None:
     config = DGDOutputConfig.model_validate(_config())
 
     assert validate_output_adapter(adapter, requested_name="dgd") is adapter
-    assert config.renderer == "aic"
+    assert config.generator == "aic"
     assert config.format == "manifest"
     assert config.output_file == "deployment.yaml"
     assert config.output_dir is None

@@ -27,11 +27,14 @@ class DGDOutputConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # TODO(#13545): carry DGDR v1's DGD override, trust-remote-code,
+    # toleration, and model-cache/PVC inputs through both generators.
+
     name: str = Field(min_length=1)
     namespace: str | None = None
     output_file: str | None = Field(default=None, min_length=1)
     output_dir: str | None = Field(default=None, min_length=1)
-    renderer: Literal["aic", "direct"] = "aic"
+    generator: Literal["aic", "direct"] = "aic"
     format: Literal["manifest", "kustomize"] = "manifest"
     runtime_image: str = Field(min_length=1)
     runtime_version_override: str | None = None
@@ -194,7 +197,7 @@ class DGDOutputAdapter:
                 workload,
                 resolved.generation_options(),
                 dgd_name=dgd_name,
-                renderer=resolved.renderer,
+                renderer=resolved.generator,
             )
             for candidate, dgd_name in zip(selected, names, strict=True)
         ]
@@ -202,7 +205,7 @@ class DGDOutputAdapter:
             rendered,
             output_dir,
             destinations=output_targets,
-            renderer=resolved.renderer,
+            renderer=resolved.generator,
             output=resolved.output_format,
         )
         return [*(Path(artifact["path"]) for artifact in artifacts), Path("index.json")]

@@ -139,6 +139,89 @@ def test_tp_strategy_materializes_successfully_on_all_three_backends() -> None:
         assert args, f"no args materialized for {backend}"
 
 
+@pytest.mark.parametrize(
+    ("backend", "tp_flag"),
+    [("vllm", "--tensor-parallel-size 4"), ("sglang", "--tp 4")],
+)
+def test_tep_uses_candidate_parallel_width(backend, tp_flag) -> None:
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM,
+        backend=backend,
+        model_name="Qwen/Qwen3-30B-A3B",
+    )
+
+    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+    worker = next(
+        component
+        for component in result.dgd["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    container = worker["podTemplate"]["spec"]["containers"][0]
+    assert tp_flag in " ".join(container["args"])
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == "4"
+
+
+def test_tp_larger_than_one_node_materializes_multinode_worker() -> None:
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM,
+        backend="vllm",
+        strategy="tp",
+        tp=16,
+        replicas=1,
+        used_gpus=16,
+    )
+
+    result = materialize_dgd_from_candidate(
+        candidate, image=_IMAGE, num_gpus_per_node=8
+    )
+
+    worker = next(
+        component
+        for component in result.dgd["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    container = worker["podTemplate"]["spec"]["containers"][0]
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == "8"
+    assert worker["multinode"] == {"nodeCount": 2}
+
+
+def test_vllm_fixed_kv_capacity_uses_num_gpu_blocks_override() -> None:
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM,
+        backend="vllm",
+        strategy="tp",
+        agg_gpu_memory_utilization=None,
+        agg_num_gpu_blocks=512,
+    )
+
+    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+    worker = next(
+        component
+        for component in result.dgd["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    args = worker["podTemplate"]["spec"]["containers"][0]["args"]
+    assert "--gpu-memory-utilization" not in args
+    index = args.index("--num-gpu-blocks-override")
+    assert args[index + 1] == "512"
+
+
+@pytest.mark.parametrize("backend", ["sglang", "trtllm"])
+def test_fixed_kv_capacity_fails_when_backend_cannot_materialize_it(backend) -> None:
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM,
+        backend=backend,
+        strategy="tp",
+        agg_gpu_memory_utilization=None,
+        agg_num_gpu_blocks=512,
+    )
+
+    with pytest.raises(MaterializationError, match="fixed KV-cache blocks"):
+        materialize_dgd_from_candidate(candidate, image=_IMAGE)
+
+
 def test_evaluated_model_is_written_into_the_dgd_not_the_template_placeholder() -> None:
     """Regression test for a real bug found running a live end-to-end sweep:
     the sweep evaluated and scored Qwen/Qwen3-8B, but the materialized DGD
@@ -401,7 +484,14 @@ def test_disagg_materializes_both_prefill_and_decode_with_their_own_shapes() -> 
     assert components["prefill"]["replicas"] == 2
     assert "deepseek-ai/DeepSeek-V3" in prefill_args
 
-    # Decode: tep strategy (moe_tp=1), replicas=1, distinct from prefill
+    # Decode: tep strategy (tp=4, moe_tp=1), replicas=1, distinct from prefill
+    assert "--tensor-parallel-size 4" in decode_args
+    assert (
+        components["decode"]["podTemplate"]["spec"]["containers"][0]["resources"][
+            "limits"
+        ]["nvidia.com/gpu"]
+        == "4"
+    )
     assert components["decode"]["replicas"] == 1
     assert "deepseek-ai/DeepSeek-V3" in decode_args
 

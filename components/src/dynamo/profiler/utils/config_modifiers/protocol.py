@@ -57,6 +57,8 @@ class ConfigModifierProtocol(Protocol):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
+        *,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         ...
 

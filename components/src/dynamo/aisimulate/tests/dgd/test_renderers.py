@@ -67,6 +67,53 @@ def _options(**overrides) -> DGDGenerationOptions:
     return DGDGenerationOptions(**values)
 
 
+def _stub_legacy_materialization(monkeypatch) -> None:
+    def get_main_container_dict(component):
+        return next(
+            container
+            for container in component["podTemplate"]["spec"]["containers"]
+            if container.get("name") == "main"
+        )
+
+    def set_unique_env_value(env, name, value):
+        return [
+            *(item for item in (env or []) if item.get("name") != name),
+            {"name": name, "value": value},
+        ]
+
+    def set_unique_argument_value(args, name, value):
+        filtered = []
+        index = 0
+        while index < len(args):
+            if args[index] == name:
+                index += 2
+            elif args[index].startswith(f"{name}="):
+                index += 1
+            else:
+                filtered.append(args[index])
+                index += 1
+        return [*filtered, name, value]
+
+    monkeypatch.setattr(base_module, "_materialize_dgd", lambda dgd, **_kwargs: dgd)
+    monkeypatch.setitem(
+        sys.modules,
+        "dynamo.profiler.utils.dgd_materialization",
+        SimpleNamespace(
+            DGDMaterializationPurpose=SimpleNamespace(FINAL_OUTPUT=object())
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "dynamo.profiler.utils.config",
+        SimpleNamespace(
+            break_arguments=lambda args: list(args or []),
+            get_main_container_dict=get_main_container_dict,
+            set_unique_argument_value=set_unique_argument_value,
+            set_unique_env_value=set_unique_env_value,
+        ),
+    )
+
+
 def test_materialize_uses_official_candidate_bridge(monkeypatch) -> None:
     captured = {}
 
@@ -353,6 +400,121 @@ spec:
     assert len(calls) == 1
     assert calls[0][0].value == "final output"
     assert calls[0][1:] == ("trtllm", "Qwen/Qwen3-32B")
+
+
+def test_patch_manifest_preserves_selected_router_configuration(monkeypatch) -> None:
+    _stub_legacy_materialization(monkeypatch)
+    candidate = _candidate(
+        adapters={
+            "dynamo.router": {
+                "policy": "kv_router",
+                "prefill_load_model": {"type": "none"},
+                "overlap_score_credit": 0.5,
+                "prefill_load_scale": 0.25,
+                "temperature": 0.2,
+            }
+        }
+    )
+
+    patched = base_module.patch_dgd_manifest(
+        """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          args: []
+""",
+        candidate,
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    frontend = yaml.safe_load(patched)["spec"]["components"][0]
+    env = {
+        item["name"]: item["value"]
+        for item in frontend["podTemplate"]["spec"]["containers"][0]["env"]
+    }
+    assert env == {
+        "DYN_ROUTER_MODE": "kv",
+        "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT": "0.5",
+        "DYN_ROUTER_PREFILL_LOAD_SCALE": "0.25",
+        "DYN_ROUTER_TEMPERATURE": "0.2",
+        "DYN_ROUTER_PREFILL_LOAD_MODEL": "none",
+    }
+
+
+def test_patch_manifest_rejects_router_runtime_model_without_configuration(
+    monkeypatch,
+) -> None:
+    _stub_legacy_materialization(monkeypatch)
+    candidate = _candidate(
+        adapters={
+            "dynamo.router": {
+                "policy": "kv_router",
+                "prefill_load_model": {"type": "ais"},
+            }
+        }
+    )
+
+    with pytest.raises(CandidateMaterializationError, match="runtime model"):
+        base_module.patch_dgd_manifest(
+            """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          args: []
+""",
+            candidate,
+            _options(),
+            dgd_name="sweeper-dgd",
+        )
+
+
+def test_patch_manifest_preserves_candidate_context_length(monkeypatch) -> None:
+    _stub_legacy_materialization(monkeypatch)
+
+    patched = base_module.patch_dgd_manifest(
+        """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: VllmWorker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          args: [--max-model-len, "40960"]
+""",
+        _candidate(context_length=8192),
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    worker = yaml.safe_load(patched)["spec"]["components"][0]
+    args = worker["podTemplate"]["spec"]["containers"][0]["args"]
+    assert args.count("--max-model-len") == 1
+    assert args[args.index("--max-model-len") + 1] == "8192"
 
 
 @pytest.mark.parametrize("namespace", [None, ""])
