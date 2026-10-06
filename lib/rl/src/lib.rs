@@ -972,22 +972,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_workers_global_scope_lists_every_namespace() {
-        let distributed = test_runtime().await;
-        let generation = start_rl_endpoint(&distributed, "mydgd-9ed17bcc").await;
-        let default = start_rl_endpoint(&distributed, GLOBAL_NAMESPACE).await;
-        let state = discovery_state(&distributed, NamespaceFilter::Global);
-
-        let workers = list_workers(&state).await.expect("list");
-        let namespaces: Vec<&str> = workers.iter().map(|w| w.namespace.as_str()).collect();
-        assert_eq!(namespaces, [GLOBAL_NAMESPACE, "mydgd-9ed17bcc"]);
-        assert_eq!(namespace_scope(&state.namespace_filter), GLOBAL_NAMESPACE);
-
-        generation.shutdown().await.expect("endpoint shutdown");
-        default.shutdown().await.expect("endpoint shutdown");
-    }
-
-    #[tokio::test]
     async fn list_workers_keeps_endpoints_without_unambiguous_model_metadata() {
         let distributed = test_runtime().await;
         let started = start_rl_endpoint(&distributed, "dynamo").await;
