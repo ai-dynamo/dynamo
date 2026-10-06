@@ -56,7 +56,9 @@ In a disaggregated deployment, the frontend routes to a generation only after th
 
 ### Warm-Up and Latency
 
-New workers start with an empty KV cache. Their first requests pay a full prefill, so time to first token and end-to-end latency rise until the cache warms, and KV-aware routing finds no cached prefixes on them until then. Nothing moves cache between generations by default. [KV cache offloading](../kv-cache-offloading/overview.mdx) reduces the penalty by letting new workers load blocks from a shared tier.
+New workers start with an empty KV cache. Their first requests pay a full prefill, so time to first token and end-to-end latency rise until the cache warms, and KV-aware routing finds no cached prefixes on them until then.
+
+Nothing moves cache between generations by default, and offloading to a tier inside the worker pod, such as host memory or local disk, does not help a new pod. A tier outside the pod does: an LMCache MP server on the same node, a Mooncake pool with SGLang HiCache, or a remote LMCache tier. Reuse also requires the new generation to keep the same model and KV layout, so a change to tensor parallelism, quantization, or KV dtype starts cold. See [KV cache offloading](../kv-cache-offloading/overview.mdx). If you use LMCache MP, upgrade the LMCache server before a worker image bump that changes the bundled LMCache version.
 
 The budgets also set the rollout's shape. A smaller `maxUnavailable` means more steps, and each step waits for a new pod to load the model and pass its readiness probe, so the rollout takes longer but disturbs less capacity at once. Roll during low traffic when you can.
 
@@ -380,6 +382,6 @@ The operator emits a `RollingUpdateNotSupported` event on the DGD for these path
 - A change to the pod template of any worker component rolls every worker component, including the ones whose template did not change.
 - Prefill and decode workers roll independently on every backing resource. Nothing holds the prefill to decode ratio inside a generation during the update, so capacity can skew between generations.
 - Grove and LWS have no surge. A worker component with one replica has a serving gap during its update.
-- New workers start with an empty KV cache. Nothing moves cache between generations.
+- New workers start with an empty KV cache. Only an offload tier outside the worker pod carries cache across generations.
 - The DGD has no fields for Grove or LWS update budgets.
 - `RollingUpdatePhase` `Failed` is defined but not set by the operator.
