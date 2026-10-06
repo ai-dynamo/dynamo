@@ -28,6 +28,10 @@ import (
 
 const matchTimeout = 30 * time.Second
 
+// Variables binds $var:<name> scalar directives in an expected manifest to
+// exact string values before matching.
+type Variables map[string]string
+
 type document struct {
 	node yaml.Node
 	gvk  schema.GroupVersionKind
@@ -47,9 +51,20 @@ type comparison struct {
 // the YAML documents in expectedPath. A final mismatch writes expectedPath + ".new".
 func EventuallyMatchManifests(t testing.TB, k8sClient client.Client, namespace, expectedPath string) {
 	t.Helper()
+	EventuallyMatchManifestsWithVariables(t, k8sClient, namespace, expectedPath, nil)
+}
+
+// EventuallyMatchManifestsWithVariables waits until the objects in namespace
+// exactly match the YAML documents in expectedPath after resolving variables.
+// A final mismatch writes expectedPath + ".new".
+func EventuallyMatchManifestsWithVariables(t testing.TB, k8sClient client.Client, namespace, expectedPath string, variables Variables) {
+	t.Helper()
 	expected, err := readDocuments(expectedPath)
 	if err != nil {
 		t.Fatalf("read golden manifests %q: %v", expectedPath, err)
+	}
+	if err := resolveVariables(expected, variables); err != nil {
+		t.Fatalf("resolve golden manifest variables %q: %v", expectedPath, err)
 	}
 
 	var last comparison
@@ -118,6 +133,33 @@ func readDocuments(path string) ([]document, error) {
 		return nil, errors.New("golden manifest file contains no objects")
 	}
 	return documents, nil
+}
+
+func resolveVariables(documents []document, variables Variables) error {
+	for i := range documents {
+		if err := resolveNodeVariables(&documents[i].node, variables); err != nil {
+			return fmt.Errorf("document %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+func resolveNodeVariables(node *yaml.Node, variables Variables) error {
+	if node.Kind == yaml.ScalarNode && node.Tag == yamlStringTag && strings.HasPrefix(node.Value, "$var:") {
+		name := strings.TrimPrefix(node.Value, "$var:")
+		value, found := variables[name]
+		if !found {
+			return fmt.Errorf("unknown variable %q", name)
+		}
+		node.Value = value
+		node.Tag = variableValueTagPrefix + name
+	}
+	for i := range node.Content {
+		if err := resolveNodeVariables(node.Content[i], variables); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func documentGVK(document *yaml.Node) (schema.GroupVersionKind, error) {
@@ -253,6 +295,8 @@ func nameCandidates(expected *yaml.Node, actual []actualDocument) []int {
 }
 
 func documentDiff(expected, actual *yaml.Node) string {
+	displayExpected := cloneNode(expected)
+	restoreVariableDirectives(displayExpected)
 	adapted := cloneNode(expected)
 	adaptedRoot := adaptNode(documentRoot(adapted), documentRoot(actual))
 	if adapted.Kind == yaml.DocumentNode {
@@ -260,7 +304,8 @@ func documentDiff(expected, actual *yaml.Node) string {
 	} else {
 		adapted = adaptedRoot
 	}
-	expectedYAML, expectedErr := encodeDocument(expected)
+	restoreVariableDirectives(adapted)
+	expectedYAML, expectedErr := encodeDocument(displayExpected)
 	actualYAML, actualErr := encodeDocument(adapted)
 	if expectedErr != nil || actualErr != nil {
 		if err := matchNode(documentRoot(expected), documentRoot(actual), "$"); err != nil {

@@ -62,7 +62,7 @@ CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.trtllm \
   --model-path <MODEL_PATH> \
   --tensor-parallel-size 2 \
   --enable-attention-dp \
-  --publish-events-and-metrics
+  --publish-kv-events
 
 # Frontend with KV routing
 python3 -m dynamo.frontend --router-mode kv
@@ -70,5 +70,10 @@ python3 -m dynamo.frontend --router-mode kv
 
 The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size` and configures Dynamo to publish KV events per DP rank. The router automatically creates routing targets for each `(worker_id, dp_rank)` combination.
 
-> [!NOTE]
-> Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.
+`--publish-kv-events` enables KV-event generation and publication and nothing
+else. Add `--publish-metrics` when the worker should also expose TensorRT-LLM
+metrics on its own Prometheus endpoint and publish the Planner's forward-pass
+metrics, or `--fpm-trace` or `DYN_FORWARDPASS_METRIC_PORT` when the Planner
+needs those metrics without the Prometheus surface. The deprecated
+`--publish-events-and-metrics` flag enables both publishing controls for one
+compatibility release.

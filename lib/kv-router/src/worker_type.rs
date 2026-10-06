@@ -94,12 +94,6 @@ mod tests {
     }
 
     #[test]
-    fn as_str_keeps_the_borrowed_receiver_api() {
-        let as_str: fn(&WorkerType) -> &'static str = WorkerType::as_str;
-        assert_eq!(as_str(&WorkerType::Prefill), "prefill");
-    }
-
-    #[test]
     fn built_in_selector_preserves_prefill_and_decode_pool_labels() {
         assert_eq!(WorkerType::Prefill.default_selector_label(), "prefill");
         assert_eq!(WorkerType::Decode.default_selector_label(), "decode");

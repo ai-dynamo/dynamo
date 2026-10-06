@@ -4,13 +4,18 @@
 // TODO: (DEP-635) this file should be renamed to system_http_server.rs
 //  it is being used not just for status, health, but others like loras management.
 
+#[cfg(test)]
+mod probe_tests;
+
 use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
 use crate::config::environment_names::runtime::system as env_system;
-use crate::logging::make_system_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
+use crate::utils::ip_resolver::{
+    DefaultIpResolver, IpResolutionError, IpResolver, resolve_advertise_ip_for_bind,
+};
 use axum::{
     Router,
     body::Bytes,
@@ -23,21 +28,32 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
+/// Selects probe semantics for the runtime-owned HTTP server.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SystemProbePolicy {
+    /// Preserve the configured worker health handler for both probes.
+    #[default]
+    Worker,
+    /// Static liveness and readiness based on runtime dependencies, not the engine.
+    RuntimeOnly,
+}
+
 /// System status server information containing socket address and handle
 #[derive(Debug)]
 pub struct SystemStatusServerInfo {
-    pub socket_addr: std::net::SocketAddr,
+    pub socket_addr: SocketAddr,
     pub handle: Option<Arc<JoinHandle<()>>>,
 }
 
 impl SystemStatusServerInfo {
-    pub fn new(socket_addr: std::net::SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
+    pub fn new(socket_addr: SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
         Self {
             socket_addr,
             handle: handle.map(Arc::new),
@@ -55,6 +71,49 @@ impl SystemStatusServerInfo {
     pub fn port(&self) -> u16 {
         self.socket_addr.port()
     }
+
+    /// Return an address that is served by the bound socket.
+    ///
+    /// A wildcard bind is replaced with a usable address from the same address
+    /// family. If interface enumeration fails, the same-family loopback is
+    /// used so IPv4 and IPv6 are never combined.
+    pub fn advertised_socket_addr(&self) -> SocketAddr {
+        match advertised_socket_addr(self.socket_addr, &DefaultIpResolver) {
+            Ok(address) => {
+                if self.socket_addr.ip().is_unspecified() && address.ip().is_loopback() {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        tracing::warn!(
+                            bind = %self.socket_addr,
+                            advertised = %address,
+                            "System status server found no non-loopback address in the bound family, so remote callers cannot reach the advertised address; on IPv6-only hosts, set DYN_SYSTEM_HOST=::"
+                        );
+                    });
+                }
+                address
+            }
+            Err(error) => {
+                let fallback = match self.socket_addr.ip() {
+                    IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                };
+                tracing::warn!(
+                    %error,
+                    %fallback,
+                    "Failed to resolve the system status advertisement address; using loopback"
+                );
+                SocketAddr::new(fallback, self.socket_addr.port())
+            }
+        }
+    }
+}
+
+fn advertised_socket_addr<R: IpResolver>(
+    bound: SocketAddr,
+    resolver: &R,
+) -> Result<SocketAddr, IpResolutionError> {
+    let advertise_ip = resolve_advertise_ip_for_bind(bound.ip(), resolver)?;
+    Ok(SocketAddr::new(advertise_ip, bound.port()))
 }
 
 impl Clone for SystemStatusServerInfo {
@@ -128,48 +187,56 @@ pub struct LoraResponse {
     pub count: Option<usize>,
 }
 
-/// Start system status server with metrics support
+/// Start the complete system HTTP server after runtime initialization.
 pub async fn spawn_system_status_server(
     host: &str,
     port: u16,
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
     discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
-) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    policy: SystemProbePolicy,
+) -> anyhow::Result<(SocketAddr, JoinHandle<()>)> {
     // Create system status server state with the provided distributed runtime
     let server_state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
-    let health_path = server_state
-        .drt()
-        .system_health()
-        .lock()
-        .health_path()
-        .to_string();
-    let live_path = server_state
-        .drt()
-        .system_health()
-        .lock()
-        .live_path()
-        .to_string();
-
+    let system_health = server_state.drt().system_health();
+    let (health_path, live_path) = {
+        let health = system_health.lock();
+        (
+            health.health_path().to_string(),
+            health.live_path().to_string(),
+        )
+    };
+    let mut app = match policy {
+        SystemProbePolicy::Worker => Router::new()
+            .route(
+                &health_path,
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || health_handler(state)
+                }),
+            )
+            .route(
+                &live_path,
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || health_handler(state)
+                }),
+            ),
+        SystemProbePolicy::RuntimeOnly => Router::new()
+            .route(&live_path, get(|| async { StatusCode::OK }))
+            .route(
+                &health_path,
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || runtime_health_handler(state)
+                }),
+            ),
+    };
     // Check if LoRA feature is enabled
     let lora_enabled =
         crate::config::env_is_truthy(crate::config::environment_names::llm::DYN_LORA_ENABLED);
 
-    let mut app = Router::new()
-        .route(
-            &health_path,
-            get({
-                let state = Arc::clone(&server_state);
-                move || health_handler(state)
-            }),
-        )
-        .route(
-            &live_path,
-            get({
-                let state = Arc::clone(&server_state);
-                move || health_handler(state)
-            }),
-        )
+    app = app
         .route(
             "/metrics",
             get({
@@ -232,7 +299,7 @@ pub async fn spawn_system_status_server(
             tracing::info!("[fallback handler] called");
             (StatusCode::NOT_FOUND, "Route not found").into_response()
         })
-        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
+        .layer(TraceLayer::new_for_http().make_span_with(crate::logging::make_system_request_span));
 
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {address}");
@@ -294,6 +361,20 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     tracing::trace!("Response {}", response.to_string());
 
     (status_code, response.to_string())
+}
+
+/// Sidecar readiness is independent of engine health and model registration.
+async fn runtime_health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    let ready = matches!(
+        tokio::time::timeout(Duration::from_secs(1), state.drt().check_dependencies()).await,
+        Ok(Ok(()))
+    );
+    let (code, status) = if ready {
+        (StatusCode::OK, "ready")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "notready")
+    };
+    (code, Json(json!({ "status": status })))
 }
 
 /// Metrics handler with DistributedRuntime uptime
@@ -710,7 +791,22 @@ async fn engine_route_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::ip_resolver::test_support::StubResolver;
     use tokio::time::Duration;
+
+    #[test]
+    fn advertised_address_stays_in_the_bound_family() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("lo", "127.0.0.1".parse().unwrap()),
+            ("eth0", "2001:db8::20".parse().unwrap()),
+        ];
+
+        let advertised = advertised_socket_addr("0.0.0.0:8080".parse().unwrap(), &resolver)
+            .expect("wildcard advertisement should resolve");
+
+        assert_eq!(advertised, "127.0.0.1:8080".parse().unwrap());
+    }
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
@@ -1175,6 +1271,97 @@ mod integration_tests {
                     );
                 }
                 // DRT handles server cleanup automatically
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_payloadless_endpoint_is_healthy_with_canary_enabled() {
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (
+                    env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+                    Some("notready"),
+                ),
+                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().unwrap();
+                let drt = Arc::new(
+                    crate::DistributedRuntime::new(
+                        runtime,
+                        crate::distributed::DistributedConfig::process_local(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                let addr = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started")
+                    .socket_addr;
+
+                use crate::pipeline::{
+                    AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn, async_trait,
+                    network::Ingress,
+                };
+                use crate::protocols::annotated::Annotated;
+
+                struct PayloadlessHandler;
+
+                #[async_trait]
+                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, anyhow::Error>
+                    for PayloadlessHandler
+                {
+                    async fn generate(
+                        &self,
+                        input: SingleIn<String>,
+                    ) -> anyhow::Result<ManyOut<Annotated<String>>> {
+                        let (data, ctx) = input.into_parts();
+                        Ok(crate::pipeline::ResponseStream::new(
+                            Box::pin(crate::stream::iter(vec![Annotated::from_data(data)])),
+                            ctx.context(),
+                        ))
+                    }
+                }
+
+                let namespace = drt.namespace("test").unwrap();
+                let component = namespace.component("backend").unwrap();
+                let ingress = Ingress::for_engine(Arc::new(PayloadlessHandler)).unwrap();
+                tokio::spawn(async move {
+                    // Unified decode workers deliberately follow this path: the
+                    // endpoint is registered without a canary payload.
+                    let _ = component
+                        .endpoint("generate")
+                        .endpoint_builder()
+                        .handler(ingress)
+                        .start()
+                        .await;
+                });
+
+                let client = reqwest::Client::new();
+                for path in ["/health", "/live"] {
+                    let url = format!("http://{addr}{path}");
+                    let mut last_response = None;
+                    for _ in 0..50 {
+                        let response = client.get(&url).send().await.unwrap();
+                        let status = response.status();
+                        let body = response.text().await.unwrap();
+                        if status == 200 && body.contains("\"status\":\"ready\"") {
+                            last_response = Some((status, body));
+                            break;
+                        }
+                        last_response = Some((status, body));
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    let (status, body) = last_response.unwrap();
+                    assert_eq!(status, 200, "{path} response: {body}");
+                    assert!(
+                        body.contains("\"status\":\"ready\""),
+                        "{path} response: {body}"
+                    );
+                }
             },
         )
         .await;

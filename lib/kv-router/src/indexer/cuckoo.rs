@@ -4,6 +4,7 @@
 mod adapter;
 mod addressing;
 mod bucket;
+mod canonical;
 mod dc;
 mod failure;
 mod global;
@@ -16,9 +17,10 @@ mod search;
 mod tests;
 
 pub use adapter::*;
+pub use canonical::CanonicalSequenceBlockHash;
 pub use dc::{
     DcCkfAggregationStats, DcCkfEventOutcome, DcCkfFormatIdentity, DcCkfMemoryStats,
-    DcCkfPublicationBatch, DcCkfPublicationStats, DcCkfState, DcCkfStats,
+    DcCkfPublicationBatch, DcCkfPublicationStats, DcCkfRankReplacement, DcCkfState, DcCkfStats,
 };
 pub use failure::{
     CkfCommitState, CkfFailureAction, CkfFailureDisposition, CkfFailureDomain, CkfFailurePoint,
@@ -94,6 +96,13 @@ impl CkfConfig {
             expected_blocks_per_dc,
             ..Self::default()
         }
+    }
+
+    /// Reports the physical bucket count so callers can size resources without allocating CKF
+    /// storage.
+    pub fn bucket_count(self) -> Result<usize, CkfBuildError> {
+        validate_config(self)?;
+        bucket_count(self.expected_blocks_per_dc)
     }
 }
 

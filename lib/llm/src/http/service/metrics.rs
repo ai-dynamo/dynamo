@@ -16,13 +16,16 @@ use dynamo_runtime::{
 };
 use prometheus::{
     Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+    core::{Collector, Desc},
+    proto::{Gauge, LabelPair, Metric, MetricFamily, MetricType},
 };
 use serde::Serialize;
 use std::{
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, OnceLock},
     time::{Duration, Instant},
 };
 
+use crate::discovery::ModelManager;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
@@ -32,7 +35,41 @@ use crate::protocols::{
 use crate::reasoning_field::{ReasoningField, RoutedReasoning};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
-use dynamo_runtime::error::ErrorType as DynamoErrorType;
+use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+fn new_failure_counter(metrics_prefix: Option<&str>) -> IntCounterVec {
+    let prefix =
+        sanitize_frontend_prometheus_prefix(metrics_prefix.unwrap_or(name_prefix::FRONTEND));
+    IntCounterVec::new(
+        Opts::new(
+            format!("{}_{}", prefix, frontend_service::FAILURES_TOTAL),
+            "Total number of terminal semantic request failures",
+        ),
+        &["class", "reason"],
+    )
+    .expect("the fixed failure metric name and labels are valid")
+}
+
+/// Process-wide because protocol error renderers can run without a request-scoped `Metrics`.
+static FAILURE_METRICS_PREFIX: OnceLock<String> = OnceLock::new();
+pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let prefix = FAILURE_METRICS_PREFIX.get_or_init(|| {
+        let raw = std::env::var(env_metrics::DYN_METRICS_PREFIX)
+            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+        sanitize_frontend_prometheus_prefix(&raw)
+    });
+    new_failure_counter(Some(prefix.as_str()))
+});
+
+fn record_failure_into(counter: &IntCounterVec, error: &DynamoError) {
+    counter
+        .with_label_values(&[error.class().as_str(), error.reason().as_str()])
+        .inc();
+}
+
+pub(crate) fn record_failure(error: &DynamoError) {
+    record_failure_into(&DYNAM_FAILURES_TOTAL, error);
+}
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
@@ -46,18 +83,63 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
-/// Check whether an error chain indicates that no backend worker is available.
+/// User-facing body for a request whose caller-supplied deadline elapsed
+/// before dispatch; shared by every HTTP surface so the wording stays uniform.
+pub(crate) const REQUEST_DEADLINE_EXCEEDED_MESSAGE: &str = "request deadline exceeded";
+
+/// Identify a deadline that expired while waiting in the router's queue.
+pub fn request_deadline_exceeded(err: &(dyn std::error::Error + 'static)) -> bool {
+    queue_deadline_error(err).is_some()
+}
+
+pub(super) fn queue_deadline_error<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a DynamoError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>()
+            && error.reason().as_str() == "router.queue_deadline_exceeded"
+        {
+            return Some(error);
+        }
+        current = error.source();
+    }
+    None
+}
+
+/// Check whether an error chain indicates that no backend worker is available
+/// to this request. Both flavors are HTTP 503; they differ only in whether
+/// migration may retry elsewhere.
 pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
-    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const UNAVAILABLE: &[DynamoErrorType] = &[
+        DynamoErrorType::Unavailable,
+        DynamoErrorType::WorkerUnavailable,
+    ];
     const AVAILABLE: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
 }
 
 /// Check whether an error chain indicates the request was cancelled.
 pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
-    const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
+    const CANCELLATION: &[DynamoErrorType] = &[
+        DynamoErrorType::Cancelled,
+        DynamoErrorType::Backend(dynamo_runtime::error::BackendError::Cancelled),
+    ];
     const NON_CANCELLATION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
+}
+
+pub fn request_was_timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
+    use dynamo_runtime::error::BackendError;
+
+    const TIMEOUT: &[DynamoErrorType] = &[
+        DynamoErrorType::ResponseTimeout,
+        DynamoErrorType::ConnectionTimeout,
+        DynamoErrorType::Backend(BackendError::ResponseTimeout),
+        DynamoErrorType::Backend(BackendError::ConnectionTimeout),
+    ];
+    const NON_TIMEOUT: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, TIMEOUT, NON_TIMEOUT)
 }
 
 pub use prometheus::Registry;
@@ -68,6 +150,88 @@ use super::RouteDoc;
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
+
+const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
+
+fn model_ready_metric_name(metrics_prefix: Option<&str>) -> String {
+    let prefix =
+        sanitize_frontend_prometheus_prefix(metrics_prefix.unwrap_or(name_prefix::FRONTEND));
+    format!("{}_{}", prefix, frontend_service::MODEL_READY)
+}
+
+/// Collects current model readiness directly from the frontend's routing catalog.
+///
+/// This is evaluated at scrape time so worker registration and removal are
+/// reflected without maintaining a second, potentially stale readiness state.
+struct ModelReadyCollector {
+    manager: Arc<ModelManager>,
+    desc: Desc,
+    metric_name: String,
+}
+
+impl ModelReadyCollector {
+    fn new(
+        manager: Arc<ModelManager>,
+        metrics_prefix: Option<String>,
+    ) -> Result<Self, prometheus::Error> {
+        let metric_name = model_ready_metric_name(metrics_prefix.as_deref());
+        let desc = Desc::new(
+            metric_name.clone(),
+            MODEL_READY_HELP.to_string(),
+            vec!["model".to_string()],
+            Default::default(),
+        )?;
+        Ok(Self {
+            manager,
+            desc,
+            metric_name,
+        })
+    }
+}
+
+impl Collector for ModelReadyCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let readiness = self.manager.registered_model_readiness();
+        if readiness.is_empty() {
+            return Vec::new();
+        }
+
+        let mut metrics = Vec::with_capacity(readiness.len());
+        for (model, ready) in readiness {
+            let mut model_label = LabelPair::default();
+            model_label.set_name("model".to_string());
+            model_label.set_value(model);
+
+            let mut gauge = Gauge::default();
+            gauge.set_value(if ready { 1.0 } else { 0.0 });
+
+            let mut metric = Metric::default();
+            metric.set_label(vec![model_label]);
+            metric.set_gauge(gauge);
+            metrics.push(metric);
+        }
+
+        let mut family = MetricFamily::default();
+        family.set_name(self.metric_name.clone());
+        family.set_help(MODEL_READY_HELP.to_string());
+        family.set_field_type(MetricType::GAUGE);
+        family.set_metric(metrics);
+        vec![family]
+    }
+}
+
+/// Register the scrape-time model readiness collector with the frontend registry.
+pub fn register_model_ready_metric(
+    registry: &Registry,
+    manager: Arc<ModelManager>,
+    metrics_prefix: Option<String>,
+) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(ModelReadyCollector::new(manager, metrics_prefix)?))
+}
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -325,9 +489,68 @@ fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
         && count <= MAX_BUCKET_COUNT
 }
 
+/// How bucket settings are looked up. Injected rather than calling `std::env::var`
+/// directly so tests can supply values without mutating the process environment:
+/// concurrent `setenv`/`getenv` is undefined behavior on Unix, and many other tests in
+/// this module construct `Metrics` and read these same variables.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The real lookup, used everywhere outside tests.
+fn system_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Read one histogram bucket setting, e.g. `DYN_METRICS_ITL_MAX`, from the environment.
+///
+/// Falls back to the deprecated doubled form (`DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`),
+/// warning so operators can migrate off it.
+///
+/// Returns `default` when neither name is set. A name that *is* set but cannot be
+/// parsed also returns `default`, but warns first: silently ignoring a typo makes
+/// the whole knob look like it does not exist.
+fn bucket_env_var<T: std::str::FromStr>(
+    env: EnvLookup<'_>,
+    prefix: &str,
+    suffix: &str,
+    default: T,
+) -> T {
+    let name = format!("{prefix}_{suffix}");
+    let found = match env(&name) {
+        Some(value) => Some((name, value)),
+        None => {
+            let deprecated = format!(
+                "{}{prefix}_{suffix}",
+                env_metrics::DEPRECATED_HISTOGRAM_PREFIX
+            );
+            env(&deprecated).map(|value| {
+                tracing::warn!(
+                    deprecated = %deprecated,
+                    replacement = %name,
+                    "Deprecated histogram bucket environment variable; rename it, \
+                     support for the old name will be removed in a future release"
+                );
+                (deprecated, value)
+            })
+        }
+    };
+
+    match found {
+        None => default,
+        Some((name, value)) => value.parse::<T>().unwrap_or_else(|_| {
+            tracing::warn!(
+                env_var = %name,
+                value = %value,
+                "Could not parse histogram bucket environment variable, using default"
+            );
+            default
+        }),
+    }
+}
+
 /// Parse histogram bucket configuration from environment variables
 /// Returns (min, max, count) with defaults if not specified
 fn parse_bucket_config(
+    env: EnvLookup<'_>,
     env_prefix: &str,
     default_min: f64,
     default_max: f64,
@@ -342,19 +565,9 @@ fn parse_bucket_config(
         );
         return (1.0, 10.0, 10);
     }
-    let env_prefix = format!("{}{}", env_metrics::HISTOGRAM_PREFIX, env_prefix);
-    let mut min = std::env::var(format!("{env_prefix}_MIN"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_min);
-    let mut max = std::env::var(format!("{env_prefix}_MAX"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_max);
-    let mut count = std::env::var(format!("{env_prefix}_COUNT"))
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(default_count);
+    let mut min = bucket_env_var(env, env_prefix, "MIN", default_min);
+    let mut max = bucket_env_var(env, env_prefix, "MAX", default_max);
+    let mut count = bucket_env_var(env, env_prefix, "COUNT", default_count);
 
     if !validate_bucket_config(min, max, count) {
         tracing::warn!(
@@ -468,6 +681,9 @@ pub enum Endpoint {
     /// Classification (sequence classification / cross-encoder pooling)
     Classify,
 
+    /// Cross-encoder reranking
+    Rerank,
+
     /// Pooling (raw pooler output)
     Pooling,
 
@@ -514,6 +730,23 @@ pub struct CancellationLabels {
 pub enum Status {
     Success,
     Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCompletion {
+    Success,
+    Cancelled,
+    Error,
+}
+
+impl RequestCompletion {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Cancelled => "cancelled",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// Error type classification for fine-grained observability
@@ -627,11 +860,11 @@ impl Metrics {
     /// All histograms use log-spaced buckets rounded to 2 significant figures. Bucket configuration
     /// can be customized via environment variables (MIN: minimum value, MAX: maximum value, COUNT: number of buckets):
     ///
-    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 256.0, 10)
+    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
     /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
-    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 2.0, 13)
+    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 80.0, 20)
     /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
@@ -660,11 +893,26 @@ impl Metrics {
     /// Create Metrics with an explicit optional prefix. `None` uses the standard
     /// frontend prefix and does not read environment variables.
     pub fn new_with_prefix(metrics_prefix: Option<String>) -> Self {
+        Self::build(metrics_prefix, &system_env)
+    }
+
+    /// Real constructor. `env` is injected so tests can pin bucket configuration
+    /// without touching the process environment.
+    fn build(metrics_prefix: Option<String>, env: EnvLookup<'_>) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
         let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
+        if let Err(configured_prefix) = FAILURE_METRICS_PREFIX.set(prefix.clone())
+            && configured_prefix != prefix
+        {
+            tracing::warn!(
+                configured=%configured_prefix,
+                requested=%prefix,
+                "Semantic failure metrics already use a different process-wide prefix"
+            );
+        }
         if prefix != raw_prefix {
             tracing::warn!(
                 raw=%raw_prefix,
@@ -727,8 +975,13 @@ impl Metrics {
         .unwrap();
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
-        let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
+        let (req_dur_min, req_dur_max, req_dur_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_REQUEST_DURATION,
+            1.0,
+            512.0,
+            10,
+        );
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -743,8 +996,13 @@ impl Metrics {
         .unwrap();
 
         // Input sequence length buckets: configurable via DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}
-        let (isl_min, isl_max, isl_count) =
-            parse_bucket_config("DYN_METRICS_INPUT_SEQUENCE", 50.0, 128000.0, 12);
+        let (isl_min, isl_max, isl_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_INPUT_SEQUENCE,
+            50.0,
+            128000.0,
+            12,
+        );
         let input_sequence_buckets = generate_log_buckets(isl_min, isl_max, isl_count);
 
         let input_sequence_length = HistogramVec::new(
@@ -758,8 +1016,13 @@ impl Metrics {
         .unwrap();
 
         // Output sequence length buckets: configurable via DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}
-        let (osl_min, osl_max, osl_count) =
-            parse_bucket_config("DYN_METRICS_OUTPUT_SEQUENCE", 50.0, 32000.0, 10);
+        let (osl_min, osl_max, osl_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_OUTPUT_SEQUENCE,
+            50.0,
+            32000.0,
+            10,
+        );
         let output_sequence_buckets = generate_log_buckets(osl_min, osl_max, osl_count);
 
         let output_sequence_length = HistogramVec::new(
@@ -783,7 +1046,7 @@ impl Metrics {
 
         // Time to first token buckets: configurable via DYN_METRICS_TTFT_{MIN,MAX,COUNT}
         let (ttft_min, ttft_max, ttft_count) =
-            parse_bucket_config("DYN_METRICS_TTFT", 0.001, 480.0, 18);
+            parse_bucket_config(env, env_metrics::DYN_METRICS_TTFT, 0.001, 480.0, 18);
         let time_to_first_token_buckets = generate_log_buckets(ttft_min, ttft_max, ttft_count);
 
         let time_to_first_token = HistogramVec::new(
@@ -797,7 +1060,8 @@ impl Metrics {
         .unwrap();
 
         // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
-        let (itl_min, itl_max, itl_count) = parse_bucket_config("DYN_METRICS_ITL", 0.001, 2.0, 13);
+        let (itl_min, itl_max, itl_count) =
+            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
 
         let inter_token_latency = HistogramVec::new(
@@ -814,8 +1078,13 @@ impl Metrics {
         // sub-second (60-200 token inputs on L4-class GPUs land in the 5-50ms
         // range), so 1ms..10s on a log scale gives p50/p99 resolution that
         // the 1..512s `request_duration` buckets cannot.
-        let (emb_min, emb_max, emb_count) =
-            parse_bucket_config("DYN_METRICS_EMBEDDING_LATENCY", 0.001, 10.0, 14);
+        let (emb_min, emb_max, emb_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_EMBEDDING_LATENCY,
+            0.001,
+            10.0,
+            14,
+        );
         let embedding_latency_buckets = generate_log_buckets(emb_min, emb_max, emb_count);
 
         let embedding_latency = HistogramVec::new(
@@ -1193,6 +1462,7 @@ impl Metrics {
         registry.register(Box::new(self.embedding_latency.clone()))?;
         registry.register(Box::new(self.images_per_request.clone()))?;
         registry.register(Box::new(self.videos_per_request.clone()))?;
+        registry.register(Box::new(DYNAM_FAILURES_TOTAL.clone()))?;
         registry.register(Box::new(self.audio_per_request.clone()))?;
         registry.register(Box::new(self.image_tokens_per_request.clone()))?;
 
@@ -1487,6 +1757,14 @@ impl InflightGuard {
         self.status = Status::Error;
         self.error_type = error_type;
     }
+
+    fn request_completion(&self) -> RequestCompletion {
+        match (&self.status, &self.error_type) {
+            (Status::Success, _) => RequestCompletion::Success,
+            (Status::Error, ErrorType::Cancelled) => RequestCompletion::Cancelled,
+            (Status::Error, _) => RequestCompletion::Error,
+        }
+    }
 }
 
 impl Drop for InflightGuard {
@@ -1506,12 +1784,14 @@ impl Drop for InflightGuard {
             .with_label_values(&[&self.model])
             .observe(duration);
 
+        let completion = self.request_completion();
+        self.span.record("request.outcome", completion.as_str());
+
         let elapsed_ms = (duration * 1000.0) as u64;
         let status_str = self.status.as_str();
-        match self.status {
-            Status::Error => {
+        match completion {
+            RequestCompletion::Error => {
                 let detail = match self.error_type {
-                    ErrorType::Cancelled => "cancelled before completion",
                     ErrorType::ResponseTimeout => "backend stream inactivity timeout",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
@@ -1519,7 +1799,11 @@ impl Drop for InflightGuard {
                     ErrorType::Overload => "service overloaded or rate limited",
                     ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
-                    ErrorType::None => "unknown error",
+                    // `request_completion()` routes `(Error, Cancelled)` to
+                    // `RequestCompletion::Cancelled`, so only `None` reaches
+                    // here. `Cancelled` is listed to keep the match total
+                    // without a panic in a `Drop` impl.
+                    ErrorType::None | ErrorType::Cancelled => "unknown error",
                 };
                 tracing::error!(
                     request_id = %self.request_id,
@@ -1533,7 +1817,20 @@ impl Drop for InflightGuard {
                     "request completed"
                 );
             }
-            Status::Success => {
+            RequestCompletion::Cancelled => {
+                tracing::info!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %completion.as_str(),
+                    error_type = %self.error_type,
+                    error_detail = "cancelled before completion",
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+            RequestCompletion::Success => {
                 tracing::info!(
                     request_id = %self.request_id,
                     model = %self.model,
@@ -1555,6 +1852,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Classify => write!(f, "classify"),
+            Endpoint::Rerank => write!(f, "rerank"),
             Endpoint::Pooling => write!(f, "pooling"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
@@ -1574,6 +1872,7 @@ impl Endpoint {
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
             Endpoint::Classify => "classify",
+            Endpoint::Rerank => "rerank",
             Endpoint::Pooling => "pooling",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
@@ -2100,19 +2399,14 @@ fn annotated_to_sse_event<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
-            let error_message = if let Some(ref dynamo_err) = annotated.error
-                && !dynamo_err.message().is_empty()
-            {
-                dynamo_err.message().to_string()
-            } else if let Some(ref comments) = annotated.comment {
-                let joined = comments.join(" -- ");
-                if joined.trim().is_empty() {
-                    "unspecified error".to_string()
-                } else {
-                    joined
-                }
+            let error_message = if let Some(ref dynamo_err) = annotated.error {
+                format!(
+                    "semantic stream error: class={} reason={}",
+                    dynamo_err.class(),
+                    dynamo_err.reason()
+                )
             } else {
-                "unspecified error".to_string()
+                "backend stream error".to_string()
             };
             return Err(axum::Error::new(error_message));
         }
@@ -2284,6 +2578,116 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 mod tests {
     use super::*;
 
+    fn model_ready_value_with_name(
+        registry: &Registry,
+        metric_name: &str,
+        model: &str,
+    ) -> Option<f64> {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)?
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "model" && label.value() == model)
+            })
+            .map(|metric| metric.get_gauge().value())
+    }
+
+    fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
+        model_ready_value_with_name(registry, &model_ready_metric_name(None), model)
+    }
+
+    #[test]
+    fn model_ready_metric_tracks_live_routing_catalog() {
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        register_model_ready_metric(&registry, manager.clone(), None).unwrap();
+
+        assert_eq!(model_ready_value(&registry, "test-model"), None);
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        let mut worker_set = crate::discovery::WorkerSet::new(
+            "watched".to_string(),
+            "watched-mdc".to_string(),
+            card,
+        );
+        let (worker_tx, worker_rx) = tokio::sync::watch::channel(Vec::new());
+        worker_set.set_instance_watcher(worker_rx);
+        worker_set.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        assert!(manager.add_worker_set("test-model", "watched", worker_set));
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+
+        let custom_registry = Registry::new();
+        register_model_ready_metric(
+            &custom_registry,
+            manager.clone(),
+            Some("custom_frontend".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            model_ready_value_with_name(
+                &custom_registry,
+                "custom_frontend_model_ready",
+                "test-model"
+            ),
+            Some(0.0)
+        );
+        assert_eq!(model_ready_value(&custom_registry, "test-model"), None);
+
+        worker_tx.send(vec![1]).unwrap();
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+
+        worker_tx.send(Vec::new()).unwrap();
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+    }
+
+    #[test]
+    fn model_ready_metric_omits_alias_names() {
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        register_model_ready_metric(&registry, manager.clone(), None).unwrap();
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        let mut worker_set = crate::discovery::WorkerSet::new(
+            "watched".to_string(),
+            "watched-mdc".to_string(),
+            card,
+        );
+        let (worker_tx, worker_rx) = tokio::sync::watch::channel(Vec::new());
+        worker_set.set_instance_watcher(worker_rx);
+        worker_set.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        let worker_set = Arc::new(worker_set);
+
+        // `register_alias` refuses a name that is already a live primary, so it must
+        // run before the alias name gains its own WorkerSet.
+        assert!(manager.add_worker_set_arc("test-model", "watched", worker_set.clone()));
+        assert!(manager.register_alias("test-model-alias", "test-model"));
+        assert!(manager.add_worker_set_arc("test-model-alias", "watched", worker_set));
+
+        worker_tx.send(vec![1]).unwrap();
+
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+        assert_eq!(model_ready_value(&registry, "test-model-alias"), None);
+
+        let series = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == model_ready_metric_name(None))
+            .map(|family| family.get_metric().len());
+        assert_eq!(series, Some(1));
+    }
+
     #[test]
     fn test_round_to_sig_figs() {
         // Test rounding to 2 significant figures
@@ -2327,6 +2731,159 @@ mod tests {
         }
     }
 
+    /// A stand-in for the process environment. Tests inject this instead of calling
+    /// `temp_env`: mutating the real environment races the many other tests in this
+    /// module that construct `Metrics` and read these same variables, which on Unix is
+    /// an unsafe `setenv`/`getenv` race, not merely an ordering hazard.
+    fn fake_env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn bucket_config_reads_the_documented_env_var_names() {
+        // These names were once read under an extra DYN_HISTOGRAM_ prefix, which
+        // silently stopped them working; they must resolve as documented.
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "0.002"),
+            ("DYN_METRICS_ITL_MAX", "80"),
+            ("DYN_METRICS_ITL_COUNT", "20"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.002, 80.0, 20));
+    }
+
+    #[test]
+    fn bucket_config_falls_back_to_the_deprecated_doubled_name() {
+        // The doubled form was the only name that worked for several releases, so it
+        // stays supported for one more rather than silently reverting to defaults.
+        let env = fake_env(&[("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "80")]);
+        let (_, max, _) = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(max, 80.0);
+    }
+
+    #[test]
+    fn bucket_config_prefers_the_new_name_over_the_deprecated_one() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MAX", "80"),
+            ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "30"),
+        ]);
+        let (_, max, _) = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(max, 80.0);
+    }
+
+    #[test]
+    fn bucket_config_falls_back_to_defaults_for_unset_and_unparseable_values() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "not-a-number"),
+            ("DYN_METRICS_ITL_COUNT", "12.5"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.001, 2.0, 13));
+    }
+
+    #[test]
+    fn bucket_config_rejects_a_parseable_but_invalid_combination() {
+        // min >= max parses fine but cannot produce buckets, so the whole set reverts —
+        // including a COUNT that was valid on its own.
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "5"),
+            ("DYN_METRICS_ITL_MAX", "1"),
+            ("DYN_METRICS_ITL_COUNT", "20"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.001, 2.0, 13));
+    }
+
+    /// Upper bounds of a histogram's buckets, i.e. the `le` label values that a
+    /// dashboard's `histogram_quantile` query sees on `/metrics`.
+    fn bucket_upper_bounds(registry: &Registry, metric_name: &str) -> Vec<f64> {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)
+            .expect("histogram not registered")
+            .get_metric()[0]
+            .get_histogram()
+            .get_bucket()
+            .iter()
+            .map(|b| b.upper_bound())
+            .collect()
+    }
+
+    #[test]
+    fn itl_ceiling_env_var_reaches_the_exported_le_labels() {
+        // Deliberately not the default (80.0, 20): a test that sets the env to the
+        // default value would pass even if the variable were ignored entirely.
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MAX", "30"),
+            ("DYN_METRICS_ITL_COUNT", "8"),
+        ]);
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &env);
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.5);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        assert_eq!(
+            bounds.last().copied(),
+            Some(30.0),
+            "top finite bucket should follow DYN_METRICS_ITL_MAX, got {bounds:?}"
+        );
+        assert_eq!(
+            bounds.len(),
+            8,
+            "bucket count should follow DYN_METRICS_ITL_COUNT"
+        );
+    }
+
+    #[test]
+    fn itl_default_buckets_reach_80_seconds() {
+        // The ceiling was 2.0s, so any inter-token latency above it landed in `+Inf` and
+        // `histogram_quantile` pinned p99 at exactly 2.0 -- indistinguishable from a real
+        // 2s measurement. Guard the shipped default, not just the env-var override.
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &fake_env(&[]));
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.5);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        // The exact set is the contract. Note the bottom edge of 0.0018: vLLM's equivalent
+        // starts at 0.01 and cannot resolve anything faster than 10ms per token, so raising
+        // the ceiling must not cost the low-end resolution Dynamo has and vLLM does not.
+        assert_eq!(
+            bounds,
+            vec![
+                0.0, 0.0018, 0.0033, 0.0059, 0.011, 0.02, 0.035, 0.064, 0.12, 0.21, 0.38, 0.69,
+                1.2, 2.3, 4.1, 7.4, 13.0, 24.0, 44.0, 80.0
+            ],
+        );
+    }
+
     #[test]
     fn test_generate_log_buckets_edge_cases() {
         // Test empty buckets
@@ -2361,11 +2918,12 @@ mod tests {
     #[test]
     fn test_all_buckets_are_two_sig_figs() {
         let test_cases = vec![
-            (1.0, 256.0, 10),
+            (1.0, 512.0, 10),
             (50.0, 128000.0, 12),
             (50.0, 32000.0, 10),
             (0.001, 480.0, 18),
-            (0.001, 2.0, 13),
+            (0.001, 80.0, 20),
+            (0.001, 10.0, 14),
         ];
 
         for (min, max, count) in test_cases {
@@ -2493,6 +3051,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: Some(LLMMetricAnnotation {
                 input_tokens: 10,
                 output_tokens: 4,
@@ -3181,6 +3740,41 @@ mod tests {
             "internal metrics leaked to client SSE: {wire}"
         );
 
+        // A choice-less Dynamo metadata frame is client-visible.
+        let metadata: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "nvext": {"engine_data": {"prompt_token_ids": [1, 2]}}
+            }))
+            .unwrap();
+        let metadata = Annotated {
+            id: None,
+            data: Some(metadata),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let mut http_queue_guard = None;
+        let event = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(metadata),
+            &mut collector,
+            &mut http_queue_guard,
+            ReasoningField::default(),
+        )
+        .expect("conversion ok")
+        .expect("nvext chunk should yield a client event");
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+        assert!(
+            wire.contains("engine_data") && wire.contains("prompt_token_ids"),
+            "nvext metadata did not reach client SSE: {wire}"
+        );
+
         // (2) Payload-only usage chunk (event = payload_usage, carries usage data).
         let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
             serde_json::from_value(serde_json::json!({
@@ -3198,10 +3792,11 @@ mod tests {
         };
 
         let mut http_queue_guard = None;
-        let result = process_response_using_event_converter_and_observe_metrics(
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(payload_usage),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
         .expect("conversion ok");
         assert!(
@@ -3323,6 +3918,18 @@ mod tests {
 
         assert_eq!(with_json, without_json);
         assert!(with_json.get("llm_metrics").is_none());
+
+        let mut inbound_json = without_json;
+        inbound_json["llm_metrics"] = serde_json::json!({
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "chunk_tokens": 1,
+            "cached_tokens": 1,
+            "image_tokens": 300
+        });
+        let inbound: NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(inbound_json).unwrap();
+        assert_eq!(inbound.llm_metrics, with_metrics.llm_metrics);
     }
 
     #[test]
@@ -3496,6 +4103,39 @@ mod tests {
                 RequestType::Unary.as_str(),
                 Status::Error.as_str(),
                 ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_classifies_cancellation_separately_for_tracing() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let mut guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "cancelled-request",
+        );
+        guard.mark_error(ErrorType::Cancelled);
+
+        assert_eq!(guard.request_completion(), RequestCompletion::Cancelled);
+        drop(guard);
+
+        // Keep the existing Prometheus contract while tracing reports cancellation
+        // as an expected request outcome rather than a span error.
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Stream.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Cancelled.as_str(),
             ])
             .get();
         assert_eq!(counter_value, 1);
@@ -3702,6 +4342,64 @@ mod tests {
     }
 
     #[test]
+    fn semantic_failure_metric_honors_custom_prefix() {
+        let registry = prometheus::Registry::new();
+        let counter = new_failure_counter(Some("nv_llm_http_service"));
+        counter
+            .with_label_values(&["Internal", "runtime.internal"])
+            .inc();
+        registry.register(Box::new(counter)).unwrap();
+
+        assert!(
+            registry
+                .gather()
+                .iter()
+                .any(|family| family.name() == "nv_llm_http_service_failures_total")
+        );
+    }
+
+    #[test]
+    fn semantic_failure_metric_has_only_class_and_reason_labels() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+
+        let registry = prometheus::Registry::new();
+        let counter = new_failure_counter(None);
+        registry.register(Box::new(counter.clone())).unwrap();
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::new("request.invalid").unwrap())
+            .build();
+
+        record_failure_into(&counter, &error);
+
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "dynamo_frontend_failures_total")
+            .expect("dynamo_frontend_failures_total metric");
+        let metric = family
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == "request.invalid")
+            })
+            .expect("request.invalid sample");
+        let labels: Vec<_> = metric
+            .get_label()
+            .iter()
+            .map(|label| (label.name(), label.value()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![("class", "InvalidRequest"), ("reason", "request.invalid")]
+        );
+        assert_eq!(metric.get_counter().value(), 1.0);
+    }
+
+    #[test]
     fn test_multiple_requests_different_error_types() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -3846,6 +4544,7 @@ mod tests {
                         service_tier: None,
                     },
                     nvext: None,
+                    prompt_logprobs: None,
                     llm_metrics: None,
                 },
             ),
@@ -3896,36 +4595,34 @@ mod tests {
     }
 
     #[test]
-    fn test_error_event_uses_dynamo_error_message() {
+    fn test_error_event_uses_semantic_identity_without_diagnostic() {
         use dynamo_runtime::error::DynamoError;
         let result = run_event_converter(error_annotated(
             Some(DynamoError::msg("image load failed: 403 Forbidden")),
             None,
         ));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("403 Forbidden"));
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("class=Internal"));
+        assert!(message.contains("reason=runtime.unclassified"));
+        assert!(!message.contains("403 Forbidden"));
     }
 
     #[test]
-    fn test_error_event_falls_back_to_comment() {
+    fn test_error_event_does_not_expose_comment() {
         let result =
             run_event_converter(error_annotated(None, Some(vec!["connection lost".into()])));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("connection lost"));
+        let message = result.unwrap_err().to_string();
+        assert_eq!(message, "backend stream error");
+        assert!(!message.contains("connection lost"));
     }
 
     #[test]
-    fn test_error_event_unspecified_when_no_message() {
+    fn test_error_event_without_identity_is_generic() {
         let result = run_event_converter(error_annotated(None, None));
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
-    }
-
-    #[test]
-    fn test_error_event_empty_comment_falls_through() {
-        let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+        assert_eq!(result.unwrap_err().to_string(), "backend stream error");
     }
 
     #[test]
@@ -4044,5 +4741,497 @@ mod tests {
             found,
             "embedding_latency_seconds histogram must be registered with the registry"
         );
+    }
+
+    /// Request payload capture must be transparent: the collector, the client
+    /// response and the handler's error path behave identically with capture on
+    /// (`scan_aggregate_with_future`) and off (#11349).
+    mod capture_transparency {
+        use super::*;
+        use crate::http::service::openai::check_for_backend_error;
+        use crate::http::service::service_v2::BackendErrorCheck;
+        use crate::preprocessor::OpenAIPreprocessor;
+        use crate::protocols::common::llm_backend::{BackendOutput, FinishReason};
+        use crate::protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE;
+        use crate::protocols::openai::ParsingOptions;
+        use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+        use crate::protocols::openai::chat_completions::{
+            NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+        };
+        use crate::request_trace::payload_stream::scan_aggregate_with_future;
+        use crate::types::Annotated;
+        use dynamo_runtime::engine::AsyncEngineContext;
+        use futures::{Stream, StreamExt};
+
+        const MODEL: &str = "test-model";
+        const REQUEST_ID: &str = "test-id";
+        const INPUT_TOKENS: usize = 7;
+        const TAIL_CACHED_TOKENS: usize = 2;
+
+        #[derive(Debug)]
+        struct TestContext;
+
+        #[async_trait::async_trait]
+        impl AsyncEngineContext for TestContext {
+            fn id(&self) -> &str {
+                REQUEST_ID
+            }
+            fn stop_generating(&self) {}
+            fn is_stopped(&self) -> bool {
+                false
+            }
+            fn is_killed(&self) -> bool {
+                false
+            }
+            async fn stopped(&self) {}
+            async fn killed(&self) {}
+            fn stop(&self) {}
+            fn kill(&self) {}
+            fn link_child(&self, _: Arc<dyn AsyncEngineContext>) {}
+        }
+
+        fn backend_output(
+            text: &str,
+            token_ids: Vec<u32>,
+            finish_reason: Option<FinishReason>,
+        ) -> BackendOutput {
+            BackendOutput {
+                token_ids,
+                tokens: vec![],
+                text: Some(text.to_string()),
+                cum_log_probs: None,
+                log_probs: None,
+                top_logprobs: None,
+                finish_reason,
+                stop_reason: None,
+                index: Some(0),
+                completion_usage: None,
+                disaggregated_params: None,
+                encoder_result: None,
+                worker_trace_link: None,
+                engine_data: None,
+                routing_data: None,
+                jailed_text: None,
+            }
+        }
+
+        /// A backend that answers "Hello world" in two chunks and reports cached
+        /// prompt tokens on the final one.
+        fn backend_success() -> Vec<Annotated<BackendOutput>> {
+            let mut last = backend_output("world", vec![2, 3], Some(FinishReason::Stop));
+            last.completion_usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: INPUT_TOKENS as u32,
+                completion_tokens: 3,
+                total_tokens: (INPUT_TOKENS + 3) as u32,
+                prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                    cached_tokens: Some(TAIL_CACHED_TOKENS as u32),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            vec![
+                Annotated::from_data(backend_output("Hello ", vec![1], None)),
+                Annotated::from_data(last),
+            ]
+        }
+
+        /// What the frontend hands the non-streaming chat handler: the real
+        /// preprocessor output for `outputs`, with payload capture off or on.
+        /// The two differ in shape (capture on ends with a `payload_usage`
+        /// chunk), which is exactly what the handler chain must not notice.
+        fn preprocessed(
+            capture: bool,
+            outputs: Vec<Annotated<BackendOutput>>,
+        ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static
+        {
+            let request = NvCreateChatCompletionRequest {
+                inner: dynamo_protocols::types::CreateChatCompletionRequest {
+                    model: MODEL.to_string(),
+                    messages: vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                            content:
+                                dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                                    "Hello".to_string(),
+                                ),
+                            name: None,
+                        },
+                    )],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            // The non-streaming handler forces usage on before preprocessing
+            // (`force_include_usage`), so the client always gets a usage block.
+            let mut request = request;
+            request.inner.stream_options =
+                Some(dynamo_protocols::types::ChatCompletionStreamOptions {
+                    include_usage: true,
+                    continuous_usage_stats: false,
+                });
+            let mut generator = request.response_generator(REQUEST_ID.to_string());
+            generator.update_isl(INPUT_TOKENS as u32);
+            OpenAIPreprocessor::transform_postprocessor_stream(
+                futures::stream::iter(outputs),
+                Box::new(generator),
+                Arc::new(TestContext),
+                capture,
+                false,
+                None,
+                Default::default(),
+            )
+        }
+
+        /// Run `outputs` through the handler chain with capture off, and with
+        /// capture on through the scan; return both registries and results plus
+        /// the capture record future.
+        async fn both_legs(
+            outputs: Vec<Annotated<BackendOutput>>,
+        ) -> (
+            (Registry, Result<NvCreateChatCompletionResponse, Rejected>),
+            (Registry, Result<NvCreateChatCompletionResponse, Rejected>),
+            impl std::future::Future<Output = crate::request_trace::payload_stream::PayloadOutcome>,
+        ) {
+            let plain = observe_and_aggregate(preprocessed(false, outputs.clone())).await;
+            let (captured, future) =
+                scan_aggregate_with_future(Box::pin(preprocessed(true, outputs)));
+            let capture = observe_and_aggregate(captured).await;
+            (plain, capture, future)
+        }
+
+        fn chat_chunk(
+            content: Option<&str>,
+            finish: Option<dynamo_protocols::types::FinishReason>,
+            llm_metrics: Option<LLMMetricAnnotation>,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            #[allow(deprecated)]
+            let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                role: Some(dynamo_protocols::types::Role::Assistant),
+                content: content.map(|c| {
+                    dynamo_protocols::types::ChatCompletionMessageContent::Text(c.to_string())
+                }),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            };
+            let choice = dynamo_protocols::types::ChatChoiceStream {
+                index: 0,
+                delta,
+                finish_reason: finish,
+                logprobs: None,
+            };
+            let response = NvCreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: REQUEST_ID.to_string(),
+                    choices: vec![choice],
+                    created: 0,
+                    model: MODEL.to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
+                prompt_logprobs: None,
+                llm_metrics,
+            };
+            Annotated {
+                data: Some(response),
+                id: None,
+                event: None,
+                comment: None,
+                error: None,
+            }
+        }
+
+        /// Per-chunk metrics as the preprocessor attaches them to content
+        /// chunks: no `cached_tokens`, which only the usage tail carries.
+        fn chunk_metrics(chunk_tokens: usize, output_tokens: usize) -> LLMMetricAnnotation {
+            LLMMetricAnnotation {
+                input_tokens: INPUT_TOKENS,
+                output_tokens,
+                chunk_tokens,
+                cached_tokens: None,
+                ..Default::default()
+            }
+        }
+
+        /// The tool-call-jail tail shape: usage data plus cumulative metrics as a
+        /// `payload_usage` annotation. The tag is set explicitly because
+        /// `to_annotation` always emits `llm_metrics`.
+        fn payload_usage_tail(
+            output_tokens: usize,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let tail_metrics = LLMMetricAnnotation {
+                cached_tokens: Some(TAIL_CACHED_TOKENS),
+                ..chunk_metrics(0, output_tokens)
+            };
+            let annotation = tail_metrics.to_annotation::<()>().unwrap();
+            let mut tail = chat_chunk(None, None, None);
+            {
+                let data = tail.data.as_mut().unwrap();
+                data.inner.choices = vec![];
+                data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                    prompt_tokens: INPUT_TOKENS as u32,
+                    completion_tokens: output_tokens as u32,
+                    total_tokens: (INPUT_TOKENS + output_tokens) as u32,
+                    ..Default::default()
+                });
+            }
+            tail.event = Some(ANNOTATION_PAYLOAD_USAGE.to_string());
+            tail.comment = annotation.comment;
+            tail
+        }
+
+        /// What the collector wrote, minus durations: TTFT and ITL sums are
+        /// wall-clock and cannot be compared across runs, so only their
+        /// sample counts are part of the signature.
+        #[derive(Debug, PartialEq)]
+        struct MetricSignature {
+            output_tokens_total: u64,
+            /// (sample count, sample sum)
+            isl: (u64, u64),
+            osl: (u64, u64),
+            cached_tokens: (u64, u64),
+            ttft_samples: u64,
+            itl_samples: u64,
+        }
+
+        fn signature(registry: &Registry) -> MetricSignature {
+            let families = registry.gather();
+            let histogram = |name: &str| -> (u64, u64) {
+                families
+                    .iter()
+                    .find(|mf| mf.name() == name)
+                    .map(|mf| {
+                        let h = mf.get_metric()[0].get_histogram();
+                        (h.get_sample_count(), h.get_sample_sum() as u64)
+                    })
+                    .unwrap_or((0, 0))
+            };
+            let counter = |name: &str| -> u64 {
+                families
+                    .iter()
+                    .find(|mf| mf.name() == name)
+                    .map(|mf| mf.get_metric()[0].get_counter().value() as u64)
+                    .unwrap_or(0)
+            };
+            MetricSignature {
+                output_tokens_total: counter("dynamo_frontend_output_tokens_total"),
+                isl: histogram("dynamo_frontend_input_sequence_tokens"),
+                osl: histogram("dynamo_frontend_output_sequence_tokens"),
+                cached_tokens: histogram("dynamo_frontend_cached_tokens"),
+                ttft_samples: histogram("dynamo_frontend_time_to_first_token_seconds").0,
+                itl_samples: histogram("dynamo_frontend_inter_token_latency_seconds").0,
+            }
+        }
+
+        /// Where the non-streaming handler chain rejected the stream, if it did.
+        #[derive(Debug, PartialEq)]
+        enum Rejected {
+            Preflight,
+            Aggregation,
+        }
+
+        /// Drive `stream` through the non-streaming HTTP handler's chain (observe,
+        /// backend-error preflight, aggregate) against a private registry.
+        /// Consuming the stream drops the collector, which flushes ITL and OSL.
+        async fn observe_and_aggregate(
+            stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        ) -> (Registry, Result<NvCreateChatCompletionResponse, Rejected>) {
+            let metrics = Arc::new(Metrics::new_with_prefix(None));
+            let registry = Registry::new();
+            metrics.register(&registry).unwrap();
+            let mut collector = metrics.create_response_collector(MODEL);
+            let mut http_queue_guard = None;
+
+            let observed = stream.inspect(move |response| {
+                process_chat_response_and_observe_metrics(
+                    response,
+                    &mut collector,
+                    &mut http_queue_guard,
+                );
+            });
+            let checked =
+                match check_for_backend_error(observed, BackendErrorCheck::UntilFirstEvent).await {
+                    Ok(checked) => checked,
+                    Err(_) => return (registry, Err(Rejected::Preflight)),
+                };
+            let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                checked,
+                ParsingOptions::default(),
+            )
+            .await
+            .map_err(|_| Rejected::Aggregation);
+            (registry, response)
+        }
+
+        fn ok(
+            result: Result<NvCreateChatCompletionResponse, Rejected>,
+        ) -> NvCreateChatCompletionResponse {
+            result.expect("production-shaped stream must aggregate")
+        }
+
+        /// The invariant #11349 is about: the same backend output, through the
+        /// real preprocessor with capture off and on, gives the collector the
+        /// same numbers and the client the same response.
+        #[tokio::test]
+        async fn test_capture_does_not_change_metrics_or_response() {
+            let ((plain_registry, plain), (capture_registry, capture), future) =
+                both_legs(backend_success()).await;
+
+            let signature_plain = signature(&plain_registry);
+            assert_eq!(
+                signature(&capture_registry),
+                signature_plain,
+                "capture changed the collector output"
+            );
+            // Not agreeing zeros: the real request.
+            assert_eq!(
+                signature_plain,
+                MetricSignature {
+                    output_tokens_total: 3,
+                    isl: (1, INPUT_TOKENS as u64),
+                    osl: (1, 3),
+                    cached_tokens: (1, TAIL_CACHED_TOKENS as u64),
+                    ttft_samples: 1,
+                    itl_samples: 2,
+                }
+            );
+
+            let (mut plain, mut capture) = (ok(plain), ok(capture));
+            // `created` is wall-clock per generator; everything else must match.
+            plain.inner.created = 0;
+            capture.inner.created = 0;
+            assert_eq!(plain, capture, "capture changed the client response");
+            assert_eq!(plain.inner.model, MODEL);
+            assert_eq!(
+                plain.inner.choices[0].message.content.as_ref().unwrap(),
+                &dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                    "Hello world".to_string()
+                )
+            );
+
+            let outcome = future.await;
+            assert!(outcome.drop_reason.is_none());
+            let record = outcome.response.expect("capture must produce a record");
+            assert_eq!(record.inner.model, MODEL);
+            assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
+        }
+
+        /// A chunk carrying both typed `llm_metrics` and a `payload_usage`
+        /// annotation (tool-call jail shape) is observed once, typed form
+        /// winning, with capture on or off.
+        #[tokio::test]
+        async fn test_capture_observes_dual_carrier_chunk_once() {
+            let dual_carrier = || {
+                let mut tail = payload_usage_tail(3);
+                tail.data.as_mut().unwrap().llm_metrics = Some(chunk_metrics(5, 5));
+                vec![tail]
+            };
+            let (plain_registry, _) =
+                observe_and_aggregate(futures::stream::iter(dual_carrier())).await;
+            let (captured, _future) =
+                scan_aggregate_with_future(futures::stream::iter(dual_carrier()));
+            let (capture_registry, _) = observe_and_aggregate(captured).await;
+
+            let expected = MetricSignature {
+                output_tokens_total: 5,
+                isl: (1, INPUT_TOKENS as u64),
+                osl: (1, 5),
+                cached_tokens: (0, 0),
+                ttft_samples: 1,
+                itl_samples: 0,
+            };
+            assert_eq!(signature(&plain_registry), expected);
+            assert_eq!(signature(&capture_registry), expected);
+        }
+
+        /// A backend error after content is surfaced to the client as an error
+        /// (not an empty success) with capture on, exactly as with capture off,
+        /// and the metrics observed before the error agree.
+        #[tokio::test]
+        async fn test_capture_surfaces_mid_stream_error_identically() {
+            let outputs = vec![
+                Annotated::from_data(backend_output("Hello ", vec![1], None)),
+                Annotated::<BackendOutput>::from_error("invalid sampling parameter"),
+            ];
+            let ((plain_registry, plain), (capture_registry, capture), future) =
+                both_legs(outputs).await;
+
+            assert_eq!(plain.unwrap_err(), Rejected::Aggregation);
+            assert_eq!(
+                capture.unwrap_err(),
+                Rejected::Aggregation,
+                "capture must not turn an error into a success"
+            );
+            assert_eq!(signature(&capture_registry), signature(&plain_registry));
+
+            let outcome = future.await;
+            assert!(
+                outcome
+                    .drop_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("invalid sampling parameter")
+            );
+            assert!(
+                outcome.response.is_some(),
+                "the pre-error prefix is recorded"
+            );
+        }
+
+        /// A backend error before any data chunk is rejected by the preflight,
+        /// with capture on or off. Without a leading frame nothing is observed;
+        /// with a leading metrics frame that frame is observed (the observer runs
+        /// ahead of the preflight, as on the streaming path) — identically in
+        /// both modes.
+        #[tokio::test]
+        async fn test_capture_rejects_leading_error_identically() {
+            // Legacy engines send a data-less `llm_metrics` frame; the
+            // preprocessor forwards it untouched.
+            let frame = || {
+                chunk_metrics(1, 1)
+                    .to_annotation::<BackendOutput>()
+                    .unwrap()
+            };
+            let error = || Annotated::<BackendOutput>::from_error("backend failed");
+            let nothing = MetricSignature {
+                output_tokens_total: 0,
+                isl: (0, 0),
+                osl: (0, 0),
+                cached_tokens: (0, 0),
+                ttft_samples: 0,
+                itl_samples: 0,
+            };
+            let one_frame = MetricSignature {
+                output_tokens_total: 1,
+                isl: (1, INPUT_TOKENS as u64),
+                osl: (1, 1),
+                cached_tokens: (0, 0),
+                ttft_samples: 1,
+                itl_samples: 0,
+            };
+            for (outputs, expected) in [
+                (vec![error()], nothing),
+                (vec![frame(), error()], one_frame),
+            ] {
+                let ((plain_registry, plain), (capture_registry, capture), future) =
+                    both_legs(outputs).await;
+
+                assert_eq!(plain.unwrap_err(), Rejected::Preflight);
+                assert_eq!(capture.unwrap_err(), Rejected::Preflight);
+                assert_eq!(signature(&plain_registry), expected);
+                assert_eq!(signature(&capture_registry), expected);
+                assert!(
+                    future
+                        .await
+                        .drop_reason
+                        .as_deref()
+                        .unwrap()
+                        .contains("backend failed")
+                );
+            }
+        }
     }
 }

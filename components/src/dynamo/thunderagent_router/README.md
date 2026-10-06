@@ -58,6 +58,12 @@ chat/completions surface; if the wrapped backend also advertises that surface
 for the same model, the frontend may route requests directly to the backend and
 bypass ThunderAgent lifecycle handling such as `x-dynamo-session-final`.
 
+For clients that require SGLang's native `/generate` API, add
+`--publish-sglang-generate` to ThunderAgent. This advertises the existing
+SGLang-native frontend route through ThunderAgent while the wrapped worker
+continues to use `--endpoint-types none`. This option requires `--model-name`
+so ThunderAgent can register the native capability for that model.
+
 The control-loop knobs (`--pause-threshold`, `--pause-target`,
 `--resume-hysteresis`, `--scheduler-interval-seconds`, …) and their defaults are
 documented in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md#utilization-driven-control-loop).
@@ -74,6 +80,12 @@ request so it can group turns under the same program. Custom harnesses can send
 Requests without session identity are passed through as one-off (no program
 admission, no pause/resume). This is the safe fallback for non-agentic traffic
 sharing the same workers.
+
+Admission is a transaction. A request cancelled while it is queued for capacity
+— a client disconnect, for instance — leaves the program table as it found it:
+a program the admission attempt created is removed, and one that already existed
+keeps the session history of its previous turn. Cancelled requests therefore do
+not hold capacity, and do not queue other programs behind them.
 
 ### SGLang HiCache retention budget
 

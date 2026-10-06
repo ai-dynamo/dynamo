@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: conductor
+replicas: 1
+podTemplate:
+  spec:
+    resourceClaims:
+    - {name: gpu, resourceClaimTemplateName: gpu}
+    containers:
+    - name: main
+      image: cyborg-runtime
+      resources:
+        claims:
+        - {name: gpu}
+      volumeMounts:
+      - {name: config, mountPath: /configs}
+      - {name: model-storage, mountPath: /models}
+    volumes:
+    - {name: model-storage, emptyDir: {}}

@@ -20,12 +20,7 @@ from gpu_memory_service.v1.snapshot.weight_artifact import save_weights
 def _build_parser():
     parser = _build_v0_parser()
     parser.description = "Save exact committed GMS V1 weight allocations."
-    parser.add_argument(
-        "--device",
-        type=int,
-        default=0,
-        help="CUDA-visible rank-local device ordinal.",
-    )
+    parser.set_defaults(device=0)
     return parser
 
 

@@ -50,6 +50,9 @@ class TRTLLMConfig(EngineConfig):
 trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/trtllm"
 )
+trtllm_test_engine_config_dir = os.path.join(
+    SERVE_TEST_DIR, "trtllm/engine_configs/qwen3"
+)
 
 # Evaluated once at collection: NVDEC needs the container's driver "video"
 # capability, which CI runners do not grant.
@@ -106,6 +109,39 @@ trtllm_configs = {
             ),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="trtllm"),
+        ],
+    ),
+    "aggregated_spec_decoding": TRTLLMConfig(
+        name="aggregated_spec_decoding",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.nightly,
+            pytest.mark.trtllm,
+            # Reuse the measured Qwen3-0.6B aggregate budget. NGram adds no
+            # draft weights, while this config lowers token and batch limits.
+            pytest.mark.profiled_vram_gib(3.9),
+            pytest.mark.requested_trtllm_kv_tokens(2592),
+            pytest.mark.timeout(650),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
+        env={
+            "AGG_ENGINE_ARGS": os.path.join(
+                trtllm_test_engine_config_dir, "agg_ngram.yaml"
+            )
+        },
+        request_payloads=[
+            completion_payload(
+                prompt=TEXT_PROMPT,
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=32,
+                temperature=0.0,
+            ),
         ],
     ),
     "disaggregated": TRTLLMConfig(
@@ -824,7 +860,9 @@ def test_chat_only_aggregated_with_test_logits_processor(
 @pytest.mark.trtllm
 @pytest.mark.core
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(3.9)
+# Concurrent TRT-LLM MPI engine startups can stall before endpoint registration;
+# keep this startup-sensitive test in the sequential GPU stage.
+# @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("num_system_ports", [1], indirect=True)

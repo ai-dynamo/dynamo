@@ -4,6 +4,8 @@
 """Unit tests for profiler config_modifiers/protocol helpers."""
 
 import copy
+import errno
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -24,14 +26,24 @@ try:
     from dynamo.profiler.utils.config_modifiers.protocol import (  # noqa: F401
         BaseConfigModifier,
     )
+    from dynamo.profiler.utils.config_modifiers.sglang import (
+        _normalize_prefill_dp_limits,
+    )
     from dynamo.profiler.utils.defaults import (
         DYNAMO_RUN_DEFAULT_PORT,
         EngineType,
         SearchStrategy,
     )
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         OverridesSpec,
+    )
+    from dynamo.profiler.utils.model_info import (
+        model_ref_allows_implicit_trust_remote_code,
     )
     from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError:
@@ -164,7 +176,7 @@ def test_dgd_serialization_omits_unset_optional_fields() -> None:
 @pytest.mark.parametrize(
     ("backend", "worker_name"),
     [
-        ("vllm", "VllmDecodeWorker"),
+        ("vllm", "worker"),
         ("sglang", "decode"),
         ("trtllm", "TRTLLMWorker"),
     ],
@@ -185,7 +197,7 @@ def test_aggregate_worker_lookup_resolves_generic_component(
 @pytest.mark.parametrize(
     ("backend", "worker_name"),
     [
-        ("vllm", "VllmDecodeWorker"),
+        ("vllm", "worker"),
         ("sglang", "decode"),
         ("trtllm", "TRTLLMWorker"),
     ],
@@ -207,6 +219,33 @@ def test_convert_aggregate_template_preserves_single_worker(
     assert workers[0]["type"] == "decode"
 
 
+def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = modifier.load_default_config("disagg")
+    decode_args = _main_container(_component_by_type(config, "decode"))["args"]
+    decode_args.extend(
+        [
+            "--disaggregation-mode=decode",
+            "--disaggregation-mode",
+            "decode",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
+        ]
+    )
+
+    converted = modifier.convert_config(config, target=EngineType.DECODE)
+    workers = _worker_components(converted)
+    converted_args = _main_container(workers[0])["args"]
+
+    assert len(workers) == 1
+    assert workers[0]["type"] == "decode"
+    assert "--disaggregation-mode" not in converted_args
+    assert not any(arg.startswith("--disaggregation-mode=") for arg in converted_args)
+    assert converted_args[converted_args.index("--kv-transfer-config") + 1] == (
+        '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+    )
+
+
 def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
     """AIC tuning args must not remove Dynamo's vLLM disaggregation contract."""
     modifier = CONFIG_MODIFIERS["vllm"]
@@ -225,18 +264,20 @@ def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert (
         prefill_args[prefill_args.index("--kv-transfer-config") + 1]
-        == '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
     )
     assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "4"
     assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
-    assert "--kv-transfer-config" not in decode_args
+    assert (
+        decode_args[decode_args.index("--kv-transfer-config") + 1]
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+    )
 
 
 def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     """An explicit connector remains authoritative while worker roles are canonical."""
-    custom_kv_config = (
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}'
-    )
+    custom_prefill_kv_config = '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu"}'
+    custom_decode_kv_config = '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cpu"}'
     modifier = CONFIG_MODIFIERS["vllm"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
@@ -244,9 +285,13 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
         image="example/vllm:test",
         prefill_cli_args=[
             "--disaggregation-mode=decode",
-            f"--kv-transfer-config '{custom_kv_config}'",
+            f"--kv-transfer-config '{custom_prefill_kv_config}'",
         ],
-        decode_cli_args=["--disaggregation-mode", "prefill"],
+        decode_cli_args=[
+            "--disaggregation-mode",
+            "prefill",
+            f"--kv-transfer-config '{custom_decode_kv_config}'",
+        ],
     )
 
     prefill_args = next(
@@ -264,10 +309,16 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert prefill_args.count("--kv-transfer-config") == 1
     assert (
-        prefill_args[prefill_args.index("--kv-transfer-config") + 1] == custom_kv_config
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1]
+        == custom_prefill_kv_config
     )
     assert decode_args.count("--disaggregation-mode") == 1
     assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+    assert decode_args.count("--kv-transfer-config") == 1
+    assert (
+        decode_args[decode_args.index("--kv-transfer-config") + 1]
+        == custom_decode_kv_config
+    )
 
 
 def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
@@ -297,6 +348,85 @@ def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
         assert "--is-decode-worker" not in args
         assert args.count("--disaggregation-mode") == 1
         assert args[args.index("--disaggregation-mode") + 1] == expected_mode
+
+
+@pytest.mark.parametrize("mode", ["agg", "disagg"])
+def test_build_dgd_config_vllm_drops_generated_max_model_len(mode: str) -> None:
+    """A generated context cap would pin the deployment to one target ISL/OSL."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    worker_args = [
+        "--max-model-len",
+        "6500",
+        "--tensor-parallel-size",
+        "2",
+        "--max-model-len=6500",
+    ]
+    dgd_config = modifier.build_dgd_config(
+        mode=mode,
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=list(worker_args),
+        decode_cli_args=list(worker_args),
+        agg_cli_args=list(worker_args),
+    )
+
+    workers = _worker_components(dgd_config)
+    assert workers
+    for worker in workers:
+        args = _main_container(worker)["args"]
+        assert not any(str(arg).startswith("--max-model-len") for arg in args)
+        assert args[args.index("--tensor-parallel-size") + 1] == "2"
+
+
+def test_materialize_dgd_keeps_overridden_max_model_len() -> None:
+    """An explicit context cap is merged after generation and stays intact."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    modifier = CONFIG_MODIFIERS["vllm"]
+    blueprint = modifier.build_dgd_config(
+        mode="agg",
+        model_name="test/model",
+        image="example/vllm:test",
+        agg_cli_args=["--max-model-len", "6500", "--tensor-parallel-size", "1"],
+    )
+
+    def _fake_apply_dgd_overrides(dgd_config: dict, overrides: dict) -> dict:
+        merged = copy.deepcopy(dgd_config)
+        for component in merged["spec"]["components"]:
+            if component.get("type") in ("worker", "prefill", "decode"):
+                _main_container(component)["args"] += ["--max-model-len", "4096"]
+        return merged
+
+    with (
+        patch(
+            "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
+            side_effect=_fake_apply_dgd_overrides,
+        ),
+        patch(
+            "dynamo.profiler.utils.config_modifiers.vllm.get_model_context_length",
+            return_value=8192,
+        ),
+        patch(
+            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            return_value=False,
+        ),
+    ):
+        result = materialize_dgd(
+            blueprint,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            override={"spec": {"services": {}}},
+            runtime_backend="vllm",
+            model_name_or_path="test/model",
+        )
+
+    workers = _worker_components(result)
+    assert workers
+    for worker in workers:
+        args = _main_container(worker)["args"]
+        assert args[args.index("--max-model-len") + 1] == "4096"
 
 
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
@@ -346,7 +476,7 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() ->
         decode_cli_args=[
             "--max-running-requests",
             "512",
-            "--cuda-graph-bs",
+            "--cuda-graph-bs-decode",
             "1",
         ],
         decode_replicas=2,
@@ -356,8 +486,67 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() ->
 
     prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
 
-    assert prefill_args.count("--cuda-graph-bs") == 1
-    assert prefill_args[prefill_args.index("--cuda-graph-bs") + 1] == "2"
+    assert prefill_args.count("--max-running-requests") == 1
+    assert prefill_args[prefill_args.index("--max-running-requests") + 1] == "2"
+    assert prefill_args.count("--cuda-graph-bs-decode") == 1
+    assert prefill_args[prefill_args.index("--cuda-graph-bs-decode") + 1] == "2"
+
+
+@pytest.mark.parametrize(
+    "prefill_args",
+    [
+        ["--enable-dp-attention", "--max-running-requests=2"],
+        ["--dp-size=4", "--max-running-requests=2"],
+        ["--dp-size=2", "--enable-dp-attention", "--max-running-requests=2"],
+    ],
+)
+def test_sglang_prefill_dp_limits_leave_safe_args_unchanged(
+    prefill_args: list[str],
+) -> None:
+    assert _normalize_prefill_dp_limits(prefill_args) == prefill_args
+
+
+def test_sglang_prefill_dp_limits_normalize_shell_joined_args() -> None:
+    args = [
+        "--dp 2",
+        "--enable-dp-attention",
+        "--max-running-requests 1",
+    ]
+
+    normalized = _normalize_prefill_dp_limits(args)
+
+    assert "--max-running-requests 1" not in normalized
+    assert normalized.count("--max-running-requests") == 1
+    assert normalized[normalized.index("--max-running-requests") + 1] == "2"
+    assert normalized[normalized.index("--cuda-graph-bs-decode") + 1] == "2"
+
+
+@pytest.mark.parametrize(
+    ("prefill_args", "error"),
+    [
+        (
+            ["--enable-dp-attention", "--dp-size=invalid"],
+            "data parallel size must be an integer",
+        ),
+        (
+            ["--enable-dp-attention", "--dp-size=0"],
+            "data parallel size must be greater than zero",
+        ),
+        (
+            ["--enable-dp-attention", "--max-running-requests=invalid"],
+            "--max-running-requests must be an integer",
+        ),
+        (
+            ["--enable-dp-attention", "--max-running-requests=0"],
+            "--max-running-requests must be greater than zero",
+        ),
+    ],
+)
+def test_sglang_prefill_dp_limits_reject_invalid_explicit_values(
+    prefill_args: list[str], error: str
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        _normalize_prefill_dp_limits(prefill_args)
 
 
 def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
@@ -370,7 +559,7 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
         prefill_cli_args=[
             "--max-running-requests",
             "1",
-            "--cuda-graph-bs=1",
+            "--cuda-graph-bs-decode=1",
         ],
         prefill_replicas=2,
         prefill_gpus=4,
@@ -385,9 +574,9 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
     cuda_graph_bs_args = [
         arg
         for arg in prefill_args
-        if arg == "--cuda-graph-bs" or arg.startswith("--cuda-graph-bs=")
+        if arg == "--cuda-graph-bs-decode" or arg.startswith("--cuda-graph-bs-decode=")
     ]
-    assert cuda_graph_bs_args == ["--cuda-graph-bs=1"]
+    assert cuda_graph_bs_args == ["--cuda-graph-bs-decode=1"]
 
 
 def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
@@ -401,6 +590,7 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
     _main_container(component)["args"] = [
         "--max-running-requests=512",
         "--dp=2",
+        "--enable-dp-attention",
     ]
 
     result = modifier.set_prefill_config(
@@ -410,9 +600,10 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
     )
     args = _main_container(_component_by_type(result, "decode"))["args"]
 
-    assert args[args.index("--max-running-requests") + 1] == "1"
-    assert args.count("--cuda-graph-bs") == 1
-    assert args[args.index("--cuda-graph-bs") + 1] == "2"
+    assert args.count("--max-running-requests") == 1
+    assert args[args.index("--max-running-requests") + 1] == "2"
+    assert args.count("--cuda-graph-bs-decode") == 1
+    assert args[args.index("--cuda-graph-bs-decode") + 1] == "2"
 
 
 def test_vllm_mamba_align_raises_max_num_batched_tokens() -> None:
@@ -528,7 +719,7 @@ def test_vllm_model_runtime_constraints_update_worker_configs() -> None:
             "components": [
                 _make_component("Frontend", "frontend"),
                 _make_component(
-                    "VllmPrefillWorker",
+                    "prefill",
                     "prefill",
                     args=[
                         "--max-model-len=6500",
@@ -539,7 +730,7 @@ def test_vllm_model_runtime_constraints_update_worker_configs() -> None:
                     ],
                 ),
                 _make_component(
-                    "VllmDecodeWorker",
+                    "decode",
                     "decode",
                     args=[
                         "--max-model-len",
@@ -567,8 +758,8 @@ def test_vllm_model_runtime_constraints_update_worker_configs() -> None:
         result = modifier.apply_model_runtime_constraints(config, "nemotron")
 
     components = _components_by_name(result)
-    prefill_args = _main_container(components["VllmPrefillWorker"])["args"]
-    args = _main_container(components["VllmDecodeWorker"])["args"]
+    prefill_args = _main_container(components["prefill"])["args"]
+    args = _main_container(components["decode"])["args"]
     assert prefill_args[prefill_args.index("--max-model-len") + 1] == "2048"
     assert prefill_args[prefill_args.index("--max-num-batched-tokens") + 1] == "8320"
     assert args[args.index("--max-model-len") + 1] == "2048"
@@ -586,7 +777,7 @@ def test_vllm_model_runtime_constraints_skip_partial_decode_config() -> None:
             "components": [
                 _make_component("Frontend", "frontend"),
                 {
-                    "name": "VllmDecodeWorker",
+                    "name": "decode",
                     "type": "decode",
                     "podTemplate": {"spec": {"containers": []}},
                 },
@@ -596,7 +787,7 @@ def test_vllm_model_runtime_constraints_skip_partial_decode_config() -> None:
 
     result = modifier.apply_model_runtime_constraints(config, "nemotron")
 
-    decode_component = _components_by_name(result)["VllmDecodeWorker"]
+    decode_component = _components_by_name(result)["decode"]
     assert decode_component["type"] == "decode"
     assert decode_component["podTemplate"]["spec"]["containers"] == []
 
@@ -1178,7 +1369,7 @@ def test_materialize_dgd_injects_trust_remote_code_for_vllm() -> None:
         materialize_dgd,
     )
 
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg = _make_dgd_with_workers("decode")
     with (
         patch(
             "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
@@ -1197,7 +1388,7 @@ def test_materialize_dgd_injects_trust_remote_code_for_vllm() -> None:
         )
 
     components = _components_by_name(result)
-    decode_args = _main_container(components["VllmDecodeWorker"])["args"]
+    decode_args = _main_container(components["decode"])["args"]
     assert decode_args[-1] == "--trust-remote-code"
     # Original args preserved.
     assert decode_args[:-1] == ["--model", "some/model", "--tp", "1"]
@@ -1241,7 +1432,7 @@ def test_materialize_dgd_skips_trust_when_no_auto_map() -> None:
         materialize_dgd,
     )
 
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg = _make_dgd_with_workers("decode")
     with patch(
         "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=False,
@@ -1253,7 +1444,7 @@ def test_materialize_dgd_skips_trust_when_no_auto_map() -> None:
             model_name_or_path="some/model",
         )
 
-    args = _main_container(_components_by_name(result)["VllmDecodeWorker"])["args"]
+    args = _main_container(_components_by_name(result)["decode"])["args"]
     assert "--trust-remote-code" not in args
 
 
@@ -1263,7 +1454,7 @@ def test_materialize_dgd_fails_closed_for_mutable_remote_ref() -> None:
         materialize_dgd,
     )
 
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg = _make_dgd_with_workers("decode")
     with (
         patch(
             "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
@@ -1316,9 +1507,9 @@ def test_materialize_dgd_remote_ref_with_explicit_override_skips_error() -> None
         materialize_dgd,
     )
 
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg = _make_dgd_with_workers("decode")
     # Simulate user override having already appended the flag.
-    _main_container(_components_by_name(cfg)["VllmDecodeWorker"])["args"].append(
+    _main_container(_components_by_name(cfg)["decode"])["args"].append(
         "--trust-remote-code"
     )
 
@@ -1340,7 +1531,7 @@ def test_materialize_dgd_remote_ref_with_explicit_override_skips_error() -> None
             model_name_or_path="some/remote-model",
         )
 
-    args = _main_container(_components_by_name(result)["VllmDecodeWorker"])["args"]
+    args = _main_container(_components_by_name(result)["decode"])["args"]
     assert args.count("--trust-remote-code") == 1
 
 
@@ -1351,7 +1542,7 @@ def test_materialize_dgd_trust_injection_is_idempotent() -> None:
         materialize_dgd,
     )
 
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg = _make_dgd_with_workers("decode")
     with (
         patch(
             "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
@@ -1375,7 +1566,7 @@ def test_materialize_dgd_trust_injection_is_idempotent() -> None:
             model_name_or_path="some/model",
         )
 
-    args = _main_container(_components_by_name(result2)["VllmDecodeWorker"])["args"]
+    args = _main_container(_components_by_name(result2)["decode"])["args"]
     assert args.count("--trust-remote-code") == 1
 
 
@@ -1386,8 +1577,8 @@ def test_materialize_dgd_respects_existing_trust_flag() -> None:
         materialize_dgd,
     )
 
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
-    _main_container(_components_by_name(cfg)["VllmDecodeWorker"])["args"].append(
+    cfg = _make_dgd_with_workers("decode")
+    _main_container(_components_by_name(cfg)["decode"])["args"].append(
         "--trust-remote-code"
     )
 
@@ -1408,7 +1599,7 @@ def test_materialize_dgd_respects_existing_trust_flag() -> None:
             model_name_or_path="some/model",
         )
 
-    args = _main_container(_components_by_name(result)["VllmDecodeWorker"])["args"]
+    args = _main_container(_components_by_name(result)["decode"])["args"]
     assert args.count("--trust-remote-code") == 1
 
 
@@ -1418,7 +1609,7 @@ def test_materialize_dgd_excludes_frontend_and_planner() -> None:
         materialize_dgd,
     )
 
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg = _make_dgd_with_workers("decode")
     cfg["spec"]["components"].append(
         _make_component("Planner", "planner", args=["--interval", "30"])
     )
@@ -1459,7 +1650,7 @@ def test_materialize_dgd_shell_form_worker() -> None:
         "spec": {
             "components": [
                 _make_component(
-                    "VllmDecodeWorker",
+                    "decode",
                     "decode",
                     command=["sh", "-c"],
                     args=[
@@ -1487,9 +1678,7 @@ def test_materialize_dgd_shell_form_worker() -> None:
             model_name_or_path="some/model",
         )
 
-    result_args = _main_container(_components_by_name(result)["VllmDecodeWorker"])[
-        "args"
-    ]
+    result_args = _main_container(_components_by_name(result)["decode"])["args"]
     # Must still be a single-element list (shell form preserved).
     assert isinstance(result_args, list) and len(result_args) == 1
     assert result_args[0].endswith("--trust-remote-code")
@@ -1512,9 +1701,7 @@ def test_materialize_dgd_shell_form_worker() -> None:
             model_name_or_path="some/model",
         )
 
-    result2_args = _main_container(_components_by_name(result2)["VllmDecodeWorker"])[
-        "args"
-    ]
+    result2_args = _main_container(_components_by_name(result2)["decode"])["args"]
     assert len(result2_args) == 1
     assert result2_args[0].count("--trust-remote-code") == 1
 
@@ -1538,7 +1725,7 @@ def test_materialize_dgd_shell_form_preserves_syntax() -> None:
         "spec": {
             "components": [
                 _make_component(
-                    "VllmDecodeWorker",
+                    "decode",
                     "decode",
                     command=["sh", "-c"],
                     args=[original_cmd],
@@ -1563,12 +1750,86 @@ def test_materialize_dgd_shell_form_preserves_syntax() -> None:
             model_name_or_path="some/model",
         )
 
-    result_args = _main_container(_components_by_name(result)["VllmDecodeWorker"])[
-        "args"
-    ]
+    result_args = _main_container(_components_by_name(result)["decode"])["args"]
     assert len(result_args) == 1
     # The original shell syntax (&&, export) must be preserved verbatim.
     assert result_args[0] == original_cmd + " --trust-remote-code"
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "expected"),
+    [
+        ("directory", True),
+        ("symlink", True),
+        ("file", False),
+        ("missing", False),
+        ("child_of_file", False),
+    ],
+)
+def test_implicit_trust_requires_local_directory(tmp_path, path_kind, expected):
+    model_path = tmp_path / "model"
+    if path_kind == "directory":
+        model_path.mkdir()
+    elif path_kind == "symlink":
+        target = tmp_path / "snapshot"
+        target.mkdir()
+        model_path.symlink_to(target, target_is_directory=True)
+    elif path_kind in ("file", "child_of_file"):
+        model_path.touch()
+        if path_kind == "child_of_file":
+            model_path /= "child"
+
+    assert model_ref_allows_implicit_trust_remote_code(model_path) is expected
+
+
+@pytest.mark.parametrize("explicit_trust", [False, True])
+def test_materialize_dgd_inaccessible_model_path(
+    tmp_path, monkeypatch, caplog, explicit_trust
+):
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    (model_path / "config.json").write_text("{}")
+    error = PermissionError(errno.EACCES, "Cannot inspect model", str(model_path))
+    original_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self == model_path:
+            raise error
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    config = _make_dgd_with_workers("decode")
+    if explicit_trust:
+        _main_container(_components_by_name(config)["decode"])["args"].append(
+            "--trust-remote-code"
+        )
+    original_config = copy.deepcopy(config)
+
+    if explicit_trust:
+        result = materialize_dgd(
+            config,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path=str(model_path),
+        )
+        assert result == original_config
+    else:
+        with pytest.raises(RuntimeError, match="Cannot inspect model path") as exc:
+            materialize_dgd(
+                config,
+                purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+                runtime_backend="vllm",
+                model_name_or_path=str(model_path),
+            )
+        assert exc.value.__cause__ is error
+        assert str(model_path) in str(exc.value)
+        assert "symlink ownership" in str(exc.value)
+        assert "modelCache.pvcModelPath" in str(exc.value)
+        assert "mutable remote" not in str(exc.value)
+
+    assert config == original_config
+    assert "auto_map detection is inconclusive" in caplog.text
+    assert "injecting --trust-remote-code" not in caplog.text
 
 
 def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:

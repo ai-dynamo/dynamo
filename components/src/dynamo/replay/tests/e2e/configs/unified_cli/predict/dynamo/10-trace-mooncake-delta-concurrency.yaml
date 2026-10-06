@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+traffic:
+  source:
+    type: trace
+    format: mooncake-delta
+    paths: [components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/traces/mooncake-delta.jsonl]
+    block_size: 512
+  load: {type: concurrency, concurrency: 1}
+  stop: {max_virtual_time_seconds: 1.0}
+engine:
+  mode: aggregated
+  model: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+  hardware: h200_sxm
+  backend: vllm
+  context_length: 2048
+  workers:
+    aggregated:
+      parallelism: {replicas: 1, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
+      timing: {type: fixed, prefill_ms: 1, decode_ms: 1}

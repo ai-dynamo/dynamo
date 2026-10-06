@@ -15,10 +15,6 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
-    /// `host:port` (or URL) of SGLang's native `sglang.runtime.v1` service.
-    #[arg(long, visible_alias = "grpc-endpoint", env = "SGLANG_GRPC_ENDPOINT")]
-    pub sglang_endpoint: String,
-
     /// Reachable host that decode workers use to connect to a prefill worker's
     /// SGLang disaggregation bootstrap port. By default this is derived from
     /// SGLang's concrete `host`, then `dist_init_addr`, then a routable local

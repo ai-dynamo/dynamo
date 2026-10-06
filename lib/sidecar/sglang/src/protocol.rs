@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    StopReason, TopLogprob, usage,
+    PromptTokensDetails, StopConditions, StopReason, TopLogprob, usage,
 };
 use serde_json::{Map, Value};
 
@@ -26,8 +26,7 @@ pub(crate) fn build_generate_request(
         .token_ids
         .iter()
         .map(|token| {
-            i32::try_from(*token)
-                .map_err(|_| client::invalid_arg(format!("token id {token} does not fit in i32")))
+            i32::try_from(*token).map_err(|_| client::invalid_request("token ids must fit in i32"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let max_new_tokens = if mode.is_prefill() {
@@ -38,7 +37,7 @@ pub(crate) fn build_generate_request(
             .max_tokens
             .map(i32::try_from)
             .transpose()
-            .map_err(|_| client::invalid_arg("max_tokens does not fit in i32"))?
+            .map_err(|_| client::invalid_request("max_tokens does not fit in i32"))?
     };
     let min_new_tokens = if mode.is_prefill() {
         None
@@ -48,7 +47,7 @@ pub(crate) fn build_generate_request(
             .min_tokens
             .map(i32::try_from)
             .transpose()
-            .map_err(|_| client::invalid_arg("min_tokens does not fit in i32"))?
+            .map_err(|_| client::invalid_request("min_tokens does not fit in i32"))?
     };
 
     let mut stop_token_ids = Vec::new();
@@ -60,16 +59,44 @@ pub(crate) fn build_generate_request(
     .flatten()
     {
         for token in tokens {
-            let token = i32::try_from(*token).map_err(|_| {
-                client::invalid_arg(format!("stop token id {token} does not fit in i32"))
-            })?;
+            let token = i32::try_from(*token)
+                .map_err(|_| client::invalid_request("stop token ids must fit in i32"))?;
             if !stop_token_ids.contains(&token) {
                 stop_token_ids.push(token);
             }
         }
     }
 
-    let guided = request.sampling_options.guided_decoding.as_ref();
+    let guided_decoding = request
+        .sampling_options
+        .guided_decoding
+        .as_ref()
+        .and_then(|guided| {
+            let constraint = if let Some(schema) = guided.json.as_ref() {
+                Some(pb::guided_decoding::Constraint::JsonSchema(
+                    json_value_to_string(schema),
+                ))
+            } else if let Some(regex) = guided.regex.as_ref() {
+                Some(pb::guided_decoding::Constraint::Regex(regex.clone()))
+            } else if let Some(grammar) = guided.grammar.as_ref() {
+                Some(pb::guided_decoding::Constraint::Ebnf(grammar.clone()))
+            } else if let Some(choice) = guided.choice.as_ref().filter(|value| !value.is_empty()) {
+                Some(pb::guided_decoding::Constraint::Choice(
+                    pb::ChoiceConstraint {
+                        values: choice.clone(),
+                    },
+                ))
+            } else {
+                guided
+                    .structural_tag
+                    .as_ref()
+                    .map(json_value_to_string)
+                    .map(pb::guided_decoding::Constraint::StructuralTag)
+            };
+            constraint.map(|constraint| pb::GuidedDecoding {
+                constraint: Some(constraint),
+            })
+        });
     let sampling_params = pb::SamplingParams {
         temperature: request.sampling_options.temperature,
         top_p: request.sampling_options.top_p,
@@ -84,10 +111,9 @@ pub(crate) fn build_generate_request(
         stop_token_ids,
         ignore_eos: request.stop_conditions.ignore_eos,
         n: request.sampling_options.n.map(i32::from),
-        json_schema: guided
-            .and_then(|value| value.json.as_ref())
-            .map(json_value_to_string),
-        regex: guided.and_then(|value| value.regex.clone()),
+        seed: request.sampling_options.seed,
+        guided_decoding,
+        ..Default::default()
     };
 
     let output_options = &request.output_options;
@@ -102,23 +128,25 @@ pub(crate) fn build_generate_request(
             .max(output_options.prompt_logprobs.unwrap_or(0))
     };
     let top_logprobs_num = i32::try_from(top_logprobs_num)
-        .map_err(|_| client::invalid_arg("requested logprobs does not fit in i32"))?;
+        .map_err(|_| client::invalid_request("requested logprobs does not fit in i32"))?;
     let logprob_start_len = if mode.is_prefill() {
         -1
     } else {
         output_options.prompt_logprobs.map(|_| 0).unwrap_or(-1)
     };
-    let routed_dp_rank = request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.dp_rank)
+    let routed_dp_rank = routed_dp_rank(request, mode)
         .map(i32::try_from)
         .transpose()
-        .map_err(|_| client::invalid_arg("routed dp_rank does not fit in i32"))?;
+        .map_err(|_| client::invalid_request("routed dp_rank does not fit in i32"))?;
     let lora_path = request
         .routing
         .as_ref()
         .and_then(|routing| routing.lora_name.clone());
+    let priority = request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.priority);
+    let kv_hints = request.kv_hint.as_ref().map(kv_hint_to_proto).transpose()?;
 
     let mut trace_headers = HashMap::new();
     dynamo_runtime::logging::inject_trace_headers_into_map(&mut trace_headers);
@@ -136,6 +164,10 @@ pub(crate) fn build_generate_request(
         routed_dp_rank,
         trace_headers,
         session_id: None,
+        priority,
+        require_reasoning: Some(request.require_reasoning),
+        max_thinking_tokens: request.stop_conditions.max_thinking_tokens,
+        kv_hints,
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
@@ -145,48 +177,80 @@ pub(crate) fn build_generate_request(
     })
 }
 
+fn kv_hint_to_proto(
+    hint: &dynamo_backend_common::KvHint,
+) -> Result<pb::KvHintsEnvelope, DynamoError> {
+    let actions = hint
+        .actions
+        .iter()
+        .map(|action| {
+            let payload = Value::Object(action.payload.clone().into_iter().collect());
+            Ok(pb::KvHintAction {
+                action_id: action.action_id.clone(),
+                action_type: action.action_type.clone(),
+                action_version: action.action_version.clone(),
+                payload: Some(dynamo_sidecar_common::json_to_struct(
+                    payload,
+                    "kv hint action payload",
+                )?),
+            })
+        })
+        .collect::<Result<Vec<_>, DynamoError>>()?;
+    Ok(pb::KvHintsEnvelope {
+        protocol_version: hint.protocol_version.clone(),
+        message_id: hint.message_id.clone(),
+        actions,
+    })
+}
+
+pub(crate) fn routed_dp_rank(
+    request: &PreprocessedRequest,
+    mode: DisaggregationMode,
+) -> Option<u32> {
+    request.routing.as_ref().and_then(|routing| {
+        if mode.is_prefill() {
+            routing.prefill_dp_rank.or(routing.dp_rank)
+        } else {
+            routing.dp_rank
+        }
+    })
+}
+
 fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
-    if request.token_ids.is_empty() {
-        return Err(client::invalid_arg("token_ids must not be empty"));
-    }
+    // prompt_embeds requests arrive with empty token_ids, so check them first.
     if request.prompt_embeds.is_some() {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "prompt_embeds are not supported by SGLang's native gRPC proto",
         ));
     }
+    if request.token_ids.is_empty() {
+        return Err(client::invalid_request("token_ids must not be empty"));
+    }
     if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "multimodal payloads are not supported by SGLang's native Generate RPC",
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {
-        return Err(client::invalid_arg("n must be 1 for the SGLang sidecar"));
+        return Err(client::invalid_request(
+            "n must be 1 for the SGLang sidecar",
+        ));
     }
     if request.sampling_options.best_of.unwrap_or(1) != 1 {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "best_of is not represented by SGLang's native gRPC proto",
         ));
     }
     if request.sampling_options.use_beam_search.unwrap_or(false) {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "beam search is not represented by SGLang's native gRPC proto",
         ));
     }
     if let Some(penalty) = request.sampling_options.length_penalty
         && (penalty - 1.0).abs() > f32::EPSILON
     {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "length_penalty is not represented by SGLang's native gRPC proto",
-        ));
-    }
-    if request.sampling_options.seed.is_some() {
-        return Err(client::invalid_arg(
-            "seed is not represented by SGLang's native gRPC proto",
-        ));
-    }
-    if request.stop_conditions.max_thinking_tokens.is_some() {
-        return Err(client::invalid_arg(
-            "max_thinking_tokens is not represented by SGLang's native gRPC proto",
         ));
     }
     if request
@@ -194,7 +258,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .include_stop_str_in_output
         .unwrap_or(false)
     {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "include_stop_str_in_output is not represented by SGLang's native gRPC proto",
         ));
     }
@@ -204,42 +268,44 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .as_ref()
         .is_some_and(|tokens| !tokens.is_empty())
     {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "visible stop-token semantics are not represented by SGLang's native gRPC proto",
         ));
     }
-    if let Some(guided) = request.sampling_options.guided_decoding.as_ref()
-        && (guided
-            .choice
+    if let Some(guided) = request.sampling_options.guided_decoding.as_ref() {
+        let constraint_count = [
+            guided.json.is_some(),
+            guided.regex.is_some(),
+            guided
+                .choice
+                .as_ref()
+                .is_some_and(|value| !value.is_empty()),
+            guided.grammar.is_some(),
+            guided.structural_tag.is_some(),
+        ]
+        .into_iter()
+        .filter(|is_set| *is_set)
+        .count();
+        if constraint_count > 1 {
+            return Err(client::invalid_request(
+                "the native SGLang gRPC proto accepts only one guided-decoding constraint",
+            ));
+        }
+        if guided
+            .backend
             .as_ref()
             .is_some_and(|value| !value.is_empty())
-            || guided.grammar.is_some()
-            || guided
-                .backend
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
             || guided.whitespace_pattern.is_some()
-            || guided.structural_tag.is_some())
-    {
-        return Err(client::invalid_arg(
-            "the native SGLang gRPC proto currently supports only JSON-schema and regex guided decoding",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.priority)
-        .unwrap_or(0)
-        != 0
-    {
-        return Err(client::invalid_arg(
-            "engine priority is not represented by SGLang's native gRPC proto",
-        ));
+        {
+            return Err(client::invalid_request(
+                "guided-decoding backend and whitespace modifiers are not represented by SGLang's native gRPC proto",
+            ));
+        }
     }
     Ok(())
 }
 
-fn resolve_disaggregated_params(
+pub(crate) fn resolve_disaggregated_params(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
     bootstrap_host: Option<&str>,
@@ -327,13 +393,6 @@ fn json_value_to_string(value: &Value) -> String {
     }
 }
 
-/// Tokens appended since the previous chunk. SGLang streams `output_ids`
-/// cumulatively, so each chunk carries the full sequence so far; `offset` is the
-/// previous chunk's total length. Guards against a non-growing chunk.
-pub(crate) fn new_output_ids(output_ids: &[i32], offset: usize) -> &[i32] {
-    output_ids.get(offset..).unwrap_or(&[])
-}
-
 pub(crate) fn output_ids_to_u32(ids: &[i32]) -> Result<Vec<u32>, DynamoError> {
     ids.iter()
         .map(|id| {
@@ -359,6 +418,7 @@ pub(crate) fn terminal_from_meta(
     meta: &HashMap<String, String>,
     prompt_tokens: u32,
     generated: u32,
+    stop_conditions: &StopConditions,
 ) -> Result<LLMEngineOutput, DynamoError> {
     let finish = meta_value(meta, "finish_reason")
         .ok_or_else(|| client::protocol_error("SGLang terminal is missing finish_reason"))?;
@@ -367,6 +427,8 @@ pub(crate) fn terminal_from_meta(
         .and_then(Value::as_str)
         .or_else(|| finish.as_str())
         .ok_or_else(|| client::protocol_error("SGLang finish_reason is missing a type"))?;
+    let mut completion_usage = usage(prompt_tokens, generated);
+    completion_usage.prompt_tokens_details = cached_prompt_tokens(meta, prompt_tokens);
     let mut output = match finish_type {
         "stop" => LLMEngineOutput::stop(),
         "length" => LLMEngineOutput::length(),
@@ -378,16 +440,36 @@ pub(crate) fn terminal_from_meta(
             )));
         }
     }
-    .with_usage(usage(prompt_tokens, generated));
+    .with_usage(completion_usage);
     output.stop_reason = finish.get("matched").and_then(|matched| match matched {
         Value::String(value) => Some(StopReason::String(value.clone())),
-        Value::Number(value) => value.as_i64().map(StopReason::Int),
+        Value::Number(value) => value
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .filter(|id| {
+                stop_conditions
+                    .stop_token_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(id))
+            })
+            .map(|id| StopReason::Int(i64::from(id))),
         _ => None,
     });
     Ok(output)
 }
 
-fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {
+/// SGLang reports the prompt tokens served from its prefix cache as `cached_tokens`.
+fn cached_prompt_tokens(
+    meta: &HashMap<String, String>,
+    prompt_tokens: u32,
+) -> Option<PromptTokensDetails> {
+    meta_u32(meta, "cached_tokens").map(|cached_tokens| PromptTokensDetails {
+        audio_tokens: None,
+        cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+    })
+}
+
+pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {
     let message = finish
         .get("message")
         .and_then(Value::as_str)
@@ -502,22 +584,18 @@ fn prompt_logprob_entry(value: &Value, label: &str) -> Result<(String, Value), D
     Ok((token_id.to_string(), Value::Object(entry)))
 }
 
-pub(crate) type ExtractedLogprobs = (Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>, usize);
+pub(crate) type ExtractedLogprobs = (Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
 
 pub(crate) fn extract_logprobs(
     meta: &HashMap<String, String>,
-    offset: usize,
     return_tokens_as_ids: bool,
 ) -> Result<ExtractedLogprobs, DynamoError> {
     let Some(Value::Array(all_logprobs)) = meta_value(meta, "output_token_logprobs") else {
-        return Ok((None, None, offset));
+        return Ok((None, None));
     };
-    if offset >= all_logprobs.len() {
-        return Ok((None, None, all_logprobs.len()));
-    }
 
-    let mut log_probs = Vec::with_capacity(all_logprobs.len() - offset);
-    for entry in &all_logprobs[offset..] {
+    let mut log_probs = Vec::with_capacity(all_logprobs.len());
+    for entry in &all_logprobs {
         let value = entry
             .as_array()
             .and_then(|parts| parts.first())
@@ -531,7 +609,7 @@ pub(crate) fn extract_logprobs(
     let top_logprobs = match meta_value(meta, "output_top_logprobs") {
         Some(Value::Array(all_top)) => {
             let mut positions = Vec::new();
-            for position in all_top.iter().skip(offset) {
+            for position in &all_top {
                 let Some(entries) = position.as_array() else {
                     positions.push(Vec::new());
                     continue;
@@ -570,277 +648,11 @@ pub(crate) fn extract_logprobs(
         _ => None,
     };
 
-    Ok((Some(log_probs), top_logprobs, all_logprobs.len()))
+    Ok((Some(log_probs), top_logprobs))
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
+mod request_tests;
 
-    use dynamo_backend_common::{
-        BootstrapInfo, DisaggregationMode, FinishReason, OutputOptions, PrefillResult,
-        PreprocessedRequest, SamplingOptions, StopConditions,
-    };
-    use serde_json::json;
-
-    use super::{
-        build_generate_request, disaggregated_params_to_json, engine_data_from_meta,
-        extract_logprobs, new_output_ids, terminal_from_meta,
-    };
-
-    fn request() -> PreprocessedRequest {
-        PreprocessedRequest::builder()
-            .model("Qwen/Qwen3-0.6B".to_string())
-            .token_ids(vec![1, 2, 3])
-            .sampling_options(SamplingOptions::default())
-            .output_options(OutputOptions::default())
-            .stop_conditions(StopConditions {
-                max_tokens: Some(8),
-                ..Default::default()
-            })
-            .build()
-            .unwrap()
-    }
-
-    #[test]
-    fn request_maps_native_fields_and_full_width_room() {
-        let mut request = request();
-        request.bootstrap_info = Some(BootstrapInfo {
-            bootstrap_host: "prefill".to_string(),
-            bootstrap_port: 5000,
-            bootstrap_room: i64::MAX as u64,
-            handoff_id: None,
-        });
-        let mapped =
-            build_generate_request(&request, "rid-1", DisaggregationMode::Decode, None, None)
-                .unwrap();
-        assert_eq!(mapped.input_ids, vec![1, 2, 3]);
-        assert_eq!(mapped.rid.as_deref(), Some("rid-1"));
-        assert_eq!(mapped.sampling_params.unwrap().max_new_tokens, Some(8));
-        assert_eq!(
-            mapped.disaggregated_params.unwrap().bootstrap_room,
-            i64::MAX
-        );
-    }
-
-    #[test]
-    fn prefill_clamps_generation_and_disables_decode_only_options() {
-        let mut request = request();
-        request.stop_conditions.min_tokens = Some(4);
-        request.output_options = OutputOptions {
-            logprobs: Some(2),
-            prompt_logprobs: Some(3),
-            ..Default::default()
-        };
-        let mapped = build_generate_request(
-            &request,
-            "rid-2",
-            DisaggregationMode::Prefill,
-            Some("prefill"),
-            Some(5001),
-        )
-        .unwrap();
-        let sampling = mapped.sampling_params.unwrap();
-        assert_eq!(sampling.max_new_tokens, Some(1));
-        assert_eq!(sampling.min_new_tokens, None);
-        assert_eq!(mapped.return_logprob, Some(false));
-        assert_eq!(mapped.top_logprobs_num, Some(0));
-        assert_eq!(mapped.logprob_start_len, Some(-1));
-        assert_eq!(mapped.disaggregated_params.unwrap().bootstrap_port, 5001);
-    }
-
-    #[test]
-    fn prefill_handoff_round_trips_to_decode_request() {
-        let prefill = build_generate_request(
-            &request(),
-            "rid-prefill",
-            DisaggregationMode::Prefill,
-            Some("prefill.internal"),
-            Some(5001),
-        )
-        .unwrap();
-        let handoff = prefill.disaggregated_params.unwrap();
-
-        let mut decode_request = request();
-        decode_request.prefill_result = Some(PrefillResult {
-            disaggregated_params: disaggregated_params_to_json(&handoff),
-            prompt_tokens_details: None,
-        });
-        let decode = build_generate_request(
-            &decode_request,
-            "rid-decode",
-            DisaggregationMode::Decode,
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(decode.disaggregated_params, Some(handoff));
-    }
-
-    #[test]
-    fn new_output_ids_slices_the_cumulative_stream() {
-        // SGLang re-sends the whole sequence each chunk; only the tail is new.
-        assert_eq!(new_output_ids(&[1, 2, 3], 0), &[1, 2, 3]);
-        assert_eq!(new_output_ids(&[1, 2, 3], 2), &[3]);
-        assert_eq!(new_output_ids(&[1, 2, 3], 3), &[] as &[i32]);
-        // A chunk that did not grow (or an over-large offset) yields nothing.
-        assert_eq!(new_output_ids(&[1, 2, 3], 5), &[] as &[i32]);
-    }
-
-    #[test]
-    fn cumulative_offset_never_rewinds_on_regression() {
-        // Mirror the engine loop: emit the new tail, then advance the offset
-        // monotonically (token_offset.max(len)) so a regressive chunk can't cause
-        // re-emission when the sequence later grows again.
-        let mut offset = 0usize;
-        let mut step = |ids: &[i32]| -> Vec<i32> {
-            let new = new_output_ids(ids, offset).to_vec();
-            offset = offset.max(ids.len());
-            new
-        };
-        assert_eq!(step(&[1, 2, 3]), vec![1, 2, 3]);
-        // Regressive chunk: emits nothing and leaves the offset at 3.
-        assert_eq!(step(&[1, 2]), Vec::<i32>::new());
-        // Growth resumes: only the genuinely-new tail is emitted, not 1..3 again.
-        assert_eq!(step(&[1, 2, 3, 4]), vec![4]);
-    }
-
-    #[test]
-    fn logprobs_are_sliced_from_cumulative_metadata() {
-        let meta = HashMap::from([
-            (
-                "output_token_logprobs".to_string(),
-                json!([[-0.1, 10, "a"], [-0.2, 11, "b"]]).to_string(),
-            ),
-            (
-                "output_top_logprobs".to_string(),
-                json!([[[-0.1, 10, "a"]], [[-0.2, 11, "b"]]]).to_string(),
-            ),
-        ]);
-        let (logprobs, top, next) = extract_logprobs(&meta, 1, false).unwrap();
-        assert_eq!(logprobs.unwrap(), vec![-0.2]);
-        assert_eq!(top.unwrap()[0][0].token_id, 11);
-        assert_eq!(next, 2);
-    }
-
-    #[test]
-    fn terminal_maps_finish_reason_and_usage() {
-        let meta = HashMap::from([(
-            "finish_reason".to_string(),
-            json!({"type": "length"}).to_string(),
-        )]);
-        let terminal = terminal_from_meta(&meta, 4, 3).unwrap();
-        assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
-        assert_eq!(terminal.completion_usage.unwrap().total_tokens, 7);
-    }
-
-    #[test]
-    fn abort_terminal_preserves_failure_metadata_as_error() {
-        let meta = HashMap::from([(
-            "finish_reason".to_string(),
-            json!({
-                "type": "abort",
-                "message": "prefill allocation failed",
-                "status_code": 503,
-                "err_type": "KVTransferError"
-            })
-            .to_string(),
-        )]);
-        let error = terminal_from_meta(&meta, 4, 0).unwrap_err().to_string();
-        assert!(error.contains("prefill allocation failed"));
-        assert!(error.contains("status_code=503"));
-        assert!(error.contains("KVTransferError"));
-    }
-
-    #[test]
-    fn malformed_terminal_is_rejected() {
-        assert!(terminal_from_meta(&HashMap::new(), 4, 0).is_err());
-        let meta = HashMap::from([(
-            "finish_reason".to_string(),
-            json!({"type": "mystery"}).to_string(),
-        )]);
-        assert!(terminal_from_meta(&meta, 4, 0).is_err());
-    }
-
-    #[test]
-    fn terminal_engine_data_handles_prompt_logprob_encodings() {
-        let meta = HashMap::from([
-            (
-                "input_token_logprobs".to_string(),
-                json!([[null, 10, null], [-0.2, 11, "b"]]).to_string(),
-            ),
-            (
-                "input_top_logprobs".to_string(),
-                json!([null, [[-0.3, 12, "c"]]]).to_string(),
-            ),
-            ("routed_experts".to_string(), json!([1, 2]).to_string()),
-        ]);
-        let data = engine_data_from_meta(&meta, true).unwrap().unwrap();
-        let prompt = data["prompt_logprobs"].as_array().unwrap();
-        assert!(prompt[0].is_null());
-        assert_eq!(prompt[1]["11"]["logprob"], json!(-0.2));
-        assert_eq!(prompt[1]["12"]["decoded_token"], json!("c"));
-        assert_eq!(data["routed_experts"], json!([1, 2]));
-
-        let legacy = HashMap::from([
-            (
-                "input_token_logprobs".to_string(),
-                json!([[-0.1, 10, "a"], [-0.2, 11, "b"]]).to_string(),
-            ),
-            (
-                "input_top_logprobs".to_string(),
-                json!([[[-0.3, 12, "c"]], []]).to_string(),
-            ),
-        ]);
-        let data = engine_data_from_meta(&legacy, true).unwrap().unwrap();
-        let prompt = data["prompt_logprobs"].as_array().unwrap();
-        assert!(prompt[0].is_null());
-        assert_eq!(prompt[1]["10"]["logprob"], json!(-0.1));
-        assert_eq!(prompt[1]["12"]["decoded_token"], json!("c"));
-
-        let mismatched = HashMap::from([
-            (
-                "input_token_logprobs".to_string(),
-                json!([[null, 10, null], [-0.2, 11, "b"]]).to_string(),
-            ),
-            (
-                "input_top_logprobs".to_string(),
-                json!([[[-0.3, 12, "c"]], []]).to_string(),
-            ),
-        ]);
-        assert!(engine_data_from_meta(&mismatched, true).is_err());
-    }
-
-    #[test]
-    fn prompt_logprobs_are_terminal_only() {
-        let meta = HashMap::from([(
-            "input_token_logprobs".to_string(),
-            json!([[-0.1, 10, "a"]]).to_string(),
-        )]);
-        assert!(engine_data_from_meta(&meta, false).unwrap().is_none());
-    }
-
-    #[test]
-    fn decode_requires_rendezvous_params() {
-        assert!(
-            build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None,)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn room_above_signed_int64_is_rejected() {
-        let mut request = request();
-        request.bootstrap_info = Some(BootstrapInfo {
-            bootstrap_host: "prefill".to_string(),
-            bootstrap_port: 5000,
-            bootstrap_room: i64::MAX as u64 + 1,
-            handoff_id: None,
-        });
-        assert!(
-            build_generate_request(&request, "rid-4", DisaggregationMode::Decode, None, None,)
-                .is_err()
-        );
-    }
-}
+#[cfg(test)]
+mod response_tests;

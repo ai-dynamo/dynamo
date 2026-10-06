@@ -28,9 +28,12 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import split_served_model_names
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_cache_metadata_compat import enable_kv_cache_metadata_compat
 
 from . import envs
 
@@ -64,6 +67,12 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     # rest vLLM args
     engine_args: AsyncEngineArgs
 
+    @property
+    def model_source_path(self) -> str:
+        return (
+            self.engine_args.model if needs_local_model_path(self.model) else self.model
+        )
+
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         DynamoVllmConfig.validate(self)
@@ -76,13 +85,38 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
 
 
 def parse_args(argv: list[str] | None = None) -> Config:
-    """Parse command-line arguments for the vLLM backend.
+    """Parse vLLM arguments without fetching; workers use parse_args_with_model_fetch.
 
     Args:
         argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
     Returns:
         Config: Parsed configuration object.
     """
+    return _build_config(*_parse_cli_args(argv))
+
+
+async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
+    """Parse worker arguments, resolving NGC sources before engine validation.
+
+    Only metadata is fetched here; worker startup fetches weights after
+    validation. Hugging Face sources retain their existing acquisition path.
+
+    Args:
+        argv: Command-line arguments. ``None`` means ``sys.argv[1:]``.
+
+    Returns:
+        The validated configuration, retaining the original source in ``model``.
+    """
+    dynamo_config, vllm_args = _parse_cli_args(argv)
+    if needs_local_model_path(dynamo_config.model):
+        vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
+        if not vllm_args.served_model_name:
+            vllm_args.served_model_name = [dynamo_config.model]
+    return _build_config(dynamo_config, vllm_args)
+
+
+def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]:
+    """Split Dynamo and vLLM arguments while preserving the original model source."""
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
@@ -120,23 +154,32 @@ def parse_args(argv: list[str] | None = None) -> Config:
     # Consume the router flags before the engine parser sees the remainder.
     dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
-    # Validate arguments
-    dynamo_config.validate()
-
     vllm_args = vllm_parser.parse_args(unknown)
     # Set the model name from the command line arguments
     # model is defined in AsyncEngineArgs, but when AsyncEngineArgs.from_cli_args is called,
     # vllm will update the model name to the full path of the model, which will break the dynamo logic,
     # as we use the model name as served_model_name (if served_model_name is not set)
     dynamo_config.model = vllm_args.model
+    return dynamo_config, vllm_args
 
+
+def _build_config(dynamo_config: Config, vllm_args: argparse.Namespace) -> Config:
+    enable_kv_cache_metadata_compat()
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 
+    # Attach engine_args before validate(): the --enable-lora exclusivity rules
+    # in DynamoVllmConfig.validate() read it, and are dead code without it.
+    dynamo_config.engine_args = engine_config
+
+    # Validate arguments
+    dynamo_config.validate()
+
+    # These run after validate() because they consume what it resolves --
+    # notably the DisaggregationMode enum and the benchmark sampling fields.
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
-    dynamo_config.engine_args = engine_config
     from .state_agent import validate_state_agent_worker
 
     validate_state_agent_worker(dynamo_config)
@@ -177,6 +220,20 @@ def cross_validate_config(
             "--gms-shadow-mode requires --load-format gms. "
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
+
+    if dynamo_config.embedding_worker_processes > 1:
+        if engine_config.data_parallel_size != 1:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 currently requires "
+                "--data-parallel-size=1. The embedding process pool shares one "
+                "local EngineCore."
+            )
+        if engine_config.enable_lora:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot currently be "
+                "combined with --enable-lora. Runtime LoRA state is not "
+                "synchronized across embedding endpoint processes."
+            )
 
 
 def update_dynamo_config_with_engine(
@@ -241,7 +298,7 @@ def update_dynamo_config_with_engine(
             "When using --disaggregation-mode prefill, you must explicitly "
             "provide --kv-transfer-config. Example:\n"
             "  --kv-transfer-config "
-            '\'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\''
+            '\'{"kv_connector":"NixlConnector","kv_role":"kv_producer"}\''
         )
 
     # Clear connector list (no longer used for vLLM)
@@ -378,15 +435,59 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
+        if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() == "freeze":
+            # Class path as a literal, not an import: importing
+            # dynamo.vllm.gc_policy auto-starts the policy in the importing
+            # process, and this launcher process must stay untouched.
+            worker_extension_cls = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+            existing_ext = getattr(engine_config, "worker_extension_cls", None)
+            if not existing_ext:
+                defaults["worker_extension_cls"] = worker_extension_cls
+                logger.info(
+                    "Benchmark mode: DYN_FPM_GC_POLICY set, injecting "
+                    "worker_extension_cls=%s",
+                    worker_extension_cls,
+                )
+            elif str(existing_ext) != worker_extension_cls:
+                raise ValueError(
+                    f"DYN_FPM_GC_POLICY requires "
+                    f"worker_extension_cls='{worker_extension_cls}' so model "
+                    f"workers apply the GC policy, but --worker-extension-cls "
+                    f"is set to '{existing_ext}'. Remove it or unset "
+                    f"DYN_FPM_GC_POLICY."
+                )
+        if dynamo_config.benchmark_randomize_kda_state:
+            if engine_config.worker_cls not in ("auto", RANDOM_KDA_WORKER):
+                raise ValueError(
+                    "Random KDA benchmarking requires the standard --worker-cls auto"
+                )
+            if (
+                engine_config.load_format == "gms"
+                or os.environ.get("DYN_GMS_USE_V1") == "true"
+            ):
+                raise ValueError(
+                    "Random KDA benchmarking does not support the GMS worker"
+                )
+            defaults["worker_cls"] = RANDOM_KDA_WORKER
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
+            "randomize_kda_state": dynamo_config.benchmark_randomize_kda_state,
+            "hybrid_live_state": dynamo_config.benchmark_hybrid_live_state,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "max_batch_size": dynamo_config.benchmark_max_batch_size,
+            "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
         }
         explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
-            benchmark_config["points"] = explicit_points.model_dump(mode="json")
+            # exclude_none so a v1 manifest round-trips as itself: the v3
+            # optional fields (partition, rows) would otherwise be dumped as
+            # nulls the operator never wrote, into a config the scheduler
+            # re-parses and a test compares against the file it read.
+            benchmark_config["points"] = explicit_points.model_dump(
+                mode="json", exclude_none=True
+            )
         else:
             benchmark_config.update(
                 {
@@ -423,6 +524,17 @@ def update_engine_config_with_dynamo(
             logger.debug(
                 f" Skipping engine_args.{key} (not available in this vLLM version)"
             )
+
+    # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        if getattr(engine_config, "load_format", None) == "gms":
+            raise ValueError(
+                "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
+            )
+        engine_config.worker_cls = (
+            "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
+        )
+        engine_config.enable_sleep_mode = True
 
 
 def create_kv_events_config(
@@ -490,7 +602,7 @@ def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
     return False
 
 
-def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
+def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str:
     """Convert a legacy --connector list to the equivalent --kv-transfer-config JSON.
 
     Used in error messages to help users migrate.
@@ -508,7 +620,7 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
             )
         elif c == "nixl":
             multi_connectors.append(
-                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+                {"kv_connector": "NixlConnector", "kv_role": nixl_role}
             )
         elif c == "kvbm":
             multi_connectors.append(
@@ -557,9 +669,16 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
             "no connector. Simply remove the --connector flag."
         )
 
+    if dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
+        nixl_role = "kv_producer"
+    elif dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
+        nixl_role = "kv_consumer"
+    else:
+        nixl_role = "kv_both"
+
     # Active connectors: show migration path
     if normalized:
-        equiv = _connector_to_kv_transfer_json(normalized)
+        equiv = _connector_to_kv_transfer_json(normalized, nixl_role)
         raise ValueError(
             "--connector is no longer supported for the vLLM backend. "
             "Use --kv-transfer-config instead.\n"
@@ -570,7 +689,7 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
     if env_connector is not None:
         env_values = [v.strip().lower() for v in env_connector.split() if v.strip()]
         if env_values and not all(v in ("none", "null") for v in env_values):
-            equiv = _connector_to_kv_transfer_json(env_values)
+            equiv = _connector_to_kv_transfer_json(env_values, nixl_role)
             raise ValueError(
                 "The DYN_CONNECTOR environment variable is no longer supported "
                 "for the vLLM backend. Use --kv-transfer-config instead.\n"

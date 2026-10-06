@@ -22,37 +22,38 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/scale"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type groveScaler struct {
-	scaleClient scale.ScalesGetter
+	client client.Client
 }
 
-func newGroveScaler(scaleClient scale.ScalesGetter) *groveScaler {
-	return &groveScaler{scaleClient: scaleClient}
+func newGroveScaler(kubeClient client.Client) *groveScaler {
+	return &groveScaler{client: kubeClient}
 }
 
 // Reconcile applies component replica changes to the Grove resources created
 // asynchronously from the PodCliqueSet.
 func (s *groveScaler) Reconcile(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) error {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
+	managedComponents := req.ManagedComponents()
+	pcsName := dynamo.PCSNameForDGD(req.DGD, req.IsDelegated)
 
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
+	for i := range managedComponents {
+		component := &managedComponents[i]
 		componentName := component.ComponentName
 		info := checkpointInfos[componentName]
 		gated := info != nil &&
@@ -71,7 +72,7 @@ func (s *groveScaler) Reconcile(
 		}
 
 		usesPCSG := component.UsesPCSG()
-		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
+		resourceName := dynamo.GroveComponentResourceName(pcsName, componentName)
 		resourceKind := "PodClique"
 		gvr := consts.PodCliqueGVR
 		if usesPCSG {
@@ -82,7 +83,7 @@ func (s *groveScaler) Reconcile(
 			ctx,
 			gvr,
 			resourceName,
-			dgd.Namespace,
+			req.DGD.Namespace,
 			replicas,
 		); err != nil {
 			logger.Error(
@@ -108,7 +109,7 @@ func (s *groveScaler) scaleResource(
 	namespace string,
 	newReplicas int32,
 ) error {
-	err := commoncontroller.ScaleResource(ctx, s.scaleClient, gvr, namespace, resourceName, newReplicas)
+	err := commoncontroller.ScaleResource(ctx, s.client, gvr, namespace, resourceName, newReplicas)
 	if apierrors.IsNotFound(err) {
 		// Grove creates these resources asynchronously after the PodCliqueSet.
 		// A later reconciliation retries the scale once the child exists.

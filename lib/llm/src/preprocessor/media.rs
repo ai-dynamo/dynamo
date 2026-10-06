@@ -3,6 +3,7 @@
 
 mod common;
 mod decoders;
+mod jpeg_turbo;
 mod loader;
 mod rdma;
 
@@ -11,9 +12,14 @@ use dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage;
 
 pub use common::EncodedMediaData;
 pub use decoders::{Decoder, ImageDecoder, MediaDecoder};
-pub use loader::{MediaFetcher, MediaLoader};
+pub use loader::{MediaFetcher, MediaLoader, max_data_url_bytes};
 
 pub use rdma::{DecodedMediaData, RdmaMediaDataDescriptor, get_nixl_agent, get_nixl_metadata};
+
+#[doc(hidden)]
+pub fn libjpeg_turbo_available() -> bool {
+    jpeg_turbo::available()
+}
 
 pub(super) fn require_image_url(
     part: &ChatCompletionRequestMessageContentPartImage,

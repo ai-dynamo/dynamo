@@ -1,11 +1,11 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Frontend Guide
-subtitle: Configures the KServe gRPC frontend, including supported endpoints, gRPC tuning, and registering OpenAI or tensor-based backends.
+title: KServe gRPC Frontend
+subtitle: Configure KServe endpoints, backend registration, message conversion, and HTTP/2 flow control
 ---
 
-This guide covers the KServe gRPC frontend configuration and integration for the Dynamo Frontend.
+The KServe gRPC frontend exposes KServe v2 and Triton-compatible endpoints through the Dynamo Frontend. This page covers only the KServe interface.
 
 ## KServe gRPC Frontend
 
@@ -133,34 +133,11 @@ When registering the backend, the backend must provide the model's metadata as t
 
 When receiving inference request, the backend will receive [NvCreateTensorRequest](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/tensor.rs) and be expected to return [NvCreateTensorResponse](https://github.com/ai-dynamo/dynamo/tree/main/lib/llm/src/protocols/tensor.rs), which are the mapping of ModelInferRequest / ModelInferResponse protobuf message in Dynamo.
 
-## Python Bindings
-
-The frontend may be started via Python binding, this is useful when integrating Dynamo in existing system that desire the frontend to be run in the same process with other components. See [server.py](https://github.com/ai-dynamo/dynamo/tree/main/lib/bindings/python/examples/kserve_grpc_service/server.py) for example.
-
-## Integration
-
-### With Router
-
-The frontend includes an integrated router for request distribution. Configure routing mode:
-
-```bash
-python -m dynamo.frontend --router-mode kv --http-port 8000
-```
-
-See [Router Documentation](../router/overview.md) for routing configuration details.
-
-### With Backends
-
-Backends auto-register with the frontend when they call `register_model()`. Supported backends:
-
-- [vLLM Backend](../backends/vllm/overview.md)
-- [SGLang Backend](../backends/sglang/overview.md)
-- [TensorRT-LLM Backend](../backends/tensorrt-llm/overview.md)
-
 ## See Also
 
 | Document | Description |
 |----------|-------------|
-| [Frontend Overview](overview.md) | Quick start and feature matrix |
+| [Frontend Overview](overview.md) | HTTP and gRPC quick starts and the feature matrix |
+| [Python Route Extensions](python-route-extensions.md) | Custom HTTP routes and in-process extensions |
 | [NVIDIA Request Extensions (`nvext`)](../../../additional-resources/nvidia-request-extensions-nvext.md) | Routing, preprocessing, response metadata, and engine priority extensions |
 | [Router Documentation](../router/overview.md) | KV-aware routing configuration |

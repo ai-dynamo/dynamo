@@ -32,7 +32,6 @@ example.
 | [**KV-Aware Routing**](../../router/overview.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/planner-guide.md) | ✅ |  |
 | [**Load Based Planner**](../../planner/overview.md) | 🚧 | Planned |
-| [**KVBM**](../../kvbm/overview.md) | ✅ | |
 
 ### Large Scale P/D and WideEP Features
 
@@ -44,7 +43,7 @@ example.
 
 ## Feature Interactions
 
-TensorRT-LLM delivers maximum inference performance and optimization, with full KVBM integration and robust disaggregated serving support. The matrix below shows which feature pairs are validated to work together.
+The matrix below shows which TensorRT-LLM feature pairs are validated to work together.
 
 **Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
 
@@ -74,9 +73,9 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 
 | Container tag | Backend version | CUDA | Min NVIDIA driver |
 |---|---|---|---|
-| `tensorrtllm-runtime:1.4.0` | TRT-LLM `v1.3.0rc22` | `v13.1` | `580+` |
-| `vllm-runtime:1.4.0` | vLLM `v0.26.0` | `v13.0` | `580+` |
-| `sglang-runtime:1.4.0` | SGLang `v0.5.16` | `v13.0` | `580+` |
+| `tensorrtllm-runtime:1.5.0` | TRT-LLM `v1.3.0rc25` | `v13.1` | `580+` |
+| `vllm-runtime:1.5.0` | vLLM `v0.28.0` | `v13.0` | `580+` |
+| `sglang-runtime:1.5.0` | SGLang `v0.5.18` | `v13.0` | `580+` |
 
 Source of truth: [`docs/fern/pages/reference/general/compatibility.mdx`](../../../../../reference/general/compatibility.mdx#release-support-matrix) and [`docs/fern/pages/reference/general/release-artifacts.mdx`](../../../../../reference/general/release-artifacts.mdx). If those differ from the values above, the source-of-truth files win.
 
@@ -91,7 +90,7 @@ docker compose -f dev/docker-compose.yml up -d
 **Step 2 (host terminal):** Pull and run the prebuilt container:
 
 ```bash
-DYNAMO_VERSION=1.4.0
+DYNAMO_VERSION=1.5.0
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
 docker run --gpus all -it --network host --ipc host \
   nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION

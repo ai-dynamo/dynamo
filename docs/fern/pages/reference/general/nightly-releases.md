@@ -24,23 +24,34 @@ Dynamo publishes nightly builds from `main`. Nightlies let you try the latest fe
 
 Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/main/.github/workflows/nightly-ci.yml) builds `main` and publishes:
 
-- **Container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, and `tensorrtllm-runtime-nightly` to NGC.
+- **Runtime container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, and `tensorrtllm-runtime-nightly` to NGC, each with an Elastic Fabric Adapter (EFA) variant under a `-efa` tag suffix.
+- **Component container images:** `kubernetes-operator-nightly`, `dynamo-planner-nightly`, and `dynamo-frontend-nightly` to NGC.
 - **Python wheels:** `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/).
+- **Helm chart:** [`dynamo-platform-nightly`](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform-nightly) to the NGC Helm registry, kept separate from the stable `dynamo-platform` chart.
 
-Nightly deliberately does **not** publish EFA image variants, `dynamo-frontend`, `kubernetes-operator`, `dynamo-planner`, `snapshot-agent`, Helm charts, or Rust crates. For those, use a [stable or pre-release build](release-artifacts.mdx).
+The runtime images and the wheels gate the release: if any of them fails to build, that night publishes nothing. The component images, the EFA variants, and the Helm chart stage fail-soft, so a flake in one of them skips that artifact for the night without holding back the rest.
+
+Nightly does not publish Rust crates — for those, use a [stable or prerelease build](release-artifacts.mdx).
 
 ## Installing Nightly Containers
 
-Nightly images live in their own `-nightly` NGC repositories so they cannot be pulled accidentally in place of a stable image. Runtime containers use a floating `:latest` tag for the most recent nightly build.
+Nightly images live in their own `-nightly` NGC repositories so they cannot be pulled accidentally in place of a stable image. Every nightly build pushes an immutable `YYYYMMDD-<shortsha>` tag and moves the `latest` tag to that build.
 
 ```bash
-# Always the latest nightly
+# Most recent nightly
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:latest
+
+# Pin one nightly build
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260830-4c7e981
+
+# EFA variant, floating or pinned
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest-efa
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260830-4c7e981-efa
 ```
 
-The old nightly docs also described immutable `:YYYYMMDD-<shortsha>` container tags. Those tags are not currently visible for the recent NGC nightly images, so use `:latest` unless you have a specific tag from the publish job.
+Pin the dated tag for anything you need to reproduce later: `latest` moves every night, so the image behind it changes underneath you. The runtime repositories also carry a `nightly` tag, but it stopped tracking `main` in July 2026 — use `latest` or a dated tag instead. The component repositories publish the same dated tags and a `latest` float, without the `nightly` alias or the EFA variants.
 
 ## Installing Nightly Wheels
 
@@ -54,14 +65,14 @@ uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
 pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
 
 # Pin a specific nightly wheel
-uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[vllm]==1.4.0.dev20260803"
+uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[vllm]==1.5.0.dev20260831"
 ```
 
 Backend extras such as `ai-dynamo[vllm]` and `ai-dynamo[sglang]` use the same flags. For TensorRT-LLM, use the nightly container rather than a PyPI extra.
 
 ## Backend Versions
 
-Nightlies track `main`, so the backend versions they ship change as `main` advances. To find which nightly or stable build ships a given backend version, and get the exact pull or install command, use the build selector in the [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx#install-dynamo).
+Nightlies track `main`, so the backend versions they ship change as `main` advances. The build selector in [Install Dynamo](../../cli/installation/install-dynamo.mdx) lists the last three versions of each backend and the newest nightly that shipped each one, with the exact install command. For Kubernetes image variables, use the selector in the [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx#install-dynamo).
 
 To confirm the exact versions a specific nightly shipped, read them from the pulled image:
 
@@ -71,6 +82,6 @@ docker run --rm nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest pip show vl
 
 ## See Also
 
-- [Release Artifacts](release-artifacts.mdx) — stable and pre-release artifact inventory
+- [Release Artifacts](release-artifacts.mdx) — stable and prerelease artifact inventory
 - [Compatibility](compatibility.mdx) — hardware, platform, CUDA, and driver support
-- [Model Early Access Builds](model-early-access-builds.mdx) — model-specific pre-release container builds
+- [Model Early Access Builds](model-early-access-builds.mdx) — model-specific prerelease container builds

@@ -132,8 +132,6 @@ spec:
                 - "32768"
                 - --enable-prefix-caching
                 - --async-scheduling
-                - --quantization
-                - modelopt_fp4
                 - --dyn-tool-call-parser
                 - nemotron_nano
                 - --dyn-reasoning-parser

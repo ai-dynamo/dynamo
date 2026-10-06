@@ -18,6 +18,10 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      build_triton:
+        description: 'Build and push triton image, tagged with branch name'
+        type: boolean
+        default: false
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
@@ -53,7 +57,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [init]
     if: inputs.build_vllm
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
@@ -67,7 +71,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [init]
     if: inputs.build_sglang
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
@@ -81,7 +85,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [init]
     if: inputs.build_trtllm
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
@@ -91,10 +95,24 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
+  triton-build:
+    name: triton-runtime # This name overlaps with other triton jobs to group them in the UI
+    needs: [init]
+    if: inputs.build_triton
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: triton
+      target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
@@ -104,7 +122,7 @@ jobs:
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build]
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
@@ -114,13 +132,16 @@ jobs:
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build]
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
+
+  # Triton images are published to AWS ECR only (no Azure ACR mirror), so there
+  # is no triton-copy-to-acr job.
 
   # ============================================================================
   # OPERATOR (build-only)
@@ -139,14 +160,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
+        uses: $/.github/actions/init-dynamo-builder
         with:
           builder_name: ${{ needs.init.outputs.builder_name }}
           flavor: general
           arch: 'linux/amd64,linux/arm64'
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Docker Login
-        uses: ./.github/actions/docker-login
+        uses: $/.github/actions/docker-login
         with:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
@@ -171,10 +192,14 @@ jobs:
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
+          # deploy/operator/Dockerfile's licenses stage does `COPY --from=compliance`,
+          # which resolves as an image unless the named build context is supplied.
+          # Without this the build fails pulling docker.io/library/compliance.
+          # .github/actions/build-deploy-component passes the same flag.
           docker buildx build --push \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_REGISTRY}/dockerhub/ \
-              --build-context snapshot=../snapshot \
+              --build-context compliance=../../container/compliance \
               ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
@@ -193,12 +218,12 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, triton-build, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     - name: Create K8s builders (skip bootstrap)
-      uses: ./.github/actions/bootstrap-buildkit
+      uses: $/.github/actions/bootstrap-buildkit
       continue-on-error: true
       with:
         builder_name: ${{ needs.init.outputs.builder_name }}

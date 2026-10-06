@@ -10,6 +10,14 @@ import threading
 from time import monotonic
 
 import pytest
+from _deps import HAS_GMS
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.v1.client.session import _GMSClientSession

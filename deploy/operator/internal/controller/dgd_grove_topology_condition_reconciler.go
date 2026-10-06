@@ -22,6 +22,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -48,10 +49,11 @@ func newDGDGroveTopologyConditionReconciler(
 
 func (r *dgdGroveTopologyConditionReconciler) Reconcile(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
 	result *workloadProgramResult,
 ) {
-	if result == nil || !dgd.HasAnyTopologyConstraint() {
+	// Project status only when typed or provider-native topology is configured.
+	if result == nil || (!req.DGD.HasAnyTopologyConstraint() && !provideroverride.HasGroveTopologyOverrides(req.DGD)) {
 		return
 	}
 	status := &result.Status
@@ -59,8 +61,8 @@ func (r *dgdGroveTopologyConditionReconciler) Reconcile(
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	if err := r.reader.Get(ctx, types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-		Namespace: dgd.Namespace,
+		Name:      dynamo.PCSNameForDGD(req.DGD, req.IsDelegated),
+		Namespace: req.DGD.Namespace,
 	}, pcs); err != nil {
 		if !apierrors.IsNotFound(err) {
 			logger.V(1).Info("failed to read PCS for topology condition projection", "error", err)

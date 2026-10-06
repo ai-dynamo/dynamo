@@ -14,7 +14,7 @@ description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 [features]
 # Preserve the package's default tests; benchmark entrypoints use the
 # documented `--no-default-features` feature sets below.
-default = ["claude-trace-export", "test-support"]
+default = ["claude-trace-export", "codex-trace-export", "test-support"]
 active-sequences = [
   "router-bench",
   "dep:dynamo-mocker",
@@ -24,15 +24,20 @@ active-sequences = [
   "dep:rustc-hash",
   "dep:tracing-subscriber",
 ]
-claude-trace-export = [
+approximate-lru = ["active-sequences"]
+coding-trace-export = [
   "dep:chrono",
-  "dep:crossbeam-channel",
   "dep:dynamo-data-gen",
-  "dep:hf-hub",
   "dep:rustc-hash",
   "dep:sha2",
+]
+claude-trace-export = [
+  "coding-trace-export",
+  "dep:crossbeam-channel",
+  "dep:hf-hub",
   "dep:tokenizers",
 ]
+codex-trace-export = ["coding-trace-export"]
 dc-ckf-consumer = []
 dc-ckf-relay = [
   "dep:crossbeam-channel",
@@ -48,6 +53,7 @@ mooncake = [
   "dep:dynamo-mocker",
   "dep:indicatif",
   "dep:libc",
+  "dep:sha2",
   "dep:tokio-util",
 ]
 multiturn = [
@@ -57,7 +63,7 @@ multiturn = [
   "dep:indicatif",
   "dep:rand",
 ]
-offline-replay = ["dep:blake3", "dep:dynamo-mocker"]
+offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
 router-bench = ["dynamo-kv-router/bench"]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
@@ -72,7 +78,7 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
-request-trace-to-mooncake = ["dep:dynamo-data-gen", "dep:tempfile"]
+request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",
@@ -94,6 +100,11 @@ required-features = ["multiturn"]
 name = "claude_trace_export"
 path = "claude_trace_export.rs"
 required-features = ["claude-trace-export"]
+
+[[bin]]
+name = "codex_trace_export"
+path = "codex_trace_export.rs"
+required-features = ["codex-trace-export"]
 
 [[bin]]
 name = "request_trace_to_satf"
@@ -132,6 +143,17 @@ name = "active_sequences_bench"
 path = "kv_router/active_sequences_bench.rs"
 harness = false
 required-features = ["active-sequences"]
+
+[[bench]]
+name = "approximate_lru_bench"
+path = "kv_router/approximate_lru_bench.rs"
+harness = false
+required-features = ["approximate-lru"]
+
+[[test]]
+name = "approximate_lru"
+path = "tests/approximate_lru.rs"
+required-features = ["approximate-lru"]
 
 [[bench]]
 name = "dc_ckf_relay_bench"

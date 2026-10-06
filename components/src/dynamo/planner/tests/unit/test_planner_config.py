@@ -6,7 +6,6 @@
 import pytest
 from pydantic import ValidationError
 
-from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import PlannerConfig
 
 pytestmark = [
@@ -44,6 +43,17 @@ def test_invalid_environment():
             namespace="test-ns",
             environment="invalid-environment",
         )
+
+
+def test_max_throughput_scaling_replicas_defaults_to_eight():
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.max_throughput_scaling_replicas == 8
+
+
+def test_max_throughput_scaling_replicas_must_be_positive():
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", max_throughput_scaling_replicas=0)
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +233,40 @@ def test_throughput_metrics_source_invalid():
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
 
 
+def test_prometheus_request_timeout_defaults_to_ten_seconds(monkeypatch):
+    monkeypatch.delenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", raising=False)
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.metric_pulling_prometheus_request_timeout_seconds == 10.0
+
+
+def test_prometheus_request_timeout_uses_environment_default(monkeypatch):
+    monkeypatch.setenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "2.5")
+
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.metric_pulling_prometheus_request_timeout_seconds == 2.5
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_prometheus_request_timeout_rejects_non_positive_values(timeout):
+    with pytest.raises(ValidationError):
+        PlannerConfig(
+            namespace="test-ns",
+            metric_pulling_prometheus_request_timeout_seconds=timeout,
+        )
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1"])
+def test_prometheus_request_timeout_rejects_non_positive_environment_values(
+    monkeypatch, timeout
+):
+    monkeypatch.setenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", timeout)
+
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns")
+
+
 @pytest.mark.parametrize("bucket_size", [1, 4, 9, 16, 25])
 def test_fpm_sample_bucket_size_accepts_perfect_squares(bucket_size):
     """fpm_sample_bucket_size must be a perfect square (valid values)."""
@@ -270,33 +314,27 @@ def test_agg_mode_supports_throughput_scaling():
     assert config.scaling_enabled() is True
 
 
-def test_aic_perf_model_requires_prefill_pick_for_prefill_mode():
-    with pytest.raises(ValidationError, match="prefill_pick"):
+def test_ais_perf_model_requires_prefill_role_for_prefill_mode():
+    with pytest.raises(ValidationError, match="roles.prefill"):
         PlannerConfig(
             namespace="test-ns",
             mode="prefill",
             optimization_target="sla",
-            aic_perf_model={
-                "hf_id": "model",
-                "system": "h200_sxm",
-                "backend": "vllm",
-            },
+            ais_perf_model={"roles": {}},
         )
 
 
-def test_aic_perf_model_accepts_mode_required_picks():
-    pick = PickedParallelConfig(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1)
+def test_ais_perf_model_accepts_mode_required_roles():
     config = PlannerConfig(
         namespace="test-ns",
         mode="decode",
         optimization_target="sla",
-        aic_perf_model={
-            "hf_id": "model",
-            "system": "h200_sxm",
-            "backend": "vllm",
-            "decode_pick": pick.model_dump(),
+        ais_perf_model={
+            "roles": {
+                "decode": {"model": "model", "system": "h200_sxm", "backend": "vllm"}
+            }
         },
     )
 
-    assert config.aic_perf_model is not None
-    assert config.aic_perf_model.decode_pick == pick
+    assert config.ais_perf_model is not None
+    assert config.ais_perf_model.roles["decode"]["tp"] == 1

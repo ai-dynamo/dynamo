@@ -14,15 +14,15 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
-    component::Endpoint,
     engine::AsyncEngine,
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
         async_trait,
     },
-    protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
+    protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
+use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
 use crate::protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::TraceLink,
@@ -31,7 +31,7 @@ use crate::protocols::common::{
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
 struct EncoderBinding {
-    endpoint_id: EndpointId,
+    target_id: WorkerSetTargetId,
     router: Arc<EncodePushRouter>,
 }
 
@@ -62,8 +62,8 @@ impl EncoderLifecycleState {
 /// token router mode; they do not participate in KV-aware routing.
 pub struct EncoderRouter {
     binding: ArcSwapOption<EncoderBinding>,
-    target: Mutex<Option<EndpointId>>,
-    target_tx: Option<watch::Sender<Option<Endpoint>>>,
+    target: Mutex<Option<WorkerSetTargetId>>,
+    target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     cancel_token: CancellationToken,
     lifecycle: AtomicU8,
     model_name: String,
@@ -129,26 +129,29 @@ impl EncoderRouter {
         router
     }
 
-    async fn build(endpoint: Endpoint) -> Result<EncoderBinding> {
-        let endpoint_id = endpoint.id();
-        let client = endpoint.client().await?;
+    async fn build(
+        target: WorkerSetTarget,
+        cancel_token: CancellationToken,
+    ) -> Result<EncoderBinding> {
+        let target_id = target.id();
+        let client = target.client(cancel_token).await?;
         let router =
             EncodePushRouter::from_client_with_monitor(client, RouterMode::RoundRobin, None)
                 .await?;
         Ok(EncoderBinding {
-            endpoint_id,
+            target_id,
             router: Arc::new(router),
         })
     }
 
     async fn drive_target(
         router: std::sync::Weak<Self>,
-        mut target_rx: watch::Receiver<Option<Endpoint>>,
+        mut target_rx: watch::Receiver<Option<WorkerSetTarget>>,
         cancel_token: CancellationToken,
     ) {
         loop {
             let target = target_rx.borrow_and_update().clone();
-            let Some(endpoint) = target else {
+            let Some(target) = target else {
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => return,
@@ -160,12 +163,13 @@ impl EncoderRouter {
                 }
                 continue;
             };
-            let endpoint_id = endpoint.id();
+            let target_id = target.id();
+            let endpoint_id = target.endpoint().id();
             let reuses_binding = router.upgrade().is_some_and(|router| {
                 router
                     .binding
                     .load_full()
-                    .is_some_and(|binding| binding.endpoint_id == endpoint_id)
+                    .is_some_and(|binding| binding.target_id == target_id)
                     && router.lifecycle_state() == EncoderLifecycleState::Active
             });
             if reuses_binding {
@@ -180,7 +184,7 @@ impl EncoderRouter {
                 }
                 continue;
             }
-            let build = Self::build(endpoint);
+            let build = Self::build(target, cancel_token.child_token());
             tokio::pin!(build);
             let result = tokio::select! {
                 biased;
@@ -200,7 +204,7 @@ impl EncoderRouter {
             match result {
                 Ok(binding) => {
                     let current_target = router.target.lock();
-                    if current_target.as_ref() != Some(&endpoint_id) {
+                    if current_target.as_ref() != Some(&target_id) {
                         continue;
                     }
                     router.binding.store(Some(Arc::new(binding)));
@@ -216,7 +220,7 @@ impl EncoderRouter {
                     );
                 }
                 Err(error) => {
-                    if router.target.lock().as_ref() != Some(&endpoint_id) {
+                    if router.target.lock().as_ref() != Some(&target_id) {
                         continue;
                     }
                     tracing::error!(
@@ -249,8 +253,8 @@ impl EncoderRouter {
     /// Update the desired Encode endpoint. Clearing is synchronous so requests
     /// holding an older catalog snapshot stop using a removed endpoint before
     /// the new catalog is published.
-    pub(crate) fn set_target(&self, target: Option<Endpoint>) {
-        let target_id = target.as_ref().map(Endpoint::id);
+    pub(crate) fn set_target(&self, target: Option<WorkerSetTarget>) {
+        let target_id = target.as_ref().map(WorkerSetTarget::id);
         let mut current = self.target.lock();
         if *current == target_id {
             return;
@@ -260,7 +264,7 @@ impl EncoderRouter {
             && self
                 .binding
                 .load_full()
-                .is_some_and(|binding| Some(&binding.endpoint_id) == target_id.as_ref());
+                .is_some_and(|binding| Some(&binding.target_id) == target_id.as_ref());
         let lifecycle = if target.is_none() {
             EncoderLifecycleState::Unavailable
         } else if reuses_binding {
@@ -276,8 +280,10 @@ impl EncoderRouter {
     }
 
     #[cfg(test)]
-    pub(crate) fn target_endpoint_id(&self) -> Option<EndpointId> {
-        self.target.lock().clone()
+    pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
+        self.target_tx
+            .as_ref()
+            .and_then(|tx| tx.borrow().as_ref().map(|target| target.endpoint().id()))
     }
 
     fn should_encode(request: &PreprocessedRequest) -> bool {
@@ -372,16 +378,26 @@ impl
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Mutex,
+        time::Duration,
+    };
 
     use futures::stream;
     use serde_json::json;
 
     use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        discovery::EventTransportKind,
+        distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
         engine::AsyncEngineContextProvider,
-        pipeline::{Error, ResponseStream, context::Controller},
+        pipeline::{Error, ResponseStream, context::Controller, network::Ingress},
+        storage::kv,
     };
 
+    use crate::discovery::CommittedWorkerSetTarget;
+    use crate::model_card::ModelDeploymentCard;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
@@ -433,6 +449,208 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    struct EncodeWorker(u64);
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for EncodeWorker
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let output = LLMEngineOutput::encode_terminal(
+                json!({"worker_id": self.0}).as_object().unwrap().clone(),
+            );
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(output)])),
+                request.context(),
+            ))
+        }
+    }
+
+    async fn encoded_worker(router: &EncoderRouter) -> Option<u64> {
+        let downstream = Arc::new(CaptureEngine::default());
+        router
+            .generate(SingleIn::new(multimodal_request()), downstream.clone())
+            .await
+            .unwrap();
+        downstream
+            .request
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .encoder_result
+            .and_then(|result| result["worker_id"].as_u64())
+    }
+
+    #[tokio::test]
+    async fn committed_encoder_admission_survives_membership_changes_and_endpoint_reuse() {
+        // Each request-plane server needs a live runtime for its process-wide
+        // accept loop, independent of the surrounding test harness's runtimes.
+        const TEST: &str = concat!(
+            module_path!(),
+            "::committed_encoder_admission_survives_membership_changes_and_endpoint_reuse"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env("DYNAMO_ROUTING_HOP_TEST", test_name)
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .expect("encoder subprocess must finish within its deadline")
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = Runtime::from_current().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let config = || DistributedConfig {
+            discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(store.path().into())),
+            nats_config: None,
+            request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
+            event_transport_kind: EventTransportKind::Zmq,
+        };
+        let namespace = format!("encoder-admission-{}", uuid::Uuid::new_v4());
+        let mut workers = Vec::new();
+        let mut runtimes = Vec::new();
+        for _ in 0..3 {
+            let drt = DistributedRuntime::new(runtime.clone(), config())
+                .await
+                .unwrap();
+            let endpoint = drt
+                .namespace(namespace.clone())
+                .unwrap()
+                .component("workers")
+                .unwrap()
+                .endpoint("encode");
+            let worker = endpoint
+                .endpoint_builder()
+                .handler(Ingress::for_engine(Arc::new(EncodeWorker(drt.connection_id()))).unwrap())
+                .start_with_registration()
+                .await
+                .unwrap();
+            workers.push(worker);
+            runtimes.push(drt);
+        }
+        let drt = DistributedRuntime::new(runtime.clone(), config())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace(namespace.clone())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("encode");
+        let raw_client = endpoint.client().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut instances = raw_client.instance_source.as_ref().clone();
+            while instances.borrow_and_update().len() != 3 {
+                instances.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("all three workers must be visible in raw discovery");
+        let ids: Vec<_> = workers
+            .iter()
+            .map(|worker| worker.instance().id())
+            .collect();
+        let (admissions, admitted_ids) = watch::channel(vec![ids[0]]);
+        let card = Arc::new(ModelDeploymentCard::with_name_only("model"));
+        let target = |generation, admitted_ids| {
+            WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+                endpoint: endpoint.clone(),
+                group: endpoint.id().to_string(),
+                generation,
+                card: card.clone(),
+                admitted_ids,
+            })
+        };
+        let router = EncoderRouter::new("model".into(), namespace);
+        router.set_target(Some(target(1, admitted_ids)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(worker) = encoded_worker(&router).await {
+                    assert_eq!(worker, ids[0]);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("committed encoder must activate");
+        for _ in 0..6 {
+            assert_eq!(encoded_worker(&router).await, Some(ids[0]));
+        }
+
+        admissions.send_replace(vec![ids[0], ids[1]]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut seen = HashSet::new();
+            while seen.len() < 2 {
+                let worker = encoded_worker(&router).await.unwrap();
+                assert!(
+                    ids[..2].contains(&worker),
+                    "rejected encoder received a request"
+                );
+                seen.insert(worker);
+            }
+        })
+        .await
+        .expect("compatible members must become reachable through the admission channel");
+
+        let retired = router.binding.load_full().unwrap();
+        admissions.send_replace(Vec::new());
+        drop(admissions);
+        router.set_target(None);
+        let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
+        router.set_target(Some(target(2, successor_ids)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(worker) = encoded_worker(&router).await {
+                    assert_eq!(worker, ids[2]);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("same-endpoint successor must activate with its own admission");
+        for _ in 0..6 {
+            assert_eq!(encoded_worker(&router).await, Some(ids[2]));
+        }
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                retired
+                    .router
+                    .generate(SingleIn::new(multimodal_request()),)
+            )
+            .await
+            .expect("retired admission must fail promptly")
+            .is_err()
+        );
+
+        drop(router);
+        for worker in workers {
+            worker.shutdown().await.unwrap();
+        }
+        runtime.shutdown();
     }
 
     #[tokio::test]

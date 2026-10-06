@@ -93,11 +93,20 @@ MULTIMODAL_MEDIA_DIR = _MEDIA_DIR
 MULTIMODAL_VIDEO_EXPECTED = ["triangle"]
 
 
-def get_multimodal_test_image_bytes() -> bytes:
-    """Return a deterministic PNG with an obvious green square."""
+def get_multimodal_test_image_bytes(color: str = "green") -> bytes:
+    """Return a deterministic PNG with an obvious green or red square."""
 
     # Lazy import so conftest loads in environments that don't have Pillow (e.g. pre-commit).
     from PIL import Image, ImageDraw
+
+    palette = {
+        "green": ((0, 180, 0), (0, 90, 0)),
+        "red": ((220, 30, 30), (130, 0, 0)),
+    }
+    try:
+        fill, outline = palette[color]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported multimodal test image color: {color}") from exc
 
     buf = BytesIO()
     # Keep this synthetic so CI never depends on Git LFS media. The white
@@ -105,8 +114,8 @@ def get_multimodal_test_image_bytes() -> bytes:
     # an edge-to-edge flat color.
     img = Image.new("RGB", (512, 512), color="white")
     draw = ImageDraw.Draw(img)
-    draw.rectangle((96, 96, 416, 416), fill=(0, 180, 0), outline=(0, 90, 0), width=8)
-    draw.text((214, 444), "GREEN", fill=(0, 90, 0))
+    draw.rectangle((96, 96, 416, 416), fill=fill, outline=outline, width=8)
+    draw.text((214, 444), color.upper(), fill=outline)
     img.save(buf, format="PNG")
     return buf.getvalue()
 

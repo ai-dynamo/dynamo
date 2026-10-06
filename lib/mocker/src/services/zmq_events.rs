@@ -7,13 +7,13 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use futures::{Sink, SinkExt, StreamExt};
 use serde::Serialize;
 use tmq::{
-    Context, Multipart, SocketBuilder,
+    AsZmqSocket, Context, Multipart, SocketBuilder,
     publish::{Publish, publish},
     router::{Router, router},
 };
@@ -56,6 +56,8 @@ enum ZmqRawKvEvent {
 
 pub struct ZmqKvEventSink {
     tx: mpsc::UnboundedSender<Vec<RawKvEvent>>,
+    endpoint: String,
+    replay_endpoint: Option<String>,
 }
 
 impl ZmqKvEventSink {
@@ -65,28 +67,52 @@ impl ZmqKvEventSink {
         dp_rank: u32,
         block_size: u32,
     ) -> Result<Self> {
+        Self::bind(Some(port), replay_port, dp_rank, block_size)
+    }
+
+    /// Bind the publisher, using an OS-assigned port when `port` is absent.
+    /// Requires an active Tokio runtime for the background publisher task.
+    pub fn bind(
+        port: Option<u16>,
+        replay_port: Option<u16>,
+        dp_rank: u32,
+        block_size: u32,
+    ) -> Result<Self> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .context("ZmqKvEventSink::bind requires an active Tokio runtime")?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<RawKvEvent>>();
 
-        let endpoint = format!("tcp://0.0.0.0:{port}");
-        let pub_socket = bind_pub_socket(&endpoint)
-            .await
-            .map_err(|e| anyhow::anyhow!("ZMQ PUB bind to {endpoint} failed: {e}"))?;
-        tracing::info!("ZmqKvEventSink bound to {endpoint} for dp_rank {dp_rank}");
-
-        let mut router_socket = if let Some(rp) = replay_port {
+        // Reserve the explicit replay port before choosing an automatic PUB port.
+        let (mut router_socket, replay_endpoint) = if let Some(rp) = replay_port {
             let replay_ep = format!("tcp://0.0.0.0:{rp}");
             let sock = bind_router_socket(&replay_ep)
-                .await
                 .map_err(|e| anyhow::anyhow!("ZMQ ROUTER bind to {replay_ep} failed: {e}"))?;
+            let replay_ep = sock
+                .get_socket()
+                .get_last_endpoint()?
+                .map_err(|_| anyhow::anyhow!("ZMQ replay endpoint is not UTF-8"))?;
             tracing::info!(
                 "ZmqKvEventSink replay ROUTER bound to {replay_ep} for dp_rank {dp_rank}"
             );
-            Some(sock)
+            (Some(sock), Some(replay_ep))
         } else {
-            None
+            (None, None)
         };
 
-        tokio::spawn(async move {
+        let endpoint = format!(
+            "tcp://0.0.0.0:{}",
+            port.map_or("*".to_string(), |p| p.to_string())
+        );
+        let pub_socket = bind_pub_socket(&endpoint)
+            .map_err(|e| anyhow::anyhow!("ZMQ PUB bind to {endpoint} failed: {e}"))?;
+        let endpoint = pub_socket
+            .get_socket()
+            .get_last_endpoint()?
+            .map_err(|_| anyhow::anyhow!("ZMQ PUB endpoint is not UTF-8"))?;
+        tracing::info!("ZmqKvEventSink bound to {endpoint} for dp_rank {dp_rank}");
+
+        let pub_socket: SharedPubSocket = Arc::new(Mutex::new(pub_socket));
+        runtime.spawn(async move {
             let mut seq_num: u64 = 0;
             let mut ring_buffer: VecDeque<(u64, Bytes)> = VecDeque::new();
 
@@ -219,7 +245,20 @@ impl ZmqKvEventSink {
             }
         });
 
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            endpoint,
+            replay_endpoint,
+        })
+    }
+
+    /// Bound address for engine discovery; sidecar resolves the wildcard host.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn replay_endpoint(&self) -> Option<&str> {
+        self.replay_endpoint.as_deref()
     }
 
     fn enqueue(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
@@ -267,7 +306,7 @@ pub(crate) fn encode_event_batch(
         .unwrap_or_default()
         .as_secs_f64();
     let batch: (f64, Vec<ZmqRawKvEvent>, Option<i32>) = (timestamp, events, Some(dp_rank as i32));
-    rmp_serde::to_vec(&batch).map(|payload| Some(payload.into()))
+    rmp_serde::to_vec_named(&batch).map(|payload| Some(payload.into()))
 }
 
 fn convert_to_zmq_events(
@@ -347,13 +386,13 @@ where
     configure_receive_builder(builder).set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
 
-async fn bind_pub_socket(endpoint: &str) -> Result<SharedPubSocket> {
+fn bind_pub_socket(endpoint: &str) -> Result<Publish> {
     let ctx = Context::new();
     let socket = configure_send_builder(publish(&ctx)).bind(endpoint)?;
-    Ok(Arc::new(Mutex::new(socket)))
+    Ok(socket)
 }
 
-async fn bind_router_socket(endpoint: &str) -> Result<Router> {
+fn bind_router_socket(endpoint: &str) -> Result<Router> {
     let ctx = Context::new();
     let socket = configure_bidirectional_builder(router(&ctx)).bind(endpoint)?;
     Ok(socket)
@@ -405,6 +444,95 @@ mod tests {
     }
 
     #[test]
+    fn bind_requires_an_active_runtime() {
+        let error = ZmqKvEventSink::bind(None, None, 0, 4)
+            .err()
+            .expect("binding without a runtime must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires an active Tokio runtime")
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_ports_are_distinct_and_released_on_drop() {
+        use std::time::Duration;
+
+        let first = ZmqKvEventSink::bind(None, None, 0, 4).unwrap();
+        let second = ZmqKvEventSink::bind(None, None, 0, 4).unwrap();
+        let port: u16 = first
+            .endpoint()
+            .rsplit_once(':')
+            .unwrap()
+            .1
+            .parse()
+            .unwrap();
+        assert_ne!(port, 0);
+        assert_ne!(first.endpoint(), second.endpoint());
+        assert_eq!(first.endpoint(), format!("tcp://0.0.0.0:{port}"));
+        assert!(ZmqKvEventSink::new(port, None, 0, 4).await.is_err());
+        drop(first);
+        let rebound = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(sink) = ZmqKvEventSink::new(port, None, 0, 4).await {
+                    break sink;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropping the sink must release its PUB socket");
+        assert_eq!(rebound.endpoint(), format!("tcp://0.0.0.0:{port}"));
+    }
+
+    #[tokio::test]
+    async fn automatic_replay_port_serves_events_and_rejects_a_second_bind() {
+        use std::time::Duration;
+        use tmq::dealer::dealer;
+
+        let sink = ZmqKvEventSink::bind(None, Some(0), 0, 4).unwrap();
+        let replay_endpoint = sink.replay_endpoint().unwrap();
+        let replay_port: u16 = replay_endpoint.rsplit_once(':').unwrap().1.parse().unwrap();
+        assert_ne!(replay_port, 0);
+        assert!(ZmqKvEventSink::bind(None, Some(replay_port), 0, 4).is_err());
+        sink.publish(RawKvEvent {
+            event: stored_event(),
+            block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
+            storage_tier: StorageTier::Device,
+        })
+        .unwrap();
+        let ctx = Context::new();
+        let mut replay = dealer(&ctx)
+            .set_linger(0)
+            .connect(&replay_endpoint.replace("0.0.0.0", "127.0.0.1"))
+            .unwrap();
+        let frames = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                replay
+                    .send(Multipart::from(vec![
+                        Vec::new(),
+                        0u64.to_be_bytes().to_vec(),
+                    ]))
+                    .await
+                    .unwrap();
+                let frames = multipart_message(replay.next().await.unwrap().unwrap());
+                assert_eq!(frames.len(), 4);
+                if frames[2] != (-1i64).to_be_bytes() {
+                    break frames;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replay must return the published event");
+        assert_eq!(frames[2], 0u64.to_be_bytes());
+        let batch = dynamo_kv_router::zmq_wire::decode_event_batch(&frames[3]).unwrap();
+        assert_eq!(batch.data_parallel_rank, Some(0));
+        assert_eq!(batch.events.len(), 1);
+    }
+
+    #[test]
     fn host_pinned_zmq_stored_event_carries_medium() {
         let events = convert_to_zmq_events(
             &stored_event(),
@@ -432,5 +560,95 @@ mod tests {
             panic!("expected one BlockStored event");
         };
         assert_eq!(*medium, None);
+    }
+
+    #[test]
+    fn encoded_batch_decodes_through_router_zmq_wire() {
+        use dynamo_kv_router::protocols::KvCacheRemoveData;
+        use dynamo_kv_router::zmq_wire::{KvEventBatch, RawKvEvent as WireKvEvent};
+
+        let stored = RawKvEvent {
+            event: stored_event(),
+            block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
+            storage_tier: StorageTier::Device,
+        };
+        // Device tier omits `medium`: under positional (unnamed) encoding the
+        // required `group_idx` shifts into `medium`'s slot and BlockRemoved
+        // fails to decode at the consumer.
+        let removed = RawKvEvent {
+            event: KvCacheEvent {
+                event_id: 2,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(10)],
+                }),
+                dp_rank: 0,
+            },
+            block_token_ids: None,
+            storage_tier: StorageTier::Device,
+        };
+
+        // Host-pinned stored events also mis-decode positionally: the medium
+        // string lands in a numeric legacy slot at the consumer.
+        let stored_pinned = RawKvEvent {
+            event: stored_event(),
+            block_token_ids: Some(vec![vec![5, 6, 7, 8]]),
+            storage_tier: StorageTier::HostPinned,
+        };
+
+        let payload = encode_event_batch(&[stored, removed, stored_pinned], 4, 3)
+            .expect("encoding must succeed")
+            .expect("non-empty batch must produce a payload");
+
+        let batch: KvEventBatch =
+            rmp_serde::from_slice(&payload).expect("router zmq_wire must decode the payload");
+        assert_eq!(batch.data_parallel_rank, Some(3));
+
+        let [
+            WireKvEvent::BlockStored {
+                block_hashes,
+                token_ids,
+                medium,
+                group_idx,
+                ..
+            },
+            WireKvEvent::BlockRemoved {
+                block_hashes: removed_hashes,
+                medium: removed_medium,
+                group_idx: removed_group_idx,
+                ..
+            },
+            WireKvEvent::BlockStored {
+                medium: pinned_medium,
+                group_idx: pinned_group_idx,
+                ..
+            },
+        ] = batch.events.as_slice()
+        else {
+            panic!(
+                "expected BlockStored + BlockRemoved, got {:?}",
+                batch.events
+            );
+        };
+        assert_eq!(
+            block_hashes
+                .iter()
+                .map(|h| h.into_u64())
+                .collect::<Vec<_>>(),
+            vec![10]
+        );
+        assert_eq!(token_ids, &vec![1, 2, 3, 4]);
+        assert_eq!(*medium, None);
+        assert_eq!(*group_idx, Some(0));
+        assert_eq!(
+            removed_hashes
+                .iter()
+                .map(|h| h.into_u64())
+                .collect::<Vec<_>>(),
+            vec![10]
+        );
+        assert_eq!(*removed_medium, None);
+        assert_eq!(*removed_group_idx, Some(0));
+        assert_eq!(pinned_medium.as_deref(), Some("CPU_PINNED"));
+        assert_eq!(*pinned_group_idx, Some(0));
     }
 }

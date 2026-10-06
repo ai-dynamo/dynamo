@@ -3,5 +3,5 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dynamo_ext_proc::run().await
+    dynamo_ext_proc::run(None).await
 }

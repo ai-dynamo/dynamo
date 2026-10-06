@@ -15,6 +15,8 @@
 
 import asyncio
 import dataclasses
+import functools
+import inspect
 import logging
 import os
 import re
@@ -23,23 +25,31 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
+import numpy as np
 import torch
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+
+try:
+    from tensorrt_llm.llmapi.llm import PreprocessedInputs
+except ImportError:  # older TRT-LLM
+    PreprocessedInputs = None
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -49,7 +59,6 @@ from dynamo.trtllm.conversation_affinity import (
     CONVERSATION_PARAMS_AVAILABLE,
     conversation_params_for,
     engine_conversation_affinity_enabled,
-    session_id_from_request,
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
@@ -78,6 +87,22 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+
+
+@functools.lru_cache(maxsize=1)
+def _trtllm_accepts_token_id_arrays() -> bool:
+    # Only from NVIDIA/TensorRT-LLM#19658 does GenerationRequest keep an array prompt
+    # as its int32 wire buffer; earlier releases rebuild a list and assert Python ints.
+    try:
+        from tensorrt_llm.executor.request import GenerationRequest
+
+        probe = GenerationRequest(
+            prompt_token_ids=np.zeros(1, dtype=np.int32),
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+    except Exception:
+        return False
+    return probe.__dict__.get("_prompt_token_ids_i32") is not None
 
 
 class TRTLLMEnginePauseController:
@@ -207,7 +232,7 @@ class _DeferredAbort:
         """Abort immediately if first token received, otherwise defer."""
         if self._first_token_received:
             self._generation_result.abort()
-            logging.debug("Deferred abort: first token already received, aborting now")
+            logging.debug("Deferred abort: immediate path, engine abort fired")
         else:
             logging.debug(
                 "Deferred abort: first token not received, spawning background task"
@@ -222,7 +247,7 @@ class _DeferredAbort:
         except Exception:
             pass
         self._generation_result.abort()
-        logging.debug("Deferred abort: background task completed, abort fired")
+        logging.debug("Deferred abort: deferred path, engine abort fired")
 
 
 @dataclass
@@ -255,6 +280,7 @@ class RequestHandlerConfig:
     conversation_affinity: bool = False
     # Select whether the engine or Dynamo owns initial DP-rank placement in affinity mode.
     conversation_affinity_dp_rank_source: str = "engine"
+    first_token_source: Optional[Any] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -297,6 +323,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
+        self.first_token_source = config.first_token_source
         # Sleep/wake state
         self._pause_lock = asyncio.Lock()
         self._inflight_lock = asyncio.Lock()
@@ -464,8 +491,9 @@ class HandlerBase(BaseGenerativeHandler):
 
         Raise EngineShutdown if shutdown event is triggered.
         """
+        cancellation_triggers: list[asyncio.Future[Any]] = []
         try:
-            cancellation_triggers: list[asyncio.Future[Any]] = [
+            cancellation_triggers = [
                 context.async_killed_or_stopped(),  # Request cancellation
             ]
             # Shutdown cancellation
@@ -498,6 +526,14 @@ class HandlerBase(BaseGenerativeHandler):
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
             pass
+        finally:
+            to_drain = []
+            for task in cancellation_triggers:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _cancellation_monitor(
@@ -855,7 +891,15 @@ class HandlerBase(BaseGenerativeHandler):
             return processed_input
 
         if self.multimodal_processor is None and self._request_has_multimodal(request):
-            raise RuntimeError(
+            # InvalidArgument, not RuntimeError: no worker in the pool can
+            # serve this request. RuntimeError maps to Backend(Unknown) and so
+            # to a sanitized 500 that reads as a server fault; this maps to
+            # Backend(InvalidArgument), which the frontend answers 4xx.
+            #
+            # That 4xx reaches a non-streaming client. A streaming client still
+            # sees 200 then an SSE error frame unless the operator sets
+            # DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, which is unset by default.
+            raise InvalidArgument(
                 "Multimodal input received but worker started without --modality multimodal. "
                 "Restart the worker with --modality multimodal or remove image_url content."
             )
@@ -894,12 +938,15 @@ class HandlerBase(BaseGenerativeHandler):
                         return True
         return False
 
-    def _normalize_request_format(self, request: dict) -> None:
+    @staticmethod
+    def _normalize_request_format(request: dict) -> None:
         """
         Convert OpenAI request format to TRT-LLM internal format.
 
         Moves fields from OpenAI locations to where TRT-LLM expects them:
         - max_tokens: top-level → stop_conditions.max_tokens
+        - min_tokens: top-level → stop_conditions.min_tokens
+        - ignore_eos: top-level → stop_conditions.ignore_eos
         - temperature: top-level → sampling_options.temperature
 
         Note: The Rust frontend's PrefillRouter handles the *value* of max_tokens
@@ -912,17 +959,17 @@ class HandlerBase(BaseGenerativeHandler):
         # Ensure stop_conditions exists
         if "stop_conditions" not in request:
             request["stop_conditions"] = {}
-        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
-            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
+        for field in ("max_tokens", "min_tokens", "ignore_eos"):
+            if field in request:
+                value = request.pop(field)
+                request["stop_conditions"].setdefault(field, value)
 
         # Ensure sampling_options exists
         if "sampling_options" not in request:
             request["sampling_options"] = {}
-        if (
-            "temperature" in request
-            and "temperature" not in request["sampling_options"]
-        ):
-            request["sampling_options"]["temperature"] = request.pop("temperature")
+        if "temperature" in request:
+            temperature = request.pop("temperature")
+            request["sampling_options"].setdefault("temperature", temperature)
 
     async def _initiate_shutdown(self, error: Exception):
         """Initiate graceful shutdown after fatal error"""
@@ -950,6 +997,9 @@ class HandlerBase(BaseGenerativeHandler):
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
     ) -> AsyncGenerator[dict, None]:
         """Track in-flight count, reject during sleep, then delegate to implementation."""
+        routing = request.get("routing") or {}
+        if self.first_token_source is not None:
+            self.first_token_source.bind(context, routing.get("dp_rank"))
         started = await self._mark_request_started()
         if not started:
             yield {
@@ -985,7 +1035,16 @@ class HandlerBase(BaseGenerativeHandler):
         """
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
 
+        # With DYN_TOKEN_IDS_AS_BYTES the ingress hands token ids over as a packed
+        # little-endian int32 buffer instead of a Python list. Keep it as an int32
+        # array when TRT-LLM can take one, otherwise decode it to the list it expects.
         request_token_ids = request.get("token_ids")
+        if isinstance(request_token_ids, (bytes, bytearray, memoryview)):
+            if _trtllm_accepts_token_id_arrays():
+                request_token_ids = np.frombuffer(request_token_ids, dtype="<i4")
+            else:
+                request_token_ids = token_ids_to_list(request_token_ids)
+            request["token_ids"] = request_token_ids
         logging.debug(
             "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",
             len(request_token_ids) if isinstance(request_token_ids, list) else None,
@@ -1078,6 +1137,7 @@ class HandlerBase(BaseGenerativeHandler):
         # choice and emit only the new slice for each Dynamo chunk.
         output_tokens_per_choice: dict[int, int] = {}
         prompt_logprobs_payload = None
+        first_output_seen = False
 
         sampling_params = self._override_sampling_params(
             self.default_sampling_params, request
@@ -1130,9 +1190,18 @@ class HandlerBase(BaseGenerativeHandler):
             if default_max_tokens is not None:
                 sampling_params.max_tokens = default_max_tokens
 
-        if is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name]):
+        # PREFILL forces max_tokens=1 above but must still apply the rest of
+        # the stop conditions (native TRT-LLM context_only overrides only
+        # max_tokens). Without this, TRT-LLM could stop on EOS at that single
+        # forced token and skip the KV handoff to decode entirely.
+        if (
+            is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name])
+            or self.disaggregation_mode == DisaggregationMode.PREFILL
+        ):
             apply_stop_conditions_to_sampling_params(
-                sampling_params, request["stop_conditions"]
+                sampling_params,
+                request["stop_conditions"],
+                no_stop_trim=(output_options or {}).get("no_stop_trim", False),
             )
 
         # TODO: Instead of True, we should use streaming from the request.
@@ -1227,16 +1296,71 @@ class HandlerBase(BaseGenerativeHandler):
             conv_kwargs = (
                 {"conversation_params": conversation_params} if conv_affinity else {}
             )
-            generation_result = self.engine.llm.generate_async(
-                inputs=processed_input,  # Use the correctly extracted inputs
-                sampling_params=sampling_params,
-                disaggregated_params=disaggregated_params,
-                streaming=streaming,
-                trace_headers=trace_headers,
-                scheduling_params=scheduling_params,
+            if (
+                isinstance(processed_input, np.ndarray)
+                and PreprocessedInputs is not None
+            ):
+                processed_input = PreprocessedInputs(prompt_token_ids=processed_input)
+            generate_kwargs = {
+                "inputs": processed_input,  # Use the correctly extracted inputs
+                "sampling_params": sampling_params,
+                "disaggregated_params": disaggregated_params,
+                "streaming": streaming,
+                "trace_headers": trace_headers,
+                "scheduling_params": scheduling_params,
                 **conv_kwargs,
-                priority=priority,
-                cache_salt=cache_salt,
+                "priority": priority,
+                "cache_salt": cache_salt,
+            }
+            generate_async = self.engine.llm.generate_async
+            try:
+                generation_result = generate_async(**generate_kwargs)
+            except (ValueError, TypeError, NotImplementedError) as e:
+                # TRT-LLM performs request validation and preprocessing synchronously in
+                # `generate_async()`, before executor submission. A TypeError can also mean
+                # Dynamo called an incompatible TRT-LLM API, so only treat it as request-local
+                # when the call itself matches a meaningful runtime signature. The same
+                # exception types during result iteration can indicate an executor bug and should
+                # continue through the fatal path below.
+                if isinstance(e, TypeError) and not _call_signature_accepts_kwargs(
+                    generate_async, generate_kwargs
+                ):
+                    raise
+                error_msg = str(e)
+                logging.warning(
+                    "Request %s rejected during request validation (%s): %s",
+                    request_id,
+                    type(e).__name__,
+                    error_msg,
+                )
+                yield {
+                    "finish_reason": {"error": error_msg},
+                    "token_ids": [],
+                }
+                return
+
+            # Log the Dynamo-to-engine request-ID mapping exactly once per
+            # request, immediately after submission. This is the only place the
+            # Dynamo request UUID, the TRT-LLM executor client ID, and (in
+            # disaggregated mode) the cross-phase disagg_request_id coexist, and
+            # none of them is persisted together anywhere else. The line makes
+            # every engine-side per-request record (e.g. a perf-metrics JSONL
+            # keyed by the executor client ID, or requestStats keyed by the
+            # disagg ID) joinable to Dynamo traces, spans, and logs offline.
+            # Notes for consumers: the client ID is a per-worker-process
+            # counter, so join it only within this worker's own log; logging
+            # before the response iteration starts means cancelled requests
+            # still leave their mapping behind.
+            # context.id() is the canonical request UUID (the payload's id field
+            # is not guaranteed on every path), and this handler already treats
+            # it as authoritative elsewhere.
+            logging.info(
+                "Engine ID map: request_id=%s trtllm_client_id=%s disagg_request_id=%s",
+                context.id(),
+                getattr(generation_result, "request_id", None),
+                disaggregated_params.disagg_request_id
+                if disaggregated_params
+                else None,
             )
 
             # In disagg decode mode with remote prefill, wrap abort() to defer
@@ -1281,6 +1405,13 @@ class HandlerBase(BaseGenerativeHandler):
                             "token_ids": output.token_ids[tokens_so_far:],
                             "index": output_idx,
                         }
+                        if (
+                            self.first_token_source is not None
+                            and out["token_ids"]
+                            and not first_output_seen
+                        ):
+                            first_output_seen = True
+                            context.notify_first_token()
 
                         # Extract logprobs from the output. Logprobs are
                         # aligned with the cumulative token list, so use the
@@ -1333,23 +1464,40 @@ class HandlerBase(BaseGenerativeHandler):
                                 len(o.token_ids) for o in res.outputs
                             )
 
-                            prompt_tokens_details = None
                             if prefill_prompt_tokens_details:
+                                # A decode with a prefill result: its prefill
+                                # attempt already reported cache reuse.
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                if output.request_perf_metrics is not None:
-                                    kv_cache_metrics = (
-                                        output.request_perf_metrics.kv_cache_metrics
+                                is_generation_only = (
+                                    getattr(disaggregated_params, "request_type", None)
+                                    == "generation_only"
+                                )
+                                prompt_tokens_details = _prompt_tokens_details(
+                                    res, num_input_tokens, is_generation_only
+                                )
+                                engine_reported = prompt_tokens_details.pop(
+                                    "_engine_reported", None
+                                )
+                                if engine_reported is not None:
+                                    out.setdefault("engine_data", {})[
+                                        "cached_tokens_engine_reported"
+                                    ] = engine_reported
+                                # A generation-only request counts its transferred
+                                # prompt KV as cached, and a multimodal count
+                                # includes expanded image tokens the unexpanded
+                                # prompt length omits, so only text context
+                                # attempts report.
+                                if not is_generation_only and not isinstance(
+                                    processed_input, dict
+                                ):
+                                    kv_cache_hit = _kv_cache_hit_engine_data(
+                                        res, num_input_tokens
                                     )
-                                    cached_tokens = min(
-                                        num_input_tokens,
-                                        kv_cache_metrics.num_reused_blocks
-                                        * self.kv_block_size,
-                                    )
-                                    if cached_tokens > 0:
-                                        prompt_tokens_details = {
-                                            "cached_tokens": int(cached_tokens),
-                                        }
+                                    if kv_cache_hit:
+                                        out.setdefault("engine_data", {})[
+                                            "kv_cache_hit"
+                                        ] = kv_cache_hit
 
                             out["completion_usage"] = {
                                 "prompt_tokens": int(num_input_tokens),
@@ -1559,3 +1707,64 @@ class HandlerBase(BaseGenerativeHandler):
         # 1. it catches unsupported fields / attributes.
         # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
         return dataclasses.replace(sampling_params, **overrides)
+
+
+def _kv_cache_hit_engine_data(res, num_input_tokens: int) -> dict:
+    """Build the final-chunk cache-reuse report read by the KV router."""
+    cached_tokens = getattr(res, "cached_tokens", None)
+    if cached_tokens is None:
+        return {}
+    return {"prompt_tokens": num_input_tokens, "reused_tokens": int(cached_tokens)}
+
+
+def _prompt_tokens_details(res, num_input_tokens: int, generation_only: bool) -> dict:
+    engine_reported = int(res.cached_tokens or 0)
+    # Clamp to prompt size: image token_ids are unexpanded placeholders, so the
+    # engine count (measured over the expanded prompt) can exceed it.
+    details: dict = {"cached_tokens": min(num_input_tokens, engine_reported)}
+    if not generation_only:
+        # On context paths the engine value is the KV manager's prepopulated
+        # prompt length, already reduced over every attention window.
+        return details
+    # A generation-only request receives its prompt KV by transfer, and the
+    # engine reports that whole sequence as cached. Only the prefix this worker
+    # reused from its own cache is a hit. num_reused_blocks / num_missed_blocks
+    # are summed over attention windows, so use their ratio (the engine's own
+    # per-request hit-rate definition) rather than a block-size multiple.
+    km = None
+    for output in getattr(res, "outputs", None) or ():
+        pm = getattr(output, "request_perf_metrics", None)
+        km = getattr(pm, "kv_cache_metrics", None) if pm is not None else None
+        if km is not None:
+            break
+    reused = getattr(km, "num_reused_blocks", None)
+    missed = getattr(km, "num_missed_blocks", None)
+    if reused is None or missed is None:
+        return details
+    total = int(reused) + int(missed)
+    from_kv = int(reused) * num_input_tokens // total if total else 0
+    # The last prompt token is never reused: it must be computed to produce logits.
+    details["cached_tokens"] = min(max(num_input_tokens - 1, 0), from_kv)
+    details["_engine_reported"] = engine_reported
+    return details
+
+
+def _call_signature_accepts_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> bool:
+    """Return whether a meaningfully inspectable callable accepts `kwargs`."""
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return False
+
+    if all(
+        parameter.kind
+        in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for parameter in signature.parameters.values()
+    ):
+        return False
+
+    try:
+        signature.bind(**kwargs)
+    except TypeError:
+        return False
+    return True

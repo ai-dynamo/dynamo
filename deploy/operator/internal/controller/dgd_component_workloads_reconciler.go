@@ -27,7 +27,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -95,9 +94,9 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
-		if err := r.preserveExistingBackendFramework(ctx, dcd); err != nil {
-			logger.Error(err, "failed to preserve existing DynamoComponentDeployment backendFramework", "name", dcd.Name)
-			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
+		if err := r.preserveExistingDCDState(ctx, dcd); err != nil {
+			logger.Error(err, "failed to preserve existing DynamoComponentDeployment state", "name", dcd.Name)
+			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
 		_, syncedDCD, err := commoncontroller.SyncResource(
 			ctx,
@@ -167,11 +166,11 @@ func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 		if existingDCD.Name == "" {
 			continue
 		}
-		restartAt := dynamo.GetPodTemplateAnnotations(
-			&existingDCD.Spec.DynamoComponentDeploymentSharedSpec,
-		)[consts.RestartAnnotation]
-		if restartAt != "" {
-			restartAnnotations[componentName] = restartAt
+		for _, podTemplate := range dynamo.ComponentPodTemplates(&existingDCD.Spec.DynamoComponentDeploymentSharedSpec) {
+			if restartAt := podTemplate.Annotations[consts.RestartAnnotation]; restartAt != "" {
+				restartAnnotations[componentName] = restartAt
+				break
+			}
 		}
 	}
 	return restartAnnotations, nil
@@ -204,6 +203,14 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
+	// Artifact identity is independent of startup policy. Preserve the automatic
+	// SnapshotJob handoff even while WaitForCheckpoint keeps replicas gated.
+	if checkpointInfo.AutomaticSnapshotJob != nil {
+		if err := applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo); err != nil {
+			return err
+		}
+	}
+
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
 		dcd.Spec.Replicas = ptr.To(int32(0))
 		return nil
@@ -212,31 +219,27 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		checkpointInfo.StartupPolicy != nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
 		return nil
 	}
-
-	labels := dynamo.GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-	if labels == nil {
-		if dcd.Spec.PodTemplate == nil {
-			dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
-		}
-		if dcd.Spec.PodTemplate.Labels == nil {
-			dcd.Spec.PodTemplate.Labels = map[string]string{}
-		}
-		labels = dcd.Spec.PodTemplate.Labels
+	if checkpointInfo.AutomaticSnapshotJob != nil {
+		return nil
 	}
-	annotations := dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-	if annotations == nil {
-		if dcd.Spec.PodTemplate == nil {
-			dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
-		}
-		if dcd.Spec.PodTemplate.Annotations == nil {
-			dcd.Spec.PodTemplate.Annotations = map[string]string{}
-		}
-		annotations = dcd.Spec.PodTemplate.Annotations
-	}
-	return checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, checkpointInfo)
+	return applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo)
 }
 
-func (r *componentWorkloadsReconciler) preserveExistingBackendFramework(
+func applyRestoreCandidateMetadataToDCD(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) error {
+	for _, podTemplate := range dynamo.EnsureComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		if err := checkpoint.ApplyRestoreCandidateMetadata(podTemplate.Annotations, checkpointInfo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// preserveExistingDCDState carries forward immutable server state that must not
+// be overwritten by a generated DCD.
+func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	ctx context.Context,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
 ) error {

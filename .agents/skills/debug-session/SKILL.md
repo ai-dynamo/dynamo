@@ -108,7 +108,7 @@ If a framework change is required (sglang, vllm, trtllm), check the user's `~/.c
 
 ### Running Examples
 
-Examples are located at: `/home/ubuntu/dynamo/examples/backends/`
+Examples are located at the repository-relative path `examples/backends/`.
 
 Available backends:
 - `sglang/launch/` - SGLang backend examples

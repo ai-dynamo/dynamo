@@ -24,7 +24,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Dict, List, Optional, Set
+from typing import List, Optional, Set
 
 import pytest
 
@@ -44,30 +44,6 @@ logging.disable(logging.WARNING)
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-
-REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
-    "Lifecycle": {"pre_merge", "post_merge", "nightly", "weekly", "release"},
-    "Test Type": {
-        "unit",
-        "integration",
-        "e2e",
-        "benchmark",
-        "stress",
-        "multimodal",
-        "performance",
-    },
-    "Hardware": {
-        "gpu_0",
-        "gpu_1",
-        "gpu_2",
-        "gpu_4",
-        "gpu_8",
-        "h100",
-        "k8s",
-        "xpu_1",
-        "xpu_2",
-    },
-}
 
 STUB_MODULES = [
     "pytest_httpserver",
@@ -110,7 +86,10 @@ STUB_MODULES = [
     "tabulate",
     "prometheus_api_client",
     "huggingface_hub",
+    "huggingface_hub.constants",
     "huggingface_hub.model_info",
+    "jinja2",
+    "jinja2.exceptions",
     "transformers",
     "transformers.models",
     "transformers.models.qwen2_vl",
@@ -129,8 +108,12 @@ STUB_MODULES = [
     "psutil",
     "requests",
     "numpy",
-    "aiconfigurator",
+    "aisimulate",
+    "aisimulate_core",
     "boto3",
+    "boto3.exceptions",
+    "boto3.s3",
+    "boto3.s3.transfer",
     "botocore",
     "botocore.client",
     "botocore.exceptions",
@@ -201,6 +184,8 @@ STUB_MODULES = [
     "sglang.srt.utils",
     "sglang.srt.utils.hf_transformers_utils",
     "sglang.srt.utils.network",
+    "sglang.srt.utils.server_args_config_parser",
+    "sglang.srt.utils.video_decoder",
     "sglang.srt.disaggregation",
     "sglang.srt.disaggregation.kv_events",
     "sglang.srt.disaggregation.utils",
@@ -222,6 +207,12 @@ STUB_MODULES = [
     "vllm.entrypoints.openai.chat_completion.protocol",
     "vllm.entrypoints.openai.engine",
     "vllm.entrypoints.openai.engine.protocol",
+    "vllm.entrypoints.generate",
+    "vllm.entrypoints.generate.base",
+    "vllm.entrypoints.generate.base.protocol",
+    "vllm.entrypoints.pooling",
+    "vllm.entrypoints.pooling.embed",
+    "vllm.entrypoints.pooling.embed.protocol",
     "vllm.inputs",
     "vllm.logprobs",
     "vllm.lora",
@@ -242,6 +233,8 @@ STUB_MODULES = [
     "vllm.tool_parsers.mistral_tool_parser",
     "vllm.tool_parsers.qwen3_engine_tool_parser",
     "vllm.tool_parsers.utils",
+    "vllm.usage",
+    "vllm.usage.usage_lib",
     "vllm.utils",
     "vllm.utils.async_utils",
     "vllm.utils.hashing",
@@ -255,12 +248,19 @@ STUB_MODULES = [
     "vllm.v1.core.sched.output",
     "vllm.v1.engine",
     "vllm.v1.engine.async_llm",
+    "vllm.v1.engine.core",
     "vllm.v1.engine.exceptions",
     "vllm.v1.engine.input_processor",
     "vllm.v1.engine.output_processor",
+    "vllm.v1.engine.utils",
+    "vllm.v1.executor",
     "vllm.v1.metrics",
     "vllm.v1.metrics.loggers",
     "vllm.v1.metrics.stats",
+    "vllm.v1.kv_cache_interface",
+    "vllm.v1.outputs",
+    "vllm.v1.worker",
+    "vllm.v1.worker.gpu_worker",
     "vllm.v1.request",
     "vllm.v1.sample",
     "vllm.v1.sample.logits_processor",
@@ -275,18 +275,27 @@ STUB_MODULES = [
     "nixl._api",
     "nixl._bindings",
     "aiohttp.web",
-    "aiconfigurator.generator",
-    "aiconfigurator.generator.naive",
-    "aiconfigurator.sdk",
-    "aiconfigurator.sdk.task_v2",
-    "aiconfigurator.cli",
-    "aiconfigurator.cli.main",
-    "aiconfigurator_core.sdk",
-    "aiconfigurator_core.sdk.engine",
-    "aiconfigurator_core.sdk.memory",
-    "aiconfigurator_core.sdk.models",
-    "aiconfigurator_core.sdk.perf_database",
-    "aiconfigurator_core.sdk.utils",
+    "aiohttp.test_utils",
+    # aiohttp submodules used by the connect-time resolver in
+    # dynamo.common.http; the bare "aiohttp" stub above has no submodules,
+    # so importing these fails collection for every test that reaches it.
+    "aiohttp.abc",
+    "aiohttp.helpers",
+    "aiohttp.resolver",
+    "aisimulate.generator",
+    "aisimulate.generator.naive",
+    "aisimulate.sdk",
+    "aisimulate.sdk.task_v2",
+    "aisimulate.legacy_cli",
+    "aisimulate.legacy_cli.main",
+    "aisimulate_core.sdk",
+    "aisimulate_core.sdk.common",
+    "aisimulate_core.sdk.engine",
+    "aisimulate_core.sdk.memory",
+    "aisimulate_core.sdk.models",
+    "aisimulate_core.sdk.perf_database",
+    "aisimulate_core.sdk.utils",
+    "aisimulate_core.sdk.rust_engine_step",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -296,27 +305,34 @@ STUB_MODULES = [
     "blake3",
 ]
 
-# These APIs define the AIC 0.11 upper/core contract. The marker-report
-# environment may contain an older, otherwise importable AIC release, so force
+# These APIs define the AISimulate application/core contract. The marker-report
+# environment may contain an older, otherwise importable release, so force
 # stubs for these versioned modules during marker-only collection.
 FORCE_STUB_MODULES = {
-    "aiconfigurator.sdk.task_v2",
-    "aiconfigurator.cli.main",
-    "aiconfigurator_core.sdk.engine",
-    "aiconfigurator_core.sdk.memory",
-    "aiconfigurator_core.sdk.models",
-    "aiconfigurator_core.sdk.perf_database",
-    "aiconfigurator_core.sdk.utils",
+    "aisimulate.sdk.task_v2",
+    "aisimulate.legacy_cli.main",
+    "aisimulate_core.sdk.models",
+    "aisimulate_core.sdk.utils",
+    "aisimulate_core.sdk",
+    "aisimulate_core.sdk.common",
+    "aisimulate_core.sdk.engine",
+    "aisimulate_core.sdk.memory",
+    "aisimulate_core.sdk.perf_database",
+    "aisimulate_core.sdk.rust_engine_step",
 }
 
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
-    os.path.join(os.getcwd(), "aisimulate", "src"),
     os.path.join(os.getcwd(), "components", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
 ]
 sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
+
+# Must follow the sys.path bootstrap above: this file runs as
+# `python3 tests/report_pytest_markers.py`, so sys.path[0] is tests/, not the
+# repo root, and the `tests` package is not importable any earlier.
+from tests.marker_categories import REQUIRED_CATEGORIES  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -341,6 +357,15 @@ def missing_categories(markers: Set[str]) -> List[str]:
 # --------------------------------------------------------------------------- #
 
 
+class _StubMeta(type):
+    def __getattr__(cls, attr):
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        sub = _make_stub_class(f"{cls.__name__}.{attr}")
+        setattr(cls, attr, sub)
+        return sub
+
+
 def _make_stub_class(name: str) -> type:
     """Permissive class usable as a base, a pydantic field type, or a callable.
 
@@ -350,14 +375,6 @@ def _make_stub_class(name: str) -> type:
     - __init_subclass__ tolerates arbitrary keyword args from typing tricks.
     - __get_pydantic_core_schema__ returns any_schema for pydantic field use.
     """
-
-    class _StubMeta(type):
-        def __getattr__(cls, attr):
-            if attr.startswith("__") and attr.endswith("__"):
-                raise AttributeError(attr)
-            sub = _make_stub_class(f"{cls.__name__}.{attr}")
-            setattr(cls, attr, sub)
-            return sub
 
     def _init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         pass
@@ -633,8 +650,8 @@ def parse_args():
     parser.add_argument(
         "--tests",
         nargs="*",
-        default=["tests", "components/src", "aisimulate/tests"],
-        help="Paths to test directories (default: tests components/src aisimulate/tests)",
+        default=["tests", "components/src"],
+        help="Paths to test directories (default: tests components/src)",
     )
     parser.add_argument(
         "--verbose",
@@ -682,6 +699,12 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
         LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
     plugin = MarkerReportPlugin()
+    # The repository-root conftest.py defaults pre_merge/gpu_0 onto unmarked
+    # tests so CI still runs them. Opt out here: this report exists to show what
+    # tests actually declare, and with the defaults applied every test would
+    # look Lifecycle- and Hardware-complete, so no missing marker could ever be
+    # reported.
+    os.environ["DYNAMO_PYTEST_NO_DEFAULT_MARKERS"] = "1"
     exitcode = pytest.main(
         [
             "--collect-only",

@@ -5,9 +5,11 @@ import json
 
 import pytest
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
     extract_media_urls,
+    extract_mm_hashes,
     raise_if_unextracted_multimodal,
 )
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
@@ -78,6 +80,60 @@ def test_extract_media_urls_rejects_malformed_payloads():
         extract_media_urls({"image_url": ""}, "image_url")
 
 
+def test_extract_mm_hashes_preserves_legacy_image_protocol():
+    request = {"extra_args": {"mm_hashes": ["image-a", "image-b"]}}
+
+    assert extract_mm_hashes(request) == ["image-a", "image-b"]
+
+
+def test_extract_mm_hashes_flattens_in_sglang_item_order():
+    request = {
+        "multi_modal_data": {
+            "image_url": ["image-a", "image-b"],
+            "video_url": ["video-a"],
+        },
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                "video": ["video-a"],
+                "image": ["image-a", "image-b"],
+            },
+        },
+    }
+
+    assert extract_mm_hashes(request) == ["image-a", "image-b", "video-a"]
+
+
+def test_extract_mm_hashes_rejects_per_modality_count_mismatch():
+    request = {
+        "multi_modal_data": {
+            "image_url": ["image-a", "image-b"],
+            "video_url": ["video-a"],
+        },
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                # The total count still matches, but the modality association does not.
+                "image": ["image-a"],
+                "video": ["video-a", "video-b"],
+            }
+        },
+    }
+
+    assert extract_mm_hashes(request) is None
+
+
+@pytest.mark.parametrize(
+    "grouped",
+    [
+        ["not-an-object"],
+        {"video": "not-a-list"},
+        {"video": ["ok", 1]},
+        {"future_modality": ["hash"]},
+    ],
+)
+def test_extract_mm_hashes_rejects_malformed_grouped_protocol(grouped):
+    assert extract_mm_hashes({"extra_args": {"mm_hashes_by_modality": grouped}}) is None
+
+
 class TestMultimodalGuard:
     """Tests for multimodal guard when frontend extraction is missing."""
 
@@ -103,7 +159,9 @@ class TestMultimodalGuard:
         ids=["top_level_messages", "extra_args_messages"],
     )
     def test_raises_for_image_url(self, request_factory):
-        with pytest.raises(RuntimeError, match="multi_modal_data"):
+        # InvalidArgument, not RuntimeError: the type is what makes the
+        # frontend answer 4xx instead of 500.
+        with pytest.raises(InvalidArgument, match="multi_modal_data"):
             raise_if_unextracted_multimodal(request_factory(self._image_message()))
 
     def test_raises_for_audio_url(self):
@@ -122,11 +180,31 @@ class TestMultimodalGuard:
             ],
         }
 
-        with pytest.raises(RuntimeError, match="audio_url"):
+        with pytest.raises(InvalidArgument, match="audio_url"):
             raise_if_unextracted_multimodal(request)
 
     def test_text_only_request_bypasses_guard(self):
         raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
+
+    def test_stripped_extra_args_still_uses_multi_modal_data(self):
+        data_url = "data:image/png;base64,AAAA"
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": data_url}]},
+            "extra_args": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {"type": "image_url", "image_url": {"url": ""}},
+                        ],
+                    }
+                ]
+            },
+        }
+        raise_if_unextracted_multimodal(request)
+        assert build_disagg_mm_kwargs(request)["image_data"] == [data_url]
 
 
 async def _stream(items):

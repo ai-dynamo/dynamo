@@ -9,105 +9,88 @@ to chat completion requests correctly.
 """
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
 import time
-from typing import Any, Dict
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Any
 
 import kr8s
 import pytest
 import requests
 import yaml
+from kubernetes_asyncio.client.exceptions import ApiException
 
 from tests.deploy.conftest import DeploymentTarget
-from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
-from tests.utils.client import send_request, wait_for_model_availability
+from tests.deploy.dgd_utils import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_REQUEST_TIMEOUT,
+    DEFAULT_TEMPERATURE,
+    MIN_RESPONSE_CONTENT_LENGTH,
+    TEST_PROMPT,
+    DeploymentSpec,
+    ManagedDeployment,
+    _get_workspace_dir,
+    validate_chat_response,
+)
+from tests.utils.client import wait_for_model_availability
 
 logger = logging.getLogger(__name__)
 
-# Test prompt designed to validate model capabilities:
-# - Long enough to test context handling (multiple sentences, ~150 words)
-# - Descriptive content requiring multi-sentence responses
-# - Consistent across test runs for reproducibility
-# This prompt is maintained from the original shell-based deployment tests.
-TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
-lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
-beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
-known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at \
-the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
-and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
-
-DEFAULT_MAX_TOKENS = 30
-DEFAULT_TEMPERATURE = 0.0
-DEFAULT_REQUEST_TIMEOUT = 120
-# Minimum response content length to validate that the model is generating meaningful output.
-# This matches the validation threshold from the original shell-based deployment tests.
-MIN_RESPONSE_CONTENT_LENGTH = 100
 GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
+JSON_LOG_REQUIRED_FIELDS = frozenset({"time", "level", "target", "message"})
 # The install script deploys the Gateway into agentgateway-system; the
 # controller provisions the proxy Service in that same namespace.
 GAIE_AGW_NAMESPACE = "agentgateway-system"
 
 
-def validate_chat_response(
-    response: requests.Response,
-    expected_model: str,
-    min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
-) -> Dict[str, Any]:
-    """Validate the structure and content of a chat completion response.
+def normalize_log_lines(log_lines: Any) -> list[str]:
+    """Return pod logs as a reusable list of lines."""
+    if isinstance(log_lines, str):
+        return log_lines.splitlines()
+    return list(log_lines)
 
-    Args:
-        response: HTTP response from the chat completion endpoint
-        expected_model: Expected model name in the response
-        min_content_length: Minimum required length for response content
 
-    Returns:
-        Parsed response JSON on success
+def find_structured_json_log(log_lines: list[str]) -> dict[str, Any] | None:
+    """Return the first Dynamo JSONL record with the documented core fields."""
+    for line in log_lines:
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
 
-    Raises:
-        AssertionError: If validation fails
-    """
-    # Check HTTP status
-    assert response.status_code == 200, (
-        f"Expected status 200, got {response.status_code}. "
-        f"Response: {response.text[:500]}"
-    )
+        if isinstance(record, dict) and JSON_LOG_REQUIRED_FIELDS.issubset(record):
+            return record
 
-    try:
-        data = response.json()
-    except ValueError as e:
-        pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
+    return None
 
-    assert "choices" in data, f"Response missing 'choices' field: {data}"
-    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
 
-    choice = data["choices"][0]
-    assert "message" in choice, f"Choice missing 'message' field: {choice}"
+def validate_agg_logging_configuration(deployment_spec: DeploymentSpec) -> None:
+    """Verify that the logging profile enables structured JSONL output."""
+    logging_config = deployment_spec.get_logging_config()
+    if not logging_config["jsonl_enabled"]:
+        pytest.fail("The agg_logging deployment profile must enable DYN_LOGGING_JSONL")
 
-    message = choice["message"]
-    assert (
-        message.get("role") == "assistant"
-    ), f"Expected role 'assistant', got '{message.get('role')}'"
-    assert "content" in message, f"Message missing 'content' field: {message}"
 
-    content = message["content"]
-    assert len(content) >= min_content_length, (
-        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
-        f"Content: {content[:200]}"
-    )
-
-    assert "model" in data, f"Response missing 'model' field: {data}"
-    assert (
-        data["model"] == expected_model
-    ), f"Expected model '{expected_model}', got '{data['model']}'"
+def validate_agg_logging_output(frontend_pod: Any, baseline_line_count: int) -> None:
+    """Verify that inference emitted a new structured frontend log record."""
+    frontend_log_lines = normalize_log_lines(frontend_pod.logs(container="main"))
+    new_log_lines = frontend_log_lines[baseline_line_count:]
+    json_log_record = find_structured_json_log(new_log_lines)
+    if json_log_record is None:
+        pytest.fail(
+            "The agg_logging deployment served inference but the frontend "
+            "did not emit a new structured Dynamo JSONL record"
+        )
 
     logger.info(
-        f"Response validation passed: model={data['model']}, "
-        f"content_length={len(content)}"
+        "Validated structured JSON logging: target=%s message=%s",
+        json_log_record["target"],
+        json_log_record["message"],
     )
-
-    return data
 
 
 @pytest.mark.framework_only
@@ -116,12 +99,18 @@ def validate_chat_response(
 @pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.timeout(1200)
+@pytest.mark.parametrize(
+    "capture_failure",
+    [False, pytest.param(True, marks=pytest.mark.gpu_1)],
+    ids=["normal", "discovery-failure"],
+)
 async def test_deployment(
     deployment_target: DeploymentTarget,
     deployment_spec: DeploymentSpec,
     namespace: str,
     skip_service_restart: bool,
     request,
+    capture_failure: bool,
 ) -> None:
     """Test Kubernetes deployment end-to-end.
 
@@ -140,10 +129,17 @@ async def test_deployment(
         skip_service_restart: Whether to skip restarting NATS/etcd services (default: True).
             Use --restart-services flag to restart services before deployment.
         request: Pytest request object for accessing test metadata
+        capture_failure: Exercise failure cleanup and validate discovery artifacts.
     """
     # Extract identifying information from the target
     framework = deployment_target.framework
     profile = deployment_target.profile
+    validate_agg_logging = profile == "agg_logging"
+    if capture_failure and (framework, profile) != ("vllm", "agg"):
+        pytest.skip("Failure snapshot coverage uses only the vLLM agg deployment")
+    if capture_failure:
+        # Avoid racing deletion of the normal case's deployment.
+        deployment_spec.name = f"{deployment_spec.name}-discovery"
 
     # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
     # transfer.  Prefill workers crash in NixlWrapper.create_backend.
@@ -156,17 +152,31 @@ async def test_deployment(
     # gpu-memory-utilization so vLLM 0.23.0+ flashinfer sampler warmup fits
     # without triggering cudaMalloc -> NVML query, which is restricted on MIG.
     # TODO (ops): remove this if CI transitions to e.g. CUDA MPS
-    if framework == "vllm":
-        deployment_spec.add_arg_to_service(
-            "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
-        )
-
-    model = next((s.model for s in deployment_spec.services if s.model), None)
-    if not model:
+    services = deployment_spec.services
+    model_service = next((service for service in services if service.model), None)
+    if model_service is None:
         pytest.fail(
             f"Could not determine model name from deployment spec for "
             f"{framework}/{profile}"
         )
+
+    if framework == "vllm":
+        worker_service = next(
+            (service for service in services if service.name in {"worker", "decode"}),
+            model_service,
+        )
+        deployment_spec.add_arg_to_service(
+            worker_service.name, "--gpu-memory-utilization", "0.7"
+        )
+        deployment_spec.add_arg_to_service(
+            worker_service.name, "--max-model-len", "4096"
+        )
+
+    model = model_service.model
+    assert model is not None
+
+    if validate_agg_logging:
+        validate_agg_logging_configuration(deployment_spec)
 
     logger.info(
         f"Starting deployment test for {deployment_target.test_id} "
@@ -174,71 +184,179 @@ async def test_deployment(
     )
     logger.info(f"Log directory: {request.node.name}")
 
-    # Deploy and test
-    async with ManagedDeployment(
-        log_dir=request.node.name,
-        deployment_spec=deployment_spec,
-        namespace=namespace,
-        skip_service_restart=skip_service_restart,
-    ) as deployment:
-        # Get frontend pod for port forwarding
-        frontend_pods = deployment.get_pods([deployment.frontend_service_name])
-        frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
+    # Catch outside the deployment context so teardown sees the failure.
+    expected_failure = (
+        pytest.raises(RuntimeError, match="^intentional discovery capture failure$")
+        if capture_failure
+        else nullcontext()
+    )
+    with expected_failure:
+        async with ManagedDeployment(
+            log_dir=request.node.name,
+            deployment_spec=deployment_spec,
+            namespace=namespace,
+            skip_service_restart=skip_service_restart,
+        ) as deployment:
+            # Get frontend pod for port forwarding
+            frontend_pods = deployment.get_pods([deployment.frontend_service_name])
+            frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
 
-        assert (
-            len(frontend_pod_list) > 0
-        ), f"No frontend pods found for deployment {deployment_spec.name}"
+            assert (
+                len(frontend_pod_list) > 0
+            ), f"No frontend pods found for deployment {deployment_spec.name}"
 
-        frontend_pod = frontend_pod_list[0]
-        logger.info(f"Found frontend pod: {frontend_pod.name}")
+            frontend_pod = frontend_pod_list[0]
+            logger.info(f"Found frontend pod: {frontend_pod.name}")
 
-        # Setup port forwarding
-        port = deployment_spec.port
-        port_forward = deployment.port_forward(frontend_pod, port)
-        assert (
-            port_forward is not None
-        ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
+            # Setup port forwarding
+            port = deployment_spec.port
+            port_forward = deployment.port_forward(frontend_pod, port)
+            assert (
+                port_forward is not None
+            ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
 
-        base_url = f"http://localhost:{port_forward.local_port}"
-        logger.info(f"Port forwarding established: {base_url}")
+            base_url = f"http://localhost:{port_forward.local_port}"
+            logger.info(f"Port forwarding established: {base_url}")
 
-        # Wait for model to be available
-        endpoint = deployment_spec.endpoint
-        model_ready = wait_for_model_availability(
-            url=base_url,
-            endpoint=endpoint,
-            model=model,
-            logger=logger,
-            max_attempts=30,
+            # Wait for model to be available
+            endpoint = deployment_spec.endpoint
+            model_ready = wait_for_model_availability(
+                url=base_url,
+                endpoint=endpoint,
+                model=model,
+                logger=logger,
+                max_attempts=30,
+            )
+
+            assert (
+                model_ready
+            ), f"Model '{model}' did not become available within the timeout period"
+
+            # This chat-completion request is side-effect free, so one retry after a
+            # dropped port-forward is safe.
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": TEST_PROMPT}],
+                "max_tokens": DEFAULT_MAX_TOKENS,
+                "temperature": DEFAULT_TEMPERATURE,
+                "stream": False,
+            }
+            frontend_log_baseline = (
+                len(normalize_log_lines(frontend_pod.logs(container="main")))
+                if validate_agg_logging
+                else 0
+            )
+            response = deployment.send_request_with_port_forward_retry(
+                pod=frontend_pod,
+                remote_port=port,
+                endpoint=endpoint,
+                payload=payload,
+                timeout=float(DEFAULT_REQUEST_TIMEOUT),
+                port_forward=port_forward,
+            )
+
+            # Validate response
+            validate_chat_response(
+                response=response,
+                expected_model=model,
+                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+            )
+
+            if validate_agg_logging:
+                validate_agg_logging_output(frontend_pod, frontend_log_baseline)
+
+            if capture_failure:
+                pod_uids = {
+                    pod.metadata.uid
+                    for pods in deployment.get_pods().values()
+                    for pod in pods
+                }
+                # Readiness alone does not guarantee that worker metadata is visible.
+                async with asyncio.timeout(60):
+                    while True:
+                        metadata = (
+                            await deployment._custom_api.list_namespaced_custom_object(
+                                "nvidia.com",
+                                "v1alpha1",
+                                namespace,
+                                "dynamoworkermetadatas",
+                                _request_timeout=3,
+                            )
+                        )
+                        worker_uids = {
+                            item["metadata"]["uid"]
+                            for item in metadata["items"]
+                            if any(
+                                owner["uid"] in pod_uids
+                                for owner in item["metadata"].get("ownerReferences", [])
+                            )
+                        }
+                        if worker_uids:
+                            break
+                        await asyncio.sleep(1)
+                raise RuntimeError("intentional discovery capture failure")
+
+            logger.info(
+                f"Deployment test PASSED for {deployment_target.test_id} "
+                f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
+            )
+
+    if capture_failure:
+        snapshots = {}
+        for resource in ("dgd", "dwm", "pods", "services", "endpointslices"):
+            path = Path(deployment.log_dir) / "discovery" / f"{resource}.json"
+            record = json.loads(path.read_text())
+            assert "error" not in record, record
+            assert record["namespace"] == namespace
+            assert record["deployment"] == deployment_spec.name
+            assert record["captured_at"]
+            snapshots[resource] = record["response"]["items"]
+            assert snapshots[resource], f"Empty discovery snapshot: {path}"
+
+        dgd = next(
+            item
+            for item in snapshots["dgd"]
+            if item["metadata"]["name"] == deployment_spec.name
+        )
+        assert dgd["metadata"]["resourceVersion"]
+        assert not dgd["metadata"].get("deletionTimestamp")
+        assert pod_uids <= {item["metadata"]["uid"] for item in snapshots["pods"]}
+        assert worker_uids <= {item["metadata"]["uid"] for item in snapshots["dwm"]}
+        for item in snapshots["dwm"]:
+            if item["metadata"]["uid"] in worker_uids:
+                assert item["metadata"]["resourceVersion"]
+                assert item["metadata"]["ownerReferences"]
+        services = {item["metadata"]["name"] for item in snapshots["services"]}
+        assert any(
+            item["metadata"].get("labels", {}).get("kubernetes.io/service-name")
+            in services
+            and any(
+                endpoint.get("targetRef", {}).get("uid") in pod_uids
+                and endpoint.get("conditions", {}).get("ready")
+                for endpoint in item["endpoints"]
+            )
+            for item in snapshots["endpointslices"]
         )
 
-        assert (
-            model_ready
-        ), f"Model '{model}' did not become available within the timeout period"
-
-        # Send test request
-        url = f"{base_url}{endpoint}"
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": TEST_PROMPT}],
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "temperature": DEFAULT_TEMPERATURE,
-            "stream": False,
-        }
-        response = send_request(
-            url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
-        )
-
-        # Validate response
-        validate_chat_response(
-            response=response,
-            expected_model=model,
-            min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
-        )
-
+        # Deletion can be asynchronous while Kubernetes processes finalizers.
+        async with asyncio.timeout(60):
+            while True:
+                try:
+                    await deployment._custom_api.get_namespaced_custom_object(
+                        "nvidia.com",
+                        deployment_spec.api_version,
+                        namespace,
+                        "dynamographdeployments",
+                        deployment_spec.name,
+                        _request_timeout=3,
+                    )
+                except ApiException as error:
+                    if error.status != 404:
+                        raise
+                    break
+                await asyncio.sleep(1)
         logger.info(
-            f"Deployment test PASSED for {deployment_target.test_id} "
-            f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
+            "Validated discovery snapshot files in %s/discovery", deployment.log_dir
         )
 
 
@@ -285,7 +403,7 @@ async def test_gaie_deployment(
     logger.info(f"Worker image: {worker_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
-    for worker in ("VllmPrefillWorker", "VllmDecodeWorker"):
+    for worker in ("prefill", "decode"):
         deployment_spec.set_image(worker_image, service_name=worker)
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
 

@@ -28,6 +28,29 @@ spec:
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
       extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.kubernetes.io/instance-type
+                  operator: In
+                  values:
+                  - p5.48xlarge
+                  - ml.p5.48xlarge
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - q32b-1p1d-cloud-provider
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: topology.kubernetes.io/zone
         mainContainer:
           args:
           - |
@@ -153,6 +176,29 @@ spec:
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
       extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.kubernetes.io/instance-type
+                  operator: In
+                  values:
+                  - p5.48xlarge
+                  - ml.p5.48xlarge
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - q32b-1p1d-cloud-provider
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: topology.kubernetes.io/zone
         mainContainer:
           args:
           - |

@@ -9,12 +9,12 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/scale"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -31,7 +31,6 @@ type DynamoComponentDeploymentSetupOptions struct {
 type DynamoGraphDeploymentSetupOptions struct {
 	SetupOptions
 	DockerSecretRetriever DockerSecretRetriever
-	ScaleClient           scale.ScalesGetter
 	RBACManager           RBACManager
 	SSHKeyManager         *secret.SSHKeyManager
 }
@@ -85,6 +84,9 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 }
 
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
+	if err := lpxcontroller.Setup(mgr, opts.Config, opts.RuntimeConfig, opts.DockerSecretRetriever); err != nil {
+		return err
+	}
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
@@ -92,7 +94,6 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		RuntimeConfig:         opts.RuntimeConfig,
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
-		ScaleClient:           opts.ScaleClient,
 		SSHKeyManager:         opts.SSHKeyManager,
 		RBACManager:           opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
@@ -141,30 +142,6 @@ func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 		RuntimeConfig:  opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoModel controller: %w", err)
-	}
-	return nil
-}
-
-func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
-	if err := (&CheckpointReconciler{
-		Client:        mgr.GetClient(),
-		Config:        opts.Config,
-		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorder("checkpoint"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
-	}
-	return nil
-}
-
-func SetupPodSnapshot(mgr ctrl.Manager, opts SetupOptions) error {
-	if err := (&PodSnapshotReconciler{
-		Client:        mgr.GetClient(),
-		Config:        opts.Config,
-		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorder("snapshot"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
 	return nil
 }
