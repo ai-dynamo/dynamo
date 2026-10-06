@@ -22,10 +22,12 @@ pytestmark = [
 
 @pytest.fixture
 def bench_without_aisimulate(monkeypatch):
+    """Load the real benchmark with AISimulate blocked and replay siblings stubbed."""
     original_import = builtins.__import__
     attempts = []
 
     def without_aisimulate(name, *args, **kwargs):
+        """Record and reject AISimulate imports, including cached modules."""
         if name.split(".")[0] in {"aisimulate", "aisimulate_core"}:
             attempts.append(name)
             raise ModuleNotFoundError("AISimulate is unavailable", name=name)
@@ -59,16 +61,10 @@ def bench_without_aisimulate(monkeypatch):
     return bench, attempts
 
 
-def test_bench_import_does_not_load_aisimulate(bench_without_aisimulate):
-    bench, attempts = bench_without_aisimulate
-
-    assert callable(bench.compare_agg_and_disagg_with_replay)
-    assert callable(bench.compare_aic_and_replay_disagg)
-    assert attempts == []
-
-
 def test_aic_comparison_requires_aisimulate_at_call_time(bench_without_aisimulate):
+    """Importing is safe; invoking an AIC comparison requires AISimulate."""
     bench, attempts = bench_without_aisimulate
+    assert attempts == []
     spec = SimpleNamespace(
         workload=SimpleNamespace(isTraceBased=False, requestCount=1, concurrency=1)
     )

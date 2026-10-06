@@ -114,7 +114,7 @@ Prefer API responses, structured response fields, metrics, or direct test helper
 - `components/src/dynamo/profiler/tests/unit/test_replay_bench_imports.py` executes
   the replay benchmark module with AISimulate imports blocked. It checks that
   importing the module succeeds and that an AIC comparison requires AISimulate
-  only when called. Sibling replay modules are stubbed, so these unit tests need
+  only when called. Sibling replay modules are stubbed, so this unit test needs
   neither native Dynamo bindings nor an installed AISimulate package.
 
 ---
