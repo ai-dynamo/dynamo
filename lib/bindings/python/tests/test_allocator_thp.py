@@ -86,7 +86,6 @@ def _strict_overcommit() -> bool:
     reason="mimalloc never advises arenas it reserves under strict overcommit",
 )
 def test_mimalloc_allow_thp_still_opts_in():
-    # dynamo.frontend sets this before importing the extension.
     probe = _probe("1")
 
     assert probe["advised_mib"] >= ARENA_MIB, probe

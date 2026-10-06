@@ -51,12 +51,6 @@ def _maybe_preload_jemalloc() -> None:
 if __name__ == "__main__":
     _maybe_preload_jemalloc()
 
-    # dynamo._core keeps its mimalloc heap off transparent huge pages, which bloat
-    # many-threaded workers. The frontend's dense heap serves more requests at saturation
-    # on huge pages, so opt back in unless the operator set it. mimalloc reads this once,
-    # when the extension loads.
-    os.environ.setdefault("MIMALLOC_ALLOW_THP", "1")
-
     # Import the runtime only after configuring the allocator.
     from dynamo.frontend.main import main
 

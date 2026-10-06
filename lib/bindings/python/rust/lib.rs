@@ -10,7 +10,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 ///
 /// mimalloc advises each arena it reserves for huge pages. In a many-threaded process each
 /// thread's sparse pages then fault in whole 2 MiB pages, and khugepaged refills partly freed
-/// ones while idle. `dynamo.frontend` opts back in for its dense heap.
+/// ones while idle.
 ///
 /// Must run before the extension's first Rust allocation, which reserves the first arena.
 #[cfg(feature = "mimalloc")]
