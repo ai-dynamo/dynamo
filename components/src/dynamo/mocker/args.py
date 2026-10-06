@@ -11,6 +11,7 @@ from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     add_worker_router_arguments,
 )
+from dynamo.common.configuration.utils import Deprecated
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
@@ -20,6 +21,7 @@ DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
+_SGLANG_ALIAS_REMOVAL = "Dynamo 1.8.0 (two releases after 1.6.0)"
 
 
 class ProfileDataResult:
@@ -459,7 +461,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sglang-schedule-policy",
         type=str,
         default=None,
-        help="SGLang scheduling policy: 'fifo' (default) or 'lpm' (longest prefix match).",
+        help="SGLang scheduling policy: 'fifo' (default) or 'lpm' (longest prefix match). "
+        "The 'fcfs' alias is deprecated and will be removed in Dynamo 1.8.0.",
+    )
+    parser.add_argument(
+        "--sglang-page-size",
+        type=int,
+        default=None,
+        help="Deprecated SGLang alias for --block-size; removed in Dynamo 1.8.0. "
+        "Ignored for other backends.",
     )
     parser.add_argument(
         "--sglang-max-prefill-tokens",
@@ -656,6 +666,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 )
             spellings[canonical] = flag
     args = parser.parse_args(argv)
+    if args.sglang_schedule_policy == "fcfs":
+        Deprecated(
+            "--sglang-schedule-policy fifo", remove_in=_SGLANG_ALIAS_REMOVAL
+        ).warn("--sglang-schedule-policy fcfs")
+        args.sglang_schedule_policy = "fifo"
+    if args.sglang_page_size is not None:
+        Deprecated("--block-size", remove_in=_SGLANG_ALIAS_REMOVAL).warn(
+            "--sglang-page-size"
+        )
+        if args.engine_type == "sglang":
+            if args.block_size is not None and args.block_size != args.sglang_page_size:
+                parser.error("--sglang-page-size and --block-size must match")
+            args.block_size = args.sglang_page_size
     # Collect them into their own config object, matching the backends.
     args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
 

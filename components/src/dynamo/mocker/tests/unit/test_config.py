@@ -77,6 +77,64 @@ def test_runtime_overrides_do_not_change_shared_engine_input(monkeypatch):
     assert runtime.bootstrap_host == "127.0.0.1"
 
 
+@pytest.mark.parametrize(
+    "legacy_flags",
+    [
+        ["--sglang-page-size", "32", "--sglang-schedule-policy", "fcfs"],
+        ["--sglang-page-size=32", "--sglang-schedule-policy=fcfs", "--block-size=32"],
+    ],
+)
+def test_legacy_sglang_cli_aliases_warn_and_match_canonical_config(legacy_flags):
+    with pytest.warns(FutureWarning) as warnings:
+        legacy = CONFIG.build_mocker_engine_args(
+            parse_args(["--engine-type", "sglang", *legacy_flags])
+        )
+    canonical = CONFIG.build_mocker_engine_args(
+        parse_args(
+            [
+                "--engine-type",
+                "sglang",
+                "--block-size",
+                "32",
+                "--sglang-schedule-policy",
+                "fifo",
+            ]
+        )
+    )
+    assert legacy == canonical
+    assert len(warnings) == 2
+    for warning in warnings:
+        message = str(warning.message)
+        assert "deprecated" in message
+        assert "Dynamo 1.8.0 (two releases after 1.6.0)" in message
+    assert "use --sglang-schedule-policy fifo" in str(warnings[0].message)
+    assert "use --block-size" in str(warnings[1].message)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "trtllm"])
+def test_legacy_sglang_page_size_does_not_change_other_backends(backend):
+    flags = ["--engine-type", backend, "--block-size", "64"]
+    with pytest.warns(FutureWarning, match="--sglang-page-size is deprecated"):
+        legacy = CONFIG.build_mocker_engine_args(
+            parse_args([*flags, "--sglang-page-size", "16"])
+        )
+    assert legacy == CONFIG.build_mocker_engine_args(parse_args(flags))
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--sglang-page-size", "16", "--block-size", "32"],
+        ["--block-size", "32", "--sglang-page-size", "16"],
+    ],
+)
+def test_legacy_sglang_page_size_rejects_conflicting_block_size(flags, capsys):
+    with pytest.warns(FutureWarning, match="--sglang-page-size is deprecated"):
+        with pytest.raises(SystemExit, match="2"):
+            parse_args(["--engine-type", "sglang", *flags])
+    assert "--sglang-page-size and --block-size must match" in capsys.readouterr().err
+
+
 def test_profile_is_an_explicit_timing_provider(tmp_path):
     from dynamo._core import run_mocker_synthetic_trace_replay
 

@@ -293,11 +293,20 @@ Apply only when `--engine-type sglang`. Set the radix-cache page size with `--bl
 
 <ParamField path="--sglang-schedule-policy" type="string" default="fifo">
   SGLang scheduling policy. `fifo` is the default; `lpm` is longest prefix match.
+  The deprecated `fcfs` alias maps to `fifo` and prints a warning when used.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fifo</Badge> <Badge intent="note" minimal>lpm</Badge></span>
 </ParamField>
 
+<ParamField path="--sglang-page-size" type="integer" default="null">
+  Deprecated alias for `--block-size` when `--engine-type sglang`. Prints a warning when used;
+  other backends ignore it. If both flags are supplied for SGLang, their values must match.
+</ParamField>
 
+<Warning>
+  Both aliases are deprecated in Dynamo 1.6.0 and will be removed in Dynamo 1.8.0, after two
+  releases. Use `--sglang-schedule-policy fifo` and `--block-size` instead.
+</Warning>
 
 <ParamField path="--sglang-max-prefill-tokens" type="integer" default="16384">
   SGLang max prefill-token budget per batch.
