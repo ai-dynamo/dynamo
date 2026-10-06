@@ -53,6 +53,23 @@ def test_route_registry_describes_routes() -> None:
     assert routes_with_kwargs == routes
 
 
+def test_route_registry_describes_world_size() -> None:
+    registry = RLRouteRegistry(_Runtime("http://worker:8081"), world_size=4)
+
+    assert registry.describe() == {
+        "status": "ok",
+        "routes": [],
+        "system_url": "http://worker:8081",
+        "world_size": 4,
+    }
+
+
+@pytest.mark.parametrize("world_size", [True, 0, -1, 1.5, "4"])
+def test_route_registry_rejects_invalid_world_size(world_size) -> None:
+    with pytest.raises(ValueError, match="world_size"):
+        RLRouteRegistry(_Runtime(), world_size=world_size)
+
+
 def test_route_registry_rejects_request_plane_admin_execution() -> None:
     registry = RLRouteRegistry(_Runtime())
 
