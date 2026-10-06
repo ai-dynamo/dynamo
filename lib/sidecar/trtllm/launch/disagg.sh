@@ -87,16 +87,18 @@ TRTLLM_PREFILL_GPU="${TRTLLM_PREFILL_GPU:-0}"
 TRTLLM_DECODE_GPU="${TRTLLM_DECODE_GPU:-1}"
 TRTLLM_CACHE_TRANSCEIVER_BACKEND="${TRTLLM_CACHE_TRANSCEIVER_BACKEND:-NIXL}"
 
-# `--extra_llm_api_options` is last-wins, not additive, so a forwarded copy
-# would drop the transceiver and leave the prefill worker producing a handoff
-# no decode worker can consume -- as an opaque engine-side transfer error, not
-# a launcher one. Refuse it rather than silently losing the setting.
+# `--extra_llm_api_options` (alias `--config`) is last-wins, not additive, so a
+# forwarded copy would drop the transceiver and leave the prefill worker
+# producing a handoff no decode worker can consume -- as an opaque engine-side
+# transfer error, not a launcher one. Refuse it rather than silently losing the
+# setting.
 for arg in "${EXTRA_ARGS[@]}"; do
     case "$arg" in
-        --extra_llm_api_options|--extra_llm_api_options=*)
-            echo "Cannot forward --extra_llm_api_options: this launcher needs it for" >&2
-            echo "cache_transceiver_config. Merge your settings into that file, or set" >&2
-            echo "TRTLLM_CACHE_TRANSCEIVER_BACKEND and run the engines yourself." >&2
+        --extra_llm_api_options|--extra_llm_api_options=*|--config|--config=*)
+            echo "Cannot forward ${arg%%=*}: this launcher needs it for" >&2
+            echo "cache_transceiver_config and guided_decoding_backend. Merge your" >&2
+            echo "settings into that file, or set TRTLLM_CACHE_TRANSCEIVER_BACKEND and" >&2
+            echo "run the engines yourself." >&2
             exit 1
             ;;
     esac
@@ -108,10 +110,11 @@ trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"
 
 # Both engines need a cache transceiver or the handoff has nothing to move the
 # KV cache over. NIXL picks its own underlying transport (UCX where there is no
-# RDMA fabric) and is the path Dynamo uses elsewhere for disaggregation.
+# RDMA fabric) and is the path Dynamo uses elsewhere for disaggregation. Both
+# also need a guided-decoding backend to enforce a required or named tool_choice.
 TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
 build_trtllm_override_args_with_mem \
-    --merge-with-json "{\"cache_transceiver_config\": {\"backend\": \"${TRTLLM_CACHE_TRANSCEIVER_BACKEND}\"}}" \
+    --merge-with-json "{\"cache_transceiver_config\": {\"backend\": \"${TRTLLM_CACHE_TRANSCEIVER_BACKEND}\"}, \"guided_decoding_backend\": \"xgrammar\"}" \
     > "$TRTLLM_EXTRA_CONFIG"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"

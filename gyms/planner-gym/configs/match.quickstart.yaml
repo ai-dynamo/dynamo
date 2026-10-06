@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Run from the checkout; the Mooncake workload is bundled with Dynamo.
+schema_version: 1
+name: planner-vs-keda-quickstart
+description: Compare Planner and KEDA on 100 public Mooncake requests.
+labels:
+  dataset: mooncake
+  purpose: onboarding
+
+backend:
+  type: sim
+  topology: disagg
+  gpu_budget: 32
+
+  model:
+    name: openai/gpt-oss-120b
+    ais_model_path: openai/gpt-oss-120b
+
+  engines:
+    common:
+      system: h200_sxm
+      backend: vllm
+      backend_version: current
+      tp_size: 1
+      moe_tp_size: 1
+      moe_ep_size: 1
+      attention_dp_size: 1
+      runtime:
+        cold_start_delay_s: 30
+      extra_args: {}
+    prefill:
+      runtime:
+        kv_transfer_bandwidth_gbps: 100
+        kv_bytes_per_token: 131072
+    decode: {}
+
+  router:
+    mode: round_robin
+
+  planner_config:
+    optimization_target: sla
+    ttft_ms: 2000
+    itl_ms: 50
+    enable_load_scaling: true
+    enable_throughput_scaling: false
+    pre_deployment_sweeping_mode: none
+    load_adjustment_interval_seconds: 5
+    load_min_observations: 5
+    load_scaling_down_sensitivity: 80
+    min_endpoint: 1
+
+  replay:
+    ais_bootstrap: true
+    concurrency: null
+    telemetry_sample_interval_s: 5
+
+  autoscalers:
+    - name: planner
+      type: planner
+      start:
+        prefill: 1
+        decode: 1
+
+    - name: keda
+      type: keda
+      start:
+        prefill: 1
+        decode: 1
+      config:
+        poll_interval_s: 15
+        queue_threshold: 5
+        kv_threshold: 0.9
+        min_prefill: 1
+        max_prefill: 16
+        min_decode: 1
+        max_decode: 8
+        tolerance: 0.1
+        scale_up_stabilization_s: 0
+        scale_down_stabilization_s: 300
+
+evaluations:
+  workloads: [mooncake]
+  defaults:
+    seed: 0
+    max_requests: 100
+    arrival_speedup: 1.0
+
+slo_profiles:
+  - name: relaxed
+    ttft_ms: 2000
+    itl_ms: 50
+
+metrics:
+  rank_by: goodput_per_gpu
+  include:
+    - goodput_per_gpu
+    - goodput_rps
+    - good_rate
+    - gpu_hours
+    - request_throughput_rps
+    - completed_requests
+    - duration_s
+    - mean_ttft_ms
+    - p99_ttft_ms
+    - mean_itl_ms
+    - oscillation_count
+    - scale_events
+
+execution:
+  repetitions: 1
+  fail_fast: true
+  max_runs: 2
+
+publish:
+  artifact_root: ../runs/quickstart/artifacts
+  destinations:
+    - type: console
+    - type: json
+      path: ../runs/quickstart/results.json
+    - type: html
+      path: ../runs/quickstart/report.html
