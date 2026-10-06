@@ -1097,34 +1097,40 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.prompt_registry.replace_worker_load_state(worker, load);
             (completion, load)
         };
-        Ok(self.settle_prefill_completion(worker, completion, load, decay_now))
+        self.settle_prefill_completion(worker, completion, load, decay_now);
+        Ok(if completion == PrefillCompletion::LoadReleased {
+            LifecycleMutationOutcome::Applied
+        } else {
+            LifecycleMutationOutcome::NoChange
+        })
     }
 
     /// Publish load released by a prefill completion. A completion that released no
-    /// prompt load changes no scheduler state, so it only refreshes the load gauges
-    /// and reports `NoChange`; callers then republish the ordered completion event.
+    /// prompt load changes no scheduler state, so it only refreshes the load gauges.
     fn settle_prefill_completion(
         &self,
         worker: WorkerWithDpRank,
         completion: PrefillCompletion,
         load: WorkerLoadSnapshot,
         decay_now: Instant,
-    ) -> LifecycleMutationOutcome {
-        if completion == PrefillCompletion::PhaseChanged {
+    ) {
+        if completion == PrefillCompletion::LoadReleased {
+            self.publish_worker_load_snapshot(worker, load, decay_now);
+        } else {
             let _ = self.observe_worker_load_snapshot(worker, load, decay_now);
-            return LifecycleMutationOutcome::NoChange;
         }
-        self.publish_worker_load_snapshot(worker, load, decay_now);
-        LifecycleMutationOutcome::Applied
     }
 
+    /// Mark prefill complete if `attempt_id` still owns the booking, and publish the
+    /// ordered completion event for every phase change, so peer routers move the
+    /// request to decode even when it held no prompt load.
     pub(crate) fn mark_prefill_completed_if_booking(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
         attempt_id: AttemptId,
         decay_now: Instant,
-    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+    ) -> Result<PrefillCompletion, SequenceError> {
         let expected = RequestBooking { worker, attempt_id };
         let (completion, load, lora_name) = {
             let table = self.workers.read();
@@ -1132,15 +1138,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 drop(table);
                 self.request_index
                     .remove_request_if_booking(request_id, worker, attempt_id);
-                return Ok(LifecycleMutationOutcome::NoChange);
+                return Ok(PrefillCompletion::Unchanged);
             };
             let mut seq = table.slots[idx].sequences.write();
             if self.request_index.booking_for(request_id) != Some(expected) {
-                return Ok(LifecycleMutationOutcome::NoChange);
+                return Ok(PrefillCompletion::Unchanged);
             }
             let completion = seq.mark_prefill_completed(request_id, decay_now);
             if completion == PrefillCompletion::Unchanged {
-                return Ok(LifecycleMutationOutcome::NoChange);
+                return Ok(completion);
             }
             let load = seq.worker_load_snapshot();
             self.prompt_registry.replace_worker_load_state(worker, load);
@@ -1151,17 +1157,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             (completion, load, lora_name)
         };
 
-        let outcome = self.settle_prefill_completion(worker, completion, load, decay_now);
-        if outcome.is_applied() {
-            self.enqueue_publish_event(|| ActiveSequenceEvent {
-                request_id: request_id.clone(),
-                worker,
-                data: ActiveSequenceEventData::MarkPrefillCompleted,
-                router_id: self.router_id,
-                lora_name,
-            });
-        }
-        Ok(outcome)
+        self.settle_prefill_completion(worker, completion, load, decay_now);
+        self.enqueue_publish_event(|| ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: self.router_id,
+            lora_name,
+        });
+        Ok(completion)
     }
 
     /// Publish the router's ordered completion fallback independently of the local mutation.
@@ -1831,6 +1835,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingPublisherState {
         events: Mutex<Vec<ActiveSequenceEventData>>,
+        published: Mutex<Vec<ActiveSequenceEvent>>,
         single_loads: Mutex<Vec<SchedulerLoadSnapshot>>,
         load_batches: Mutex<Vec<Vec<SchedulerLoadSnapshot>>>,
         observations: Mutex<Vec<(WorkerWithDpRank, LocalWorkerLoad)>>,
@@ -1845,6 +1850,7 @@ mod tests {
 
         fn clear(&self) {
             self.events.lock().unwrap().clear();
+            self.published.lock().unwrap().clear();
             self.single_loads.lock().unwrap().clear();
             self.load_batches.lock().unwrap().clear();
             self.observations.lock().unwrap().clear();
@@ -1859,7 +1865,8 @@ mod tests {
 
     impl SequencePublisher for RecordingPublisher {
         fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
-            self.state.events.lock().unwrap().push(event.data);
+            self.state.events.lock().unwrap().push(event.data.clone());
+            self.state.published.lock().unwrap().push(event);
             Ok(())
         }
 
@@ -2269,7 +2276,7 @@ mod tests {
             sequences
                 .mark_prefill_completed_if_booking(&request_id, worker, first_attempt, now)
                 .unwrap(),
-            LifecycleMutationOutcome::NoChange
+            PrefillCompletion::Unchanged
         );
         assert_eq!(
             sequences
@@ -2290,7 +2297,7 @@ mod tests {
             sequences
                 .mark_prefill_completed_if_booking(&request_id, worker, replacement_attempt, now)
                 .unwrap(),
-            LifecycleMutationOutcome::Applied
+            PrefillCompletion::LoadReleased
         );
         assert!(matches!(
             state.events.lock().unwrap().as_slice(),
@@ -3302,7 +3309,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_only_prefill_completion_observes_without_publishing_load() {
+    fn phase_only_prefill_completion_publishes_event_without_publishing_load() {
         let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let now = Instant::now();
@@ -3324,10 +3331,13 @@ mod tests {
             sequences
                 .mark_prefill_completed_if_booking(&"booked".to_string(), worker, attempt_id, now)
                 .unwrap(),
-            LifecycleMutationOutcome::NoChange
+            PrefillCompletion::PhaseChanged
         );
 
-        assert!(state.events.lock().unwrap().is_empty());
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [ActiveSequenceEventData::MarkPrefillCompleted]
+        ));
         assert!(state.single_loads.lock().unwrap().is_empty());
         let prefill_counts: Vec<_> = state
             .observations
@@ -3337,6 +3347,43 @@ mod tests {
             .map(|(_, load)| (load.active_requests, load.prefill_requests))
             .collect();
         assert_eq!(prefill_counts, vec![(2, 1), (2, 0)]);
+    }
+
+    #[test]
+    fn peer_moves_phase_only_booking_completion_to_decode() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (origin, origin_state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let peer_state = Arc::new(RecordingPublisherState::default());
+        let peer = ActiveSequencesMultiWorker::new(
+            RecordingPublisher {
+                state: Arc::clone(&peer_state),
+            },
+            4,
+            HashMap::from([(1, (0, 1))]),
+            true,
+            1,
+            "test",
+        );
+        let forward_to_peer = || {
+            let events = std::mem::take(&mut *origin_state.published.lock().unwrap());
+            peer.apply_replica_batch(events);
+            let load = last_observed_load(&peer_state, worker).unwrap();
+            (load.active_requests, load.prefill_requests)
+        };
+        let now = Instant::now();
+
+        let attempt_id = origin
+            .add_request_admitted(unloaded_sequence_request("req-1", worker), now)
+            .unwrap();
+        assert_eq!(forward_to_peer(), (1, 1));
+
+        assert_eq!(
+            origin
+                .mark_prefill_completed_if_booking(&"req-1".to_string(), worker, attempt_id, now)
+                .unwrap(),
+            PrefillCompletion::PhaseChanged
+        );
+        assert_eq!(forward_to_peer(), (1, 0));
     }
 
     #[test]

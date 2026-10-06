@@ -55,7 +55,7 @@ pub(super) struct RequestState {
 
 /// What marking a request's prefill complete changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PrefillCompletion {
+pub(crate) enum PrefillCompletion {
     /// The request is unknown or its prefill was already complete.
     Unchanged,
     /// The request left the prefill phase without holding prompt load.
