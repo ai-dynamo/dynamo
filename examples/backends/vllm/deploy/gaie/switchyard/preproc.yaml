@@ -44,6 +44,8 @@ spec:
         env:
         - name: ROUTES_CONFIG
           value: /etc/switchyard/routes.toml
+        - name: MAX_ACTIVE_STREAMS
+          value: "16"
         volumeMounts:
         - name: routing-config
           mountPath: /etc/switchyard

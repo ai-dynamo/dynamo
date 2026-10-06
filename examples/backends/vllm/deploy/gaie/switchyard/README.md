@@ -25,6 +25,8 @@ sequenceDiagram
     EPP-->>Gateway: Selected worker endpoint
     Gateway->>Worker: Forward request
     Worker-->>Gateway: JSON or SSE response
+    Gateway->>Proc: Response headers and chunks
+    Proc-->>Gateway: Pass through unchanged
     Gateway-->>Client: JSON or SSE response
 ```
 
@@ -99,6 +101,8 @@ curl --fail-with-body -sS http://localhost:8000/v1/chat/completions \
 
 Check the response's `model` field. Add `"stream":true` and use `curl --no-buffer` to verify SSE.
 Set `X-Switchyard-Session-Id` to retain StageRouter state across requests in one session.
+Send `X-Switchyard-Session-Final: true` on the final request to release its session admission
+slot after a successful routing decision.
 
 ## Configure routing
 
@@ -110,10 +114,23 @@ rule in [http-routes.yaml](http-routes.yaml). Use policies that select a model w
 a response or rewriting the request.
 
 The example supports text and function-tool history on `/v1/chat/completions`, with requests up
-to 2 MiB and a response timeout of 120 seconds. PreProc admits up to 4,096 session identities
+to 2 MiB. PreProc admits up to 4,096 session identities
 active within the past hour; idle admission slots are reused. The SDK reclaims idle state on
 its own hourly sweep. Session state resets when PreProc restarts, and updates briefly interrupt
 routing. This single-replica example does not provide high availability.
+
+agentgateway 1.0.0 sends responses through PreProc and cannot disable those phases. Each
+request holds a stream slot until its response finishes. Set `MAX_ACTIVE_STREAMS` in
+[preproc.yaml](preproc.yaml) to change the default of 16. Preprocessing also has a separate
+limit of eight concurrent requests; reaching either limit returns HTTP 503. Increasing the
+stream limit increases memory and response-forwarding work. Reapply the Kustomization after
+changing the setting.
+
+PreProc's 120-second response timeout measures inactivity and resets on each message.
+It also releases stream slots if output forwarding stalls for 120 seconds.
+The `timeouts.request: 120s` setting in [http-routes.yaml](http-routes.yaml) is separate:
+in agentgateway 1.0.0 it bounds the wait for upstream response headers, measured from request
+start. It does not limit the duration of an active response stream.
 
 ## Remove
 

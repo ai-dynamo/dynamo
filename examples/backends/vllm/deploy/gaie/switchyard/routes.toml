@@ -15,7 +15,6 @@
 
 schema_version = 1
 
-# Native Switchyard runner configuration.
 # This StageRouter policy makes no routing-time model calls.
 [llm_clients.dynamo]
 format = "openai_chat"
