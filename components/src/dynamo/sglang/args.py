@@ -26,7 +26,7 @@ from dynamo.common.configuration.groups.router_args import (
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.model_fetch import fetch_model
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.snapshot.lifecycle import (
     configure_snapshot_capture_env,
     is_snapshot_enabled,
@@ -61,6 +61,8 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 
     component: str
     diffusion_worker: bool = False
+    # Preserve NGC identity for registration while SGLang loads the local path.
+    model_source_uri: Optional[str] = None
     # Whether this worker publishes KV events. Distinct from the router-side
     # `use_kv_events` on `router_advertisement`, which means the router
     # subscribes to them -- the reason the two live on separate objects.
@@ -193,10 +195,16 @@ def is_object_storage_path(model_path: str) -> bool:
 
 
 def should_fetch_model(args: Any, model_path: str) -> bool:
+    """Prefetch NGC and native-loader models, leaving HF P2P to ModelExpress."""
     if os.path.exists(model_path):
         return False
     if is_object_storage_path(model_path):
         return False
+    # SGLang resolves config/tokenizer files before invoking its weight loader.
+    # NGC therefore needs a local directory even with the ModelExpress plugin;
+    # fetch weights too so the plugin's native fallback can read that directory.
+    if needs_local_model_path(model_path):
+        return True
     return not use_modelexpress_remote_instance(args)
 
 
@@ -665,19 +673,30 @@ async def parse_args(args: list[str]) -> Config:
                 served_names[1:],
             )
 
+    if needs_local_model_path(model_path) and (
+        not served_names or ":" in served_names[0]
+    ):
+        raise ValueError(
+            "NGC models require a served model name without ':' in SGLang. "
+            "Pass --served-model-name my-model."
+        )
+
     # Name the model — falls back to model_path only if neither
     # --served-model-name nor an env var supplied one.
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
     # Download the model if necessary using modelexpress.
-    # We don't set `parsed_args.model_path` to the local path fetch_model returns
-    # because sglang will send this to its pipeline-parallel workers, which may
-    # not have the local path.
+    # For HF names we don't set `parsed_args.model_path` to the local path
+    # fetch_model returns, because sglang will send this to its pipeline-parallel
+    # workers, which may not have the local path.
     # sglang will attempt to download the model again, but find it in the HF cache.
-    # For non-HF models use a path instead of an HF name, and ensure all workers have
-    # that path (ideally via a shared folder).
+    # sglang cannot resolve `ngc://` names, so those use the local path instead;
+    # every worker needs that path (ideally via a shared folder).
     if should_fetch_model(parsed_args, model_path):
-        await fetch_model(model_path)
+        local_path = await fetch_model(model_path)
+        if needs_local_model_path(model_path):
+            dynamo_config.model_source_uri = model_path
+            parsed_args.model_path = model_path = local_path
 
     snapshot_enabled = is_snapshot_enabled()
     if snapshot_enabled:

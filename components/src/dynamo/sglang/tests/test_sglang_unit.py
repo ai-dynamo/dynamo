@@ -10,6 +10,7 @@ import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -1601,6 +1602,70 @@ def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
     assert should_fetch_model(args, "Qwen/Qwen3-0.6B") is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("load_format", ["auto", "remote_instance"])
+async def test_parse_args_resolves_ngc_before_server_args(
+    monkeypatch, tmp_path, load_format
+):
+    model_uri = "ngc://test-org/test-team/test-model:v1"
+    local_path = str(tmp_path)
+    fetch = AsyncMock(return_value=local_path)
+    monkeypatch.setattr(sglang_args, "fetch_model", fetch)
+    monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
+
+    def resolve(parsed_args):
+        assert parsed_args.model_path == local_path
+        return _dcp_server_args_stub(
+            model_path=parsed_args.model_path,
+            served_model_name=parsed_args.served_model_name,
+            load_format=parsed_args.load_format,
+            remote_instance_weight_loader_backend=(
+                parsed_args.remote_instance_weight_loader_backend
+            ),
+        )
+
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", resolve)
+    argv = [
+        "--model",
+        model_uri,
+        "--load-format",
+        load_format,
+        "--served-model-name",
+        "my-model,alternate:model",
+    ]
+    if load_format == "remote_instance":
+        argv.extend(["--remote-instance-weight-loader-backend", "modelexpress"])
+
+    config = await parse_args(argv)
+
+    # A full download supplies the plugin's native fallback as well as config.
+    fetch.assert_awaited_once_with(model_uri)
+    assert config.server_args.model_path == local_path
+    assert config.dynamo_args.model_source_uri == model_uri
+    assert config.server_args.served_model_name == "my-model"
+    assert config.dynamo_args.served_model_aliases == ["alternate:model"]
+    assert config.server_args.load_format == load_format
+    if load_format == "remote_instance":
+        assert use_modelexpress_remote_instance(config.server_args)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("served_model_name", [None, " ", "model:adapter"])
+async def test_ngc_requires_valid_served_name_before_fetch(
+    monkeypatch, served_model_name
+):
+    fetch = AsyncMock()
+    monkeypatch.setattr(sglang_args, "fetch_model", fetch)
+    argv = ["--model", "ngc://test-org/test-team/test-model:v1"]
+    if served_model_name is not None:
+        argv.extend(["--served-model-name", served_model_name])
+
+    with pytest.raises(ValueError, match="--served-model-name my-model"):
+        await parse_args(argv)
+
+    fetch.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "model_path",
     [
@@ -1622,7 +1687,11 @@ def test_should_fetch_model_keeps_default_non_local_fetch():
 
 
 @pytest.mark.asyncio
-async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeypatch):
+@pytest.mark.parametrize("model_source", ["hf", "local", "ngc"])
+@pytest.mark.parametrize("worker_name", ["Aggregated", "Encode"])
+async def test_register_model_preserves_source_with_sglang_modelexpress(
+    monkeypatch, tmp_path, model_source, worker_name
+):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
 
@@ -1632,14 +1701,19 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
         return None
 
     async def fake_register_model(*args, **kwargs):
+        captured["args"] = args
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
 
+    model_path = "Qwen/Qwen3-0.6B" if model_source == "hf" else str(tmp_path)
+    model_uri = (
+        "ngc://test-org/test-team/test-model:v1" if model_source == "ngc" else None
+    )
     server_args = SimpleNamespace(
-        model_path="Qwen/Qwen3-0.6B",
-        served_model_name="Qwen/Qwen3-0.6B",
+        model_path=model_path,
+        served_model_name="my-model",
         context_length=4096,
         page_size=64,
         dcp_size=8,
@@ -1647,20 +1721,24 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
         remote_instance_weight_loader_backend="modelexpress",
     )
     dynamo_args = SimpleNamespace(
+        model_source_uri=model_uri,
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
     )
 
     result = await sglang_register._register_model_with_runtime_config(
-        engine=SimpleNamespace(),
+        engine=None if worker_name == "Encode" else SimpleNamespace(),
         endpoint=SimpleNamespace(),
         server_args=server_args,
         dynamo_args=dynamo_args,
-        worker_type=sglang_register.WorkerType.Aggregated,
+        worker_type=getattr(sglang_register.WorkerType, worker_name),
     )
 
     assert result is True
+    assert captured["args"][3] == (model_uri or model_path)
+    assert captured["args"][4] == "my-model"
+    assert server_args.model_path == model_path
     assert captured["kwargs"]["ignore_weights"] is True
     assert captured["kwargs"]["kv_cache_block_size"] == 512
 
@@ -1695,6 +1773,7 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
         remote_instance_weight_loader_backend=None,
     )
     dynamo_args = SimpleNamespace(
+        model_source_uri=None,
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
