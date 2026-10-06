@@ -216,6 +216,17 @@ impl NativeHttp {
         }
     }
 
+    pub(crate) async fn abort(&self, rid: &str, timeout: Duration) -> Result<(), reqwest::Error> {
+        self.client
+            .post(self.endpoint.with_path("/abort_request"))
+            .json(&serde_json::json!({"rid": rid, "abort_all": false}))
+            .timeout(timeout)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     async fn open(&self, body: &Value) -> Result<Response, DynamoError> {
         let response = self
             .client

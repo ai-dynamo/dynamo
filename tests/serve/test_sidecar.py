@@ -142,6 +142,20 @@ def _compatibility_payloads():
     logprobs.expected_finish_reason = "length"
     logprobs.expected_completion_tokens = 8
     logprobs.min_token_chunks = 2
+    unicode_logprobs = chat_payload_with_logprobs(
+        content="Repeat these characters: café € 中文.",
+        expected_response=[],
+        max_tokens=8,
+        top_logprobs=2,
+        stream=True,
+        extra_body={
+            "return_tokens_as_token_ids": False,
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    unicode_logprobs.expected_finish_reason = "length"
+    unicode_logprobs.expected_completion_tokens = 8
     structured = GuidedDecodingChatPayload(
         body={
             "messages": [{"role": "user", "content": "Return a successful status."}],
@@ -168,7 +182,7 @@ def _compatibility_payloads():
         expected_finish_reason="stop",
         needs_token_ids=True,
     )
-    return [chat_payload_default(), logprobs, structured]
+    return [chat_payload_default(), logprobs, unicode_logprobs, structured]
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -188,8 +202,11 @@ sidecar_configs = {
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-0.6B",
-        # Flush Python output promptly into CI logs.
-        env={"PYTHONUNBUFFERED": "1"},
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "MAX_MODEL_LEN": "4096",
+            "VLLM_DATA_PARALLEL_SIZE": "1",
+        },
         request_payloads=_compatibility_payloads(),
     ),
     "sglang_aggregated": EngineConfig(
@@ -205,7 +222,11 @@ sidecar_configs = {
             pytest.mark.requested_sglang_kv_tokens(8192),
         ],
         model="Qwen/Qwen3-0.6B",
-        env={"PYTHONUNBUFFERED": "1"},
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "MAX_MODEL_LEN": "4096",
+            "SGLANG_MAX_NEW_TOKENS_LIMIT": "0",
+        },
         request_payloads=_compatibility_payloads(),
     ),
     "trtllm_aggregated": EngineConfig(
