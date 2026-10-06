@@ -200,6 +200,15 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out
 }
 
+/// Exclusive bound for client token ids: the largest id plus one, added tokens
+/// included. Ids can have gaps, so the token count is not a bound.
+fn hf_token_id_bound(hf: &HfTokenizer) -> Option<usize> {
+    hf.get_vocab(true)
+        .into_values()
+        .max()
+        .map(|id| id as usize + 1)
+}
+
 /// serde `deserialize_with` that maps an explicitly-present value -- *including
 /// an explicit JSON `null`* -- to `Some`. Paired with `#[serde(default)]` (which
 /// supplies `None` only when the key is absent), this distinguishes "field
@@ -1037,6 +1046,10 @@ pub struct ModelDeploymentCard {
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
+
+    /// Set when this card loads its tokenizer. See `hf_token_id_bound`.
+    #[serde(skip, default)]
+    tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
 /// LoRA adapter information for routing decisions
@@ -1335,6 +1348,12 @@ impl ModelDeploymentCard {
         self.tokenizer_with_options(Default::default(), false)
     }
 
+    /// `None` until this card loads its tokenizer, then `Some` of the
+    /// tokenizer's token id bound. That bound is `None` if unknown (tiktoken).
+    pub(crate) fn tokenizer_id_bound(&self) -> Option<Option<usize>> {
+        self.tokenizer_id_bound.get().copied()
+    }
+
     pub(crate) fn embedding_tokenizer_with_options(
         &self,
         options: crate::tokenizers::TokenizerOptions,
@@ -1392,6 +1411,8 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+                self.tokenizer_id_bound
+                    .get_or_init(|| hf_token_id_bound(&hf));
 
                 // Disable any truncation baked into `tokenizer.json`: the HF
                 // `tokenizers` crate honors it on `encode()`, silently clipping every
@@ -1547,6 +1568,8 @@ impl ModelDeploymentCard {
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
+                // tiktoken does not expose its ids.
+                self.tokenizer_id_bound.get_or_init(|| None);
 
                 let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
@@ -1961,6 +1984,7 @@ impl ModelDeploymentCard {
             indexer_identity: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
+            tokenizer_id_bound: OnceLock::new(),
         })
     }
 }

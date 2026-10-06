@@ -1729,13 +1729,14 @@ pub struct OpenAIPreprocessor {
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
 
-/// Exclusive bound for client token ids: the larger known vocab size, so ids
-/// that only the model or only the tokenizer has (e.g. an image placeholder)
-/// stay valid. A zero size counts as unknown. `None` means no check.
-fn token_id_bound(model_vocab: Option<usize>, tokenizer_vocab: Option<usize>) -> Option<usize> {
+/// Exclusive bound for client token ids: the larger of the model's vocab size
+/// and the tokenizer's largest id plus one, so ids that only the model or only
+/// the tokenizer has (e.g. an image placeholder) stay valid. A zero counts as
+/// unknown. `None` means no check.
+fn token_id_bound(model_vocab: Option<usize>, tokenizer_bound: Option<usize>) -> Option<usize> {
     model_vocab
         .into_iter()
-        .chain(tokenizer_vocab)
+        .chain(tokenizer_bound)
         .filter(|&size| size > 0)
         .max()
 }
@@ -2460,8 +2461,15 @@ impl OpenAIPreprocessor {
             );
         };
         let model_info = model_info.get_model_info()?;
-        // Once per preprocessor: the HF tokenizer clones its vocab to count it.
-        let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer.vocab_size());
+        // The tokenizer trait exposes no ids, so the card keeps the bound.
+        let tokenizer_id_bound = mdc.tokenizer_id_bound().unwrap_or_else(|| {
+            tracing::warn!(
+                model = %mdc.display_name,
+                "Tokenizer not loaded from this model card: only vocab_size bounds client token ids"
+            );
+            None
+        });
+        let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer_id_bound);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
@@ -7619,15 +7627,27 @@ impl
 mod token_data_tests {
     use super::*;
     use crate::common::checked_file::CheckedFile;
-    use crate::model_card::{ModelDeploymentCard, ModelInfoType};
+    use crate::model_card::{ModelDeploymentCard, ModelInfoType, TokenizerKind};
 
     /// `config.json` has `vocab_size` 128256; the mock tokenizer is smaller.
     const LLAMA_DIR: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
     /// The tokenizer has 32000 ids.
     const TINYLLAMA_DIR: &str = "tests/data/sample-models/TinyLlama_v1.1";
+    const NO_VOCAB_SIZE: &str = r#"{"architectures":[],"model_type":"","eos_token_id":2}"#;
+    /// Ids 0 and 2 only, as in the HF `incomplete_vocab` test.
+    const GAP_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[],
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"b":2},"unk_token":"<unk>"}}"#;
+    /// Ids 0 and 1, and an added token that HF gives id 2.
+    const ADDED_TOKEN_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[{"id":2,
+        "content":"<x>","special":true,"single_word":false,"lstrip":false,"rstrip":false,
+        "normalized":false}],
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"a":1},"unk_token":"<unk>"}}"#;
 
-    /// TinyLlama's tokenizer with the given `config.json`.
-    fn tinyllama_with_config(config: &str) -> (Arc<OpenAIPreprocessor>, tempfile::TempDir) {
+    /// TinyLlama's card with the given `config.json` and, if set, `tokenizer.json`.
+    fn tinyllama_card(
+        config: &str,
+        tokenizer: Option<&str>,
+    ) -> (ModelDeploymentCard, tempfile::TempDir) {
         let mut mdc = ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -7635,6 +7655,19 @@ mod token_data_tests {
         mdc.model_info = Some(ModelInfoType::HfConfigJson(
             CheckedFile::from_disk(&path).unwrap(),
         ));
+        if let Some(tokenizer) = tokenizer {
+            let path = dir.path().join("tokenizer.json");
+            std::fs::write(&path, tokenizer).unwrap();
+            mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                CheckedFile::from_disk(&path).unwrap(),
+            ));
+        }
+        (mdc, dir)
+    }
+
+    /// TinyLlama's tokenizer with the given `config.json`.
+    fn tinyllama_with_config(config: &str) -> (Arc<OpenAIPreprocessor>, tempfile::TempDir) {
+        let (mdc, dir) = tinyllama_card(config, None);
         (OpenAIPreprocessor::new(mdc).unwrap(), dir)
     }
 
@@ -7694,6 +7727,26 @@ mod token_data_tests {
         assert_rejected(&preprocessor, &[1, 32000]).await;
     }
 
+    #[tokio::test]
+    async fn token_data_is_bounded_by_largest_tokenizer_id() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        let encoding = mdc.tokenizer().unwrap().encode("b").unwrap();
+        assert_eq!(encoding.token_ids(), [2]);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_forwarded(&preprocessor, &[0, 2]).await;
+        assert_rejected(&preprocessor, &[0, 3]).await;
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_added_tokens() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(ADDED_TOKEN_TOKENIZER));
+        let encoding = mdc.tokenizer().unwrap().encode("<x>").unwrap();
+        assert_eq!(encoding.token_ids(), [2]);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_forwarded(&preprocessor, &[0, 2]).await;
+        assert_rejected(&preprocessor, &[0, 3]).await;
+    }
+
     fn completion(prompt: serde_json::Value) -> NvCreateCompletionRequest {
         serde_json::from_value(serde_json::json!({"model": "test-model", "prompt": prompt}))
             .unwrap()
@@ -7729,6 +7782,28 @@ mod token_data_tests {
                 .unwrap();
             assert_eq!(preprocessed.token_ids.as_slice(), in_range);
         }
+    }
+
+    #[tokio::test]
+    async fn token_prompt_is_bounded_by_largest_tokenizer_id() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&completion(serde_json::json!([0, 2])), None)
+            .await
+            .unwrap();
+        assert_eq!(preprocessed.token_ids.as_slice(), [0, 2]);
+        let error = preprocessor
+            .preprocess_request(&completion(serde_json::json!([0, 3])), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
     }
 
     /// Records the token ids of each request that reaches the backend.
@@ -7812,6 +7887,52 @@ mod token_data_tests {
             *backend.0.lock().unwrap(),
             vec![vec![vec![1, 128255]], vec![vec![1, 2], vec![3, 128255]]]
         );
+    }
+
+    #[tokio::test]
+    async fn embedding_token_input_is_bounded_by_largest_tokenizer_id() {
+        let (mut mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        mdc.model_type = crate::model_type::ModelType::Embedding;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+        let backend = Arc::new(RecordingEmbeddingBackend::default());
+        let next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
+        > = backend.clone();
+        let embed = |input: serde_json::Value| {
+            let request: NvCreateEmbeddingRequest =
+                serde_json::from_value(serde_json::json!({"model": "test-model", "input": input}))
+                    .unwrap();
+            PipelineContext::new(request)
+        };
+
+        Operator::generate(
+            preprocessor.as_ref(),
+            embed(serde_json::json!([0, 2])),
+            next.clone(),
+        )
+        .await
+        .unwrap();
+        let Err(error) = Operator::generate(
+            preprocessor.as_ref(),
+            embed(serde_json::json!([0, 3])),
+            next.clone(),
+        )
+        .await
+        else {
+            panic!("an out-of-range token input must fail");
+        };
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
+        assert_eq!(*backend.0.lock().unwrap(), vec![vec![vec![0, 2]]]);
     }
 
     #[test]
