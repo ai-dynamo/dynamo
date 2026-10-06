@@ -224,9 +224,8 @@ async fn run_with_router_plugins(
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
     http_service_builder =
         http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
-    // Resolve the discovery scope once: model discovery and the RL worker listing must
-    // see the same namespaces. The worker suffix composes with a non-global namespace
-    // the same way workers apply it when they register.
+    // Resolve the scope once so model discovery and the RL worker listing see the same
+    // namespaces. The suffix applies to a non-global namespace, as on workers.
     let worker_suffix = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok();
     let namespace_filter = NamespaceFilter::from_namespace_prefix_and_suffix(
         local_model.namespace(),
