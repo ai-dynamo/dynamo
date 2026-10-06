@@ -77,7 +77,7 @@ pub async fn completion_response_stream(
     )
     .await;
     // update the request to always stream
-    let request = request.map(|mut req| {
+    let mut request = request.map(|mut req| {
         req.inner.stream = Some(true);
         req
     });
@@ -106,7 +106,8 @@ pub async fn completion_response_stream(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.tracked_request().attach_to(&mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();

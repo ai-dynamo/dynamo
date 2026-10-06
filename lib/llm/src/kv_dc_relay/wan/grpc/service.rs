@@ -16,7 +16,7 @@ use super::identity::{
     descriptor_to_wire, endpoint_to_wire, pool_id_from_wire, pool_id_to_wire, producer_to_wire,
     relay_identity_to_wire, unix_timestamp, worker_role_to_wire,
 };
-use super::load::LoadUpdateHub;
+use super::load::{LoadUpdateHub, LoadWindow};
 use super::protocol as proto;
 use super::source::GrpcPublicationSource;
 use crate::kv_dc_relay::identity::{DcPoolCatalog, DcRelayIdentity};
@@ -32,8 +32,7 @@ type CatalogStream =
 type ReadinessStream =
     Pin<Box<dyn Stream<Item = Result<proto::ServingReadinessUpdate, Status>> + Send + 'static>>;
 type PoolStream = Pin<Box<dyn Stream<Item = Result<proto::FilterUpdate, Status>> + Send + 'static>>;
-type LoadStream =
-    Pin<Box<dyn Stream<Item = Result<proto::KvPoolLoadUpdate, Status>> + Send + 'static>>;
+type WindowStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 
 #[derive(Clone)]
 struct SubscriberLimit {
@@ -56,6 +55,7 @@ pub(super) enum StreamKind {
     Pool,
     Readiness,
     Load,
+    ServingLoad,
 }
 
 #[derive(Clone)]
@@ -64,15 +64,23 @@ pub(super) struct SubscriberLimits {
     pool: SubscriberLimit,
     readiness: SubscriberLimit,
     load: SubscriberLimit,
+    serving_load: SubscriberLimit,
 }
 
 impl SubscriberLimits {
-    pub(super) fn new(catalog: usize, pool: usize, readiness: usize, load: usize) -> Self {
+    pub(super) fn new(
+        catalog: usize,
+        pool: usize,
+        readiness: usize,
+        load: usize,
+        serving_load: usize,
+    ) -> Self {
         Self {
             catalog: SubscriberLimit::new(catalog),
             pool: SubscriberLimit::new(pool),
             readiness: SubscriberLimit::new(readiness),
             load: SubscriberLimit::new(load),
+            serving_load: SubscriberLimit::new(serving_load),
         }
     }
 
@@ -83,6 +91,7 @@ impl SubscriberLimits {
             StreamKind::Pool => &self.pool,
             StreamKind::Readiness => &self.readiness,
             StreamKind::Load => &self.load,
+            StreamKind::ServingLoad => &self.serving_load,
         };
         limit.permits.clone().try_acquire_owned().map_err(|_| {
             let resource = match stream {
@@ -90,6 +99,7 @@ impl SubscriberLimits {
                 StreamKind::Pool => "total pool stream",
                 StreamKind::Readiness => "readiness stream",
                 StreamKind::Load => "load stream",
+                StreamKind::ServingLoad => "serving-load stream",
             };
             RelayErrorReason::ResourceLimit
                 .status(format!("Relay {resource} limit {} reached", limit.maximum))
@@ -103,14 +113,16 @@ pub(super) struct KvEventRelayService {
     cancel: CancellationToken,
     pool_heartbeat_interval: Duration,
     readiness_heartbeat_interval: Duration,
-    load_updates: LoadUpdateHub,
+    load_updates: LoadUpdateHub<proto::KvPoolLoadUpdate>,
+    serving_load_updates: LoadUpdateHub<proto::ServingLoadUpdate>,
     limits: SubscriberLimits,
 }
 
 pub(super) struct KvEventRelayServiceConfig {
     pub(super) pool_heartbeat_interval: Duration,
     pub(super) readiness_heartbeat_interval: Duration,
-    pub(super) load_updates: LoadUpdateHub,
+    pub(super) load_updates: LoadUpdateHub<proto::KvPoolLoadUpdate>,
+    pub(super) serving_load_updates: LoadUpdateHub<proto::ServingLoadUpdate>,
     pub(super) limits: SubscriberLimits,
 }
 
@@ -126,6 +138,7 @@ impl KvEventRelayService {
             pool_heartbeat_interval: config.pool_heartbeat_interval,
             readiness_heartbeat_interval: config.readiness_heartbeat_interval,
             load_updates: config.load_updates,
+            serving_load_updates: config.serving_load_updates,
             limits: config.limits,
         }
     }
@@ -141,7 +154,8 @@ impl proto::KvEventRelay for KvEventRelayService {
     type WatchKvPoolCatalogStream = CatalogStream;
     type SubscribeKvPoolStream = PoolStream;
     type SubscribeServingReadinessStream = ReadinessStream;
-    type SubscribeKvPoolLoadStream = LoadStream;
+    type SubscribeKvPoolLoadStream = WindowStream<proto::KvPoolLoadUpdate>;
+    type SubscribeServingLoadStream = WindowStream<proto::ServingLoadUpdate>;
 
     async fn get_relay_info(
         &self,
@@ -268,6 +282,24 @@ impl proto::KvEventRelay for KvEventRelayService {
         Ok(Response::new(Box::pin(stream)))
     }
 
+    async fn subscribe_serving_load(
+        &self,
+        request: Request<proto::SubscribeServingLoadRequest>,
+    ) -> Result<Response<Self::SubscribeServingLoadStream>, Status> {
+        let request = request.into_inner();
+        require_contract(request.contract_marker)?;
+        let subscriber_id = validate_subscriber_id(request.subscriber_id)?;
+        let permit = self.acquire_stream_permit(StreamKind::ServingLoad)?;
+        tracing::debug!(%subscriber_id, "KV Relay serving-load subscriber connected");
+        Ok(Response::new(window_stream(
+            &self.serving_load_updates,
+            permit,
+            self.cancel.clone(),
+            subscriber_id,
+            "serving load",
+        )))
+    }
+
     async fn subscribe_kv_pool_load(
         &self,
         request: Request<proto::SubscribeKvPoolLoadRequest>,
@@ -277,39 +309,55 @@ impl proto::KvEventRelay for KvEventRelayService {
         let subscriber_id = validate_subscriber_id(request.subscriber_id)?;
         let permit = self.acquire_stream_permit(StreamKind::Load)?;
         tracing::debug!(%subscriber_id, "KV Relay pool load subscriber connected");
-        let mut updates = self.load_updates.subscribe();
-        let initial = self.load_updates.current();
-        let cancel = self.cancel.clone();
-        let stream = try_stream! {
-            let _permit = permit;
-            let mut current_sequence = initial.window_sequence;
-            yield initial;
-            loop {
-                let update = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => break,
-                    update = updates.recv() => update,
-                };
-                match update {
-                    Ok(update) if update.window_sequence > current_sequence => {
-                        current_sequence = update.window_sequence;
-                        yield update;
-                    }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(%subscriber_id, skipped, "KV Relay load subscriber lagged; forcing resubscribe");
-                        Err(RelayErrorReason::SubscriberLagged.status(format!(
-                            "load subscriber lagged by {skipped} complete windows; resubscribe"
-                        )))?;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        Err(RelayErrorReason::PublicationUnavailable.status("pool load publication stopped"))?;
-                    }
+        Ok(Response::new(window_stream(
+            &self.load_updates,
+            permit,
+            self.cancel.clone(),
+            subscriber_id,
+            "pool load",
+        )))
+    }
+}
+
+/// Streams the current window, then every newer one. A subscriber that falls
+/// behind the bounded fanout must resubscribe from a complete window.
+fn window_stream<T: LoadWindow>(
+    hub: &LoadUpdateHub<T>,
+    permit: OwnedSemaphorePermit,
+    cancel: CancellationToken,
+    subscriber_id: String,
+    plane: &'static str,
+) -> WindowStream<T> {
+    let mut updates = hub.subscribe();
+    let initial = hub.current();
+    Box::pin(try_stream! {
+        let _permit = permit;
+        let mut current_sequence = initial.window_sequence();
+        yield initial;
+        loop {
+            let update = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                update = updates.recv() => update,
+            };
+            match update {
+                Ok(update) if update.window_sequence() > current_sequence => {
+                    current_sequence = update.window_sequence();
+                    yield update;
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(%subscriber_id, plane, skipped, "KV Relay load subscriber lagged; forcing resubscribe");
+                    Err(RelayErrorReason::SubscriberLagged.status(format!(
+                        "{plane} subscriber lagged by {skipped} complete windows; resubscribe"
+                    )))?;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    Err(RelayErrorReason::PublicationUnavailable.status(format!("{plane} publication stopped")))?;
                 }
             }
-        };
-        Ok(Response::new(Box::pin(stream)))
-    }
+        }
+    })
 }
 
 struct PoolStreamContext {
@@ -573,7 +621,7 @@ mod tests {
     #[test]
     fn total_pool_stream_limit_is_configurable_and_releases_permits() {
         const MAX_POOL_STREAMS: usize = 65;
-        let limits = SubscriberLimits::new(1, MAX_POOL_STREAMS, 1, 1);
+        let limits = SubscriberLimits::new(1, MAX_POOL_STREAMS, 1, 1, 1);
         let mut permits = (0..MAX_POOL_STREAMS)
             .map(|_| limits.acquire(StreamKind::Pool).unwrap())
             .collect::<Vec<_>>();

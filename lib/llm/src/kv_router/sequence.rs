@@ -15,7 +15,7 @@ pub use dynamo_kv_router::multi_worker_sequence::{
 };
 use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+    MAX_REPLICA_BATCH_EVENTS, SchedulerGroup, SchedulerLoad, WorkerWithDpRank,
 };
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
@@ -25,20 +25,31 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
-use std::collections::VecDeque;
+use parking_lot::Mutex;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
+use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, SCHEDULER_LOAD_SUBJECT};
+use crate::utils::retry::{Backoff, FailureStreak};
 #[cfg(test)]
 use dynamo_runtime::transports::event_plane::MsgpackCodec;
 
 // Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
+/// Every interval, a router publishes the load of every registered worker rank on
+/// [`SCHEDULER_LOAD_SUBJECT`]; nothing is published between ticks. Each message is also a
+/// freshness heartbeat: the KV DC Relay derives its freshness window from this interval. Cost:
+/// one small message per rank per router per interval.
+pub(crate) const SCHEDULER_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
+const SCHEDULER_LOAD_CONNECT_RETRY_INITIAL: Duration = Duration::from_millis(100);
+const SCHEDULER_LOAD_CONNECT_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// How active-sequence events are framed on the wire for a transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,11 +485,178 @@ async fn forward_replica_events(
     }
 }
 
+/// Latest scheduler load of every registered worker rank, shared by the request path, catalog
+/// membership, and the task that publishes it on [`SCHEDULER_LOAD_SUBJECT`].
+#[derive(Default)]
+pub(crate) struct SchedulerRankLoads(Mutex<HashMap<WorkerWithDpRank, SchedulerLoadSnapshot>>);
+
+impl SchedulerRankLoads {
+    pub(crate) fn record(&self, snapshot: SchedulerLoadSnapshot) {
+        self.0.lock().insert(snapshot.worker, snapshot);
+    }
+
+    pub(crate) fn record_batch(&self, snapshots: &[SchedulerLoadSnapshot]) {
+        self.0.lock().extend(
+            snapshots
+                .iter()
+                .map(|snapshot| (snapshot.worker, *snapshot)),
+        );
+    }
+
+    /// Start publishing `worker` as idle. Membership is applied after the scheduler admits the
+    /// rank, so a request routed in between may already have recorded real load; keep it.
+    pub(crate) fn register(&self, worker: WorkerWithDpRank) {
+        self.0
+            .lock()
+            .entry(worker)
+            .or_insert(SchedulerLoadSnapshot {
+                worker,
+                active_decode_blocks: 0,
+                active_prefill_tokens: 0,
+            });
+    }
+
+    pub(crate) fn remove(&self, worker: &WorkerWithDpRank) {
+        self.0.lock().remove(worker);
+    }
+
+    pub(crate) fn snapshots(&self) -> Vec<SchedulerLoadSnapshot> {
+        self.0.lock().values().copied().collect()
+    }
+}
+
+/// Publish every rank in the returned [`SchedulerRankLoads`] once per
+/// [`SCHEDULER_LOAD_PUBLISH_INTERVAL`] until `cancellation_token` fires.
+///
+/// With replica sync, every router on `endpoint` reports the same requests, so they form one
+/// replica group; otherwise this router's view is standalone and consumers sum it with others.
+pub(crate) fn start_scheduler_load_publisher(
+    endpoint: &Endpoint,
+    replica_sync: bool,
+    cancellation_token: CancellationToken,
+) -> Arc<SchedulerRankLoads> {
+    let group = if replica_sync {
+        SchedulerGroup::ReplicaGroup {
+            group_id: endpoint.id().to_string(),
+        }
+    } else {
+        // Not the DRT connection id: one process may host several routers for the same
+        // endpoint, and their independent views must be summed.
+        SchedulerGroup::Standalone {
+            scheduler_id: rand::random(),
+        }
+    };
+    let loads = Arc::new(SchedulerRankLoads::default());
+    let endpoint = endpoint.clone();
+    tokio::spawn(run_scheduler_load_publisher(
+        move || {
+            let endpoint = endpoint.clone();
+            async move { EventPublisher::for_endpoint(&endpoint, SCHEDULER_LOAD_SUBJECT).await }
+        },
+        Arc::clone(&loads),
+        group,
+        cancellation_token,
+    ));
+    loads
+}
+
+trait SchedulerLoadPublisher: Send + Sync {
+    fn publish_load(&self, load: &SchedulerLoad) -> impl Future<Output = Result<()>> + Send;
+}
+
+impl SchedulerLoadPublisher for EventPublisher {
+    async fn publish_load(&self, load: &SchedulerLoad) -> Result<()> {
+        self.publish(load).await
+    }
+}
+
+/// Router startup never waits on the event plane: `connect` is retried with capped exponential
+/// backoff, and a publish failure discards the publisher and connects a new one.
+async fn run_scheduler_load_publisher<P, C, F>(
+    mut connect: C,
+    loads: Arc<SchedulerRankLoads>,
+    group: SchedulerGroup,
+    cancellation_token: CancellationToken,
+) where
+    P: SchedulerLoadPublisher,
+    C: FnMut() -> F,
+    F: Future<Output = Result<P>>,
+{
+    let mut publish_tick = tokio::time::interval(SCHEDULER_LOAD_PUBLISH_INTERVAL);
+    publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut retry = Backoff::new(
+        SCHEDULER_LOAD_CONNECT_RETRY_INITIAL,
+        SCHEDULER_LOAD_CONNECT_RETRY_MAX,
+    );
+    let mut failures = FailureStreak::default();
+
+    'connect: loop {
+        let connected = tokio::select! {
+            _ = cancellation_token.cancelled() => return,
+            connected = connect() => connected,
+        };
+        let publisher = match connected {
+            Ok(publisher) => publisher,
+            Err(error) => {
+                report_scheduler_load_failure(&mut failures, "connect", &error);
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => return,
+                    _ = tokio::time::sleep(retry.next_delay()) => {}
+                }
+                continue;
+            }
+        };
+        retry.reset();
+
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return,
+                _ = publish_tick.tick() => {}
+            }
+            for snapshot in loads.snapshots() {
+                let load = SchedulerLoad {
+                    worker_id: snapshot.worker.worker_id,
+                    dp_rank: snapshot.worker.dp_rank,
+                    active_decode_blocks: snapshot.active_decode_blocks,
+                    active_prefill_tokens: snapshot.active_prefill_tokens,
+                    group: group.clone(),
+                };
+                let published = tokio::select! {
+                    _ = cancellation_token.cancelled() => return,
+                    published = publisher.publish_load(&load) => published,
+                };
+                if let Err(error) = published {
+                    report_scheduler_load_failure(&mut failures, "publish", &error);
+                    continue 'connect;
+                }
+            }
+            if let Some(failures) = failures.recover() {
+                tracing::info!(failures, "Scheduler load publishing recovered");
+            }
+        }
+    }
+}
+
+fn report_scheduler_load_failure(
+    failures: &mut FailureStreak,
+    operation: &str,
+    error: &anyhow::Error,
+) {
+    if failures.fail() {
+        tracing::warn!(
+            operation,
+            %error,
+            "Scheduler load publishing failed; retrying in the background"
+        );
+    } else {
+        tracing::debug!(operation, %error, failures = failures.failures(), "Scheduler load publishing still failing");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dynamo_kv_router::protocols::ActiveSequenceEventData;
-    use std::sync::Arc;
     use tokio::time::Instant;
 
     fn free_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
@@ -881,5 +1059,137 @@ mod tests {
         cancel.cancel();
         distributed.shutdown();
         Ok(())
+    }
+
+    fn load_snapshot(worker_id: u64, blocks: u64) -> SchedulerLoadSnapshot {
+        SchedulerLoadSnapshot {
+            worker: WorkerWithDpRank::new(worker_id, 0),
+            active_decode_blocks: blocks,
+            active_prefill_tokens: 0,
+        }
+    }
+
+    fn sorted_snapshots(loads: &SchedulerRankLoads) -> Vec<SchedulerLoadSnapshot> {
+        let mut snapshots = loads.snapshots();
+        snapshots.sort_by_key(|snapshot| snapshot.worker.worker_id);
+        snapshots
+    }
+
+    #[test]
+    fn registration_keeps_load_recorded_before_it_and_removal_stops_publishing() {
+        let loads = SchedulerRankLoads::default();
+        let busy = load_snapshot(1, 10);
+        let idle = load_snapshot(2, 0);
+
+        loads.record(busy);
+        loads.register(busy.worker);
+        loads.register(idle.worker);
+        assert_eq!(sorted_snapshots(&loads), [busy, idle]);
+
+        loads.record_batch(&[load_snapshot(1, 4), load_snapshot(2, 6)]);
+        loads.remove(&busy.worker);
+        assert_eq!(sorted_snapshots(&loads), [load_snapshot(2, 6)]);
+    }
+
+    /// Records published loads; fails the publish calls whose 0-based index is in `fail_at`.
+    struct RecordingLoadPublisher {
+        published_tx: mpsc::UnboundedSender<SchedulerLoad>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail_at: &'static [usize],
+    }
+
+    impl SchedulerLoadPublisher for RecordingLoadPublisher {
+        async fn publish_load(&self, load: &SchedulerLoad) -> Result<()> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::ensure!(!self.fail_at.contains(&call), "synthetic publish failure");
+            self.published_tx.send(load.clone()).unwrap();
+            Ok(())
+        }
+    }
+
+    async fn next_loads(
+        published_rx: &mut mpsc::UnboundedReceiver<SchedulerLoad>,
+        count: usize,
+    ) -> Vec<SchedulerLoad> {
+        let mut published = Vec::with_capacity(count);
+        for _ in 0..count {
+            let load =
+                tokio::time::timeout(10 * SCHEDULER_LOAD_PUBLISH_INTERVAL, published_rx.recv())
+                    .await
+                    .expect("scheduler load was not published");
+            published.push(load.unwrap());
+        }
+        published.sort_by_key(|load| load.worker_id);
+        published
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scheduler_load_publisher_publishes_every_rank_each_tick_and_reconnects() {
+        let group = SchedulerGroup::Standalone { scheduler_id: 9 };
+        let expected = |loads: &[SchedulerLoadSnapshot]| -> Vec<SchedulerLoad> {
+            loads
+                .iter()
+                .map(|snapshot| SchedulerLoad {
+                    worker_id: snapshot.worker.worker_id,
+                    dp_rank: snapshot.worker.dp_rank,
+                    active_decode_blocks: snapshot.active_decode_blocks,
+                    active_prefill_tokens: snapshot.active_prefill_tokens,
+                    group: group.clone(),
+                })
+                .collect()
+        };
+        let loads = Arc::new(SchedulerRankLoads::default());
+        loads.record_batch(&[load_snapshot(1, 10), load_snapshot(2, 20)]);
+        let (published_tx, mut published_rx) = mpsc::unbounded_channel();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+        let start = Instant::now();
+        let task = tokio::spawn(run_scheduler_load_publisher(
+            {
+                let connects = Arc::clone(&connects);
+                let calls = Arc::clone(&calls);
+                move || {
+                    let attempt = connects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let publisher = RecordingLoadPublisher {
+                        published_tx: published_tx.clone(),
+                        calls: Arc::clone(&calls),
+                        // The second publish of the second tick fails.
+                        fail_at: &[3],
+                    };
+                    // The first connection attempt fails before any publisher exists.
+                    async move {
+                        anyhow::ensure!(attempt > 0, "synthetic connect failure");
+                        Ok(publisher)
+                    }
+                }
+            },
+            Arc::clone(&loads),
+            group.clone(),
+            cancel.clone(),
+        ));
+
+        // The first tick waits out the connect retry, then publishes every rank.
+        assert_eq!(
+            next_loads(&mut published_rx, 2).await,
+            expected(&[load_snapshot(1, 10), load_snapshot(2, 20)])
+        );
+        assert_eq!(start.elapsed(), SCHEDULER_LOAD_CONNECT_RETRY_INITIAL);
+        assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // The next tick republishes the unchanged map, but its second publish fails.
+        assert_eq!(next_loads(&mut published_rx, 1).await.len(), 1);
+
+        // The rebuilt publisher resumes on the following tick with the latest load of every rank.
+        loads.record(load_snapshot(2, 0));
+        assert_eq!(
+            next_loads(&mut published_rx, 2).await,
+            expected(&[load_snapshot(1, 10), load_snapshot(2, 0)])
+        );
+        assert_eq!(start.elapsed(), 2 * SCHEDULER_LOAD_PUBLISH_INTERVAL);
+        assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        cancel.cancel();
+        task.await.unwrap();
     }
 }

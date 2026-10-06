@@ -36,6 +36,7 @@ WAN_TUNING_KEYS: tuple[str, ...] = (
     "max_initialized_pool_hubs",
     "max_readiness_subscribers",
     "max_load_subscribers",
+    "max_serving_load_subscribers",
 )
 
 TUNING_KEYS = PRODUCER_TUNING_KEYS + WAN_TUNING_KEYS

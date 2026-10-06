@@ -102,8 +102,8 @@ error. All values must be positive integers; byte limits use bytes, not MiB.
 | `DYN_RELAY_POOL_HEARTBEAT_INTERVAL_MS` | `10000` | Pool-stream heartbeat interval after snapshot bootstrap. |
 | `DYN_RELAY_READINESS_HEARTBEAT_INTERVAL_MS` | `10000` | Interval for repeating the current readiness snapshot. |
 | `DYN_RELAY_SNAPSHOT_PROGRESS_TIMEOUT_MS` | `60000` | Per-frame progress deadline while producing the initial snapshot. |
-| `DYN_RELAY_LOAD_WINDOW_MS` | `1000` | Load publication window. |
-| `DYN_RELAY_LOAD_FANOUT_CAPACITY` | `16` | Buffered load updates for fanout. |
+| `DYN_RELAY_LOAD_WINDOW_MS` | `1000` | Pool-load and serving-load publication window. |
+| `DYN_RELAY_LOAD_FANOUT_CAPACITY` | `16` | Buffered updates per load stream type for fanout. |
 
 ### Universal Publication Resources
 
@@ -125,6 +125,7 @@ These limits belong to the publisher; the Python launcher exposes their override
 | `DYN_RELAY_MAX_SUBSCRIBERS_PER_POOL` | `64` | Subscribers attached to one pool. |
 | `DYN_RELAY_MAX_READINESS_SUBSCRIBERS` | `64` | Concurrent readiness streams. |
 | `DYN_RELAY_MAX_LOAD_SUBSCRIBERS` | `64` | Concurrent load streams. |
+| `DYN_RELAY_MAX_SERVING_LOAD_SUBSCRIBERS` | `64` | Concurrent serving-load streams. |
 
 ### Validation Limits
 

@@ -25,10 +25,11 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use dynamo_kv_router::services::selection::{
-    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost, SelectionOperation,
-    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionService,
-    SelectionServiceBuilder, WorkerCatalogSource, WorkerRequest,
+    CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
+    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
+    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
+    SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
+    WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use tokio_util::sync::CancellationToken;
@@ -38,6 +39,7 @@ use crate::kv_router::metrics::{
     ActiveSequenceIngressMetrics, ROUTER_QUEUE_METRICS, RegistrationAvailabilityProvider,
     RouterQueueMetricHandles, RouterRequestMetrics, WORKER_LOAD_METRICS,
 };
+use crate::kv_router::sequence::SchedulerRankLoads;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 /// Inputs the embedded backend needs from the router at construction.
@@ -185,19 +187,23 @@ pub(crate) struct EmbeddedSelection {
 }
 
 /// Bridges the partition's scheduler load snapshots to the router's
-/// `SchedulerLoadSender`, which feeds `KvWorkerMonitor`, and its per-worker
-/// load to the frontend gauges.
+/// `SchedulerLoadSender`, which feeds `KvWorkerMonitor`, and to the ranks this
+/// router publishes on the event plane, and its per-worker load to the frontend
+/// gauges.
 struct SenderLoadSink {
     sender: crate::kv_router::routing_load::SchedulerLoadSender,
+    published: Arc<SchedulerRankLoads>,
     worker_type: &'static str,
 }
 
 impl dynamo_kv_router::services::selection::SchedulerLoadSink for SenderLoadSink {
     fn publish(&self, snapshot: dynamo_kv_router::sequences::SchedulerLoadSnapshot) {
+        self.published.record(snapshot);
         self.sender.publish(snapshot);
     }
 
     fn publish_batch(&self, snapshots: Vec<dynamo_kv_router::sequences::SchedulerLoadSnapshot>) {
+        self.published.record_batch(&snapshots);
         self.sender.publish_batch(snapshots);
     }
 
@@ -239,6 +245,11 @@ impl EmbeddedSelection {
         )
         .await
         .context("start replica sync for the embedded selection partition")?;
+        let published_loads = crate::kv_router::sequence::start_scheduler_load_publisher(
+            &args.endpoint,
+            args.kv_router_config.router_replica_sync,
+            cancellation_token.child_token(),
+        );
         channels.ingress_observer = Some(Arc::new(
             ActiveSequenceIngressMetrics::from_component(args.endpoint.component()).handles(
                 &key.model_name,
@@ -278,6 +289,7 @@ impl EmbeddedSelection {
             telemetry: HostTelemetry {
                 scheduler_load: Some(Arc::new(SenderLoadSink {
                     sender: args.scheduler_load,
+                    published: Arc::clone(&published_loads),
                     worker_type: args.metric_worker_type,
                 })),
             },
@@ -341,7 +353,8 @@ impl EmbeddedSelection {
             is_eagle: args.is_eagle,
             primed: false,
         };
-        let mut reconciler = CatalogReconciler::new(Arc::clone(service.core()));
+        let mut reconciler = CatalogReconciler::new(Arc::clone(service.core()))
+            .with_observer(Arc::new(PublishedRanks::new(published_loads)));
         // The current membership is in the catalog before the router serves.
         if let Some(snapshot) = source.next_snapshot().await
             && let Err(error) = reconciler.apply(&snapshot).await
@@ -448,6 +461,59 @@ impl WorkerCatalogSource for RuntimeDiscoverySource {
             })
             .collect();
         Some(snapshot)
+    }
+}
+
+/// Keeps the published scheduler-load ranks in step with the catalog.
+struct PublishedRanks {
+    published_loads: Arc<SchedulerRankLoads>,
+    /// Last published rank range per worker, so a shrinking or shifted
+    /// `data_parallel_size` clears the ranks that left.
+    ranks: std::sync::Mutex<HashMap<WorkerId, std::ops::Range<u32>>>,
+}
+
+impl PublishedRanks {
+    fn new(published_loads: Arc<SchedulerRankLoads>) -> Self {
+        Self {
+            published_loads,
+            ranks: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl CatalogObserver for PublishedRanks {
+    fn upserted(&self, record: &WorkerCatalogRecord) {
+        let current = record.dp_ranks();
+        let previous = self
+            .ranks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(record.worker_id, current.clone());
+        for dp_rank in previous
+            .into_iter()
+            .flatten()
+            .filter(|dp_rank| !current.contains(dp_rank))
+        {
+            self.published_loads
+                .remove(&WorkerWithDpRank::new(record.worker_id, dp_rank));
+        }
+        for dp_rank in current {
+            self.published_loads
+                .register(WorkerWithDpRank::new(record.worker_id, dp_rank));
+        }
+    }
+
+    fn removed(&self, record: &WorkerCatalogRecord) {
+        let previous = self
+            .ranks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&record.worker_id);
+        // The record's own ranks plus whatever an earlier upsert published.
+        for dp_rank in record.dp_ranks().chain(previous.into_iter().flatten()) {
+            self.published_loads
+                .remove(&WorkerWithDpRank::new(record.worker_id, dp_rank));
+        }
     }
 }
 
@@ -606,12 +672,47 @@ mod tests {
         );
     }
 
+    /// A data-parallel shrink clears the published loads of the ranks that
+    /// left; a removal clears every rank the worker ever published.
+    #[test]
+    fn published_ranks_clear_ranks_that_leave_the_worker() {
+        let loads = Arc::new(SchedulerRankLoads::default());
+        let observer = PublishedRanks::new(Arc::clone(&loads));
+        let published_ranks = || {
+            let mut ranks: Vec<_> = loads
+                .snapshots()
+                .into_iter()
+                .map(|snapshot| snapshot.worker.dp_rank)
+                .collect();
+            ranks.sort_unstable();
+            ranks
+        };
+        let record = |dp_size: u32| {
+            WorkerCatalogRecord::new(WorkerRequest {
+                worker_id: 7,
+                data_parallel_start_rank: Some(0),
+                data_parallel_size: Some(dp_size),
+                ..WorkerRequest::default()
+            })
+        };
+
+        observer.upserted(&record(4));
+        assert_eq!(published_ranks(), [0, 1, 2, 3]);
+
+        observer.upserted(&record(2));
+        assert_eq!(published_ranks(), [0, 1]);
+
+        observer.removed(&record(2));
+        assert!(published_ranks().is_empty());
+    }
+
     #[test]
     fn local_load_observation_sets_worker_gauges() {
         let sink = SenderLoadSink {
             sender: crate::kv_router::routing_load::SchedulerLoadSender::disabled(
                 CancellationToken::new(),
             ),
+            published: Arc::default(),
             worker_type: "decode",
         };
         sink.observe_local_load(

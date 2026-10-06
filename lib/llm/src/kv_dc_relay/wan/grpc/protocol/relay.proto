@@ -18,6 +18,7 @@ service KvEventRelay
   rpc SubscribeKvPool(SubscribeKvPoolRequest) returns (stream FilterUpdate);
   rpc SubscribeServingReadiness(SubscribeServingReadinessRequest) returns (stream ServingReadinessUpdate);
   rpc SubscribeKvPoolLoad(SubscribeKvPoolLoadRequest) returns (stream KvPoolLoadUpdate);
+  rpc SubscribeServingLoad(SubscribeServingLoadRequest) returns (stream ServingLoadUpdate);
 }
 
 // Relay application errors carry this enum's exact symbolic name in the
@@ -294,5 +295,139 @@ message KvPoolLoadUpdate
   uint64 observed_ms = 4;
   uint64 window_ms = 5;
   repeated KvPoolLoadEntry pools = 6;
+  fixed32 contract_marker = 127;
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeServingLoad (additive to v1)
+// ---------------------------------------------------------------------------
+
+// Coverage of an aggregate in a ServingLoadUpdate.
+enum DataStatus {
+  DATA_STATUS_UNSPECIFIED = 0;
+  // Every expected source reported recently; all documented optional fields are set.
+  DATA_STATUS_COMPLETE = 1;
+  // Some but not all expected sources reported; aggregate gauges are unset
+  // because a partial sum would read as lower load.
+  DATA_STATUS_DEGRADED = 2;
+  // No expected source reported.
+  DATA_STATUS_UNAVAILABLE = 3;
+}
+
+message SubscribeServingLoadRequest
+{
+  string subscriber_id = 1;
+  fixed32 contract_marker = 127;
+}
+
+// Request counts reported by frontends. Present on models only.
+message RequestLifecycleStats
+{
+  // Cumulative over every frontend the Relay has heard from during its
+  // relay_incarnation, including frontends that have since left. Monotonic
+  // within one incarnation. A new incarnation starts from each frontend's own
+  // running totals when it is first heard, so values are neither zero nor
+  // continuous across incarnations: compute rates only within one incarnation.
+  // Set even when the view is not COMPLETE.
+  uint64 requests_started_total = 1;
+  uint64 requests_completed_total = 2;
+  uint64 requests_failed_total = 3;
+  uint64 requests_cancelled_total = 4;
+  // Admitted requests that have not produced their first output token yet:
+  // being tokenized, queued, routed, or prefilled. Set only when COMPLETE.
+  optional uint64 requests_awaiting_first_token = 5;
+  // Requests producing output tokens. Set only when COMPLETE.
+  optional uint64 requests_generating = 6;
+}
+
+// Token load. Each field names the view that carries it.
+message TokenLoadStats
+{
+  // Pools: uncached prompt tokens the routers' schedulers have assigned to the
+  // pool and that are waiting for or undergoing prefill.
+  optional uint64 active_prefill_tokens = 1;
+  // Pools: KV blocks the routers' schedulers attribute to running requests.
+  optional uint64 active_decode_blocks = 2;
+  // Models: prompt tokens of requests_awaiting_first_token.
+  optional uint64 awaiting_first_token_input_tokens = 3;
+  // Models: prompt tokens of every in-flight request.
+  optional uint64 inflight_input_tokens = 4;
+  // Models: cumulative, with the same rules as the request _total counters.
+  optional uint64 input_tokens_total = 5;
+  optional uint64 output_tokens_total = 6;
+}
+
+// Prompt token counts are known once a request has been tokenized; requests
+// still being tokenized contribute zero input tokens. Gauges are set only when
+// status is COMPLETE.
+message LoadView
+{
+  // Unset for pools.
+  RequestLifecycleStats requests = 1;
+  TokenLoadStats tokens = 2;
+  DataStatus status = 3;
+  // Producer wall clock of the oldest contributing source report; 0 when none.
+  uint64 source_observed_ms = 4;
+}
+
+// Derived from the pool's live worker membership.
+message PoolDeploymentStatus
+{
+  optional uint64 live_workers = 1;
+  // Sum over workers of max concurrent sequences times data-parallel size. Set
+  // while every worker declares its limit.
+  optional uint64 max_concurrency = 2;
+}
+
+// Scheduler load of one pool as seen by the routers that schedule onto it:
+// COMPLETE when every expected router reported every expected rank recently,
+// DEGRADED when coverage is partial, UNAVAILABLE when no router reported.
+// Expected routers are those registered for the pool's scheduler-load subject
+// plus any that reported recently; routers that predate this RPC are not
+// counted.
+message PoolServingLoad
+{
+  ProducerIdentity producer = 1;
+  LoadView load = 2;
+  PoolDeploymentStatus deployment = 3;
+}
+
+// Expected frontends are the frontends registered in discovery for the
+// namespace plus every frontend that published recently. A frontend that does
+// not list the model is not serving it and contributes zero.
+message ModelDeploymentStatus
+{
+  uint64 expected_frontends = 1;
+  // Expected frontends that published recently.
+  uint64 observed_frontends = 2;
+  // Observed frontends that list the model and are ready to serve.
+  uint64 ready_frontends = 3;
+  // Stable links to catalog pools serving the model in this namespace.
+  repeated KvPoolId serving_pools = 4;
+}
+
+// Frontend load of one model. Key: (namespace, canonical_model_id), as in
+// TopologyEntry; alias traffic is counted under the canonical model.
+// COMPLETE when frontend discovery succeeded and every expected frontend
+// published recently, DEGRADED when some are silent or discovery failed,
+// UNAVAILABLE when none published recently.
+message ModelServingLoad
+{
+  string namespace = 1;
+  string canonical_model_id = 2;
+  LoadView load = 3;
+  ModelDeploymentStatus deployment = 4;
+}
+
+// Complete window: a pool or model absent from the next window is gone.
+message ServingLoadUpdate
+{
+  uint32 protocol_version = 1;
+  RelayIdentity relay = 2;
+  uint64 window_sequence = 3;
+  uint64 observed_ms = 4;
+  uint64 window_ms = 5;
+  repeated PoolServingLoad pools = 6;
+  repeated ModelServingLoad models = 7;
   fixed32 contract_marker = 127;
 }

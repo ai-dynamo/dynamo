@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(test)]
 use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -24,11 +25,13 @@ use tonic::transport::Server;
 use tonic::transport::server::Connected;
 
 use super::config::KvDcRelayGrpcConfig;
-use super::load::{LoadUpdateHub, run_load_publisher};
+use super::load::{LoadUpdateHub, load_update, run_load_publisher};
 use super::protocol::{FILE_DESCRIPTOR_SET, KvEventRelayServer};
 use super::service::{KvEventRelayService, KvEventRelayServiceConfig, SubscriberLimits};
+use super::serving_load::serving_load_update;
 use super::source::GrpcPublicationSource;
 use crate::kv_dc_relay::RelayPublicationSource;
+use crate::kv_dc_relay::serving_load::ServingLoadSnapshot;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct GrpcTransportHealth {
@@ -137,8 +140,11 @@ impl Connected for CancellableIo {
 }
 
 impl GrpcTransport {
+    /// `serving_load` is the host's serving-load aggregate; its sender closing
+    /// before shutdown fails the transport.
     pub(crate) async fn start(
         publication: Arc<dyn RelayPublicationSource>,
+        serving_load: watch::Receiver<Arc<ServingLoadSnapshot>>,
         lifecycle: CancellationToken,
         config: KvDcRelayGrpcConfig,
     ) -> anyhow::Result<Self> {
@@ -163,12 +169,21 @@ impl GrpcTransport {
             last_error: None,
         }));
         let load_window = Duration::from_millis(config.load_window_ms);
-        let load_updates = LoadUpdateHub::new(&source, load_window, config.load_fanout_capacity);
+        let relay = source.relay_identity();
+        let load_updates = LoadUpdateHub::new(
+            load_update(relay, source.load_snapshots(), load_window, 0),
+            config.load_fanout_capacity,
+        );
+        let serving_load_updates = LoadUpdateHub::new(
+            serving_load_update(relay, &serving_load.borrow(), load_window, 0),
+            config.load_fanout_capacity,
+        );
         let limits = SubscriberLimits::new(
             config.max_catalog_subscribers,
             config.max_pool_streams_total,
             config.max_readiness_subscribers,
             config.max_load_subscribers,
+            config.max_serving_load_subscribers,
         );
         let service = KvEventRelayServer::new(KvEventRelayService::new(
             source.clone(),
@@ -179,6 +194,7 @@ impl GrpcTransport {
                     config.readiness_heartbeat_interval_ms,
                 ),
                 load_updates: load_updates.clone(),
+                serving_load_updates: serving_load_updates.clone(),
                 limits,
             },
         ))
@@ -231,12 +247,34 @@ impl GrpcTransport {
                 .await
                 .context("KV Relay gRPC server failed")
         });
-        let load_task = tokio::spawn(run_load_publisher(
-            source,
+        let kv_load =
+            run_load_publisher(load_window, load_updates, cancel.clone(), move |sequence| {
+                Ok(load_update(
+                    relay,
+                    source.load_snapshots(),
+                    load_window,
+                    sequence,
+                ))
+            });
+        let serving_load = run_load_publisher(
             load_window,
-            load_updates,
+            serving_load_updates,
             cancel.clone(),
-        ));
+            move |sequence| {
+                // Errors only once the aggregator dropped its sender.
+                serving_load
+                    .has_changed()
+                    .map_err(|_| anyhow::anyhow!("KV Relay serving-load aggregator stopped"))?;
+                Ok(serving_load_update(
+                    relay,
+                    &serving_load.borrow(),
+                    load_window,
+                    sequence,
+                ))
+            },
+        );
+        let load_task =
+            tokio::spawn(async move { tokio::try_join!(kv_load, serving_load).map(drop) });
         let supervisor_cancel = cancel.clone();
         let supervisor_health = health.clone();
         let task = tokio::spawn(supervise_transport(
