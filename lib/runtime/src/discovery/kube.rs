@@ -556,6 +556,9 @@ impl Discovery for KubeDiscoveryClient {
                             "Broadcast receiver lagged, reconciling from list_state"
                         );
                         let state = list_state.read().await;
+                        // Buffered events predate this snapshot. The daemon publishes under the
+                        // write lock, so a receiver taken here starts where the snapshot ends.
+                        broadcast_rx = broadcast_rx.resubscribe();
                         let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = state
                             .values()
                             .flat_map(|m| m.filter(&query))
@@ -758,6 +761,43 @@ mod tests {
         assert_eq!(
             contract::next(&mut events).await,
             DiscoveryEvent::Added(third)
+        );
+    }
+
+    #[tokio::test]
+    async fn lagged_watch_does_not_replay_events_older_than_its_resync() {
+        let workers: Vec<_> = (1..=16)
+            .map(|instance_id| endpoint_instance(instance_id, "127.0.0.1:8000"))
+            .collect();
+        let (client, state_tx) = client_with(&workers);
+        state_tx.send_replace(DaemonState::Ready);
+        let mut events = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        while !matches!(contract::next(&mut events).await, DiscoveryEvent::Resync(_)) {}
+
+        // A fleet-wide readiness flap (32 events into `client_with`'s 16-slot channel) overflows
+        // the receiver: on the current-thread test runtime the watch task cannot run before this
+        // test yields. list_state ends where it started.
+        let event_tx = &client.event_tx;
+        for worker in &workers {
+            event_tx.send(DiscoveryEvent::Removed(worker.id())).unwrap();
+            event_tx
+                .send(DiscoveryEvent::Added(worker.clone()))
+                .unwrap();
+        }
+        let DiscoveryEvent::Resync(_) = contract::next(&mut events).await else {
+            panic!("a lagged watch must resync from list_state");
+        };
+
+        let joined = endpoint_instance(17, "127.0.0.1:9000");
+        event_tx
+            .send(DiscoveryEvent::Added(joined.clone()))
+            .unwrap();
+        assert_eq!(
+            contract::next(&mut events).await,
+            DiscoveryEvent::Added(joined)
         );
     }
 
