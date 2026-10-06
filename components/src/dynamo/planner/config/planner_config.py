@@ -115,7 +115,9 @@ class AISPerfModelSpec(BaseModel):
     ) -> dict[str, dict[str, Any]]:
         # Operator schema generation imports this module without the optional
         # estimator runtime. Require AIS only when validating an AIS config.
-        from aisimulate_core import RustForwardPassPerfModel
+        # The package root loads native APIs lazily and types them as object;
+        # import the typed native module directly.
+        from aisimulate_core._native import RustForwardPassPerfModel
         from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
         result = {}
