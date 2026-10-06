@@ -100,11 +100,14 @@ Or set the equivalent environment variable before starting the worker:
 export DYN_ENABLE_STRUCTURAL_TAG=false
 ```
 
-Rust preprocessing preserves the existing native grammars for Kimi K2
-`required`/named choices and Kimi K3 named choices even when structural tags
-are disabled. Kimi K2/K3 automatic choices and Kimi K3 `required` do not use
-this exception. Python vLLM and SGLang preprocessing respect the opt-out for
-all tool choices.
+Rust preprocessing still applies native tags to Kimi K2 `required`/named
+choices and Kimi K3 named choices when structural tags are disabled. Kimi K3
+named tags use the new argument-schema enforcement; the opt-out does not
+restore main's grammar. A lookahead pattern can still be rejected by XGrammar
+0.2.1 or 0.2.7 unless the tool sets `strict: false` under schema mode `auto`.
+Global schema mode `strict` overrides that workaround. Kimi K2/K3 automatic
+choices and Kimi K3 `required` do not use this exception. Python vLLM and SGLang
+preprocessing respect the opt-out for all tool choices.
 
 To keep structural tags enabled but preserve the previous conditional activation
 policy, set the scope to `auto`:
