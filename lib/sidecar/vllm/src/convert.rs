@@ -214,6 +214,7 @@ pub(crate) fn build_generate_request(
         ));
     }
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
+    consume_reasoning_parser_args(&mut extra_args);
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
         extra.remove("messages");
@@ -534,6 +535,16 @@ fn consume_preprocessed_mm_routing_hashes(
     }
     Ok(Some(hashes))
 }
+/// The frontend adds these for vLLM's structured-output reasoning gate. The
+/// sidecar requires vLLM to run without its own reasoning parser, so vLLM never
+/// reads them, and the gRPC proto cannot carry them.
+fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
+        extra.remove("reasoning_parser_kwargs");
+        extra.remove("reasoning_ended");
+    }
+}
+
 fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
     cache_namespace: Option<&str>,
