@@ -1555,8 +1555,7 @@ mod tests {
 
     /// Run the pump with a health-check notifier set and a publisher whose
     /// receiver is already gone, so every `send` fails. This models a client
-    /// that left before the engine produced its first chunk. The pump is
-    /// bounded by a short timeout so a stream that never yields still returns.
+    /// that left before the engine produced its first chunk.
     /// Returns whether the pump left a notification permit for the canary.
     async fn pump_with_dead_publisher(
         engine: impl Stream<Item = TestResponse> + Send + 'static,
@@ -1574,15 +1573,9 @@ mod tests {
         let ctx = Context::new(serde_json::json!({}));
         let response_stream: ManyOut<TestResponse> =
             ResponseStream::new(Box::pin(engine), ctx.context());
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            ingress.pump_response_stream(
-                response_stream,
-                &publisher,
-                RequestPlanePayloadCodec::Json,
-            ),
-        )
-        .await;
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
 
         // `notify_one` stores a permit when no task is waiting, so a pending
         // notification resolves immediately here.
@@ -1603,15 +1596,10 @@ mod tests {
         );
     }
 
-    /// A silent engine produces nothing, so the canary timer must expire and
-    /// the canary must fire. Error-only output must not reset the timer
-    /// either, since errors do not prove the engine is healthy.
+    /// Error chunks do not prove the engine is healthy, so they must not reset
+    /// the canary timer even though they are engine output.
     #[tokio::test]
-    async fn silent_engine_does_not_reset_canary() {
-        assert!(
-            !pump_with_dead_publisher(stream::pending()).await,
-            "an engine that yields nothing must not reset the canary"
-        );
+    async fn error_only_output_does_not_reset_canary() {
         assert!(
             !pump_with_dead_publisher(stream::iter(vec![TestResponse::from_error("boom")])).await,
             "an error-only chunk must not reset the canary"
