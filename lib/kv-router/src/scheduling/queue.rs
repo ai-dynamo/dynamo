@@ -1225,14 +1225,9 @@ impl<
                         &active_tokens,
                         &configs,
                         class,
-                        Self::with_exclusive_affinity(
-                            self.selector.uses_exclusive_affinity_target(),
-                            &configs,
-                            &request,
-                            request
-                                .eligibility()
-                                .with_available_workers(available.as_deref()),
-                        ),
+                        request
+                            .eligibility()
+                            .with_available_workers(available.as_deref()),
                     )
                 });
             if !should_queue {
@@ -1394,7 +1389,6 @@ impl<
     fn has_dispatchable_ready_head(&self) -> bool {
         let decay_now = Instant::now();
         let mut active_tokens = None;
-        let exclusive = self.selector.uses_exclusive_affinity_target();
         self.pending.any_ready_head(|_, class, queued| {
             if !class.queueing_enabled() {
                 return true;
@@ -1410,15 +1404,10 @@ impl<
                 active_tokens,
                 &configs,
                 class,
-                Self::with_exclusive_affinity(
-                    exclusive,
-                    &configs,
-                    &queued.request,
-                    queued
-                        .request
-                        .eligibility()
-                        .with_available_workers(available.as_deref()),
-                ),
+                queued
+                    .request
+                    .eligibility()
+                    .with_available_workers(available.as_deref()),
             )
         })
     }
@@ -1501,7 +1490,6 @@ impl<
                 let slots = &self.slots;
                 let provider = self.available_worker_provider.as_ref();
                 let workers = &self.workers_with_configs;
-                let exclusive = self.selector.uses_exclusive_affinity_target();
                 self.pending.pop_next(|_, class, queued| {
                     if !class.queueing_enabled() {
                         return true;
@@ -1517,15 +1505,10 @@ impl<
                         active_tokens,
                         &configs,
                         class,
-                        Self::with_exclusive_affinity(
-                            exclusive,
-                            &configs,
-                            &queued.request,
-                            queued
-                                .request
-                                .eligibility()
-                                .with_available_workers(available.as_deref()),
-                        ),
+                        queued
+                            .request
+                            .eligibility()
+                            .with_available_workers(available.as_deref()),
                     )
                 })
             };
@@ -1642,14 +1625,15 @@ impl<
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
-            let eligibility = Self::with_exclusive_affinity(
-                self.selector.uses_exclusive_affinity_target(),
-                &workers,
-                request,
-                request
-                    .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
-                    .with_available_workers(available_worker_ids.as_deref()),
-            );
+            let mut eligibility = request
+                .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
+                .with_available_workers(available_worker_ids.as_deref());
+            if self.selector.uses_exclusive_affinity_target()
+                && let Some(target) = request.affinity_target
+                && eligibility.affinity_target_is_eligible(&workers, target)
+            {
+                eligibility = eligibility.with_affinity_target(target);
+            }
             self.selector
                 .select_worker(WorkerSelectionInput::configured(
                     &workers,
@@ -1917,25 +1901,6 @@ impl<
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
         })
-    }
-
-    /// Narrow `eligibility` to the request's affinity target when the selector treats an eligible
-    /// target as exclusive. Admission and selection both apply it, so a request bound to a busy
-    /// worker waits for that worker instead of being admitted because another worker is free.
-    fn with_exclusive_affinity<'a>(
-        exclusive: bool,
-        workers: &HashMap<WorkerId, C>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'a>,
-    ) -> RoutingEligibility<'a> {
-        match request.affinity_target {
-            Some(target)
-                if exclusive && eligibility.affinity_target_is_eligible(workers, target) =>
-            {
-                eligibility.with_affinity_target(target)
-            }
-            _ => eligibility,
-        }
     }
 
     fn all_workers_prefill_busy_with(
@@ -4756,40 +4721,6 @@ policy_classes:
         let second_resp = second_resp.expect("scheduling returned error");
         assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
         assert_eq!(queue.pending_count(), 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn exclusive_affinity_waits_for_a_busy_target() {
-        let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
-
-        let (mut first, first_rx) = make_request("bound-1", 256);
-        first.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
-        queue.enqueue(first).await;
-        let first_resp = first_rx.await.unwrap().unwrap();
-        assert_eq!(first_resp.best_worker, WorkerWithDpRank::new(1, 0));
-
-        // Worker 1 is prefill-busy and worker 0 is idle.
-        let (mut second, mut second_rx) = make_request("bound-2", 256);
-        second.affinity_target = Some(crate::protocols::WorkerAffinityTarget::new(1, None));
-        queue.enqueue(second).await;
-        assert_eq!(queue.pending_count(), 1);
-        assert!(
-            second_rx.try_recv().is_err(),
-            "a request bound to a busy worker waits for it"
-        );
-
-        slots
-            .mark_prefill_completed(&"bound-1".to_string(), decay_now())
-            .unwrap();
-        slots.free(&"bound-1".to_string(), decay_now()).unwrap();
-        queue.capacity_changed(Some(WorkerWithDpRank::new(1, 0)));
-
-        let second_resp = tokio::time::timeout(Duration::from_secs(1), second_rx)
-            .await
-            .expect("capacity notification should schedule the bound request")
-            .expect("response channel should remain open")
-            .expect("scheduling returned error");
-        assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
     }
 
     #[tokio::test(flavor = "multi_thread")]
