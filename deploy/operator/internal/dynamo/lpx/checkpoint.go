@@ -30,9 +30,6 @@ func checkpointSnapshotPath(checkpoint *dynamov1beta1.LPXCheckpoint, modelStorag
 	return filepath.Join(modelStoragePath, repository, "snapshots", checkpoint.Revision)
 }
 
-// applyCyborgWeightsPath projects the projection's checkpoint directory into one
-// Cyborg container. Without a checkpoint, the container's authored environment
-// is unchanged.
 func applyCyborgWeightsPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) {
 	if projection.checkpoint == nil {
 		return
