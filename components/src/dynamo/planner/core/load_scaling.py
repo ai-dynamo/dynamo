@@ -11,7 +11,7 @@ Mixin consumed by ``PlannerScalingState``.  All methods access state via
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from dynamo.planner.config.planner_config import resolve_min_endpoint
 from dynamo.planner.core.types import FpmObservations, ScalingDecision
@@ -57,7 +57,7 @@ class LoadScalingMixin:
         return self._advance_load_single(obs, mode)
 
     def _advance_load_single(
-        self, obs: FpmObservations, component: str
+        self, obs: FpmObservations, component: Literal["prefill", "decode"]
     ) -> Optional[ScalingDecision]:
         if self._load_scaling_blocked(component):
             logger.info(f"Scaling in progress for {component}, observing only")
@@ -89,11 +89,15 @@ class LoadScalingMixin:
                 if component == "prefill"
                 else self._decode_load_decision(fpm_stats, num_workers)
             )
+        # None means "no change" (or no usable signal). Hold at the current
+        # count so the floors below still apply, as in the agg and disagg paths.
+        load_unchanged = desired is None
         if desired is None:
-            return None
+            desired = num_workers
 
         if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
             return None
+        desired = max(desired, resolve_min_endpoint(self._config, component))
         original_desired = desired
         if self._config.enable_throughput_scaling:
             bound = (
@@ -107,6 +111,12 @@ class LoadScalingMixin:
             desired,
             component,
         )
+        if load_unchanged and desired == num_workers:
+            # Keep the sub-decision's reason. A ready-equal target would also
+            # cancel replicas that are still starting.
+            if budget_reason is not None:
+                self._diag_load_reason = budget_reason
+            return None
 
         if desired < num_workers + self._pending_startup(component):
             if desired > original_desired:

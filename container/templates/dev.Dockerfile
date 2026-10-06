@@ -356,7 +356,7 @@ RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
     pip install maturin[patchelf]
 {% else %}
 # SGLang CUDA: Create a writable Dynamo venv and seed it from the upstream
-# SGLang venv. The 0.5.19 runtime moved its packages from the system Python's
+# SGLang venv. The 0.5.21 runtime keeps its packages outside the system Python's
 # dist-packages directory to /opt/sglang.
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \

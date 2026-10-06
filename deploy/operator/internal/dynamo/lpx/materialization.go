@@ -118,6 +118,9 @@ func (p *MaterializationPlan) ValidateReplicaCount() error {
 		}
 	}
 	for _, agent := range p.Agents {
+		if agent.Replicas == 0 {
+			continue
+		}
 		if err := p.validatePodHostname("Agent", agent.TemplateName, agent.Replicas-1); err != nil {
 			return err
 		}
