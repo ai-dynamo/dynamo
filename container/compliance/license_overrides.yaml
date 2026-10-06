@@ -358,6 +358,7 @@ overrides:
   - { ecosystem: dpkg, name: media-types,       license: "GPL-2.0-or-later", source: "Debian/Ubuntu media-types package; copyright file references common-licenses/GPL" }
   - { ecosystem: dpkg, name: libgc1,            license: "BSD-3-Clause",     source: "Boehm-GC upstream — http://www.hboehm.info/gc/license.txt (MIT-like, mapped to closest SPDX)" }
   - { ecosystem: dpkg, name: numactl,           license: "GPL-2.0-or-later", source: "Linux NUMA tools, GPL-2+" }
+  - { ecosystem: dpkg, name: cuda-keyring,      license: "MIT",              source: "NVIDIA cuda-keyring upstream — https://github.com/NVIDIA/apt-packaging-cuda-keyring/blob/main/LICENSE; .deb ships no copyright file" }
   - { ecosystem: dpkg, name: ubuntu-keyring,    license: "GPL-2.0-or-later", source: "Ubuntu keyring; copyright file references common-licenses/GPL-2" }
 
   # --- Sglang cuda12.9 — dpkg additions on top of cuda:12.9.1-cudnn-devel ---
