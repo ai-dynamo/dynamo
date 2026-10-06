@@ -392,22 +392,28 @@ def test_e_pd_launcher_fails_fast_on_missing_managed_port(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    "option",
+    "option,endpoint_suffix",
     [
-        "--kv-events-config",
-        "--kv_events_config",
-        "--kv_events_config=",
-        "--kv-events-conf",
-        "--kv_events_conf=",
+        ("--kv-events-config", ""),
+        ("--kv_events_config", ""),
+        ("--kv_events_config=", ""),
+        ("--kv-events-conf", ""),
+        ("--kv_events_conf=", ""),
+        pytest.param("--kv-events-config", r"\n", id="trailing-newline"),
+        pytest.param("--kv-events-config", r"\u0000", id="trailing-null"),
     ],
 )
 @pytest.mark.timeout(180)
 def test_e_pd_launcher_refuses_managed_kv_events_override(
-    tmp_path: Path, option: str
+    tmp_path: Path, option: str, endpoint_suffix: str
 ) -> None:
     """Stop a passthrough config whose endpoint is not the reserved KV port."""
     with reserved_ports(7, DynamoPortRange.SERVE.value) as allocated:
-        config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{allocated[6]}"}}'
+        port = allocated[3] if endpoint_suffix else allocated[6]
+        config = (
+            '{"publisher":"zmq","topic":"kv-events",'
+            f'"endpoint":"tcp://*:{port}{endpoint_suffix}"}}'
+        )
         result, workers = _run_e_pd_launcher(
             tmp_path,
             {

@@ -184,15 +184,16 @@ if [[ "$KV_EVENTS_PD_FOUND" == true ]]; then
         # Decoded with the same json module vLLM parses this option with, so an
         # escaped or duplicated endpoint reads here as it will there. Anything
         # that is not an object with a string endpoint, including unparseable
-        # JSON or a missing interpreter, reads as unset and is refused.
-        KV_EVENTS_PD_ENDPOINT=$(python -c '
+        # JSON or a missing interpreter, reads as unset and is refused. Compare
+        # in Python before Bash can strip trailing newlines or null characters.
+        if ! KV_EVENTS_PD_ENDPOINT=$(python -c '
 import json, sys
 config = json.loads(sys.argv[1])
 endpoint = config.get("endpoint") if isinstance(config, dict) else None
 if isinstance(endpoint, str):
-    print(endpoint)
-' "$KV_EVENTS_PD_OVERRIDE" 2>/dev/null) || KV_EVENTS_PD_ENDPOINT=""
-        if [[ "$KV_EVENTS_PD_ENDPOINT" != "tcp://*:${KV_PORT_PD}" ]]; then
+    print(json.dumps(endpoint))
+sys.exit(endpoint != sys.argv[2])
+' "$KV_EVENTS_PD_OVERRIDE" "tcp://*:${KV_PORT_PD}" 2>/dev/null); then
             echo "Refusing a passthrough --kv-events-config under DYN_MANAGED_PORTS:" \
                  "its endpoint reads as ${KV_EVENTS_PD_ENDPOINT:-unset}, not the" \
                  "tcp://*:${KV_PORT_PD} reserved on DYN_VLLM_KV_EVENT_PORT2." \
