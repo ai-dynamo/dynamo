@@ -123,6 +123,7 @@ where
             retain_kv_transfer_chain,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
+            modeled_prefill_backlog_ms: Default::default(),
             resp_tx,
         };
 

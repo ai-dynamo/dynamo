@@ -35,12 +35,6 @@ pub(crate) enum PrefillTimeLoadError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PrefillTimeLoad {
-    pub(crate) worker: WorkerWithDpRank,
-    pub(crate) modeled_remaining_prefill_time_ms: Result<u64, PrefillTimeLoadError>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PrefillLoadSnapshot {
     pub(super) prefill_full_tokens_sum: usize,
     pub(super) anchored_prefill: Option<AnchoredPrefillSnapshot>,

@@ -23,7 +23,6 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::{RequestBooking, RequestIndex};
 use super::sharded_lock::ShardedRwLock;
@@ -1287,35 +1286,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.active_tokens(decay_now)
     }
 
-    /// Return modeled remaining prefill time by worker from the derived read model.
+    /// Fill `out` with the modeled remaining prefill time, in milliseconds, of every worker whose
+    /// active prefills all carry a prefill-load model prediction.
     ///
-    /// Values are non-negative milliseconds. For workers whose active prefills
-    /// all have modeled durations, the formula is:
-    /// `total_modeled_prefill_ms.saturating_sub(elapsed_since_oldest_anchor_ms)`.
+    /// For such a worker the value is
+    /// `total_modeled_prefill_ms.saturating_sub(elapsed_since_oldest_anchor_ms)`. Elapsed time
+    /// from the oldest active prefill can reduce later modeled backlog before the result is clipped
+    /// at zero, which accounts for engines that batch or overlap prefills.
     ///
-    /// Elapsed time from the oldest active prefill can reduce later modeled
-    /// backlog, then the final worker backlog is clipped at zero. This accounts
-    /// for engines that batch or overlap multiple prefills.
-    ///
-    /// `Err(MissingExpectedDuration)` is expected for workers with any active
-    /// prefill that lacks an AIS prediction, including the default no-AIS path or
-    /// failed predictions. Replica-synced remote values are receive-time anchored
-    /// advisory reads, not producer-time truth.
-    #[allow(dead_code)]
-    pub(crate) fn modeled_remaining_prefill_time_loads_at(
+    /// A worker is absent when any active prefill lacks a prediction, including the default path
+    /// without a prefill-load model and failed predictions. Replica-synced remote values are
+    /// receive-time anchored advisory reads, not producer-time truth.
+    pub fn modeled_prefill_backlog_ms_into(
         &self,
         now: Instant,
-    ) -> Vec<PrefillTimeLoad> {
+        out: &mut FxHashMap<WorkerWithDpRank, u64>,
+    ) {
+        out.clear();
         self.prompt_registry
-            .modeled_remaining_prefill_times_ms(now)
-            .into_iter()
-            .map(
-                |(worker, modeled_remaining_prefill_time_ms)| PrefillTimeLoad {
-                    worker,
-                    modeled_remaining_prefill_time_ms,
-                },
-            )
-            .collect()
+            .modeled_prefill_backlog_ms_into(now, out);
     }
 
     /// Return true if any worker satisfies the provided predicate on active token count.
@@ -1729,11 +1718,18 @@ mod tests {
         sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
         now: Instant,
     ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
-        sequences
-            .modeled_remaining_prefill_time_loads_at(now)
-            .into_iter()
-            .map(|load| (load.worker, load.modeled_remaining_prefill_time_ms))
-            .collect()
+        let loads = sequences
+            .prompt_registry
+            .modeled_remaining_prefill_times_ms(now);
+        // The public fill must report exactly the modeled workers.
+        let mut modeled = FxHashMap::default();
+        sequences.modeled_prefill_backlog_ms_into(now, &mut modeled);
+        let expected: FxHashMap<_, _> = loads
+            .iter()
+            .filter_map(|(&worker, load)| load.ok().map(|ms| (worker, ms)))
+            .collect();
+        assert_eq!(modeled, expected);
+        loads
     }
 
     fn active_request_count(

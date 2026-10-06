@@ -26,7 +26,7 @@ use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
-use super::selector::{WorkerSelectionInput, WorkerSelector};
+use super::selector::{WorkerInputs, WorkerSelectionInput, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
@@ -483,6 +483,9 @@ struct SchedulerQueueActor<
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    /// Whether the selector declared `WorkerInputs::PREFILL_TIME`, read once at construction.
+    projects_prefill_time: bool,
+    projected_prefill_backlog: FxHashMap<WorkerWithDpRank, u64>,
     block_size: u32,
     selector: Sel,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -617,6 +620,11 @@ impl<
                 .collect(),
         );
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
+        // Without a prefill-load model, idle workers would still report a zero backlog.
+        let projects_prefill_time = prefill_load_estimator.is_some()
+            && selector
+                .required_worker_inputs()
+                .contains(WorkerInputs::PREFILL_TIME);
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let start_time = Instant::now();
@@ -651,6 +659,8 @@ impl<
             slots,
             workers_with_configs: workers_with_configs.clone(),
             projected_loads: FxHashMap::default(),
+            projects_prefill_time,
+            projected_prefill_backlog: FxHashMap::default(),
             block_size,
             selector,
             prefill_load_estimator,
@@ -1607,8 +1617,20 @@ impl<
             decay_now,
             &mut request.worker_loads,
         );
+        if self.projects_prefill_time {
+            request.modeled_prefill_backlog_ms =
+                std::mem::take(&mut self.projected_prefill_backlog);
+            self.slots.modeled_prefill_backlog_ms_into(
+                decay_now,
+                &mut request.modeled_prefill_backlog_ms,
+            );
+        }
         let result = handle(self, &mut request);
         self.projected_loads = std::mem::take(&mut request.worker_loads);
+        if self.projects_prefill_time {
+            self.projected_prefill_backlog =
+                std::mem::take(&mut request.modeled_prefill_backlog_ms);
+        }
         result
     }
 
@@ -1981,7 +2003,7 @@ mod tests {
     use crate::sequences::topology::WorkerDpRange;
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use crate::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
+    use crate::{DefaultWorkerSelector, WorkerSelector};
 
     fn decay_now() -> Instant {
         Instant::now()
@@ -2224,6 +2246,30 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, Sel>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
+        make_queue_with_custom_selector_and_estimator(
+            num_workers,
+            block_size,
+            isl,
+            threshold_frac,
+            selector,
+            None,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_custom_selector_and_estimator<
+        Sel: WorkerSelector<SimpleWorkerConfig> + Send + 'static,
+    >(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        selector: Sel,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, Sel>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
         let dp_range: HashMap<u64, (u32, u32)> =
             (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
@@ -2253,7 +2299,7 @@ mod tests {
             PolicyProfile::synthetic(threshold_frac, RouterQueuePolicy::Fcfs),
             block_size,
             selector,
-            None,
+            prefill_load_estimator,
             None,
             None,
             None,
@@ -2631,6 +2677,7 @@ mod tests {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
+            modeled_prefill_backlog_ms: Default::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,
@@ -3277,6 +3324,8 @@ policy_classes:
             slots: Arc::clone(slots),
             workers_with_configs: queue.workers_with_configs.clone(),
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            projects_prefill_time: false,
+            projected_prefill_backlog: FxHashMap::default(),
             block_size: 16,
             selector: DefaultWorkerSelector::new(None, "test"),
             prefill_load_estimator: None,
@@ -4332,6 +4381,83 @@ policy_classes:
         assert_eq!(rejection.current, 1);
         assert_eq!(rejection.limit, 1);
         assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn declared_prefill_time_exposes_the_modeled_backlog() {
+        use crate::plugins::worker_selection::{
+            WorkerInputView, WorkerPicker, WorkerSelectionContext,
+        };
+        use crate::scheduling::config::KvRouterConfig;
+        use crate::scheduling::selector::WorkerSelectionPolicy;
+        use crate::scheduling::types::WorkerSelectionPolicyError;
+
+        struct RecordingPicker {
+            inputs: WorkerInputs,
+            seen: Arc<std::sync::Mutex<Vec<Option<u64>>>>,
+        }
+
+        impl WorkerPicker for RecordingPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.inputs
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(input.modeled_prefill_backlog_ms(0));
+                Ok(0)
+            }
+        }
+
+        async fn seen_backlogs(
+            inputs: WorkerInputs,
+            estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        ) -> Vec<Option<u64>> {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let selector = WorkerSelectionPolicy::new(
+                KvRouterConfig::default(),
+                "test",
+                Vec::new(),
+                Box::new(RecordingPicker {
+                    inputs,
+                    seen: Arc::clone(&seen),
+                }),
+            );
+            let (queue, _slots) = make_queue_with_custom_selector_and_estimator(
+                1, 16, 100, None, selector, estimator,
+            );
+            for request_id in ["first", "second"] {
+                let (request, response_rx) = make_request(request_id, 100);
+                queue.enqueue(request).await;
+                response_rx.await.unwrap().unwrap();
+            }
+            seen.lock().unwrap().clone()
+        }
+
+        let estimator = || -> Option<Arc<dyn PrefillLoadEstimator>> {
+            Some(Arc::new(FixedPrefillLoadEstimator {
+                duration: Duration::from_secs(10),
+            }))
+        };
+        assert_eq!(
+            seen_backlogs(WorkerInputs::PREFILL_TIME, estimator()).await,
+            [Some(0), Some(10_000)]
+        );
+        assert_eq!(
+            seen_backlogs(WorkerInputs::NONE, estimator()).await,
+            [None, None]
+        );
+        // Without a prefill-load model the host reports nothing, not a zero for idle workers.
+        assert_eq!(
+            seen_backlogs(WorkerInputs::PREFILL_TIME, None).await,
+            [None, None]
+        );
     }
 
     #[tokio::test(start_paused = true)]

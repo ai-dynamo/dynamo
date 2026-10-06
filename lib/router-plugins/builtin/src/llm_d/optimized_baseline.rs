@@ -9,11 +9,18 @@
 //!
 //! - Workers whose cached share of the prompt reaches `affinity_threshold` are sticky. With no
 //!   sticky worker, every worker stays in play.
-//! - Each worker's TTFT is estimated as its in-flight prefill tokens over
-//!   `peak_prefill_tokens_per_second`. When the best sticky worker's estimate trails the best
-//!   non-sticky worker's by more than `max_ttft_penalty_ms`, stickiness breaks and every worker
-//!   stays in play; otherwise only sticky workers do. A zero `max_ttft_penalty_ms` disables this
-//!   gate, as in llm-d.
+//! - Each worker's TTFT is estimated from its prefill backlog, excluding this request, as
+//!   `ttft_source` selects. When the best sticky worker's estimate trails the best non-sticky
+//!   worker's by more than `max_ttft_penalty_ms`, stickiness breaks and every worker stays in play;
+//!   otherwise only sticky workers do. A zero `max_ttft_penalty_ms` disables this gate, as in
+//!   llm-d.
+//!   - `throughput`: in-flight prefill tokens over `peak_prefill_tokens_per_second`, llm-d's
+//!     default. The constant is one calibration point for one model, GPU, and parallelism.
+//!   - `modeled`: the host's modeled prefill backlog, available when the router runs a
+//!     prefill-load model (`router_prefill_load_model: ais`). Like llm-d's latency-predictor
+//!     source, a worker without a modeled value never counts as the fastest.
+//!   - `auto` (default): `modeled` when every candidate has a modeled backlog, otherwise
+//!     `throughput` for all of them, since the two estimates are not comparable.
 //! - Among the remaining workers, the token-load score `1 − min(1, tokens / queue_threshold_tokens)`
 //!   picks the highest, with `tokens` the in-flight prefill tokens plus this request's uncached
 //!   prompt tokens on that worker. Ties rotate.
@@ -45,11 +52,20 @@ use crate::signals::{device_overlap_blocks, uncached_prompt_tokens};
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "llm-d-optimized-baseline";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TtftSource {
+    Auto,
+    Modeled,
+    Throughput,
+}
+
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Parameters {
     affinity_threshold: f64,
     max_ttft_penalty_ms: f64,
+    ttft_source: TtftSource,
     peak_prefill_tokens_per_second: f64,
     queue_threshold_tokens: usize,
 }
@@ -59,6 +75,7 @@ impl Default for Parameters {
         Self {
             affinity_threshold: 0.8,
             max_ttft_penalty_ms: 18_000.0,
+            ttft_source: TtftSource::Auto,
             peak_prefill_tokens_per_second: 15_928.0,
             queue_threshold_tokens: 4_194_304,
         }
@@ -128,7 +145,12 @@ struct AffinityPicker {
 
 impl WorkerPicker for AffinityPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
+        let inputs = WorkerInputs::CACHE | WorkerInputs::LOAD;
+        if self.parameters.ttft_source == TtftSource::Throughput {
+            inputs
+        } else {
+            inputs | WorkerInputs::PREFILL_TIME
+        }
     }
 
     fn pick(
@@ -151,10 +173,21 @@ impl WorkerPicker for AffinityPicker {
                     device_overlap_blocks(cache) / full_blocks >= self.parameters.affinity_threshold
                 })
         };
+        let modeled_ms = |row: usize| input.modeled_prefill_backlog_ms(row);
+        let use_model = match self.parameters.ttft_source {
+            TtftSource::Throughput => false,
+            TtftSource::Modeled => true,
+            TtftSource::Auto => (0..candidates.len()).all(|row| modeled_ms(row).is_some()),
+        };
         let ttft_ms = |row: usize| {
-            load[row].active_prefill_tokens() as f64
-                / self.parameters.peak_prefill_tokens_per_second
-                * 1_000.0
+            if use_model {
+                // llm-d scores a worker without a prediction as maximally slow.
+                modeled_ms(row).map_or(f64::MAX, |ms| ms as f64)
+            } else {
+                load[row].active_prefill_tokens() as f64
+                    / self.parameters.peak_prefill_tokens_per_second
+                    * 1_000.0
+            }
         };
         let best_ttft = |want_sticky: bool| {
             (0..candidates.len())
@@ -204,6 +237,15 @@ fn provider(
     parameters.validate()?;
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
+            if parameters.ttft_source == TtftSource::Modeled
+                && !config.router_prefill_load_model.is_enabled()
+            {
+                tracing::warn!(
+                    policy = POLICY_TYPE,
+                    "ttft_source=modeled without a router prefill-load model never breaks \
+                     stickiness; set router_prefill_load_model or use ttft_source=auto"
+                );
+            }
             policy(config, worker_type.as_str(), parameters)
         },
     ))
@@ -238,6 +280,69 @@ mod tests {
         // idle worker's lower token load wins.
         let workers = [Worker::new(0), Worker::new(1).cached(9).prefill(300_000)];
         assert_eq!(select(&default_policy(), request(10, 1), &workers), 0);
+    }
+
+    fn with_source(ttft_source: TtftSource) -> WorkerSelectionPolicy {
+        policy(
+            &KvRouterConfig::default(),
+            "test",
+            Parameters {
+                ttft_source,
+                ..Parameters::default()
+            },
+        )
+    }
+
+    #[test]
+    fn modeled_backlog_overrides_the_throughput_constant() {
+        // 300k tokens exceed the 18 s allowance at 15,928 tokens/s, but the model predicts 5 s,
+        // so the cached worker keeps the request.
+        let busy_but_fast = [
+            Worker::new(0).modeled(0),
+            Worker::new(1).cached(9).prefill(300_000).modeled(5_000),
+        ];
+        assert_eq!(select(&default_policy(), request(10, 1), &busy_but_fast), 1);
+        // 10k tokens look cheap at the constant rate, but the model predicts 25 s.
+        let light_but_slow = [
+            Worker::new(0).modeled(0),
+            Worker::new(1).cached(9).prefill(10_000).modeled(25_000),
+        ];
+        assert_eq!(
+            select(&default_policy(), request(10, 1), &light_but_slow),
+            0
+        );
+    }
+
+    #[test]
+    fn auto_falls_back_to_throughput_unless_every_worker_is_modeled() {
+        // Worker 0 has no modeled backlog, so both workers use the constant: 300k tokens break
+        // stickiness even though worker 1's model predicts 5 s.
+        let workers = [
+            Worker::new(0),
+            Worker::new(1).cached(9).prefill(300_000).modeled(5_000),
+        ];
+        assert_eq!(select(&default_policy(), request(10, 1), &workers), 0);
+        // Forcing the model scores the unmodeled worker as maximally slow, so stickiness holds.
+        assert_eq!(
+            select(&with_source(TtftSource::Modeled), request(10, 1), &workers),
+            1
+        );
+    }
+
+    #[test]
+    fn throughput_source_ignores_the_model() {
+        let workers = [
+            Worker::new(0).modeled(0),
+            Worker::new(1).cached(9).prefill(300_000).modeled(5_000),
+        ];
+        assert_eq!(
+            select(
+                &with_source(TtftSource::Throughput),
+                request(10, 1),
+                &workers
+            ),
+            0
+        );
     }
 
     #[test]

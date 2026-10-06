@@ -16,7 +16,7 @@ use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
 use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
+    CandidateData, RequestSnapshot, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
     WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
     WorkerSelectionContext,
 };
@@ -194,7 +194,7 @@ impl ComposedPolicyState {
     fn score_candidates(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        cache_snapshot: &CacheSnapshot<'_>,
+        request_snapshot: &RequestSnapshot<'_>,
     ) -> Result<(), KvSchedulerError> {
         let Self {
             scorers,
@@ -212,7 +212,7 @@ impl ComposedPolicyState {
             score_contributions.fill(f64::NAN);
             scorer.score(
                 context,
-                WorkerCandidates::new(unscored_candidates, *inputs, cache_snapshot),
+                WorkerCandidates::new(unscored_candidates, *inputs, request_snapshot),
                 score_contributions,
             )?;
             for (row, (contribution, scored)) in score_contributions
@@ -266,7 +266,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             state.push_candidate(candidate);
             false
         });
-        state.score_candidates(&input.context, &input.cache_snapshot)?;
+        state.score_candidates(&input.context, &input.request_snapshot)?;
         return Ok(!state.candidates.is_empty());
     }
 
@@ -294,7 +294,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         for (inputs, filter) in &mut state.filters {
             match filter.keep(
                 &input.context,
-                WorkerCandidate::new(&filter_candidate, *inputs, &input.cache_snapshot),
+                WorkerCandidate::new(&filter_candidate, *inputs, &input.request_snapshot),
             ) {
                 Ok(true) => {}
                 Ok(false) => return false,
@@ -325,7 +325,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     if let Some(error) = error {
         return Err(error);
     }
-    state.score_candidates(&input.context, &input.cache_snapshot)?;
+    state.score_candidates(&input.context, &input.request_snapshot)?;
     Ok(has_eligible_worker)
 }
 
@@ -1105,5 +1105,95 @@ mod tests {
             .unwrap();
         assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(0));
         assert_eq!(scored.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn modeled_prefill_backlog_reaches_only_declaring_components() {
+        fn expected(inputs: WorkerInputs) -> Option<u64> {
+            inputs.contains(WorkerInputs::PREFILL_TIME).then_some(250)
+        }
+
+        struct BacklogFilter(WorkerInputs);
+
+        impl WorkerFilter for BacklogFilter {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.0
+            }
+
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                assert_eq!(candidate.modeled_prefill_backlog_ms(), expected(self.0));
+                Ok(true)
+            }
+        }
+
+        struct BacklogScorer(WorkerInputs);
+
+        impl WorkerScorer for BacklogScorer {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.0
+            }
+
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    assert_eq!(candidate.modeled_prefill_backlog_ms(), expected(self.0));
+                    *cost = 0.0;
+                }
+                Ok(())
+            }
+        }
+
+        struct BacklogPicker(WorkerInputs);
+
+        impl WorkerPicker for BacklogPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.0
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert_eq!(input.modeled_prefill_backlog_ms(0), expected(self.0));
+                Ok(0)
+            }
+        }
+
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let mut request = base_request(16);
+        request
+            .modeled_prefill_backlog_ms
+            .insert(WorkerWithDpRank::from_worker_id(0), 250);
+        let (declared, undeclared) = (WorkerInputs::PREFILL_TIME, WorkerInputs::NONE);
+        for (filter, scorer, picker) in [
+            (declared, undeclared, undeclared),
+            (undeclared, declared, undeclared),
+            (undeclared, undeclared, declared),
+        ] {
+            let policy = WorkerSelectionPolicy::new_with_filters(
+                KvRouterConfig::default(),
+                "test",
+                vec![Box::new(BacklogFilter(filter))],
+                vec![Box::new(BacklogScorer(scorer))],
+                Box::new(BacklogPicker(picker)),
+            );
+            policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap();
+        }
     }
 }

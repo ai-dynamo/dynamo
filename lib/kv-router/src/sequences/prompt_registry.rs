@@ -366,6 +366,21 @@ impl PromptRegistry {
             .collect()
     }
 
+    pub(super) fn modeled_prefill_backlog_ms_into(
+        &self,
+        now: Instant,
+        out: &mut FxHashMap<WorkerWithDpRank, u64>,
+    ) {
+        let loads = self.loads.read();
+        out.reserve(loads.len());
+        for (worker, load) in loads.iter() {
+            if let Ok(ms) = load.modeled_remaining_prefill_time_ms(now) {
+                out.insert(worker, ms);
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn modeled_remaining_prefill_times_ms(
         &self,
         now: Instant,
