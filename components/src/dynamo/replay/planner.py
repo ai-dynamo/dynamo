@@ -145,7 +145,8 @@ def _ais_performance_model_config(
             raise TypeError(
                 f"performance_model_metadata.{role}.config must be a mapping"
             )
-        return dict(config)
+        # Runner metadata uses None for unset options; omit them so AIS applies defaults.
+        return {key: value for key, value in config.items() if value is not None}
     return None
 
 

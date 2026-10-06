@@ -558,6 +558,10 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
             decode_args = role_args("decode", 2)
             metadata = None
 
+    if metadata is not None:
+        for raw in metadata.values():
+            raw["config"]["nextn"] = None
+
     result = replay_planner.prepare_planner_replay(
         extra_engine_args=None,
         prefill_engine_args=prefill_args,
