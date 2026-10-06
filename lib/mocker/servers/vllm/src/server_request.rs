@@ -292,6 +292,7 @@ impl PreparedRequest {
             logprobs,
             ranks,
             candidate_tokens,
+            sampling_mask: Vec::new(),
             finish_info: terminal.then(|| pb::FinishInfo {
                 num_output_tokens: token_ids.len() as u32,
                 finish_reason: pb::finish_info::FinishReason::Length as i32,

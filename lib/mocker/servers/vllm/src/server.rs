@@ -383,6 +383,15 @@ impl pb::control_server::Control for VllmMockerService {
         Ok(Response::new((*self.model_info).clone()))
     }
 
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::failed_precondition(
+            "the vLLM mocker does not manage an engine process",
+        ))
+    }
+
     async fn abort(
         &self,
         request: Request<pb::AbortRequest>,

@@ -266,6 +266,7 @@ pub(crate) fn build_generate_request(
             skip_special_tokens,
         }),
         kv: Some(kv),
+        kv_hints: None,
         truncate_prompt_tokens: 0,
         priority,
         session_id: None,
@@ -1243,12 +1244,12 @@ fn validate_request(
     if !mode.is_prefill() && !mode.is_encode() {
         if matches!(sampling.top_k, Some(-1 | 0)) {
             return Err(client::invalid_argument(
-                "top_k=-1 or top_k=0 cannot be represented by vllm-proto 0.3",
+                "top_k=-1 or top_k=0 cannot be represented by vllm-proto 0.4",
             ));
         }
         if sampling.min_p == Some(0.0) {
             return Err(client::invalid_argument(
-                "min_p=0 cannot be represented by vllm-proto 0.3",
+                "min_p=0 cannot be represented by vllm-proto 0.4",
             ));
         }
     }

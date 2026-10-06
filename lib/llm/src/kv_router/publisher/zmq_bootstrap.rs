@@ -99,6 +99,30 @@ pub struct ZmqBootstrapConfig {
     pub dp_rank: u32,
     pub timeout: std::time::Duration,
     pub completion: tokio::sync::oneshot::Sender<BootstrapOutcome>,
+    pub recovery: Option<ZmqRecoveryControl>,
+}
+
+/// Opt-in lifecycle recovery; ordinary ZMQ publishers retain their existing policy.
+pub struct ZmqRecoveryControl {
+    pub status: tokio::sync::watch::Sender<KvStreamStatus>,
+    pub commands: mpsc::Receiver<KvStreamCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KvStreamStatus {
+    Recovering,
+    ProbeRequired,
+    Ready,
+    MissingHistory { expected: u64, got: u64 },
+    Uncertain { reason: String, is_terminal: bool },
+}
+
+#[derive(Debug)]
+pub enum KvStreamCommand {
+    /// Fence ingestion while the sidecar determines the engine incarnation.
+    Suspend,
+    ReconnectSameInstance(tokio::sync::oneshot::Sender<()>),
+    RetryReplay(tokio::sync::oneshot::Sender<()>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,6 +309,310 @@ async fn apply_batch(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct TerminalRecovery(anyhow::Error);
+
+fn terminal(error: anyhow::Error) -> anyhow::Error {
+    TerminalRecovery(error).into()
+}
+
+enum RecoveryAction {
+    Suspend,
+    Reconnect,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn recovering_listener(
+    endpoint: &str,
+    topic: &str,
+    normalizer: &mut ZmqEventNormalizer,
+    tx: &mpsc::UnboundedSender<PublisherInput>,
+    next_event_id: &AtomicU64,
+    worker_id: WorkerId,
+    config: ZmqBootstrapConfig,
+    mut control: ZmqRecoveryControl,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let mut cursor = ReplayCursor::new(LIMIT);
+    let mut completion = Some(config.completion);
+    let mut needs_reconnect = true;
+    loop {
+        if !needs_reconnect {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    command = control.commands.recv() => match command {
+                        Some(KvStreamCommand::ReconnectSameInstance(accepted)) => {
+                            control.status.send_replace(KvStreamStatus::Recovering);
+                            let _ = accepted.send(());
+                            break;
+                        },
+                        Some(_) => {},
+                        None => return,
+                    },
+                }
+            }
+        }
+        control.status.send_replace(KvStreamStatus::Recovering);
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            result = recovery_session(
+                endpoint, topic, &config.endpoint, config.dp_rank, config.timeout,
+                &mut cursor, normalizer, tx, next_event_id, worker_id,
+                &mut control, &mut completion,
+            ) => result,
+        };
+        match result {
+            Ok(RecoveryAction::Reconnect) => needs_reconnect = true,
+            Ok(RecoveryAction::Suspend) => {
+                control.status.send_replace(KvStreamStatus::Recovering);
+                needs_reconnect = false;
+            }
+            Err(error) => {
+                if let Some(missing) = error.downcast_ref::<MissingHistory>() {
+                    control.status.send_replace(KvStreamStatus::MissingHistory {
+                        expected: missing.expected,
+                        got: missing.got,
+                    });
+                    if let Some(completion) = completion.take() {
+                        let _ = completion.send(BootstrapOutcome::MissingHistory {
+                            dp_rank: config.dp_rank,
+                            expected: missing.expected,
+                            got: missing.got,
+                        });
+                    }
+                    return;
+                }
+                let is_terminal = error.is::<TerminalRecovery>();
+                let reason = error.to_string();
+                control.status.send_replace(KvStreamStatus::Uncertain {
+                    reason: reason.clone(),
+                    is_terminal,
+                });
+                if is_terminal {
+                    if let Some(completion) = completion.take() {
+                        let _ = completion.send(BootstrapOutcome::Uncertain { reason });
+                    }
+                    return;
+                }
+                needs_reconnect = false;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recovery_session(
+    endpoint: &str,
+    topic: &str,
+    replay_endpoint: &str,
+    dp_rank: u32,
+    timeout: Duration,
+    cursor: &mut ReplayCursor,
+    normalizer: &mut ZmqEventNormalizer,
+    tx: &mpsc::UnboundedSender<PublisherInput>,
+    next_event_id: &AtomicU64,
+    worker_id: WorkerId,
+    control: &mut ZmqRecoveryControl,
+    completion: &mut Option<tokio::sync::oneshot::Sender<BootstrapOutcome>>,
+) -> Result<RecoveryAction> {
+    let connect = async {
+        let (live, mut live_monitor) =
+            crate::utils::zmq::connect_sub_socket_with_monitor(endpoint, topic).await?;
+        let ctx = tmq::Context::new();
+        let replay = tmq::dealer(&ctx)
+            .set_linger(0)
+            .set_ipv6(true)
+            .set_rcvhwm(8)
+            .set_maxmsgsize(LIMIT as i64)
+            .monitor(
+                "inproc://replay-monitor",
+                zmq::SocketEvent::HANDSHAKE_SUCCEEDED as i32
+                    | zmq::SocketEvent::DISCONNECTED as i32,
+            )
+            .connect(replay_endpoint)?;
+        let mut replay_monitor = tmq::pair(&ctx).connect("inproc://replay-monitor")?;
+        tokio::try_join!(connected(&mut live_monitor), connected(&mut replay_monitor))?;
+        Ok::<_, anyhow::Error>((live, live_monitor, replay, replay_monitor))
+    };
+    let (mut live, mut live_monitor, mut replay, mut replay_monitor) = tokio::select! {
+        result = tokio::time::timeout(INACTIVITY_TIMEOUT, connect) => result??,
+        command = control.commands.recv() => return command_action(command, &control.status),
+    };
+    let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+    let mut witness = None;
+    let mut is_ready = false;
+    let mut is_replaying = false;
+    let mut replay_through = None;
+    let mut next_replay = tokio::time::Instant::now();
+    let mut replay_deadline = next_replay + INACTIVITY_TIMEOUT;
+    let mut recovery_deadline = next_replay + timeout;
+    loop {
+        tokio::select! {
+            biased;
+            command = control.commands.recv() => match command {
+                Some(KvStreamCommand::RetryReplay(accepted)) => {
+                    is_ready = false;
+                    recovery_deadline = tokio::time::Instant::now() + timeout;
+                    control.status.send_replace(KvStreamStatus::Recovering);
+                    let _ = accepted.send(());
+                    next_replay = tokio::time::Instant::now();
+                },
+                command => return command_action(command, &control.status),
+            },
+            _ = live_monitor.next() => bail!("KV live connection lost; engine identity must be rechecked"),
+            _ = replay_monitor.next() => bail!("KV replay connection lost; engine identity must be rechecked"),
+            _ = tokio::time::sleep_until(recovery_deadline), if !is_ready => bail!("KV recovery deadline exceeded"),
+            _ = tokio::time::sleep_until(replay_deadline), if is_replaying => bail!("KV replay timed out; history availability is unknown"),
+            _ = tokio::time::sleep_until(next_replay), if !is_replaying => {
+                tokio::time::timeout(INACTIVITY_TIMEOUT, replay.send(tmq::Multipart::from(vec![
+                    Vec::new(), cursor.next().to_be_bytes().to_vec(),
+                ]))).await??;
+                is_replaying = true;
+                replay_through = None;
+                replay_deadline = tokio::time::Instant::now() + INACTIVITY_TIMEOUT;
+            },
+            message = replay.next(), if is_replaying => {
+                let frames = multipart_message(message.ok_or_else(|| anyhow::anyhow!("KV replay socket ended"))??);
+                replay_deadline = tokio::time::Instant::now() + INACTIVITY_TIMEOUT;
+                match decode_replay(frames).map_err(terminal)? {
+                    ReplayFrame::Batch(sequence, payload) => {
+                        replay_through = Some(sequence);
+                        if sequence > cursor.next() && is_ready {
+                            is_ready = false;
+                            recovery_deadline = tokio::time::Instant::now() + timeout;
+                            control.status.send_replace(KvStreamStatus::Recovering);
+                        }
+                        strict_apply(cursor, sequence, payload, normalizer, tx, next_event_id, worker, true).await.map_err(terminal)?;
+                    }
+                    ReplayFrame::End => {
+                        is_replaying = false;
+                        // Bound each drain so a busy producer cannot starve lifecycle commands.
+                        for _ in 0..4096 {
+                            let Some(message) = live.next().now_or_never() else { break };
+                            let (sequence, payload) = live_payload(message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??).map_err(terminal)?;
+                            witness = Some(sequence);
+                            strict_apply(cursor, sequence, payload, normalizer, tx, next_event_id, worker, true).await.map_err(terminal)?;
+                        }
+                        if let Some((expected, got)) = cursor.gap() {
+                            if replay_through.is_some_and(|through| through > expected) {
+                                return Err(MissingHistory { expected, got }.into());
+                            }
+                            if is_ready {
+                                is_ready = false;
+                                recovery_deadline = tokio::time::Instant::now() + timeout;
+                                control.status.send_replace(KvStreamStatus::Recovering);
+                            }
+                            next_replay = tokio::time::Instant::now();
+                        } else if witness.is_some_and(|sequence| sequence < cursor.next()) && cursor.next() > 0 {
+                            if !is_ready {
+                                tokio::time::timeout(INACTIVITY_TIMEOUT, apply(tx, Vec::new())).await
+                                    .map_err(|error| terminal(error.into()))?.map_err(terminal)?;
+                                is_ready = true;
+                                control.status.send_replace(KvStreamStatus::Ready);
+                                if let Some(completion) = completion.take() {
+                                    let _ = completion.send(BootstrapOutcome::Success);
+                                }
+                            }
+                            next_replay = tokio::time::Instant::now() + Duration::from_secs(1);
+                        } else {
+                            control.status.send_if_modified(|status| {
+                                if *status == KvStreamStatus::ProbeRequired { false }
+                                else { *status = KvStreamStatus::ProbeRequired; true }
+                            });
+                            next_replay = tokio::time::Instant::now() + Duration::from_millis(250);
+                        }
+                    }
+                }
+            },
+            message = live.next() => {
+                let (sequence, payload) = live_payload(message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??).map_err(terminal)?;
+                witness = Some(sequence);
+                if sequence > cursor.next() && is_ready {
+                    is_ready = false;
+                    recovery_deadline = tokio::time::Instant::now() + timeout;
+                    control.status.send_replace(KvStreamStatus::Recovering);
+                    next_replay = tokio::time::Instant::now();
+                }
+                strict_apply(cursor, sequence, payload, normalizer, tx, next_event_id, worker, !is_ready).await.map_err(terminal)?;
+            },
+        }
+    }
+}
+
+fn command_action(
+    command: Option<KvStreamCommand>,
+    status: &tokio::sync::watch::Sender<KvStreamStatus>,
+) -> Result<RecoveryAction> {
+    match command {
+        Some(KvStreamCommand::Suspend) => Ok(RecoveryAction::Suspend),
+        Some(KvStreamCommand::ReconnectSameInstance(accepted)) => {
+            status.send_replace(KvStreamStatus::Recovering);
+            let _ = accepted.send(());
+            Ok(RecoveryAction::Reconnect)
+        }
+        Some(KvStreamCommand::RetryReplay(accepted)) => {
+            status.send_replace(KvStreamStatus::Recovering);
+            let _ = accepted.send(());
+            Ok(RecoveryAction::Reconnect)
+        }
+        None => Err(terminal(anyhow::anyhow!("KV recovery controller stopped"))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn strict_apply(
+    cursor: &mut ReplayCursor,
+    sequence: u64,
+    payload: Vec<u8>,
+    normalizer: &mut ZmqEventNormalizer,
+    tx: &mpsc::UnboundedSender<PublisherInput>,
+    next_event_id: &AtomicU64,
+    worker: WorkerWithDpRank,
+    needs_ack: bool,
+) -> Result<()> {
+    if sequence > cursor.next() {
+        let batch = decode_event_batch(&payload)?;
+        anyhow::ensure!(
+            !batch
+                .data_parallel_rank
+                .is_some_and(|rank| rank < 0 || rank as u32 != worker.dp_rank),
+            "KV batch belongs to the wrong DP rank"
+        );
+    }
+    cursor.insert(sequence, payload)?;
+    while let Some(payload) = cursor.pending.remove(&cursor.next) {
+        cursor.bytes -= payload.len();
+        let decoded = decode_zmq_kv_batch(vec![
+            Vec::new(),
+            cursor.next.to_be_bytes().to_vec(),
+            payload,
+        ])?;
+        anyhow::ensure!(
+            !decoded
+                .batch
+                .data_parallel_rank
+                .is_some_and(|rank| rank < 0 || rank as u32 != worker.dp_rank),
+            "KV batch belongs to the wrong DP rank"
+        );
+        let events = normalize_batch(decoded.batch, normalizer, worker, next_event_id);
+        if needs_ack {
+            tokio::time::timeout(INACTIVITY_TIMEOUT, apply(tx, events)).await??;
+        } else if !events.is_empty() {
+            tx.send(PublisherInput::Events(events))
+                .map_err(|_| anyhow::anyhow!("KV publisher stopped"))?;
+        }
+        cursor.next = cursor
+            .next
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("KV sequence exhausted"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod socket_tests {
     use super::*;
@@ -307,6 +635,28 @@ mod socket_tests {
     }
     impl Fixture {
         fn new(timeout: Duration) -> Self {
+            Self::with_recovery(timeout, None)
+        }
+        fn strict() -> (
+            Self,
+            tokio::sync::watch::Receiver<KvStreamStatus>,
+            mpsc::Sender<KvStreamCommand>,
+        ) {
+            let (status, updates) = tokio::sync::watch::channel(KvStreamStatus::Recovering);
+            let (commands, receiver) = mpsc::channel(4);
+            (
+                Self::with_recovery(
+                    Duration::from_secs(5),
+                    Some(ZmqRecoveryControl {
+                        status,
+                        commands: receiver,
+                    }),
+                ),
+                updates,
+                commands,
+            )
+        }
+        fn with_recovery(timeout: Duration, recovery: Option<ZmqRecoveryControl>) -> Self {
             let ctx = tmq::Context::new();
             let live = tmq::publish(&ctx)
                 .set_linger(0)
@@ -330,6 +680,7 @@ mod socket_tests {
                 None,
                 None,
                 Some(ZmqBootstrapConfig {
+                    recovery,
                     endpoint: replay.get_socket().get_last_endpoint().unwrap().unwrap(),
                     dp_rank: 0,
                     timeout,
@@ -384,9 +735,196 @@ mod socket_tests {
                 .unwrap()
                 .unwrap()
         }
+        async fn live(&mut self, sequence: u64) {
+            self.live
+                .send(Multipart::from(vec![
+                    vec![],
+                    sequence.to_be_bytes().to_vec(),
+                    payload(0),
+                ]))
+                .await
+                .unwrap();
+        }
+        async fn ready(&mut self) {
+            let id = self.request(0).await;
+            self.live_ack(0).await;
+            self.send(&id, 0, payload(0)).await;
+            self.send(&id, -1, vec![]).await;
+            self.ack().await;
+            assert_eq!(self.result().await, BootstrapOutcome::Success);
+        }
+        async fn live_ack(&mut self, sequence: u64) -> Vec<PlacementEvent> {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut retry = tokio::time::interval(Duration::from_millis(20));
+                loop {
+                    tokio::select! {
+                        input = self.inputs.recv() => {
+                            let Some(PublisherInput::Recovery(events, done)) = input else {
+                                panic!("expected acknowledged live history")
+                            };
+                            done.send(Ok(())).unwrap();
+                            break events;
+                        }
+                        _ = retry.tick() => self.live(sequence).await,
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
     }
     fn payload(rank: i32) -> Vec<u8> {
         rmp_serde::to_vec(&(0.0_f64, vec![vec!["AllBlocksCleared"]], Some(rank))).unwrap()
+    }
+
+    async fn status(
+        updates: &mut tokio::sync::watch::Receiver<KvStreamStatus>,
+        expected: KvStreamStatus,
+    ) {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            updates.wait_for(|value| *value == expected),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_empty_replay_and_probe_completion_require_live_history() {
+        for warm in [false, true] {
+            let (mut f, mut updates, commands) = Fixture::strict();
+            let id = f.request(0).await;
+            if warm {
+                f.send(&id, 0, payload(0)).await;
+                f.ack().await;
+            }
+            f.send(&id, -1, vec![]).await;
+            status(&mut updates, KvStreamStatus::ProbeRequired).await;
+            let (accepted, acknowledgement) = oneshot::channel();
+            commands
+                .send(KvStreamCommand::RetryReplay(accepted))
+                .await
+                .unwrap();
+            acknowledgement.await.unwrap();
+            let first_live = u64::from(warm);
+            let id = f.request(first_live).await;
+            f.send(&id, -1, vec![]).await;
+            status(&mut updates, KvStreamStatus::ProbeRequired).await;
+            assert!(f.outcome.try_recv().is_err());
+            // Actual history, rather than the completed inference, releases startup.
+            assert_eq!(f.live_ack(first_live).await[0].event.event_id, first_live);
+            let id = f.request(first_live + 1).await;
+            f.send(&id, -1, vec![]).await;
+            f.ack().await;
+            assert_eq!(f.result().await, BootstrapOutcome::Success);
+            status(&mut updates, KvStreamStatus::Ready).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_runtime_repairs_gaps_and_idle_tail_without_reapplying_history() {
+        let (mut f, mut updates, _commands) = Fixture::strict();
+        f.ready().await;
+        f.live(2).await;
+        status(&mut updates, KvStreamStatus::Recovering).await;
+        let id = f.request(1).await;
+        f.send(&id, 1, payload(0)).await;
+        f.send(&id, 2, payload(0)).await;
+        f.send(&id, -1, vec![]).await;
+        assert_eq!(f.ack().await[0].event.event_id, 1);
+        assert_eq!(f.ack().await[0].event.event_id, 2);
+        f.ack().await;
+        status(&mut updates, KvStreamStatus::Ready).await;
+        // No subsequent live batch is needed to discover a lost final batch.
+        let id = f.request(3).await;
+        f.send(&id, 3, payload(0)).await;
+        f.send(&id, -1, vec![]).await;
+        assert_eq!(f.ack().await[0].event.event_id, 3);
+        assert_eq!(*updates.borrow(), KvStreamStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn strict_same_instance_reconnect_retains_cursor_and_requires_new_live_witness() {
+        let (mut f, mut updates, commands) = Fixture::strict();
+        f.ready().await;
+        commands.send(KvStreamCommand::Suspend).await.unwrap();
+        status(&mut updates, KvStreamStatus::Recovering).await;
+        let (accepted, acknowledgement) = oneshot::channel();
+        commands
+            .send(KvStreamCommand::ReconnectSameInstance(accepted))
+            .await
+            .unwrap();
+        acknowledgement.await.unwrap();
+        assert_eq!(*updates.borrow(), KvStreamStatus::Recovering);
+        let id = f.request(1).await;
+        f.send(&id, -1, vec![]).await;
+        status(&mut updates, KvStreamStatus::ProbeRequired).await;
+        assert_eq!(f.live_ack(1).await[0].event.event_id, 1);
+        let id = f.request(2).await;
+        f.send(&id, -1, vec![]).await;
+        f.ack().await;
+        status(&mut updates, KvStreamStatus::Ready).await;
+    }
+
+    #[tokio::test]
+    async fn strict_application_failure_does_not_advance_cursor() {
+        let mut cursor = ReplayCursor::new(LIMIT);
+        let mut normalizer = ZmqEventNormalizer::new(4);
+        let (tx, mut inputs) = mpsc::unbounded_channel();
+        let next_id = AtomicU64::new(0);
+        let application = strict_apply(
+            &mut cursor,
+            0,
+            payload(0),
+            &mut normalizer,
+            &tx,
+            &next_id,
+            WorkerWithDpRank::new(1, 0),
+            true,
+        );
+        let (result, ()) = tokio::join!(application, async {
+            let Some(PublisherInput::Recovery(_, done)) = inputs.recv().await else {
+                panic!("expected recovery")
+            };
+            done.send(Err(anyhow::anyhow!("index application failed")))
+                .unwrap();
+        });
+        assert!(result.is_err());
+        assert_eq!(cursor.next(), 0);
+    }
+
+    #[tokio::test]
+    async fn strict_invalid_batch_and_application_error_are_terminal_uncertainty() {
+        for is_wrong_rank in [false, true] {
+            let (mut f, updates, _commands) = Fixture::strict();
+            let id = f.request(0).await;
+            f.send(
+                &id,
+                if is_wrong_rank { 500 } else { 0 },
+                payload(i32::from(is_wrong_rank)),
+            )
+            .await;
+            f.send(&id, -1, vec![]).await;
+            if !is_wrong_rank {
+                let PublisherInput::Recovery(_, done) = f.input().await else {
+                    panic!("expected recovery application")
+                };
+                done.send(Err(anyhow::anyhow!("application failed")))
+                    .unwrap();
+            }
+            assert!(matches!(
+                f.result().await,
+                BootstrapOutcome::Uncertain { .. }
+            ));
+            assert!(matches!(
+                *updates.borrow(),
+                KvStreamStatus::Uncertain {
+                    is_terminal: true,
+                    ..
+                }
+            ));
+        }
     }
 
     #[tokio::test]

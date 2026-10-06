@@ -37,7 +37,9 @@ mod tests;
 mod worker_metrics;
 mod zmq_bootstrap;
 mod zmq_listener;
-pub use zmq_bootstrap::{BootstrapOutcome, ZmqBootstrapConfig};
+pub use zmq_bootstrap::{
+    BootstrapOutcome, KvStreamCommand, KvStreamStatus, ZmqBootstrapConfig, ZmqRecoveryControl,
+};
 
 pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
@@ -87,7 +89,7 @@ pub enum KvEventSourceConfig {
 enum KvEventSource {
     Zmq {
         listener_abort_handle: tokio::task::AbortHandle,
-        supervisor_handle: tokio::task::JoinHandle<bool>,
+        supervisor_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<bool>>>,
     },
 }
 
@@ -173,7 +175,7 @@ impl KvEventSource {
 
                 Ok(KvEventSource::Zmq {
                     listener_abort_handle,
-                    supervisor_handle,
+                    supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
                 })
             }
         }
@@ -183,12 +185,25 @@ impl KvEventSource {
         match self {
             KvEventSource::Zmq {
                 listener_abort_handle,
-                supervisor_handle,
+                ..
             } => {
                 listener_abort_handle.abort();
-                supervisor_handle.abort();
             }
         }
+    }
+
+    async fn stop_and_wait(&self) -> Result<()> {
+        self.shutdown();
+        match self {
+            Self::Zmq {
+                supervisor_handle, ..
+            } => {
+                if let Some(handle) = supervisor_handle.lock().await.take() {
+                    handle.await?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -236,6 +251,7 @@ pub struct KvEventPublisher {
     worker_id: WorkerId,
     /// The channel to send events to.
     tx: mpsc::UnboundedSender<PublisherInput>,
+    processor_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>,
 }
 
 impl KvEventPublisher {
@@ -392,7 +408,7 @@ impl KvEventPublisher {
 
         tracing::info!("Using event plane for KV event publishing");
         let endpoint_clone = endpoint.clone();
-        component.drt().runtime().secondary().spawn(async move {
+        let processor_handle = component.drt().runtime().secondary().spawn(async move {
             let event_publisher =
                 match dynamo_runtime::transports::event_plane::EventPublisher::for_endpoint_id(
                     endpoint_clone.drt(),
@@ -404,7 +420,7 @@ impl KvEventPublisher {
                     Ok(publisher) => publisher,
                     Err(e) => {
                         tracing::error!("Failed to create event publisher: {}", e);
-                        return;
+                        return Err(e);
                     }
                 };
             let publisher_id = event_publisher.publisher_id();
@@ -439,7 +455,7 @@ impl KvEventPublisher {
                 if let Some(endpoint) = recovery_endpoint {
                     let _ = endpoint.shutdown().await;
                 }
-                return;
+                return Ok(());
             }
 
             let source = DiscoveredKvEventSource {
@@ -463,7 +479,7 @@ impl KvEventPublisher {
                         if let Some(endpoint) = recovery_endpoint {
                             let _ = endpoint.shutdown().await;
                         }
-                        return;
+                        return Err(error.into());
                     }
                 },
             };
@@ -474,7 +490,7 @@ impl KvEventPublisher {
                     if let Some(endpoint) = recovery_endpoint {
                         let _ = endpoint.shutdown().await;
                     }
-                    return;
+                    return Err(error);
                 }
             };
 
@@ -488,19 +504,25 @@ impl KvEventPublisher {
             )
             .await;
 
-            if let Err(error) = component
+            let unregister_result = component
                 .drt()
                 .discovery()
                 .unregister(source_instance)
-                .await
-            {
+                .await;
+            if let Err(error) = &unregister_result {
                 tracing::warn!(%error, publisher_id, "Failed to unregister KV event source");
             }
-            if let Some(endpoint) = recovery_endpoint
-                && let Err(error) = endpoint.shutdown().await
-            {
+            let shutdown_result = if let Some(endpoint) = recovery_endpoint {
+                endpoint.shutdown().await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = &shutdown_result {
                 tracing::warn!(%error, publisher_id, "Failed to stop KV recovery endpoint");
             }
+            unregister_result?;
+            shutdown_result?;
+            Ok(())
         });
 
         Ok(Self {
@@ -510,6 +532,7 @@ impl KvEventPublisher {
             cancellation_token,
             worker_id,
             tx,
+            processor_handle: tokio::sync::Mutex::new(Some(processor_handle)),
         })
     }
 
@@ -624,6 +647,18 @@ impl KvEventPublisher {
         if let Some(source) = self.source.take() {
             source.shutdown();
         }
+    }
+
+    /// Retire the source before attaching a replacement engine's publishers.
+    pub async fn stop_and_wait(&self) -> Result<()> {
+        self.cancellation_token.cancel();
+        if let Some(source) = &self.source {
+            source.stop_and_wait().await?;
+        }
+        if let Some(handle) = self.processor_handle.lock().await.take() {
+            handle.await??;
+        }
+        Ok(())
     }
 }
 

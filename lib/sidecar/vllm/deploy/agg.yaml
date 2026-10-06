@@ -39,11 +39,10 @@ spec:
       spec:
         # vllm-engine as a native sidecar (initContainer, restartPolicy: Always):
         # it starts before `main` and stops after it. Stock multi-arch vLLM image
-        # (v0.28.0 ships vllm-rs; its base gRPC services match the sidecar's pinned
-        # vllm-proto crate, while RL requires the documented legacy world-size option).
+        # containing Control.Shutdown for sidecar KV-history recovery.
         initContainers:
         - name: vllm-engine
-          image: vllm/vllm-openai:v0.28.0
+          image: vllm/vllm-openai:nightly-21d93d0d8c0e9627900020382bfce4730e61cab7
           restartPolicy: Always
           # These lightweight lifecycle probes confirm that the loopback listener
           # accepts connections. The Dynamo sidecar independently waits for both

@@ -68,6 +68,11 @@ KV_EVENT_DIR=""
 if [[ -z "${VLLM_PREFILL_KV_EVENT_ENDPOINT:-}" ]]; then
     KV_EVENT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dynamo-vllm-kv.XXXXXX")"
     VLLM_PREFILL_KV_EVENT_ENDPOINT="ipc://${KV_EVENT_DIR}/events"
+if [[ "$VLLM_PREFILL_KV_EVENT_ENDPOINT" == ipc://* ]]; then
+    VLLM_PREFILL_KV_REPLAY_ENDPOINT="${VLLM_PREFILL_KV_REPLAY_ENDPOINT:-${VLLM_PREFILL_KV_EVENT_ENDPOINT}.replay}"
+else
+    VLLM_PREFILL_KV_REPLAY_ENDPOINT="${VLLM_PREFILL_KV_REPLAY_ENDPOINT:-${VLLM_PREFILL_KV_EVENT_ENDPOINT%:*}:$(( ${VLLM_PREFILL_KV_EVENT_ENDPOINT##*:} + 100 ))}"
+fi
 fi
 
 lora_exit_trap() {
@@ -164,7 +169,7 @@ vllm-rs serve "$MODEL" \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\",\"enable_kv_cache_events\":true}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\",\"replay_endpoint\":\"${VLLM_PREFILL_KV_REPLAY_ENDPOINT}\",\"buffer_steps\":${VLLM_KV_EVENT_BUFFER_STEPS:-10000},\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

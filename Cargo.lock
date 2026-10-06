@@ -3274,6 +3274,8 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
+ "hyper-util",
+ "parking_lot",
  "prost-types 0.14.3",
  "reqwest 0.12.28",
  "serde",
@@ -3284,6 +3286,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.14.6",
  "tonic-health 0.14.6",
+ "tower 0.5.3",
  "tracing",
  "vllm-proto",
 ]
@@ -11235,9 +11238,9 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "vllm-proto"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77383505a016d5090ecf460297c815752339669aee187e29111baf444cd6e171"
+checksum = "baa2617ffd1d9a203c4e434537d0c174bb198065299630976ec37f38887fc2b1"
 dependencies = [
  "prost 0.14.3",
  "prost-types 0.14.3",

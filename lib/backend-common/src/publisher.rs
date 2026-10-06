@@ -30,9 +30,7 @@ use crate::metrics::{ComponentGauges, EngineMetrics};
 use crate::snapshot_publisher::SnapshotPublisher;
 
 /// Live publisher handles owned by `Worker` for the lifetime of serving.
-/// They keep the underlying publishers alive; there is no task to join during cleanup.
 pub(crate) struct PublisherHandles {
-    #[allow(dead_code)]
     kv_publishers: Vec<Arc<KvEventPublisher>>,
     /// Stashed so the engine's `Arc<SnapshotPublisher>` reference stays
     /// valid for the worker's lifetime. Engines drop their copy when
@@ -44,6 +42,44 @@ pub(crate) struct PublisherHandles {
 }
 
 impl PublisherHandles {
+    pub(crate) async fn stop_kv(&mut self) -> Result<(), DynamoError> {
+        for publisher in &self.kv_publishers {
+            publisher
+                .stop_and_wait()
+                .await
+                .map_err(|e| publisher_err(format!("KV publisher shutdown: {e}")))?;
+        }
+        self.kv_publishers.clear();
+        Ok(())
+    }
+
+    pub(crate) fn replace_kv(
+        &mut self,
+        endpoint: &Endpoint,
+        kv_state_endpoint: &EndpointId,
+        sources: Vec<KvEventSource>,
+        block_size: Option<u32>,
+        enable_local_indexer: bool,
+    ) -> Result<(), DynamoError> {
+        debug_assert!(self.kv_publishers.is_empty());
+        self.kv_publishers = match block_size {
+            Some(block_size) => setup_kv_publishers(
+                endpoint,
+                kv_state_endpoint,
+                sources,
+                block_size,
+                enable_local_indexer,
+            )?,
+            None if sources.is_empty() => Vec::new(),
+            None => {
+                return Err(publisher_err(
+                    "replacement engine has KV sources without a block size".into(),
+                ));
+            }
+        };
+        Ok(())
+    }
+
     pub(crate) fn first_token_source(&self) -> Option<FirstTokenSource> {
         self.first_token_source.clone()
     }

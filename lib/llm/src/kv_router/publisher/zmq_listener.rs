@@ -56,7 +56,7 @@ pub(super) async fn start_zmq_listener(
     next_event_id: Arc<AtomicU64>,
     image_token_id: Option<u32>,
     video_token_id: Option<u32>,
-    bootstrap: Option<ZmqBootstrapConfig>,
+    mut bootstrap: Option<ZmqBootstrapConfig>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -67,6 +67,21 @@ pub(super) async fn start_zmq_listener(
     let mut normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(image_token_id)
         .with_video_token_id(video_token_id);
+    if let Some(recovery) = bootstrap.as_mut().and_then(|config| config.recovery.take()) {
+        super::zmq_bootstrap::recovering_listener(
+            &zmq_endpoint,
+            &zmq_topic,
+            &mut normalizer,
+            &tx,
+            &next_event_id,
+            worker_id,
+            bootstrap.expect("recovery configuration"),
+            recovery,
+            cancellation_token,
+        )
+        .await;
+        return;
+    }
     let connection = if bootstrap.is_some() {
         connect_sub_socket_with_monitor(&zmq_endpoint, &zmq_topic)
             .await

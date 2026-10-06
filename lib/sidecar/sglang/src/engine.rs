@@ -739,6 +739,7 @@ impl LLMEngine for SglangSidecarEngine {
                     dp_rank: source.dp_rank,
                     image_token_id: None,
                     bootstrap: Some(ZmqBootstrapConfig {
+                        recovery: None,
                         endpoint: source.replay_endpoint.clone(),
                         dp_rank: source.dp_rank,
                         timeout: self.transport.startup_deadline,

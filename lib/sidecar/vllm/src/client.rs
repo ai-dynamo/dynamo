@@ -178,6 +178,19 @@ impl VllmClient {
             .map_err(|status| status_to_dynamo("GenerateStream", status))
     }
 
+    pub(crate) async fn watch_service(
+        &self,
+        service: &str,
+    ) -> Result<tonic::Streaming<tonic_health::pb::HealthCheckResponse>, DynamoError> {
+        HealthClient::new(self.pool.next_channel())
+            .watch(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("Health.Watch", status))
+    }
+
     pub(crate) async fn kv_event_sources(&self) -> Result<Vec<pb::KvEventSource>, DynamoError> {
         let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
@@ -224,6 +237,49 @@ impl VllmClient {
             .await
             .map(|response| response.adapters)
     }
+}
+
+// Keep identity verification and Shutdown on one connection that cannot redial a replacement.
+pub(crate) async fn shutdown_instance(
+    endpoint: &GrpcEndpoint,
+    expected_instance: &str,
+) -> Result<bool, tonic::Status> {
+    let transport = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+        .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
+    let address = format!(
+        "{}:{}",
+        endpoint.authority_host(),
+        transport.uri().port_u16().unwrap_or(80)
+    );
+    let mut socket = Some(
+        tokio::net::TcpStream::connect(address)
+            .await
+            .map_err(|error| tonic::Status::unavailable(error.to_string()))?,
+    );
+    let channel = transport
+        .connect_with_connector(tower::service_fn(move |_| {
+            let socket = socket.take();
+            async move {
+                socket.map(hyper_util::rt::TokioIo::new).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "shutdown connection closed; recheck engine identity",
+                    )
+                })
+            }
+        }))
+        .await
+        .map_err(|error| tonic::Status::unavailable(error.to_string()))?;
+    let mut control = pb::control_client::ControlClient::new(channel);
+    let observed = control
+        .get_server_info(pb::GetServerInfoRequest {})
+        .await?
+        .into_inner();
+    if observed.instance_id != expected_instance {
+        return Ok(false);
+    }
+    control.shutdown(pb::ShutdownRequest {}).await?;
+    Ok(true)
 }
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {

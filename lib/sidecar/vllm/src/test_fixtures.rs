@@ -82,6 +82,7 @@ pub(crate) fn sequence_response(
     pb::GenerateResponse {
         prompt_info: None,
         outputs: Some(pb::SequenceOutput {
+            sampling_mask: Vec::new(),
             index: 0,
             text: " token".to_string(),
             num_tokens: 1,
@@ -125,6 +126,7 @@ pub(crate) fn encode_response(
     pb::GenerateResponse {
         prompt_info: None,
         outputs: Some(pb::SequenceOutput {
+            sampling_mask: Vec::new(),
             index: 0,
             text: String::new(),
             num_tokens: 0,
