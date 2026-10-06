@@ -144,11 +144,20 @@ def _apply_router_config(dgd: dict[str, Any], candidate: CandidateLike) -> None:
         for field, env_name in (
             ("overlap_score_credit", "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"),
             ("prefill_load_scale", "DYN_ROUTER_PREFILL_LOAD_SCALE"),
-            ("temperature", "DYN_ROUTER_TEMPERATURE"),
         ):
             value = router.get(field)
             if value is not None:
                 env_values[env_name] = str(value)
+
+        # Native SmartSearchConfig calls this router_temperature; the public
+        # adapter config uses the canonical temperature name.
+        temperature = (
+            router["temperature"]
+            if "temperature" in router
+            else router.get("router_temperature")
+        )
+        if temperature is not None:
+            env_values["DYN_ROUTER_TEMPERATURE"] = str(temperature)
         env_values["DYN_ROUTER_PREFILL_LOAD_MODEL"] = "none"
 
     from dynamo.profiler.utils.config import (

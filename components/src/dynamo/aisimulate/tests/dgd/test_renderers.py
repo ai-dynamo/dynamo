@@ -451,6 +451,54 @@ spec:
     }
 
 
+@pytest.mark.parametrize(
+    ("router_config", "expected_temperature"),
+    [
+        ({"mode": "kv_router", "router_temperature": 0.7}, "0.7"),
+        (
+            {
+                "mode": "kv_router",
+                "router_temperature": 0.7,
+                "temperature": 0.2,
+            },
+            "0.2",
+        ),
+    ],
+)
+def test_patch_manifest_preserves_native_router_temperature(
+    monkeypatch, router_config, expected_temperature
+) -> None:
+    _stub_legacy_materialization(monkeypatch)
+
+    patched = base_module.patch_dgd_manifest(
+        """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          args: []
+""",
+        _candidate(adapters={"dynamo.router": router_config}),
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    frontend = yaml.safe_load(patched)["spec"]["components"][0]
+    env = {
+        item["name"]: item["value"]
+        for item in frontend["podTemplate"]["spec"]["containers"][0]["env"]
+    }
+    assert env["DYN_ROUTER_TEMPERATURE"] == expected_temperature
+
+
 def test_patch_manifest_rejects_router_runtime_model_without_configuration(
     monkeypatch,
 ) -> None:
