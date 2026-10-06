@@ -12,7 +12,6 @@ from PIL import Image
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.video_loader import VideoLoader
-from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.vllm.multimodal_utils import request_processor as mod
 from dynamo.vllm.multimodal_utils.models import qwen as qwen_mod
 
@@ -148,9 +147,8 @@ async def test_image_cache_has_no_scope_for_malformed_scope():
 async def test_worker_video_media_io_kwargs_control_vllm_decode(monkeypatch):
     """Request-level video kwargs reach vLLM's media decoder.
 
-    The fixture is VP9, which is not in HW_ROUTED_CODECS, so should_use_nvdec is
-    False and the clip goes to vLLM -- the path that owns the media_io_kwargs
-    contract. With num_frames=2 vLLM linspace-samples the endpoints of a 4-frame
+    Codec probing is stubbed to VP9 and NVDEC routing to False, so the clip goes
+    to vLLM -- the path that owns the media_io_kwargs contract. With num_frames=2 vLLM linspace-samples the endpoints of a 4-frame
     clip, so it must return source frames 0 and 3.
     """
     size = 16
@@ -160,9 +158,10 @@ async def test_worker_video_media_io_kwargs_control_vllm_decode(monkeypatch):
     frames = np.array(
         [np.full((size, size, 3), color, dtype=np.uint8) for color in colors],
     )
-    video_uri = "data:video/mp4;base64," + base64.b64encode(
-        encode_to_video_bytes(frames, fps=4, output_format="mp4")
-    ).decode("ascii")
+    # The decoder is faked, so the payload only has to be a valid data URI.
+    video_uri = "data:video/mp4;base64," + base64.b64encode(b"fake-video").decode()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda data: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda codec: False)
     processor = _processor(
         video_loader=VideoLoader(),
     )
@@ -237,12 +236,11 @@ async def test_worker_video_media_io_kwargs_control_nvdec_decode(
     ``test_nvdec_decoder.py``.
     """
     frames = np.zeros((8, 16, 16, 3), dtype=np.uint8)
-    video_uri = "data:video/mp4;base64," + base64.b64encode(
-        encode_to_video_bytes(frames, fps=4, output_format="mp4")
-    ).decode("ascii")
+    # The decoder is faked, so the payload only has to be a valid data URI.
+    video_uri = "data:video/mp4;base64," + base64.b64encode(b"fake-video").decode()
 
-    # Route to NVDEC regardless of what the fixture encoder produced: it does
-    # not let the test pick H.264, and codec probing has its own unit tests.
+    # Stub codec probing to H.264 and route to NVDEC. Codec probing has its own
+    # unit tests.
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda data: "h264")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda codec: True)
     requested = {}
@@ -740,7 +738,10 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    # vLLM #53610 skips modalities with no missing items, so both forms mean "none missing".
+    parse_mm_data.assert_called_once()
+    assert parse_mm_data.call_args.args in (({"vision_chunk": []},), ({},))
+    assert parse_mm_data.call_args.kwargs == {"validate": False}
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()

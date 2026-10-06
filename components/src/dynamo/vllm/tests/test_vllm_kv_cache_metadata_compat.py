@@ -93,7 +93,13 @@ def test_enable_preserves_plugin_selection(monkeypatch, allowlist, ray_vars):
         *(ray_vars.split(",") if ray_vars else []),
         compat._ACTIVATION_ENV,
     ]
-    envs.validate_environ(hard_fail=True)
+    # vLLM #48599 moved validate_environ from vllm.envs to the platform class.
+    validate_environ = getattr(envs, "validate_environ", None)
+    if validate_environ is None:
+        from vllm.platforms import current_platform
+
+        validate_environ = current_platform.validate_environ
+    validate_environ(hard_fail=True)
     if allowlist is None:
         assert "VLLM_PLUGINS" not in os.environ
     else:

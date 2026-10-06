@@ -68,11 +68,13 @@ async def _stream_audio(audio_stream, input_stream):
         yield chunk
 
 
-def _handler(engine: _FakeEngine) -> RealtimeTranscriptionHandler:
+def _handler(
+    engine: _FakeEngine, model_sample_rate: float = 16_000.0
+) -> RealtimeTranscriptionHandler:
     return RealtimeTranscriptionHandler(
         engine_client=engine,
         model_name=MODEL,
-        model_sample_rate=16_000.0,
+        model_sample_rate=model_sample_rate,
         streaming_input_factory=_stream_audio,
         sampling_params_factory=lambda: object(),
     )
@@ -142,6 +144,8 @@ def test_rejects_unsupported_session_type():
 
 
 def test_transcription_session_streams_canonical_events_and_resamples_audio():
+    # Workaround: this image has no vLLM-Omni, which brought scipy for resampling.
+    pytest.importorskip("scipy", reason="workaround: no vLLM-Omni, so no scipy")
     pcm = np.linspace(-12_000, 12_000, 2_400, dtype=np.int16).tobytes()
     engine = _FakeEngine()
     events = [
@@ -267,11 +271,12 @@ def test_server_vad_is_rejected_until_worker_supports_it():
 
 
 def test_clear_cancels_uncommitted_turn_and_allows_next_utterance():
+    # The model rate matches the 24 kHz session, so these turns skip resampling.
     pcm = base64.b64encode(np.ones(480, dtype=np.int16).tobytes()).decode()
     engine = _FakeEngine()
     result = asyncio.run(
         _drive(
-            _handler(engine),
+            _handler(engine, model_sample_rate=24_000.0),
             [
                 {"type": "session.update", "session": _session()},
                 {"type": "input_audio_buffer.append", "audio": pcm},
@@ -292,6 +297,8 @@ def test_clear_cancels_uncommitted_turn_and_allows_next_utterance():
 
 
 def test_next_turn_is_pumped_while_previous_turn_uses_engine_slot():
+    # The model rate matches the 24 kHz session, so these turns skip resampling.
+
     class _BlockingFirstEngine:
         def __init__(self, release: asyncio.Event) -> None:
             self.release = release
@@ -312,7 +319,7 @@ def test_next_turn_is_pumped_while_previous_turn_uses_engine_slot():
     async def scenario():
         release = asyncio.Event()
         engine = _BlockingFirstEngine(release)
-        handler = _handler(engine)
+        handler = _handler(engine, model_sample_rate=24_000.0)
         pcm = base64.b64encode(np.ones(480, dtype=np.int16).tobytes()).decode()
 
         async def request_stream():
@@ -355,6 +362,8 @@ def test_from_engine_rejects_unsupported_model_at_startup(monkeypatch):
 
 
 def test_native_transcription_emits_before_commit_and_feeds_tokens_back():
+    # The model rate matches the 24 kHz session, so these turns skip resampling.
+
     async def scenario():
         partial_received = asyncio.Event()
         feedback = []
@@ -375,7 +384,7 @@ def test_native_transcription_emits_before_commit_and_feeds_tokens_back():
         handler = RealtimeTranscriptionHandler(
             engine_client=FeedbackEngine(),
             model_name=MODEL,
-            model_sample_rate=16_000,
+            model_sample_rate=24_000,
             streaming_input_factory=streaming_input,
             sampling_params_factory=lambda: object(),
         )

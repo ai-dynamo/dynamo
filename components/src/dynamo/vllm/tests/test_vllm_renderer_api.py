@@ -384,6 +384,9 @@ class TestVllmRendererApi:
             "abort_immediately",
             "session_id",
         )
+        # vLLM #53423 appends kv_hints. Dynamo reads request fields by name.
+        if "kv_hints" in EngineCoreRequest.__struct_fields__:
+            expected_request_fields += ("kv_hints",)
         expected_output_fields = (
             "request_id",
             "new_token_ids",
