@@ -12,7 +12,7 @@ model:
 status: experimental
 targets:
 - id: vllm-agg-gb200
-  recommended: true
+  recommended: false
   hardware:
     gpu: GB200
     count: 8
@@ -44,7 +44,7 @@ targets:
     summary: 'Concurrency 168, 953.08 output tok/s/GPU, output per user p50 51.83 tok/s, TTFT p50/p99 286.75/26793.16
       ms, per-request mean ITL p50/p99 19.29/110.46 ms.'
 - id: vllm-disagg-gb200
-  recommended: false
+  recommended: true
   hardware:
     gpu: GB200
     count: 8

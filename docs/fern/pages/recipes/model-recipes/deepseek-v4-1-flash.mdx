@@ -305,6 +305,12 @@ curl -sS http://localhost:8000/v1/chat/completions \
 
 Check that the response contains an answer.
 
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
+
+For disaggregated SGLang, HTTP 200 can still contain `content: null` and zero completion tokens when KV transfer fails. Require a nonempty answer. The generic manifest forces Mooncake TCP with `MC_FORCE_TCP=1`; the GKE variant uses RDMA. If you select the NVLink fabric path, place both workers in one NVLink clique. A split can log `cuMemImportFromShareableHandle failed: 400` and return an empty answer.
+
+</div>
+
 ## Measured Performance
 
 <div data-recipe-framework="vllm">
@@ -312,14 +318,17 @@ Check that the response contains an answer.
 Results for the agentic workload (64K input tokens, 400 output tokens), using
 eight B200/GB200 GPUs, 16 H200 GPUs for aggregated serving, or eight H200 GPUs for disaggregated serving. Output throughput includes reasoning tokens.
 
-| Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | B200 | 168 | 990.57 | 54.69 | 178.66 |
-| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | B200 | 184 | 1,087.71 | 82.12 | 135.12 |
-| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | GB200 | 168 | 953.08 | 51.83 | 286.75 |
-| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | GB200 | 168 | 1,154.87 | 80.85 | 169.02 |
-| Agentic (64K input, 400 output) | Aggregated (4 × TP4) | vLLM | H200 | 80 | 209.18 | 51.32 | 171.29 |
-| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | H200 | 64 | 359.41 | 50.63 | 177.59 |
+| Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) | TTFT P90 (ms) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | B200 | 168 | 990.57 | 54.69 | 178.66 | 3,068.28 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | B200 | 184 | 1,087.71 | 82.12 | 135.12 | 90,076.83 |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | GB200 | 168 | 953.08 | 51.83 | 286.75 | 3,524.82 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | GB200 | 168 | 1,154.87 | 80.85 | 169.02 | 57,116.54 |
+| Agentic (64K input, 400 output) | Aggregated (4 × TP4) | vLLM | H200 | 80 | 209.18 | 51.32 | 171.29 | 6,368.76 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | H200 | 64 | 359.41 | 50.63 | 177.59 | 35,043.23 |
+
+The catalog recommends GB200 disaggregated for maximum measured system output
+throughput per GPU at these operating points.
 
 For GB200 at the selected concurrency, disaggregated serving delivers 21%
 more output tok/s/GPU and 56% more p50 user tok/s. TTFT p90 rises from
@@ -362,10 +371,12 @@ and tool-call parsers. In the table below, P/D means prefill/decode.
 | Conditional disaggregation | N/A | `isl_bounding` | Enabled, default policy | N/A | `isl_bounding` |
 | KV transfer | N/A | NIXL/UCX over InfiniBand | NIXL/UCX within one NVLink clique | N/A | NIXL/UCX over InfiniBand |
 
-Aggregated routing sets the decode-active-request weight to 50. B200
-conditional routing sets the effective-input threshold to 2,048, input-ratio
-threshold to 0.70, and decode-busy threshold to 0.50. See the linked Kustomize
-sources for the complete flags and container images.
+Aggregated targets and H200 disaggregated set the decode-active-request weight
+to 50. B200 and H200 disaggregated use `isl_bounding` with effective-input
+threshold 2,048, input-ratio threshold 0.70, and decode-busy threshold 0.50.
+With the measured image, both B200 disaggregated workers logged
+`Using DeepSeek's nvfp4_ds_mla KV cache format` when `kv_cache_dtype=auto`.
+See the linked Kustomize sources for the complete flags and container images.
 
 </div>
 

@@ -25,12 +25,12 @@ spec:
       spec:
         containers:
         - args:
+          - -m
+          - dynamo.frontend
           - --http-port
           - '8000'
           command:
           - python3
-          - -m
-          - dynamo.frontend
           env:
           - name: HF_HUB_OFFLINE
             value: '1'
@@ -62,6 +62,8 @@ spec:
       spec:
         containers:
         - args:
+          - -m
+          - dynamo.vllm
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
@@ -106,8 +108,6 @@ spec:
           - '1024'
           command:
           - python3
-          - -m
-          - dynamo.vllm
           env:
           - name: HF_HOME
             value: /shared-model-cache
@@ -161,6 +161,8 @@ spec:
       spec:
         containers:
         - args:
+          - -m
+          - dynamo.vllm
           - --disaggregation-mode
           - decode
           - --kv-transfer-config
@@ -205,8 +207,6 @@ spec:
           - '1024'
           command:
           - python3
-          - -m
-          - dynamo.vllm
           env:
           - name: HF_HOME
             value: /shared-model-cache
