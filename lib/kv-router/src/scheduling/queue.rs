@@ -1663,10 +1663,8 @@ impl<
                     self.block_size,
                 ))
                 .map(|mut selection| {
-                    // A session-affinity selection is measured against every worker the
-                    // router could otherwise have picked, so cache-quality metrics keep
-                    // meaning "best eligible worker" when affinity made the call. Explicit
-                    // pins (no affinity target) keep the selection eligibility.
+                    // Measure affinity selections against every eligible worker so cache
+                    // metrics still mean "best eligible worker"; explicit pins are not widened.
                     let metrics_eligibility = if request.affinity_target.is_some() {
                         let unconstrained = RoutingEligibility::new(
                             request.allowed_worker_ids.as_ref(),
