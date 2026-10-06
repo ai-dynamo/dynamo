@@ -46,6 +46,70 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### v1.6.0
+
+#### CRD and admission breaking changes
+
+##### Reserved runtime init container name
+
+**Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
+sidecar mode for that component. The runtime container must specify an image and `restartPolicy: Always`.
+Dynamo defaults and runtime-version resolution target this container;
+`spec.components[*].podTemplate.spec.containers[name=main]` runs the engine.
+
+In v1alpha1, the corresponding paths are `spec.services.<service-name>.extraPodSpec.initContainers[name=runtime]`
+and `spec.services.<service-name>.extraPodSpec.mainContainer`.
+
+Only worker, prefill, and decode components support this mode. Multinode, enabled checkpoint, GPU memory
+service, and failover are currently unsupported and rejected. Support for these features is planned for a future release.
+
+**Affected:** Any deployment with `spec.components[*].podTemplate.spec.initContainers[name=runtime]`,
+including an unrelated setup container using that name.
+
+**Action:** Before upgrading, rename unrelated containers at
+`spec.components[*].podTemplate.spec.initContainers[name=runtime]`. For native Dynamo sidecars, declare
+`spec.components[*].podTemplate.spec.initContainers[name=runtime]` and specify `restartPolicy: Always`.
+
+**Existing deployments:** Components without `spec.components[*].podTemplate.spec.initContainers[name=runtime]`
+retain their current mode. Existing components with that entry adopt sidecar behavior when
+reconciled, which can change the rendered pod and trigger a rollout. Invalid combinations are
+rejected on updates.
+
+#### Operator behavior breaking changes
+
+##### Frontend sidecar identity in container discovery mode
+
+**Change:** The operator now sets `CONTAINER_NAME` to the container selected by
+`spec.components[*].frontendSidecar`, rather than `main`.
+In container discovery mode, the frontend registers as `{pod}-<name>`, where `<name>` is
+`spec.components[*].frontendSidecar`, instead of sharing the `{pod}` identity.
+
+**Affected:** Existing components with `spec.components[*].frontendSidecar` and
+`nvidia.com/dynamo-kube-discovery-mode: container`.
+
+**Action:** Plan for a one-time rollout of affected worker pods when upgrading the operator
+to v1.6.0. Update any tooling that depends on the frontend's previous registration identity.
+
+**Existing deployments:** Reconciliation updates the frontend container's `CONTAINER_NAME`,
+which changes the pod template and triggers the rollout even without a manifest change.
+Components without a frontend sidecar or using pod discovery are unaffected by this change.
+
+#### Dependency compatibility
+
+**Change:** The bundled Grove version is now `v0.1.0-alpha.14`. It provides the group-wide pod
+index and environment-variable ordering used by Dynamo's backend-independent `DYNAMO_RANK` and
+`DYNAMO_LEADER_ADDRESS` aliases.
+
+**Affected:** New multinode DGDs created by Dynamo 1.6.0 when Grove is managed outside the platform
+chart.
+
+**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.14` or later before
+creating new multinode DGDs.
+
+**Existing deployments:** The operator origin version gates alias injection. An operator-only
+upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
+add the aliases.
+
 ### v1.5.0
 
 #### CRD and admission breaking changes
@@ -239,7 +303,7 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.6.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.13 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.14 |
 | oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
@@ -392,10 +456,12 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
+| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
 [v1.4.0 upgrade notes](#v140) for the topology API transition and the
-[v1.5.0 upgrade notes](#v150) for Grove CRD installation and the required KAI staleness setting.
+[v1.5.0 upgrade notes](#v150) for Grove CRD installation and the required KAI staleness setting,
+and the [v1.6.0 upgrade notes](#v160) for the multinode topology aliases.
 
 After installing them separately, enable Dynamo integration:
 

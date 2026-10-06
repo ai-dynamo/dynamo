@@ -20,12 +20,13 @@ Runtime data-contract notes (not code-level shims):
   >= 0.5.11. Pass through; do not re-encode.
 """
 
+import argparse
 import importlib
 import inspect
 import logging
 import uuid
 from collections.abc import Mapping
-from functools import lru_cache, wraps
+from functools import lru_cache
 from types import ModuleType
 from typing import Any
 
@@ -34,7 +35,8 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name != "sglang.srt.utils.server_args_config_parser":
         raise
-    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
+    # Fallback for the separately pinned XPU SGLang 0.5.11.
+    # Remove when the XPU pin is upgraded to 0.5.19+.
     from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 try:
@@ -42,8 +44,8 @@ try:
         model_config_of as sglang_model_config_of,
     )
 except ImportError:
-    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.get_model_config().
-    # Remove when min supported version has the accessor move (sgl #36972).
+    # Fallback for XPU SGLang 0.5.11, which exposes ServerArgs.get_model_config().
+    # Remove when the XPU pin is upgraded to 0.5.19+.
     sglang_model_config_of = None
 
 try:
@@ -51,15 +53,15 @@ try:
         use_mla_backend as sglang_use_mla_backend,
     )
 except ImportError:
-    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.use_mla_backend().
-    # Remove when min supported version has the accessor move (sgl #36972).
+    # Fallback for XPU SGLang 0.5.11, which exposes ServerArgs.use_mla_backend().
+    # Remove when the XPU pin is upgraded to 0.5.19+.
     sglang_use_mla_backend = None
 
 try:
     from sglang.srt.runtime_context import publish as _sglang_publish
 except ImportError:
-    # Fallback for SGLang 0.5.18 and the XPU 0.5.11 pin. Remove the 0.5.18
-    # portion when minimum supported SGLang is 0.5.19+.
+    # Fallback for the XPU SGLang 0.5.11 pin.
+    # Remove when the XPU pin is upgraded to 0.5.19+.
     _sglang_publish = None
 
 try:
@@ -118,28 +120,42 @@ def publish_server_args(server_args: Any, *, role: str) -> None:
 
 
 try:
-    from sglang.srt.arg_groups.overrides import declare_late_resolution
+    from sglang.srt.arg_groups.overrides import declare_resolution
 except ImportError:
-    # The separately pinned XPU SGLang 0.5.11 predates declarations. Remove
-    # when the XPU SGLang pin is upgraded to 0.5.18+.
-    declare_late_resolution = None
+    # The separately pinned XPU SGLang 0.5.11 predates declarations.
+    # Remove when that pin is upgraded to 0.5.19+.
+    declare_resolution = None
 
 try:
     from sglang.srt.arg_groups.model_override_base import (
         resolved_view as sglang_resolved_view,
     )
 except ImportError:
-    # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
-    try:
-        from sglang.srt.arg_groups.overrides import (
-            resolved_view as sglang_resolved_view,
-        )
-    except ImportError:
-        # The separately pinned XPU SGLang 0.5.11 stores effective values on
-        # ServerArgs directly. Remove when that pin is upgraded.
-        sglang_resolved_view = None
+    # The separately pinned XPU SGLang 0.5.11 stores effective values on
+    # ServerArgs directly. Remove when that pin is upgraded to 0.5.19+.
+    sglang_resolved_view = None
 
 logger = logging.getLogger(__name__)
+
+
+def add_sglang_cli_compat(parser: argparse.ArgumentParser) -> None:
+    """Keep launch scripts compatible with SGLang's renamed graph options."""
+    legacy_flag = "--disable-piecewise-cuda-graph"
+    options = parser._option_string_actions
+    if legacy_flag in options or "--cuda-graph-backend-prefill" not in options:
+        return
+    # SGLang 0.5.20 removed the alias supplied by 0.5.19. Preserve its exact
+    # translation while launch scripts also support the XPU 0.5.11 pin.
+    # Remove when all supported pins accept --cuda-graph-backend-prefill and
+    # the launch scripts have migrated to that spelling.
+    parser.add_argument(
+        legacy_flag,
+        dest="cuda_graph_backend_prefill",
+        action="store_const",
+        const="disabled",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
 
 
 def get_mm_encoder_class() -> type[Any]:
@@ -152,8 +168,8 @@ def get_mm_encoder_class() -> type[Any]:
     try:
         from sglang.srt.disaggregation.encoder.server import MMEncoder
     except ImportError:
-        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
-        # 0.5.19+.
+        # Fallback for XPU SGLang 0.5.11.
+        # Remove when the XPU pin is upgraded to 0.5.19+.
         from sglang.srt.disaggregation.encode_server import MMEncoder
 
     return MMEncoder
@@ -164,8 +180,8 @@ def get_encoder_preprocessor_modules() -> tuple[ModuleType, ...]:
     modules: list[ModuleType] = []
     for module_path in (
         "sglang.srt.disaggregation.encoder.preprocessor",
-        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
-        # 0.5.19+.
+        # Fallback for XPU SGLang 0.5.11.
+        # Remove when the XPU pin is upgraded to 0.5.19+.
         "sglang.srt.disaggregation.encode_server",
     ):
         try:
@@ -181,8 +197,8 @@ async def mm_encode(
     """Encode media across the supported SGLang MMEncoder APIs."""
     legacy_encode = getattr(encoder, "_encode", None)
     if callable(legacy_encode):
-        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
-        # 0.5.19+.
+        # Fallback for XPU SGLang 0.5.11.
+        # Remove when the XPU pin is upgraded to 0.5.19+.
         return await legacy_encode(media_inputs, modality)
 
     prepare = getattr(encoder, "_prepare_encode_context", None)
@@ -221,50 +237,6 @@ def _warn_require_reasoning_unsupported() -> None:
     )
 
 
-def ensure_sglang_tensor_image_size() -> None:
-    """Allow SGLang's image-token resolver to handle decoded image tensors.
-
-    SGLang 0.5.13 through the 0.5.19 release branch assume every decoded image
-    exposes the PIL ``height``/``width`` attributes. Its CUDA JPEG decoder
-    instead returns a CHW tensor, causing multimodal requests to fall back to
-    retokenization.
-
-    Remove this compatibility override once the minimum supported SGLang
-    release handles tensor image dimensions itself.
-    """
-    import torch
-    from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
-
-    original = getattr(BaseMultimodalProcessor, "resolve_image_token_counts", None)
-    if original is None or getattr(
-        original, "_dynamo_tensor_image_size_support", False
-    ):
-        return
-
-    @wraps(original)
-    def resolve_image_token_counts(self: Any, images: list[Any]) -> list[int]:
-        if not any(isinstance(image, torch.Tensor) for image in images):
-            return original(self, images)
-
-        image_sizes: list[tuple[int, int]] = []
-        for image in images:
-            if isinstance(image, torch.Tensor):
-                if image.ndim < 2:
-                    raise ValueError(f"Invalid image tensor shape: {image.shape}")
-                height, width = image.shape[-2:]
-            else:
-                height, width = image.height, image.width
-            image_sizes.append((int(height), int(width)))
-
-        token_counts = self._processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes
-        ).num_image_tokens
-        return [int(count) for count in token_counts]
-
-    resolve_image_token_counts._dynamo_tensor_image_size_support = True  # type: ignore[attr-defined]
-    BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
-
-
 def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     """Declare launcher-stage SGLang configuration fields.
 
@@ -274,8 +246,8 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     XPU image still uses SGLang 0.5.11, which predates that API; preserve its
     legacy assignment behavior until its engine pin is upgraded.
     """
-    if declare_late_resolution is not None:
-        declare_late_resolution(server_args, source, **fields)
+    if declare_resolution is not None:
+        declare_resolution(server_args, source, **fields)
         return
 
     # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
@@ -287,7 +259,7 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang 0.5.18 and 0.5.19 keep ``ServerArgs`` raw and expose the effective
+    SGLang 0.5.20 and 0.5.21 keep ``ServerArgs`` raw and expose the effective
     projection through ``resolved_view()``. The separately pinned XPU release
     and Dynamo's non-LLM argument stubs retain effective values on the object
     itself.
@@ -354,6 +326,52 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def supports_external_mm_hashes(engine: Any) -> bool:
+    """Enable safe caller-provided MM hashes when this SGLang accepts them.
+
+    Supported SGLang releases apply caller hashes after some processors have
+    already built ``padded_input_ids``. Rebuild that derived field after
+    tokenization so the external hash, item pad value, and padded IDs remain
+    consistent. The repair is idempotent if upstream already rebuilt them.
+    """
+    if "mm_hashes" not in filter_supported_async_generate_kwargs(
+        engine, {"mm_hashes": None}
+    ):
+        return False
+
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
+    if tokenize_one is None or getattr(
+        tokenize_one, "_dynamo_rebuilds_external_mm_padding", False
+    ):
+        return True
+
+    # Deferred: schedule_batch imports torch and other SGLang runtime modules.
+    from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
+
+    async def tokenize_with_consistent_mm_padding(obj):
+        tokenized = await tokenize_one(obj)
+        mm_inputs = getattr(tokenized, "mm_inputs", None)
+        if getattr(obj, "mm_hashes", None) and mm_inputs is not None:
+            padded_input_ids = MultimodalProcessorOutput.build_padded_input_ids(
+                tokenized.input_ids,
+                mm_inputs.mm_items,
+            )
+            if padded_input_ids is not None:
+                mm_inputs.padded_input_ids = padded_input_ids
+        return tokenized
+
+    setattr(
+        tokenize_with_consistent_mm_padding,
+        "_dynamo_rebuilds_external_mm_padding",
+        True,
+    )
+    assert tokenizer_manager is not None
+    tokenizer_manager._tokenize_one_request = tokenize_with_consistent_mm_padding
+
+    return True
+
+
 def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
     """Preserve cache isolation, rejecting salts an older engine cannot honor."""
     if not cache_salt:
@@ -395,8 +413,8 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 __all__ = [
     "ConfigArgumentMerger",
+    "add_sglang_cli_compat",
     "cache_salt_kwargs",
-    "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "get_encoder_preprocessor_modules",
     "get_mm_encoder_class",
@@ -407,4 +425,5 @@ __all__ = [
     "require_reasoning_kwargs",
     "resolved_server_args",
     "sglang_uses_mla_backend",
+    "supports_external_mm_hashes",
 ]

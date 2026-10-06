@@ -30,4 +30,13 @@ var (
 		Name:             "VLLMMultiprocessing",
 		MinOriginVersion: *semver.MustParse("1.0.0"),
 	}
+
+	// MultinodeTopologyAliases gates the injection of backend-independent rank
+	// and leader-address environment variables. Enabled for DGDs originally
+	// created by operator >= 1.6.0 so an operator upgrade does not roll existing
+	// multinode workloads solely to add the aliases.
+	MultinodeTopologyAliases = Gate{
+		Name:             "MultinodeTopologyAliases",
+		MinOriginVersion: *semver.MustParse("1.6.0"),
+	}
 )

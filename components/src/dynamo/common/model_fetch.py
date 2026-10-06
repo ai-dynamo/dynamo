@@ -17,6 +17,17 @@ from dynamo.common.snapshot.lifecycle import (
 
 logger = logging.getLogger(__name__)
 
+NGC_URI_PREFIX = "ngc://"
+
+
+def needs_local_model_path(model: str) -> bool:
+    """Whether an engine must be given the fetched local path instead of ``model``.
+
+    Engines resolve Hugging Face repo IDs against the HF cache themselves, but
+    cannot resolve ``ngc://`` URIs.
+    """
+    return model.startswith(NGC_URI_PREFIX)
+
 
 def _fetch_model_process_main(
     remote_name: str,
