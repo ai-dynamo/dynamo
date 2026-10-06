@@ -605,6 +605,10 @@ def build_tool_call_guided_decoding(
         return None
 
     parallel_tool_calls = request.get("parallel_tool_calls")
+    if parallel_tool_calls is None:
+        # OpenAI defaults parallel tool calls to enabled. SGLang 0.5.21 also
+        # requires this argument to be a concrete bool rather than None.
+        parallel_tool_calls = True
     constraint: Any = None
 
     if tool_choice == "required" or _is_named_tool_choice(tool_choice):

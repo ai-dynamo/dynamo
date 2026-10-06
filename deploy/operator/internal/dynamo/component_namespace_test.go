@@ -15,6 +15,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestComponentNamespacePrefixRuntimeCompatibility(t *testing.T) {
@@ -60,6 +62,7 @@ func TestFrontendSidecarNamespacePrefixRuntimeCompatibility(t *testing.T) {
 		workerImage     string
 		sidecarImage    string
 		workerOverride  string
+		runtimeImage    string
 		sidecarEnv      []corev1.EnvVar
 		wantStrictValue string
 	}{
@@ -71,21 +74,33 @@ func TestFrontendSidecarNamespacePrefixRuntimeCompatibility(t *testing.T) {
 		{name: "digest-only frontend stays unknown", workerImage: "worker:1.6.0", sidecarImage: "frontend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		{name: "custom frontend explicitly enables strict mode", workerImage: "worker:1.5.0", sidecarImage: "frontend:custom", sidecarEnv: []corev1.EnvVar{{Name: commonconsts.DynamoNamespacePrefixStrictEnvVar, Value: "true"}}, wantStrictValue: "true"},
 		{name: "supported frontend explicitly disables strict mode", workerImage: "worker:1.5.0", sidecarImage: "frontend:1.6.0", sidecarEnv: []corev1.EnvVar{{Name: commonconsts.DynamoNamespacePrefixStrictEnvVar, Value: "false"}}, wantStrictValue: "false"},
+		{name: "older runtime init sidecar with supported frontend", workerImage: "engine:custom", runtimeImage: "runtime:1.5.0", sidecarImage: "frontend:1.6.0", wantStrictValue: "true"},
+		{name: "supported runtime init sidecar with older frontend", workerImage: "engine:custom", runtimeImage: "runtime:1.6.0", sidecarImage: "frontend:1.5.0"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("configure independently versioned worker and frontend containers")
+			t.Log("configure independently versioned containers with container discovery")
 			sidecarName := "sidecar-frontend"
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:          v1beta1.ComponentTypeWorker,
 				RuntimeVersionOverride: tt.workerOverride,
 				FrontendSidecar:        &sidecarName,
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container",
+				}}, Spec: corev1.PodSpec{Containers: []corev1.Container{
 					{Name: commonconsts.MainContainerName, Image: tt.workerImage},
 					{Name: sidecarName, Image: tt.sidecarImage, Env: tt.sidecarEnv},
 					{Name: "other-sidecar", Image: "frontend:1.7.0"},
 				}}},
+			}
+
+			// Native runtime layout must not change the independently versioned frontend gate.
+			if tt.runtimeImage != "" {
+				component.PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: commonconsts.RuntimeContainerName, Image: tt.runtimeImage,
+					RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
 			}
 
 			t.Log("render the production pod spec, including frontend sidecar defaults")
@@ -98,6 +113,7 @@ func TestFrontendSidecarNamespacePrefixRuntimeCompatibility(t *testing.T) {
 			assert.Equal(t, sidecarName, sidecar.Name)
 			assert.Equal(t, tt.sidecarImage, sidecar.Image)
 			env := envVarsToMap(sidecar.Env)
+			assert.Equal(t, sidecarName, env["CONTAINER_NAME"])
 			assert.Equal(t, "default-foo", env[commonconsts.DynamoNamespacePrefixEnvVar])
 			if tt.wantStrictValue != "" {
 				assert.Equal(t, tt.wantStrictValue, env[commonconsts.DynamoNamespacePrefixStrictEnvVar])

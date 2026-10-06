@@ -86,6 +86,7 @@ STUB_MODULES = [
     "tabulate",
     "prometheus_api_client",
     "huggingface_hub",
+    "huggingface_hub.constants",
     "huggingface_hub.model_info",
     "jinja2",
     "jinja2.exceptions",
