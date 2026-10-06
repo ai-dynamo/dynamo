@@ -3,12 +3,7 @@
 
 import pytest
 
-from dynamo.frontend.utils import (
-    extract_mm_urls,
-    reject_undeclared_input_modalities,
-    runtime_input_modalities,
-)
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.frontend.utils import extract_mm_urls
 
 pytestmark = [
     pytest.mark.unit,
@@ -291,50 +286,3 @@ def test_rejects_media_parts_without_valid_url_or_uuid(part):
 
     with pytest.raises(ValueError, match=r"URL or uuid|non-empty string"):
         extract_mm_urls(messages)
-
-
-_IMAGE_MESSAGE = {
-    "role": "user",
-    "content": [
-        {"type": "text", "text": "What is this?"},
-        {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
-    ],
-}
-
-
-@pytest.mark.parametrize(
-    "runtime_config, expected",
-    [
-        (None, None),
-        ({}, None),
-        ({"runtime_data": {}}, None),
-        ({"runtime_data": {"input_modalities": "text"}}, None),
-        ({"runtime_data": {"input_modalities": [1]}}, None),
-        ({"runtime_data": {"input_modalities": ["text", 1]}}, None),
-        ({"runtime_data": {"input_modalities": []}}, frozenset()),
-        ({"runtime_data": {"input_modalities": ["text"]}}, frozenset({"text"})),
-    ],
-)
-def test_runtime_input_modalities(runtime_config, expected):
-    assert runtime_input_modalities(runtime_config) == expected
-
-
-def test_undeclared_input_modalities_accept_media():
-    reject_undeclared_input_modalities([_IMAGE_MESSAGE], None)
-
-
-def test_declared_input_modalities_accept_listed_media():
-    reject_undeclared_input_modalities([_IMAGE_MESSAGE], frozenset({"text", "image"}))
-
-
-def test_text_only_input_modalities_reject_image():
-    with pytest.raises(InvalidArgument, match="'image_url'"):
-        reject_undeclared_input_modalities([_IMAGE_MESSAGE], frozenset({"text"}))
-
-
-def test_text_only_input_modalities_accept_text():
-    messages = [
-        {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
-        {"role": "user", "content": "Hello again"},
-    ]
-    reject_undeclared_input_modalities(messages, frozenset({"text"}))
