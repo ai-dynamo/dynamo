@@ -247,27 +247,15 @@ async def test_openmetrics_online_traffic_rejects_invalid_active_request_gauge(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("active_samples", "error_match"),
-    [
-        ([], "was missing"),
-        (
-            [
-                "dynamo_frontend_active_requests 1",
-                "dynamo_frontend_active_requests 2",
-            ],
-            "exactly one series",
-        ),
-    ],
-)
-async def test_openmetrics_online_traffic_requires_one_active_request_gauge(
-    active_samples: list[str], error_match: str
-) -> None:
+async def test_openmetrics_online_traffic_rejects_duplicate_active_request_gauge() -> (
+    None
+):
     payload = "\n".join(
         (
             "process_start_time_seconds 1",
             "dynamo_frontend_requests_started_total 100",
-            *active_samples,
+            "dynamo_frontend_active_requests 1",
+            "dynamo_frontend_active_requests 2",
         )
     )
     source = OpenMetricsOnlineTrafficSource(
@@ -279,8 +267,51 @@ async def test_openmetrics_online_traffic_requires_one_active_request_gauge(
         wall_clock=_SequenceClock([10.0]),
     )
 
-    with pytest.raises(ValueError, match=error_match):
+    with pytest.raises(ValueError, match="exactly one series"):
         await source.collect_online_traffic(observed_at_s=10.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "active_samples",
+    [
+        # A freshly started frontend registers the GaugeVec but exports no
+        # child until the model serves its first inference request.
+        "",
+        # Other models have created their children; ours has not yet.
+        'dynamo_frontend_active_requests{model="model-b"} 3\n',
+    ],
+)
+async def test_openmetrics_online_traffic_lazily_absent_gauge_keeps_rate(
+    active_samples: str,
+) -> None:
+    session = _FakeOpenMetricsSession(
+        [
+            "process_start_time_seconds 1\n"
+            'dynamo_frontend_requests_started_total{model="model-a"} 100\n'
+            f"{active_samples}",
+            "process_start_time_seconds 1\n"
+            'dynamo_frontend_requests_started_total{model="model-a"} 150\n'
+            f"{active_samples}",
+        ]
+    )
+    source = OpenMetricsOnlineTrafficSource(
+        pool_id="pool-a",
+        metrics_url="http://frontend.example/metrics",
+        session=session,  # type: ignore[arg-type]
+        match_labels={"model": "model-a"},
+        monotonic_clock=_SequenceClock([0.0, 1.0, 11.0, 12.0]),
+        wall_clock=_SequenceClock([10.0, 20.0]),
+    )
+
+    with pytest.raises(RuntimeError, match="warming up"):
+        await source.collect_online_traffic(observed_at_s=10.0)
+    traffic = await source.collect_online_traffic(observed_at_s=20.0)
+
+    # The valid rate survives so admission can open; concurrency is unknown,
+    # which the policy never treats as idle.
+    assert traffic[0].online_offered_rps == pytest.approx(5.0)
+    assert traffic[0].frontend_active_requests is None
 
 
 @pytest.mark.asyncio
@@ -288,7 +319,6 @@ async def test_openmetrics_online_traffic_requires_one_active_request_gauge(
     "active_sample",
     [
         "dynamo_frontend_active_requests 1",
-        'dynamo_frontend_active_requests{model="wrong"} 1',
         'dynamo_frontend_active_requests{model="model-a",endpoint="chat"} 1',
     ],
 )
@@ -310,7 +340,7 @@ async def test_openmetrics_online_traffic_rejects_wrong_active_request_labels(
         wall_clock=_SequenceClock([10.0]),
     )
 
-    with pytest.raises(ValueError, match="no series exactly matching"):
+    with pytest.raises(ValueError, match="does not match selector keys"):
         await source.collect_online_traffic(observed_at_s=10.0)
 
 
