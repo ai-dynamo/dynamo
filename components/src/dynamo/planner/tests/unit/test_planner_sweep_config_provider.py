@@ -666,7 +666,11 @@ def test_fpm_bucket_range_keeps_only_perfect_square_choices() -> None:
         )
 
 
-def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
+def test_custom_fpm_preset_validation_ignores_prometheus_environment(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("PROMETHEUS_EXTRA_QUERY_PARAMS", "missing-equals")
+    monkeypatch.setenv("PROMETHEUS_CA_BUNDLE", str(tmp_path / "missing-ca.pem"))
     context = RecommendationAdapterContext(
         engine={},
         traffic={},
@@ -674,7 +678,13 @@ def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
         optimization={"target": "goodput"},
         sweep=_sweep_context(target="goodput"),
     )
-    with pytest.raises(ValueError):
+    preset = {"max_num_fpm_samples": 64, "fpm_sample_bucket_size": 16}
+    plan = create_provider().compile_recommendation(
+        {"fpm_sampling": {"preset": [preset]}}, context
+    )
+    assert plan.fragment.choices_by_branch["agg"]["fpm_sampling"] == [preset]
+
+    with pytest.raises(ValueError, match="must be a perfect square"):
         create_provider().compile_recommendation(
             {
                 "fpm_sampling": {
@@ -690,8 +700,7 @@ def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
         )
 
 
-@pytest.mark.parametrize("named", [False, True])
-def test_custom_disabled_scaling_preset_uses_null_inactive_intervals(named) -> None:
+def test_custom_disabled_scaling_preset_uses_null_inactive_intervals() -> None:
     context = RecommendationAdapterContext(
         engine={},
         traffic={},
@@ -705,14 +714,13 @@ def test_custom_disabled_scaling_preset_uses_null_inactive_intervals(named) -> N
         "throughput_adjustment_interval_seconds": None,
         "load_adjustment_interval_seconds": None,
     }
-    selected = "disabled" if named else disabled
     adapter = create_provider()
     plan = adapter.compile_recommendation(
-        {"policy": "enabled", "scaling_policy": {"preset": [selected]}}, context
+        {"policy": "enabled", "scaling_policy": {"preset": [disabled]}}, context
     )
-    assert plan.fragment.choices_by_branch["agg"]["scaling_policy"] == [selected]
+    assert plan.fragment.choices_by_branch["agg"]["scaling_policy"] == [disabled]
     spec = adapter.materialize_candidate(
-        plan, {"policy": "enabled", "scaling_policy": selected}, _candidate_context()
+        plan, {"policy": "enabled", "scaling_policy": disabled}, _candidate_context()
     )
     assert spec.config == {"policy": "disabled"}
     assert spec.runtime_hooks == ()

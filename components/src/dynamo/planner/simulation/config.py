@@ -52,7 +52,9 @@ class FpmSamplingMapping(BaseModel):
 
     @model_validator(mode="after")
     def _validate_bucket(self) -> FpmSamplingMapping:
-        PlannerConfig.model_validate(self.model_dump())
+        root = math.isqrt(self.fpm_sample_bucket_size)
+        if root * root != self.fpm_sample_bucket_size:
+            raise ValueError("fpm_sample_bucket_size must be a perfect square")
         return self
 
 
