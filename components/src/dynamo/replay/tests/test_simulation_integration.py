@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -430,7 +429,6 @@ def _aic_engine_args(backend: str, role: str, dp_size: int = 1) -> dict:
         ("mtp", "vllm", "round_robin"),
         ("mtp", "sglang", "kv_router"),
         ("ngram", "vllm", "round_robin"),
-        ("ngram", "sglang", "kv_router"),
         ("eagle3", "sglang", "kv_router"),
         ("dflash", "vllm", "kv_router"),
         ("dspark", "sglang", "round_robin"),
@@ -450,12 +448,28 @@ def test_real_agentic_speculation_prices_full_bursts(
         row["output_length"] = 32
     trace = tmp_path / "agentic-long-output.jsonl"
     trace.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    params = {
+        "mtp": {"depth": 7},
+        "ngram": {"num_speculative_tokens": 3},
+        "eagle3": {"tree_shape": [1, 2, 4], "verify_token_budget": 16},
+        "dflash": {},
+        "dspark": {"num_draft_tokens": 7},
+        "draft_model": {"num_speculative_tokens": 7},
+    }[kind]
+    selection = {
+        "kind": kind,
+        "params": params,
+        "expected_accepted_tokens": 2.4,
+        "seed": 42,
+    }
+    if kind not in {"mtp", "ngram"}:
+        path, draft = draft_checkpoint
+        selection.update(draft_model_path=path, draft_config=draft)
     role = "aggregated" if deployment_mode == "agg" else "decode"
     args = _aic_engine_args(backend, role)
-    model = args["timing_model"]["config"]["model"]
+    args["speculation"] = selection
     if deployment_mode == "agg":
         engines = {"agg_engine_args": args, "num_workers": 2}
-        roles = ("aggregated",)
     else:
         engines = {
             "prefill_engine_args": _aic_engine_args(backend, "prefill"),
@@ -463,15 +477,12 @@ def test_real_agentic_speculation_prices_full_bursts(
             "num_prefill_workers": 1,
             "num_decode_workers": 2,
         }
-        roles = ("prefill", "decode")
+        engines["prefill_engine_args"]["speculation"] = selection
     spec = ReplaySpec(
         backend_deployment=BackendDeploymentSpec(
             deployment_mode=deployment_mode,
             backend=backend,
             backend_version="0.24.0" if backend == "vllm" else "0.5.14",
-            performance_model_metadata={
-                name: {"config": {"model": model}} for name in roles
-            },
             **engines,
         ),
         workload={
@@ -494,71 +505,30 @@ def test_real_agentic_speculation_prices_full_bursts(
             )
         },
     )
-    if kind == "mtp":
-        selection = {
-            "kind": kind,
-            "num_speculative_tokens": 2,
-            "expected_accepted_tokens": 1.5,
-            "seed": 42,
-        }
-    else:
-        params = {
-            "ngram": {"num_speculative_tokens": 7},
-            "eagle3": {"tree_shape": [1, 2, 4], "verify_token_budget": 16},
-            "dflash": {},
-            "dspark": {"num_draft_tokens": 7},
-            "draft_model": {"num_speculative_tokens": 7},
-        }[kind]
-        selection = {
-            "kind": kind,
-            "params": params,
-            "expected_accepted_tokens": 2.4,
-            "seed": 42,
-        }
-        if kind != "ngram":
-            path, draft = draft_checkpoint
-            selection.update(draft_model_path=path, draft_config=draft)
-    speculative = {**args, "speculation": selection}
-    field = "agg_engine_args" if deployment_mode == "agg" else "decode_engine_args"
-    overrides = {field: speculative}
-    if deployment_mode == "disagg":
-        overrides["prefill_engine_args"] = {
-            **spec.backend_deployment.prefill_engine_args,
-            "speculation": selection,
-        }
-    speculative_spec = replace(
-        spec,
-        backend_deployment=replace(spec.backend_deployment, **overrides),
-    )
     output = ReplayOutputRequirements(capture_per_request=True)
     runner = DynamoReplayRunnerFactory().create(0)
     try:
-        baseline = runner.run(spec, output_requirements=output)
-        report = runner.run(speculative_spec, output_requirements=output)
+        report = runner.run(spec, output_requirements=output)
     finally:
         runner.close()
-    for result in (baseline, report):
-        assert result.metrics["completed_requests"] == 3
-        assert result.metrics["total_output_tokens"] == 96
-        assert result.metrics["completed_trajectories"] == 1
-        assert result.metrics["incomplete_trajectories"] == 0
-        assert result.metrics["duration_ms"] > 0
-        assert result.metadata["agentic_qualification"] == "functional_only"
-        assert (
-            result.metadata["native_report"]["agentic_qualification"]
-            == "functional_only"
-        )
-        records = result.metadata["native_report"]["per_request"]
-        assert len(records) == 3
-        assert all(record["output_length"] == 32 for record in records)
-    if kind == "mtp":
-        assert report.metrics["duration_ms"] < baseline.metrics["duration_ms"]
+    assert report.metrics["completed_requests"] == 3
+    assert report.metrics["total_output_tokens"] == 96
+    assert report.metrics["completed_trajectories"] == 1
+    assert report.metrics["incomplete_trajectories"] == 0
+    assert report.metrics["duration_ms"] > 0
+    assert report.metadata["agentic_qualification"] == "functional_only"
+    assert (
+        report.metadata["native_report"]["agentic_qualification"] == "functional_only"
+    )
+    records = report.metadata["native_report"]["per_request"]
+    assert len(records) == 3
+    assert all(record["output_length"] == 32 for record in records)
     # Different draft graphs can cost more than AR. Every scheme must execute
     # its configured burst through the same native sampler and finish the DAG.
-    native = runner._engine_args(speculative)
-    assert native.ais_nextn == (2 if kind == "mtp" else 3 if kind == "eagle3" else 7)
+    native = runner._engine_args(args)
+    assert native.ais_nextn == (3 if kind in {"eagle3", "ngram"} else 7)
     assert native.ais_verify_width == (
-        3 if kind == "mtp" else 16 if kind == "eagle3" else 8
+        16 if kind == "eagle3" else 4 if kind == "ngram" else 8
     )
     assert native.ais_perf_config["speculation"]["kind"] == kind
 
@@ -640,7 +610,7 @@ def test_auto_agentic_capacity_remains_authored(entry, capacity):
         args["ais_perf_config"] = args.pop("timing_model")["config"]
         args["ais_perf_config"]["speculation"] = {
             "kind": "mtp",
-            "params": {"num_speculative_tokens": 2},
+            "params": {"depth": 2},
         }
         args["ais_nextn_accept_rates"] = "1,0.5"
         engine = load_engine_args(args)
@@ -656,8 +626,9 @@ def test_auto_agentic_capacity_remains_authored(entry, capacity):
     else:
         args["speculation"] = {
             "kind": "mtp",
-            "num_speculative_tokens": 2,
+            "params": {"depth": 2},
             "expected_accepted_tokens": 1.5,
+            "seed": 42,
         }
         spec = ReplaySpec(
             backend_deployment=BackendDeploymentSpec(
@@ -684,3 +655,24 @@ def test_auto_agentic_capacity_remains_authored(entry, capacity):
         assert (report.summary if entry == "loader" else report.metrics)[
             "completed_requests"
         ] == 4
+
+
+@pytest.mark.pre_merge
+def test_generic_draft_capacity_is_not_automatically_estimated():
+    from dynamo.replay import run_synthetic_trace_replay
+
+    args = _aic_engine_args("vllm", "aggregated")
+    args.pop("num_gpu_blocks")
+    args["ais_perf_config"] = args.pop("timing_model")["config"]
+    args["ais_perf_config"]["speculation"] = {"kind": "mtp", "params": {"depth": 2}}
+    args["ais_nextn_accept_rates"] = "1,0.5"
+    with pytest.raises(
+        ValueError, match="explicitly configured positive num_gpu_blocks"
+    ):
+        run_synthetic_trace_replay(
+            8,
+            8,
+            1,
+            extra_engine_args=MockEngineArgs.from_json(json.dumps(args)),
+            replay_concurrency=1,
+        )

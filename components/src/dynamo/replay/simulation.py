@@ -35,12 +35,7 @@ from dynamo.replay.api import (
     run_synthetic_trace_replay,
     run_trace_replay,
 )
-from dynamo.replay.config import (
-    lower_upstream_engine_args,
-    native_engine_args_payload,
-    speculation_config_adapter,
-    validate_speculation_payload,
-)
+from dynamo.replay.config import lower_upstream_engine_args, native_engine_args_payload
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -55,19 +50,6 @@ _ROUTER_HOOK = HookCapability(
 _REPLAY_SPEC_API_VERSION = 1
 
 
-class _DynamoRunnerCapabilities(RunnerCapabilities):
-    def require_compatible(self, spec: ReplaySpec) -> None:
-        deployment = spec.backend_deployment
-        for args in (
-            deployment.agg_engine_args,
-            deployment.prefill_engine_args,
-            deployment.decode_engine_args,
-        ):
-            if args is not None:
-                validate_speculation_payload(args)
-        super().require_compatible(spec)
-
-
 @dataclass(frozen=True)
 class DynamoReplayRunnerFactory:
     """Serializable factory for the current Dynamo offline replay composition."""
@@ -79,8 +61,7 @@ class DynamoReplayRunnerFactory:
         """Advertise the backend/topology and Dynamo hook support."""
 
         engine_capabilities = EngineReplayRunnerFactory().capabilities()
-        speculation_supported = speculation_config_adapter(required=False) is not None
-        return _DynamoRunnerCapabilities(
+        return RunnerCapabilities(
             # Runner-owned constant: do not inherit the consumer package's default,
             # otherwise an old Dynamo wheel can self-certify against a newer spec.
             replay_spec_api_version=_REPLAY_SPEC_API_VERSION,
@@ -94,8 +75,8 @@ class DynamoReplayRunnerFactory:
             supports_disaggregated_attention_dp=(
                 engine_capabilities.supports_disaggregated_attention_dp
             ),
-            supports_mtp_expected_acceptance=speculation_supported,
-            supports_agentic_speculative_decoding=speculation_supported,
+            supports_mtp_expected_acceptance=True,
+            supports_agentic_speculative_decoding=True,
             supported_execution_modes=("offline",),
             supported_trace_formats=(
                 "mooncake",

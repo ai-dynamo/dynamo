@@ -1966,128 +1966,11 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MockEngineArgs as PyMockEngineArgs, agentic_speculation_assumptions,
-        build_synthetic_requests, fpm_snapshots_to_json, has_explicit_accept_rates,
-        reconcile_replay_dp_topology, validate_disagg_replay_mode,
+        build_synthetic_requests, fpm_snapshots_to_json, reconcile_replay_dp_topology,
+        validate_disagg_replay_mode,
     };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
     use dynamo_mocker::loadgen::ArrivalSpec;
-
-    fn speculative_args() -> PyMockEngineArgs {
-        let mut inner = MockEngineArgs::builder()
-            .num_gpu_blocks(64)
-            .ais_nextn(Some(2))
-            .ais_nextn_accept_rates(Some("1,0.5".to_string()))
-            .build()
-            .unwrap()
-            .normalized()
-            .unwrap();
-        inner.ais_perf_config = Some(serde_json::json!({
-            "model": "target-model",
-            "estimation_mode": "op_level",
-            "fallback_policy": "deny",
-        }));
-        PyMockEngineArgs {
-            inner,
-            num_gpu_blocks_explicit: true,
-            ais_nextn_accept_rates_explicit: true,
-        }
-    }
-
-    #[test]
-    fn agentic_sd_off_needs_no_speculative_assumptions() {
-        assert!(
-            agentic_speculation_assumptions(&[("aggregated", Some(&PyMockEngineArgs::default()))])
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn agentic_speculation_requires_authored_positive_capacity() {
-        let mut args = speculative_args();
-        args.num_gpu_blocks_explicit = false;
-        assert!(
-            agentic_speculation_assumptions(&[("decode", Some(&args))])
-                .unwrap_err()
-                .contains("explicitly configured positive num_gpu_blocks for decode")
-        );
-        args.num_gpu_blocks_explicit = true;
-        args.inner.num_gpu_blocks = 0;
-        assert!(
-            agentic_speculation_assumptions(&[("decode", Some(&args))])
-                .unwrap_err()
-                .contains("positive num_gpu_blocks")
-        );
-    }
-
-    #[test]
-    fn agentic_speculation_distinguishes_default_from_authored_acceptance() {
-        let mut args = speculative_args();
-        // Normalization already populated the rates; their provenance must
-        // remain distinct from an authored acceptance assumption.
-        args.ais_nextn_accept_rates_explicit = false;
-        assert!(
-            agentic_speculation_assumptions(&[("aggregated", Some(&args))])
-                .unwrap_err()
-                .contains("explicit ais_nextn_accept_rates")
-        );
-        args.ais_nextn_accept_rates_explicit = true;
-        assert!(agentic_speculation_assumptions(&[("aggregated", Some(&args))]).is_ok());
-        assert!(!has_explicit_accept_rates(None));
-        assert!(!has_explicit_accept_rates(Some(" \t")));
-        assert!(has_explicit_accept_rates(Some("0,0")));
-    }
-
-    #[test]
-    fn agentic_speculation_leaves_estimator_selection_to_ais() {
-        let mut args = speculative_args();
-        args.inner.ais_perf_config = None;
-        assert!(
-            agentic_speculation_assumptions(&[("aggregated", Some(&args))])
-                .unwrap_err()
-                .contains("AIS timing configuration")
-        );
-        // Only authored replay assumptions are checked here. Constructing the
-        // canonical cost model still applies the existing estimator contract.
-        for mode in ["op_level", "fpm_regression", "fpm_interpolation", "auto"] {
-            args.inner.ais_perf_config = Some(serde_json::json!({
-                "model": "target-model", "estimation_mode": mode,
-            }));
-            assert!(agentic_speculation_assumptions(&[("aggregated", Some(&args))]).is_ok());
-        }
-    }
-
-    #[test]
-    fn agentic_canonical_scheme_requires_assumptions_before_geometry_resolution() {
-        let mut args = speculative_args();
-        args.inner.ais_nextn = None;
-        args.inner.ais_perf_config.as_mut().unwrap()["speculation"] = serde_json::json!({
-            "kind": "eagle3", "params": {"tree_shape": [1, 2, 4]},
-        });
-        args.num_gpu_blocks_explicit = false;
-        assert!(
-            agentic_speculation_assumptions(&[("aggregated", Some(&args))])
-                .unwrap_err()
-                .contains("positive num_gpu_blocks")
-        );
-        args.num_gpu_blocks_explicit = true;
-        assert!(agentic_speculation_assumptions(&[("aggregated", Some(&args))]).is_ok());
-    }
-
-    #[test]
-    fn agentic_speculation_checks_each_disaggregated_role() {
-        let prefill = PyMockEngineArgs::default();
-        let mut decode = speculative_args();
-        decode.ais_nextn_accept_rates_explicit = false;
-        assert!(
-            agentic_speculation_assumptions(&[
-                ("prefill", Some(&prefill)),
-                ("decode", Some(&decode)),
-            ])
-            .unwrap_err()
-            .contains("for decode")
-        );
-    }
 
     #[test]
     fn online_disaggregation_is_rejected_with_stable_message() {
@@ -2244,6 +2127,16 @@ fn materialize_replay_mocker_args(
         .map_err(|error| PyException::new_err(error.to_string()))?;
     if let Some(config) = args.ais_perf_config.as_ref() {
         if !extra_args.num_gpu_blocks_explicit() {
+            if config
+                .get("speculation")
+                .and_then(|spec| spec.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind != "ngram")
+            {
+                return Err(PyValueError::new_err(
+                    "speculation requires explicitly configured positive num_gpu_blocks",
+                ));
+            }
             let kwargs = pyo3::types::PyDict::new(py);
             kwargs.set_item("block_size", args.block_size)?;
             kwargs.set_item(

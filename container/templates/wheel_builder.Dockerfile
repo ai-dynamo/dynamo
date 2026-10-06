@@ -658,21 +658,17 @@ COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/side
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
-# Build the existing AISimulate wheel from the same immutable source as the Rust
-# core. The matching speculative replay release is not published yet; neither
-# an older published wheel nor a same-series nightly provides this contract.
+# Stage AISimulate from the same source revision as the Rust core.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    AISIMULATE_REV=$(python -c 'import pathlib, tomlkit; print(tomlkit.parse(pathlib.Path("/opt/dynamo/Cargo.toml").read_text())["workspace"]["dependencies"]["aisimulate-core"]["rev"])') && \
     python -m pip wheel \
         --no-deps \
         --config-settings=build-args=--locked \
         --wheel-dir /opt/dynamo/dist \
-        --constraint /opt/dynamo/container/deps/requirements.aisimulate.txt \
-        "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@${AISIMULATE_REV}#subdirectory=python/aisimulate"
+        --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry

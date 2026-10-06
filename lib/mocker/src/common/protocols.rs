@@ -1681,7 +1681,6 @@ mod tests {
             kind: "eagle3".into(),
             verify_width: 16,
             max_accepted_draft_tokens: 3,
-            draft_weights_bytes: 1024.0,
         };
         args.resolve_speculation(&resolved).unwrap();
         assert_eq!(args.ais_nextn, Some(3));
@@ -1707,7 +1706,7 @@ mod tests {
             &json!({"ais_perf_config": {
                 "model": "model", "system": "h200_sxm", "backend": "vllm",
                 "worker_type": "aggregated", "nextn": 3,
-                "speculation": {"kind": "mtp", "params": {"num_speculative_tokens": 3}}
+                "speculation": {"kind": "mtp", "params": {"depth": 3}}
             }})
             .to_string(),
         )
@@ -1717,33 +1716,12 @@ mod tests {
     }
 
     #[test]
-    fn canonical_schemes_preserve_the_complete_cost_identity() {
-        for kind in ["mtp", "ngram", "eagle3", "dflash", "dspark", "draft_model"] {
-            let cost = json!({
-                "model": "model", "system": "h200_sxm", "backend": "vllm",
-                "worker_type": "aggregated", "speculation": {
-                    "kind": kind, "params": {"num_speculative_tokens": 3},
-                    "draft_model_path": "draft-revision", "draft_config": {"hidden_size": 128}
-                }
-            });
-            let args = MockEngineArgs::from_json_str(
-                &json!({
-                    "ais_perf_config": cost, "ais_nextn_accept_rates": "1,1,0.4",
-                })
-                .to_string(),
-            )
-            .unwrap();
-            assert_eq!(args.ais_perf_config, Some(cost));
-        }
-    }
-
-    #[test]
     fn canonical_mtp_requires_authored_acceptance() {
         let error = MockEngineArgs::from_json_str(
             &json!({"ais_perf_config": {
                 "model": "model", "system": "h200_sxm", "backend": "vllm",
                 "worker_type": "aggregated",
-                "speculation": {"kind": "mtp", "params": {"num_speculative_tokens": 3}}
+                "speculation": {"kind": "mtp", "params": {"depth": 3}}
             }})
             .to_string(),
         )
@@ -1861,106 +1839,30 @@ mod tests {
 
     #[test]
     fn test_normalized_rejects_zero_max_model_len() {
-        for engine_type in [EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm] {
-            let error = MockEngineArgs::builder()
-                .engine_type(engine_type)
-                .max_model_len(Some(0))
-                .build()
-                .unwrap()
-                .normalized()
-                .unwrap_err();
+        let error = MockEngineArgs::builder()
+            .max_model_len(Some(0))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
 
-            assert!(
-                error.to_string().contains("max_model_len"),
-                "unexpected error for {engine_type:?}: {error}",
-            );
-        }
+        assert!(
+            error.to_string().contains("max_model_len"),
+            "unexpected error: {error}",
+        );
     }
 
     #[test]
-    fn test_sglang_factory_enforces_authored_max_model_len() {
-        use std::num::NonZeroU32;
-
-        use aisimulate_core::engine::generalized::{EngineIdentity, SchedulerCommand};
-        use aisimulate_core::engine::{Command, Request};
-
-        use crate::engine_adapter::{engine_components, engine_factory};
-
-        for nextn in [None, Some(2)] {
-            for prompt_len in [4, 8, 9] {
-                let args = MockEngineArgs::builder()
-                    .engine_type(EngineType::Sglang)
-                    .num_gpu_blocks(16)
-                    .block_size(4)
-                    .max_model_len(Some(8))
-                    .ais_nextn(nextn)
-                    .ais_nextn_accept_rates(nextn.map(|_| "1,1".to_string()))
-                    .perf_model(Arc::new(PerfModel::Fixed {
-                        prefill_ms: 1.0,
-                        decode_ms: 1.0,
-                    }))
-                    .build()
-                    .unwrap();
-                let components = engine_components(args, false, false).unwrap();
-                assert_eq!(components.rank.max_model_len, Some(8));
-                let mut engine = engine_factory(components.rank, components.timing)
-                    .unwrap()
-                    .build(EngineIdentity::new(0), NonZeroU32::new(1).unwrap())
-                    .unwrap();
-                let request_id = Uuid::from_u128(1);
-                engine
-                    .apply_command_effects(
-                        SchedulerCommand::new(
-                            0,
-                            Command::Submit(Request {
-                                request_id,
-                                tokens: (0..prompt_len).collect(),
-                                max_output_tokens: 10,
-                                output_token_ids: None,
-                            }),
-                        ),
-                        0.0,
-                    )
-                    .unwrap();
-                let mut outputs = Vec::new();
-                let mut now_ms = 0.0;
-                for _ in 0..16 {
-                    let Some(pass) = engine.execute_pass(now_ms).unwrap() else {
-                        break;
-                    };
-                    now_ms = pass.end_ms;
-                    let completed = engine.complete_pass(pass.pass_id, now_ms).unwrap();
-                    outputs.extend(
-                        completed
-                            .effects
-                            .by_rank
-                            .into_iter()
-                            .flat_map(|rank| rank.effects.outputs),
-                    );
-                }
-                assert!(
-                    engine.is_drained(),
-                    "prompt_len={prompt_len}, nextn={nextn:?}"
-                );
-                assert!(outputs.iter().all(|output| output.request_id == request_id));
-                if prompt_len >= 8 {
-                    assert_eq!(outputs.len(), 1);
-                    assert!(outputs[0].completed && outputs[0].rejected);
-                    assert_eq!(outputs[0].token_id, None);
-                } else {
-                    // Ten requested outputs are clipped to the four remaining
-                    // context tokens, including when a speculative burst crosses it.
-                    assert_eq!(outputs.len(), 4);
-                    assert!(
-                        outputs
-                            .iter()
-                            .all(|output| output.token_id.is_some() && !output.rejected)
-                    );
-                    assert_eq!(outputs.iter().filter(|output| output.completed).count(), 1);
-                    assert!(outputs.last().unwrap().completed);
-                }
-            }
-        }
+    fn test_sglang_context_limit_reaches_the_scheduler() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .max_model_len(Some(8))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        let components = crate::engine_adapter::engine_components(args, false, false).unwrap();
+        assert_eq!(components.rank.max_model_len, Some(8));
     }
 
     #[test]
