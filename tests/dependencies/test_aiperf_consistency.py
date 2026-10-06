@@ -33,7 +33,7 @@ def test_epd_aiperf_version_gate_matches_release() -> None:
         ast.literal_eval(node.value)
         for node in module.body
         if isinstance(node, ast.Assign)
-        and any(
+        if any(
             isinstance(target, ast.Name) and target.id == "EXPECTED_AIPERF_VERSION"
             for target in node.targets
         )
@@ -78,3 +78,21 @@ def test_zstandard_pin_accepts_aiperf_requirement(component: str) -> None:
         if line.startswith("zstandard==")
     )
     assert pin.specifier == SpecifierSet("==0.25.0")
+
+
+def test_pillow_floor_accepts_aiperf_requirement() -> None:
+    """Reject Pillow floor bumps that AIPerf would undo in the images."""
+    requirements = ROOT / "container/deps/requirements.common.txt"
+    pin = next(
+        Requirement(line)
+        for line in requirements.read_text(encoding="utf-8").splitlines()
+        if line.startswith("pillow")
+    )
+    floors = [spec.version for spec in pin.specifier if spec.operator == ">="]
+    assert len(floors) == 1, "Expected one inclusive Pillow minimum version"
+    # AIPerf 0.13.0 still limits Pillow to the 12.3 patch series. Revisit its
+    # constraint before raising the shared floor now that overrides are gone.
+    assert floors[0] in SpecifierSet("~=12.3.0"), (
+        f"Pillow floor {floors[0]} is outside AIPerf 0.13.0's ~=12.3.0 range; "
+        "update AIPerf or restore an explicit override before raising the floor"
+    )
