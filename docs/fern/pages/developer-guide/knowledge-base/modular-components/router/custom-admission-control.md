@@ -6,87 +6,77 @@ subtitle: Admit, defer, or reject requests with a Rust request classifier
 ---
 
 > [!WARNING]
-> **Experimental.** The request-classifier API and its inputs can change. Build your plugin against the same NVIDIA Dynamo revision as the frontend. Custom plugins are linked at build time; YAML selects a linked type at startup.
+> **Experimental.** The request-classifier API and its inputs can change.
 
-Implement `RequestClassifier` to decide when a request can enter the KV router's scheduling queue. A classifier can return the request immediately, wait asynchronously before returning it, or reject it. It can also choose a queue class, set a queue deadline or scheduling cost, and supply a preferred worker and data-parallel rank.
+Implement `RequestClassifier` to control when NVIDIA Dynamo admits a request to the KV router's scheduling queue. Use it to wait for capacity, assign a policy class, or reject a request that has exceeded its wait budget.
 
-The native [ThunderAgent plugin](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin) uses this API to hold requests from paused or busy sessions. Its worker-selection plugin handles placement after admission. You can write a classifier without replacing worker selection.
+The built-in [ThunderAgent plugin](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin) uses this API to hold requests from paused or busy sessions. Select it through router-policy YAML if it fits your workload. Write a custom classifier when you need a different admission rule.
 
-## Request Flow
+## How It Works
+
+Dynamo calls `classify` before queueing a request. Return `Ok(request)` to admit it, wait asynchronously to defer it, or return an error to reject it. Before admitting the request, the classifier can set its policy class, queue deadline, scheduling cost, or preferred worker.
 
 ```mermaid
 flowchart TD
-    Host["Frontend registers request lifecycle"] --> Classify["RequestClassifier::classify"]
-    Classify --> Wait["Optional asynchronous wait"]
-    Wait --> Return["Return the same ClassifyRequest"]
-    Classify --> Return
-    Classify --> Reject["Return an error to the client"]
-    Return --> Queue["Dynamo queue: class, ordering, deadline"]
-    Queue --> Place["Eligibility, worker selection, reservation"]
-    Place --> Dispatch["Worker dispatch and response stream"]
-    Dispatch --> Events["Sent / Responding / Completed / Aborted"]
-    Reject --> Events
-    Events --> Callback["RequestClassifier::on_event"]
+    Request["Incoming request"] --> Classify
+    subgraph Plugin["RequestClassifier"]
+        Classify["classify(request)"]
+        Classify -->|Admit| Settings["Set policy class<br/>(optional)"]
+        Classify -->|Defer| Wait["Wait for capacity<br/>or session readiness"]
+        Wait -->|Ready| Settings
+        Classify -->|Reject| Error["Return an error"]
+        Wait -->|Wait budget exhausted| Error
+    end
+    Settings -->|"Ok(request)"| Queue["Dynamo scheduling queue"]
+    Queue --> Select["Worker selection and dispatch"]
+    Error --> Client["Error response to client"]
 ```
 
-Returning `Ok(request)` releases the request into Dynamo's scheduler. It does not guarantee immediate dispatch. Dynamo still owns worker eligibility, hard pins, queue limits, reservations, retries, and transport. Class fairness applies after the classifier releases a request; it does not order requests waiting inside your plugin.
+Admitted requests follow Dynamo's queue scheduling and worker-selection rules. A classifier can work with either built-in or [custom worker selection](custom-worker-selection.mdx). Dynamo enforces worker eligibility, hard pins, and reservations.
 
-Use the public types in `dynamo_kv_router::plugins::request_classifier` and register through `dynamo_kv_router::plugins::RouterPluginRegistry`. The provider validates YAML once at startup and returns a factory. Dynamo calls the factory when constructing each model's router. Plugin state is local to that instance unless you explicitly arrange sharing; multiple frontend replicas do not share an admission budget.
+This guide uses the embedded KV router in `dynamo.frontend`. Classification runs on aggregated or decode routing; in disaggregated serving, remote prefill can start before this admission decision. Standalone selection, including standalone EPP, does not support a configured classifier.
 
-## Inputs and Decisions
+## Build the Classifier
 
-| Input | Meaning |
-|---|---|
-| `request_id()` | Optional logical request ID; lifecycle events use this ID. |
-| `session_context()` | Optional session ID, parent ID, final marker, input trigger, and captured agent headers. Headers are untrusted ingress observations; see [Agent Harnesses](../../../../use-cases/agents/agent-harnesses.mdx#agent-headers). |
-| `input_tokens()` | Input size on the scheduler's routing-token basis. |
-| `scheduling_cost_tokens()` | Initial uncached-work estimate, or your explicit override. This is one scalar, not a per-worker cache view. |
-| `policy_class()` | Requested policy class, or your override. |
-| `ingress_at()` | Original router ingress time on Tokio's monotonic clock. |
-| `due_at()` | Deadline set by this classifier, if any. |
-| `progress().context_tokens()` | Live logical context high-water mark, initialized from input size and raised by host observations of prompt plus output tokens. Clone the progress handle to retain it. This is not physical KV occupancy. |
+This example limits router queue waiting to a configured budget measured from request ingress. It rejects requests whose budget has already expired and admits the rest with that deadline.
 
-The factory receives a `RequestClassifierContext`. Its `block_size()` is tokens per KV block. Its `workers()` returns registered worker/rank identities and each rank's optional `total_kv_blocks()`, from cached discovery configuration. These are advertised total capacities, not currently free blocks or health checks. A registered worker may be ineligible for a particular request. The current API returns a new vector on each read.
+### Create the Classifier and Catalog Crates
 
-The classifier does not currently receive prefix hashes, expected output length, effective placement restrictions, or per-worker cache and load views. Worker-selection plugins have a separate input API; their `WorkerInputs` declarations do not apply to classifiers.
-
-| Setter | Effect |
-|---|---|
-| `set_policy_class(name)` | Select a configured family or standalone explicit class. Family selection preserves Dynamo's uncached-input bucketing. A family-backed physical queue name is not a valid override. |
-| `set_due_at(instant)` | Bound subsequent router queue waiting. It does not time out a pending classifier future or stop an already dispatched generation. |
-| `set_scheduling_cost_tokens(tokens)` | Override the cost used by queue scheduling. It does not reserve that many KV tokens. |
-| `set_worker_selection_target(worker)` | Replace this request's soft worker/rank preference. Hard pins and eligibility remain authoritative. |
-| `clear_worker_selection_target()` | Clear the soft preference without removing hard pins. |
-
-Dynamo recomputes cache eligibility when the released request enters the queue. Only explicit overrides survive classification; an estimate read before a long wait can be stale. Reconcile preferred placement with the actual worker reported by `Sent`.
-
-## Implement and Register a Classifier
-
-This example gives requests a router queue budget measured from original ingress. It rejects requests whose budget has already expired and immediately releases the rest with the same absolute deadline. It demonstrates registration and typed rejection without maintaining session state. Deferral and state cleanup are covered below.
-
-Create an external library crate. Set `DYNAMO_DIR` to the checkout that will build your frontend and `PLUGIN_DIR` to the new crate directory:
+Set the checkout and plugin project paths, then create a classifier crate and a catalog crate for registration:
 
 ```bash
 export DYNAMO_DIR=/work/dynamo
 export PLUGIN_DIR=/work/acme-admission
-cargo init --lib --name acme-admission "$PLUGIN_DIR"
-cargo add --manifest-path "$PLUGIN_DIR/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
-cargo add --manifest-path "$PLUGIN_DIR/Cargo.toml" --path "$DYNAMO_DIR/lib/runtime" dynamo-runtime
-cargo add --manifest-path "$PLUGIN_DIR/Cargo.toml" serde --features derive
-cargo add --manifest-path "$PLUGIN_DIR/Cargo.toml" tokio --features time
+mkdir -p "$PLUGIN_DIR"
+cargo init --lib --name acme-admission "$PLUGIN_DIR/classifier"
+cargo init --lib --name acme-admission-catalog "$PLUGIN_DIR/catalog"
 ```
 
-Put this implementation and catalog entry point in `src/lib.rs`:
+Add the classifier's API, error, configuration, and time dependencies:
+
+```bash
+cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
+cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/runtime" dynamo-runtime
+cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" serde --features derive
+cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" tokio --features time
+```
+
+Add the classifier and registry API to the catalog:
+
+```bash
+cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$PLUGIN_DIR/classifier" acme-admission
+cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
+```
+
+### Classify Requests
+
+Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to stop queueing the request:
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestClassifierFactory, RequestClassifierParameters,
-    RequestClassifierProviderError, RequestClassifierRegistryError,
 };
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
@@ -113,6 +103,20 @@ impl RequestClassifier for QueueBudget {
         })
     }
 }
+```
+
+For intentional rejection, return a typed `DynamoError`. `ErrorClass::CapacityExhausted` produces HTTP 529 by default; set `DYN_HTTP_OVERLOAD_STATUS_CODE=429` to return 429. Use `ErrorClass::RateLimited` for caller-specific limits, which return 429.
+
+### Parse Parameters and Create the Factory
+
+Add the provider below the classifier in `classifier/src/lib.rs`. Dynamo calls it at startup to validate the YAML parameters, then uses the returned factory to create a classifier for each model's router:
+
+```rust
+use std::sync::Arc;
+
+use dynamo_kv_router::plugins::request_classifier::{
+    RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProviderError,
+};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,6 +136,17 @@ fn provider(
     let budget = Duration::from_millis(parameters.max_wait_ms);
     Ok(Arc::new(move |_context| Box::new(QueueBudget { budget })))
 }
+```
+
+Each factory-created classifier owns its state. Separate frontend replicas have separate admission budgets unless the plugin explicitly shares them.
+
+### Register the Classifier
+
+Expose a registration function from `classifier/src/lib.rs`:
+
+```rust
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError;
 
 pub fn register(
     registry: &mut RouterPluginRegistry,
@@ -140,36 +155,24 @@ pub fn register(
 }
 ```
 
-Choose a unique registered type name. Unknown types, duplicate registrations, and invalid parameters fail startup. The name `default` is reserved: omit `request_classifier` to use pass-through behavior.
+Call it from `catalog/src/lib.rs`:
 
-### Link and Enable It
+```rust
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierRegistryError;
 
-The Python binding has one replaceable catalog dependency, `dynamo-worker-selection-policy-catalog`. Despite its name, it registers both worker-selection policies and request classifiers. A crate with the `register` entry point above can occupy that slot directly. If you already have a catalog, add this crate as a dependency and call its registration function from your existing catalog instead.
-
-```bash
-cargo add \
-  --manifest-path "$DYNAMO_DIR/lib/bindings/python/Cargo.toml" \
-  --optional \
-  --rename dynamo-worker-selection-policy-catalog \
-  --path "$PLUGIN_DIR" \
-  acme-admission
+pub fn register(
+    registry: &mut RouterPluginRegistry,
+) -> Result<(), RequestClassifierRegistryError> {
+    acme_admission::register(registry)
+}
 ```
 
-Build from a [source-build environment](../../../advanced-customizations/building-from-source.md), using that checkout's virtual environment:
+If you already have a worker-selection catalog, add the classifier to that catalog instead. One catalog can register both kinds of plugin.
 
-```bash
-cd "$DYNAMO_DIR"
-test -d .venv || uv venv .venv
-source .venv/bin/activate
-cd lib/bindings/python
-CARGO_TARGET_DIR="$DYNAMO_DIR/target" maturin develop --uv --features custom-policy
-cd "$DYNAMO_DIR"
-uv pip install -e .
-```
+### Configure the Classifier
 
-The linked catalog adds plugins alongside Dynamo's builtins. Selecting the built-in ThunderAgent type needs no custom catalog or rebuild on a build that includes it. An external crate does require rebuilding the frontend extension or image; placing a Rust library next to a stock wheel does not load it.
-
-Save this as `admission.yaml`:
+Save this as `$PLUGIN_DIR/admission.yaml`:
 
 ```yaml
 request_classifier:
@@ -178,48 +181,90 @@ request_classifier:
     max_wait_ms: 2000
 ```
 
-Start against existing workers with matching discovery configuration:
+The `type` selects the registered provider; `parameters` supplies its configuration. Unknown types, duplicate registrations, and invalid parameters stop startup. Omit `request_classifier` to use Dynamo's pass-through behavior.
+
+## Available Inputs and Decisions
+
+### Request Inputs
+
+`classify` receives a `ClassifyRequest` with these accessors:
+
+| Accessor | Meaning |
+|---|---|
+| `request_id()` | Optional request ID, also used in lifecycle events |
+| `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/agent-harnesses.mdx#agent-headers) |
+| `input_tokens()` | Input size used by the scheduler |
+| `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
+| `policy_class()` | Requested policy class, or the classifier's override |
+| `ingress_at()` | Original router ingress time |
+| `due_at()` | Queue deadline set by the classifier, if any |
+| `progress().context_tokens()` | Live context high-water mark from input and generated tokens; this measures logical context, not physical KV occupancy |
+
+### Router Context
+
+The factory receives a `RequestClassifierContext`. Use `block_size()` for tokens per KV block and `workers()` for registered worker/rank identities and their optional `total_kv_blocks()`. These are advertised total capacities, not currently free blocks.
+
+Classifiers do not currently receive the per-worker cache and load views exposed to worker-selection plugins through `WorkerInputs`.
+
+### Admission Decisions
+
+| Setter | Effect |
+|---|---|
+| `set_policy_class(name)` | Select a configured policy family or standalone class; family selection preserves uncached-input bucketing |
+| `set_due_at(instant)` | Set a deadline for router queue waiting |
+| `set_scheduling_cost_tokens(tokens)` | Override the cost used by queue scheduling |
+| `set_worker_selection_target(worker)` | Set a soft worker/rank preference, subject to hard pins and eligibility |
+| `clear_worker_selection_target()` | Clear the soft preference |
+
+Use a family name or standalone class from the [router policy configuration](configuration-and-tuning.md) with `set_policy_class`; generated queue names within a family are not valid overrides. Dynamo refreshes cache estimates when the admitted request enters the queue and applies the classifier's explicit overrides.
+
+## Defer Requests and Track Their Lifecycle
+
+Defer a request when it may become admissible later, such as when another request finishes or a paused session resumes. Wait inside the future returned by `classify`, then return `Ok(request)` when the condition is met. Dynamo continues processing other requests and delivering lifecycle events while this request waits.
+
+Give the wait its own timeout if admission has a time budget. `set_due_at` limits queue waiting after admission; it does not end the classifier's wait or stop a running generation.
+
+Implement `on_event` when the classifier tracks active requests or session capacity. For example, use completion or abort events to release capacity and wake waiting requests:
+
+| Event | Use |
+|---|---|
+| `Sent` | Record the worker/rank used for dispatch |
+| `Responding` | Observe that the worker has started responding |
+| `Completed` | Release request state and read final context-token usage when available |
+| `Aborted` | Release request state after rejection, cancellation, or failure |
+
+Dynamo delivers events in lifecycle order. Keep callbacks short so they do not delay new admission decisions, and release waiting-request state when a client cancels. For a working stateful implementation, see the [ThunderAgent classifier](https://github.com/ai-dynamo/dynamo/blob/main/lib/router-plugins/builtin/src/thunderagent/request_classifier/mod.rs).
+
+## Link the Classifier Into Dynamo
+
+Add the catalog to the Python binding manifest. Keep the dependency alias `dynamo-worker-selection-policy-catalog`, which supports both worker-selection policies and request classifiers:
+
+```bash
+cargo add \
+  --manifest-path "$DYNAMO_DIR/lib/bindings/python/Cargo.toml" \
+  --optional \
+  --rename dynamo-worker-selection-policy-catalog \
+  --path "$PLUGIN_DIR/catalog" \
+  acme-admission-catalog
+```
+
+The catalog adds custom plugins alongside Dynamo's built-ins. Custom plugins are linked at build time; YAML selects the registered type at startup.
+
+In a [source-build environment](../../../advanced-customizations/building-from-source.md), activate the checkout's virtual environment and build the extension with the catalog:
+
+```bash
+cd "$DYNAMO_DIR"
+source .venv/bin/activate
+cd lib/bindings/python
+CARGO_TARGET_DIR="$DYNAMO_DIR/target" maturin develop --uv --features custom-policy
+cd "$DYNAMO_DIR"
+uv pip install -e .
+```
+
+Start the frontend against existing workers with matching discovery configuration:
 
 ```bash
 DYN_HTTP_OVERLOAD_STATUS_CODE=429 python3 -m dynamo.frontend \
   --router-mode kv \
-  --router-policy-config admission.yaml
+  --router-policy-config "$PLUGIN_DIR/admission.yaml"
 ```
-
-Intentional rejection should return a typed `DynamoError`. `ErrorClass::CapacityExhausted` maps to HTTP status 529 by default, or 429 with the environment variable above. `ErrorClass::RateLimited` is for caller-specific limits and maps to 429. Untyped plugin errors and panics become sanitized internal errors. Classifier rejection does not trigger worker migration. This path does not add a `Retry-After` header.
-
-## Deferral and Lifecycle State
-
-`classify` returns a `Send + 'static` future. The router calls its synchronous prologue under the classifier lock, then releases the lock before polling the future. Return promptly and do the wait inside the future. Move owned values or cloned `Arc` handles into it; the future cannot borrow `self`.
-
-For a capacity gate, register a waiter and create a cleanup guard before returning the future. Inside the future, check shared state and await a notification when capacity is unavailable. Release the state lock before awaiting. Register notifications before checking the condition to avoid lost wakeups. Wrap the wait in `tokio::time::timeout_at` if admission has a budget, then carry that same absolute deadline into `set_due_at` after release. Setting `due_at` alone cannot interrupt this wait.
-
-The native [ThunderAgent classifier](https://github.com/ai-dynamo/dynamo/blob/main/lib/router-plugins/builtin/src/thunderagent/request_classifier/mod.rs) implements this pattern with `PendingClassification` and `await_release`. Its guard removes a pending registration when the future is dropped. Give each registration its own identity so cleanup from an old future cannot remove a new request that reuses the same public ID.
-
-Override `on_event` with `#[async_trait::async_trait]` when your policy retains state after admission; add `async-trait` to your crate. The default callback does nothing.
-
-| Event | Use |
-|---|---|
-| `Sent` | Record the actual dispatched worker/rank. Dispatch does not prove backend admission. |
-| `Responding` | Record response progress. It is not a measurement of pure decode time. |
-| `Completed` | Release request state and reconcile optional final context-token usage. Completion can occur without a prior `Sent` when selection recorded a worker but dispatch never happened. |
-| `Aborted` | Release request state after rejection, cancellation, or failure. Worker and error can be absent. |
-
-Events arrive asynchronously, one callback at a time in lifecycle order. A pending classification does not block events. A slow `on_event` holds the classifier lock and delays new classifications, so keep callbacks short. Internal retries retain the logical lifecycle and classification overrides; do not equate a dispatch attempt with a new admitted request. Dynamo orders the previous terminal callback before classifying a reused request ID.
-
-Queued events are dropped at router shutdown. Use drop guards for pending resources and make cleanup idempotent; do not depend on a final callback to release an external resource. Bound retained session state separately from active request state.
-
-## Current Scope
-
-- Use the embedded KV routing path in `dynamo.frontend`. The host registers the logical lifecycle and supplies progress and terminal events.
-- Query-only selection probes do not run classification. Stateful `best_worker` and `RouterRequest::New` calls without a registered classifier lifecycle also bypass it. Standalone selection, including standalone EPP, rejects a configured classifier.
-- Decode or aggregated routing owns the classifier lifecycle. The prefill leg skips it. In ordinary disaggregated serving, remote prefill can start before decode-side classification; this hook alone cannot prevent all prefill work before admission.
-- A preferred worker is advisory. A plugin's token accounting does not pin cache, reserve physical KV memory, or preempt a running generation.
-
-## Verify Your Plugin
-
-Run `cargo check --manifest-path "$PLUGIN_DIR/Cargo.toml"` against the matching checkout, then test through the rebuilt frontend. Cover immediate admission, deliberate rejection, and any deferred path. Cancel a request while it waits, fail a dispatch, retry, and reuse a request ID; confirm no plugin state or reservation survives incorrectly. If you read worker capacity or progress, test missing capacities, rank removal, and growth while waiting. Confirm the client-visible error and that rejection sends no worker request.
-
-For the queue-budget example, create queue contention and confirm requests past the deadline expire before dispatch. A successful idle request alone does not exercise the deadline.
-
-Measure classification time and allocations with the plugin disabled, pass-through, and active. For stateful policies, also measure deferred age, completed requests, and latency tails under overload. The [request-classifier contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/plugins/request_classifier.rs), [router lifecycle tests](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_router/routing_host/tests.rs), and [ThunderAgent implementation](https://github.com/ai-dynamo/dynamo/tree/main/lib/router-plugins/builtin/src/thunderagent) are the source references for these behaviors.
