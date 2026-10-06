@@ -342,13 +342,21 @@ pub fn run_offline_handoff_conformance(
     transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
 ) -> Result<NormalizedHandoffConformance> {
     let build_args = |worker_type| {
-        MockerConfig::from_value(serde_json::json!({"engine": {
-            "backend":engine_type,"worker_type":worker_type,"block_size":4,
-            "num_gpu_blocks":64,"max_num_batched_tokens":64,"max_num_seqs":2,
-            "speedup_ratio":1000.0,"decode_speedup_ratio":1000.0,
-            "kv_transfer_bandwidth":1.0,"kv_transfer_bytes_per_token":1_000_000,
-            "kv_transfer_timing_mode":transfer_timing_mode
-        }}))
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": engine_type,
+                "worker_type": worker_type,
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "max_num_seqs": 2,
+                "speedup_ratio": 1000.0,
+                "decode_speedup_ratio": 1000.0,
+                "kv_transfer_bandwidth": 1.0,
+                "kv_transfer_bytes_per_token": 1_000_000,
+                "kv_transfer_timing_mode": transfer_timing_mode
+            }
+        }))
     };
     let prefill_args = build_args(WorkerType::Prefill)?;
     let decode_args = build_args(WorkerType::Decode)?;

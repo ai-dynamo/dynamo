@@ -63,8 +63,18 @@ impl Drop for RunningServer {
 }
 
 fn fast_engine_args() -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"dp_size":1,"engine":{"backend":EngineType::Sglang,"block_size":4,"num_gpu_blocks":4_096,"max_num_seqs":64,"max_num_batched_tokens":1_024,"speedup_ratio":0.0}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": EngineType::Sglang,
+            "block_size": 4,
+            "num_gpu_blocks": 4_096,
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1_024,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> SglangSidecarEngine {

@@ -259,8 +259,17 @@ async fn capacity_rejection_is_an_in_band_internal_error() {
     for mode in [ServerMode::Aggregated, ServerMode::Decode] {
         let service = TrtllmMockerService::new(
             MockerServerConfig { mode, ..config() },
-            MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Trtllm,"num_gpu_blocks":1usize,"block_size":4usize,"max_num_seqs":8,"max_num_batched_tokens":64,"speedup_ratio":0.0}}))
-                .unwrap(),
+            MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "backend": EngineType::Trtllm,
+                    "num_gpu_blocks": 1usize,
+                    "block_size": 4usize,
+                    "max_num_seqs": 8,
+                    "max_num_batched_tokens": 64,
+                    "speedup_ratio": 0.0
+                }
+            }))
+            .unwrap(),
         )
         .unwrap();
         let mut oversized = request("req-cap", 4);

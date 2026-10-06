@@ -51,8 +51,15 @@ fn replay_config(
 }
 
 fn sglang_replay_args() -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Sglang,"num_gpu_blocks":512,"speedup_ratio":1000.0,"block_size":2}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Sglang,
+            "num_gpu_blocks": 512,
+            "speedup_ratio": 1000.0,
+            "block_size": 2
+        }
+    }))
+    .unwrap()
 }
 
 fn request(uuid: u128, token: u32, arrival_timestamp_ms: Option<f64>) -> DirectRequest {
@@ -115,8 +122,19 @@ async fn admission_timestamp_is_preserved_when_forwarding_is_delayed() {
 
 fn trtllm_reject_args() -> MockerConfig {
     // 4 GPU blocks * block_size 4 = 16-token to-completion budget per request.
-    MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Trtllm,"block_size":4,"num_gpu_blocks":4,"max_num_batched_tokens":64,"max_num_seqs":4,"enable_prefix_caching":false,"enable_chunked_prefill":true,"speedup_ratio":1000.0}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Trtllm,
+            "block_size": 4,
+            "num_gpu_blocks": 4,
+            "max_num_batched_tokens": 64,
+            "max_num_seqs": 4,
+            "enable_prefix_caching": false,
+            "enable_chunked_prefill": true,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap()
 }
 
 fn reject_request(uuid: u128, prompt_tokens: u32, max_output: usize) -> DirectRequest {
@@ -224,8 +242,14 @@ fn test_online_trace_workload_completes_multiturn_sessions() {
 
 #[test]
 fn online_report_options_populate_request_goodput_and_capacity_metrics() {
-    let args = MockerConfig::from_value(serde_json::json!({"tensor_parallel_size":2,"engine":{"speedup_ratio":1000.0,"block_size":64}}))
-        .unwrap();
+    let args = MockerConfig::from_value(serde_json::json!({
+        "tensor_parallel_size": 2,
+        "engine": {
+            "speedup_ratio": 1000.0,
+            "block_size": 64
+        }
+    }))
+    .unwrap();
     let report = simulate_trace_workload(
         replay_config(
             args,
@@ -795,8 +819,19 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
 
 #[tokio::test(start_paused = true)]
 async fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
-    let args = MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"num_gpu_blocks":6,"max_num_batched_tokens":16,"max_num_seqs":2,"enable_chunked_prefill":true,"enable_prefix_caching":false,"preemption_mode":PreemptionMode::Lifo,"speedup_ratio":1000.0}}))
-        .unwrap();
+    let args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "block_size": 4,
+            "num_gpu_blocks": 6,
+            "max_num_batched_tokens": 16,
+            "max_num_seqs": 2,
+            "enable_chunked_prefill": true,
+            "enable_prefix_caching": false,
+            "preemption_mode": PreemptionMode::Lifo,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap();
     let requests = (0..2)
         .map(|request_idx| DirectRequest {
             tokens: (0..8).map(|token| request_idx * 100 + token).collect(),

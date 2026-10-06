@@ -6,8 +6,17 @@ use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
 use futures::StreamExt;
 
 fn engine_args() -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Sglang,"block_size":4,"num_gpu_blocks":128,"max_num_seqs":8,"max_num_batched_tokens":64,"speedup_ratio":0.0}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Sglang,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 fn request(request_id: &str) -> pb::GenerateRequest {
@@ -42,10 +51,20 @@ async fn engine_state_watch_is_explicitly_unsupported() {
 #[tokio::test]
 async fn service_rejects_normalized_multi_rank_ais_args() {
     let args = MockerConfig::from_value(json!({
-        "engine": {"backend":"sglang","timing_model":{"type":"external","provider":"ais","config":{
-            "model":"model","system":"h200_sxm","backend":"sglang",
-            "worker_type":"aggregated","attention_dp":2
-        }}}
+        "engine": {
+            "backend": "sglang",
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    "model": "model",
+                    "system": "h200_sxm",
+                    "backend": "sglang",
+                    "worker_type": "aggregated",
+                    "attention_dp": 2
+                }
+            }
+        }
     }))
     .unwrap();
     assert_eq!(args.dp_size, 2);

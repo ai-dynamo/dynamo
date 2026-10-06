@@ -1425,8 +1425,18 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn no_bootstrap_prefill_delays_terminal_finish_once() {
-        let args = MockerConfig::from_value(serde_json::json!({"engine":{"worker_type":WorkerType::Prefill,"block_size":4,"num_gpu_blocks":64,"max_num_batched_tokens":64,"speedup_ratio":1000.0,"kv_transfer_bandwidth":Some(1.0),"kv_transfer_bytes_per_token":Some(25_000_000)}}))
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Prefill,
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0,
+                "kv_transfer_bandwidth": Some(1.0),
+                "kv_transfer_bytes_per_token": Some(25_000_000)
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1452,8 +1462,16 @@ mod tests {
 
     #[tokio::test]
     async fn context_capped_completion_maps_to_length() {
-        let args = MockerConfig::from_value(serde_json::json!({"engine":{"max_model_len":Some(4),"block_size":4,"num_gpu_blocks":64,"max_num_batched_tokens":64,"speedup_ratio":1000.0}}))
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "max_model_len": Some(4),
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1486,8 +1504,15 @@ mod tests {
 
     #[tokio::test]
     async fn native_sglang_completion_attaches_length_to_final_token() {
-        let args = MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"num_gpu_blocks":64,"max_num_batched_tokens":64,"speedup_ratio":1000.0}}))
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
@@ -1514,8 +1539,16 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_response_cancels_live_request_and_allows_id_reuse() {
-        let args = MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"num_gpu_blocks":64,"max_num_seqs":1,"max_num_batched_tokens":64,"speedup_ratio":0.1}}))
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 1,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 0.1
+            }
+        }))
+        .unwrap();
         let live = LiveEngine::start(args.clone(), 0).unwrap();
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live.clone()]).is_ok());
@@ -1565,8 +1598,15 @@ mod tests {
 
     #[tokio::test]
     async fn unread_response_completes_without_overflow_cancellation() {
-        let args = MockerConfig::from_value(serde_json::json!({"engine":{"block_size":4,"num_gpu_blocks":64,"max_num_batched_tokens":64,"speedup_ratio":1000.0}}))
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let engines = LiveEngine::start_grouped_with_configs_and_request_output_buffering(
             args.clone(),
             vec![LiveEngineConfig::default()],
@@ -1651,10 +1691,17 @@ mod tests {
     async fn prepared_bootstrap_shutdown_releases_the_listener() {
         let occupied = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = occupied.local_addr().unwrap().port();
-        let args = MockerConfig::from_value(serde_json::json!({"engine":{"worker_type":WorkerType::Prefill},"dynamo":{"bootstrap_port":Some(port)}}))
-            .unwrap()
-            .normalized()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Prefill
+            },
+            "dynamo": {
+                "bootstrap_port": Some(port)
+            }
+        }))
+        .unwrap()
+        .normalized()
+        .unwrap();
         let engine = MockerExecutionContext::new(args);
 
         assert!(engine.prepare_bootstrap().await.is_err());
@@ -1695,8 +1742,20 @@ mod tests {
                 (WorkerType::Prefill, &[7][..]),
                 (WorkerType::Decode, &[7, 8][..]),
             ] {
-                let args = MockerConfig::from_value(serde_json::json!({"engine":{"backend":engine_type,"worker_type":worker_type,"block_size":4,"num_gpu_blocks":64,"max_num_batched_tokens":64,"speedup_ratio":1000.0},"dynamo":{"response_replay_trace_path":Some(file.path().to_path_buf())}}))
-                    .unwrap();
+                let args = MockerConfig::from_value(serde_json::json!({
+                    "engine": {
+                        "backend": engine_type,
+                        "worker_type": worker_type,
+                        "block_size": 4,
+                        "num_gpu_blocks": 64,
+                        "max_num_batched_tokens": 64,
+                        "speedup_ratio": 1000.0
+                    },
+                    "dynamo": {
+                        "response_replay_trace_path": Some(file.path().to_path_buf())
+                    }
+                }))
+                .unwrap();
                 let live = LiveEngine::start(args.clone(), 0).unwrap();
                 let engine = MockerExecutionContext::new(args);
                 assert!(engine.engines.set(vec![live]).is_ok());

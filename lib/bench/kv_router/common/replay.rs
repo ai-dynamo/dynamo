@@ -45,9 +45,16 @@ pub fn default_mock_engine_args(
     num_gpu_blocks: usize,
     block_size: usize,
 ) -> anyhow::Result<MockerConfig> {
-    MockerConfig::from_value(
-        serde_json::json!({"engine":{"num_gpu_blocks":num_gpu_blocks,"block_size":block_size,"speedup_ratio":10.0,"enable_prefix_caching":true,"max_num_batched_tokens":usize::MAX,"max_num_seqs":usize::MAX}}),
-    )
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "num_gpu_blocks": num_gpu_blocks,
+            "block_size": block_size,
+            "speedup_ratio": 10.0,
+            "enable_prefix_caching": true,
+            "max_num_batched_tokens": usize::MAX,
+            "max_num_seqs": usize::MAX
+        }
+    }))
 }
 
 fn replay_worker_trace(

@@ -83,8 +83,18 @@ impl Drop for RunningServer {
 }
 
 fn fast_engine_args() -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"dp_size":1,"engine":{"backend":EngineType::Trtllm,"block_size":4,"num_gpu_blocks":4096,"max_num_seqs":64,"max_num_batched_tokens":1024,"speedup_ratio":0.0}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": EngineType::Trtllm,
+            "block_size": 4,
+            "num_gpu_blocks": 4096,
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 /// `--model-path` is mandatory and becomes `GenerateRequest.model`. The server
@@ -426,8 +436,18 @@ async fn decode_rejects_a_handoff_with_a_dropped_opaque_field() {
 async fn dropping_the_sidecar_stream_cancels_mocker_work() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockerConfig::from_value(serde_json::json!({"dp_size":1,"engine":{"backend":EngineType::Trtllm,"block_size":4,"num_gpu_blocks":4096,"max_num_seqs":64,"max_num_batched_tokens":1024,"speedup_ratio":0.1}}))
-            .unwrap(),
+        MockerConfig::from_value(serde_json::json!({
+            "dp_size": 1,
+            "engine": {
+                "backend": EngineType::Trtllm,
+                "block_size": 4,
+                "num_gpu_blocks": 4096,
+                "max_num_seqs": 64,
+                "max_num_batched_tokens": 1024,
+                "speedup_ratio": 0.1
+            }
+        }))
+        .unwrap(),
     )
     .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
@@ -458,8 +478,18 @@ async fn dropping_the_sidecar_stream_cancels_mocker_work() {
 async fn capacity_rejection_surfaces_as_a_sidecar_error() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockerConfig::from_value(serde_json::json!({"dp_size":1,"engine":{"backend":EngineType::Trtllm,"block_size":4,"num_gpu_blocks":1,"max_num_seqs":8,"max_num_batched_tokens":64,"speedup_ratio":0.0}}))
-            .unwrap(),
+        MockerConfig::from_value(serde_json::json!({
+            "dp_size": 1,
+            "engine": {
+                "backend": EngineType::Trtllm,
+                "block_size": 4,
+                "num_gpu_blocks": 1,
+                "max_num_seqs": 8,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 0.0
+            }
+        }))
+        .unwrap(),
     )
     .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
@@ -504,8 +534,18 @@ async fn capacity_rejection_surfaces_as_a_sidecar_error() {
 async fn sidecar_abort_cancels_the_mocker_request() {
     let server = RunningServer::start(
         ServerMode::Aggregated,
-        MockerConfig::from_value(serde_json::json!({"dp_size":1,"engine":{"backend":EngineType::Trtllm,"block_size":4,"num_gpu_blocks":4096,"max_num_seqs":64,"max_num_batched_tokens":1024,"speedup_ratio":0.1}}))
-            .unwrap(),
+        MockerConfig::from_value(serde_json::json!({
+            "dp_size": 1,
+            "engine": {
+                "backend": EngineType::Trtllm,
+                "block_size": 4,
+                "num_gpu_blocks": 4096,
+                "max_num_seqs": 64,
+                "max_num_batched_tokens": 1024,
+                "speedup_ratio": 0.1
+            }
+        }))
+        .unwrap(),
     )
     .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;

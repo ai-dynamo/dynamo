@@ -264,12 +264,21 @@ async fn native_host_offload_restore_wakes_idle_engine_and_publishes_g1_residenc
     let zmq = Arc::new(ZmqEncodingSink::default());
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    let engine_args = MockerConfig::from_value(serde_json::json!({"engine": {
-        "num_gpu_blocks": 1, "block_size": 4, "max_num_seqs": 1,
-        "max_num_batched_tokens": 4, "kv_cache_bytes_per_token": 250_000,
-        "native_host_offload": NativeHostOffloadConfig::new(2).with_bandwidths(0.0, 0.01),
-        "timing_model": {"type": "fixed", "prefill_ms": 0.0, "decode_ms": 0.0}
-    }}))
+    let engine_args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "num_gpu_blocks": 1,
+            "block_size": 4,
+            "max_num_seqs": 1,
+            "max_num_batched_tokens": 4,
+            "kv_cache_bytes_per_token": 250_000,
+            "native_host_offload": NativeHostOffloadConfig::new(2).with_bandwidths(0.0, 0.01),
+            "timing_model": {
+                "type": "fixed",
+                "prefill_ms": 0.0,
+                "decode_ms": 0.0
+            }
+        }
+    }))
     .unwrap();
     let GroupedSchedulers {
         schedulers, actor, ..
@@ -369,12 +378,21 @@ async fn command_after_a_due_host_restore_drains_the_restore_first() {
     let effects = Arc::new(CapturedEffects::default());
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    let engine_args = MockerConfig::from_value(serde_json::json!({"engine": {
-        "num_gpu_blocks": 1, "block_size": 4, "max_num_seqs": 1,
-        "max_num_batched_tokens": 4, "kv_cache_bytes_per_token": 250_000,
-        "native_host_offload": NativeHostOffloadConfig::new(2).with_bandwidths(0.0, 0.01),
-        "timing_model": {"type": "fixed", "prefill_ms": 0.0, "decode_ms": 0.0}
-    }}))
+    let engine_args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "num_gpu_blocks": 1,
+            "block_size": 4,
+            "max_num_seqs": 1,
+            "max_num_batched_tokens": 4,
+            "kv_cache_bytes_per_token": 250_000,
+            "native_host_offload": NativeHostOffloadConfig::new(2).with_bandwidths(0.0, 0.01),
+            "timing_model": {
+                "type": "fixed",
+                "prefill_ms": 0.0,
+                "decode_ms": 0.0
+            }
+        }
+    }))
     .unwrap();
     let GroupedSchedulers {
         schedulers, actor, ..
@@ -459,10 +477,12 @@ async fn command_after_a_due_host_restore_drains_the_restore_first() {
 
 #[tokio::test]
 async fn live_engine_rejects_cluster_shared_host_offload() {
-    let engine_args = MockerConfig::from_value(serde_json::json!({"engine": {
-        "kv_cache_bytes_per_token": 1024,
-        "native_host_offload": NativeHostOffloadConfig::new(2).cluster_shared("test-kv-layout")
-    }}))
+    let engine_args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "kv_cache_bytes_per_token": 1024,
+            "native_host_offload": NativeHostOffloadConfig::new(2).cluster_shared("test-kv-layout")
+        }
+    }))
     .unwrap();
     let Err(error) = create_grouped_scheduler(
         engine_args,

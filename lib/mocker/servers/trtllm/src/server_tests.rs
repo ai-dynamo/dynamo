@@ -20,8 +20,15 @@ mod disagg;
 mod serving;
 
 fn admitting_args() -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Trtllm,"num_gpu_blocks":4_096usize,"block_size":4usize,"speedup_ratio":0.0}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Trtllm,
+            "num_gpu_blocks": 4_096usize,
+            "block_size": 4usize,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 fn config() -> MockerServerConfig {
@@ -35,8 +42,15 @@ fn config() -> MockerServerConfig {
 /// something else to it -- aborting it, racing a second request, filling the
 /// concurrency limit.
 fn slow_args() -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Trtllm,"num_gpu_blocks":4_096usize,"block_size":4usize,"speedup_ratio":0.01}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Trtllm,
+            "num_gpu_blocks": 4_096usize,
+            "block_size": 4usize,
+            "speedup_ratio": 0.01
+        }
+    }))
+    .unwrap()
 }
 
 fn service() -> TrtllmMockerService {

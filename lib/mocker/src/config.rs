@@ -192,11 +192,20 @@ mod tests {
     fn canonical_fields_and_dynamo_options_round_trip_without_reconstruction() {
         let input = json!({
             "engine": {
-                "backend": "vllm", "max_model_len": 64,
-                "kv_cache_bytes_per_token": 128, "prefill_schedule_interval": 2,
-                "timing_model": {"type":"fixed", "prefill_ms":1.0, "decode_ms":2.0}
+                "backend": "vllm",
+                "max_model_len": 64,
+                "kv_cache_bytes_per_token": 128,
+                "prefill_schedule_interval": 2,
+                "timing_model": {
+                    "type": "fixed",
+                    "prefill_ms": 1.0,
+                    "decode_ms": 2.0
+                }
             },
-            "dynamo": {"enable_local_indexer": true, "bootstrap_port": 9001}
+            "dynamo": {
+                "enable_local_indexer": true,
+                "bootstrap_port": 9001
+            }
         });
         let args = MockerConfig::from_value(input).unwrap();
         let roundtrip = MockerConfig::from_value(serde_json::to_value(&args).unwrap()).unwrap();

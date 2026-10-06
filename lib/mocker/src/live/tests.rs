@@ -40,13 +40,34 @@ impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
 }
 
 fn args(engine_type: EngineType) -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"dp_size":1,"engine":{"backend":engine_type,"block_size":4,"num_gpu_blocks":128,"max_num_seqs":8,"max_num_batched_tokens":64,"speedup_ratio":1000.0}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": engine_type,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap()
 }
 
 fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"dp_size":1,"engine":{"backend":engine_type,"worker_type":worker_type,"block_size":4,"num_gpu_blocks":128,"max_num_seqs":8,"max_num_batched_tokens":64,"speedup_ratio":1000.0}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": engine_type,
+            "worker_type": worker_type,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap()
 }
 
 async fn wait_for_idle(engine: &LiveEngine) {

@@ -233,10 +233,12 @@ mod tests {
 
     #[test]
     fn replay_json_keeps_transfer_and_cache_geometry_independent() {
-        let args: MockerConfig = serde_json::from_value(serde_json::json!({"engine": {
-            "kv_transfer_bytes_per_token": 4096,
-            "kv_cache_bytes_per_token": 1024,
-        }}))
+        let args: MockerConfig = serde_json::from_value(serde_json::json!({
+            "engine": {
+                "kv_transfer_bytes_per_token": 4096,
+                "kv_cache_bytes_per_token": 1024,
+            }
+        }))
         .unwrap();
         let components = engine_components(args, false, false).unwrap();
         assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
@@ -245,11 +247,13 @@ mod tests {
 
     #[test]
     fn native_host_offload_preserves_explicit_cache_geometry() {
-        let mut args = MockerConfig::from_value(serde_json::json!({"engine": {
-            "kv_transfer_bytes_per_token": 4096,
-            "kv_cache_bytes_per_token": 2048,
-            "native_host_offload": NativeHostOffloadConfig::new(8)
-        }}))
+        let mut args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "kv_transfer_bytes_per_token": 4096,
+                "kv_cache_bytes_per_token": 2048,
+                "native_host_offload": NativeHostOffloadConfig::new(8)
+            }
+        }))
         .unwrap();
         args.kv_transfer_bytes_per_token = Some(8192);
         let components = engine_components(args, false, false).unwrap();
