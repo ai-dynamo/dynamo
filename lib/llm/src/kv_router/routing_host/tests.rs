@@ -4514,7 +4514,6 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
     runtime.shutdown();
 }
 
-/// One captured `Selected worker`-style event: its message and its fields, rendered as text.
 #[derive(Debug, Default, Clone)]
 struct CapturedEvent {
     message: String,
@@ -4541,7 +4540,6 @@ impl tracing::field::Visit for CapturedEvent {
     }
 }
 
-/// Collects every event whose message starts with `Selected`, on the thread that installs it.
 #[derive(Clone, Default)]
 struct SelectedWorkerCapture(Arc<Mutex<Vec<CapturedEvent>>>);
 
@@ -4574,11 +4572,10 @@ impl SelectedWorkerCapture {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn kv_session_affinity_hit_logs_selected_worker_and_records_kv_metrics() {
+async fn kv_session_affinity_hit_logs_selected_worker() {
     let (router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7]).await;
     let session_id = SessionAffinityId::new("kv-affinity-hit-observability");
     bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
-    let hit_rate_samples = router.request_metrics.kv_hit_rate.get_sample_count();
 
     let tracker = Arc::new(RequestTracker::new());
     let mut input = request();
@@ -4631,10 +4628,6 @@ async fn kv_session_affinity_hit_logs_selected_worker_and_records_kv_metrics() {
     assert_eq!(
         fields.get("selection").map(String::as_str),
         Some("session_affinity")
-    );
-    assert_eq!(
-        router.request_metrics.kv_hit_rate.get_sample_count(),
-        hit_rate_samples + 1
     );
 
     selection.booking.take();

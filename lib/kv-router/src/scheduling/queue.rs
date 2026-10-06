@@ -1664,8 +1664,14 @@ impl<
                 ))
                 .map(|mut selection| {
                     // Measure affinity selections against every eligible worker so cache
-                    // metrics still mean "best eligible worker"; explicit pins are not widened.
-                    let metrics_eligibility = if request.affinity_target.is_some() {
+                    // metrics still mean "best eligible worker". Explicit pins are not
+                    // widened, nor are selectors whose own filters may reject workers.
+                    let affinity_selected = request
+                        .affinity_target
+                        .is_some_and(|target| target.matches(selection.worker));
+                    let metrics_eligibility = if affinity_selected
+                        && !self.selector.applies_worker_filters()
+                    {
                         let unconstrained = RoutingEligibility::new(
                             request.allowed_worker_ids.as_ref(),
                             overloaded_worker_ids.as_ref(),
@@ -3642,6 +3648,45 @@ policy_classes:
         .await;
         assert_eq!(response.selected_raw_cached_tokens, Some(16));
         assert_eq!(response.max_raw_cached_tokens, Some(16));
+    }
+
+    #[tokio::test]
+    async fn affinity_selection_is_not_widened_for_filtering_selectors() {
+        // A custom selector may reject workers through its own filters, so the host must not
+        // count a worker it never saw as the best eligible alternative.
+        let (queue, _slots) = make_queue_with_custom_selector(
+            2,
+            16,
+            64,
+            None,
+            MinDecodeSelector { rendezvous: None },
+        );
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(queue.set_non_max_overlap_selection_observer(Arc::new(
+            move |request_id, event| {
+                observer_tx
+                    .send((request_id.to_string(), event))
+                    .expect("observer receiver should remain open");
+            }
+        )));
+        let (mut request, response_rx) = make_request("affinity-pin-custom", 64);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .extend([(worker0, 8.0), (worker1, 2.0)]);
+        request.pinned_worker = Some(worker1);
+        request.affinity_target = Some(worker1.into());
+
+        queue.enqueue(request).await;
+        assert_eq!(response_rx.await.unwrap().unwrap().best_worker, worker1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), observer_rx.recv())
+                .await
+                .is_err(),
+            "a filtering selector's affinity pin must not report a non-max-overlap selection"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

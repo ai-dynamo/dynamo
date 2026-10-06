@@ -44,6 +44,14 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         false
     }
 
+    /// Whether the selector can reject workers that [`RoutingEligibility`] accepts.
+    ///
+    /// The host measures affinity selections against the best eligible worker only when
+    /// this is `false`, so cache metrics never count a worker the policy would reject.
+    fn applies_worker_filters(&self) -> bool {
+        true
+    }
+
     fn select_worker(
         &self,
         input: WorkerSelectionInput<'_, C>,
@@ -313,14 +321,11 @@ fn log_selection<C: WorkerConfigLike>(
         .copied()
         .unwrap_or(0);
 
-    // Every routed request logs one "Selected worker" line; `selection` records how the
-    // worker was chosen (issue #15728: affinity hits used to log a different message).
-    let selection = if request.affinity_target.is_some_and(|target| {
-        target.worker_id == worker.worker_id
-            && target
-                .dp_rank
-                .is_none_or(|dp_rank| dp_rank == worker.dp_rank)
-    }) {
+    // Every routed request logs one "Selected worker" event.
+    let selection = if request
+        .affinity_target
+        .is_some_and(|target| target.matches(worker))
+    {
         "session_affinity"
     } else if request.pinned_worker == Some(worker) {
         "pinned"

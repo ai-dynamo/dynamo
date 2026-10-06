@@ -338,6 +338,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         self.exclusive_affinity
     }
 
+    fn applies_worker_filters(&self) -> bool {
+        match &self.state {
+            #[cfg(any(test, feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => false,
+            WorkerSelectionPolicyState::Composed(state) => !state.borrow().filters.is_empty(),
+        }
+    }
+
     fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.state {
             #[cfg(any(test, feature = "bench"))]
@@ -956,6 +964,19 @@ mod tests {
             ))
             .unwrap();
 
+        assert!(<WorkerSelectionPolicy as WorkerSelector<
+            TaintedWorkerConfig,
+        >>::applies_worker_filters(&policy));
+        assert!(!<WorkerSelectionPolicy as WorkerSelector<
+            TaintedWorkerConfig,
+        >>::applies_worker_filters(
+            &WorkerSelectionPolicy::new(
+                KvRouterConfig::default(),
+                "test",
+                vec![Box::new(ZeroScorer)],
+                Box::new(FirstPicker),
+            )
+        ));
         assert_eq!(selected.worker, kept);
         // The rejected worker's 96 cached tokens must not count as available reuse.
         assert_eq!(selected.max_raw_cached_tokens, Some(16));
