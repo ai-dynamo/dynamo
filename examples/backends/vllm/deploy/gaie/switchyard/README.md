@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Switchyard model routing with Dynamo GAIE
 
-Run Switchyard's published Rust SDK in a separate, single-replica PreProc. It chooses between
+Run Switchyard in a separate, single-replica PreProc. It chooses between
 `Qwen/Qwen3-0.6B` and `Qwen/Qwen3-1.7B`; Dynamo's native EPP then selects a worker within that
 model's pool. The example adds PreProc and gateway routing to an existing GAIE deployment.
 
@@ -14,28 +14,20 @@ sequenceDiagram
     participant Client
     participant Gateway as agentgateway 1.0.0
     participant Proc as Switchyard PreProc
-    participant SDK as Switchyard SDK
     participant EPP as Selected model's Dynamo EPP
     participant Worker as Worker Frontend / vLLM
     Client->>Gateway: POST /v1/chat/completions (model: auto)
-    Gateway->>Proc: PreRouting ExtProc: headers + body chunks
-    Proc->>SDK: Decode with SDK codec, then route.decide(IR)
-    SDK-->>Proc: Selected model
-    Proc-->>Gateway: Model header + rewritten request body
+    Gateway->>Proc: Choose a model
+    Proc-->>Gateway: Selected model
     Gateway->>EPP: HTTPRoute → InferencePool → ExtProc
     EPP-->>Gateway: Selected worker endpoint
     Gateway->>Worker: Forward request
     Worker-->>Gateway: JSON or SSE response
-    Gateway->>Proc: Response chunks
-    Proc-->>Gateway: Unchanged response chunks
     Gateway-->>Client: JSON or SSE response
 ```
 
-These are two distinct ExtProc calls: PreProc chooses the model before route matching; the EPP
-selects the worker after pool selection. The SDK runs inside PreProc and makes no generation calls
-for the supplied StageRouter policy. PreProc receives no Dynamo load or cache signals. Both services use Dynamo's ExtProc streaming
-server. Switchyard implements its `RequestPreprocessor` hook; it does not implement another
-gateway protocol server.
+PreProc chooses the model before gateway route matching. The selected model's EPP then chooses
+the worker. This example uses StageRouter without Dynamo load or cache signals.
 
 ## Prerequisites
 
@@ -60,8 +52,7 @@ You also need Docker, `kubectl` with Kustomize support, and a registry the clust
 
 ## Build and deploy
 
-From the Dynamo repository root, build the PreProc image. It uses Dynamo's ExtProc library with
-EPP dependencies disabled, so the repository root is the required build context:
+From the Dynamo repository root, build and publish the PreProc image:
 
 ```bash
 export PREPROC_IMAGE=registry.example.com/your-project/switchyard-preproc:example
@@ -85,8 +76,7 @@ kubectl get -n "$NAMESPACE" httproute
 kubectl port-forward -n "$NAMESPACE" service/switchyard-gateway 8000:80
 ```
 
-The HTTPRoutes must report `Accepted=True` and `ResolvedRefs=True`. PreProc does not replace the
-existing Dynamo worker Frontends or EPPs. There is one separate Switchyard process for both models.
+The HTTPRoutes must report `Accepted=True` and `ResolvedRefs=True`.
 
 ## Verify both model choices
 
@@ -112,34 +102,18 @@ Set `X-Switchyard-Session-Id` to retain StageRouter state across requests in one
 
 ## Configure routing
 
-Edit [routes.toml](preproc/config/routes.toml) using the native Switchyard runner schema, then
-reapply the Kustomization. `Runner::load` reads the TOML and constructs the SDK; there is no adapter
-configuration schema. The request's `model` is a **route ID**, such as `auto`, rather than a served
-model alias. Named routes can select other configured policies.
+Edit [routes.toml](preproc/config/routes.toml) to choose the routing policy, then reapply the
+Kustomization. Set the request's `model` to a configured route ID, such as `auto`.
 
-To route to another existing model pool, add its target and policy in the TOML and a matching model
-header rule in `http-routes.yaml`. HTTPRoute owns the model-to-pool mapping. PreProc changes only
-the top-level `model` field and overwrites incoming gateway/worker routing controls; other raw JSON
-field values remain intact. Use decision-only policies: request-rewriting or generation-producing
-policies do not fit this forwarding contract.
+To route to another existing model pool, add its target and policy in the TOML and a matching
+rule in [http-routes.yaml](http-routes.yaml). Use policies that select a model without generating
+a response or rewriting the request.
 
-The example supports text and function-tool history on `/v1/chat/completions`. It limits requests
-to 2 MiB, concurrent routing to eight requests, total ExtProc streams to sixteen, and session
-identities to 4096. SDK decisions time out after one second, request preprocessing after five
-seconds, and response passthrough after 120 seconds. Agentgateway 1.0.0 keeps PreProc on the
-response path. State lives in one process and resets on restart; `Recreate` updates briefly stop
-routing. This example does not provide high availability or production throughput guarantees.
+The example supports text and function-tool history on `/v1/chat/completions`, with requests up
+to 2 MiB and a response timeout of 120 seconds. Session state resets when PreProc restarts, and
+updates briefly interrupt routing. This single-replica example does not provide high availability.
 
-## Validate and remove
-
-With Rust 1.96.1, CMake, and `protoc` installed, run the focused service checks from the repository root:
-
-```bash
-cargo fmt --manifest-path "$EXAMPLE/preproc/Cargo.toml" --check
-cargo clippy --manifest-path "$EXAMPLE/preproc/Cargo.toml" --locked --all-targets -- -D warnings
-cargo test --manifest-path "$EXAMPLE/preproc/Cargo.toml" --locked
-kubectl kustomize "$EXAMPLE"
-```
+## Remove
 
 Remove the add-on's resources; the existing model deployments and pools remain:
 
