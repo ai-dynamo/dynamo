@@ -2322,7 +2322,6 @@ dependencies = [
  "blake3",
  "bytes",
  "dashmap",
- "derive_builder",
  "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-tokens",

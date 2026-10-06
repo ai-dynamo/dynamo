@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Draft source pin: replace with the matching published Python/Rust nightly pair.
+# Keep in sync with the aisimulate-core pins in Cargo.toml and lib/bindings/python/Cargo.toml.
 aisimulate==0.13.0.dev202610060000000067

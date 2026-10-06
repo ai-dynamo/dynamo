@@ -6,6 +6,7 @@ import json
 import pytest
 
 from dynamo._core import run_mocker_synthetic_trace_replay
+from dynamo._internal import ais
 from dynamo.mocker.config import normalize_mocker_config
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
@@ -23,8 +24,6 @@ def _config(**overrides):
 
 
 def test_automatic_capacity_roundtrip_and_unbounded_limits(monkeypatch):
-    import dynamo._internal.ais as ais
-
     calls = []
 
     def estimate(config, **options):
@@ -72,8 +71,6 @@ def test_automatic_capacity_roundtrip_and_unbounded_limits(monkeypatch):
 
 
 def test_explicit_capacity_skips_estimation_and_preserves_controls(monkeypatch):
-    import dynamo._internal.ais as ais
-
     def unexpected(*args, **kwargs):
         raise AssertionError("explicit capacity must not be estimated")
 

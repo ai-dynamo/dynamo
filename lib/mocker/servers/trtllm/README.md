@@ -17,7 +17,7 @@ scheduling behave like a real deployment.
 ```bash
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50051 --model Qwen/Qwen3-0.6B --context-length 2048 \
-  --extra-engine-args '{"speedup_ratio":1000,"block_size":32}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":32}}'
 
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
   --grpc-endpoint http://127.0.0.1:50051 --model-path Qwen/Qwen3-0.6B
@@ -42,11 +42,11 @@ fetch rather than anywhere in this server.
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50051 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --disaggregation-mode prefill \
-  --extra-engine-args '{"speedup_ratio":1000}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 cargo run -p dynamo-trtllm-mocker --bin dynamo-trtllm-mocker-server -- \
   --listen 127.0.0.1:50052 --model Qwen/Qwen3-0.6B --context-length 2048 \
   --disaggregation-mode decode \
-  --extra-engine-args '{"speedup_ratio":1000}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 
 cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
   --grpc-endpoint http://127.0.0.1:50051 --model-path Qwen/Qwen3-0.6B \

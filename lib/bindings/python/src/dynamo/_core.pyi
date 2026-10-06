@@ -3061,7 +3061,8 @@ class EntrypointArgs:
             tls_key_path: TLS key path (PEM format)
             tls_client_ca_cert_path: Client CA certificate path for mutual TLS (PEM format)
             extra_engine_args: Optional path to mocker engine arguments JSON
-            mocker_engine_args: Typed mocker engine arguments
+            mocker_engine_args: Canonical mocker configuration mapping with an ``engine``
+                section and optional ``dynamo`` runtime options
             runtime_config: Optional runtime configuration for discovery registration
             namespace: Dynamo namespace for model discovery scoping
             namespace_prefix: Optional namespace prefix

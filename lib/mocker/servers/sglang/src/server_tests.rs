@@ -225,6 +225,27 @@ async fn kv_event_discovery_follows_regular_mocker_rules() {
 }
 
 #[tokio::test]
+async fn discovery_uses_sglang_prefill_limit_for_unbounded_batches() {
+    for (batch_limit, expected) in [(64, 64), (usize::MAX, 4096)] {
+        let mut args = engine_args();
+        args.enable_prefix_caching = false;
+        args.max_num_batched_tokens = batch_limit;
+        args.sglang.max_prefill_tokens = 4096;
+        let service = SglangMockerService::new(MockerServerConfig::default(), args).unwrap();
+        let info: serde_json::Value = serde_json::from_str(
+            &service
+                .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json_info,
+        )
+        .unwrap();
+        assert_eq!(info["max_prefill_tokens"], expected);
+    }
+}
+
+#[tokio::test]
 async fn failed_kv_publisher_is_not_advertised() {
     let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let mut args = engine_args();

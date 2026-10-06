@@ -183,7 +183,11 @@ impl SglangMockerService {
             kv_events,
             max_total_num_tokens,
             max_running_requests: engine_args.effective_handoff_capacity(),
-            max_prefill_tokens: engine_args.max_num_batched_tokens,
+            max_prefill_tokens: if engine_args.max_num_batched_tokens == usize::MAX {
+                engine_args.sglang.max_prefill_tokens
+            } else {
+                engine_args.max_num_batched_tokens
+            },
         };
         let engine = LiveEngine::start_with_config(
             engine_args,
