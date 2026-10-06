@@ -786,7 +786,7 @@ def chat_payload_with_logprobs(
     if stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
-        body["return_tokens_as_token_ids"] = True
+        body.setdefault("return_tokens_as_token_ids", True)
         nvext = dict(body.get("nvext") or {})
         fields = [*nvext.get("extra_fields", []), "completion_token_ids"]
         nvext["extra_fields"] = fields
