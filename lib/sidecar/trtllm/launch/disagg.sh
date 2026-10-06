@@ -96,8 +96,9 @@ for arg in "${EXTRA_ARGS[@]}"; do
     case "$arg" in
         --extra_llm_api_options|--extra_llm_api_options=*|--config|--config=*)
             echo "Cannot forward ${arg%%=*}: this launcher needs it for" >&2
-            echo "cache_transceiver_config. Merge your settings into that file, or set" >&2
-            echo "TRTLLM_CACHE_TRANSCEIVER_BACKEND and run the engines yourself." >&2
+            echo "cache_transceiver_config and guided_decoding_backend. Merge your" >&2
+            echo "settings into that file, or set TRTLLM_CACHE_TRANSCEIVER_BACKEND and" >&2
+            echo "run the engines yourself." >&2
             exit 1
             ;;
     esac
