@@ -278,12 +278,22 @@ impl MooncakeTraceTotals {
     }
 }
 
+/// One KV event applied untimed before the measured window (warm-up prefix).
+#[derive(Clone, Debug)]
+pub(crate) struct WarmupEvent {
+    pub(crate) worker: usize,
+    pub(crate) event: KvCacheEvent,
+    pub(crate) storage_tier: StorageTier,
+}
+
 #[derive(Clone)]
 pub(crate) struct PreparedMooncakeBenchmark {
     pub(crate) worker_traces: WorkerTimelines<WorkerTrace>,
     pub(crate) totals: MooncakeTraceTotals,
     pub(crate) benchmark_duration_ms: u64,
     pub(crate) block_size: u32,
+    /// Warm-up events in time order, applied before the window; empty unless requested.
+    pub(crate) warmup_events: Vec<WarmupEvent>,
 }
 
 fn merge_event_worker_trace(
@@ -444,5 +454,6 @@ fn prepared_with_totals(
         totals,
         benchmark_duration_ms,
         block_size,
+        warmup_events: Vec::new(),
     }
 }

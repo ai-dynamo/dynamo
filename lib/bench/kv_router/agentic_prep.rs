@@ -14,9 +14,10 @@ use dynamo_bench::kv_router_common::agentic::{
 };
 use dynamo_bench::kv_router_common::replay::mock_engine_args_with_speedup;
 use dynamo_kv_router::protocols::KvCacheEventData;
+use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
 
 use super::mooncake_shared::{
-    PreparedMooncakeBenchmark, WorkerTraceEntry, merge_worker_traces,
+    PreparedMooncakeBenchmark, WarmupEvent, WorkerTraceEntry, merge_worker_traces,
     prepare_scaled_benchmark_global,
 };
 use super::scaling_diag::PrepTimings;
@@ -27,6 +28,34 @@ pub(crate) struct AgenticEngine {
     pub(crate) num_gpu_blocks: usize,
     pub(crate) block_size: u32,
     pub(crate) speedup_ratio: f64,
+    /// `vllm` keeps the original capture; `sglang` uses the radix-cache engine with
+    /// `page_size = block_size`.
+    pub(crate) sglang: bool,
+}
+
+impl AgenticEngine {
+    fn mock_engine_args(self) -> anyhow::Result<MockEngineArgs> {
+        if !self.sglang {
+            return mock_engine_args_with_speedup(
+                self.num_gpu_blocks,
+                self.block_size as usize,
+                self.speedup_ratio,
+            );
+        }
+        Ok(MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .sglang(Some(SglangArgs {
+                page_size: Some(self.block_size as usize),
+                ..SglangArgs::default()
+            }))
+            .num_gpu_blocks(self.num_gpu_blocks)
+            .block_size(self.block_size as usize)
+            .speedup_ratio(self.speedup_ratio)
+            .enable_prefix_caching(true)
+            .max_num_batched_tokens(None)
+            .max_num_seqs(None)
+            .build()?)
+    }
 }
 
 /// Load the pool (failing closed on an expected SHA-256), capture, merge, and rescale.
@@ -60,22 +89,45 @@ pub(crate) async fn prepare_agentic_benchmark(
     };
 
     let started = Instant::now();
-    let engine_args = mock_engine_args_with_speedup(
-        engine.num_gpu_blocks,
-        engine.block_size as usize,
-        engine.speedup_ratio,
-    )?;
-    let artifacts =
+    let engine_args = engine.mock_engine_args()?;
+    report.engine_type = if engine.sglang { "sglang" } else { "vllm" }.to_string();
+    let (artifacts, warmups) =
         generate_agentic_artifacts(Arc::new(pool), config, engine_args, &mut report).await?;
     timings.simulation_ms = started.elapsed().as_secs_f64() * 1e3;
 
     let started = Instant::now();
+    let warmup_events = merge_warmup_events(warmups);
     let merged = merge_worker_traces(artifacts, engine.block_size)?;
-    let prepared = prepare_scaled_benchmark_global(merged, benchmark_duration_ms);
+    let mut prepared = prepare_scaled_benchmark_global(merged, benchmark_duration_ms);
+    prepared.warmup_events = warmup_events;
     check_worker_order(&prepared)?;
     report.merged_corpus_digest = prepared_corpus_digest(&prepared);
     timings.merge_and_rescale_ms = started.elapsed().as_secs_f64() * 1e3;
     Ok((prepared, timings, report))
+}
+
+/// Merge per-worker warm-up events into one list ordered by (virtual time, worker, source
+/// order); per-worker order is what the indexer needs, the global order mimics arrival.
+fn merge_warmup_events(
+    warmups: Vec<Vec<dynamo_mocker::replay::ReplayTimedKvEvent>>,
+) -> Vec<WarmupEvent> {
+    let mut keyed = Vec::with_capacity(warmups.iter().map(Vec::len).sum());
+    for (worker, events) in warmups.into_iter().enumerate() {
+        for (ordinal, event) in events.into_iter().enumerate() {
+            keyed.push((event.timestamp_us, worker, ordinal, event));
+        }
+    }
+    keyed.sort_unstable_by_key(|(timestamp_us, worker, ordinal, _)| {
+        (*timestamp_us, *worker, *ordinal)
+    });
+    keyed
+        .into_iter()
+        .map(|(_, worker, _, event)| WarmupEvent {
+            worker,
+            event: event.event,
+            storage_tier: event.storage_tier,
+        })
+        .collect()
 }
 
 /// Fail closed unless every worker's merged timeline is time-ordered.
@@ -140,6 +192,28 @@ pub(crate) fn prepared_corpus_digest(prepared: &PreparedMooncakeBenchmark) -> St
                     }
                 }
             }
+        }
+    }
+    put(prepared.warmup_events.len() as u64);
+    for warmup in &prepared.warmup_events {
+        put(warmup.worker as u64);
+        put(warmup.event.event_id);
+        match &warmup.event.data {
+            KvCacheEventData::Stored(store) => {
+                put(2);
+                put(store.parent_hash.map_or(u64::MAX, |hash| hash.0));
+                put(store.blocks.len() as u64);
+                for block in &store.blocks {
+                    put(block.block_hash.0);
+                    put(block.tokens_hash.0);
+                }
+            }
+            KvCacheEventData::Removed(remove) => {
+                put(3);
+                put(remove.block_hashes.len() as u64);
+                remove.block_hashes.iter().for_each(|hash| put(hash.0));
+            }
+            KvCacheEventData::Cleared => put(4),
         }
     }
     format!("{:016x}", hasher.digest())

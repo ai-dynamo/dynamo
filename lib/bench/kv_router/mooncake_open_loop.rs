@@ -104,6 +104,7 @@ impl MooncakeLogicalOperation {
 #[derive(Debug)]
 pub(crate) struct PreparedMooncakeCorpus {
     pub(crate) operations: Vec<MooncakeLogicalOperation>,
+    warmup_events: Vec<RouterEvent>,
     query_corpus: QueryCorpus,
     expected_events_by_worker: Vec<(u64, usize)>,
     totals: MooncakeTraceTotals,
@@ -160,6 +161,9 @@ struct DispatchEntry {
 #[derive(Debug)]
 pub struct PreparedOpenLoopTrial {
     dispatch: Vec<DispatchEntry>,
+    warmup_events: Vec<RouterEvent>,
+    /// Called after the warm-up prefix is applied (e.g. to return freed heap pages).
+    post_warmup_hook: Option<fn()>,
     query_corpus: Arc<QueryCorpus>,
     operation_workers: Box<[u64]>,
     lane_capacities: Vec<usize>,
@@ -190,6 +194,10 @@ fn event_kind_name(code: u8) -> &'static str {
 }
 
 impl PreparedOpenLoopTrial {
+    pub fn set_post_warmup_hook(&mut self, hook: fn()) {
+        self.post_warmup_hook = Some(hook);
+    }
+
     fn page_touch_untimed(&self) {
         let mut checksum = self.benchmark_duration_ns;
         checksum ^= u64::from(self.block_size);
@@ -249,10 +257,27 @@ impl PreparedOpenLoopTrial {
 }
 
 pub(crate) fn prepare_mooncake_corpus(
-    prepared: PreparedMooncakeBenchmark,
+    mut prepared: PreparedMooncakeBenchmark,
     inference_worker_duplication_factor: usize,
 ) -> anyhow::Result<PreparedMooncakeCorpus> {
     let num_trace_workers = prepared.worker_traces.len();
+    if !prepared.warmup_events.is_empty() && inference_worker_duplication_factor != 1 {
+        anyhow::bail!("a warm-up prefix does not support -d worker duplication");
+    }
+    let mut warmup_events = Vec::with_capacity(prepared.warmup_events.len());
+    for warmup in std::mem::take(&mut prepared.warmup_events) {
+        if !warmup.storage_tier.is_gpu() {
+            anyhow::bail!(
+                "warm-up prefix has a non-GPU event for worker {}",
+                warmup.worker
+            );
+        }
+        warmup_events.push(RouterEvent::with_storage_tier(
+            warmup.worker as u64,
+            warmup.event,
+            warmup.storage_tier,
+        ));
+    }
     let estimated_ops = prepared
         .worker_traces
         .iter()
@@ -350,6 +375,7 @@ pub(crate) fn prepare_mooncake_corpus(
 
     Ok(PreparedMooncakeCorpus {
         operations,
+        warmup_events,
         query_corpus: QueryCorpus {
             hashes: hash_slab.into_boxed_slice(),
             specs,
@@ -376,6 +402,7 @@ pub(crate) fn prepare_open_loop_trial(
 
     let PreparedMooncakeCorpus {
         operations,
+        warmup_events,
         query_corpus,
         expected_events_by_worker,
         totals,
@@ -421,6 +448,8 @@ pub(crate) fn prepare_open_loop_trial(
 
     Ok(PreparedOpenLoopTrial {
         dispatch,
+        warmup_events,
+        post_warmup_hook: None,
         query_corpus: Arc::new(query_corpus),
         operation_workers: operation_workers.into_boxed_slice(),
         lane_capacities,
@@ -1009,6 +1038,12 @@ pub struct RegistrationStats {
     pub ranks: usize,
     pub elapsed_ms: f64,
     pub failures: usize,
+    /// Untimed warm-up prefix applied after registration (0 when disabled).
+    pub warmup_events: usize,
+    pub warmup_stored_blocks: usize,
+    pub warmup_removed_blocks: usize,
+    pub warmup_elapsed_ms: f64,
+    pub warmup_failures: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -1194,7 +1229,34 @@ async fn pre_register_ranks<T: SyncIndexer>(
         ranks: workers.len(),
         elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
         failures,
+        ..RegistrationStats::default()
     }
+}
+
+/// Apply the warm-up prefix untimed (enqueue in order, then one FIFO flush barrier) and
+/// record its size and wall time in `stats`.
+async fn apply_warmup_events<T: SyncIndexer>(
+    indexer: &ThreadPoolIndexer<T>,
+    events: Vec<RouterEvent>,
+    stats: &mut RegistrationStats,
+) {
+    if events.is_empty() {
+        return;
+    }
+    let started = Instant::now();
+    stats.warmup_events = events.len();
+    for event in events {
+        match &event.event.data {
+            KvCacheEventData::Stored(store) => stats.warmup_stored_blocks += store.blocks.len(),
+            KvCacheEventData::Removed(remove) => {
+                stats.warmup_removed_blocks += remove.block_hashes.len()
+            }
+            KvCacheEventData::Cleared => {}
+        }
+        stats.warmup_failures += usize::from(indexer.enqueue_event(event).is_err());
+    }
+    stats.warmup_failures += usize::from(indexer.flush_and_wait().await.is_err());
+    stats.warmup_elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
 }
 
 fn aggregate_issuer_outputs(
@@ -1242,12 +1304,20 @@ pub async fn run_open_loop<T: SyncIndexer>(
     trial: PreparedOpenLoopTrial,
     config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
-    trial.page_touch_untimed();
-    let registration = if config.pre_register_ranks {
+    let mut trial = trial;
+    let mut registration = if config.pre_register_ranks {
         pre_register_ranks(indexer.as_ref(), &trial.expected_events_by_worker).await
     } else {
         RegistrationStats::default()
     };
+    let warmup_events = std::mem::take(&mut trial.warmup_events);
+    if !warmup_events.is_empty() {
+        apply_warmup_events(indexer.as_ref(), warmup_events, &mut registration).await;
+        if let Some(hook) = trial.post_warmup_hook {
+            hook();
+        }
+    }
+    trial.page_touch_untimed();
     let clock = BenchmarkClock::new(config.spin_us.saturating_mul(1_000))?;
     let epoch = clock.epoch();
 
@@ -1716,6 +1786,9 @@ fn analyze_result(
         failure_reasons.push(format!("failed_events={failed_events}"));
     }
     let registration = scaling_input.registration;
+    if registration.warmup_failures > 0 {
+        failure_reasons.push(format!("warmup_failures={}", registration.warmup_failures));
+    }
     if registration.failures > 0 {
         failure_reasons.push(format!("registration_failures={}", registration.failures));
     }
@@ -1777,7 +1850,7 @@ fn analyze_result(
         max_issuer_active_fraction,
         issuer_active_ok: max_issuer_active_fraction < config.guard_issuer_active_fraction,
         no_failed_events: failed_events == 0,
-        no_registration_failures: registration.failures == 0,
+        no_registration_failures: registration.failures == 0 && registration.warmup_failures == 0,
         pass: false,
     };
     harness_guard.pass = harness_guard.generator_valid
@@ -2027,28 +2100,33 @@ pub async fn run_correctness_check<T: SyncIndexer>(
     let started = Instant::now();
     let PreparedMooncakeCorpus {
         operations,
+        warmup_events,
         query_corpus,
         expected_events_by_worker,
         ..
     } = corpus;
-    let registration = if pre_register_ranks_first {
+    let mut registration = if pre_register_ranks_first {
         pre_register_ranks(indexer.as_ref(), &expected_events_by_worker).await
     } else {
         RegistrationStats::default()
     };
+    let mut reference = ReferenceIndex::default();
+    for event in &warmup_events {
+        reference.apply(event);
+    }
+    apply_warmup_events(indexer.as_ref(), warmup_events, &mut registration).await;
     let total_queries = operations
         .iter()
         .filter(|operation| matches!(operation.payload, MooncakeOperationPayload::Query))
         .count();
     let stride = (total_queries / max_checked_queries.max(1)).max(1);
-    let mut reference = ReferenceIndex::default();
     let mut report = CorrectnessReport {
         mode: "correctness",
         backend: backend_name.to_string(),
         workers: expected_events_by_worker.len(),
         total_queries,
         stride,
-        registration_failures: registration.failures,
+        registration_failures: registration.failures + registration.warmup_failures,
         ..CorrectnessReport::default()
     };
     let mut matched = Vec::new();

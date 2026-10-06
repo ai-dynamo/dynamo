@@ -244,6 +244,16 @@ struct Args {
     #[clap(long, default_value = "1.0")]
     agentic_speedup_ratio: f64,
 
+    /// Mock engine for the agentic capture: `vllm` (original) or `sglang` (radix cache with
+    /// page size = --block-size).
+    #[clap(long, default_value = "vllm", value_parser = ["vllm", "sglang"])]
+    agentic_engine: String,
+
+    /// Virtual-time warm-up prefix of the agentic capture: lookups before it are dropped and
+    /// its KV events are applied untimed before the measured window.
+    #[clap(long, default_value = "0")]
+    agentic_warmup_sim_ms: u64,
+
     /// Allow closed-loop lanes to run out of plays before the cap (plumbing smokes only).
     #[clap(long)]
     agentic_allow_exhausted_lanes: bool,
@@ -377,6 +387,7 @@ fn agentic_corpus_config(args: &Args) -> anyhow::Result<AgenticCorpusConfig> {
         seed: args.common.seed,
         allow_exhausted_lanes: args.agentic_allow_exhausted_lanes,
         collision_stats: !args.agentic_no_collision_stats,
+        warmup_sim_ms: args.agentic_warmup_sim_ms,
     })
 }
 
@@ -467,7 +478,8 @@ async fn run_open_loop_for_config(
     let started = Instant::now();
     let corpus =
         prepare_mooncake_corpus(prepared, bench_config.inference_worker_duplication_factor)?;
-    let trial = prepare_open_loop_trial(corpus, args.query_lanes)?;
+    let mut trial = prepare_open_loop_trial(corpus, args.query_lanes)?;
+    trial.set_post_warmup_hook(quiesce_prepared_heap);
     timings.corpus_and_dispatch_ms = elapsed_ms(started);
     let started = Instant::now();
     quiesce_prepared_heap();
@@ -721,6 +733,7 @@ async fn prepare_benchmark(
                 num_gpu_blocks: args.common.num_gpu_blocks,
                 block_size: args.common.block_size,
                 speedup_ratio: args.agentic_speedup_ratio,
+                sglang: args.agentic_engine == "sglang",
             },
             benchmark_duration_ms,
         )

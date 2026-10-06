@@ -128,6 +128,7 @@ fn config() -> AgenticCorpusConfig {
         seed: 42,
         allow_exhausted_lanes: true,
         collision_stats: true,
+        warmup_sim_ms: 0,
     }
 }
 

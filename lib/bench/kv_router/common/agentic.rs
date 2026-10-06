@@ -38,6 +38,7 @@ use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use super::progress::make_progress_bar;
 use super::replay::WorkerReplayArtifacts;
+use dynamo_mocker::replay::ReplayTimedKvEvent;
 
 pub const AGENTIC_POOL_SCHEMA: &str = "dynamo-bench.agentic-row-pool.v1";
 /// Seed domain for the per-worker local-hash salt.
@@ -190,6 +191,9 @@ pub struct AgenticCorpusConfig {
     /// Allow lanes that run out of plays before the cap (plumbing smokes only).
     pub allow_exhausted_lanes: bool,
     pub collision_stats: bool,
+    /// Virtual-time warm-up prefix: lookups before it are dropped and its KV events are
+    /// applied untimed before the measured window, so the window starts on a warm index.
+    pub warmup_sim_ms: u64,
 }
 
 impl AgenticCorpusConfig {
@@ -208,6 +212,10 @@ impl AgenticCorpusConfig {
             "--agentic-lanes-per-worker must be > 0"
         );
         ensure!(self.sim_ms > 0, "--agentic-sim-ms must be > 0");
+        ensure!(
+            self.warmup_sim_ms < self.sim_ms,
+            "--agentic-warmup-sim-ms must be below --agentic-sim-ms"
+        );
         ensure!(
             self.length_factor > 0,
             "--agentic-length-factor must be > 0"
@@ -375,6 +383,10 @@ pub struct WorkerCaptureStats {
     pub removed_blocks: usize,
     pub request_blocks: usize,
     pub phase_offset_us: u64,
+    pub warmup_requests_dropped: usize,
+    pub warmup_events: usize,
+    pub warmup_stored_blocks: usize,
+    pub warmup_removed_blocks: usize,
 }
 
 fn chain(parent: Option<u64>, local: u64) -> u64 {
@@ -513,6 +525,26 @@ pub fn count_shared_values(lists: &[Vec<u64>]) -> (u64, u64) {
     (shared, distinct)
 }
 
+/// Drop lookups before `cut_us` and move earlier KV events into an untimed warm-up list.
+fn split_warmup(
+    artifacts: &mut WorkerReplayArtifacts,
+    cut_us: u64,
+) -> (usize, Vec<ReplayTimedKvEvent>) {
+    if cut_us == 0 {
+        return (0, Vec::new());
+    }
+    let requests_before = artifacts.requests.len();
+    artifacts
+        .requests
+        .retain(|request| request.timestamp_us >= cut_us);
+    let dropped = requests_before - artifacts.requests.len();
+    let (warmup, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut artifacts.kv_events)
+        .into_iter()
+        .partition(|event| event.timestamp_us < cut_us);
+    artifacts.kv_events = kept;
+    (dropped, warmup)
+}
+
 fn shift_worker_timeline(artifacts: &mut WorkerReplayArtifacts, offset_us: u64) {
     for request in &mut artifacts.requests {
         request.timestamp_us += offset_us;
@@ -524,6 +556,7 @@ fn shift_worker_timeline(artifacts: &mut WorkerReplayArtifacts, offset_us: u64) 
 
 struct WorkerCapture {
     artifacts: WorkerReplayArtifacts,
+    warmup_events: Vec<ReplayTimedKvEvent>,
     stats: WorkerCaptureStats,
     locals_before_salt: Vec<u64>,
     locals_after_salt: Vec<u64>,
@@ -630,6 +663,12 @@ fn capture_worker(
     };
     shift_worker_timeline(&mut artifacts, phase_offset_us);
     artifacts.output_signals = Vec::new();
+    // Only local hashes reach the open-loop corpus; drop the sequence hashes early.
+    for request in &mut artifacts.requests {
+        request.replay_hashes.sequence_hashes = Vec::new();
+    }
+    let (warmup_requests_dropped, warmup_events) =
+        split_warmup(&mut artifacts, config.warmup_sim_ms.saturating_mul(1_000));
 
     let mut stats = WorkerCaptureStats {
         plays_assigned: instances.len(),
@@ -644,8 +683,19 @@ fn capture_worker(
         rejected_outputs,
         capped_delays,
         phase_offset_us,
+        warmup_requests_dropped,
+        warmup_events: warmup_events.len(),
         ..WorkerCaptureStats::default()
     };
+    for event in &warmup_events {
+        match &event.event.data {
+            KvCacheEventData::Stored(store) => stats.warmup_stored_blocks += store.blocks.len(),
+            KvCacheEventData::Removed(remove) => {
+                stats.warmup_removed_blocks += remove.block_hashes.len()
+            }
+            KvCacheEventData::Cleared => {}
+        }
+    }
     for request in &artifacts.requests {
         stats.request_blocks += request.replay_hashes.local_block_hashes.len();
     }
@@ -661,6 +711,7 @@ fn capture_worker(
     }
     Ok(WorkerCapture {
         artifacts,
+        warmup_events,
         stats,
         locals_before_salt,
         locals_after_salt,
@@ -730,6 +781,12 @@ pub struct AgenticPrepReport {
     pub distinct_local_hashes_after_salt: Option<u64>,
     pub total_request_blocks: u64,
     pub query_slab_gate_blocks: u64,
+    pub engine_type: String,
+    pub warmup_sim_ms: u64,
+    pub warmup_requests_dropped: u64,
+    pub warmup_events: u64,
+    pub warmup_stored_blocks: u64,
+    pub warmup_removed_blocks: u64,
     pub capture_ms: f64,
     pub collision_stats_ms: f64,
     /// xxh3 digest of the merged, rescaled corpus (filled in by the bench).
@@ -743,7 +800,7 @@ pub async fn generate_agentic_artifacts(
     config: &AgenticCorpusConfig,
     engine_args: MockEngineArgs,
     report: &mut AgenticPrepReport,
-) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
+) -> anyhow::Result<(Vec<WorkerReplayArtifacts>, Vec<Vec<ReplayTimedKvEvent>>)> {
     config.validate()?;
     let copies = config.copies(pool.plays.len());
     let dealt = deal_play_instances(pool.plays.len(), copies, config.workers, config.seed);
@@ -784,12 +841,14 @@ pub async fn generate_agentic_artifacts(
         }));
     }
     let mut artifacts = Vec::with_capacity(config.workers);
+    let mut warmups = Vec::with_capacity(config.workers);
     let mut stats = Vec::with_capacity(config.workers);
     let mut before = Vec::new();
     let mut after = Vec::new();
     for task in tasks {
         let capture = task.await??;
         artifacts.push(capture.artifacts);
+        warmups.push(capture.warmup_events);
         stats.push(capture.stats);
         before.push(capture.locals_before_salt);
         after.push(capture.locals_after_salt);
@@ -814,6 +873,11 @@ pub async fn generate_agentic_artifacts(
     report.rejected_outputs = spread(|stats| stats.rejected_outputs).total;
     report.capped_delays = spread(|stats| stats.capped_delays).total;
     report.total_request_blocks = report.request_blocks_per_worker.total;
+    report.warmup_sim_ms = config.warmup_sim_ms;
+    report.warmup_requests_dropped = spread(|stats| stats.warmup_requests_dropped).total;
+    report.warmup_events = spread(|stats| stats.warmup_events).total;
+    report.warmup_stored_blocks = spread(|stats| stats.warmup_stored_blocks).total;
+    report.warmup_removed_blocks = spread(|stats| stats.warmup_removed_blocks).total;
     report.query_slab_gate_blocks = QUERY_SLAB_GATE_BLOCKS;
 
     if config.collision_stats {
@@ -861,7 +925,7 @@ pub async fn generate_agentic_artifacts(
         "agentic corpus has {} query blocks, above the u32 query-slab gate {QUERY_SLAB_GATE_BLOCKS}; lower --agentic-sim-ms",
         report.total_request_blocks
     );
-    Ok(artifacts)
+    Ok((artifacts, warmups))
 }
 
 #[cfg(test)]
@@ -927,6 +991,7 @@ mod tests {
             seed: 42,
             allow_exhausted_lanes: true,
             collision_stats: true,
+            warmup_sim_ms: 0,
         }
     }
 
@@ -1136,9 +1201,11 @@ mod tests {
             .build()
             .unwrap();
         let mut report = AgenticPrepReport::default();
-        let artifacts = generate_agentic_artifacts(pool, &config(2), engine_args, &mut report)
-            .await
-            .unwrap();
+        let (artifacts, warmups) =
+            generate_agentic_artifacts(pool, &config(2), engine_args, &mut report)
+                .await
+                .unwrap();
+        assert!(warmups.iter().all(Vec::is_empty));
         assert_eq!(artifacts.len(), 2);
         assert!(report.shared_local_hashes_before_salt.unwrap() > 0);
         assert_eq!(report.shared_local_hashes_after_salt, Some(0));
