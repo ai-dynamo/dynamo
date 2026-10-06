@@ -79,7 +79,7 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
-#[cfg(feature = "mimalloc")]
+#[cfg(feature = "jemalloc")]
 mod allocator;
 mod backend;
 mod context;
@@ -287,12 +287,10 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
 }
 
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Model teardown trims glibc arenas; when mimalloc holds this extension's Rust
-    // allocations instead, also return its freed memory.
-    #[cfg(feature = "mimalloc")]
-    if allocator::uses_mimalloc() {
-        dynamo_llm::discovery::register_allocator_trim_hook(allocator::collect);
-    }
+    // Model teardown trims glibc arenas; jemalloc holds this extension's Rust allocations,
+    // so also return its unused pages.
+    #[cfg(feature = "jemalloc")]
+    dynamo_llm::discovery::register_allocator_trim_hook(allocator::purge);
 
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
@@ -477,8 +475,6 @@ fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    #[cfg(feature = "mimalloc")]
-    allocator::configure();
     register_core_with_router_plugins(m)
 }
 
@@ -486,8 +482,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(not(feature = "custom-policy"))]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    #[cfg(feature = "mimalloc")]
-    allocator::configure();
     register_core(m)
 }
 
@@ -1592,6 +1586,10 @@ impl DistributedRuntime {
     // recognize that both bindings use the same PyClass.
     #[pyo3(name = "to_capsule")]
     fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+        // The runtime behind this pointer, and the memory it owns, live on this extension's
+        // jemalloc (the `jemalloc` feature). An extension with another global allocator, such
+        // as kvbm, that upgrades the pointer would free or reallocate that memory with its own
+        // allocator.
         let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
         let weak: Weak<rs::DistributedRuntime> = Arc::downgrade(&arc);
 
