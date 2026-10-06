@@ -152,6 +152,42 @@ def _preferred_block_ids(free_block_queue, limit: int) -> list[int]:
     return list(itertools.islice(_iter_preferred_block_ids(free_block_queue), limit))
 
 
+# Bound on free-queue nodes inspected to find unleased allocation candidates.
+_PREFERRED_UNLEASED_SCAN = 256
+
+
+def _preferred_unleased_block_ids(pool, limit: int) -> tuple[list[int], bool]:
+    """Prefer the oldest local free blocks that hold no lease.
+
+    The head of vLLM's free queue is usually a sealed cached block that keeps
+    its lease until directory retirement, so preferring it fails and the lease
+    ring falls back to a linear scan of every slot: about 220 us per
+    allocation on a 43k-block pool, against about 2 us for a free preferred
+    slot. Skip leased blocks within a small window; if none is found, keep the
+    plain head prefix and the ring's own fallback. The flag reports whether
+    the result is the queue's head prefix, which popleft_n may take as is.
+    """
+    if limit <= 0:
+        return [], True
+    leased = getattr(pool, "_gms_kv_leases_by_block", None) or {}
+    out: list[int] = []
+    skipped = False
+    for scanned, block_id in enumerate(
+        _iter_preferred_block_ids(pool.free_block_queue)
+    ):
+        if block_id in leased:
+            skipped = True
+        else:
+            out.append(block_id)
+            if len(out) >= limit:
+                return out, not skipped
+        if scanned + 1 >= _PREFERRED_UNLEASED_SCAN:
+            break
+    if out:
+        return out, not skipped
+    return _preferred_block_ids(pool.free_block_queue, limit), True
+
+
 def _preferred_candidate_limit(num_blocks: int) -> int:
     configured = os.environ.get("GMS_VLLM_KV_LEASE_PREFERRED_CANDIDATES")
     if configured:
@@ -1143,9 +1179,8 @@ def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
             "[GMS-KVLease] dormant HBM capacity reclaim failed",
             exc_info=True,
         )
-    preferred = _preferred_block_ids(
-        self.free_block_queue,
-        _preferred_candidate_limit(int(num_blocks)),
+    preferred, preferred_is_head = _preferred_unleased_block_ids(
+        self, _preferred_candidate_limit(int(num_blocks))
     )
 
     def acquire_with_preferred(
@@ -1188,6 +1223,7 @@ def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
         try:
             leases = acquire_with_preferred(fallback_preferred, strict=False)
             preferred = fallback_preferred
+            preferred_is_head = True
         except Exception as fallback_exc:  # noqa: BLE001
             refresh = getattr(client, "refresh_free_count", None)
             if refresh is not None:
@@ -1204,8 +1240,10 @@ def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
 
     lease_block_ids = [int(lease.block_id) for lease in leases]
     try:
-        if lease_block_ids == preferred[:num_blocks] and hasattr(
-            self.free_block_queue, "popleft_n"
+        if (
+            preferred_is_head
+            and lease_block_ids == preferred[:num_blocks]
+            and hasattr(self.free_block_queue, "popleft_n")
         ):
             ret = self.free_block_queue.popleft_n(num_blocks)
         else:

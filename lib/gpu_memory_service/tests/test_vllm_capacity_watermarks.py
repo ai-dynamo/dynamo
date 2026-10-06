@@ -48,6 +48,27 @@ def test_concurrency_reserve_does_not_erase_entire_prefix_cache(monkeypatch):
     assert hooks._reserve_dormant_headroom(pool, 28) == 1024
 
 
+def _linked_queue(block_ids):
+    node = SimpleNamespace(next_free_block=None)
+    for block_id in reversed(block_ids):
+        node = SimpleNamespace(block_id=block_id, is_null=False, next_free_block=node)
+    return SimpleNamespace(fake_free_list_head=SimpleNamespace(next_free_block=node))
+
+
+def test_allocation_prefers_unleased_free_blocks(monkeypatch):
+    """A leased head would send the lease ring into a full linear scan."""
+    pool = SimpleNamespace(
+        free_block_queue=_linked_queue([5, 6, 7, 8, 9]),
+        _gms_kv_leases_by_block={5: object(), 6: object(), 8: object()},
+    )
+    # Not the head prefix, so the caller must not popleft_n these.
+    assert hooks._preferred_unleased_block_ids(pool, 2) == ([7, 9], False)
+
+    # Beyond the scan window, keep the plain head prefix.
+    monkeypatch.setattr(hooks, "_PREFERRED_UNLEASED_SCAN", 2)
+    assert hooks._preferred_unleased_block_ids(pool, 1) == ([5], True)
+
+
 def test_capacity_retires_only_native_lru_candidates():
     blocks = {
         slot: SimpleNamespace(
