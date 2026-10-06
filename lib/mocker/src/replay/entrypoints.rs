@@ -2486,13 +2486,19 @@ mod tests {
 
     fn disagg_test_config() -> OfflineDisaggReplayConfig {
         OfflineDisaggReplayConfig {
-            prefill_args: MockerConfig::from_value(
-                serde_json::json!({"engine":{"worker_type":WorkerType::Prefill,"block_size":4}}),
-            )
+            prefill_args: MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": WorkerType::Prefill,
+                    "block_size": 4
+                }
+            }))
             .unwrap(),
-            decode_args: MockerConfig::from_value(
-                serde_json::json!({"engine":{"worker_type":WorkerType::Decode,"block_size":4}}),
-            )
+            decode_args: MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": WorkerType::Decode,
+                    "block_size": 4
+                }
+            }))
             .unwrap(),
             num_prefill_workers: 1,
             num_decode_workers: 1,

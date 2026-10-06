@@ -37,8 +37,13 @@ use super::task::wait_for_workload_progress;
 use super::{ReplayPlacement, ReplayRouter};
 
 fn replay_args() -> MockerConfig {
-    MockerConfig::from_value(serde_json::json!({"engine":{"speedup_ratio":1000.0,"block_size":64}}))
-        .unwrap()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "speedup_ratio": 1000.0,
+            "block_size": 64
+        }
+    }))
+    .unwrap()
 }
 
 fn replay_config(

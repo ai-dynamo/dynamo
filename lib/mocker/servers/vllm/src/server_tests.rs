@@ -229,9 +229,12 @@ fn text_prompts_fail_with_an_actionable_status() {
 
 #[tokio::test]
 async fn service_rejects_non_vllm_or_multi_rank_engines() {
-    let mut sglang =
-        MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Sglang}}))
-            .unwrap();
+    let mut sglang = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Sglang
+        }
+    }))
+    .unwrap();
     // Service-specific errors must take priority over general validation.
     sglang.num_gpu_blocks = 0;
     assert!(
@@ -252,9 +255,12 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("dp_size")
     );
 
-    let mut disaggregated =
-        MockerConfig::from_value(serde_json::json!({"engine":{"worker_type":WorkerType::Prefill}}))
-            .unwrap();
+    let mut disaggregated = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "worker_type": WorkerType::Prefill
+        }
+    }))
+    .unwrap();
     disaggregated.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), disaggregated)

@@ -1273,16 +1273,22 @@ mod tests {
     }
 
     fn replay_args() -> MockerConfig {
-        MockerConfig::from_value(
-            serde_json::json!({"engine":{"block_size":64,"max_num_batched_tokens":256}}),
-        )
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 256
+            }
+        }))
         .unwrap()
     }
 
     fn queueing_args() -> MockerConfig {
-        MockerConfig::from_value(
-            serde_json::json!({"engine":{"block_size":64,"max_num_batched_tokens":64}}),
-        )
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
         .unwrap()
     }
 

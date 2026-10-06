@@ -1651,9 +1651,12 @@ mod tests {
 
     #[test]
     fn unbounded_sequence_limit_uses_finite_multi_handoff_capacity() {
-        let args = MockerConfig::from_value(
-            serde_json::json!({"engine":{"num_gpu_blocks":3,"max_num_seqs":usize::MAX}}),
-        )
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "num_gpu_blocks": 3,
+                "max_num_seqs": usize::MAX
+            }
+        }))
         .unwrap()
         .normalized()
         .unwrap();

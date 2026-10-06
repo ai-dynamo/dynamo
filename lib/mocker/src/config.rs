@@ -227,14 +227,21 @@ mod tests {
         ] {
             assert!(MockerConfig::from_value(input).is_err());
         }
-        let args = MockerConfig::from_value(
-            json!({"engine":{"max_num_seqs":usize::MAX,"num_gpu_blocks":16}}),
-        )
+        let args = MockerConfig::from_value(json!({
+            "engine": {
+                "max_num_seqs": usize::MAX,
+                "num_gpu_blocks": 16
+            }
+        }))
         .unwrap();
         assert_eq!(args.effective_handoff_capacity(), 16);
-        let args =
-            MockerConfig::from_value(json!({"engine":{"max_num_seqs":32,"num_gpu_blocks":16}}))
-                .unwrap();
+        let args = MockerConfig::from_value(json!({
+            "engine": {
+                "max_num_seqs": 32,
+                "num_gpu_blocks": 16
+            }
+        }))
+        .unwrap();
         assert_eq!(args.effective_handoff_capacity(), 32);
     }
 }

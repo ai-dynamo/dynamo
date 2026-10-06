@@ -8,14 +8,21 @@ use dynamo_mocker::live::deterministic_token_id;
 
 #[tokio::test]
 async fn service_requires_a_trtllm_single_rank_aggregated_engine() {
-    let vllm = MockerConfig::from_value(serde_json::json!({"engine":{"backend":EngineType::Vllm}}))
-        .unwrap();
+    let vllm = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Vllm
+        }
+    }))
+    .unwrap();
     let error = construction_error(config(), vllm);
     assert!(error.contains("engine_type"), "{error}");
 
-    let multi_rank = MockerConfig::from_value(
-        serde_json::json!({"dp_size":2u32,"engine":{"backend":EngineType::Trtllm}}),
-    )
+    let multi_rank = MockerConfig::from_value(serde_json::json!({
+        "dp_size": 2u32,
+        "engine": {
+            "backend": EngineType::Trtllm
+        }
+    }))
     .unwrap();
     let error = construction_error(config(), multi_rank);
     assert!(error.contains("dp_size"), "{error}");

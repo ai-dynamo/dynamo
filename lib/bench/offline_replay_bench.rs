@@ -269,8 +269,10 @@ fn build_engine_args(args: &Args) -> Result<MockerConfig> {
             rank[key] = serde_json::json!(value);
         }
     }
-    MockerConfig::from_value(serde_json::json!({"engine":rank}))
-        .context("invalid replay engine config")
+    MockerConfig::from_value(serde_json::json!({
+        "engine": rank
+    }))
+    .context("invalid replay engine config")
 }
 
 fn router_config(args: &Args) -> Result<Option<KvRouterConfig>> {
