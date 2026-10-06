@@ -28,9 +28,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
-use dynamo_renderer::{
-    OAIPromptFormatter, PromptReasoningState, PromptRenderError, RenderedPrompt,
-};
+use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
 use dynamo_runtime::config::{
     env_is_falsey, environment_names::llm as env_llm, is_truthy, parse_bool_opt,
 };
@@ -2809,11 +2807,13 @@ impl OpenAIPreprocessor {
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
-        let prompt_reasoning_state = Self::prompt_reasoning_state(
+        // Generic reasoning parsers start from `<think>`; MiniMax M3 starts
+        // from `<mm:think>`. If the chat template injected that opener at the
+        // end of the prompt, the model completion starts mid-reasoning.
+        let prompt_injected_reasoning = Self::prompt_injected_reasoning_start(
             self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_ref(),
+            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
         );
-        let prompt_injected_reasoning = prompt_reasoning_state == Some(PromptReasoningState::Open);
 
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
@@ -2828,7 +2828,7 @@ impl OpenAIPreprocessor {
             .gather_multi_modal_data_with_image_tokens(
                 request,
                 &mut builder,
-                formatted_prompt.as_ref(),
+                formatted_prompt.as_ref().map(RenderedPrompt::as_str),
                 &token_ids,
             )
             .await
@@ -2852,7 +2852,7 @@ impl OpenAIPreprocessor {
         let mut preprocessed = builder.build()?;
         if let Some(reasoning_ended) = Self::prompt_injected_reasoning_ended_arg(
             self.runtime_config.reasoning_parser.as_deref(),
-            prompt_reasoning_state,
+            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
         ) {
             let extra_args = preprocessed
                 .extra_args
@@ -3306,7 +3306,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
-        formatted_prompt: Option<&RenderedPrompt>,
+        formatted_prompt: Option<&str>,
         // Worker-bound token ids; used (mm-routing only) to build the exact
         // routing sequence and atomically gate worker `mm_hashes`.
         token_ids: &[crate::protocols::TokenIdType],
@@ -3342,7 +3342,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
-        formatted_prompt: Option<&RenderedPrompt>,
+        formatted_prompt: Option<&str>,
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<(Vec<MmRoutingEntry>, Option<usize>)> {
         // `token_ids` is only consumed by exact MM-routing construction below.
@@ -3719,20 +3719,17 @@ impl OpenAIPreprocessor {
             if let Some(prompt) = formatted_prompt {
                 // Clone here is the single owned allocation we actually need:
                 // the prompt is inserted into the request's `extra_args` JSON.
-                // The caller still holds the original prompt; passing
-                // `Option<&RenderedPrompt>` keeps text-only requests (no MM)
-                // clone-free.
-                extra_args["formatted_prompt"] =
-                    serde_json::Value::String(prompt.as_str().to_string());
+                // The caller still holds the original `String`; passing
+                // `Option<&str>` keeps text-only requests (no MM) clone-free.
+                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.to_string());
             }
 
-            let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
             if let Some(serde_json::Value::Object(backend_extra_args)) = Self::backend_extra_args(
                 request,
-                reasoning_parser.is_some(),
+                self.runtime_config.reasoning_parser.is_some(),
                 Self::prompt_injected_reasoning_ended_arg(
-                    reasoning_parser,
-                    Self::prompt_reasoning_state(reasoning_parser, formatted_prompt),
+                    self.runtime_config.reasoning_parser.as_deref(),
+                    formatted_prompt,
                 ),
             ) {
                 let extra_args_obj = extra_args
@@ -3769,7 +3766,7 @@ impl OpenAIPreprocessor {
                         counter
                             .context_budget_text_len(
                                 self.tokenizer.clone(),
-                                formatted_prompt.map(RenderedPrompt::as_str),
+                                formatted_prompt,
                                 resolved_image_count,
                             )
                             .await
@@ -6262,46 +6259,22 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// The rendered prompt's reasoning state.
-    ///
-    /// Prefers the renderer's own claim (`RenderedPrompt::reasoning_state`,
-    /// set by the HF chat-template formatter from the markers it rendered).
-    /// Native formatters that make no claim fall back to the legacy
-    /// parser-keyed suffix check, which can only recognize an opened block.
-    fn prompt_reasoning_state(
-        reasoning_parser: Option<&str>,
-        formatted_prompt: Option<&RenderedPrompt>,
-    ) -> Option<PromptReasoningState> {
-        let prompt = formatted_prompt?;
-        prompt.reasoning_state().or_else(|| {
-            Self::prompt_injected_reasoning_start(reasoning_parser, Some(prompt.as_str()))
-                .then_some(PromptReasoningState::Open)
-        })
-    }
-
-    /// Request-level `reasoning_ended` hint for engines whose native reasoning
-    /// parser gates guided decoding on the prompt's reasoning state.
-    ///
-    /// `Open`: the template pre-filled a reasoning opener, so the completion
-    /// starts mid-reasoning and the backend must hold any grammar until the
-    /// model closes the block. `Closed`: the MiniMax M2 template rendered an
-    /// empty block because the request disabled thinking, so the grammar may
-    /// apply from the first generated token. Everything else makes no claim
-    /// and leaves the engine to its own defaults.
     fn prompt_injected_reasoning_ended_arg(
         reasoning_parser: Option<&str>,
-        prompt_reasoning_state: Option<PromptReasoningState>,
+        formatted_prompt: Option<&str>,
     ) -> Option<bool> {
-        match (reasoning_parser, prompt_reasoning_state?) {
-            (
-                Some(
-                    "minimax_m2" | "minimax_m3" | "minimax-m3" | "kimi_k3" | "kimi-k3"
-                    | "deepseek_v41",
-                ),
-                PromptReasoningState::Open,
-            ) => Some(false),
-            (Some("minimax_m2"), PromptReasoningState::Closed) => Some(true),
-            _ => None,
+        let should_forward = matches!(
+            reasoning_parser,
+            Some(
+                "minimax_m2" | "minimax_m3" | "minimax-m3" | "kimi_k3" | "kimi-k3" | "deepseek_v41"
+            )
+        );
+        if should_forward
+            && Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt)
+        {
+            Some(false)
+        } else {
+            None
         }
     }
 
@@ -7777,16 +7750,6 @@ mod tests {
         FinishReason, Role,
     };
 
-    /// Backend `reasoning_ended` for a plain rendered prompt without a renderer
-    /// claim: exercises the parser-keyed suffix fallback.
-    fn reasoning_ended_for_prompt_text(parser: Option<&str>, prompt: &str) -> Option<bool> {
-        let prompt = RenderedPrompt::text(prompt.to_string());
-        OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(
-            parser,
-            OpenAIPreprocessor::prompt_reasoning_state(parser, Some(&prompt)),
-        )
-    }
-
     #[test]
     fn deepseek_v41_preserves_markers_and_initializes_backend_reasoning() {
         for (tool, reasoning) in [(Some("deepseek_v41"), None), (None, Some("deepseek_v41"))] {
@@ -7795,11 +7758,17 @@ mod tests {
             ));
         }
         assert_eq!(
-            reasoning_ended_for_prompt_text(Some("deepseek_v41"), "<｜Assistant｜><think>"),
+            OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(
+                Some("deepseek_v41"),
+                Some("<｜Assistant｜><think>"),
+            ),
             Some(false)
         );
         assert_eq!(
-            reasoning_ended_for_prompt_text(Some("deepseek_v41"), "<｜Assistant｜></think>"),
+            OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(
+                Some("deepseek_v41"),
+                Some("<｜Assistant｜></think>"),
+            ),
             None
         );
         let disabled = HashMap::from([("thinking".to_string(), serde_json::json!(false))]);
@@ -9965,124 +9934,55 @@ mod tests {
         let cases = [
             (
                 Some("minimax_m2"),
-                "...<think>\n",
+                Some("...<think>\n"),
                 Some(false),
                 "MiniMax M2 needs native backend reasoning state aligned with the prompt",
             ),
             (
                 Some("minimax_m3"),
-                "...<mm:think>\n",
+                Some("...<mm:think>\n"),
                 Some(false),
                 "MiniMax M3 needs native backend reasoning state aligned with the prompt",
             ),
             (
                 Some("kimi_k3"),
-                "...<|open|>think<|sep|>\n",
+                Some("...<|open|>think<|sep|>\n"),
                 Some(false),
                 "Kimi K3 guided decoding must start after its prompt-opened think channel",
             ),
             (
                 Some("deepseek_v4"),
-                "...<think>\n",
+                Some("...<think>\n"),
                 None,
                 "DeepSeek V4 native guided JSON must not be forced into reasoning mode",
             ),
             (
                 Some("deepseek-v4"),
-                "...<think>\n",
+                Some("...<think>\n"),
                 None,
                 "DeepSeek V4 alias must not receive reasoning_ended=false",
             ),
             (
                 Some("qwen3"),
-                "...<think>\n",
+                Some("...<think>\n"),
                 None,
                 "Qwen-style prompt injection is handled by Dynamo postprocessing only",
             ),
             (
                 Some("minimax_m2"),
-                "plain prompt",
+                Some("plain prompt"),
                 None,
                 "no injected reasoning opener means no backend state override",
-            ),
-            (
-                Some("minimax_m2"),
-                "...<think>\n</think>\n",
-                None,
-                "a closed block is only known through the renderer's claim, never by suffix",
             ),
         ];
 
         for (parser, prompt, expected, desc) in cases {
             assert_eq!(
-                reasoning_ended_for_prompt_text(parser, prompt),
+                OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(parser, prompt),
                 expected,
                 "FAILED: {desc}",
             );
         }
-    }
-
-    #[test]
-    fn test_prompt_reasoning_state_prefers_renderer_claim_then_parser_suffix() {
-        use PromptReasoningState::{Closed, Open};
-        let text = |s: &str| RenderedPrompt::text(s.to_string());
-        let claimed =
-            |s: &str, state| RenderedPrompt::text(s.to_string()).with_reasoning_state(state);
-
-        assert_eq!(
-            OpenAIPreprocessor::prompt_reasoning_state(Some("minimax_m2"), None),
-            None
-        );
-        // No claim: legacy parser-keyed suffix inference, opened blocks only.
-        assert_eq!(
-            OpenAIPreprocessor::prompt_reasoning_state(
-                Some("minimax_m2"),
-                Some(&text("..<think>\n"))
-            ),
-            Some(Open)
-        );
-        assert_eq!(
-            OpenAIPreprocessor::prompt_reasoning_state(
-                Some("minimax_m2"),
-                Some(&text("..<think>\n</think>\n"))
-            ),
-            None
-        );
-        assert_eq!(
-            OpenAIPreprocessor::prompt_reasoning_state(Some("kimi_k3"), Some(&text("..<think>\n"))),
-            None,
-            "Kimi K3 suffix inference only knows its own opener"
-        );
-        assert_eq!(
-            OpenAIPreprocessor::prompt_reasoning_state(
-                Some("minimax_m2"),
-                Some(&claimed("..<think>\n</think>\n", Closed))
-            ),
-            Some(Closed)
-        );
-        assert_eq!(
-            OpenAIPreprocessor::prompt_reasoning_state(Some("qwen3"), Some(&claimed("..", Open))),
-            Some(Open)
-        );
-
-        for (parser, expected) in [
-            (Some("minimax_m2"), Some(true)),
-            (Some("minimax_m3"), None),
-            (Some("kimi_k3"), None),
-            (Some("deepseek_v41"), None),
-            (Some("qwen3"), None),
-            (None, None),
-        ] {
-            assert_eq!(
-                OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(parser, Some(Closed)),
-                expected,
-                "{parser:?}"
-            );
-        }
-        assert_eq!(
-            OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(Some("minimax_m2"), None),
-            None
-        );
     }
 
     #[test]
@@ -11006,8 +10906,9 @@ mod tests {
         }
     }
 
-    // MiniMax M2 disabled-thinking integration with the renderer's prompt state.
-    // The synthetic template independently spells out the stock generation block.
+    // MiniMax M2 disabled thinking through the renderer adapter: prompt rendering,
+    // preprocessing, and tool-call postprocessing. The synthetic template spells
+    // out the stock generation block independently of the renderer's matcher.
 
     const MINIMAX_OPEN_TAIL: &str = "]~b]ai\n<think>\n";
     const MINIMAX_CLOSED_TAIL: &str = "]~b]ai\n<think>\n</think>\n";
@@ -11020,13 +10921,13 @@ mod tests {
 {{- ']~b]ai' ~ '\n' ~ '<think>' ~ '\n' }}
 {%- endif -%}";
 
-    fn minimax_m2_test_preprocessor(reasoning_parser: &str) -> OpenAIPreprocessor {
+    fn minimax_m2_test_preprocessor() -> OpenAIPreprocessor {
         let mut mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
         )
         .unwrap();
-        mdc.runtime_config.reasoning_parser = Some(reasoning_parser.to_string());
+        mdc.runtime_config.reasoning_parser = Some("minimax_m2".to_string());
         mdc.runtime_config.tool_call_parser = Some("minimax_m2".to_string());
         let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
             .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
@@ -11062,8 +10963,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minimax_m2_disabled_thinking_closes_prompt_and_ends_backend_reasoning() {
-        let preprocessor = minimax_m2_test_preprocessor("minimax_m2");
+    async fn minimax_m2_disabled_thinking_closes_prompt_and_forwards_no_override() {
+        let preprocessor = minimax_m2_test_preprocessor();
         let choices = [Some(minimax_m2_named_choice()), None];
         for key in ["thinking", "enable_thinking"] {
             for choice in &choices {
@@ -11081,18 +10982,19 @@ mod tests {
                     "{key}/{choice:?}: disabled thinking must close the empty block: {:?}",
                     prompt.as_str()
                 );
-                assert_eq!(prompt.reasoning_state(), Some(PromptReasoningState::Closed));
 
                 let (mut prepared, _, injected) = preprocessor
                     .preprocess_request(&request, None)
                     .await
                     .unwrap();
                 assert!(!injected, "{key}/{choice:?}");
-                let extra_args = prepared.extra_args.clone().unwrap();
-                assert_eq!(extra_args["reasoning_ended"], true, "{key}/{choice:?}");
-                assert_eq!(
-                    extra_args["reasoning_parser_kwargs"]["chat_template_kwargs"]["thinking"],
-                    false
+                assert!(
+                    prepared
+                        .extra_args
+                        .as_ref()
+                        .and_then(|args| args.get("reasoning_ended"))
+                        .is_none(),
+                    "{key}/{choice:?}: closed prompts do not forward reasoning_ended"
                 );
                 assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
                     Some("minimax_m2"),
@@ -11119,7 +11021,7 @@ mod tests {
 
     #[tokio::test]
     async fn minimax_m2_default_and_enabled_thinking_keep_open_prompt() {
-        let preprocessor = minimax_m2_test_preprocessor("minimax_m2");
+        let preprocessor = minimax_m2_test_preprocessor();
         for args in [
             serde_json::json!({}),
             serde_json::json!({"thinking": true}),
@@ -11133,7 +11035,6 @@ mod tests {
                 prompt.as_str()
             );
             assert!(!prompt.as_str().contains("</think>"));
-            assert_eq!(prompt.reasoning_state(), Some(PromptReasoningState::Open));
 
             let (prepared, _, injected) = preprocessor
                 .preprocess_request(&request, None)
@@ -11153,35 +11054,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minimax_m2_closed_prompt_override_is_parser_specific() {
-        // Only MiniMax M2 forwards the closed prompt state to the backend.
-        let preprocessor = minimax_m2_test_preprocessor("qwen3");
-        let request = minimax_m2_request(
-            serde_json::json!({"thinking": false}),
-            Some(minimax_m2_named_choice()),
-        );
-        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
-        assert_eq!(prompt.reasoning_state(), Some(PromptReasoningState::Closed));
-        let (prepared, _, injected) = preprocessor
-            .preprocess_request(&request, None)
-            .await
-            .unwrap();
-        assert!(!injected);
-        assert!(
-            prepared
-                .extra_args
-                .as_ref()
-                .and_then(|args| args.get("reasoning_ended"))
-                .is_none(),
-            "no MiniMax M2 backend override for qwen3"
-        );
-    }
-
-    #[tokio::test]
     async fn minimax_m2_disabled_named_json_returns_tool_call() {
         // Bare JSON becomes a named tool call with thinking disabled,
         // both whole and fragmented across deltas.
-        let preprocessor = minimax_m2_test_preprocessor("minimax_m2");
+        let preprocessor = minimax_m2_test_preprocessor();
         for fragmented in [false, true] {
             let request = minimax_m2_request(
                 serde_json::json!({"thinking": false}),
