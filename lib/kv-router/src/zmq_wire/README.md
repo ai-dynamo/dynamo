@@ -73,8 +73,9 @@ vLLM's `BlockStored` tuple includes the vLLM-compatible fixed prefix before
 the metadata tail, so `group_idx` and cache metadata are parsed from tail
 positions.
 
-SGLang emits map events, so its fields are parsed by name. With
-`"format": "dynamo"` in `--kv-events-config`, its `BlockStored` also carries
-`lora_name`. Older SGLang releases emit a shorter positional `BlockStored`
-shape ending at `lora_id`, without cache-group metadata. That parses correctly
-because the tuple terminates early.
+SGLang workers should always publish with `"format": "dynamo"` in
+`--kv-events-config`, with or without LoRA. That format follows this wire
+format: map events parsed by name, with `lora_name` on `BlockStored`. Other
+SGLang shapes are legacy and parsed only for compatibility: the default format,
+and the positional `BlockStored` of older releases, which ends at `lora_id` and
+parses because the tuple terminates early.
