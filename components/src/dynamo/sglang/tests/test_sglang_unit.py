@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import argparse
 import logging
 import os
 import re
@@ -11,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import torch
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
@@ -21,8 +21,8 @@ import dynamo.sglang.args as sglang_args
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
+    add_sglang_cli_compat,
     cache_salt_kwargs,
-    ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
     override_server_args,
@@ -30,6 +30,7 @@ from dynamo.sglang._compat import (
     require_reasoning_kwargs,
     resolved_server_args,
     sglang_uses_mla_backend,
+    supports_external_mm_hashes,
 )
 from dynamo.sglang.args import (
     _diffusion_generator_kwargs,
@@ -52,6 +53,35 @@ try:
     from dynamo.sglang import register as sglang_register
 except ImportError:
     sglang_register = None
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["--disable-piecewise-cuda-graph"], "disabled"),
+        (
+            ["--disable-piecewise-cuda-graph", "--cuda-graph-backend-prefill", "full"],
+            "full",
+        ),
+    ],
+)
+def test_removed_piecewise_flag_preserves_prefill_backend_selection(argv, expected):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cuda-graph-backend-prefill")
+    add_sglang_cli_compat(parser)
+
+    assert parser.parse_args(argv).cuda_graph_backend_prefill == expected
+
+
+def test_piecewise_cli_compat_preserves_native_legacy_flag():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--disable-piecewise-cuda-graph", action="store_true")
+    add_sglang_cli_compat(parser)
+
+    assert parser.parse_args(
+        ["--disable-piecewise-cuda-graph"]
+    ).disable_piecewise_cuda_graph
+
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -110,7 +140,7 @@ def test_override_server_args_uses_declarative_resolution(monkeypatch):
     def declare(server_args, source, **fields):
         calls.append((server_args, source, fields))
 
-    monkeypatch.setattr(sglang_compat, "declare_late_resolution", declare)
+    monkeypatch.setattr(sglang_compat, "declare_resolution", declare)
     server_args = SimpleNamespace()
 
     override_server_args(
@@ -124,7 +154,7 @@ def test_override_server_args_uses_declarative_resolution(monkeypatch):
 
 
 def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
-    monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
+    monkeypatch.setattr(sglang_compat, "declare_resolution", None)
     server_args = SimpleNamespace(enable_memory_saver=False)
 
     override_server_args(
@@ -403,107 +433,6 @@ def _make_sglang_config(**overrides):
     return config
 
 
-def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):
-    from sglang.srt.multimodal.processors.base_processor import (
-        BaseMultimodalProcessor,
-        BaseMultiModalProcessorOutput,
-        MultimodalSpecialTokens,
-    )
-
-    class Processor:
-        image_sizes = None
-
-        def _get_num_multimodal_tokens(self, *, image_sizes):
-            self.image_sizes = image_sizes
-            return SimpleNamespace(num_image_tokens=[4])
-
-    class ConcreteMultimodalProcessor(BaseMultimodalProcessor):
-        async def process_mm_data_async(self, *args, **kwargs):
-            raise NotImplementedError
-
-    original = BaseMultimodalProcessor.resolve_image_token_counts
-    try:
-        ensure_sglang_tensor_image_size()
-        installed = BaseMultimodalProcessor.resolve_image_token_counts
-        ensure_sglang_tensor_image_size()
-
-        processor = object.__new__(ConcreteMultimodalProcessor)
-        processor._processor = Processor()
-        # SGLang 0.5.17 resolves the processor and tokenizer together before
-        # handling raw multimodal items. This test stubs the processing path,
-        # so a tokenizer is not exercised, but the attribute must exist.
-        processor._tokenizer = None
-        processor.use_cuda_ipc = False
-        image_token_id = 99
-        processor._process_and_collect_mm_items = lambda **kwargs: (
-            [],
-            torch.tensor(
-                [20, image_token_id, image_token_id, image_token_id, image_token_id, 21]
-            ),
-            {},
-        )
-        base_output = BaseMultiModalProcessorOutput(
-            input_text="decoded prompt",
-            input_ids=[10, image_token_id, 11],
-            images=[torch.empty((3, 48, 80), dtype=torch.uint8)],
-        )
-        mm_tokens = MultimodalSpecialTokens(image_token_id=image_token_id)
-        # SGLang defaults this on to preserve caller token IDs and expand only
-        # image placeholders instead of decoding and retokenizing the prompt.
-        monkeypatch.setenv("SGLANG_MM_AVOID_RETOKENIZE", "1")
-
-        with caplog.at_level(
-            logging.WARNING,
-            logger="sglang.srt.multimodal.processors.base_processor",
-        ):
-            _, input_ids, _ = processor.process_and_combine_mm_data(
-                base_output, mm_tokens
-            )
-
-        assert installed is BaseMultimodalProcessor.resolve_image_token_counts
-        assert processor._processor.image_sizes == [(48, 80)]
-        assert input_ids.tolist() == [
-            10,
-            image_token_id,
-            image_token_id,
-            image_token_id,
-            image_token_id,
-            11,
-        ]
-        assert not any(
-            "falling back to decode+retokenize" in record.message
-            for record in caplog.records
-        )
-    finally:
-        BaseMultimodalProcessor.resolve_image_token_counts = original
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("is_multimodal", [False, True])
-async def test_tensor_image_size_compat_uses_resolved_model_capability(
-    monkeypatch, mock_sglang_cli, is_multimodal
-):
-    server_args = SimpleNamespace(
-        disaggregation_mode="null",
-        dllm_algorithm=None,
-        kv_events_config=None,
-        get_model_config=lambda: SimpleNamespace(is_multimodal=is_multimodal),
-    )
-    install_calls = []
-    monkeypatch.setattr(
-        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
-    )
-    monkeypatch.setattr(
-        "dynamo.sglang.args.ensure_sglang_tensor_image_size",
-        lambda: install_calls.append(True),
-    )
-    mock_sglang_cli(model="/tmp")
-
-    await parse_args(sys.argv[1:])
-
-    assert install_calls == ([True] if is_multimodal else [])
-
-
 @pytest.mark.asyncio
 async def test_parse_args_enables_incremental_streaming_before_resolution(
     monkeypatch, mock_sglang_cli
@@ -756,7 +685,7 @@ async def test_parse_args_sets_raw_memory_saver_before_resolution(
     )
 
     def resolve(parsed_args):
-        # SGLang 0.5.19 copies this raw field unchanged; late resolution does
+        # SGLang copies this raw field unchanged; configuration resolution does
         # not update it before the parent process launches the scheduler.
         server_args.enable_memory_saver = parsed_args.enable_memory_saver
         return server_args
@@ -853,6 +782,40 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     kwargs = {"return_routed_experts": True}
 
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+@pytest.mark.asyncio
+async def test_external_mm_hashes_rebuild_padding_after_hash_override():
+    item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
+    mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
+    tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
+
+    class TokenizerManager:
+        async def _tokenize_one_request(self, obj):
+            return tokenized
+
+    class MmHashEngine:
+        tokenizer_manager = TokenizerManager()
+
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    engine = MmHashEngine()
+    assert supports_external_mm_hashes(engine)
+    patched = engine.tokenizer_manager._tokenize_one_request
+    result = await patched(SimpleNamespace(mm_hashes=["abc"]))
+
+    assert result.mm_inputs.padded_input_ids == [1, 91, 91, 4]
+    assert supports_external_mm_hashes(engine)
+    assert engine.tokenizer_manager._tokenize_one_request is patched
+
+
+def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
+    class LegacyEngine:
+        async def async_generate(self):
+            return None
+
+    assert not supports_external_mm_hashes(LegacyEngine())
 
 
 @pytest.mark.parametrize(

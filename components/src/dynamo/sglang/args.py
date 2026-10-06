@@ -35,8 +35,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
-    ensure_sglang_tensor_image_size,
-    get_sglang_model_config,
+    add_sglang_cli_compat,
     resolved_server_args,
     sglang_uses_mla_backend,
 )
@@ -251,7 +250,7 @@ def _validate_dcp_attention_backend(
     Call this twice: once on the arguments the CLI produced, which catches a
     backend the user named, and once on the engine's own configuration, which
     is the only place a backend SGLang chose for itself can be read. SGLang
-    0.5.19 keeps ``ServerArgs`` at what the caller asked for and resolves in a
+    SGLang keeps ``ServerArgs`` at what the caller asked for and resolves in a
     separate pass, so at CLI time an automatic backend is still ``None``.
     """
     # Diffusion/video argument stubs and older SGLang releases omit dcp_size.
@@ -482,6 +481,7 @@ async def parse_args(args: list[str]) -> Config:
 
     sglang_only_parser = argparse.ArgumentParser(add_help=False)
     ServerArgs.add_cli_args(sglang_only_parser)
+    add_sglang_cli_compat(sglang_only_parser)
 
     # Add "gms" to --load-format choices so it passes argparse validation.
     # The actual loader class is set in main.py when load_format == "gms".
@@ -764,8 +764,6 @@ async def parse_args(args: list[str]) -> Config:
         # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
         parsed_args.incremental_streaming_output = True
         server_args = ServerArgs.from_cli_args(parsed_args)
-        if get_sglang_model_config(server_args).is_multimodal:
-            ensure_sglang_tensor_image_size()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(

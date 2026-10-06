@@ -82,7 +82,8 @@ SPDX-License-Identifier: Apache-2.0
 
 - Retain matching LPRs and their status across input edits. Collect missing
   requests in the same ordered pass that constructs desired requests. An
-  immutable mismatch invalidates that result and requires PCS replacement.
+  immutable mismatch waits for its Grove engine to roll and LPX to release the
+  old requests; incompatible layouts and OnDelete builds require PCS replacement.
 - Publish missing requests independently in workload/PCSG ordinal/model order.
   Partial publication and idempotent retries are supported; exactly-once
   batches are not required. Creation order does not guarantee scheduler order or prevent
@@ -114,8 +115,8 @@ SPDX-License-Identifier: Apache-2.0
   This also defers PCS updates and replacement until all groups are observed.
 - Render a complete valid replacement before deleting an existing workload.
   A replacement error preserves the existing workload, even if its digest differs.
-- For immutable workload or request changes, foreground-delete the PCS and
-  recreate it after garbage collection.
+- For incompatible layouts or OnDelete build changes, foreground-delete the PCS
+  and recreate it after garbage collection. Grove rolls compatible layouts.
 - Grove makes PCS clique composition and scaling-group `CliqueNames` immutable.
   Model removal therefore requires PCS replacement. Do not trim group membership
   while retaining templates; those templates can become standalone cliques.
@@ -123,8 +124,10 @@ SPDX-License-Identifier: Apache-2.0
   Preserve the PCS and clique templates.
 - For replica-only scale-out, wait for old request names to disappear, update
   capacity, then publish missing LPRs.
-- Write scale-down before deleting LPRs, but do not wait for Grove or pod
-  deletion. Asynchronous pod cleanup allows scheduler finalizers to complete.
+- Ordinary retirement waits for `status.committed` to clear after Grove cleanup.
+  For build changes, all retiring requests in an engine must release before any
+  are deleted. Keep UID/resource-version delete preconditions. Deadline cancellation
+  remains separate.
 - Never directly delete Pods or PodCliques from graph reconciliation or LPR
   lifecycle helpers. Grove scaling and owner garbage collection own workload
   cleanup; scheduler Pod references and release journals do not authorize it.

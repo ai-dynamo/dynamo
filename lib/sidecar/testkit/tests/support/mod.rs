@@ -79,6 +79,19 @@ pub trait ProcessFixture: WireFixture {
     fn command() -> Command;
     fn configure_request(request: &mut PreprocessedRequest);
     fn assert_registration(card: &ModelDeploymentCard);
+    fn set_served_model_name(&self, name: &str);
+    fn set_health(&self, is_healthy: Option<bool>);
+    async fn health_check_received(&self);
+    fn assert_unhealthy_startup(logs: &str);
+}
+
+pub trait HandoffFixture: ProcessFixture {
+    const HAS_BOOTSTRAP: bool;
+    fn assert_handoff(
+        prefill: &RequestHandle<Self::Protocol>,
+        decode: &RequestHandle<Self::Protocol>,
+        id: &str,
+    );
 }
 
 pub fn sidecar_command(binary_name: &str, override_env: &str) -> Command {
