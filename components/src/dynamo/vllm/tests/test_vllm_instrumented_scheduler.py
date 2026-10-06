@@ -6979,6 +6979,7 @@ def test_scheduler_cls_resolution_installs_the_patch():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.timeout(60)
 def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     """Through vLLM's own utility dispatch, both FPM payload kinds carry the new id."""
     import queue
