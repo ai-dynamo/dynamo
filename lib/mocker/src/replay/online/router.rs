@@ -906,6 +906,7 @@ policy_classes:
                     data: KvCacheEventData::Stored(KvCacheStoreData {
                         parent_hash: first.checked_sub(1).map(block_hash),
                         start_position: None,
+                        shared_cache_eligible: false,
                         blocks: (first..if first == 0 { 1 } else { 4 })
                             .map(|index| KvCacheStoredBlockData {
                                 block_hash: block_hash(index),
