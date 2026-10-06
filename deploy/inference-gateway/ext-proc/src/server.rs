@@ -956,62 +956,75 @@ fn extract_candidate_subset(
 struct ExtProcError {
     status_code: StatusCode,
     message: String,
-    /// Response headers to attach to the immediate response. Empty for most
-    /// failures; carries `Retry-After` when a policy class sheds a request.
-    headers: Vec<(String, String)>,
 }
 
 impl ExtProcError {
-    fn new(status_code: StatusCode, message: String) -> Self {
-        Self {
-            status_code,
-            message,
-            headers: Vec::new(),
-        }
-    }
-
     fn from_pick_error(e: PickError) -> Self {
         match e {
-            PickError::NoEndpoints => Self::new(StatusCode::ServiceUnavailable, e.to_string()),
-            PickError::RoutingFailed(msg) => Self::new(StatusCode::ServiceUnavailable, msg),
-            PickError::InvalidRequest(msg) => Self::new(StatusCode::BadRequest, msg),
-            PickError::MetadataHeadersTooLarge(err) => {
-                Self::new(StatusCode::RequestHeaderFieldsTooLarge, err.to_string())
-            }
+            PickError::NoEndpoints => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: e.to_string(),
+            },
+            PickError::RoutingFailed(msg) => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: msg,
+            },
+            PickError::InvalidRequest(msg) => Self {
+                status_code: StatusCode::BadRequest,
+                message: msg,
+            },
+            PickError::MetadataHeadersTooLarge(err) => Self {
+                status_code: StatusCode::RequestHeaderFieldsTooLarge,
+                message: err.to_string(),
+            },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
             // client-safe variant message; the detailed cause is logged upstream.
-            PickError::TokenizerUnavailable => {
-                Self::new(StatusCode::ServiceUnavailable, e.to_string())
-            }
-            PickError::TokenizerTimeout => Self::new(StatusCode::GatewayTimeout, e.to_string()),
-            PickError::TokenizerUpstreamError => Self::new(StatusCode::BadGateway, e.to_string()),
+            PickError::TokenizerUnavailable => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: e.to_string(),
+            },
+            PickError::TokenizerTimeout => Self {
+                status_code: StatusCode::GatewayTimeout,
+                message: e.to_string(),
+            },
+            PickError::TokenizerUpstreamError => Self {
+                status_code: StatusCode::BadGateway,
+                message: e.to_string(),
+            },
             // In-flight limit saturated: shed as retryable backpressure. The
             // variant message ("endpoint picker overloaded") is client-safe.
-            PickError::Overloaded => Self::new(StatusCode::ServiceUnavailable, e.to_string()),
-            // A policy class refused admission. 429 is what gateway failover
-            // logic already understands, and `Retry-After` tells the client when
-            // to come back instead of leaving it to guess. The picker logs which
-            // class and limit refused the request.
-            PickError::Saturated {
-                retry_after_secs, ..
-            } => {
-                let mut err = Self::new(StatusCode::TooManyRequests, e.to_string());
-                if let Some(secs) = retry_after_secs {
-                    err.headers
-                        .push(("retry-after".to_string(), secs.to_string()));
-                }
-                err
-            }
+            PickError::Overloaded => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: e.to_string(),
+            },
+            // Must match `scheduler_error_status`; see
+            // `epp_statuses_match_the_selection_service`.
+            PickError::RouterOverloaded => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: e.to_string(),
+            },
+            PickError::RouterQueueRejected => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: e.to_string(),
+            },
+            PickError::RouterDeadlineExceeded => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: e.to_string(),
+            },
+            PickError::RouterConflict => Self {
+                status_code: StatusCode::Conflict,
+                message: e.to_string(),
+            },
+            PickError::RouterInternal => Self {
+                status_code: StatusCode::InternalServerError,
+                message: e.to_string(),
+            },
         }
     }
 
     fn into_processing_response(self) -> ProcessingResponse {
-        envoy_helpers::build_error_response_with_headers(
-            self.status_code,
-            Some(&self.message),
-            &self.headers,
-        )
+        envoy_helpers::build_error_response(self.status_code, Some(&self.message))
     }
 }
 
@@ -1729,5 +1742,54 @@ mod tests {
     fn inject_body_extensions_rejects_non_object_nvext() {
         let body = br#"{"nvext": "bad"}"#;
         assert!(inject_body_extensions(body, Some(&[1]), None).is_err());
+    }
+
+    /// The EPP and the selection service give every scheduler error the same status.
+    #[test]
+    fn epp_statuses_match_the_selection_service() {
+        use crate::admission::RouterRejectionExt;
+        use dynamo_kv_router::protocols::WorkerId;
+        use dynamo_kv_router::scheduling::{KvSchedulerError, QueueLimitKind, QueueRejection};
+        use dynamo_kv_router::services::selection::SelectionError;
+
+        let cases = [
+            KvSchedulerError::NoEndpoints,
+            KvSchedulerError::AllEligibleWorkersOverloaded,
+            KvSchedulerError::AllEligibleWorkersFiltered,
+            KvSchedulerError::SubscriberShutdown,
+            KvSchedulerError::InitFailed("boom".to_string()),
+            KvSchedulerError::BookingFailed("duplicate".to_string()),
+            KvSchedulerError::PinnedWorkerOverloaded {
+                worker_id: WorkerId::default(),
+            },
+            KvSchedulerError::PinnedWorkerNotAllowed {
+                worker_id: WorkerId::default(),
+            },
+            KvSchedulerError::QueueRejected(QueueRejection {
+                policy_class: "batch".to_string(),
+                limit_kind: QueueLimitKind::Requests,
+                current: 8,
+                limit: 8,
+            }),
+            KvSchedulerError::DeadlineExceeded,
+            KvSchedulerError::RequestClassifierPanicked("boom".to_string()),
+            KvSchedulerError::RequestClassifierFailed(std::sync::Arc::new(std::io::Error::other(
+                "boom",
+            ))),
+            KvSchedulerError::DuplicateClassificationRequestId("req".to_string()),
+            KvSchedulerError::InvalidClassificationMetadata("bad".to_string()),
+            KvSchedulerError::ClassificationLifecycleEnded("req".to_string()),
+        ];
+
+        for error in cases {
+            let label = error.to_string();
+            let epp = ExtProcError::from_pick_error(error.rejection().into_pick_error());
+            let selection = SelectionError::Scheduler(error).status_code();
+
+            assert_eq!(
+                epp.status_code as u16, selection,
+                "EPP and selection service disagree on {label:?}"
+            );
+        }
     }
 }

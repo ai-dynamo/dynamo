@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -33,6 +33,9 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
+use crate::admission::{
+    RouterRejection, RouterRejectionExt, classify_router_error, record_rejection,
+};
 use crate::envoy_helpers::find_header;
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{
@@ -124,28 +127,6 @@ const HEADER_ENVOY_ATTEMPT_COUNT: &str = "x-envoy-attempt-count";
 /// `policy_family` in the router's policy config for per-class limits to apply.
 const POLICY_FAMILY_RETRY: &str = "retry";
 
-/// `Retry-After` value, in seconds, advertised when a policy class sheds a
-/// request. `0` suppresses the header.
-const DYN_EPP_SHED_RETRY_AFTER_SECS: &str = "DYN_EPP_SHED_RETRY_AFTER_SECS";
-const DEFAULT_SHED_RETRY_AFTER_SECS: u64 = 1;
-
-/// The router's rejection carries no timing hint of its own, so the retry delay
-/// is a deployment-wide constant read once at startup.
-static SHED_RETRY_AFTER_SECS: LazyLock<Option<u64>> = LazyLock::new(|| {
-    let secs = match std::env::var(DYN_EPP_SHED_RETRY_AFTER_SECS) {
-        Ok(raw) => raw.trim().parse::<u64>().unwrap_or_else(|_| {
-            tracing::warn!(
-                value = %raw,
-                default = DEFAULT_SHED_RETRY_AFTER_SECS,
-                "Ignoring invalid {DYN_EPP_SHED_RETRY_AFTER_SECS}"
-            );
-            DEFAULT_SHED_RETRY_AFTER_SECS
-        }),
-        Err(_) => DEFAULT_SHED_RETRY_AFTER_SECS,
-    };
-    (secs > 0).then_some(secs)
-});
-
 /// Resolve the router policy-class family for a request from its headers.
 ///
 /// The `x-dynamo-meta-policy-class` request-metadata header names a family
@@ -192,42 +173,10 @@ fn is_retry_attempt(headers: &[(String, String)]) -> bool {
         .is_some_and(|count| count > 1)
 }
 
-/// Turn a router's per-class refusal into a shed answer: every eligible worker
-/// was saturated for this class and the class is configured not to queue.
-/// `stage` names which router refused, for the log line only.
-fn shed_error(stage: &'static str, rejection: QueueRejection) -> PickError {
-    tracing::info!(
-        stage,
-        policy_class = %rejection.policy_class,
-        limit_kind = %rejection.limit_kind,
-        current = rejection.current,
-        limit = rejection.limit,
-        "Router refused admission; shedding request"
-    );
-    PickError::Saturated {
-        policy_class: rejection.policy_class,
-        retry_after_secs: *SHED_RETRY_AFTER_SECS,
-    }
-}
-
-/// Result of a decode routing query. Keeps a policy-class refusal separate from a
-/// routing failure: the former is a deliberate, retryable shed, the latter is an
-/// error.
-#[derive(Debug)]
-pub enum DecodeRouteOutcome {
-    Routed {
-        worker: WorkerWithDpRank,
-        overlap_blocks: u32,
-    },
-    Shed {
-        rejection: QueueRejection,
-    },
-}
-
 /// Recover the typed policy-class refusal from a prefill reservation failure.
 ///
-/// As with [`DecodeRouteOutcome`], a refusal is a deliberate shed, not a signal
-/// to fall back to aggregated routing the way other prefill errors are. The
+/// A refusal is a deliberate shed, not a signal to fall back to aggregated
+/// routing the way other prefill errors are. The
 /// reservation API returns one `anyhow::Error` for every failure, so the
 /// distinction has to be recovered from the chain.
 fn prefill_queue_rejection(err: &anyhow::Error) -> Option<&QueueRejection> {
@@ -648,9 +597,8 @@ impl Router {
     /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
     /// mismatch excludes a worker from selection.
     ///
-    /// A per-class queue rejection comes back as [`DecodeRouteOutcome::Shed`],
-    /// not an `Err`: the class explicitly refused rather than queued, so the
-    /// caller sheds with a retry hint instead of reporting a routing failure.
+    /// A per-class queue limit rejection surfaces as an error here, the same as
+    /// it does for the integrated frontend.
     #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
@@ -662,7 +610,7 @@ impl Router {
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<DecodeRouteOutcome> {
+    ) -> std::result::Result<(WorkerWithDpRank, u32), PickError> {
         let config_override = decode_router_config_override(is_disaggregated);
 
         let outcome = self
@@ -686,21 +634,25 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+            .map_err(|error| {
+                // Classify while the router's error is still typed.
+                let rejection = classify_router_error(&error);
+                record_rejection(rejection, &error);
+                rejection.into_pick_error()
+            })?;
 
-        Ok(match outcome {
+        match outcome {
             FindBestMatchOutcome::Routed {
                 worker,
                 overlap_blocks,
                 ..
-            } => DecodeRouteOutcome::Routed {
-                worker,
-                overlap_blocks,
-            },
+            } => Ok((worker, overlap_blocks)),
+            // An outcome, not an error, so it is classified here.
             FindBestMatchOutcome::QueueRejected { rejection } => {
-                DecodeRouteOutcome::Shed { rejection }
+                record_rejection(RouterRejection::QueueRejected, &rejection);
+                Err(RouterRejection::QueueRejected.into_pick_error())
             }
-        })
+        }
     }
 
     /// Register a request with the decode router for bookkeeping.
@@ -1619,7 +1571,10 @@ impl EndpointPicker for Router {
             // The refusal happens before anything is booked, so a shed here
             // leaves no reservation to roll back.
             Err(e) => match prefill_queue_rejection(e) {
-                Some(rejection) => return Err(shed_error("prefill", rejection.clone())),
+                Some(rejection) => {
+                    record_rejection(RouterRejection::QueueRejected, rejection);
+                    return Err(RouterRejection::QueueRejected.into_pick_error());
+                }
                 None => {
                     tracing::debug!(
                         error = %e,
@@ -1630,7 +1585,7 @@ impl EndpointPicker for Router {
             },
         };
 
-        let decode_outcome = self
+        let (decode_worker, _overlap) = self
             .route_decode(
                 &tokens,
                 is_disaggregated,
@@ -1641,16 +1596,7 @@ impl EndpointPicker for Router {
                 allowed_worker_ids,
                 routing_constraints,
             )
-            .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
-
-        let (decode_worker, _overlap) = match decode_outcome {
-            DecodeRouteOutcome::Routed {
-                worker,
-                overlap_blocks,
-            } => (worker, overlap_blocks),
-            DecodeRouteOutcome::Shed { rejection } => return Err(shed_error("decode", rejection)),
-        };
+            .await?;
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
@@ -1876,39 +1822,6 @@ mod tests {
         ];
 
         assert_eq!(policy_class(&headers).as_deref(), Some("batch"));
-    }
-
-    fn sample_rejection(policy_class: &str) -> QueueRejection {
-        QueueRejection {
-            policy_class: policy_class.to_string(),
-            limit_kind: dynamo_kv_router::scheduling::QueueLimitKind::Requests,
-            current: 4,
-            limit: 0,
-        }
-    }
-
-    /// `shed_error` is shared by both the prefill and decode call sites in
-    /// `pick()`; the answer it produces must depend only on the rejection, not
-    /// on which router refused.
-    #[test]
-    fn shed_error_maps_the_same_rejection_the_same_way_from_either_stage() {
-        let rejection = sample_rejection("retry_large");
-
-        let from_prefill = shed_error("prefill", rejection.clone());
-        let from_decode = shed_error("decode", rejection.clone());
-
-        for err in [from_prefill, from_decode] {
-            match err {
-                PickError::Saturated {
-                    policy_class,
-                    retry_after_secs,
-                } => {
-                    assert_eq!(policy_class, rejection.policy_class);
-                    assert_eq!(retry_after_secs, *SHED_RETRY_AFTER_SECS);
-                }
-                other => panic!("expected PickError::Saturated, got {other:?}"),
-            }
-        }
     }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a

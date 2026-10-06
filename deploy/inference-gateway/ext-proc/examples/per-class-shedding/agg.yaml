@@ -3,9 +3,8 @@
 #
 # Per-class load shedding on the EPP decode path. This is
 # `examples/backends/vllm/deploy/gaie/agg.yaml` in its Rust-EPP form, plus the
-# router policy config that makes the EPP answer HTTP 429 with `Retry-After` —
-# instead of routing — when a request's class is saturated. Every added line is
-# commented.
+# router policy config that makes the EPP answer HTTP 429 — instead of
+# routing — when a request's class is saturated. Every added line is commented.
 #
 # The Epp component carries no `eppConfig`: that block configured the removed Go
 # EPP's GAIE plugin chain, and the Rust EPP is configured entirely by environment,
@@ -30,7 +29,7 @@
 # Test:
 #   GW=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
 #   # A retry with a long prompt is the first thing shed. Under load this
-#   # returns 429 with `Retry-After: 2` while the same prompt unmarked succeeds.
+#   # returns 429 while the same prompt unmarked succeeds.
 #   curl -i http://$GW/v1/chat/completions \
 #     -H 'content-type: application/json' \
 #     -H 'x-dynamo-retry-attempt: 1' \
@@ -117,10 +116,6 @@ spec:
           # behaves exactly as it does today.
           - name: DYN_ROUTER_POLICY_CONFIG
             value: /etc/dynamo/router-policy.yaml
-          # Seconds advertised in `Retry-After` on a shed. Defaults to 1; set to
-          # 0 to answer 429 with no hint at all.
-          - name: DYN_EPP_SHED_RETRY_AFTER_SECS
-            value: "2"
           envFrom:
           - secretRef:
               name: hf-token-secret

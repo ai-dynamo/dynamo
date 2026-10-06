@@ -18,7 +18,11 @@ use axum::{
     routing::get,
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
-use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
+use prometheus::{
+    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TEXT_FORMAT, TextEncoder,
+};
+
+use crate::admission::{RouterRejection, RouterRejectionExt};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
 /// otherwise. Distinct from the ext_proc gRPC port (9002) and the health port
@@ -89,6 +93,30 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
         .observe(cached_tokens as f64);
 }
 
+/// Requests the embedded router refused, by reason. `reason` comes from
+/// [`RouterRejection`], so its cardinality is fixed.
+static ROUTER_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        Opts::new(
+            "dynamo_epp_router_rejections_total",
+            "Requests the embedded KV router refused to place, by rejection reason",
+        ),
+        &["model", "reason"],
+    )
+    .expect("router_rejections counter options are statically valid");
+    REGISTRY
+        .register(Box::new(counter.clone()))
+        .expect("router_rejections is the only registrant of its name");
+    counter
+});
+
+/// Count one rejection for the served model. Non-blocking; safe on the `pick()` path.
+pub fn inc_router_rejection(rejection: RouterRejection) {
+    ROUTER_REJECTIONS
+        .with_label_values(&[served_model_label(), rejection.metric_label()])
+        .inc();
+}
+
 /// Serve `/metrics` until the process exits.
 pub async fn serve(port: u16) -> anyhow::Result<()> {
     let app = AxumRouter::new().route("/metrics", get(render));
@@ -128,6 +156,26 @@ mod tests {
     fn bind_test_model() -> MutexGuard<'static, ()> {
         set_served_model(TEST_MODEL);
         SERIALIZE.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn rejections(reason: &str) -> u64 {
+        ROUTER_REJECTIONS
+            .with_label_values(&[TEST_MODEL, reason])
+            .get()
+    }
+
+    /// A queue deadline is logged but not counted, matching the Frontend.
+    #[test]
+    fn queue_deadline_is_not_counted_as_a_rejection() {
+        let _guard = bind_test_model();
+        let overloaded = rejections("overloaded");
+        let deadline = rejections("deadline_exceeded");
+
+        crate::admission::record_rejection(RouterRejection::Overloaded, &"busy");
+        crate::admission::record_rejection(RouterRejection::DeadlineExceeded, &"late");
+
+        assert_eq!(rejections("overloaded"), overloaded + 1);
+        assert_eq!(rejections("deadline_exceeded"), deadline);
     }
 
     /// `(count, sum)` currently recorded against [`TEST_MODEL`].
