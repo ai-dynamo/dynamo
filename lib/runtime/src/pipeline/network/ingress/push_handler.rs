@@ -251,8 +251,8 @@ where
     /// upstream response transport, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
     /// classification (client-side disconnect vs. real failure), and the
-    /// health-check notifier policy (notify only on non-error chunks and
-    /// at clean stream end).
+    /// health-check notifier policy (notify on every non-error chunk the
+    /// engine produces, before publishing it, and at clean stream end).
     async fn pump_response_stream<U>(
         &self,
         mut stream: ManyOut<U>,
@@ -289,6 +289,12 @@ where
             };
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
+            // The canary timer tracks engine progress, not delivery: notify
+            // before the publish so a client that already left does not hide
+            // a busy engine. Error chunks do not prove the engine is healthy.
+            if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
+            }
             let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
@@ -318,12 +324,6 @@ where
                         .inc();
                 }
                 break;
-            } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                    notifier.notify_one();
-                }
             }
             if encoded.stop_stream {
                 // Dropping the engine stream after the terminal frame is sent
@@ -1551,6 +1551,125 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
             0
+        );
+    }
+
+    /// An ingress wired to a canary notifier, as `HealthCheckManager` does, so
+    /// the tests can watch the permit `spawn_endpoint_health_check_task`
+    /// selects on: a stored permit resets the canary timer, none lets it fire.
+    fn ingress_with_canary_notifier() -> (
+        Arc<TestIngress>,
+        Arc<WorkHandlerMetrics>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+        (ingress, metrics, notifier)
+    }
+
+    /// A publisher whose response transport is already gone, as when the
+    /// client timed out and left before the engine produced its first chunk.
+    fn closed_publisher() -> StreamSender {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        StreamSender { tx, prologue: None }
+    }
+
+    async fn canary_timer_was_reset(notifier: &tokio::sync::Notify) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(100), notifier.notified())
+            .await
+            .is_ok()
+    }
+
+    /// Issue #15707: the engine is producing chunks but every publish fails.
+    /// The canary timer must still be reset, so the canary does not probe a
+    /// busy worker and get it restarted.
+    #[tokio::test]
+    async fn test_canary_timer_reset_when_publish_fails_but_engine_progresses() {
+        let (ingress, metrics, notifier) = ingress_with_canary_notifier();
+        let publisher = closed_publisher();
+
+        let ctx = Context::new(serde_json::json!({}));
+        let content: Vec<TestResponse> = (0..3)
+            .map(|i| Annotated::from_data(serde_json::json!({ "token": i })))
+            .collect();
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
+
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                .get(),
+            1,
+            "the publish must really have failed"
+        );
+        assert!(
+            canary_timer_was_reset(&notifier).await,
+            "a non-error engine chunk must reset the canary timer even when its publish fails"
+        );
+    }
+
+    /// The engine produces nothing: nothing may reset the canary timer, so the
+    /// canary fires and probes the worker as before.
+    #[tokio::test]
+    async fn test_canary_timer_not_reset_when_engine_is_silent() {
+        let (ingress, _metrics, notifier) = ingress_with_canary_notifier();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let publisher = StreamSender { tx, prologue: None };
+
+        // A stream that never yields and never ends. A cleanly ending empty
+        // stream would notify through the end-of-stream path instead.
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(stream::pending()), ctx.context());
+
+        let pumped = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ingress.pump_response_stream(
+                response_stream,
+                &publisher,
+                RequestPlanePayloadCodec::Json,
+            ),
+        )
+        .await;
+        assert!(pumped.is_err(), "a silent engine keeps the pump waiting");
+        assert!(
+            !canary_timer_was_reset(&notifier).await,
+            "a silent engine must not reset the canary timer"
+        );
+    }
+
+    /// Error chunks do not prove the engine is healthy, so they must not reset
+    /// the canary timer, also when their publish fails.
+    #[tokio::test]
+    async fn test_canary_timer_not_reset_by_error_chunks_when_publish_fails() {
+        let (ingress, _metrics, notifier) = ingress_with_canary_notifier();
+        let publisher = closed_publisher();
+
+        let ctx = Context::new(serde_json::json!({}));
+        let content: Vec<TestResponse> = (0..3)
+            .map(|i| Annotated::from_error(format!("engine error {i}")))
+            .collect();
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
+
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+
+        assert!(
+            !canary_timer_was_reset(&notifier).await,
+            "error chunks must not reset the canary timer"
         );
     }
 }
