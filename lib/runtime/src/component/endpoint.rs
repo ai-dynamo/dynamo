@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Weak};
 
 use anyhow::Result;
 use derive_builder::Builder;
@@ -59,6 +60,21 @@ pub struct StartedEndpoint {
     instance: Instance,
     shutdown_token: CancellationToken,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+type StartupLocks = HashMap<(u64, EndpointId), Weak<tokio::sync::Mutex<()>>>;
+static STARTUP_LOCKS: LazyLock<parking_lot::Mutex<StartupLocks>> = LazyLock::new(Default::default);
+
+fn startup_lock(connection_id: u64, endpoint_id: &EndpointId) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = STARTUP_LOCKS.lock();
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    let key = (connection_id, endpoint_id.clone());
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 struct EndpointStartupGuard {
@@ -233,6 +249,8 @@ impl EndpointConfigBuilder {
         );
 
         // Register endpoint with the server (unified interface)
+        // A cancelled attempt must remove its handler before a retry can replace it.
+        let startup_lock = startup_lock(connection_id, &endpoint_id).lock_owned().await;
         server
             .register_endpoint(
                 endpoint_name_for_task.clone(),
@@ -283,6 +301,12 @@ impl EndpointConfigBuilder {
 
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             let registration_lease = registration_rx.await.ok();
+            // Successful startup releases serialization here. Failed or cancelled startup
+            // keeps it through request-plane cleanup, including when acquisition is pending.
+            let mut startup_lock = Some(startup_lock);
+            if registration_lease.is_some() {
+                drop(startup_lock.take());
+            }
             tokio::select! {
                 _ = cancel_token_for_cleanup.cancelled() => {}
                 _ = startup_cancellation.cancelled() => {}
@@ -313,6 +337,7 @@ impl EndpointConfigBuilder {
                 tracker.unregister_endpoint();
             }
 
+            drop(startup_lock);
             release_result
         });
 
@@ -557,24 +582,19 @@ mod tests {
                     .is_empty()
             );
             drop(startup);
-            while tracker.get_count() != initial_count || Arc::strong_count(&handler) != 1 {
-                tokio::task::yield_now().await;
-            }
-            while !drt
-                .discovery()
-                .list(DiscoveryQuery::AllEndpoints)
-                .await
-                .unwrap()
-                .is_empty()
-            {
-                tokio::task::yield_now().await;
-            }
-            let retry = endpoint
-                .endpoint_builder()
-                .handler(handler.clone())
-                .start_with_registration()
-                .await
-                .unwrap();
+            // Retry before either the abandoned acquisition or its cleanup task can run.
+            let replacement_handler: Arc<dyn PushWorkHandler> = Arc::new(NoopHandler);
+            let mut retry = Box::pin(
+                endpoint
+                    .endpoint_builder()
+                    .handler(replacement_handler.clone())
+                    .start_with_registration(),
+            );
+            assert!(futures::poll!(retry.as_mut()).is_pending());
+            assert_eq!(tracker.get_count(), initial_count + 1);
+            let retry = retry.await.unwrap();
+            assert_eq!(Arc::strong_count(&handler), 1);
+            assert!(Arc::strong_count(&replacement_handler) > 1);
             assert_eq!(tracker.get_count(), initial_count + 1);
             assert_eq!(
                 drt.discovery()
@@ -587,6 +607,7 @@ mod tests {
             retry.shutdown().await.unwrap();
             assert_eq!(tracker.get_count(), initial_count);
             assert_eq!(Arc::strong_count(&handler), 1);
+            assert_eq!(Arc::strong_count(&replacement_handler), 1);
             assert!(
                 drt.discovery()
                     .list(DiscoveryQuery::AllEndpoints)

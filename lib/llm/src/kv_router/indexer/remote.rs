@@ -501,9 +501,8 @@ async fn get_or_start_service(
             && service.retire_if_unused()
         {
             service.stop_endpoints().await;
-            let removed =
-                SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &service));
-            drop(removed);
+            // Keep the retired entry and its instance IDs for the next topology check.
+            // Discovery watch caches can still contain the endpoints we just stopped.
         }
     });
     result_rx
@@ -528,10 +527,8 @@ async fn start_service_locked(
         }
 
         ignored_instance_ids = existing.stop_endpoints().await;
-        // Drop the removed entry after the DashMap shard guard is released.
-        let removed =
-            SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &existing));
-        drop(removed);
+        // Retain retirement information if replacement fails. A successful insertion below
+        // replaces this entry; runtime teardown still evicts it if there is no retry.
     }
 
     let service =
@@ -582,6 +579,13 @@ async fn verify_service_topology(
             component: component.name().to_string(),
         })
         .await?;
+
+    #[cfg(test)]
+    let endpoints = tests::STALE_TOPOLOGY
+        .lock()
+        .get(&service_key(component))
+        .cloned()
+        .unwrap_or(endpoints);
 
     let namespace = component.namespace().name();
     validate_service_topology(
@@ -804,6 +808,10 @@ mod tests {
     type Pauses = LazyLock<parking_lot::Mutex<HashMap<ServiceKey, Pause>>>;
     static STARTUP_PAUSES: Pauses = LazyLock::new(Default::default);
     static RETIREMENT_PAUSES: Pauses = LazyLock::new(Default::default);
+    // Simulates a discovery watch cache that has not delivered endpoint removals yet.
+    pub(super) static STALE_TOPOLOGY: LazyLock<
+        parking_lot::Mutex<HashMap<ServiceKey, Vec<DiscoveryInstance>>>,
+    > = LazyLock::new(Default::default);
 
     fn install_pause(
         pauses: &Pauses,
@@ -966,9 +974,34 @@ mod tests {
                 if let Some(record) = conflicting_record {
                     drt.discovery().unregister(record).await.unwrap();
                 }
+                let replacement_mode = if fail_record {
+                    ServedIndexerMode::EventDriven
+                } else {
+                    let stale = drt
+                        .discovery()
+                        .list(DiscoveryQuery::ComponentEndpoints {
+                            namespace: component.namespace().name(),
+                            component: component.name().to_string(),
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(stale.len(), 2);
+                    assert!(
+                        validate_service_topology(
+                            &component.namespace().name(),
+                            component.name(),
+                            ServedIndexerMode::Approximate,
+                            stale.clone(),
+                            &HashSet::new(),
+                        )
+                        .is_err()
+                    );
+                    STALE_TOPOLOGY.lock().insert(key.clone(), stale);
+                    ServedIndexerMode::Approximate
+                };
                 let mut replacement = Box::pin(ensure_served_indexer_service(
                     component.clone(),
-                    ServedIndexerMode::EventDriven,
+                    replacement_mode,
                     "model-a".to_string(),
                     Indexer::None,
                 ));
@@ -976,6 +1009,7 @@ mod tests {
                 assert!(service_creation_lock(&key).try_lock().is_err());
                 cleanup_release.send(()).unwrap();
                 let handle = replacement.await.unwrap();
+                STALE_TOPOLOGY.lock().remove(&key);
                 assert_query_callable(&component).await;
                 let endpoints = drt
                     .discovery()
@@ -985,7 +1019,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                assert_eq!(endpoints.len(), 1);
+                assert_eq!(endpoints.len(), if fail_record { 1 } else { 2 });
                 drop(handle);
             }
             shutdown_and_settle(drt).await;
