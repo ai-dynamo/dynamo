@@ -177,8 +177,7 @@ kubectl apply -n dynamo -f vllm-disagg.yaml
 
 The operator computes the previous worker hash, so the workers return to the previous generation through the same rollout as any other change. Watch it the same way.
 
-> [!WARNING]
-> On Deployment-backed workers, wait for `status.rollingUpdate.phase` to reach `Completed` before you apply another change, including a rollback. Changing the spec while a managed rolling update is in progress can remove the serving generation faster than the `maxUnavailable` budget allows.
+You can roll back while a rollout is still in progress. On Deployment-backed workers the operator treats the previous pod templates as the new target: the generation that was rolling out becomes the old generation and scales down within `maxUnavailable`, while the previous generation scales back up within `maxSurge`. The operator deletes an old DCD only after it reaches zero replicas and its pods have terminated. Available since operator 1.5.0; earlier releases could delete the serving generation on a mid-rollout rollback.
 
 ## Control the Pace
 
