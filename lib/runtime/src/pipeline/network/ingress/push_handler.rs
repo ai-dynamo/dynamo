@@ -289,9 +289,8 @@ where
             };
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
-            // The canary timer tracks engine progress, not delivery: notify
-            // before the publish so a client that already left does not hide
-            // a busy engine. Error chunks do not prove the engine is healthy.
+            // Notify on engine progress, before publishing, so a departed client
+            // cannot hide a busy engine. Error chunks do not prove health.
             if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
                 notifier.notify_one();
             }
@@ -1554,9 +1553,8 @@ mod tests {
         );
     }
 
-    /// An ingress wired to a canary notifier, as `HealthCheckManager` does, so
-    /// the tests can watch the permit `spawn_endpoint_health_check_task`
-    /// selects on: a stored permit resets the canary timer, none lets it fire.
+    /// An ingress wired to a canary notifier as `HealthCheckManager` does.
+    /// A stored permit resets the canary timer; none lets it fire.
     fn ingress_with_canary_notifier() -> (
         Arc<TestIngress>,
         Arc<WorkHandlerMetrics>,
@@ -1586,9 +1584,8 @@ mod tests {
             .is_ok()
     }
 
-    /// Issue #15707: the engine is producing chunks but every publish fails.
-    /// The canary timer must still be reset, so the canary does not probe a
-    /// busy worker and get it restarted.
+    /// Issue #15707: a busy engine whose publishes all fail must still reset
+    /// the canary timer, so the canary does not restart the worker.
     #[tokio::test]
     async fn test_canary_timer_reset_when_publish_fails_but_engine_progresses() {
         let (ingress, metrics, notifier) = ingress_with_canary_notifier();
