@@ -548,3 +548,22 @@ def test_gpu_fault_watchdog_can_be_disabled(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setenv("DYN_GMS_GPU_FAULT_WATCHDOG_MS", "0")
     assert gq.start_gpu_fault_watchdog("vllm", on_fault=lambda _exc: None) is False
+
+
+@pytest.mark.parametrize(
+    ("isolation", "started"), [("process", ["sglang"]), ("mps", []), ("", [])]
+)
+def test_fault_watchdog_without_interlock_only_under_process_isolation(
+    monkeypatch, isolation, started
+):
+    """Without MPS a fault never reaches the TP peers, so only the watchdog ends it."""
+    from gpu_memory_service.integrations.common import gpu_quiescence as gq
+
+    monkeypatch.setenv("DYN_GMS_GPU_ISOLATION", isolation)
+    monkeypatch.delenv("DYN_GMS_EXPERIMENTAL_PROCESS_LIFETIME_RECLAIM", raising=False)
+    calls = []
+    monkeypatch.setattr(gq, "start_gpu_fault_watchdog", calls.append)
+
+    gq.arm_gpu_crash_interlock(None, backend_name="sglang")
+
+    assert calls == started

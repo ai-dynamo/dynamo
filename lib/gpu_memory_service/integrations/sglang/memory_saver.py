@@ -211,7 +211,7 @@ class GMSMemorySaverImpl:
                 shared=self._kv_shared,
             ),
         }
-        if crash_interlock_fd is not None:
+        if cohort:
             from gpu_memory_service.integrations.common.gpu_quiescence import (
                 arm_gpu_crash_interlock,
             )

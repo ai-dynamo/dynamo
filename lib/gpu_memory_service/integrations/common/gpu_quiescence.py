@@ -407,12 +407,20 @@ def register_gpu_client(
 def arm_gpu_crash_interlock(notification_fd: int | None, *, backend_name: str) -> None:
     """Install the native one-shot handler after CUDA/MPS initialization.
 
+    Without an interlock FD, only the GPU fault watchdog is started, and only
+    for process isolation.
+
     Ownership of the notification FD transfers to the native extension. The
     handler performs only async-signal-safe syscalls: one fixed-size socket
     write and parking the reporting thread. GMS proves MPS client termination
     before it terminates the host process.
     """
     if notification_fd is None:
+        # Without MPS, a fault stays inside this worker's CUDA context and its
+        # TP peers block on it. The watchdog turns it into the process death
+        # that retires the writer cohort.
+        if _process_lifetime_enabled():
+            start_gpu_fault_watchdog(backend_name)
         return
     try:
         import signal
@@ -480,7 +488,8 @@ def start_gpu_fault_watchdog(backend_name: str, on_fault=None) -> bool:
     sit idle while its TP peers wait on it, and neither the crash interlock
     nor rank heartbeats notice. Poll an idle private stream, which surfaces
     the sticky error in about 2 microseconds per query. On a fault, kill the
-    worker. Its interlock socket closes, which reports the crash through the
+    worker. Its interlock socket closes, or under process isolation its
+    writer-cohort guard is released, which reports the crash through the
     normal takeover path. DYN_GMS_GPU_FAULT_WATCHDOG_MS=0 disables the
     watchdog.
     """

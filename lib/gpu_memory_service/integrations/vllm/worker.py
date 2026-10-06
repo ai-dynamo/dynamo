@@ -296,7 +296,7 @@ class GMSWorker(_BaseWorker):
 
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
-        if crash_interlock_fd is not None:
+        if cohort:
             from gpu_memory_service.integrations.common.gpu_quiescence import (
                 arm_gpu_crash_interlock,
             )
