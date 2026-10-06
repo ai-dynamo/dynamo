@@ -40,6 +40,8 @@ for _ in $(seq 200); do
     [ "$(wc -l < "$PORT_RECORD")" -ge {_STUB_ROLES} ] && exit 0
     sleep 0.05
 done
+echo "stub: only $(wc -l < "$PORT_RECORD") of {_STUB_ROLES} roles recorded" >&2
+exit 1
 """
 
 
