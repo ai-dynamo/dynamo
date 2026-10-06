@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 Run Switchyard in a separate, single-replica PreProc. It chooses between
 `Qwen/Qwen3-0.6B` and `Qwen/Qwen3-1.7B`; Dynamo's native EPP then selects a worker within that
 model's pool. The example adds PreProc and gateway routing to an existing GAIE deployment.
+The [PreProc implementation and image build](https://github.com/NVIDIA-NeMo/Switchyard/tree/main/examples/dynamo-preproc)
+live in Switchyard; this directory contains the Dynamo deployment manifests and routing policy.
 
 ```mermaid
 sequenceDiagram
@@ -44,7 +46,7 @@ native pool attachment.
 
 The Kustomization assumes the existing namespace is `switchyard`. Change `namespace` in
 [kustomization.yaml](kustomization.yaml) to your workload namespace, and adjust the target model IDs
-in [routes.toml](preproc/config/routes.toml) and pool references in
+in [routes.toml](routes.toml) and pool references in
 [http-routes.yaml](http-routes.yaml) if they differ. PreProc and the example's dedicated Gateway run
 in that same namespace. Do not downgrade newer controller CRDs to run this example.
 
@@ -52,14 +54,12 @@ You also need Docker, `kubectl` with Kustomize support, and a registry the clust
 
 ## Build and deploy
 
-From the Dynamo repository root, build and publish the PreProc image:
+Build and publish the image from the
+[Switchyard PreProc example](https://github.com/NVIDIA-NeMo/Switchyard/tree/main/examples/dynamo-preproc#build-the-image).
+Then, from the Dynamo repository root:
 
 ```bash
-export PREPROC_IMAGE=registry.example.com/your-project/switchyard-preproc:example
 export EXAMPLE=examples/backends/vllm/deploy/gaie/switchyard
-
-docker build -f "$EXAMPLE/preproc/Dockerfile" -t "$PREPROC_IMAGE" .
-docker push "$PREPROC_IMAGE"
 ```
 
 Set the PreProc registry image in [kustomization.yaml](kustomization.yaml). Then apply the add-on
@@ -102,7 +102,7 @@ Set `X-Switchyard-Session-Id` to retain StageRouter state across requests in one
 
 ## Configure routing
 
-Edit [routes.toml](preproc/config/routes.toml) to choose the routing policy, then reapply the
+Edit [routes.toml](routes.toml) to choose the routing policy, then reapply the
 Kustomization. Set the request's `model` to a configured route ID, such as `auto`.
 
 To route to another existing model pool, add its target and policy in the TOML and a matching

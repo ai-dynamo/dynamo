@@ -23,7 +23,7 @@ resources:
 configMapGenerator:
 - name: switchyard-preproc-config
   files:
-  - routes.toml=preproc/config/routes.toml
+  - routes.toml
 images:
 - name: switchyard-preproc
   newName: registry.example.com/your-project/switchyard-preproc
