@@ -386,6 +386,8 @@ jobs:
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
+      extra_build_args: |
+        RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/ai-dynamo/vllm-base
       target: runtime
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
@@ -414,6 +416,8 @@ jobs:
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
+      extra_build_args: |
+        RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/ai-dynamo/vllm-base
       target: dev
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
@@ -437,6 +441,7 @@ jobs:
       build_timeout_minutes: 60
       # local-dev remaps to the host user; ARG USER_UID/USER_GID have no defaults.
       extra_build_args: |
+        RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/ai-dynamo/vllm-base
         USER_UID=1000
         USER_GID=1000
     secrets: inherit
@@ -604,6 +609,8 @@ jobs:
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
+      extra_build_args: |
+        RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/ai-dynamo/vllm-base
       target: runtime
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
