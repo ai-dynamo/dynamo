@@ -5,20 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Protocol compatibility tooling
 
+This branch adds optional source investigation on top of the contract-only B1
+base (`codex/vllm-protocol-tooling`). B1 can be reviewed and merged independently.
+Investigation is supporting analysis, not a third acceptance layer or behavioral
+conformance. There are two acceptance layers: declared contracts and runtime behavior.
+
 Assess Dynamo against a pinned native server: what differs, what changed, and what
 needs action? Initial coverage is vLLM chat-completion and completion request
-contracts. Static analysis does
+contracts, plus selected upstream behavioral-source changes. Static analysis does
 not establish runtime parity. Start with the generated `report.md`.
 
 The accepted [layered assessment design](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md#design-decision-layered-compatibility-assessment)
 separates contract comparison, behavioral conformance, and optional source
 investigation. It lets developers complete contract work before independently
-addressing behavior. This base implements only contract assessment (B1).
-Optional source investigation is a separate stacked change on
-`codex/vllm-source-investigation`, not a prerequisite for B1.
-The base has no handling/projection analyzer or investigation CLI option.
-Its v2 report marks investigation `not_implemented` and preserves historical
-advisory evidence without evaluating it.
+addressing behavior. Assessment v2 implements contract-only findings and gates;
+source investigation is advisory and can be skipped with `--no-investigation`.
 Behavioral conformance stays `not_assessed`: this command never launches servers
 or substitutes source references for runtime tests. Native-schema export migration
 and the separately scoped behavioral test workflow are not completed by this change.
@@ -58,8 +59,8 @@ and does not prove N-2 runtime interoperability.
 | Directory | Responsibility |
 | --- | --- |
 | `inputs/` | Validate source pins, choose revisions, validate retained report/decision/policy inputs |
-| `extraction/` | Derive Python/Rust declaration facts, resolving reachable dependencies |
-| `assessment/` | Compare contracts, track finding lifecycle, apply decisions and gates |
+| `extraction/` | Derive Python/Rust contract and handling facts, resolving reachable dependencies |
+| `assessment/` | Compare contracts, track finding lifecycle, select upstream changes, apply decisions and gates |
 | `reporting/` | Render the developer-readable assessment |
 | `generation/` | Generate compact vocabulary, optional detailed inventory and historical release fixtures |
 | `common/` | Shared contracts, repository paths, immutable Git reads and provenance |

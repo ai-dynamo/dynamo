@@ -153,7 +153,7 @@ def render_assessment(report: dict[str, Any]) -> str:
         f'Scope: {code(report["scope"])}',
         "",
         "Stage 1 compares declared request contracts. Stage 2 requires separate behavioral tests.",
-        "Source investigation is not implemented in this contract-only tool.",
+        "Source investigation is optional and cannot approve or block either stage.",
         "",
         "| Check | Result |",
         "| --- | --- |",
@@ -170,7 +170,8 @@ def render_assessment(report: dict[str, Any]) -> str:
         f'Contract coverage gaps: {counts["coverage"]}. '
         f'Dynamo-only inputs: {counts["dynamo_specific"]}.',
         f'Contract review actions: {len(gates["pending"])}. '
-        f'Lost contract coverage: {len(gates["lost_coverage"])}.',
+        f'Lost contract coverage: {len(gates["lost_coverage"])}. '
+        f'Advisory investigation notes: {len(investigation["notes"])}.',
         "",
     ]
     if report["previous_revisions"]:
@@ -213,9 +214,17 @@ def render_assessment(report: dict[str, Any]) -> str:
             "Dynamo-specific inputs (not automatically defects)",
             lambda item: item["category"] == "dynamo_specific",
         ),
+        (
+            "Optional investigation: source handling and upstream changes",
+            lambda item: item["category"] in {"investigation", "behavior"},
+        ),
     ]
     for title, predicate in sections:
-        selected = [item for item in report["findings"] if predicate(item)]
+        selected = [
+            item
+            for item in report["findings"] + investigation["notes"]
+            if predicate(item)
+        ]
         lines.extend([f"## {title}", ""])
         if not selected:
             lines.extend(["None observed within this assessment's coverage.", ""])
