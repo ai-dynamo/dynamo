@@ -837,6 +837,7 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
     /usr/local/external/ffmpeg \
     /usr/local/share/jupyter/lab \
+    /usr/local/share/jupyter/labextensions/@jupyter-notebook/lab-extension \
     /usr/local/lib/python3.12/dist-packages/jupyter_server \
     /usr/local/lib/python3.12/dist-packages/jupyter_server-*.dist-info \
     /usr/local/lib/python3.12/dist-packages/jupyterlab \
