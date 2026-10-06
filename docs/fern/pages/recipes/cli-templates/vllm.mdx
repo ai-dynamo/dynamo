@@ -46,6 +46,32 @@ The default model is `Qwen/Qwen3-0.6B`.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg.sh)
 </Accordion>
+<Accordion title="Qwen3-ASR Realtime Transcription">
+
+**Experimental.** Transcribe English audio over `/v1/realtime` using vLLM 0.30.0's native
+Qwen3-ASR support. The launch script requires an explicit `--hf-overrides` argument:
+
+```bash
+./launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-0.6B \
+    --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}' \
+    --max-model-len 4096 --max-num-seqs 2
+```
+
+In another terminal, send a speech file longer than five seconds to check incremental delivery:
+
+```bash
+python launch/realtime_audio_client.py \
+    --session-type transcription \
+    --model Qwen/Qwen3-ASR-0.6B \
+    --input-audio speech.wav \
+    --require-incremental
+```
+
+The client sends audio while receiving transcription events. A successful check prints
+`delta before commit: True`. vLLM processes five-second segments and flushes remaining audio on commit.
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
+</Accordion>
 <Accordion title="Text Embeddings">
 
 Starts a vLLM pooling worker and exposes the OpenAI-compatible embeddings endpoint. Use it for

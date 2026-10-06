@@ -141,6 +141,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
         None
     }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
+        None
+    }
 }
 
 impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
@@ -275,6 +279,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
             skip_special_tokens,
             formatted_prompt,
             return_tokens_as_token_ids,
+            no_stop_trim: self.get_no_stop_trim(),
         })
     }
 }

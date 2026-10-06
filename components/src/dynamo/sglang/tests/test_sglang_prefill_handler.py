@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -105,7 +106,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     handler._priority_kwargs = lambda priority: {}
     monkeypatch.setattr(
         "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
-        lambda engine, request: {},
+        lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
         cancellation, "resolved_server_args", lambda server_args: server_args
@@ -227,6 +228,111 @@ async def test_native_batched_prefill_disables_ordered_cancellation(monkeypatch)
         await anext(stream)
     assert captured_submitted_id is None
     assert captured_native_request.input_ids == [[1], [2]]
+
+
+def _kv_hit_prefill_handler(monkeypatch, responses, *, cancelled):
+    async def results():
+        for response in responses:
+            yield response
+
+    class _Engine:
+        async def async_generate(self, **kwargs):
+            return results()
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = _Engine()
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
+    handler.shutdown_event = None
+    handler.bootstrap_host = "127.0.0.1"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+    handler._consume_tasks = set()
+    handler._generate_bootstrap_room = lambda: 17
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    handler._priority_kwargs = lambda priority: {}
+
+    @asynccontextmanager
+    async def cancellation_monitor(*args, **kwargs):
+        async def fire_or_wait():
+            if not cancelled:
+                await asyncio.Future()
+
+        task = asyncio.create_task(fire_or_wait())
+        if cancelled:
+            await task
+        try:
+            yield task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    handler._cancellation_monitor = cancellation_monitor
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
+        lambda engine, request, **kwargs: {},
+    )
+    return handler
+
+
+@pytest.fixture
+def prefill_responses():
+    return [
+        {
+            "meta_info": {
+                "id": "request-id",
+                "finish_reason": {"type": "length"},
+                "prompt_tokens": 3,
+                "cached_tokens": 2,
+            }
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_prefill_reports_kv_cache_hit_after_bootstrap(
+    monkeypatch, prefill_responses
+):
+    handler = _kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=False)
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+
+    chunks = await _drain(
+        handler.generate(
+            {"request": {"token_ids": [1, 2, 3], "routing": {}}, "sampling_params": {}},
+            context,
+        )
+    )
+
+    assert len(chunks) == 2
+    assert "disaggregated_params" in chunks[0]
+    assert chunks[1] == {
+        "token_ids": [],
+        "engine_data": {"kv_cache_hit": {"prompt_tokens": 3, "reused_tokens": 2}},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_prefill_omits_kv_cache_hit_after_cancellation(
+    monkeypatch, prefill_responses
+):
+    handler = _kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=True)
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+
+    chunks = await _drain(
+        handler.generate(
+            {"request": {"token_ids": [1, 2, 3], "routing": {}}, "sampling_params": {}},
+            context,
+        )
+    )
+
+    assert len(chunks) == 1
+    assert "disaggregated_params" in chunks[0]
 
 
 async def _drain(stream):

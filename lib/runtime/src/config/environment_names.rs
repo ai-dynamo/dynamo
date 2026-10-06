@@ -196,6 +196,9 @@ pub mod nats {
     /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
     pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
 
+    /// Maximum time in seconds to establish the initial NATS connection.
+    pub const NATS_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "NATS_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
@@ -245,11 +248,17 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
-    /// ETCD lease TTL in seconds (default: 10)
+    /// ETCD lease TTL in seconds (default: 30)
     pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
     /// Maximum time in seconds to retry the initial ETCD connection (default: 120)
     pub const ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
+    /// HTTP/2 keepalive ping interval in seconds for the ETCD channel (default: 15, 0 disables)
+    pub const ETCD_KEEPALIVE_INTERVAL_SECONDS: &str = "ETCD_KEEPALIVE_INTERVAL_SECONDS";
+
+    /// Seconds to wait for a keepalive ping ack before the ETCD channel is closed (default: 10)
+    pub const ETCD_KEEPALIVE_TIMEOUT_SECONDS: &str = "ETCD_KEEPALIVE_TIMEOUT_SECONDS";
 
     /// ETCD authentication environment variables
     pub mod auth {
@@ -532,6 +541,13 @@ pub mod llm {
     pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
         "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
 
+    /// Progress-thread delay, in microseconds, of the frontend media loader's NIXL
+    /// agent (default 1000, range 0 to 1000000). NIXL rounds it up to whole
+    /// milliseconds; `0` makes the thread busy-poll one core. Over TCP, a read can
+    /// wait up to the full delay, so larger values add longer stalls. Values that do
+    /// not parse or are above 1000000 use the default.
+    pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -808,6 +824,11 @@ pub mod request_plane {
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 
+    /// Serialize `PreprocessedRequest.token_ids` as one packed little-endian int32 blob on
+    /// binary codecs instead of a sequence. Opt-in; every msgpack worker must run a release
+    /// whose readers accept the packed form.
+    pub const DYN_TOKEN_IDS_AS_BYTES: &str = "DYN_TOKEN_IDS_AS_BYTES";
+
     /// Maximum TCP request-plane message size, in bytes.
     pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
 
@@ -836,6 +857,11 @@ pub mod tcp_response_stream {
     /// Port shared by the TCP request callback and QUIC response listeners.
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
+
+    /// Listen backlog of the TCP response stream (CallHome) listener. Defaults to
+    /// 4096, capped by the kernel at `net.core.somaxconn`. Unset, zero, negative, or
+    /// unparseable values fall back to the default.
+    pub const DYN_TCP_LISTEN_BACKLOG: &str = "DYN_TCP_LISTEN_BACKLOG";
 
     /// Host or interface for the TCP response stream server and QUIC response listener.
     ///
@@ -1051,6 +1077,7 @@ mod tests {
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
+            nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,
@@ -1065,6 +1092,8 @@ mod tests {
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,
             etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+            etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS,
+            etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -1104,6 +1133,7 @@ mod tests {
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
+            llm::DYN_MM_NIXL_PROGRESS_DELAY_US,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -1178,6 +1208,7 @@ mod tests {
             request_plane::DYN_TCP_RPC_PORT,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            tcp_response_stream::DYN_TCP_LISTEN_BACKLOG,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
             tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_KEY_PATH,
