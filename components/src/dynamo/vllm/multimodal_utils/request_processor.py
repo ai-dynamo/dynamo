@@ -864,22 +864,24 @@ class VllmMultimodalRequestProcessor:
                         "embedding metadata (image_grid_thw) for Qwen-VL decode"
                     )
                     raise MissingMultimodalHandoffError(message)
-            elif embedding_params and embedding_params.get("expanded_prompt_token_ids"):
-                request_for_prompt["token_ids"] = embedding_params[
-                    "expanded_prompt_token_ids"
-                ]
-                has_mm_data = False
-
-            # Video/audio media is loaded again on decode because the handoff
-            # currently carries image metadata only. For mixed requests, merge
-            # it with the reconstructed Qwen image placeholder.
+            # Reload media on decode. Qwen reconstructs image placeholders from
+            # the prefill handoff, so only video/audio are loaded again and
+            # merged. Non-Qwen keeps multi_modal_data and loads images (and
+            # other modalities) via ImageLoader so forwarded uuids/hashes are
+            # honored. Do not also substitute expanded_prompt_token_ids when
+            # an image is loaded: vLLM expands the placeholder again and the
+            # decode prompt grows by N-1 tokens, which trips NIXL
+            # num_decode_blocks <= len(prefill_group) (#15343).
             if has_mm_data:
                 mm_map = request["multi_modal_data"]
-                local_mm_map = {
-                    key: mm_map[key]
-                    for key in (VIDEO_URL_KEY, AUDIO_URL_KEY)
-                    if mm_map.get(key)
-                }
+                if self._model_family is ModelFamily.QWEN_VL:
+                    local_mm_map = {
+                        key: mm_map[key]
+                        for key in (VIDEO_URL_KEY, AUDIO_URL_KEY)
+                        if mm_map.get(key)
+                    }
+                else:
+                    local_mm_map = mm_map
                 if local_mm_map:
                     local_request = dict(request)
                     local_request["multi_modal_data"] = local_mm_map
@@ -894,6 +896,20 @@ class VllmMultimodalRequestProcessor:
                             multi_modal_data = local_mm_data
                         else:
                             multi_modal_data.update(local_mm_data)
+            # Expanded prefill tokens only when decode loaded no media.
+            # With media present, the original placeholder ids are what
+            # vLLM should expand, once, matching prefill's prompt length.
+            # vision_chunk counts too, not only the image key.
+            media_loaded = bool(multi_modal_data)
+            if (
+                self._model_family is not ModelFamily.QWEN_VL
+                and not media_loaded
+                and embedding_params
+                and embedding_params.get("expanded_prompt_token_ids")
+            ):
+                request_for_prompt["token_ids"] = embedding_params[
+                    "expanded_prompt_token_ids"
+                ]
         elif mode == DisaggregationMode.AGGREGATED:
             pre_rendered = await self.try_receive_mm_kwargs(request)
             if pre_rendered is None:

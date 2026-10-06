@@ -13,6 +13,7 @@ import pytest
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.vllm.args import Config
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.instrumented_scheduler import ENV_FPM_WORKER_ID, InstrumentedScheduler
 from dynamo.vllm.worker_factory import (
@@ -2328,6 +2329,42 @@ async def test_decode_call_site_stops_workers_when_benchmark_wait_raises(
     assert order == ["wait", "stop"]
     register.assert_not_awaited()
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_encode_registration_preserves_ngc_identity_across_local_caches(tmp_path):
+    model = "ngc://example/team/model:1"
+    for worker in ("encoder-a", "encoder-b"):
+        config = Config()
+        config.namespace = "dynamo"
+        config.component = "encoder"
+        config.endpoint = "generate"
+        config.model = model
+        config.served_model_name = "public-model"
+        config.engine_args = SimpleNamespace(model=str(tmp_path / worker / "model"))
+        config.embedding_transfer_mode = "nixl"
+        config.frontend_decoding = False
+        config.multimodal_embedding_cache_capacity_gb = 0.0
+        endpoint = Mock(serve_endpoint=AsyncMock())
+        runtime = Mock(endpoint=Mock(return_value=endpoint))
+        handler = Mock(async_init=AsyncMock())
+        register = AsyncMock()
+
+        with (
+            patch(
+                "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
+            ),
+            patch("dynamo.vllm.worker_factory.register_model", register),
+            patch("dynamo.vllm.worker_factory.register_image_loader_metrics"),
+            patch("dynamo.vllm.worker_factory.register_model_taint_route"),
+        ):
+            await _make_factory()._create_multimodal_encode_worker(
+                runtime, config, asyncio.Event(), []
+            )
+
+        register.assert_awaited_once()
+        assert register.await_args.args[3] == model
+        assert register.await_args.kwargs["model_name"] == "public-model"
 
 
 @pytest.mark.asyncio
