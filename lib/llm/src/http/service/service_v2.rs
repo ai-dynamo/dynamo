@@ -819,7 +819,8 @@ pub struct HttpServiceConfig {
 
     /// The discovery scope the frontend resolved; the RL listener uses the same scope.
     /// When unset and RL is enabled, it is resolved from `DYN_NAMESPACE`,
-    /// `DYN_NAMESPACE_PREFIX` and `DYN_NAMESPACE_WORKER_SUFFIX`.
+    /// `DYN_NAMESPACE_PREFIX` and `DYN_NAMESPACE_WORKER_SUFFIX`. Without a prefix,
+    /// the builder uses an exact namespace, defaulting to `dynamo`.
     #[builder(default = "None")]
     namespace_filter: Option<NamespaceFilter>,
 
@@ -836,17 +837,20 @@ pub struct HttpServiceConfig {
     streaming_backend_error_check: BackendErrorCheck,
 }
 
-/// Resolve the discovery scope from the namespace environment variables, with the same
-/// rules the frontend applies to its flags.
+/// Keep the builder's environment fallback scoped to one namespace unless a
+/// non-empty prefix is set. The frontend supplies its own resolved filter.
 fn namespace_filter_from_env() -> NamespaceFilter {
-    let namespace = std::env::var("DYN_NAMESPACE").ok();
     let namespace_prefix = std::env::var("DYN_NAMESPACE_PREFIX").ok();
+    if let Some(prefix) = namespace_prefix.as_deref().filter(|prefix| !prefix.is_empty()) {
+        return NamespaceFilter::from_namespace_and_prefix(None, Some(prefix));
+    }
+
+    let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| "dynamo".to_string());
     let worker_suffix = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok();
-    NamespaceFilter::from_namespace_prefix_and_suffix(
-        namespace.as_deref(),
-        namespace_prefix.as_deref(),
-        worker_suffix.as_deref(),
-    )
+    match worker_suffix.filter(|suffix| !suffix.is_empty()) {
+        Some(suffix) => NamespaceFilter::Exact(format!("{namespace}-{suffix}")),
+        None => NamespaceFilter::Exact(namespace),
+    }
 }
 
 fn default_rl_port() -> u16 {
@@ -1951,6 +1955,30 @@ mod tests {
         assert!(enabled.state.flags.get(&EndpointType::Batch));
     }
 
+    /// An unset builder scope must not widen RL discovery to other namespaces.
+    #[test]
+    #[serial_test::serial]
+    fn test_rl_environment_fallback_keeps_exact_namespace() {
+        for (namespace, suffix, expected) in [
+            (None, None, "dynamo"),
+            (None, Some("worker"), "dynamo-worker"),
+            (Some(""), None, ""),
+        ] {
+            temp_env::with_vars(
+                [
+                    ("DYN_NAMESPACE", namespace),
+                    ("DYN_NAMESPACE_PREFIX", None),
+                    ("DYN_NAMESPACE_WORKER_SUFFIX", suffix),
+                ],
+                || {
+                    let filter = namespace_filter_from_env();
+                    assert_eq!(filter, NamespaceFilter::Exact(expected.to_string()));
+                    assert!(!filter.matches("other"));
+                },
+            );
+        }
+    }
+
     async fn rl_workers_scope(service: &HttpService) -> String {
         use tower::ServiceExt;
 
@@ -2005,7 +2033,6 @@ mod tests {
                     .unwrap();
                 assert_eq!(rl_workers_scope(&scoped).await, "myns");
 
-                // Without a builder filter the listener falls back to the environment.
                 let fallback = HttpService::builder()
                     .enable_rl(true)
                     .rl_port(0)
