@@ -6,6 +6,11 @@
 # device-plugin allocations, so it can place the GMS claim on a GPU that is
 # already fully occupied. Reserving the occupied devices with this claim before
 # deploying a GMS workload steers the generated claims onto free devices.
+# Use this claim for verification only. NVIDIA does not support the device
+# plugin and the DRA driver on the same node. The claim protects one direction
+# only, so hold off new nvidia.com/gpu pods on the node while the GMS claim is
+# live. Delete both objects when the verification is done. Full procedure:
+# docs/fern/pages/kubernetes/fault-tolerance/gms-dra-coexistence.md
 #
 # Devices are selected by GPU UUID. List the UUIDs with `nvidia-smi -L` on the
 # node, or map DRA device names to UUIDs from the v1 ResourceSlices (the shape
