@@ -9,8 +9,12 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
-use super::worker_selection_config::RawWorkerSelectionConfig;
-pub use super::worker_selection_config::{WorkerSelectionConfig, WorkerSelectionInstance};
+use crate::plugins::request_classifier::RawRequestClassifierConfig;
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::request_classifier::RequestClassifierConfig;
+use crate::plugins::worker_selection::RawWorkerSelectionConfig;
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance};
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
@@ -47,6 +51,15 @@ pub struct PolicyClassConfig {
 impl PolicyClassConfig {
     pub fn queueing_enabled(&self) -> bool {
         self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
+    }
+
+    /// Any zero per-worker limit means `queue_rejection` rejects every queued
+    /// entry (`current >= limit` holds at zero usage), so the class can never
+    /// hold a queued request and must keep the direct admission path.
+    pub fn never_queues(&self) -> bool {
+        self.request_queue_limit_per_worker == Some(0)
+            || self.raw_isl_token_queue_limit_per_worker == Some(0)
+            || self.cached_token_queue_limit_per_worker == Some(0)
     }
 
     pub fn worker_is_busy(&self, active_tokens: usize, max_batched_tokens: u64) -> bool {
@@ -101,6 +114,21 @@ impl FamilyBucketClassifier {
         let family_index = requested
             .and_then(|name| self.family_indices.get(name).copied())
             .unwrap_or(self.default_family_index);
+        self.class_index_for_family(family_index, uncached_tokens)
+    }
+
+    fn strict_class_index(&self, requested: &str, uncached_tokens: usize) -> Option<usize> {
+        self.explicit_class_indices
+            .get(requested)
+            .copied()
+            .or_else(|| {
+                self.family_indices
+                    .get(requested)
+                    .map(|family_index| self.class_index_for_family(*family_index, uncached_tokens))
+            })
+    }
+
+    fn class_index_for_family(&self, family_index: usize, uncached_tokens: usize) -> usize {
         let bucket_index = self
             .buckets
             .partition_point(|bucket| bucket.min_tokens <= uncached_tokens)
@@ -160,13 +188,78 @@ impl PolicyProfile {
     pub fn class(&self, index: usize) -> &PolicyClassConfig {
         &self.classes[index]
     }
+
+    pub(crate) fn resolve_class_index_strict(
+        &self,
+        requested: &str,
+        uncached_tokens: usize,
+    ) -> Option<usize> {
+        match &self.classifier {
+            PolicyClassifier::SyntheticSingle { class_index } => {
+                (self.classes[*class_index].name == requested).then_some(*class_index)
+            }
+            PolicyClassifier::FamilyBucket(classifier) => {
+                classifier.strict_class_index(requested, uncached_tokens)
+            }
+        }
+    }
+}
+
+/// Process-wide cache and tracking settings, separate from policy parameters.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(transparent)]
+pub(super) struct RouterSettings(HashMap<String, serde_json::Value>);
+
+impl RouterSettings {
+    pub(super) fn apply(&self, config: &mut super::config::KvRouterConfig) -> Result<(), String> {
+        // Deserialize into each field's existing type, including nullable fields.
+        // Do not round-trip KvRouterConfig: it has process-local, non-wire fields.
+        macro_rules! apply_fields {
+            ($($field:ident),* $(,)?) => {
+                for (name, value) in &self.0 {
+                    match name.as_str() {
+                        $(stringify!($field) => {
+                            config.$field = serde_json::from_value(value.clone())
+                                .map_err(|error| format!("router.{name}: {error}"))?;
+                        })*
+                        _ => return Err(format!("unknown router setting: {name}")),
+                    }
+                }
+            };
+        }
+        apply_fields!(
+            host_cache_hit_weight,
+            disk_cache_hit_weight,
+            use_kv_events,
+            router_replica_sync,
+            router_track_active_blocks,
+            router_track_output_blocks,
+            router_assume_kv_reuse,
+            router_track_prefill_tokens,
+            router_tracking_hash,
+            router_tracking_key_file,
+            router_tracking_key_id,
+            router_prefill_load_model,
+            router_ttl_secs,
+            router_approximate_cache_policy,
+            router_event_threads,
+            use_remote_indexer,
+            serve_indexer,
+            enable_session_prefix_index,
+            shared_cache_type,
+            router_predicted_ttl_secs,
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouterPolicyConfig {
+    router: Option<RouterSettings>,
     root: Option<PolicyProfile>,
     models: HashMap<String, PolicyProfile>,
     worker_selection: Option<WorkerSelectionConfig>,
+    request_classifier: Option<RequestClassifierConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -210,9 +303,18 @@ impl RouterPolicyConfig {
             .unwrap_or_else(|| PolicyProfile::synthetic(fallback_threshold, fallback_policy))
     }
 
+    pub(super) fn router(&self) -> Option<&RouterSettings> {
+        self.router.as_ref()
+    }
+
     /// Returns the process-wide worker-selection policy configuration, if present.
     pub fn worker_selection(&self) -> Option<&WorkerSelectionConfig> {
         self.worker_selection.as_ref()
+    }
+
+    /// Returns the process-wide request-classifier plugin configuration, if present.
+    pub fn request_classifier(&self) -> Option<&RequestClassifierConfig> {
+        self.request_classifier.as_ref()
     }
 
     /// Whether this document configures queue policy profiles.
@@ -224,16 +326,23 @@ impl RouterPolicyConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRouterPolicyConfig {
+    router: Option<RouterSettings>,
     default_policy_family: Option<String>,
     policy_classes: Option<Vec<RawPolicyClassConfig>>,
     uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
     #[serde(default)]
     models: HashMap<String, RawPolicyProfile>,
     worker_selection: Option<RawWorkerSelectionConfig>,
+    request_classifier: Option<RawRequestClassifierConfig>,
 }
 
 impl RawRouterPolicyConfig {
     fn resolve(self) -> Result<RouterPolicyConfig, RouterPolicyConfigError> {
+        if let Some(router) = &self.router {
+            router
+                .apply(&mut super::config::KvRouterConfig::default())
+                .map_err(RouterPolicyConfigError::Validation)?;
+        }
         let root = match (
             self.default_policy_family,
             self.policy_classes,
@@ -273,16 +382,27 @@ impl RawRouterPolicyConfig {
             None => None,
         };
 
-        if root.is_none() && models.is_empty() && worker_selection.is_none() {
+        let request_classifier = self
+            .request_classifier
+            .map(|config| config.resolve())
+            .transpose()?;
+        if self.router.is_none()
+            && root.is_none()
+            && models.is_empty()
+            && worker_selection.is_none()
+            && request_classifier.is_none()
+        {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define a root profile, at least one model profile, or worker_selection".to_string(),
+                "router policy config must define router settings, a root profile, at least one model profile, worker_selection, or request_classifier".to_string(),
             ));
         }
 
         Ok(RouterPolicyConfig {
+            router: self.router,
             root,
             models,
             worker_selection,
+            request_classifier,
         })
     }
 }
@@ -565,7 +685,7 @@ fn resolve_uncached_isl_buckets(
     })
 }
 
-pub(super) fn validate_identifier(
+pub(crate) fn validate_identifier(
     name: &str,
     kind: &str,
     location: &str,
@@ -617,6 +737,50 @@ worker_selection:
                 .queue_policy,
             RouterQueuePolicy::Wspt
         );
+    }
+
+    #[test]
+    fn request_classifier_only_config_preserves_parameter_mapping() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+request_classifier:
+  type: thunderagent
+  parameters:
+    pause_threshold: 0.9
+"#,
+        )
+        .unwrap();
+
+        let classifier = config.request_classifier().unwrap();
+        assert_eq!(classifier.classifier_type(), "thunderagent");
+        assert!(matches!(
+            classifier.parameters(),
+            serde_yaml::Value::Mapping(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_request_classifier_config() {
+        for yaml in [
+            r#"
+request_classifier:
+  type: default
+"#,
+            r#"
+request_classifier:
+  type: thunderagent
+  parameters: 1
+"#,
+            r#"
+request_classifier:
+  type: ""
+"#,
+        ] {
+            assert!(
+                RouterPolicyConfig::from_yaml(yaml).is_err(),
+                "unexpectedly accepted {yaml}"
+            );
+        }
     }
 
     #[test]

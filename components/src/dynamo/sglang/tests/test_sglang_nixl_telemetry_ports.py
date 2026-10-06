@@ -292,6 +292,22 @@ class TestInstall:
         telemetry_env.setenv("NIXL_TELEMETRY_ENABLE", "n")
         install_per_rank_nixl_prometheus_ports()
 
+    @pytest.mark.parametrize(
+        ("env_name", "value"),
+        [
+            ("NIXL_TELEMETRY_ENABLE", "maybe"),
+            (NIXL_TELEMETRY_PROMETHEUS_PORT_ENV, "not-a-port"),
+        ],
+    )
+    def test_invalid_config_is_rejected_before_importing_sglang(
+        self, telemetry_env, env_name, value
+    ):
+        telemetry_env.setenv(env_name, value)
+        telemetry_env.setitem(sys.modules, "sglang", _LazyProxyModule())
+
+        with pytest.raises(ValueError, match=env_name):
+            install_per_rank_nixl_prometheus_ports()
+
     def test_install_points_sglang_at_the_wrapper(self, telemetry_env):
         """The override has to land on the class, not on the ``sglang`` proxy."""
         engine = type("Engine", (), {"run_scheduler_process_func": None})

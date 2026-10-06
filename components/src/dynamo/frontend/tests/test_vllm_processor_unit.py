@@ -1008,6 +1008,106 @@ class TestReasoningParserMetadata:
         }
 
 
+class TestReasoningParserOutputCapability:
+    def test_harmony_note_only_for_gptoss(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class BoundaryOnlyParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                raise NotImplementedError("boundary detection only")
+
+        with pytest.raises(RuntimeError, match="boundary detection") as exc_info:
+            _ensure_reasoning_parser_output_capable(
+                "future_parser", BoundaryOnlyParser, object(), {}, None
+            )
+        assert "HarmonyParser" not in str(exc_info.value)
+
+        with pytest.raises(RuntimeError, match="HarmonyParser"):
+            _ensure_reasoning_parser_output_capable(
+                "openai_gptoss", BoundaryOnlyParser, object(), {}, None
+            )
+
+    def test_output_capable_parser_accepted(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class WorkingParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                return None
+
+        _ensure_reasoning_parser_output_capable(
+            "fake", WorkingParser, object(), {}, None
+        )
+
+    def test_probe_tolerates_other_empty_input_failures(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class PickyParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                raise IndexError("empty input")
+
+        _ensure_reasoning_parser_output_capable("fake", PickyParser, object(), {}, None)
+
+    def test_incompatible_signature_rejected(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class WrongSignatureParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, delta_text):
+                return None
+
+        with pytest.raises(RuntimeError, match="signature"):
+            _ensure_reasoning_parser_output_capable(
+                "fake", WrongSignatureParser, object(), {}, None
+            )
+
+    def test_real_gptoss_parser_rejected(self):
+        pytest.importorskip("vllm.reasoning.gptoss_reasoning_parser")
+        from vllm.reasoning import ReasoningParserManager
+
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class GptOssTokenizer:
+            vocab = {"<|end|>": 1}
+            encoded = {
+                "<|channel|>final": [2],
+                "<|message|>": [3],
+                "<|start|>assistant<|channel|>final<|message|>": [4],
+            }
+
+            def encode(self, text, *args, **kwargs):
+                return self.encoded[text]
+
+            def get_vocab(self):
+                return self.vocab
+
+        parser_class = ReasoningParserManager.get_reasoning_parser("openai_gptoss")
+        with pytest.raises(RuntimeError, match="openai_gptoss"):
+            _ensure_reasoning_parser_output_capable(
+                "openai_gptoss", parser_class, GptOssTokenizer(), {}, None
+            )
+
+
 @pytest.mark.asyncio
 @pytest.mark.multimodal
 async def test_build_engine_inputs_preserves_multimodal_uuids(
@@ -1243,6 +1343,8 @@ async def test_include_reasoning_false_keeps_response_parser_active(
                     cache_salt=None,
                     mm_processor_kwargs=None,
                     include_reasoning=False,
+                    top_k=None,
+                    min_p=None,
                 ),
                 tool_parser=None,
                 chat_template_kwargs={"reasoning_effort": "low"},
@@ -1350,6 +1452,105 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         "finish_reason": "stop",
         "logprobs": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("generation_config", "requested", "expected_top_k", "expected_min_p"),
+    [
+        ({}, {}, None, None),
+        ({"top_k": 20}, {}, 20, None),
+        ({"top_k": 20}, {"temperature": 0.0, "min_p": 0.05}, None, None),
+        ({}, {"top_k": 5, "min_p": 0.1}, 5, 0.1),
+        ({"top_k": 20}, {"top_k": -1, "min_p": 0.0}, -1, 0.0),
+        ({"top_k": 20}, {"temperature": 0.0, "top_k": -1}, 0, None),
+    ],
+    ids=[
+        "no-defaults",
+        "config-top-k",
+        "greedy-reset",
+        "client-enabled",
+        "client-disabled",
+        "greedy-client-disabled",
+    ],
+)
+async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
+    vllm_processor_module,
+    monkeypatch,
+    generation_config,
+    requested,
+    expected_top_k,
+    expected_min_p,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset({"temperature", "top_k", "min_p"})
+
+    request_for_sampling = RequestForSampling(
+        max_completion_tokens=None,
+        max_tokens=1,
+        cache_salt=None,
+        mm_processor_kwargs=None,
+        **{"temperature": None, "top_k": None, "min_p": None, **requested},
+    )
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=request_for_sampling,
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        # InputProcessor.process_inputs clones, which applies the greedy reset.
+        return SimpleNamespace(
+            sampling_params=sampling_params.clone(), mm_features=None
+        )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=SimpleNamespace(
+            generation_config_fields=generation_config,
+            renderer=SimpleNamespace(
+                process_for_engine_async=AsyncMock(return_value={})
+            ),
+            process_inputs=process_inputs,
+            model_config=None,
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id, request, dynamo_preproc, *args, **kwargs
+    ):
+        captured["sampling_options"] = dynamo_preproc["sampling_options"]
+        yield {}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+
+    async for _ in processor._generator_inner(
+        {"model": "test", "messages": [{"role": "user", "content": "Hello"}]}
+    ):
+        pass
+
+    assert captured["sampling_options"]["top_k"] == expected_top_k
+    assert captured["sampling_options"]["min_p"] == expected_min_p
 
 
 @pytest.mark.asyncio
@@ -1586,8 +1787,6 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        # One annotated envelope per iteration carries both data and the
-        # llm_metrics annotation; observer strips the annotation before SSE.
         assert len(chunks) == 1
         envelope = chunks[0]
 
@@ -1604,16 +1803,15 @@ class TestRoutedEnginePath:
             "created": envelope["data"]["created"],
             "model": MODEL,
             "object": "chat.completion.chunk",
+            "llm_metrics": {
+                "input_tokens": 3,
+                "output_tokens": 1,
+                "chunk_tokens": 1,
+            },
         }
 
-        assert envelope["event"] == "llm_metrics"
-        assert len(envelope["comment"]) == 1
-        # Zero counts are omitted (text-only request), mirroring the Rust skip-zero behavior.
-        assert json.loads(envelope["comment"][0]) == {
-            "input_tokens": 3,
-            "output_tokens": 1,
-            "chunk_tokens": 1,
-        }
+        assert "event" not in envelope
+        assert "comment" not in envelope
 
     @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
@@ -1657,7 +1855,7 @@ class TestRoutedEnginePath:
             )
         ]
 
-        metrics = json.loads(chunks[0]["comment"][0])
+        metrics = chunks[0]["data"]["llm_metrics"]
         assert metrics["image_count"] == 2
         assert metrics["video_count"] == 1
         # audio has zero parts, so the key is omitted from the emitted metrics.

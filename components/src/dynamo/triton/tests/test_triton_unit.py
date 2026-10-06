@@ -385,3 +385,73 @@ def test_metrics_flags_flow_through_to_server_options(
             assert (
                 key not in options
             ), f"Expected {key} to be stripped (unset), got {options.get(key)}"
+
+
+# --- --task / --classify-{input,output}-name endpoint-selection flags -------
+
+
+def test_task_defaults_to_tensor(mock_triton_cli):
+    mock_triton_cli("--model-repository", "/models")
+    config = backend_args.parse_args()
+
+    assert config.task == "tensor"
+    assert config.classify_input_name is None
+    assert config.classify_output_name is None
+
+
+def test_task_classify_parses(mock_triton_cli):
+    mock_triton_cli(
+        "--model-repository",
+        "/models",
+        "--task",
+        "classify",
+        "--classify-input-name",
+        "TEXT",
+        "--classify-output-name",
+        "probs",
+    )
+    config = backend_args.parse_args()
+
+    assert config.task == "classify"
+    assert config.classify_input_name == "TEXT"
+    assert config.classify_output_name == "probs"
+
+
+def test_task_rejects_unknown_value(mock_triton_cli):
+    mock_triton_cli("--model-repository", "/models", "--task", "embed")
+
+    with pytest.raises(SystemExit):
+        backend_args.parse_args()
+
+
+def test_classify_name_overrides_require_classify_task(mock_triton_cli):
+    mock_triton_cli(
+        "--model-repository",
+        "/models",
+        "--classify-input-name",
+        "TEXT",
+    )
+
+    with pytest.raises(ValueError, match="only valid with --task classify"):
+        backend_args.parse_args()
+
+
+def test_endpoint_selection_fields_are_not_server_options(mock_triton_cli):
+    """to_server_options must not leak --task / --classify-{input,output}-name
+    into tritonserver.Server(**opts); Triton would reject the unknown kwargs."""
+    mock_triton_cli(
+        "--model-repository",
+        "/models",
+        "--task",
+        "classify",
+        "--classify-input-name",
+        "TEXT",
+        "--classify-output-name",
+        "probs",
+    )
+    options = backend_args.parse_args().to_server_options()
+
+    for leaked in ("task", "classify_input_name", "classify_output_name"):
+        assert (
+            leaked not in options
+        ), f"{leaked} must be filtered out of to_server_options()"
