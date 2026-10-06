@@ -580,9 +580,8 @@ class VllmV1ConfigModifier(BaseConfigModifier):
 
         args = break_arguments(args)
         try:
-            idx = args.index("--http-port")
-            return int(args[idx + 1])
-        except (ValueError, IndexError):
+            return int(_get_valued_arg(args, "--http-port") or "")
+        except ValueError:
             logger.warning(
                 "Port not found in configuration args, using default port: %s",
                 DYNAMO_RUN_DEFAULT_PORT,

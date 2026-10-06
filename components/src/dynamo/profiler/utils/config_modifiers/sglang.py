@@ -465,9 +465,8 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         args = break_arguments(args)
         try:
-            idx = args.index("--http-port")
-            return int(args[idx + 1])
-        except (ValueError, IndexError):
+            return int(_arg_value(args, "--http-port") or "")
+        except ValueError:
             logger.warning(
                 "Port not found in configuration args, using default port: %s",
                 DYNAMO_RUN_DEFAULT_PORT,
