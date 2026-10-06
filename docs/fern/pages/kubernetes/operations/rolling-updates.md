@@ -11,11 +11,11 @@ This guide shows how to change the image, arguments, or resources of the workers
 
 The operator renders each worker component into one of three backing resources. The backing resource decides who replaces the pods and which controls you have.
 
-| Backing resource | Used for | Who replaces pods | Pace controls | Progress in |
-|---|---|---|---|---|
-| Kubernetes Deployment | Single-node workers without Grove | The Dynamo operator (managed rolling update) | `maxSurge`, `maxUnavailable`, `Recreate` | `status.rollingUpdate` on the DGD |
-| Grove PodCliqueSet | Any workers when Grove is installed | Grove | `nvidia.com/grove-update-strategy` | `status.updateProgress` on the PodCliqueSet |
-| LeaderWorkerSet (LWS) | Multinode workers without Grove | LWS | None through the DGD | The LeaderWorkerSet status |
+| Backing resource | Used for | Who replaces pods | Pace controls | Surge | Progress in |
+|---|---|---|---|---|---|
+| Kubernetes Deployment | Single-node workers without Grove | The Dynamo operator (managed rolling update) | `maxSurge`, `maxUnavailable`, `Recreate` | Yes | `status.rollingUpdate` on the DGD |
+| Grove PodCliqueSet | Any workers when Grove is installed | Grove | `nvidia.com/grove-update-strategy` | No | `status.updateProgress` on the PodCliqueSet |
+| LeaderWorkerSet (LWS) | Multinode workers without Grove | LWS | None through the DGD | No | The LeaderWorkerSet status |
 
 Two rules apply to every backing resource:
 
@@ -23,6 +23,48 @@ Two rules apply to every backing resource:
 - **Other components roll on their own.** A frontend, planner, or other non-worker component rolls only when its own pod template changes, through the rolling update of its own Deployment or PodClique. A worker change does not restart it, and a change to it does not create a new worker generation.
 
 See [Multinode Orchestration](../installation/multinode-orchestration.md) for how a DGD selects Grove or LWS.
+
+## Plan the Rollout
+
+A rollout replaces worker pods. How many pods it replaces at once decides how much capacity you keep, how many GPUs you need, and how long the rollout takes. Decide these before you apply the change.
+
+### Capacity During the Rollout
+
+On Deployment-backed workers the operator keeps at least `replicas - maxUnavailable` workers of each component available and creates at most `maxSurge` extra workers. The capacity floor during the rollout is `(replicas - maxUnavailable) / replicas`.
+
+| Replicas | `maxSurge` / `maxUnavailable` | Capacity floor | Spare GPUs needed | Notes |
+|---|---|---|---|---|
+| 2 | `0` / `1` | 50% | None | One worker serves while the other restarts |
+| 1 | `0` / `1` | 0% | None | No worker serves until the new pod is Ready |
+| 1 or 2 | `25%` / `25%` (default) | 100% | One worker's GPUs | Resolves to surge 1, unavailable 0 |
+| 4 | `25%` / `25%` (default) | 75% | One worker's GPUs | Resolves to surge 1, unavailable 1 |
+| 4 | `1` / `0` | 100% | One worker's GPUs | Zero downtime |
+| Any | `Recreate` | 0% | None | The whole component restarts |
+
+A surge slot is one extra worker pod, so it needs the GPUs that one worker requests, on one node. A worker with `--tensor-parallel-size 4` requests four GPUs, and its surge pod needs four free GPUs on a single node. A multinode worker has no surge path, because Grove and LWS do not surge.
+
+Grove and LWS replace one pod per PodClique, or one replica per LeaderWorkerSet, at a time and never surge. Their capacity floor is `(replicas - 1) / replicas`, and a component with one replica has a gap.
+
+### Zero-Downtime Updates
+
+A zero-downtime update keeps at least one Ready worker of each worker component serving at every moment and never restarts the frontend. The conditions are:
+
+- **Deployment-backed workers**: `replicas - maxUnavailable` is at least 1. To keep full capacity as well, set `maxUnavailable: "0"`, set `maxSurge` to at least `"1"`, and have the GPUs for the surge. The defaults already resolve to surge 1 and unavailable 0 for a component with one or two replicas, so a gap appears only when you set `maxSurge: "0"` or use `Recreate`.
+- **Grove-backed and LWS-backed workers**: every worker component needs at least two replicas, because there is no surge.
+
+In a disaggregated deployment, the frontend routes to a generation only after that generation has both a prefill and a decode worker Ready. A prefill worker declares that it needs a decode peer, and a decode worker declares that it needs a prefill peer, so a generation with only one of them is not routable and requests keep going to the complete generation. Nothing holds the prefill to decode ratio inside a generation while it rolls, so the new generation can serve at a different ratio than you configured until the rollout finishes.
+
+### Warm-Up and Latency
+
+New workers start with an empty KV cache. Their first requests pay a full prefill, so time to first token and end-to-end latency rise until the cache warms, and KV-aware routing finds no cached prefixes on them until then. Nothing moves cache between generations by default. [KV cache offloading](../kv-cache-offloading/overview.mdx) reduces the penalty by letting new workers load blocks from a shared tier.
+
+The budgets also set the rollout's shape. A smaller `maxUnavailable` means more steps, and each step waits for a new pod to load the model and pass its readiness probe, so the rollout takes longer but disturbs less capacity at once. Roll during low traffic when you can.
+
+### Graceful Shutdown
+
+Every pod a rollout replaces goes through [graceful shutdown](../fault-tolerance/graceful-shutdown.md): the worker stops taking new requests, finishes the ones in flight, and exits. Kubernetes waits `terminationGracePeriodSeconds` for that, 60 seconds by default on operator-created pods, and then kills the pod. A request still running at that point fails unless request migration recovers it.
+
+To size the grace period, measure the worker's P99 request duration from the `dynamo_component_request_duration_seconds` histogram, add a buffer, and set that value in the worker's `podTemplate.spec.terminationGracePeriodSeconds`. Keep the Dynamo shutdown timeouts described on the graceful shutdown page below it. The grace period also bounds the rollout: each step can take up to that long for an old pod to leave.
 
 ## Update the Workers
 
@@ -191,7 +233,7 @@ Set these annotations on a worker component's `podTemplate.metadata.annotations`
 | `nvidia.com/deployment-rolling-update-max-unavailable` | Pods that may be unavailable during the update. | `25%` |
 | `nvidia.com/deployment-strategy` | `RollingUpdate` (default) or `Recreate`. | `RollingUpdate` |
 
-Values are integers (`"1"`) or percentages (`"25%"`). Percentages resolve against `replicas`, rounding up for `maxSurge` and down for `maxUnavailable`. If both resolve to zero, the operator sets `maxSurge` to 1 so the rollout can progress.
+Values are integers (`"1"`) or percentages (`"25%"`). Percentages resolve against `replicas`, rounding up for `maxSurge` and down for `maxUnavailable`. If both resolve to zero, the operator sets `maxSurge` to 1 so the rollout can progress. See [Capacity During the Rollout](#capacity-during-the-rollout) for what these numbers mean for serving capacity and GPUs.
 
 To keep full capacity while the new generation comes up:
 
@@ -256,7 +298,7 @@ kubectl get pods -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disag
 kubectl delete pod -n dynamo <old-pod-name>
 ```
 
-Use `OnDelete` for updates that need manual coordination, such as a maintenance window. The DGD does not expose Grove's per-PodClique `maxUnavailable`; Grove's default is 1. For the Grove design, see [GREP-291](https://github.com/ai-dynamo/grove/pull/403).
+Use `OnDelete` for updates that need manual coordination, such as a maintenance window. Grove has no surge: it deletes an old pod before it creates the replacement. The DGD does not expose Grove's per-PodClique `maxUnavailable`; Grove's default is 1. For the Grove design, see [GREP-291](https://github.com/ai-dynamo/grove/pull/403).
 
 ### LWS-Backed Workers
 
@@ -272,7 +314,7 @@ The operator hashes the rendered pod templates of all worker components, includi
 - set as the `nvidia.com/dynamo-worker-hash` label on every worker DCD and worker pod,
 - appended to each worker's runtime namespace through the `DYN_NAMESPACE_WORKER_SUFFIX` environment variable, so workers of generation `a1b2c3d4` register under `vllm-disagg-a1b2c3d4`.
 
-Workers discover only workers in their own runtime namespace. A new prefill worker therefore sends KV cache only to a new decode worker, and old workers keep talking to old workers. The frontend keeps the base runtime namespace and discovers every generation, so both generations serve requests during the update. See [Disaggregated Serving](../disaggregated-serving/overview.md) for the prefill and decode flow.
+Workers discover only workers in their own runtime namespace. A new prefill worker therefore sends KV cache only to a new decode worker, and old workers keep talking to old workers. The frontend keeps the base runtime namespace and discovers every generation. It routes to a generation only after that generation's worker set is complete, meaning every worker type that the other types declare they need is present. Until then, requests keep going to the generation that is already complete, so both generations serve during the update. See [Disaggregated Serving](../disaggregated-serving/overview.md) for the prefill and decode flow.
 
 ```mermaid
 flowchart LR
@@ -336,6 +378,8 @@ The operator emits a `RollingUpdateNotSupported` event on the DGD for these path
 
 - `status.rollingUpdate`, `maxSurge`, `maxUnavailable`, and `Recreate` apply only to Deployment-backed workers. See the [DGD reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx).
 - A change to the pod template of any worker component rolls every worker component, including the ones whose template did not change.
-- Prefill and decode workers roll independently on every backing resource. Capacity can skew between generations during the update.
+- Prefill and decode workers roll independently on every backing resource. Nothing holds the prefill to decode ratio inside a generation during the update, so capacity can skew between generations.
+- Grove and LWS have no surge. A worker component with one replica has a serving gap during its update.
+- New workers start with an empty KV cache. Nothing moves cache between generations.
 - The DGD has no fields for Grove or LWS update budgets.
 - `RollingUpdatePhase` `Failed` is defined but not set by the operator.
