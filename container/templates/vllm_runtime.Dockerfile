@@ -186,12 +186,16 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# TODO: Remove this workaround once bundled vllm-rs accepts extra output fields. #}
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
+{# Without Omni, keep the Transformers and tokenizers that the vLLM image ships. #}
+{% set enable_vllm_omni = context.vllm[device_key].get("enable_vllm_omni", context.vllm.enable_vllm_omni) == "true" %}
 
+{% if enable_vllm_omni %}
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
         "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"
+{% endif %}
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -260,6 +264,7 @@ RUN set -eux; \
     ldconfig -p | grep -q 'libturbojpeg.so.0'; \
     rm -rf /var/lib/apt/lists/*
 
+{% if enable_vllm_omni %}
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
@@ -269,6 +274,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -675,6 +681,7 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
 
+{% if enable_vllm_omni %}
 # Check that later package layers preserve the Omni-compatible versions.
 RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
 import importlib.metadata as md
@@ -685,12 +692,15 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
     if actual != expected:
         raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
+{% endif %}
 
 # Use the packaged binary to match the installed vLLM version.
+# The vLLM image can ship the link as a symlink to that binary, so remove it first.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
         if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
+            rm -f {{ vllm_rs_link }}; \
             printf '%s\n' \
                 '#!/bin/sh' \
                 '# Keep Omni from changing the EngineCore output schema.' \

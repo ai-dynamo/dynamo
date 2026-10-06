@@ -92,8 +92,12 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.30.0-ubuntu2404
+    # Rubin (SM107) needs CUDA 13.4, Triton 3.8 and NCCL 2.32. This pins the
+    # multi-arch cu134 nightly image index (arm64 89fd14d0, amd64 38f917c5).
+    runtime_image_tag: cu134-nightly-bb87d227d4b964abb2a966cdf9194f3d376d9bbe@sha256:e631ba412c9b40c9cfd2bc3b56a24f2b6cba16b49abb0e8c7645a2f5adc875ea
     vllm_omni_ref: "v0.30.0rc1"
+    # This vLLM needs Transformers >= 5.16.1, but Omni needs < 5.15. Skip Omni.
+    enable_vllm_omni: "false"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -101,6 +105,7 @@ vllm:
     # rather than hiding it. Per-arch stem; the licenses stage appends
     # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
     # the runtime image — see the codec-purge follow-up.)
+    # The cu134 nightly is built on CUDA 13.4.1. Recapture this 13.0.2 baseline if compliance fails.
     baseline_sbom: cuda@2ab6381d
   xpu:
     base_image: vllm/vllm-openai-xpu
@@ -115,7 +120,9 @@ vllm:
     runtime_image_tag: v0.29.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
   vllm_omni_ref: "v0.29.0rc1"
+  enable_vllm_omni: "true"
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
+  # These pins apply only when enable_vllm_omni is "true".
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"
   nixl_ref: v1.3.2
