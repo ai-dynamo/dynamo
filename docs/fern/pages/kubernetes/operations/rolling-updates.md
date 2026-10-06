@@ -2,182 +2,247 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Rolling Updates
-subtitle: Updates DGD worker images, resources, and arguments with managed rolling updates across Deployment, Grove, and LWS backends.
+subtitle: Update the workers of a DynamoGraphDeployment, watch the rollout, control its pace, and roll back.
 ---
 
-This guide covers how rolling updates work for `DynamoGraphDeployment` (DGD) resources. Rolling updates allow you to update worker configurations (images, resources, environment variables, etc.) with minimal downtime by gradually replacing old pods with new ones.
+This guide shows how to change the image, arguments, or resources of the workers in a `DynamoGraphDeployment` (DGD) while the deployment keeps serving. It covers how to apply the change, how to watch it, how to control its pace, how to roll back, and what the operator does underneath.
 
-The behavior of rolling updates depends on the backing resource type of your deployment. DGDs backed by Kubernetes Deployments benefit from **managed rolling updates** with namespace isolation, while Grove and LWS-backed deployments use their native update mechanisms.
+## Before You Start
 
-## Example
+The operator renders each worker component into one of three backing resources. The backing resource decides who replaces the pods and which controls you have.
 
-Consider a disaggregated deployment with separate prefill and decode workers. You want to update the tensor parallelism of the decode worker to 2.
+| Backing resource | Used for | Who replaces pods | Pace controls | Progress in |
+|---|---|---|---|---|
+| Kubernetes Deployment | Single-node workers without Grove | The Dynamo operator (managed rolling update) | `maxSurge`, `maxUnavailable`, `Recreate` | `status.rollingUpdate` on the DGD |
+| Grove PodCliqueSet | Any workers when Grove is installed | Grove | `nvidia.com/grove-update-strategy` | `status.updateProgress` on the PodCliqueSet |
+| LeaderWorkerSet (LWS) | Multinode workers without Grove | LWS | None through the DGD | The LeaderWorkerSet status |
 
-**Before** — original deployment:
+Two rules apply to every backing resource:
+
+- **Only worker components roll.** A worker component has `type: worker`, `type: prefill`, or `type: decode`. Frontends and other components update in place.
+- **One worker generation covers all workers.** The operator hashes the pod templates of every worker component into one worker hash. A change to any worker's pod template creates a new generation and rolls every worker component. Changing `replicas` or `minAvailable` does not create a new generation.
+
+See [Multinode Orchestration](../installation/multinode-orchestration.md) for how a DGD selects Grove or LWS.
+
+## Update the Workers
+
+The examples use a disaggregated vLLM deployment with one frontend, one prefill worker, and one decode worker.
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg
 spec:
-  services:
-    Frontend:
-      componentType: frontend
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
       replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
-    VllmDecodeWorker:
-      componentType: worker
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --disaggregation-mode
-            - decode
-    VllmPrefillWorker:
-      componentType: worker
-      subComponentType: prefill
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --disaggregation-mode
-            - prefill
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+              command: [python3]
+              args: [-m, dynamo.frontend]
+    - name: PrefillWorker
+      type: prefill
+      replicas: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+              command: [python3]
+              args: [-m, dynamo.vllm, --model, Qwen/Qwen3-0.6B, --disaggregation-mode, prefill]
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+    - name: DecodeWorker
+      type: decode
+      replicas: 4
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+              command: [python3]
+              args: [-m, dynamo.vllm, --model, Qwen/Qwen3-0.6B, --disaggregation-mode, decode]
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
 ```
 
-**After** — updated with parallelism tuning:
+To update the workers:
+
+1. Edit the pod template of a worker component. This example raises the decode context length.
+
+   ```yaml
+       - name: DecodeWorker
+         type: decode
+         replicas: 4
+         podTemplate:
+           spec:
+             containers:
+               - name: main
+                 image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+                 command: [python3]
+                 args: [-m, dynamo.vllm, --model, Qwen/Qwen3-0.6B, --disaggregation-mode, decode, --max-model-len, "32768"]
+   ```
+
+2. Apply the manifest.
+
+   ```bash
+   kubectl apply -n dynamo -f vllm-disagg.yaml
+   ```
+
+3. Watch the rollout. See [Watch the Rollout](#watch-the-rollout).
+
+Both worker components roll, because the worker hash covers all workers. The frontend does not restart.
+
+> [!NOTE]
+> Keep the manifest in version control. Rolling back is applying the previous version of the file.
+
+## Watch the Rollout
+
+Every worker pod carries its generation in the `nvidia.com/dynamo-worker-hash` label. This command works for every backing resource and shows old and new pods side by side:
+
+```bash
+kubectl get pods -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg \
+  -L nvidia.com/dynamo-worker-hash
+```
+
+The DGD records the active generation in the `nvidia.com/current-worker-hash-v2` annotation and lists the backing resources and runtime namespace of each component in `status.components`:
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.metadata.annotations.nvidia\.com/current-worker-hash-v2}{"\n"}'
+kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.components.DecodeWorker}{"\n"}'
+```
+
+The rollout is complete when `status.state` returns to `successful` and every worker pod shows the new hash.
+
+### Deployment-Backed Workers
+
+The operator tracks a managed rolling update in `status.rollingUpdate`:
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.rollingUpdate}{"\n"}'
+```
+
+```text
+{"phase":"InProgress","startTime":"2026-10-06T18:02:11Z","updatedComponents":["PrefillWorker"]}
+```
+
+| Phase | Meaning |
+|---|---|
+| `Pending` | A new worker generation was detected. |
+| `InProgress` | New worker `DynamoComponentDeployments` (DCDs) are scaling up and old ones are scaling down. |
+| `Completed` | Every worker component has moved to the new generation and the old DCDs are deleted. |
+
+`updatedComponents` lists the worker components that have finished. `endTime` is set when the phase becomes `Completed`. The API also defines a `Failed` phase, which the operator does not set today.
+
+During the update, `status.components.<name>.componentNames` lists both the old and the new DCD, and `runtimeNamespace` keeps the old generation's namespace until the component finishes. To see both generations:
+
+```bash
+kubectl get dcd -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg \
+  -L nvidia.com/dynamo-worker-hash
+```
+
+### Grove-Backed Workers
+
+Grove tracks the update on the PodCliqueSet, which is named after the DGD:
+
+```bash
+kubectl get podcliqueset vllm-disagg -n dynamo -o jsonpath='{.status.updateProgress}{"\n"}'
+```
+
+`updateEndedAt` is set when Grove has replaced every pod.
+
+### LWS-Backed Workers
+
+LWS replaces one replica, all of its ranks, at a time:
+
+```bash
+kubectl get leaderworkerset -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg
+```
+
+## Roll Back
+
+A rollback is an update to the previous pod templates. Apply the previous version of the manifest:
+
+```bash
+kubectl apply -n dynamo -f vllm-disagg.yaml
+```
+
+The operator computes the previous worker hash, so the workers return to the previous generation through the same rollout as any other change. Watch it the same way.
+
+> [!WARNING]
+> On Deployment-backed workers, wait for `status.rollingUpdate.phase` to reach `Completed` before you apply another change, including a rollback. Changing the spec while a managed rolling update is in progress can remove the serving generation faster than the `maxUnavailable` budget allows.
+
+## Control the Pace
+
+### Deployment-Backed Workers
+
+Set these annotations on a worker component's `podTemplate.metadata.annotations`, or on `spec.annotations` to apply them to every component.
+
+| Annotation | Meaning | Default |
+|---|---|---|
+| `nvidia.com/deployment-rolling-update-max-surge` | Extra pods the operator may create above `replicas` during the update. | `25%` |
+| `nvidia.com/deployment-rolling-update-max-unavailable` | Pods that may be unavailable during the update. | `25%` |
+| `nvidia.com/deployment-strategy` | `RollingUpdate` (default) or `Recreate`. | `RollingUpdate` |
+
+Values are integers (`"1"`) or percentages (`"25%"`). Percentages resolve against `replicas`, rounding up for `maxSurge` and down for `maxUnavailable`. If both resolve to zero, the operator sets `maxSurge` to 1 so the rollout can progress.
+
+To keep full capacity while the new generation comes up:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: vllm-disagg
-spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
-    VllmDecodeWorker:
-      componentType: worker
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --disaggregation-mode
-            - decode
-            - --tensor-parallelism
-            - "2"
-    VllmPrefillWorker:
-      componentType: worker
-      subComponentType: prefill
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --disaggregation-mode
-            - prefill
+    - name: PrefillWorker
+      type: prefill
+      replicas: 4
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/deployment-rolling-update-max-surge: "1"
+            nvidia.com/deployment-rolling-update-max-unavailable: "0"
 ```
 
-Apply the update:
+To finish faster and accept reduced capacity:
 
-```bash
-kubectl apply -f vllm-disagg.yaml
+```yaml
+    - name: DecodeWorker
+      type: decode
+      replicas: 8
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/deployment-rolling-update-max-surge: "0"
+            nvidia.com/deployment-rolling-update-max-unavailable: "2"
 ```
 
-Monitor rolling update progress:
+To stop the old generation before the new one starts, set `Recreate`. The operator scales the old DCDs for that component to zero, waits for every old pod to terminate, and then scales the new DCD to `replicas`. The surge and unavailable annotations are ignored for that component.
 
-```bash
-kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.rollingUpdate}'
+```yaml
+    - name: DecodeWorker
+      type: decode
+      replicas: 4
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/deployment-strategy: Recreate
 ```
 
-## Default Behavior (Grove and LWS)
+> [!WARNING]
+> `Recreate` causes an outage of that component while its pods restart. Use it when old and new generations must not run at the same time, or when the cluster has no spare GPUs for a surge.
 
-For DGDs backed by **Grove** (PodCliques, PodCliqueSets) or **LWS** (LeaderWorkerSets), the operator does not manage rolling updates directly. Instead, these deployments rely on the native rolling update mechanisms of their underlying resources.
+### Grove-Backed Workers
 
-### What Happens
-
-- A modification to the pod spec of a service triggers the rolling update behavior of the backing resource. In the example above, the modification to the pod spec of the decode worker triggers the rolling update of just the decode worker.
-- For Grove, PodCliques (PCLQ) and PodCliqueScalingGroups use a static rolling update strategy of `maxUnavailable: 1` and `maxSurge: 0`. LWS follows the same `maxUnavailable: 1` and `maxSurge: 0` strategy.
-- **Old and new workers operate within the same Dynamo namespace.** This means old and new workers can discover each other through service discovery.
-
-The following diagram illustrates the rolling update of the decode worker in a Grove PodCliqueSet (PCS). Only the decode PodClique is updated — the frontend and prefill PodCliques are unaffected:
-
-```
-┌─ PodCliqueSet: vllm-disagg ───────────────────────────────────────────────────────┐
-│                                                                                    │
-│  ┌─ PCLQ: Frontend ──────┐  ┌─ PCLQ: VllmPrefillWorker ─┐                        │
-│  │                        │  │                            │                        │
-│  │  ┌──────────────────┐  │  │  ┌──────────────────────┐  │                        │
-│  │  │ Pod (v1) ✓       │  │  │  │ Pod (v1) ✓           │  │   No changes —        │
-│  │  └──────────────────┘  │  │  └──────────────────────┘  │   not rolling          │
-│  │                        │  │                            │                        │
-│  └────────────────────────┘  └────────────────────────────┘                        │
-│                                                                                    │
-│  ┌─ PCLQ: VllmDecodeWorker ──────────────────────────────────────────────────────┐ │
-│  │                                                                                │ │
-│  │  maxUnavailable: 1, maxSurge: 0                                                │ │
-│  │                                                                                │ │
-│  │  ┌──────────────────────┐  ┌──────────────────────┐                            │ │
-│  │  │ Pod (v2) ✓ NEW       │  │ Pod (v1) Terminating │  ← rolling one at a time   │ │
-│  │  └──────────────────────┘  └──────────────────────┘                            │ │
-│  │                                                                                │ │
-│  └────────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                    │
-│                        ┌──────────────────────────────────┐                        │
-│                        │  Dynamo Namespace: vllm-disagg   │                        │
-│                        │                                  │                        │
-│                        │  All v1 and v2 pods registered   │                        │
-│                        │  and discoverable by each other  │                        │
-│                        └──────────────────────────────────┘                        │
-│                                                                                    │
-└────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Grove Update Strategy Annotation
-
-For Grove-backed DGDs, set `nvidia.com/grove-update-strategy` on the `DynamoGraphDeployment` metadata to pass a Grove `PodCliqueSet` update strategy through to the generated `PodCliqueSet`. This annotation does not affect Deployment-backed or LWS-backed DGDs. For the Grove-side design, see [GREP-291: `OnDelete` update strategy for `PodCliqueSet`](https://github.com/ai-dynamo/grove/pull/403).
-
-Supported values are:
+Set `nvidia.com/grove-update-strategy` on the DGD's `metadata.annotations` to choose the PodCliqueSet update strategy. Values must match Grove's spelling.
 
 | Value | Behavior |
-|-------|----------|
-| `RollingRecreate` | Use Grove's rolling recreate behavior. |
-| `OnDelete` | Create a new pod revision, but replace old pods only after you delete them. |
-
-If the annotation is omitted, Dynamo leaves the Grove update strategy unset and Grove uses its default behavior. Invalid values are rejected. Values must match Grove's exact spelling, including case.
+|---|---|
+| `RollingRecreate` | Grove replaces pods one at a time per PodClique. This is Grove's default when the annotation is absent. |
+| `OnDelete` | Grove updates the pod template but replaces a pod only after you delete it. |
 
 ```yaml
 metadata:
@@ -185,228 +250,93 @@ metadata:
     nvidia.com/grove-update-strategy: OnDelete
 ```
 
-Inspect the generated Grove strategy:
+With `OnDelete`, replace pods when you are ready:
 
 ```bash
-kubectl get podcliqueset -n dynamo vllm-disagg -o jsonpath='{.spec.updateStrategy.type}'
-```
-
-For `OnDelete`, delete old Grove-managed pods when you are ready to replace them:
-
-```bash
-kubectl get pods -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg
+kubectl get pods -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg -L nvidia.com/dynamo-worker-hash
 kubectl delete pod -n dynamo <old-pod-name>
 ```
 
-Use `OnDelete` for updates that require manual coordination, such as incompatible worker versions or maintenance windows. Because old and new workers still share the same Dynamo namespace, `OnDelete` gives you control over when pods are replaced but does not provide namespace isolation.
+Use `OnDelete` for updates that need manual coordination, such as a maintenance window. The DGD does not expose Grove's per-PodClique `maxUnavailable`; Grove's default is 1. For the Grove design, see [GREP-291](https://github.com/ai-dynamo/grove/pull/403).
 
-### Implications for Disaggregated Deployments
+### LWS-Backed Workers
 
-Because old and new workers share the same Dynamo namespace, they are grouped together by the router. In a disaggregated setup, this can lead to cross-generation communication — for example, the router might send a request from a newly deployed prefill worker to an old decode worker (or vice versa). If the old and new versions are incompatible, this can result in errors.
+LWS uses its default rolling update: one replica at a time, no surge. The DGD does not expose LWS update settings.
 
-> [!WARNING]
-> For Grove and LWS deployments with disaggregated prefill/decode workers, be aware that during a rolling update, new workers may communicate with old workers. Ensure that your worker versions are backward-compatible, or consider using Deployment-backed DGDs which provide namespace isolation during updates.
+## How It Works
 
-> [!NOTE]
-> Managed rolling updates with namespace isolation are planned for Grove and LWS-backed deployments in a future release. See [Future Work](#future-work) for details.
+### Worker Generations
 
-## Managed Rolling Updates (Deployments)
+The operator hashes the rendered pod templates of all worker components, including labels, annotations, and the resolved runtime version, into an 8-character worker hash. Replica counts, `minAvailable`, and scaling-adapter settings are left out. The hash is:
 
-For DGDs backed by Kubernetes **Deployments** (single-node, non-multinode services), the Dynamo operator implements managed rolling updates with namespace isolation. This is tracked in the DGD status and provides stronger guarantees for disaggregated deployments.
+- recorded on the DGD as the `nvidia.com/current-worker-hash-v2` annotation,
+- set as the `nvidia.com/dynamo-worker-hash` label on every worker DCD and worker pod,
+- appended to each worker's runtime namespace through the `DYN_NAMESPACE_WORKER_SUFFIX` environment variable, so workers of generation `a1b2c3d4` register under `vllm-disagg-a1b2c3d4`.
 
-### How It Works
+Workers discover only workers in their own runtime namespace. A new prefill worker therefore sends KV cache only to a new decode worker, and old workers keep talking to old workers. The frontend keeps the base runtime namespace and discovers every generation, so both generations serve requests during the update. See [Disaggregated Serving](../disaggregated-serving/overview.md) for the prefill and decode flow.
 
-1. **Spec change detection** — The operator computes a hash of all worker service specs (prefill, decode, and worker component types). When this hash changes, a rolling update is triggered.
-
-2. **Namespace isolation** — New worker `DynamoComponentDeployments` (DCDs) are created with the spec hash appended to their Dynamo namespace. This means new workers register in a different Dynamo namespace than old workers, preventing cross-generation discovery. A new prefill worker will only discover and route to new decode workers, avoiding compatibility issues.
-
-3. **Gradual replacement** — The operator gradually scales up new worker DCDs and scales down old ones, respecting `maxSurge` and `maxUnavailable` constraints. When a worker service is updated (all new replicas are ready, all old replicas are terminated), it is marked as completed.
-
-4. **Cleanup** — Once all worker services have completed the transition, old worker DCDs are deleted and the rolling update is marked as completed.
-
-```
-┌─ DynamoGraphDeployment: vllm-disagg ──────────────────────────────────────────────┐
-│                                                                                    │
-│  ┌─ DCD: Frontend ──────────┐                                                      │
-│  │                          │                                                      │
-│  │  ┌────────────────────┐  │   No changes —                                       │
-│  │  │ Pod (v1) ✓         │  │   not a worker component                             │
-│  │  └────────────────────┘  │                                                      │
-│  │                          │                                                      │
-│  └──────────────────────────┘                                                      │
-│                                                                                    │
-│  ┌─ OLD DCDs (hash: a1b2c3d4) ──────────────────────────────────────────────────┐  │
-│  │                                                                               │  │
-│  │  ┌─ DCD: VllmDecodeWorker-a1b2c3d4 ──┐  ┌─ DCD: VllmPrefillWorker-a1b2c3d4 ┐│  │
-│  │  │                                    │  │                                   ││  │
-│  │  │  ┌──────────────────────┐          │  │  ┌─────────────────────┐          ││  │
-│  │  │  │ Pod (v1) Terminating │          │  │  │ Pod (v1) Terminating│          ││  │
-│  │  │  └──────────────────────┘          │  │  └─────────────────────┘          ││  │
-│  │  │                                    │  │                                   ││  │
-│  │  │  Dynamo Namespace: vllm-disagg     │  │  Dynamo Namespace: vllm-disagg    ││  │
-│  │  │                  -a1b2c3d4         │  │                  -a1b2c3d4        ││  │
-│  │  └────────────────────────────────────┘  └───────────────────────────────────┘│  │
-│  │                                                                               │  │
-│  └───────────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                    │
-│  ┌─ NEW DCDs (hash: f5e6d7c8) ──────────────────────────────────────────────────┐  │
-│  │                                                                               │  │
-│  │  ┌─ DCD: VllmDecodeWorker-f5e6d7c8 ──┐  ┌─ DCD: VllmPrefillWorker-f5e6d7c8 ┐│  │
-│  │  │                                    │  │                                   ││  │
-│  │  │  ┌──────────────────────┐          │  │  ┌─────────────────────┐          ││  │
-│  │  │  │ Pod (v2) ✓ NEW      │          │  │  │ Pod (v2) ✓ NEW     │          ││  │
-│  │  │  └──────────────────────┘          │  │  └─────────────────────┘          ││  │
-│  │  │                                    │  │                                   ││  │
-│  │  │  Dynamo Namespace: vllm-disagg     │  │  Dynamo Namespace: vllm-disagg    ││  │
-│  │  │                  -f5e6d7c8         │  │                  -f5e6d7c8        ││  │
-│  │  └────────────────────────────────────┘  └───────────────────────────────────┘│  │
-│  │                                                                               │  │
-│  └───────────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                    │
-│  Old and new workers are in different Dynamo namespaces —                           │
-│  new prefill only discovers new decode, preventing cross-generation routing.        │
-│                                                                                    │
-└────────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    FE[Frontend<br/>namespace vllm-disagg]
+    subgraph old[Generation a1b2c3d4]
+        OP[PrefillWorker] --> OD[DecodeWorker]
+    end
+    subgraph new[Generation f5e6d7c8]
+        NP[PrefillWorker] --> ND[DecodeWorker]
+    end
+    FE --> OP
+    FE --> NP
 ```
 
-> [!NOTE]
-> Only worker component types (`worker`, `prefill`, `decode`) participate in managed rolling updates. Non-worker components like `frontend` are updated in-place without namespace isolation.
+### Deployment-Backed Rollout
 
-### Rolling Update Phases
+For Deployment-backed workers the operator runs the rollout itself. Worker DCDs are named `<dgd>-<component>-<hash>` in lowercase, so both generations exist at once.
 
-The rolling update progress is tracked in `.status.rollingUpdate` with the following phases:
-
-| Phase | Description |
-|-------|-------------|
-| `Pending` | A spec change was detected and the rolling update has been initialized. |
-| `InProgress` | New worker DCDs are being scaled up and old ones are being scaled down. |
-| `Completed` | All worker services have transitioned to new replicas. Old DCDs have been cleaned up. |
-
-The status also tracks:
-- `startTime` — When the rolling update began.
-- `endTime` — When the rolling update completed.
-- `updatedComponents` - List of worker components that have completed the transition.
-
-### Configuring maxSurge and maxUnavailable
-
-You can configure the rolling update strategy per service using annotations:
-
-| Annotation | Description | Default |
-|------------|-------------|---------|
-| `nvidia.com/deployment-rolling-update-max-surge` | Maximum number of extra pods that can be created above the desired count during the update. | `25%` |
-| `nvidia.com/deployment-rolling-update-max-unavailable` | Maximum number of pods that can be unavailable during the update. | `25%` |
-
-Values can be absolute integers (e.g., `"1"`, `"2"`) or percentages (e.g., `"25%"`, `"50%"`). Percentages are resolved against the desired replica count — rounding up for `maxSurge` and rounding down for `maxUnavailable`. The operator ensures at least one of `maxSurge` or `maxUnavailable` is greater than zero to guarantee forward progress.
-
-**Example** — zero-downtime update with surge capacity:
-
-```yaml
-VllmPrefillWorker:
-  componentType: worker
-  subComponentType: prefill
-  replicas: 4
-  annotations:
-    nvidia.com/deployment-rolling-update-max-surge: "1"
-    nvidia.com/deployment-rolling-update-max-unavailable: "0"
+```mermaid
+sequenceDiagram
+    participant U as You
+    participant O as Dynamo operator
+    participant Old as Old DCDs (a1b2c3d4)
+    participant New as New DCDs (f5e6d7c8)
+    U->>O: kubectl apply (worker pod template changed)
+    O->>O: compute worker hash, phase Pending
+    O->>New: create DCDs
+    loop until new replicas are ready and old are 0
+        O->>New: scale up within maxSurge
+        O->>Old: scale down within maxUnavailable
+    end
+    O->>Old: delete
+    O->>O: phase Completed
 ```
 
-This ensures that all 4 existing prefill replicas remain available while 1 new replica is brought up at a time.
+Each worker component is marked in `updatedComponents` when all of its new replicas are ready and all of its old replicas are gone.
 
-**Example** — fast update allowing temporary capacity reduction:
+### Grove-Backed and LWS-Backed Rollout
 
-```yaml
-VllmDecodeWorker:
-  componentType: worker
-  subComponentType: decode
-  replicas: 8
-  annotations:
-    nvidia.com/deployment-rolling-update-max-surge: "0"
-    nvidia.com/deployment-rolling-update-max-unavailable: "2"
+For Grove and LWS, the operator updates the pod templates in place and the backing resource replaces the pods. The new pod template carries the new worker hash, so new pods join the new generation's runtime namespace as they start. Grove replaces pods per PodClique and LWS per replica, each with its own budget. Neither coordinates across worker components, so the ratio of old to new capacity can differ between prefill and decode while the update runs.
+
+```mermaid
+sequenceDiagram
+    participant U as You
+    participant O as Dynamo operator
+    participant G as Grove or LWS
+    participant P as Worker pods
+    U->>O: kubectl apply (worker pod template changed)
+    O->>O: compute worker hash
+    O->>G: update pod templates with the new hash
+    loop per PodClique or per LWS replica
+        G->>P: delete an old pod
+        G->>P: create a new pod (new hash, new namespace)
+    end
+    O->>O: record the hash on the DGD
 ```
 
-This avoids creating extra pods but allows up to 2 decode replicas to be unavailable at a time, speeding up the transition.
+The operator emits a `RollingUpdateNotSupported` event on the DGD for these paths. It means the managed controls above do not apply, not that the update failed.
 
-### Recreate Strategy
+## Limitations
 
-For a Deployment-backed worker component that cannot use temporary surge capacity, set
-`nvidia.com/deployment-strategy: Recreate` on its pod template. The operator scales every old DCD
-for that component to zero, waits for the DCDs to observe the scale-down and for every old worker
-pod to reach a terminal phase or be deleted, and then scales the new DCD to the requested replica
-count.
-
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: vllm-agg
-spec:
-  components:
-    - name: worker
-      type: worker
-      replicas: 1
-      podTemplate:
-        metadata:
-          annotations:
-            nvidia.com/deployment-strategy: Recreate
-        spec:
-          containers:
-            - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
-```
-
-`Recreate` applies independently to each worker component. Other worker components without the
-annotation continue to use `RollingUpdate`. The operator ignores
-`nvidia.com/deployment-rolling-update-max-surge` and
-`nvidia.com/deployment-rolling-update-max-unavailable` on a component that uses `Recreate`.
-
-> [!WARNING]
-> `Recreate` causes an availability gap while the old workers stop and the new workers start. Use
-> it when old and new generations must not run concurrently or when the cluster has no spare GPU
-> capacity for a surge. This annotation affects only operator-managed, Deployment-backed updates;
-> use `nvidia.com/grove-update-strategy` for Grove-backed DGDs.
-
-### Worker Hash and DCD Naming
-
-Worker DCDs always include a hash suffix derived from the worker specs: `{dgd-name}-{service-name}-{hash}` (e.g., `vllm-disagg-vllmdecodeworker-a1b2c3d4`). During a rolling update, the new worker DCDs are created with the new spec hash while the old DCDs retain the previous hash, allowing both generations to coexist:
-
-- **Old worker DCD:** `vllm-disagg-vllmdecodeworker-a1b2c3d4` (previous hash)
-- **New worker DCD:** `vllm-disagg-vllmdecodeworker-f5e6d7c8` (new hash)
-
-The hash is computed from a SHA-256 digest of all worker service specs (excluding non-pod-template fields like `replicas`, `autoscaling`, and `ingress`). This means:
-
-- Scaling changes (replica count) do **not** trigger a rolling update.
-- Pod template changes (image, resources, env vars, volumes, etc.) **do** trigger a rolling update.
-- The hash covers **all** worker services together — changing any single worker's spec triggers a rolling update for all workers.
-
-The current worker hash is stored as the annotation `nvidia.com/current-worker-hash` on the DGD resource, and individual worker DCDs are labeled with `nvidia.com/dynamo-worker-hash` for filtering.
-
-### Status During Rolling Updates
-
-During a rolling update, the DGD status aggregates information from both old and new worker DCDs:
-
-- **Replicas** — Total count across old and new.
-- **ReadyReplicas** — Aggregate ready count across old and new.
-- **UpdatedReplicas** — Only new worker replicas.
-
-This provides a holistic view of the deployment's health during the transition.
-
-## Comparison
-
-| Aspect | Grove / LWS | Deployments (Managed) |
-|--------|-------------|----------------------|
-| Update mechanism | Native resource rolling update | Operator-managed with DCD lifecycle |
-| Namespace isolation | No — old and new share the same namespace | Yes — hash-based namespace separation |
-| Cross-generation discovery | Possible — old and new workers can see each other | Prevented — new workers only discover new workers |
-| Update strategy | Grove uses its native strategy. `nvidia.com/grove-update-strategy: OnDelete` can require manual pod deletion. | `RollingUpdate` or component-scoped `Recreate` |
-| maxSurge / maxUnavailable | Determined by the native Grove or LWS strategy | Configurable per component when using `RollingUpdate` |
-| Status tracking | Native resource status | DGD `.status.rollingUpdate` with phase and per-service tracking |
-| Multinode support | Yes | No (single-node only) |
-
-## Future Work
-
-The following enhancements are planned for future releases:
-
-- **Managed rolling updates for Grove and LWS** — Extending managed rolling updates with namespace isolation to Grove and LWS-backed deployments, providing the same cross-generation discovery protection that Deployment-backed DGDs have today.
-- **Coordinated worker updates** — Currently, prefill and decode workers are updated independently, which can result in an imbalance between old and new sets during the transition. Future releases will coordinate the rollout across worker types.
-- **Partitioned rollouts** — The ability to roll out updates to a percentage of workers (e.g., 30%), pause, observe metrics, and then continue. This enables canary-style deployments for safer rollouts.
-- **DGD-level rolling update configuration** — The ability to configure `maxSurge` and `maxUnavailable` at the DGD API level, regardless of the backing resource type.
+- `status.rollingUpdate`, `maxSurge`, `maxUnavailable`, and `Recreate` apply only to Deployment-backed workers. See the [DGD reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx).
+- A change to any worker's pod template rolls every worker component.
+- Prefill and decode workers roll independently on every backing resource. Capacity can skew between generations during the update.
+- The DGD has no fields for Grove or LWS update budgets.
+- `RollingUpdatePhase` `Failed` is defined but not set by the operator.
