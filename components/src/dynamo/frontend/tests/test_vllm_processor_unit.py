@@ -1343,6 +1343,8 @@ async def test_include_reasoning_false_keeps_response_parser_active(
                     cache_salt=None,
                     mm_processor_kwargs=None,
                     include_reasoning=False,
+                    top_k=None,
+                    min_p=None,
                 ),
                 tool_parser=None,
                 chat_template_kwargs={"reasoning_effort": "low"},
@@ -1450,6 +1452,105 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         "finish_reason": "stop",
         "logprobs": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("generation_config", "requested", "expected_top_k", "expected_min_p"),
+    [
+        ({}, {}, None, None),
+        ({"top_k": 20}, {}, 20, None),
+        ({"top_k": 20}, {"temperature": 0.0, "min_p": 0.05}, None, None),
+        ({}, {"top_k": 5, "min_p": 0.1}, 5, 0.1),
+        ({"top_k": 20}, {"top_k": -1, "min_p": 0.0}, -1, 0.0),
+        ({"top_k": 20}, {"temperature": 0.0, "top_k": -1}, 0, None),
+    ],
+    ids=[
+        "no-defaults",
+        "config-top-k",
+        "greedy-reset",
+        "client-enabled",
+        "client-disabled",
+        "greedy-client-disabled",
+    ],
+)
+async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
+    vllm_processor_module,
+    monkeypatch,
+    generation_config,
+    requested,
+    expected_top_k,
+    expected_min_p,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset({"temperature", "top_k", "min_p"})
+
+    request_for_sampling = RequestForSampling(
+        max_completion_tokens=None,
+        max_tokens=1,
+        cache_salt=None,
+        mm_processor_kwargs=None,
+        **{"temperature": None, "top_k": None, "min_p": None, **requested},
+    )
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=request_for_sampling,
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        # InputProcessor.process_inputs clones, which applies the greedy reset.
+        return SimpleNamespace(
+            sampling_params=sampling_params.clone(), mm_features=None
+        )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=SimpleNamespace(
+            generation_config_fields=generation_config,
+            renderer=SimpleNamespace(
+                process_for_engine_async=AsyncMock(return_value={})
+            ),
+            process_inputs=process_inputs,
+            model_config=None,
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id, request, dynamo_preproc, *args, **kwargs
+    ):
+        captured["sampling_options"] = dynamo_preproc["sampling_options"]
+        yield {}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+
+    async for _ in processor._generator_inner(
+        {"model": "test", "messages": [{"role": "user", "content": "Hello"}]}
+    ):
+        pass
+
+    assert captured["sampling_options"]["top_k"] == expected_top_k
+    assert captured["sampling_options"]["min_p"] == expected_min_p
 
 
 @pytest.mark.asyncio

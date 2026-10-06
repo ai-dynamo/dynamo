@@ -39,6 +39,9 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	}
 	if len(partitions) < len(manifestPartitions) {
 		if intent.Pipeline == PipelineLPX {
+			if intent.LocalPartitions != nil {
+				return nil, fmt.Errorf("%w: localPartitions cannot split packed HX prop-sync partitions, which require an LPU-only workload", ErrUnsupportedRuntime)
+			}
 			return nil, fmt.Errorf("packed HX prop-sync requires an LPU-only workload")
 		}
 		edgePositions = nil
@@ -57,6 +60,19 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		}
 	}
 
+	// Keep GPU-local runtime partitions out of every LPU reservation and runtime record.
+	// Selection requires a hybrid build, which is never packed, so partitions still
+	// match the manifest order.
+	remote, localPartitionIDs, err := selectRemotePartitions(intent.LocalPartitions, intent.Pipeline, intent.BuildSnapshot.build, partitions)
+	if err != nil {
+		return nil, err
+	}
+	if len(localPartitionIDs) > 0 {
+		edgePositions = retainedPropSyncEdges(partitions, remote, edgePositions)
+		partitions = remote
+		runtimeBuild.Partitions = remote
+	}
+
 	// Selected chains are represented by the allocation metadata and connectors below.
 	runtimeBuild.SelectedPropSyncChains = nil
 	allocationMetadata, connectors, err := projectV3PropSync(partitions, edgePositions)
@@ -68,6 +84,12 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	transcripts := newModelProjectionTranscripts(intent, v3ProjectionVersion)
 	for index := range transcripts {
 		transcripts[index].field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
+	}
+	if len(localPartitionIDs) > 0 {
+		encoded, _ := json.Marshal(localPartitionIDs)
+		for index := range transcripts {
+			transcripts[index].field("local-partition-ids", encoded)
+		}
 	}
 
 	// Count runtime endpoints while binding ordered partitions into projection identity.
@@ -98,11 +120,34 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 			partitions:             partitions,
 			connectors:             connectors,
 			agentReplicas:          agentReplicas,
+			localPartitionIDs:      localPartitionIDs,
 		})
 	}
 	return dst, nil
 }
 
+// retainedPropSyncEdges rebases selected edges from positions in partitions to
+// positions in remote, which holds a build-ordered subset of partitions. It keeps
+// declaration order and drops every edge with a GPU-local endpoint. A selected
+// chain moves to the GPU as one runtime partition, so both endpoints of an edge
+// share one placement and a retained edge joins adjacent retained positions.
+func retainedPropSyncEdges(partitions, remote []BuildPartition, edgePositions []int) []int {
+	retainedOrdinal := make(map[int]int, len(remote))
+	for ordinal, partition := range remote {
+		retainedOrdinal[partition.SourcePartitionID] = ordinal
+	}
+	retained := make([]int, 0, len(edgePositions))
+	for _, position := range edgePositions {
+		from, fromRetained := retainedOrdinal[partitions[position].SourcePartitionID]
+		_, toRetained := retainedOrdinal[partitions[position+1].SourcePartitionID]
+		if fromRetained && toRetained {
+			retained = append(retained, from)
+		}
+	}
+	return retained
+}
+
+// Each edgePositions entry is a source index whose destination is position+1.
 func projectV3PropSync(partitions []BuildPartition, edgePositions []int) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
 	// Project each physical partition into the V3 allocation metadata envelope.
 	partitionInfo := make(map[string]any, len(partitions)+1)
