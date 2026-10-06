@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::Path,
     sync::Mutex,
     time::{Duration, Instant},
@@ -22,6 +22,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use protocol::ModelId;
+use serde_json::value::{RawValue, to_raw_value};
 use switchyard_runner::Runner;
 
 use crate::request;
@@ -53,7 +54,7 @@ impl Router {
     ) -> Result<(Vec<u8>, String)> {
         let started = Instant::now();
         let request = {
-            let raw = crate::json::parse(body)?;
+            let raw = serde_json::from_slice(body)?;
             request::decode(&raw, headers)?
         };
         let input_model = request
@@ -105,7 +106,7 @@ impl Router {
             selected_ir == original_ir,
             "router unexpectedly rewrote request semantics"
         );
-        let output = crate::json::replace_model(body, model.as_str())?;
+        let output = replace_model(body, model.as_str())?;
         let elapsed_us = started.elapsed().as_micros() as u64;
         tracing::info!(
             %model,
@@ -114,6 +115,14 @@ impl Router {
         );
         Ok((output, model.as_str().to_owned()))
     }
+}
+
+fn replace_model(body: &[u8], model: &str) -> Result<Vec<u8>, serde_json::Error> {
+    // Preserve original values, including precise numbers and provider-specific fields.
+    let mut fields: BTreeMap<String, &RawValue> = serde_json::from_slice(body)?;
+    let model = to_raw_value(model)?;
+    fields.insert("model".to_owned(), &model);
+    serde_json::to_vec(&fields)
 }
 
 #[cfg(test)]
