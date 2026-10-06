@@ -14,15 +14,20 @@
 # limitations under the License.
 
 import asyncio
+import socket
 import threading
 from copy import deepcopy
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch, sentinel
 
 import pytest
+import urllib3
 from kubernetes import client
 
-from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.clients.kubernetes_api import (
+    REQUEST_TIMEOUT,
+    KubernetesAPI,
+)
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
     DynamoGraphDeploymentNotFoundError,
@@ -155,7 +160,26 @@ def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
         namespace=k8s_api.current_namespace,
         plural="dynamographdeployments",
         name="test-deployment",
+        _request_timeout=REQUEST_TIMEOUT,
     )
+
+
+@pytest.mark.timeout(10)
+def test_stalled_apiserver_raises_instead_of_blocking(monkeypatch, mock_config):
+    # The client silently ignores a bare float, so the shipped value must stay a tuple.
+    assert isinstance(REQUEST_TIMEOUT, tuple) and len(REQUEST_TIMEOUT) == 2
+    monkeypatch.setattr(
+        "dynamo.planner.connectors.clients.kubernetes_api.REQUEST_TIMEOUT", (0.1, 0.1)
+    )
+    # A listening socket completes the TCP handshake but never answers.
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        configuration = client.Configuration()
+        configuration.host = f"http://127.0.0.1:{server.getsockname()[1]}"
+        api = KubernetesAPI(k8s_namespace="default")
+        api.custom_api = client.CustomObjectsApi(client.ApiClient(configuration))
+
+        with pytest.raises(urllib3.exceptions.MaxRetryError):
+            api.get_graph_deployment("test-deployment")
 
 
 def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
@@ -172,6 +196,7 @@ def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-frontend",  # lowercase service name
         body={"spec": {"replicas": 3}},
+        _request_timeout=REQUEST_TIMEOUT,
     )
     # Should NOT fall back to DGD patch
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
@@ -193,6 +218,7 @@ def test_get_service_scaling_adapter_reads_named_dgdsa(k8s_api, mock_custom_api)
         namespace=k8s_api.current_namespace,
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-frontend",
+        _request_timeout=REQUEST_TIMEOUT,
     )
 
 
@@ -222,6 +248,7 @@ def test_update_scaling_adapter_replicas_is_strict(k8s_api, mock_custom_api):
             "spec": {"replicas": 3},
             "metadata": {"resourceVersion": "101"},
         },
+        _request_timeout=REQUEST_TIMEOUT,
     )
     mock_custom_api.get_namespaced_custom_object.assert_not_called()
     mock_custom_api.api_client.call_api.assert_not_called()
@@ -297,6 +324,7 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
         auth_settings=["BearerToken"],
         _return_http_data_only=True,
         collection_formats={},
+        _request_timeout=REQUEST_TIMEOUT,
     )
 
 
@@ -329,6 +357,7 @@ def test_update_graph_replicas_calls_update_service_replicas(k8s_api, mock_custo
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-test-component",
         body={"spec": {"replicas": 1}},
+        _request_timeout=REQUEST_TIMEOUT,
     )
 
 
@@ -380,6 +409,7 @@ def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
         auth_settings=["BearerToken"],
         _return_http_data_only=True,
         collection_formats={},
+        _request_timeout=REQUEST_TIMEOUT,
     )
 
 
@@ -545,6 +575,7 @@ def test_patch_scaling_adapter_writer_fence_uses_resource_version_json_patch(
         auth_settings=["BearerToken"],
         _return_http_data_only=True,
         collection_formats={},
+        _request_timeout=REQUEST_TIMEOUT,
     )
 
 
@@ -1623,6 +1654,7 @@ def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_
     mock_core_api.list_namespaced_pod.assert_called_once_with(
         namespace="default",
         label_selector="nvidia.com/dynamo-graph-deployment-name=my-dgd",
+        _request_timeout=REQUEST_TIMEOUT,
     )
     assert by_component == {
         "prefill": [prefill],
