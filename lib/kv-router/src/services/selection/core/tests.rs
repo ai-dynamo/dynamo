@@ -2095,13 +2095,6 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
     let mut request = worker(1);
     request.total_kv_blocks = Some(1000);
     core.upsert_worker(request).await.expect("worker upsert");
-    // The scheduler's watch task initializes worker load tracking asynchronously.
-    wait_until("worker load tracking", || {
-        !core.loads(Some("model"), Some("default"))[0]
-            .loads
-            .is_empty()
-    })
-    .await;
 
     // Admitted (queued) select: decode evaluation comes from the catalog's
     // total_kv_blocks; no load snapshot is taken.
