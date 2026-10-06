@@ -19,8 +19,8 @@ The operator renders each worker component into one of three backing resources. 
 
 Two rules apply to every backing resource:
 
-- **Only worker components roll.** A worker component has `type: worker`, `type: prefill`, or `type: decode`. Frontends and other components update in place.
-- **One worker generation covers all workers.** The operator hashes the pod templates of every worker component into one worker hash. A change to any worker's pod template creates a new generation and rolls every worker component. Changing `replicas` or `minAvailable` does not create a new generation.
+- **Worker components roll together.** A worker component has `type: worker`, `type: prefill`, or `type: decode`. The operator hashes the pod templates of every worker component into one worker hash. When the pod template of one, some, or all worker components changes, the hash changes and every worker component rolls, including the ones whose template did not change. Changing `replicas` or `minAvailable` does not change the hash.
+- **Other components roll on their own.** A frontend, planner, or other non-worker component rolls only when its own pod template changes, through the rolling update of its own Deployment or PodClique. A worker change does not restart it, and a change to it does not create a new worker generation.
 
 See [Multinode Orchestration](../installation/multinode-orchestration.md) for how a DGD selects Grove or LWS.
 
@@ -99,7 +99,7 @@ To update the workers:
 
 3. Watch the rollout. See [Watch the Rollout](#watch-the-rollout).
 
-Both worker components roll, because the worker hash covers all workers. The frontend does not restart.
+Both worker components roll, even though only the decode template changed, because the worker hash covers all workers. The frontend does not restart.
 
 > [!NOTE]
 > Keep the manifest in version control. Rolling back is applying the previous version of the file.
@@ -312,7 +312,7 @@ Each worker component is marked in `updatedComponents` when all of its new repli
 
 ### Grove-Backed and LWS-Backed Rollout
 
-For Grove and LWS, the operator updates the pod templates in place and the backing resource replaces the pods. The new pod template carries the new worker hash, so new pods join the new generation's runtime namespace as they start. Grove replaces pods per PodClique and LWS per replica, each with its own budget. Neither coordinates across worker components, so the ratio of old to new capacity can differ between prefill and decode while the update runs.
+For Grove and LWS, the operator writes the new pod templates to the existing PodCliqueSet or LeaderWorkerSet, and the backing resource replaces the pods. The new pod template carries the new worker hash, so new pods join the new generation's runtime namespace as they start. Grove replaces pods per PodClique and LWS per replica, each with its own budget. Neither coordinates across worker components, so the ratio of old to new capacity can differ between prefill and decode while the update runs.
 
 ```mermaid
 sequenceDiagram
@@ -335,7 +335,7 @@ The operator emits a `RollingUpdateNotSupported` event on the DGD for these path
 ## Limitations
 
 - `status.rollingUpdate`, `maxSurge`, `maxUnavailable`, and `Recreate` apply only to Deployment-backed workers. See the [DGD reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx).
-- A change to any worker's pod template rolls every worker component.
+- A change to the pod template of any worker component rolls every worker component, including the ones whose template did not change.
 - Prefill and decode workers roll independently on every backing resource. Capacity can skew between generations during the update.
 - The DGD has no fields for Grove or LWS update budgets.
 - `RollingUpdatePhase` `Failed` is defined but not set by the operator.
