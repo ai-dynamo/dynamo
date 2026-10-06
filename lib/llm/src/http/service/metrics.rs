@@ -4954,7 +4954,6 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
-                prompt_logprobs: None,
                 llm_metrics,
             };
             Annotated {

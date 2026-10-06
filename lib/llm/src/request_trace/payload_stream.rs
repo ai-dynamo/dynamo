@@ -559,7 +559,7 @@ mod tests {
         let outcome = future.await;
         assert_eq!(delivered.len(), chunks.len());
         assert!(outcome.drop_reason.is_none());
-        assert!(
+        assert_eq!(
             outcome
                 .response
                 .expect("complete output should be captured")
@@ -567,7 +567,8 @@ mod tests {
                 .choices[0]
                 .message
                 .tool_calls
-                .is_none()
+                .is_none(),
+            crate::protocols::openai::chat_completions::unified_parser::parsers_v2_selected()
         );
 
         // Without a unified parser selected, the same structurally valid call is kept.
@@ -605,7 +606,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.starts_with("aggregation_failed:"))
         );
-        assert!(
+        assert_eq!(
             outcome
                 .response
                 .expect("the prefix should still be captured")
@@ -613,7 +614,8 @@ mod tests {
                 .choices[0]
                 .message
                 .tool_calls
-                .is_none()
+                .is_none(),
+            crate::protocols::openai::chat_completions::unified_parser::parsers_v2_selected()
         );
     }
 

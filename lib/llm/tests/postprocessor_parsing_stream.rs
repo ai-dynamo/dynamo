@@ -5084,8 +5084,8 @@ async fn postprocessor_parsing_stream_muse_auto_honors_disabled_reasoning() {
 async fn postprocessor_parsing_stream_preserves_repeated_qwen_reason_text_tool_order() {
     let preprocessor = build_preprocessor(Some("qwen3"), Some("qwen3_coder"));
     let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
-    let use_unified_v2 =
-        dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2");
+    let use_unified_v2 = dynamo_runtime::config::selected_parser_version().unwrap()
+        == dynamo_runtime::config::ParserVersion::V2;
     eprintln!(
         "repeated Qwen3 test route: {}",
         if use_unified_v2 {
@@ -5823,7 +5823,8 @@ async fn route_matrix_minimax_m2_named_native_xml_with_inner_brace_stays_native(
 #[tokio::test]
 async fn research_per_chunk_interleaving() {
     use futures::FutureExt;
-    let v2_enabled = dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2");
+    let v2_enabled = dynamo_runtime::config::selected_parser_version().unwrap()
+        == dynamo_runtime::config::ParserVersion::V2;
     for family in ["qwen3_coder", "deepseek_v4", "kimi_k2"] {
         // Hold reasoning grammar fixed to isolate the selected tool parser and its routing.
         let preprocessor = build_preprocessor(Some("qwen3"), Some(family));
@@ -5975,9 +5976,10 @@ fn kimi_native_calls(
 // parser-only conformance cannot express an open downstream stream or OpenAI IDs.
 #[tokio::test]
 async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings() {
-    let flag = dynamo_runtime::config::env_is_truthy(
-        dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
-    );
+    // TODO: 0.7.17 still buffers count-before-string native calls until completion.
+    // Keep this acceptance test enabled until the parser library streams them.
+    let flag = dynamo_runtime::config::selected_parser_version().unwrap()
+        == dynamo_runtime::config::ParserVersion::V2;
     let q = "q".repeat(4096);
     let shapes = [
         (
@@ -6183,6 +6185,154 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                                 .map(get_text)
                                 .unwrap_or_default()
                                 .is_empty()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_backend_arguments_survive_postprocessing_and_aggregation() {
+    for (parser, reasoning) in [
+        (None, None),
+        (Some("hermes"), None),
+        (Some("deepseek_v41"), Some("deepseek_v41")),
+    ] {
+        if parser == Some("deepseek_v41")
+            && (dynamo_runtime::config::selected_parser_version().unwrap()
+                == dynamo_runtime::config::ParserVersion::V2)
+        {
+            continue;
+        }
+        let preprocessor = build_preprocessor(reasoning, parser);
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        for finish in [
+            None,
+            Some(FinishReason::Stop),
+            Some(FinishReason::ToolCalls),
+            Some(FinishReason::Length),
+            Some(FinishReason::ContentFilter),
+        ] {
+            for arguments in [r#"{"location":"SF"}"#, r#"{"location":"SF""#, ""] {
+                let mixed_modes: &[bool] = if parser == Some("deepseek_v41") {
+                    &[false, true]
+                } else {
+                    &[false]
+                };
+                for &mixed in mixed_modes {
+                    for separate_terminal in [false, true] {
+                        if separate_terminal && finish.is_none() {
+                            continue;
+                        }
+                        let split = arguments.len() / 2;
+                        let mut first = mock_content_chunk("");
+                        first.inner.choices[0].delta.content =
+                            mixed.then(|| ChatCompletionMessageContent::Text("prefix ".into()));
+                        first.inner.choices[0].delta.tool_calls = Some(
+                    serde_json::from_value(serde_json::json!([{
+                        "index": 0, "id": "backend-call", "type": "function",
+                        "function": {"name": "get_weather", "arguments": &arguments[..split]}
+                    }]))
+                    .unwrap(),
+                );
+                        let mut second = mock_content_chunk("");
+                        second.inner.choices[0].delta.content =
+                            mixed.then(|| ChatCompletionMessageContent::Text("suffix".into()));
+                        second.inner.choices[0].delta.tool_calls = Some(
+                            serde_json::from_value(serde_json::json!([{
+                                "index": 0, "function": {"arguments": &arguments[split..]}
+                            }]))
+                            .unwrap(),
+                        );
+                        second.inner.choices[0].finish_reason =
+                            if separate_terminal { None } else { finish };
+                        let mut input =
+                            vec![Annotated::from_data(first), Annotated::from_data(second)];
+                        if separate_terminal {
+                            let mut terminal = mock_content_chunk("");
+                            terminal.inner.choices[0].finish_reason = finish;
+                            input.push(Annotated::from_data(terminal));
+                        }
+                        let responses = preprocessor
+                            .postprocessor_parsing_stream(
+                                stream::iter(input),
+                                &request,
+                                false,
+                                false,
+                            )
+                            .unwrap()
+                            .collect::<Vec<_>>()
+                            .await;
+                        let streamed: String = responses
+                            .iter()
+                            .filter_map(|r| r.data.as_ref())
+                            .flat_map(|r| &r.inner.choices)
+                            .filter_map(|c| c.delta.tool_calls.as_ref())
+                            .flatten()
+                            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                            .collect();
+                        assert_eq!(streamed, arguments, "stream {parser:?}/{finish:?}");
+                        if parser == Some("deepseek_v41")
+                            && matches!(
+                                finish,
+                                None | Some(FinishReason::Stop | FinishReason::ToolCalls)
+                            )
+                        {
+                            let streamed_finish = responses
+                                .iter()
+                                .filter_map(|response| response.data.as_ref())
+                                .flat_map(|response| &response.inner.choices)
+                                .filter_map(|choice| choice.finish_reason)
+                                .next_back();
+                            assert_eq!(
+                                streamed_finish,
+                                Some(FinishReason::ToolCalls),
+                                "legacy stream {arguments}/{finish:?}/mixed={mixed}/separate={separate_terminal}"
+                            );
+                        }
+                        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                            stream::iter(responses),
+                            ParsingOptions::new(
+                                parser.map(str::to_string),
+                                reasoning.map(str::to_string),
+                            ),
+                        )
+                        .await
+                        .unwrap();
+                        let choice = &response.inner.choices[0];
+                        let retained = finish != Some(FinishReason::Length)
+                            || serde_json::from_str::<serde_json::Value>(arguments).is_ok();
+                        assert_eq!(
+                            choice.message.tool_calls.is_some(),
+                            retained,
+                            "aggregate {parser:?}/{finish:?}/{arguments}"
+                        );
+                        if retained {
+                            let call = &choice.message.tool_calls.as_ref().unwrap()[0];
+                            assert_eq!(call.id, "backend-call");
+                            assert_eq!(call.function.name, "get_weather");
+                            assert_eq!(call.function.arguments, arguments);
+                            assert_eq!(
+                                choice.finish_reason,
+                                Some(match finish {
+                                    Some(FinishReason::Length) => FinishReason::Length,
+                                    Some(FinishReason::ContentFilter) =>
+                                        FinishReason::ContentFilter,
+                                    _ => FinishReason::ToolCalls,
+                                })
+                            );
+                        } else {
+                            assert_eq!(choice.finish_reason, Some(FinishReason::Length));
+                        }
+                        assert_eq!(
+                            match &choice.message.content {
+                                Some(ChatCompletionMessageContent::Text(text)) => text.as_str(),
+                                None => "",
+                                other => panic!("unexpected content: {other:?}"),
+                            },
+                            if mixed { "prefix suffix" } else { "" }
                         );
                     }
                 }
