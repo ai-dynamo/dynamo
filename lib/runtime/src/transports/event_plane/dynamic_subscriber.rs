@@ -160,7 +160,7 @@ impl DynamicSubscriber {
                                     &endpoint_clone,
                                     &zmq_topic_clone,
                                     event_tx_clone,
-                                    endpoint_cancel,
+                                    &endpoint_cancel,
                                 )
                                 .await
                                 {
@@ -170,8 +170,12 @@ impl DynamicSubscriber {
                                         "Error consuming ZMQ endpoint stream"
                                     );
                                 }
-                                // Clean up on stream termination
-                                endpoints_clone.write().await.remove(&instance_id_clone);
+                                // A cancelled token means the watcher already handled this
+                                // entry, and the ID may now belong to a newer stream.
+                                let mut endpoints_guard = endpoints_clone.write().await;
+                                if !endpoint_cancel.is_cancelled() {
+                                    endpoints_guard.remove(&instance_id_clone);
+                                }
                             });
                         } else {
                             tracing::debug!(
@@ -262,7 +266,7 @@ impl DynamicSubscriber {
         endpoint: &str,
         zmq_topic: &str,
         event_tx: mpsc::Sender<Bytes>,
-        cancel_token: CancellationToken,
+        cancel_token: &CancellationToken,
     ) -> Result<()> {
         // Connect to the endpoint
         let sub_transport = ZmqSubTransport::connect(endpoint, zmq_topic).await?;
@@ -329,7 +333,11 @@ impl Drop for DynamicSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::{DiscoverySpec, DiscoveryStream, EventChannelQuery, EventScope};
+    use crate::discovery::{
+        DiscoverySpec, DiscoveryStream, EventChannelQuery, EventScope, MockDiscovery,
+        SharedMockRegistry,
+    };
+    use crate::transports::event_plane::{Codec, EventTransportTx, ZmqPubTransport};
     use tokio::sync::Notify;
     use tokio::time::{Duration, timeout};
 
@@ -476,5 +484,74 @@ mod tests {
         timeout(Duration::from_secs(1), backend_stopped.notified())
             .await
             .expect("dropping the stream should cancel the discovery backend");
+    }
+
+    #[tokio::test]
+    async fn reregistered_publisher_stops_on_next_removal() {
+        let topic = "kv-events";
+        let (publisher, endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
+            .await
+            .unwrap();
+        let discovery: Arc<dyn Discovery> =
+            Arc::new(MockDiscovery::new(None, SharedMockRegistry::new()));
+        let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+            "test-ns",
+            "test-component",
+            topic,
+        ));
+        let mut stream = Arc::new(DynamicSubscriber::new(
+            Arc::clone(&discovery),
+            query,
+            topic.to_string(),
+        ))
+        .start_zmq()
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        let spec = DiscoverySpec::EventChannel {
+            scope: EventScope::Component {
+                namespace: "test-ns".to_string(),
+                component: "test-component".to_string(),
+            },
+            topic: topic.to_string(),
+            publisher_id: 7,
+            transport: EventTransport::zmq(endpoint),
+        };
+        // The watcher handles all three changes before the first endpoint task runs.
+        let instance = discovery.register(spec.clone()).await.unwrap();
+        discovery.unregister(instance).await.unwrap();
+        let instance = discovery.register(spec).await.unwrap();
+
+        let codec = Codec::default();
+        let ready = codec
+            .encode_envelope_parts(7, 1, 1, topic, b"ready")
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                publisher.publish(topic, ready.clone()).await.unwrap();
+                if let Ok(Some(_)) = timeout(Duration::from_millis(25), stream.next()).await {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("re-registered publisher should deliver events");
+
+        discovery.unregister(instance).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let removed = codec
+            .encode_envelope_parts(7, 2, 2, topic, b"removed")
+            .unwrap();
+        publisher.publish(topic, removed.clone()).await.unwrap();
+        let delivered = timeout(Duration::from_millis(250), async {
+            while stream.next().await.unwrap().unwrap() != removed {}
+        })
+        .await;
+        assert!(
+            delivered.is_err(),
+            "removed publisher still delivered events"
+        );
     }
 }
