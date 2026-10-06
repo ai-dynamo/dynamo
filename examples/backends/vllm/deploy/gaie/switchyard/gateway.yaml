@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: switchyard-gateway
+spec:
+  image:
+    registry: cr.agentgateway.dev
+    repository: agentgateway
+    tag: v1.0.0@sha256:855a2800042aff4a26e687fd3f6d898fd4aeadf67437fe53f7b41017ad633bcd
+  deployment:
+    spec:
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: switchyard-gateway
+spec:
+  gatewayClassName: agentgateway
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: switchyard-gateway
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: switchyard-preproc
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: switchyard-gateway
+  frontend:
+    http:
+      maxBufferSize: 2097152
+  traffic:
+    phase: PreRouting
+    extProc:
+      backendRef:
+        group: ""
+        kind: Service
+        name: switchyard-preproc
+        port: 9002

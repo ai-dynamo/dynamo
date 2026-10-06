@@ -168,7 +168,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let source = include_str!("../config/routes.toml").replace(
-            "http://inference-gateway/v1",
+            "http://switchyard-gateway/v1",
             &format!("http://{}/v1", listener.local_addr().unwrap()),
         );
         let source = format!(
