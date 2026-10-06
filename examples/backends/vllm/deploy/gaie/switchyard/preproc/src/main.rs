@@ -16,6 +16,12 @@
 mod preprocessor;
 mod request;
 mod router;
+mod server;
+
+#[allow(clippy::all)]
+mod proto {
+    include!(concat!(env!("OUT_DIR"), "/envoy.rs"));
+}
 
 use std::{
     sync::{
@@ -28,8 +34,6 @@ use std::{
 use axum::{Router as HttpRouter, extract::State, http::StatusCode, routing::get};
 use tokio::sync::watch;
 use tonic::transport::Server;
-
-use dynamo_ext_proc::{ExtProcServer, PreprocessLimits};
 
 use crate::{preprocessor::MAX_BODY, router::Router};
 
@@ -69,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
     });
-    let processor = ExtProcServer::from_preprocessor(router, PreprocessLimits::default())
+    let processor = server::Server::new(router)
         .into_service()
         .max_decoding_message_size(MAX_BODY + 65536)
         .max_encoding_message_size(MAX_BODY + 65536);

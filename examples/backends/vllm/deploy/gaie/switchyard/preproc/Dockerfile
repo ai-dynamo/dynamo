@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build from the repository root to resolve the shared ExtProc crate and workspace manifests.
+# Build from the repository root to reuse its Envoy protocol definitions.
 FROM rust:1.96.1-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY . .
+COPY deploy/inference-gateway/ext-proc/proto deploy/inference-gateway/ext-proc/proto
+COPY examples/backends/vllm/deploy/gaie/switchyard/preproc examples/backends/vllm/deploy/gaie/switchyard/preproc
 WORKDIR /app/examples/backends/vllm/deploy/gaie/switchyard/preproc
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/app/examples/backends/vllm/deploy/gaie/switchyard/preproc/target cargo build --release --locked && cp target/release/switchyard-preproc /app/switchyard-preproc
 

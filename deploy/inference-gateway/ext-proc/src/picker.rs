@@ -9,10 +9,8 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-#[cfg(feature = "epp")]
 use dynamo_llm::http::service::metadata::MetadataHeaderError;
 
-#[cfg(feature = "epp")]
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, last_non_empty_trimmed_value};
 
 /// A model server pod endpoint available for serving requests.
@@ -108,7 +106,6 @@ pub struct PickResult {
 /// Resolve the request's cache namespace with the canonical precedence:
 /// non-empty `x-tenant-id` header, then `nvext.cache_salt`, then top-level
 /// `cache_salt`. Empty values count as absent.
-#[cfg(feature = "epp")]
 pub fn resolve_cache_namespace(
     headers: &[(String, String)],
     nvext_cache_salt: Option<&str>,
@@ -125,7 +122,6 @@ pub fn resolve_cache_namespace(
     .or_else(|| non_empty_owned(top_level_cache_salt))
 }
 
-#[cfg(feature = "epp")]
 fn non_empty_owned(value: Option<&str>) -> Option<String> {
     value.filter(|v| !v.is_empty()).map(str::to_owned)
 }
@@ -191,7 +187,6 @@ pub enum PickError {
     InvalidRequest(String),
     /// Metadata headers exceeded the frontend's entry/size limits → 431, the
     /// same status the frontend returns.
-    #[cfg(feature = "epp")]
     #[error("metadata headers too large: {0}")]
     MetadataHeadersTooLarge(MetadataHeaderError),
     /// The upstream tokenization service could not be reached → 503.
@@ -226,7 +221,6 @@ mod tests {
         assert_eq!(endpoint.address_port(), "[2001:db8::10]:8001");
     }
 
-    #[cfg(feature = "epp")]
     fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
@@ -234,7 +228,6 @@ mod tests {
             .collect()
     }
 
-    #[cfg(feature = "epp")]
     #[test]
     fn resolve_cache_namespace_precedence() {
         for (name, request_headers, nvext_cache_salt, top_level_cache_salt, expected) in [

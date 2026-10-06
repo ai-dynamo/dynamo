@@ -62,17 +62,6 @@ make test
 
 These targets map to Cargo commands for the `dynamo-ext-proc` package.
 
-## PreRouting preprocessing
-
-For model selection before pool routing, implement `RequestPreprocessor` and construct
-`ExtProcServer::from_preprocessor`. The hook validates request headers and returns header/body
-mutations after receiving the complete request. The shared server handles streaming, cancellation,
-limits, and response passthrough; it does not invoke worker reservation callbacks in this mode.
-
-Depend on `dynamo-ext-proc` with `default-features = false` for preprocessing without Kubernetes
-or the KV router. The default `epp` feature retains the existing endpoint-picker binary and API.
-See the [Switchyard example](../../../examples/backends/vllm/deploy/gaie/switchyard/README.md).
-
 ## Image Builds
 
 Build and load a local image:

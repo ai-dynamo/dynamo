@@ -12,11 +12,9 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::time::{Instant, timeout_at};
+use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
@@ -24,17 +22,13 @@ use crate::envoy_helpers::{self, metadata};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
 };
-use crate::preprocess::{PreprocessError, PreprocessLimits, RequestMutation, RequestPreprocessor};
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc, ProcessingRequest, ProcessingResponse,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
     processing_request,
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
-#[cfg(feature = "epp")]
 use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
-#[cfg(not(feature = "epp"))]
-const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 /// State machine phases for the ext_proc stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,92 +195,18 @@ impl RequestContext {
 
 /// The ext_proc gRPC server.
 ///
-/// Uses an `EndpointPicker` for worker selection or a `RequestPreprocessor`
-/// for header/body mutations before gateway route matching.
+/// Takes an `EndpointPicker` for endpoint selection, decoupling the ext-proc
+/// protocol handling from the routing decision.
 ///
 /// Endpoints are resolved internally by the picker (the `Router` uses a K8s
 /// pod reflector), so pickers always receive an empty endpoint slice.
-pub struct ExtProcServer<P: EndpointPicker = NoopPicker> {
-    picker: Option<Arc<P>>,
-    preprocessing: Option<Arc<Preprocessing>>,
-}
-
-/// Type marker for preprocessing servers, which never invoke endpoint selection.
-pub struct NoopPicker;
-
-#[tonic::async_trait]
-impl EndpointPicker for NoopPicker {
-    async fn pick(
-        &self,
-        _request: &RequestInfo,
-        _endpoints: &[Endpoint],
-    ) -> Result<crate::picker::PickResult, PickError> {
-        Err(PickError::RoutingFailed(
-            "preprocessing does not select worker endpoints".into(),
-        ))
-    }
-}
-
-struct Preprocessing {
-    hook: Arc<dyn RequestPreprocessor>,
-    limits: PreprocessLimits,
-    requests: Arc<Semaphore>,
-    streams: Arc<Semaphore>,
-}
-
-/// The deadline also bounds outbound backpressure, not just reads and decisions.
-struct StreamOutput {
-    sender: mpsc::Sender<Result<ProcessingResponse, Status>>,
-    deadline: Option<Instant>,
-}
-
-impl StreamOutput {
-    async fn closed(&self) {
-        self.sender.closed().await
-    }
-
-    async fn send(&self, item: Result<ProcessingResponse, Status>) -> Result<(), ()> {
-        let Some(deadline) = self.deadline else {
-            return self.sender.send(item).await.map_err(|_| ());
-        };
-        let terminal = item.as_ref().map_or(true, |response| {
-            matches!(
-                response.response,
-                Some(ext_proc::processing_response::Response::ImmediateResponse(
-                    _
-                ))
-            )
-        });
-        let deadline = if terminal {
-            Instant::now() + std::time::Duration::from_secs(1)
-        } else {
-            deadline
-        };
-        timeout_at(deadline, self.sender.send(item))
-            .await
-            .map_err(|_| ())?
-            .map_err(|_| ())
-    }
-}
-
-struct ResponseStream {
-    receiver: ReceiverStream<Result<ProcessingResponse, Status>>,
-    _permit: Option<OwnedSemaphorePermit>,
-}
-
-impl Stream for ResponseStream {
-    type Item = Result<ProcessingResponse, Status>;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().receiver).poll_next(cx)
-    }
+pub struct ExtProcServer<P: EndpointPicker> {
+    picker: Arc<P>,
 }
 
 impl<P: EndpointPicker> ExtProcServer<P> {
     pub fn new(picker: Arc<P>) -> Self {
-        Self {
-            picker: Some(picker),
-            preprocessing: None,
-        }
+        Self { picker }
     }
 
     /// Create a `tonic` service ready for registration on a gRPC server.
@@ -328,7 +248,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
     /// Handle a header-only request (EndOfStream on headers, no body).
     async fn handle_header_only_request(
-        picker: &dyn EndpointPicker,
+        picker: &P,
         ctx: &mut RequestContext,
         endpoints: &[Endpoint],
     ) -> Result<(), ExtProcError> {
@@ -358,7 +278,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
     /// Handle request body phase: extract model, call picker.
     async fn handle_request_body(
-        picker: &dyn EndpointPicker,
+        picker: &P,
         ctx: &mut RequestContext,
         raw_body: Bytes,
         endpoints: &[Endpoint],
@@ -501,23 +421,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 }
 
-impl ExtProcServer<NoopPicker> {
-    pub fn from_preprocessor(
-        hook: Arc<impl RequestPreprocessor>,
-        limits: PreprocessLimits,
-    ) -> Self {
-        Self {
-            picker: None,
-            preprocessing: Some(Arc::new(Preprocessing {
-                requests: Arc::new(Semaphore::new(limits.max_concurrent_requests)),
-                streams: Arc::new(Semaphore::new(limits.max_in_flight_streams)),
-                limits,
-                hook,
-            })),
-        }
-    }
-}
-
 /// Extract [`ResponseUsage`] from a JSON `usage` object.
 fn usage_from_json(value: &serde_json::Value) -> Option<ResponseUsage> {
     let usage = value.get("usage")?;
@@ -639,121 +542,21 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
     ) -> Result<Response<Self::ProcessStream>, Status> {
         let mut inbound = request.into_inner();
         let picker = self.picker.clone();
-        let preprocessing = self.preprocessing.clone();
 
-        let (sender, rx) = mpsc::channel::<Result<ProcessingResponse, Status>>(32);
-        let mut tx = StreamOutput {
-            sender,
-            deadline: preprocessing
-                .as_ref()
-                .map(|pre| Instant::now() + pre.limits.request_timeout),
-        };
-        let permit = if let Some(pre) = &preprocessing {
-            match pre.streams.clone().try_acquire_owned() {
-                Ok(permit) => Some(permit),
-                Err(_) => {
-                    let _ = tx
-                        .send(Ok(preprocess_error_response(PreprocessError::new(
-                            503,
-                            "preprocessor overloaded",
-                        ))))
-                        .await;
-                    return Ok(Response::new(Box::pin(ResponseStream {
-                        receiver: ReceiverStream::new(rx),
-                        _permit: None,
-                    })));
-                }
-            }
-        } else {
-            None
-        };
-        let output_stream = ResponseStream {
-            receiver: ReceiverStream::new(rx),
-            _permit: permit,
-        };
+        let (tx, rx) = mpsc::channel::<Result<ProcessingResponse, Status>>(32);
+        let output_stream = ReceiverStream::new(rx);
 
         tokio::spawn(async move {
             let mut ctx = RequestContext::new();
             let mut body_buf: Vec<u8> = Vec::new();
             let mut resp_body_buf: Vec<u8> = Vec::new();
-            let mut request_permit = if let Some(pre) = &preprocessing {
-                match pre.requests.clone().try_acquire_owned() {
-                    Ok(permit) => Some(permit),
-                    Err(_) => {
-                        let _ = tx
-                            .send(Ok(preprocess_error_response(PreprocessError::new(
-                                503,
-                                "preprocessor overloaded",
-                            ))))
-                            .await;
-                        return;
-                    }
-                }
-            } else {
-                None
-            };
-            let mut deadline = tx.deadline;
-            let mut process_response = true;
 
             let result: Result<(), Status> = async {
-                loop {
-                    let next = if let Some(deadline) = deadline {
-                        tokio::select! {
-                            biased;
-                            _ = tx.closed() => return Ok(()),
-                            next = timeout_at(deadline, inbound.next()) => match next {
-                                Ok(next) => next,
-                                Err(_) => {
-                                    let response = if matches!(ctx.state, StreamState::HeaderResponseResponseComplete | StreamState::BodyResponseResponsesComplete) {
-                                        Err(Status::deadline_exceeded("preprocessor response stream timed out"))
-                                    } else {
-                                        Ok(preprocess_error_response(PreprocessError::new(504, "preprocessor stream timed out")))
-                                    };
-                                    let _ = tx.send(response).await;
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    } else { inbound.next().await };
-                    let Some(req_result) = next else {
-                        if preprocessing.is_some() && !ctx.body_routed {
-                            let _ = tx.send(Ok(preprocess_error_response(PreprocessError::new(400, "incomplete request body")))).await;
-                        } else if preprocessing.is_some() && process_response && !ctx.response_complete {
-                            return Err(Status::failed_precondition("incomplete response stream"));
-                        }
-                        break;
-                    };
-                    let mut req = req_result.map_err(|e| {
+                while let Some(req_result) = inbound.next().await {
+                    let req = req_result.map_err(|e| {
                         Status::unknown(format!("Cannot receive stream request: {e}"))
                     })?;
 
-                    // Envoy completes a streamed body with trailers. Stock agentgateway
-                    // 1.0 instead follows trailers with a synthetic body EOS message.
-                    let request_trailer_eos = preprocessing.is_some()
-                        && (ctx.protocol_validated || req.protocol_config.is_some())
-                        && matches!(req.request, Some(processing_request::Request::RequestTrailers(_)));
-                    if request_trailer_eos {
-                        req.request = Some(processing_request::Request::RequestBody(ext_proc::HttpBody {
-                            body: vec![], end_of_stream: true,
-                        }));
-                    }
-                    if preprocessing.is_some() {
-                        let ordered = match &req.request {
-                            Some(processing_request::Request::RequestHeaders(_)) => ctx.request_id.is_empty(),
-                            Some(processing_request::Request::RequestBody(_)) => !ctx.request_id.is_empty() && !ctx.body_routed,
-                            Some(processing_request::Request::RequestTrailers(_)) => !ctx.request_id.is_empty(),
-                            Some(processing_request::Request::ResponseHeaders(_)) => ctx.body_routed && matches!(ctx.state, StreamState::BodyRequestResponsesComplete | StreamState::TrailerRequestResponsesComplete),
-                            Some(processing_request::Request::ResponseBody(_) | processing_request::Request::ResponseTrailers(_)) => ctx.state == StreamState::HeaderResponseResponseComplete,
-                            None => false,
-                        };
-                        if !ordered {
-                            let error = if matches!(ctx.state, StreamState::HeaderResponseResponseComplete | StreamState::BodyResponseResponsesComplete) {
-                                Err(Status::invalid_argument("unexpected processing phase"))
-                            } else { Ok(preprocess_error_response(PreprocessError::new(400, "unexpected processing phase"))) };
-                            let _ = tx.send(error).await;
-                            return Ok(());
-                        }
-                    }
                     ctx.request_metadata = envoy_helpers::extract_metadata_values(&req);
 
                     if let Some(ref pc) = req.protocol_config {
@@ -765,12 +568,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             "[PROTOCOL] ProtocolConfiguration from Envoy"
                         );
                         if !ctx.protocol_validated {
-                            if preprocessing.is_some() {
-                                validate_preprocess_protocol(pc)?;
-                                process_response = pc.response_body_mode != 0;
-                            } else {
-                                validate_protocol_config(pc)?;
-                            }
+                            validate_protocol_config(pc)?;
                             ctx.protocol_validated = true;
                         }
                     }
@@ -781,17 +579,9 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 eos = hdr.end_of_stream,
                                 "[MSG-ORDER] Received RequestHeaders from Envoy"
                             );
-                            if let Some(pre) = &preprocessing
-                                && let Err(error) = pre.hook.validate_headers(
-                                    &hdr.headers.as_ref().map(envoy_helpers::collect_headers).unwrap_or_default(),
-                                    hdr.end_of_stream,
-                                ) {
-                                    let _ = tx.send(Ok(preprocess_error_response(error))).await;
-                                    return Ok(());
-                            }
                             ExtProcServer::<P>::handle_request_headers(&mut ctx, hdr);
 
-                            if hdr.end_of_stream && let Some(picker) = &picker {
+                            if hdr.end_of_stream {
                                 // Same cancellation race as the body path below:
                                 // if the stream closes while the header-only pick
                                 // is queued, drop the pick future to cancel it.
@@ -804,8 +594,8 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                         );
                                         return Ok(());
                                     }
-                                    result = ExtProcServer::<P>::handle_header_only_request(
-                                        picker.as_ref(),
+                                    result = ExtProcServer::handle_header_only_request(
+                                        &*picker,
                                         &mut ctx,
                                         &[],
                                     ) => result,
@@ -823,11 +613,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 body_len = body.body.len(),
                                 "[MSG-ORDER] Received RequestBody from Envoy"
                             );
-                            if let Some(pre) = &preprocessing
-                                && body.body.len() > pre.limits.max_body_bytes.saturating_sub(body_buf.len()) {
-                                    let _ = tx.send(Ok(preprocess_error_response(PreprocessError::new(413, "request body exceeds limit")))).await;
-                                    return Ok(());
-                            }
                             body_buf.extend_from_slice(&body.body);
 
                             if body.end_of_stream {
@@ -843,34 +628,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 // reservation is skipped/released) instead of
                                 // booking for a request that is already gone.
                                 // Biased: check closure before polling the pick.
-                                if let Some(pre) = &preprocessing {
-                                    let req_info = RequestInfo {
-                                        request_id: ctx.request_id.clone(), headers: ctx.request_headers.clone(),
-                                        model: extract_model_from_body(&raw_body), body: raw_body,
-                                        candidate_subset: vec![],
-                                    };
-                                    let mutation = tokio::select! {
-                                        biased;
-                                        _ = tx.closed() => return Ok(()),
-                                        result = timeout_at(deadline.expect("preprocessing deadline"), pre.hook.preprocess(&req_info)) =>
-                                            match result {
-                                                Ok(result) => result,
-                                                Err(_) => Err(PreprocessError::new(504, "preprocessing timed out")),
-                                            }
-                                    };
-                                    match mutation {
-                                        Ok(mutation) if mutation.body.len() <= pre.limits.max_body_bytes => {
-                                            ctx.req_header_resp = Some(preprocess_header_response(&mutation));
-                                            ctx.req_body_resp = envoy_helpers::build_request_body_responses(&mutation.body);
-                                            ctx.body_routed = true;
-                                        }
-                                        result => {
-                                            let error = result.err().unwrap_or_else(|| PreprocessError::new(413, "rewritten request body exceeds limit"));
-                                            let _ = tx.send(Ok(preprocess_error_response(error))).await;
-                                            return Ok(());
-                                        }
-                                    }
-                                } else {
                                 let routed = tokio::select! {
                                     biased;
                                     _ = tx.closed() => {
@@ -880,8 +637,8 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                         );
                                         return Ok(());
                                     }
-                                    result = ExtProcServer::<P>::handle_request_body(
-                                        picker.as_ref().expect("endpoint picker mode").as_ref(),
+                                    result = ExtProcServer::handle_request_body(
+                                        &*picker,
                                         &mut ctx,
                                         raw_body,
                                         &[],
@@ -892,15 +649,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
                                 }
-                                }
                             }
                         }
                         Some(processing_request::Request::RequestTrailers(_)) => {}
                         Some(processing_request::Request::ResponseHeaders(ref hdr)) => {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
-                            if preprocessing.is_some() && hdr.end_of_stream {
-                                ctx.response_complete = true;
-                            }
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
                             // Signal prefill completion on the first non-empty
@@ -911,7 +664,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             // bookkeeping before decode actually starts. The
                             // first non-empty body chunk is the earliest signal
                             // that prefill produced output and decode is underway.
-                            if let Some(picker) = &picker && ctx.body_routed
+                            if ctx.body_routed
                                 && !ctx.prefill_complete_signaled
                                 && !body.body.is_empty()
                             {
@@ -937,10 +690,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
                             // TODO(epp-output-tracking): Parse generated-token progress and
                             // update router output blocks instead of tracking only phase changes.
-                            if preprocessing.is_some() {
-                                ctx.response_complete = body.end_of_stream;
-                                ctx.resp_body_resp = envoy_helpers::build_response_body_responses(&body.body, body.end_of_stream, None);
-                            } else if ctx.model_server_streaming {
+                            if ctx.model_server_streaming {
                                 ExtProcServer::<P>::handle_response_body(&mut ctx, body);
                             } else {
                                 resp_body_buf.extend_from_slice(&body.body);
@@ -955,12 +705,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             }
                         }
                         Some(processing_request::Request::ResponseTrailers(_)) => {
-                            if preprocessing.is_some() && !ctx.protocol_validated {
-                                if tx.send(Ok(envoy_helpers::build_response_trailer_response())).await.is_err() {
-                                    return Ok(());
-                                }
-                                continue;
-                            }
                             if !ctx.response_complete {
                                 ctx.response_complete = true;
                                 if !resp_body_buf.is_empty() {
@@ -980,12 +724,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         }
                     }
 
-                    if request_trailer_eos {
-                        ctx.req_trailer_resp = Some(ProcessingResponse {
-                            response: Some(ext_proc::processing_response::Response::RequestTrailers(ext_proc::TrailersResponse { header_mutation: None })),
-                            ..Default::default()
-                        });
-                    }
                     let responses = ctx.drain_pending_responses();
                     for resp in responses {
                         if tx.send(Ok(resp)).await.is_err() {
@@ -993,12 +731,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         }
                     }
 
-                    if let Some(pre) = &preprocessing && ctx.body_routed && request_permit.take().is_some() {
-                        deadline = Some(Instant::now() + pre.limits.response_timeout);
-                        tx.deadline = deadline;
-                    }
-                    if ctx.state == StreamState::RequestEvicted
-                        || (preprocessing.is_some() && (ctx.response_complete || (ctx.body_routed && !process_response))) {
+                    if ctx.state == StreamState::RequestEvicted {
                         break;
                     }
                 }
@@ -1015,16 +748,12 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             // work continuing after an ext_proc disconnect affect booking ownership.
             // Notify the picker that this request is complete so it can free
             // router bookkeeping state.
-            if let Some(picker) = &picker
-                && ctx.body_routed
-                && !ctx.request_id.is_empty()
-            {
+            if ctx.body_routed && !ctx.request_id.is_empty() {
                 let booking_id = ctx
                     .booking_id
                     .clone()
                     .unwrap_or_else(|| ctx.request_id.clone());
                 let usage = ctx.parsed_usage.take();
-                #[cfg(feature = "epp")]
                 if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
                     crate::metrics::observe_cached_tokens(cached_tokens);
                 }
@@ -1035,79 +764,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
         });
 
         Ok(Response::new(Box::pin(output_stream)))
-    }
-}
-
-fn preprocess_error_response(error: PreprocessError) -> ProcessingResponse {
-    let mut response = envoy_helpers::build_error_response(
-        StatusCode::try_from(i32::from(error.status_code))
-            .unwrap_or(StatusCode::InternalServerError),
-        None,
-    );
-    if let Some(ext_proc::processing_response::Response::ImmediateResponse(ref mut immediate)) =
-        response.response
-    {
-        immediate.body = serde_json::to_vec(&serde_json::json!({"error": {"message": error.message, "type": "preprocessing_error"}})).unwrap_or_default();
-        immediate.headers = Some(ext_proc::HeaderMutation {
-            set_headers: vec![envoy_helpers::header_overwrite(
-                "content-type",
-                b"application/json",
-            )],
-            remove_headers: vec![],
-        });
-    }
-    response
-}
-
-fn preprocess_header_response(mutation: &RequestMutation) -> ProcessingResponse {
-    use ext_proc::processing_response;
-    let mut headers = mutation.headers.clone();
-    headers.retain(|(key, _)| !key.eq_ignore_ascii_case("content-length"));
-    headers.push(("content-length".into(), mutation.body.len().to_string()));
-    let set_headers = headers
-        .into_iter()
-        .map(|(key, value)| envoy_helpers::header_overwrite(&key, value.as_bytes()))
-        .collect();
-    ProcessingResponse {
-        response: Some(processing_response::Response::RequestHeaders(
-            ext_proc::HeadersResponse {
-                response: Some(ext_proc::CommonResponse {
-                    header_mutation: Some(ext_proc::HeaderMutation {
-                        set_headers,
-                        remove_headers: mutation
-                            .remove_headers
-                            .iter()
-                            .filter(|key| {
-                                !mutation
-                                    .headers
-                                    .iter()
-                                    .any(|(set_key, _)| set_key.eq_ignore_ascii_case(key))
-                                    && !key.eq_ignore_ascii_case("content-length")
-                            })
-                            .cloned()
-                            .collect(),
-                    }),
-                    ..Default::default()
-                }),
-            },
-        )),
-        ..Default::default()
-    }
-}
-
-#[allow(clippy::result_large_err)]
-fn validate_preprocess_protocol(pc: &ext_proc::ProtocolConfiguration) -> Result<(), Status> {
-    use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
-    if pc.request_body_mode == BodySendMode::FullDuplexStreamed as i32
-        && pc.send_body_without_waiting_for_header_response
-        && (pc.response_body_mode == 0
-            || pc.response_body_mode == BodySendMode::FullDuplexStreamed as i32)
-    {
-        Ok(())
-    } else {
-        Err(Status::failed_precondition(
-            "preprocessing requires FULL_DUPLEX_STREAMED request bodies; responses must be NONE or FULL_DUPLEX_STREAMED",
-        ))
     }
 }
 
@@ -1317,7 +973,6 @@ impl ExtProcError {
                 status_code: StatusCode::BadRequest,
                 message: msg,
             },
-            #[cfg(feature = "epp")]
             PickError::MetadataHeadersTooLarge(err) => Self {
                 status_code: StatusCode::RequestHeaderFieldsTooLarge,
                 message: err.to_string(),
@@ -1672,15 +1327,9 @@ mod tests {
 
     // Spin up a GRPC server and create a gRPC bi-directional stream
     async fn connect(t: Arc<Tracker>) -> ExternalProcessorClient<tonic::transport::Channel> {
-        connect_server(ExtProcServer::new(t)).await
-    }
-
-    async fn connect_server<P: EndpointPicker>(
-        server: ExtProcServer<P>,
-    ) -> ExternalProcessorClient<tonic::transport::Channel> {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        let svc = server.into_service();
+        let svc = ExtProcServer::new(t).into_service();
         tokio::spawn(
             tonic::transport::Server::builder()
                 .add_service(svc)
@@ -1694,320 +1343,6 @@ mod tests {
                 .await
                 .unwrap(),
         )
-    }
-
-    struct Preprocessor;
-
-    #[tonic::async_trait]
-    impl RequestPreprocessor for Preprocessor {
-        async fn preprocess(
-            &self,
-            request: &RequestInfo,
-        ) -> Result<RequestMutation, PreprocessError> {
-            if request.body == "reject" {
-                return Err(PreprocessError::new(503, "decision unavailable"));
-            }
-            assert_eq!(request.body, br#"{"model":"m","messages":[]}"#.as_slice());
-            Ok(RequestMutation {
-                body: Bytes::from_static(br#"{"model":"selected"}"#),
-                headers: vec![("x-gateway-model-name".into(), "selected".into())],
-                remove_headers: vec!["x-client-routing".into(), "X-Gateway-Model-Name".into()],
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn preprocessing_mutates_complete_request_and_passes_response_chunks() {
-        for advertised in [false, true] {
-            let mut client = connect_server(ExtProcServer::from_preprocessor(
-                Arc::new(Preprocessor),
-                PreprocessLimits::default(),
-            ))
-            .await;
-            let mut input = stream();
-            let Some(ProcReq::RequestBody(body)) = input[1].request.take() else {
-                panic!()
-            };
-            let split = body.body.len() / 2;
-            input.splice(
-                1..2,
-                [
-                    ProcessingRequest {
-                        request: Some(ProcReq::RequestBody(HttpBody {
-                            body: body.body[..split].to_vec(),
-                            end_of_stream: false,
-                        })),
-                        ..Default::default()
-                    },
-                    ProcessingRequest {
-                        request: Some(ProcReq::RequestBody(HttpBody {
-                            body: body.body[split..].to_vec(),
-                            end_of_stream: false,
-                        })),
-                        ..Default::default()
-                    },
-                ],
-            );
-            input.insert(
-                3,
-                ProcessingRequest {
-                    request: Some(ProcReq::RequestTrailers(ext_proc::HttpTrailers::default())),
-                    ..Default::default()
-                },
-            );
-            if advertised {
-                use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
-                input[0].protocol_config = Some(protocol_config(
-                    BodySendMode::FullDuplexStreamed as i32,
-                    BodySendMode::FullDuplexStreamed as i32,
-                    true,
-                ));
-            } else {
-                input.insert(
-                    4,
-                    ProcessingRequest {
-                        request: Some(ProcReq::RequestBody(HttpBody {
-                            body: vec![],
-                            end_of_stream: true,
-                        })),
-                        ..Default::default()
-                    },
-                );
-            }
-            if let Some(ProcReq::ResponseBody(body)) = &mut input.last_mut().unwrap().request {
-                body.end_of_stream = false;
-            }
-            input.push(ProcessingRequest {
-                request: Some(ProcReq::ResponseTrailers(ext_proc::HttpTrailers::default())),
-                ..Default::default()
-            });
-            if !advertised {
-                input.push(ProcessingRequest {
-                    request: Some(ProcReq::ResponseBody(HttpBody {
-                        body: vec![],
-                        end_of_stream: true,
-                    })),
-                    ..Default::default()
-                });
-            }
-            let mut output = client
-                .process(tokio_stream::iter(input))
-                .await
-                .unwrap()
-                .into_inner();
-            let Some(ext_proc::processing_response::Response::RequestHeaders(header)) =
-                output.message().await.unwrap().unwrap().response
-            else {
-                panic!()
-            };
-            let headers = header.response.unwrap().header_mutation.unwrap();
-            assert_eq!(headers.remove_headers, ["x-client-routing"]);
-            assert!(headers.set_headers.iter().any(|h| {
-                h.header
-                    .as_ref()
-                    .is_some_and(|h| h.key == "x-gateway-model-name" && h.raw_value == b"selected")
-            }));
-            assert!(!headers.set_headers.iter().any(|h| {
-                h.header
-                    .as_ref()
-                    .is_some_and(|h| h.key == "x-gateway-destination-endpoint")
-            }));
-            let mut request_body = Vec::new();
-            let mut response_chunks = Vec::new();
-            let mut request_trailer_ack = false;
-            while let Some(response) = output.message().await.unwrap() {
-                let common = match response.response.unwrap() {
-                    ext_proc::processing_response::Response::RequestBody(body) => {
-                        (true, body.response.unwrap())
-                    }
-                    ext_proc::processing_response::Response::ResponseBody(body) => {
-                        (false, body.response.unwrap())
-                    }
-                    ext_proc::processing_response::Response::RequestTrailers(_) => {
-                        request_trailer_ack = true;
-                        continue;
-                    }
-                    _ => continue,
-                };
-                let Some(ext_proc::body_mutation::Mutation::StreamedResponse(body)) =
-                    common.1.body_mutation.unwrap().mutation
-                else {
-                    panic!()
-                };
-                if common.0 {
-                    request_body.extend(body.body);
-                } else {
-                    response_chunks.push(body.body);
-                }
-            }
-            assert_eq!(request_body, br#"{"model":"selected"}"#);
-            let mut expected = vec![b"{".to_vec(), b"}".to_vec()];
-            if !advertised {
-                expected.push(vec![]);
-            }
-            assert_eq!(response_chunks, expected);
-            assert_eq!(request_trailer_ack, advertised);
-        }
-    }
-
-    #[tokio::test]
-    async fn preprocessing_rejects_errors_oversize_and_incomplete_request() {
-        for (body, max_body, complete, expected) in [
-            (b"reject".as_slice(), 100, true, 503),
-            (b"too long".as_slice(), 1, true, 413),
-            (b"partial".as_slice(), 100, false, 400),
-            (b"phase".as_slice(), 100, true, 400),
-            (b"headers".as_slice(), 100, true, 400),
-        ] {
-            let limits = PreprocessLimits {
-                max_body_bytes: max_body,
-                ..Default::default()
-            };
-            let mut client = connect_server(ExtProcServer::from_preprocessor(
-                Arc::new(Preprocessor),
-                limits,
-            ))
-            .await;
-            let mut input = request_only_stream("r1");
-            input[1].request = Some(ProcReq::RequestBody(HttpBody {
-                body: body.to_vec(),
-                end_of_stream: complete,
-            }));
-            if expected == 413 {
-                input[1].request = Some(ProcReq::RequestBody(HttpBody {
-                    body: vec![b'x'],
-                    end_of_stream: true,
-                }));
-                input.insert(
-                    1,
-                    ProcessingRequest {
-                        request: Some(ProcReq::RequestBody(HttpBody {
-                            body: vec![b'x'],
-                            end_of_stream: false,
-                        })),
-                        ..Default::default()
-                    },
-                );
-            }
-            if body == b"phase" {
-                input.remove(0);
-            }
-            if body == b"headers" {
-                input.insert(1, input[0].clone());
-            }
-            let mut output = client
-                .process(tokio_stream::iter(input))
-                .await
-                .unwrap()
-                .into_inner();
-            let Some(ext_proc::processing_response::Response::ImmediateResponse(error)) =
-                output.message().await.unwrap().unwrap().response
-            else {
-                panic!()
-            };
-            assert_eq!(error.status.unwrap().code, expected);
-            assert!(
-                serde_json::from_slice::<serde_json::Value>(&error.body)
-                    .unwrap()
-                    .get("error")
-                    .is_some()
-            );
-            assert!(output.message().await.unwrap().is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn preprocessing_bounds_uploads_and_releases_capacity_during_responses() {
-        let server = ExtProcServer::from_preprocessor(
-            Arc::new(Preprocessor),
-            PreprocessLimits {
-                max_concurrent_requests: 1,
-                max_in_flight_streams: 2,
-                request_timeout: Duration::from_millis(80),
-                response_timeout: Duration::from_secs(2),
-                ..Default::default()
-            },
-        );
-        let state = server.preprocessing.as_ref().unwrap().clone();
-        let mut client = connect_server(server).await;
-        let (upload, rx) = mpsc::channel(8);
-        upload
-            .send(request_only_stream("upload").remove(0))
-            .await
-            .unwrap();
-        let mut output = client
-            .process(ReceiverStream::new(rx))
-            .await
-            .unwrap()
-            .into_inner();
-        let Some(ext_proc::processing_response::Response::ImmediateResponse(error)) =
-            output.message().await.unwrap().unwrap().response
-        else {
-            panic!()
-        };
-        assert_eq!(error.status.unwrap().code, 504);
-        drop(output);
-        drop(upload);
-
-        let (first_tx, first_rx) = mpsc::channel(8);
-        for request in request_only_stream("first") {
-            first_tx.send(request).await.unwrap();
-        }
-        let mut first = client
-            .process(ReceiverStream::new(first_rx))
-            .await
-            .unwrap()
-            .into_inner();
-        for _ in 0..2 {
-            assert!(first.message().await.unwrap().is_some());
-        }
-        first_tx.send(stream().remove(2)).await.unwrap();
-        assert!(first.message().await.unwrap().is_some());
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(state.requests.available_permits(), 1);
-
-        let (second_tx, second_rx) = mpsc::channel(8);
-        for request in request_only_stream("second") {
-            second_tx.send(request).await.unwrap();
-        }
-        let mut second = client
-            .process(ReceiverStream::new(second_rx))
-            .await
-            .unwrap()
-            .into_inner();
-        for _ in 0..2 {
-            assert!(second.message().await.unwrap().is_some());
-        }
-        assert_eq!(state.streams.available_permits(), 0);
-        let mut rejected = client
-            .process(tokio_stream::iter(request_only_stream("overloaded")))
-            .await
-            .unwrap()
-            .into_inner();
-        let Some(ext_proc::processing_response::Response::ImmediateResponse(error)) =
-            rejected.message().await.unwrap().unwrap().response
-        else {
-            panic!()
-        };
-        assert_eq!(error.status.unwrap().code, 503);
-
-        drop(first);
-        drop(first_tx);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while state.streams.available_permits() == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let mut replacement = client
-            .process(tokio_stream::iter(stream()))
-            .await
-            .unwrap()
-            .into_inner();
-        while replacement.message().await.unwrap().is_some() {}
-        drop(second);
-        drop(second_tx);
     }
 
     fn stream() -> Vec<ProcessingRequest> {
@@ -2286,7 +1621,6 @@ mod tests {
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
     }
 
-    #[cfg(feature = "epp")]
     #[test]
     fn metadata_headers_too_large_maps_to_431() {
         let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(

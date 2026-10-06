@@ -317,25 +317,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
-name = "dynamo-ext-proc"
-version = "1.6.0"
-dependencies = [
- "anyhow",
- "bytes",
- "prost",
- "prost-types",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-build",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1995,15 +1976,21 @@ name = "switchyard-preproc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum",
- "dynamo-ext-proc",
+ "futures-core",
  "http",
+ "prost",
+ "prost-types",
  "serde_json",
  "switchyard-protocol",
  "switchyard-runner",
  "switchyard-translation",
+ "thiserror",
  "tokio",
+ "tokio-stream",
  "tonic",
+ "tonic-build",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2203,7 +2190,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -2479,7 +2465,6 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 

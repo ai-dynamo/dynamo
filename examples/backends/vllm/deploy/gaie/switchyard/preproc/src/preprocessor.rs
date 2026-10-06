@@ -13,46 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynamo_ext_proc::{PreprocessError, RequestInfo, RequestMutation, RequestPreprocessor};
-
-use crate::router::{MODEL_HEADER, Router};
+use crate::{router::MODEL_HEADER, server::Error};
 
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
 
-#[tonic::async_trait]
-impl RequestPreprocessor for Router {
-    fn validate_headers(
-        &self,
-        input: &[(String, String)],
-        end_of_stream: bool,
-    ) -> Result<(), PreprocessError> {
-        if end_of_stream {
-            return Err(PreprocessError::new(
-                400,
-                "chat completion requires a request body",
-            ));
-        }
-        headers(input).map(|_| ()).map_err(reject)
-    }
-
-    async fn preprocess(&self, request: &RequestInfo) -> Result<RequestMutation, PreprocessError> {
-        let (headers, remove_headers) = headers(&request.headers).map_err(reject)?;
-        let (body, model) = self.decide(&request.body, &headers).await.map_err(reject)?;
-        Ok(RequestMutation {
-            body: body.into(),
-            headers: vec![(MODEL_HEADER.to_owned(), model)],
-            remove_headers,
-        })
-    }
-}
-
-fn reject(error: anyhow::Error) -> PreprocessError {
-    error
-        .downcast::<PreprocessError>()
-        .unwrap_or_else(|error| PreprocessError::new(400, error.to_string()))
-}
-
-fn headers(input: &[(String, String)]) -> anyhow::Result<(http::HeaderMap, Vec<String>)> {
+pub fn headers(input: &[(String, String)]) -> anyhow::Result<(http::HeaderMap, Vec<String>)> {
     let mut map = http::HeaderMap::new();
     let mut method = None;
     let mut path = None;
@@ -107,12 +72,12 @@ fn headers(input: &[(String, String)]) -> anyhow::Result<(http::HeaderMap, Vec<S
         "content-type must be application/json"
     );
     if map.contains_key("content-encoding") {
-        return Err(PreprocessError::new(415, "compressed request bodies are unsupported").into());
+        return Err(Error::new(415, "compressed request bodies are unsupported").into());
     }
     if let Some(length) = map.get("content-length")
         && length.to_str()?.parse::<usize>()? > MAX_BODY
     {
-        return Err(PreprocessError::new(413, "request body exceeds 2 MiB").into());
+        return Err(Error::new(413, "request body exceeds 2 MiB").into());
     }
     remove.sort();
     remove.dedup();

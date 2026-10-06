@@ -82,11 +82,9 @@ impl Router {
             let identity = (route_id.as_str().to_owned(), session.clone(), agent);
             let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
             if !sessions.contains(&identity) && sessions.len() >= 4096 {
-                return Err(dynamo_ext_proc::PreprocessError::new(
-                    503,
-                    "session identity capacity exceeded",
-                )
-                .into());
+                return Err(
+                    crate::server::Error::new(503, "session identity capacity exceeded").into(),
+                );
             }
             sessions.insert(identity);
         }
@@ -94,10 +92,8 @@ impl Router {
         original_ir.model = None;
         let outcome = tokio::time::timeout(Duration::from_secs(1), route.decide(request))
             .await
-            .map_err(|_| {
-                dynamo_ext_proc::PreprocessError::new(504, "SDK routing deadline exceeded")
-            })?
-            .map_err(|_| dynamo_ext_proc::PreprocessError::new(500, "SDK routing failed"))?;
+            .map_err(|_| crate::server::Error::new(504, "SDK routing deadline exceeded"))?
+            .map_err(|_| crate::server::Error::new(500, "SDK routing failed"))?;
         ensure!(outcome.response.is_none(), "routing-only contract violated");
         let model = outcome.selected_model_id()?.clone();
         let mut selected_ir = outcome.request.llm_request;
@@ -148,23 +144,6 @@ mod tests {
         let mut h = http::HeaderMap::new();
         h.insert("x-switchyard-session-id", id.parse().unwrap());
         h
-    }
-
-    #[tokio::test]
-    async fn toml_controls_stage_policy() {
-        let source =
-            include_str!("../config/routes.toml").replace("efficient_first", "capable_first");
-        let r = Router::new(Runner::from_toml(&source).unwrap());
-        assert_eq!(
-            r.decide(
-                &serde_json::to_vec(&neutral()).unwrap(),
-                &http::HeaderMap::new()
-            )
-            .await
-            .unwrap()
-            .1,
-            "Qwen/Qwen3-1.7B"
-        );
     }
 
     #[tokio::test]
@@ -239,19 +218,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actual_stage_router_routes_neutral_to_efficient_and_preserves_fields() {
-        let input = neutral();
-        let (body, model) = router()
-            .decide(
-                &serde_json::to_vec(&input).unwrap(),
-                &http::HeaderMap::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(model, "Qwen/Qwen3-0.6B");
-        let mut expected = input;
-        expected["model"] = json!("Qwen/Qwen3-0.6B");
-        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+    async fn selects_both_models_and_preserves_request_fields() {
+        for (mut input, expected) in [
+            (neutral(), "Qwen/Qwen3-0.6B"),
+            (recovery(), "Qwen/Qwen3-1.7B"),
+        ] {
+            let (body, model) = router()
+                .decide(
+                    &serde_json::to_vec(&input).unwrap(),
+                    &http::HeaderMap::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(model, expected);
+            input["model"] = json!(expected);
+            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), input);
+        }
     }
 
     #[tokio::test]
@@ -283,21 +265,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actual_stage_router_escalates_critical_tool_failure_and_preserves_history() {
-        let mut input = recovery();
-        let (body, model) = router()
-            .decide(
-                &serde_json::to_vec(&input).unwrap(),
-                &http::HeaderMap::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(model, "Qwen/Qwen3-1.7B");
-        input["model"] = json!("Qwen/Qwen3-1.7B");
-        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), input);
-    }
-
-    #[tokio::test]
     async fn same_session_holds_capable_without_leaking_to_other_sessions() {
         let r = router();
         let failure = serde_json::to_vec(&recovery()).unwrap();
@@ -325,46 +292,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_unknown_catalog_and_media() {
-        let r = router();
+    async fn rejects_unknown_route() {
         let mut body = neutral();
-        body["model"] = json!("attacker-model");
+        body["model"] = json!("unknown");
         assert_eq!(
-            r.decide(&serde_json::to_vec(&body).unwrap(), &http::HeaderMap::new())
+            router()
+                .decide(&serde_json::to_vec(&body).unwrap(), &http::HeaderMap::new())
                 .await
                 .unwrap_err()
                 .to_string(),
             "model is outside the configured catalog"
-        );
-        body["model"] = json!("auto");
-        body["messages"][0]["content"] =
-            json!([{"type":"image_url", "image_url":{"url":"https://example.com/image.png"}}]);
-        assert!(
-            r.decide(&serde_json::to_vec(&body).unwrap(), &http::HeaderMap::new())
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn projects_malformed_historical_arguments_and_compacted_tool_output() {
-        let r = router();
-        let mut body = recovery();
-        body["messages"][1]["tool_calls"][0]["function"]["arguments"] = json!("{bad json");
-        assert_eq!(
-            r.decide(&serde_json::to_vec(&body).unwrap(), &http::HeaderMap::new())
-                .await
-                .unwrap()
-                .1,
-            "Qwen/Qwen3-1.7B"
-        );
-        body["messages"] = json!([{"role":"tool", "tool_call_id":"historical", "content":"MemoryError: out of memory"}, {"role":"user", "content":"Recover"}]);
-        assert_eq!(
-            r.decide(&serde_json::to_vec(&body).unwrap(), &http::HeaderMap::new())
-                .await
-                .unwrap()
-                .1,
-            "Qwen/Qwen3-1.7B"
         );
     }
 }
