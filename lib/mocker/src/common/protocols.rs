@@ -14,6 +14,8 @@ use crate::common::perf_model::PerfModel;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_tokens::Token;
 
+pub use aisimulate_core::engine::{G2Scope, NativeHostOffloadConfig};
+
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
 pub trait KvCacheEventSink: Send + Sync {
@@ -453,6 +455,7 @@ struct MockEngineArgsSerde {
     #[serde(alias = "kv_transfer_bytes_per_token")]
     kv_bytes_per_token: OptionalConfigValue<usize>,
     kv_cache_bytes_per_token: OptionalConfigValue<usize>,
+    native_host_offload: OptionalConfigValue<NativeHostOffloadConfig>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
     kv_transfer_timing_mode: OptionalConfigValue<String>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
@@ -730,9 +733,17 @@ pub struct MockEngineArgs {
     pub kv_bytes_per_token: Option<usize>,
 
     /// Physical KV-cache bytes occupied by one token, independent of transfer geometry.
+    /// Defaults to `kv_bytes_per_token` when native host offload is enabled.
     #[builder(default = "None")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_cache_bytes_per_token: Option<usize>,
+
+    /// Framework-native G1-to-host (G2) KV offload, simulated by AISimulate.
+    /// Host block bytes are `block_size * kv_cache_bytes_per_token`. AISimulate
+    /// owns validation of the physical controls; omission keeps G1-only behavior.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_host_offload: Option<NativeHostOffloadConfig>,
 
     /// KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation.
     /// Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay.
@@ -1063,6 +1074,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(kv_cache_bytes_per_token) = compat.kv_cache_bytes_per_token.into_nullable() {
             builder = builder.kv_cache_bytes_per_token(kv_cache_bytes_per_token);
+        }
+        if let Some(native_host_offload) = compat.native_host_offload.into_nullable() {
+            builder = builder.native_host_offload(native_host_offload);
         }
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);
@@ -1613,6 +1627,47 @@ mod tests {
         .unwrap();
         assert_eq!(args.ais_gemm_dtype.as_deref(), Some("fp8_block"));
         assert_eq!(args.ais_kv_cache_dtype.as_deref(), Some("fp8"));
+    }
+
+    #[test]
+    fn native_host_offload_json_round_trip_preserves_aisimulate_controls() {
+        for payload in [json!({}), json!({"native_host_offload": null})] {
+            let args = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
+            assert!(args.native_host_offload.is_none());
+            assert!(
+                serde_json::to_value(&args)
+                    .unwrap()
+                    .get("native_host_offload")
+                    .is_none()
+            );
+        }
+
+        for host_offload in [
+            json!({"num_host_blocks": 32}),
+            json!({
+                "scope": "cluster_shared",
+                "num_host_blocks": 32,
+                "d2h_bandwidth_gbps": 12.5,
+                "h2d_bandwidth_gbps": 0.0,
+                "shared_d2h_bandwidth_gbps": 40.0,
+                "latency_to_first_byte_ms": 0.5,
+                "kv_layout_id": "tp1",
+            }),
+        ] {
+            let args = MockEngineArgs::from_json_str(
+                &json!({
+                    "kv_cache_bytes_per_token": 1024,
+                    "native_host_offload": host_offload,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let expected: NativeHostOffloadConfig = serde_json::from_value(host_offload).unwrap();
+            assert_eq!(args.native_host_offload.as_ref(), Some(&expected));
+            let round_trip =
+                MockEngineArgs::from_json_str(&serde_json::to_string(&args).unwrap()).unwrap();
+            assert_eq!(round_trip.native_host_offload, Some(expected));
+        }
     }
 
     #[test]

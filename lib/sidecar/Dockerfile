@@ -196,6 +196,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && { userdel -r ubuntu 2>/dev/null || true; } \
     && useradd --create-home --uid 1000 --gid 0 dynamo
 
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
 COPY --from=sglang-builder /out/dynamo-sglang-sidecar /usr/local/bin/
 COPY --from=trtllm-builder /out/dynamo-trtllm-sidecar /usr/local/bin/
