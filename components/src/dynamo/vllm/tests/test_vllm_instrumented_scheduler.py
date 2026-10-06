@@ -6990,15 +6990,18 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     from dynamo.common.forward_pass_metrics import decode
 
     ctx = zmq.Context.instance()
-    sub = ctx.socket(zmq.SUB)
-    sub.setsockopt(zmq.SUBSCRIBE, b"")
-    port = sub.bind_to_random_port("tcp://127.0.0.1")
-    sub.unbind(sub.getsockopt(zmq.LAST_ENDPOINT))
+    # The publisher binds an OS-assigned port and keeps it; probing a free port
+    # and releasing it before the publisher binds lets another process take it.
     publisher = instrumented_scheduler_module._FpmPublisherThread(
-        f"tcp://127.0.0.1:{port}", worker_id="", dp_rank=0
+        "tcp://127.0.0.1:*", worker_id="", dp_rank=0
     )
-    sub.connect(f"tcp://127.0.0.1:{port}")
+    sub = None
     try:
+        endpoint = publisher._pub.getsockopt(zmq.LAST_ENDPOINT).decode()
+        sub = ctx.socket(zmq.SUB)
+        sub.setsockopt(zmq.SUBSCRIBE, b"")
+        sub.connect(endpoint)
+
         scheduler = object.__new__(InstrumentedScheduler)
         scheduler._fpm_worker_id = ""
         scheduler._fpm_dp_rank = 0
@@ -7029,4 +7032,5 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
         assert heartbeat.worker_id == "8465209922961459"
     finally:
         publisher.shutdown()
-        sub.close(linger=0)
+        if sub is not None:
+            sub.close(linger=0)
