@@ -717,7 +717,6 @@ impl OfflineReplayRouter {
         })
     }
 
-    /// Apply `events` observed at `now_ms`, or hold them back until `now_ms + kv_event_lag_ms`.
     pub(crate) fn on_kv_events_at(
         &mut self,
         events: Vec<RouterEvent>,
