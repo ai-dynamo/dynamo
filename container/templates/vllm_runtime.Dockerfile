@@ -755,8 +755,17 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/comp
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
 COPY --chown=dynamo:0 lib /workspace/lib
 
-# Setup launch banner in common directory accessible to all users
 USER root
+{% if device == "cuda" %}
+# Backport Dynamo PR #15755 to the installed package and copied test workspace.
+RUN --mount=type=bind,source=./container/deps/vllm/dynamo-pr-15755-nixl-multiconn-host.patch,target=/tmp/dynamo-pr-15755.patch \
+    set -eu; \
+    pkg_root="$(python3 -c 'import importlib.metadata; print(importlib.metadata.distribution("ai-dynamo").locate_file(""))')"; \
+    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/dynamo-pr-15755.patch; \
+    patch --batch --forward --fuzz=0 -p1 -d /workspace/components/src < /tmp/dynamo-pr-15755.patch
+{% endif %}
+
+# Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
