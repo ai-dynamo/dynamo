@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoscaling-arena"
+version = "0.1.0"
+description = "Compare LLM inference autoscaling policies with Dynamo replay and live endpoints."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11,<3.13"
+# The optional Dynamo simulation runtime is intentionally not installed here.
+# PyYAML powers Match Configs; Plotly is embedded into standalone arena reports.
+dependencies = [
+    "PyYAML>=6.0",
+    "plotly>=6.0.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-timeout>=2.4.0"]
+jev = ["httpx>=0.27,<1"]
+# Match Planner's forecasting dependencies in container/deps/requirements.planner.txt.
+# Install Dynamo itself from this checkout with scripts/setup_simulation_env.sh.
+sim = [
+    "scikit-learn==1.7.2",
+    "pmdarima==2.1.1",
+    "filterpy==1.4.5",
+    "prophet==1.2.1",
+    "prometheus-api-client==0.6.0",
+    # Generated planner plugin stubs require 1.67.1; this intentionally exceeds
+    # the container requirements' grpcio>=1.63.0 floor.
+    "grpcio>=1.67.1",
+    "protobuf==6.33.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Keep this standalone suite independent of Dynamo's GPU/backend pytest plugins.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "-p", "no:vllm_tests",
+    "-p", "no:trtllm_tests",
+    "-p", "no:triton_tests",
+    "-p", "no:sglang_tests",
+]
+markers = [
+    "pre_merge: tests suitable for pre-merge CI",
+    "unit: unit tests",
+    "gpu_0: tests that do not require a GPU",
+    "timeout: per-test time limit supplied by pytest-timeout",
+]

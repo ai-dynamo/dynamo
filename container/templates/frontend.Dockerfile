@@ -63,7 +63,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gnupg2 \
         # required for installing dependencies from git repositories
         git \
-        git-lfs \
         # compliance audit bootstraps syft over HTTPS
         curl \
         # lets Dynamo processes opt into jemalloc via
@@ -150,7 +149,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp/overrides.frontend.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --overrides /tmp/overrides.frontend.txt \
         --requirement /tmp/requirements.common.txt \
@@ -184,7 +183,7 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
         uv pip install "$GMS_WHEEL"; \
     fi && \
     cd /workspace/benchmarks && \
-    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    export UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install --overrides /tmp/overrides.frontend.txt .
 
 # Setup environment for all users
