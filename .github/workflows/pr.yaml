@@ -1326,7 +1326,8 @@ jobs:
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.snapshot_vllm == 'true')
+       needs.changed-files.outputs.snapshot_vllm == 'true') &&
+      needs.vllm-copy-to-acr.result == 'success'
     runs-on: prod-default-v2
     outputs:
       image_tag: ${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
@@ -1378,7 +1379,8 @@ jobs:
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.snapshot_sglang == 'true')
+       needs.changed-files.outputs.snapshot_sglang == 'true') &&
+      needs.sglang-copy-to-acr.result == 'success'
     runs-on: prod-default-v2
     outputs:
       image_tag: ${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
@@ -1431,7 +1433,8 @@ jobs:
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.snapshot_trtllm == 'true')
+       needs.changed-files.outputs.snapshot_trtllm == 'true') &&
+      needs.trtllm-copy-to-acr.result == 'success'
     runs-on: prod-default-v2
     outputs:
       image_tag: ${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
@@ -1510,7 +1513,9 @@ jobs:
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
-       needs.changed-files.outputs.operator == 'true')
+       needs.changed-files.outputs.operator == 'true') &&
+      needs.deploy-operator.result == 'success' &&
+      needs.vllm-copy-to-acr.result == 'success'
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -1529,7 +1534,9 @@ jobs:
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
-       needs.changed-files.outputs.operator == 'true')
+       needs.changed-files.outputs.operator == 'true') &&
+      needs.deploy-operator.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success'
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -1548,7 +1555,9 @@ jobs:
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
-       needs.changed-files.outputs.operator == 'true')
+       needs.changed-files.outputs.operator == 'true') &&
+      needs.deploy-operator.result == 'success' &&
+      needs.trtllm-copy-to-acr.result == 'success'
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
@@ -1565,7 +1574,9 @@ jobs:
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.dgdr == 'true')
+       needs.changed-files.outputs.dgdr == 'true') &&
+      needs.deploy-operator.result == 'success' &&
+      needs.planner-copy-to-acr.result == 'success'
     uses: $/.github/workflows/shared-dgdr-deploy-test.yml
     with:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
