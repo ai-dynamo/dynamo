@@ -654,7 +654,8 @@ class LoadScalingMixin:
         # as the fixed cost the new request must pay regardless of N.
         can_scale_down = num_workers > 1 or self._pending_startup("decode") > 0
         consolidation_refused = False
-        for _label, group in self._agg_regression.query_groups(fpm_stats):
+        consolidation_unknown = False
+        for label, group in self._agg_regression.query_groups(fpm_stats):
             # Pre-consolidation prediction uses scheduled-only decode load.
             # Queued decode is modeled only in the consolidation check below.
             est = self._agg_regression.estimate_queued_prefill_time(
@@ -688,7 +689,15 @@ class LoadScalingMixin:
                     include_queued_decode=True,
                 )
                 if t_own_post is None or post_est is None:
-                    can_scale_down = False
+                    # A group without a TTFT estimate carries no prefill signal.
+                    if est is not None:
+                        logger.info(
+                            "Agg engine %s: post-consolidation TTFT unavailable, "
+                            "refusing scale-down",
+                            label,
+                        )
+                        can_scale_down = False
+                        consolidation_unknown = True
                 else:
                     t_own_ms = t_own_post * 1000
                     queue_budget_ms = (self._config.ttft_ms - t_own_ms) * sensitivity
@@ -708,7 +717,7 @@ class LoadScalingMixin:
             resolve_min_endpoint(self._config, "decode"),
             can_scale_down=can_scale_down,
         )
-        if decision is None and consolidation_refused:
+        if decision is None and (consolidation_refused or consolidation_unknown):
             self._diag_load_reason = "scale_down_refused_consolidation"
             # Return num_workers (not None) so ``_advance_load_agg`` does NOT
             # mistake the safety refusal for a missing prefill signal and grant
