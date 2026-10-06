@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::io;
+use std::sync::{Arc, Mutex};
 
 use dynamo_sidecar_testkit::control::{Controller, Protocol};
 use dynamo_sidecar_testkit::server::TestServer;
@@ -9,23 +11,47 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 pub struct Fixture {
     server: TestServer,
     aborted: watch::Receiver<Vec<String>>,
+    held: Arc<Mutex<HashMap<String, Arc<ResponseGate>>>>,
+}
+
+pub struct ResponseGate {
+    empty_sent: watch::Sender<bool>,
+    release: Notify,
+    responses: Vec<Value>,
+}
+
+impl ResponseGate {
+    pub async fn wait_empty_response(&self) {
+        dynamo_sidecar_testkit::bounded(
+            "HTTP headers and empty response",
+            self.empty_sent.subscribe().wait_for(|sent| *sent),
+        )
+        .await
+        .unwrap();
+    }
+
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
 }
 
 impl Fixture {
     pub async fn start(control: Controller<Adapter>) -> Self {
         let (abort_tx, aborted) = watch::channel(Vec::new());
+        let held = Arc::new(Mutex::new(HashMap::new()));
+        let server_held = Arc::clone(&held);
         let server = TestServer::start(move |listener, _shutdown| async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let (socket, _) = accepted?;
-                        connections.spawn(serve(socket, control.clone(), abort_tx.clone()));
+                        connections.spawn(serve(socket, control.clone(), abort_tx.clone(), Arc::clone(&server_held)));
                     }
                     result = connections.join_next(), if !connections.is_empty() => {
                         result.unwrap()??;
@@ -35,7 +61,27 @@ impl Fixture {
         })
         .await
         .unwrap();
-        Self { server, aborted }
+        Self {
+            server,
+            aborted,
+            held,
+        }
+    }
+
+    pub fn hold_responses(&self, request_id: &str, responses: Vec<Value>) -> Arc<ResponseGate> {
+        let gate = Arc::new(ResponseGate {
+            empty_sent: watch::channel(false).0,
+            release: Notify::new(),
+            responses,
+        });
+        assert!(
+            self.held
+                .lock()
+                .unwrap()
+                .insert(request_id.into(), Arc::clone(&gate))
+                .is_none()
+        );
+        gate
     }
 
     pub async fn wait_aborted(&self, request_id: &str) {
@@ -71,6 +117,7 @@ async fn serve(
     socket: TcpStream,
     control: Controller<Adapter>,
     aborted: watch::Sender<Vec<String>>,
+    held: Arc<Mutex<HashMap<String, Arc<ResponseGate>>>>,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(socket);
     let mut line = String::new();
@@ -117,6 +164,7 @@ async fn serve(
         return Ok(());
     }
     let (mut reader, mut writer) = reader.into_inner().into_split();
+    let gate = held.lock().unwrap().remove(Adapter::request_id(&request));
     let mut eof = [0];
     let mut has_terminal = false;
     tokio::select! {
@@ -130,7 +178,16 @@ async fn serve(
         result = async {
             let opened = control.open(&request).await?;
             writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
-            let source = futures::stream::iter(responses(Adapter::request_id(&request)).map(Ok));
+            let responses = if let Some(gate) = gate {
+                let empty = json!({"output_ids": [], "text": "", "meta_info": {"finish_reason": null}});
+                writer.write_all(format!("data: {empty}\n\n").as_bytes()).await?;
+                gate.empty_sent.send_replace(true);
+                gate.release.notified().await;
+                gate.responses.clone()
+            } else {
+                responses(Adapter::request_id(&request)).into()
+            };
+            let source = futures::stream::iter(responses.into_iter().map(Ok));
             let mut stream = opened.wrap(Box::pin(source));
             while let Some(response) = stream.next().await {
                 let response = response?;

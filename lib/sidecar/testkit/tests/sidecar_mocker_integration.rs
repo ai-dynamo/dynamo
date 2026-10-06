@@ -3,9 +3,10 @@
 
 use dynamo_backend_common::testing::mock_context;
 use dynamo_backend_common::{
-    BackendError, DynamoError, FinishReason, GenerateContext, LLMEngine, LLMEngineOutput,
-    PreprocessedRequest,
+    BackendError, DisaggregationMode, DynamoError, FinishReason, GenerateContext, LLMEngine,
+    LLMEngineOutput, PreprocessedRequest,
 };
+use dynamo_llm::protocols::common::preprocessor::PrefillResult;
 use dynamo_sidecar_testkit::assert::{failure, terminal};
 use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{
@@ -860,6 +861,117 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
                     collect(&engine, http_request(), GenerateContext::new(ctx, None)).await,
                     &id,
                 );
+                assert_eq!(http.aborted_requests(), aborted);
+            }
+        }
+        finish(&mut fixture, &engine).await;
+        http.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn sglang_http_decode_cancellation_waits_for_transfer() {
+    bounded("HTTP decode transfer-safe cancellation", async {
+        let mut fixture = sglang_fixture::Fixture::start(
+            Controller::default(),
+            FixtureConfig {
+                disaggregation_mode: DisaggregationMode::Decode,
+                ..Default::default()
+            },
+        )
+        .await;
+        let control = Controller::<http::Adapter>::default();
+        let mut http = http::Fixture::start(control.clone()).await;
+        fixture.override_discovery(
+            Value::Null,
+            vec![json!({"port": http.port(), "incremental_streaming_output": true})],
+        );
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let mut aborted = Vec::new();
+        for is_terminal_without_tokens in [false, true] {
+            for cancellation in [Cancellation::Explicit, Cancellation::ConsumerDrop] {
+                let ctx = mock_context();
+                let target = control.request(
+                    ctx.id(),
+                    RequestPlan {
+                        open: OpenAction::Hold,
+                        ..after_token_responses(1, StreamAction::Continue)
+                    },
+                );
+                let gate = http.hold_responses(
+                    ctx.id(),
+                    if is_terminal_without_tokens {
+                        vec![json!({"output_ids": [], "text": "", "meta_info": {"id": ctx.id(), "finish_reason": {"type": "length"}}})]
+                    } else {
+                        http::responses(ctx.id()).into()
+                    },
+                );
+                let mut req = http_request();
+                req.prefill_result = Some(PrefillResult {
+                    disaggregated_params: json!({
+                        "bootstrap_host": "127.0.0.1",
+                        "bootstrap_port": http.port(),
+                        "bootstrap_room": 1,
+                    }),
+                    prompt_tokens_details: None,
+                });
+                let (first_token_tx, first_token) = tokio::sync::watch::channel(false);
+                let mut stream = engine
+                    .generate(req, GenerateContext::new(ctx.clone(), Some(first_token_tx)))
+                    .await
+                    .unwrap();
+                tokio::select! {
+                    _ = target.wait(Event::Received) => {},
+                    output = stream.next() => panic!("response arrived before headers: {output:?}"),
+                }
+                assert!(poll!(stream.next()).is_pending());
+                if matches!(cancellation, Cancellation::Explicit) {
+                    ctx.stop_generating();
+                    failure(
+                        vec![bounded("HTTP decode cancellation", stream.next()).await.unwrap()],
+                        &[],
+                        BackendError::Cancelled,
+                    );
+                }
+                drop(stream);
+
+                for is_before_headers in [true, false] {
+                    if !is_before_headers {
+                        target.release();
+                        gate.wait_empty_response().await;
+                    }
+                    assert!(
+                        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+                            tokio::select! {
+                                _ = http.wait_aborted(ctx.id()) => panic!("decode aborted before transfer completed"),
+                                _ = target.wait(Event::Dropped) => panic!("decode transport dropped before transfer completed"),
+                            }
+                        })
+                        .await
+                        .is_err()
+                    );
+                    assert!(!*first_token.borrow());
+                }
+                gate.release();
+                if !is_terminal_without_tokens {
+                    http.wait_aborted(ctx.id()).await;
+                    assert!(*first_token.borrow());
+                    assert_eq!(target.tokens(), vec![101]);
+                    aborted.push(ctx.id().to_string());
+                }
+                bounded("HTTP decode transport released", target.wait(Event::Dropped)).await;
+                if is_terminal_without_tokens {
+                    assert!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            http.wait_aborted(ctx.id()),
+                        )
+                        .await
+                        .is_err()
+                    );
+                }
                 assert_eq!(http.aborted_requests(), aborted);
             }
         }
