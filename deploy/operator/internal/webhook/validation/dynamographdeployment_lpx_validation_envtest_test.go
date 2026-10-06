@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
+	"strings"
 )
 
 // lpxDGDAdmissionCases builds fresh LPX scenarios for the single native DGD admission table.
@@ -199,7 +200,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
 				}
 			}),
-			wantSchemaErr: `spec.components[0].lpx.checkpoint.model: Invalid value: "openai/gpt-oss-20b/original": spec.components[0].lpx.checkpoint.model in body should match '^([A-Za-z0-9_]([A-Za-z0-9_.-]*[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$'`,
+			wantSchemaErr: `spec.components[0].lpx.checkpoint.model: Invalid value: "openai/gpt-oss-20b/original": spec.components[0].lpx.checkpoint.model in body should match '^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$'`,
 		},
 		{
 			name: "LPX checkpoint rejects a model name that aliases the cache layout",
@@ -221,7 +222,18 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
 				}
 			}),
-			wantSchemaErr: `spec.components[0].lpx.checkpoint.model: Invalid value: "openai/gpt-oss-": spec.components[0].lpx.checkpoint.model in body should match '^([A-Za-z0-9_]([A-Za-z0-9_.-]*[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$'`,
+			wantSchemaErr: `spec.components[0].lpx.checkpoint.model: Invalid value: "openai/gpt-oss-": spec.components[0].lpx.checkpoint.model in body should match '^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$'`,
+		},
+		{
+			name: "LPX checkpoint rejects a namespace longer than 96 characters",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Checkpoint = &nvidiacomv1beta1.LPXCheckpoint{
+					Provider: nvidiacomv1beta1.LPXCheckpointProviderHuggingFace,
+					Model:    strings.Repeat("a", 97) + "/gpt-oss-20b",
+					Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+				}
+			}),
+			wantSchemaErr: `spec.components[0].lpx.checkpoint.model: Invalid value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/gpt-oss-20b": spec.components[0].lpx.checkpoint.model in body should match '^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$'`,
 		},
 		{
 			name: "LPX checkpoint rejects a model name ending in .git",

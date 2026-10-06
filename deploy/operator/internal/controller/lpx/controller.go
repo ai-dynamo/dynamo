@@ -475,11 +475,28 @@ func (r *graphReconciler) reconcileReadiness(
 
 	setReadyCondition(deployment, v1beta1.DGDStateSuccessful, readiness.Message)
 
-	if download := deployment.Status.ModelDownload; download != nil && download.LastCheckedAt != nil {
-		return ctrl.Result{RequeueAfter: max(modelDownloadRequeueAfter, time.Until(download.LastCheckedAt.Add(modelDownloadRefreshInterval)))}
+	if refreshAt, found := downloadRefreshAt(&deployment.Status); found {
+		return ctrl.Result{RequeueAfter: max(modelDownloadRequeueAfter, time.Until(refreshAt))}
 	}
 
 	return ctrl.Result{}
+}
+
+// downloadRefreshAt returns when the earlier of the recorded build and
+// checkpoint download checks expires. found is false when neither check is
+// recorded. status is non-nil.
+func downloadRefreshAt(status *v1alpha1.LPXGraphDeploymentStatus) (refreshAt time.Time, found bool) {
+	var lastChecks []time.Time
+	if download := status.ModelDownload; download != nil && download.LastCheckedAt != nil {
+		lastChecks = append(lastChecks, download.LastCheckedAt.Time)
+	}
+	if download := status.CheckpointDownload; download != nil && download.LastCheckedAt != nil {
+		lastChecks = append(lastChecks, download.LastCheckedAt.Time)
+	}
+	if len(lastChecks) == 0 {
+		return time.Time{}, false
+	}
+	return slices.MinFunc(lastChecks, time.Time.Compare).Add(modelDownloadRefreshInterval), true
 }
 
 // deleteUnusedConfigMaps runs only after readiness so existing pods keep their

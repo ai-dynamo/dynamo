@@ -96,12 +96,12 @@ type LPXCheckpoint struct {
 
 	// model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
 	// It follows the Hub's repository-ID rules: an optional namespace and a
-	// name of at most 96 characters, each starting and ending with a letter,
+	// name, each at most 96 characters and starting and ending with a letter,
 	// digit, or underscore.
 	// +required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
-	// +kubebuilder:validation:Pattern=`^([A-Za-z0-9_]([A-Za-z0-9_.-]*[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$`
+	// +kubebuilder:validation:MaxLength=193
+	// +kubebuilder:validation:Pattern=`^([A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$`
 	// +kubebuilder:validation:XValidation:rule="!self.contains('--') && !self.contains('..')",message="model must not contain '--' or '..'"
 	// +kubebuilder:validation:XValidation:rule="!self.endsWith('.git')",message="model must not end with '.git'"
 	Model string `json:"model"`

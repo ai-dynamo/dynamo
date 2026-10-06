@@ -157,3 +157,46 @@ func (r *fakeModelDownloadRegistry) EnsureCheckpointDownloaded(ctx context.Conte
 	r.deadlines = append(r.deadlines, deadline)
 	return r.ready[key], r.err[key]
 }
+
+func TestDownloadRefreshAt(t *testing.T) {
+	buildCheck := metav1.NewTime(time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC))
+	checkpointCheck := metav1.NewTime(buildCheck.Add(-time.Hour))
+	tests := []struct {
+		name          string
+		status        v1alpha1.LPXGraphDeploymentStatus
+		wantRefreshAt time.Time
+		wantFound     bool
+	}{
+		{name: "no recorded check"},
+		{
+			name:          "build check only",
+			status:        v1alpha1.LPXGraphDeploymentStatus{ModelDownload: &v1alpha1.ModelDownloadStatus{LastCheckedAt: &buildCheck}},
+			wantRefreshAt: buildCheck.Add(modelDownloadRefreshInterval),
+			wantFound:     true,
+		},
+		{
+			name:          "checkpoint check with a local build",
+			status:        v1alpha1.LPXGraphDeploymentStatus{CheckpointDownload: &v1alpha1.CheckpointDownloadStatus{LastCheckedAt: &checkpointCheck}},
+			wantRefreshAt: checkpointCheck.Add(modelDownloadRefreshInterval),
+			wantFound:     true,
+		},
+		{
+			name: "earlier of both checks",
+			status: v1alpha1.LPXGraphDeploymentStatus{
+				ModelDownload:      &v1alpha1.ModelDownloadStatus{LastCheckedAt: &buildCheck},
+				CheckpointDownload: &v1alpha1.CheckpointDownloadStatus{LastCheckedAt: &checkpointCheck},
+			},
+			wantRefreshAt: checkpointCheck.Add(modelDownloadRefreshInterval),
+			wantFound:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Schedule the Ready refresh from the earliest recorded download check")
+			refreshAt, found := downloadRefreshAt(&tt.status)
+			require.Equal(t, tt.wantFound, found)
+			require.True(t, tt.wantRefreshAt.Equal(refreshAt), "refreshAt = %v, want %v", refreshAt, tt.wantRefreshAt)
+		})
+	}
+}
