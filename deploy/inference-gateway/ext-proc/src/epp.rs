@@ -222,6 +222,8 @@ impl Router {
                 .load_thresholds()
                 .update(&load_thresholds);
             tracing::info!(?load_thresholds, "Router load thresholds configured");
+        } else {
+            tracing::info!("Router load thresholds off; set DYN_ACTIVE_* to enable");
         }
 
         // Wait for runtime config watch to populate
