@@ -354,6 +354,8 @@ areas:
   - dynamo.code-workspace
   - hatch_build.py
   - lib/bindings/kvbm/pyproject.toml
+  - lib/sidecar/build-with-cache.sh
+  - lib/sidecar/test_build_cache.py
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/

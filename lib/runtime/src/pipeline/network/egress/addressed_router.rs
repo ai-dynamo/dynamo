@@ -1218,6 +1218,16 @@ mod tests {
 
     #[tokio::test]
     async fn quic_router_delivers_data_after_successful_wait() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::quic_router_delivers_data_after_successful_wait"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         use super::{
             AddressedPushRouter, AddressedRequest, RequestPlaneClient, quic_response, tcp,
         };
