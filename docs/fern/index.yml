@@ -486,6 +486,8 @@ navigation:
                       - page: Write Custom Routing Strategies
                         slug: write-custom-routing-strategies
                         path: pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx
+                      - page: Write an Admission Control Plugin
+                        path: pages/developer-guide/knowledge-base/modular-components/router/custom-admission-control.md
                       - page: Router Examples
                         path: pages/developer-guide/knowledge-base/modular-components/router/router-examples.md
                       - page: Router Testing
