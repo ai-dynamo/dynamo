@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -216,8 +217,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 supported=getattr(self, "_supports_ordered_cancellation", False),
                 batched=False,
             )
+            output_options = inner_request.get("output_options", {}) or {}
+            # Prompt logprobs are discarded until the handoff carries their metadata.
+            logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
+                {"logprobs": output_options.get("logprobs")},
+                allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
+            )
             results = await self.engine.async_generate(
                 **input_param,
+                **logprob_kwargs,
                 **mm_kwargs,
                 **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
                 sampling_params=sampling_params,
