@@ -130,7 +130,7 @@ Prefill and encode use their canonical one-token request and do not apply decode
 
 The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's `vllm-proto` dependency is pinned in the workspace `Cargo.toml`.
 
-The CUDA image uses the upstream `vllm-rs` command from vLLM 0.31, which accepts
+The CUDA image uses the upstream `vllm-rs` command, which accepts
 the extra engine response fields added by vLLM-Omni. Use `vllm-rs` from `PATH`
 when starting the engine.
 
