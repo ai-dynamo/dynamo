@@ -11,6 +11,10 @@ Recipes for [GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash), a mix
 
 ## Configurations
 
+For SGLang on GB200, see the [GLM-5.3-Flash NVFP4 Kustomize recipes](sglang/README.md):
+4-GPU aggregated serving or 12-GPU disaggregated serving with two prefill workers
+and one decode worker. These use a separate pinned NVFP4 checkpoint and model-download Job.
+
 Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 
 |                          | GB200 Aggregated              | GB200 Disaggregated                         | H200 Aggregated             | H200 Disaggregated                      |
