@@ -26,22 +26,44 @@ impl NamespaceFilter {
         namespace: Option<&str>,
         namespace_prefix: Option<&str>,
     ) -> Self {
+        Self::from_namespace_prefix_and_suffix(namespace, namespace_prefix, None)
+    }
+
+    /// Resolve the discovery scope from the three namespace inputs: the namespace
+    /// (`--namespace` / `DYN_NAMESPACE`), the prefix (`--namespace-prefix` /
+    /// `DYN_NAMESPACE_PREFIX`) and the worker suffix (`DYN_NAMESPACE_WORKER_SUFFIX`).
+    ///
+    /// Frontend model discovery and the RL worker listing both use this, so they see
+    /// the same set of namespaces. Precedence, highest first:
+    ///
+    /// 1. A prefix, when given: empty or [`GLOBAL_NAMESPACE`] means every namespace,
+    ///    anything else is a literal [`NamespaceFilter::Prefix`]. The suffix is ignored.
+    /// 2. A namespace that is absent, empty or [`GLOBAL_NAMESPACE`]: every namespace.
+    ///    The suffix is ignored because `Global` already contains `dynamo-<suffix>`.
+    /// 3. A namespace with a non-empty suffix: exactly `{namespace}-{suffix}`, the
+    ///    namespace a worker started with that suffix registers under (see
+    ///    `get_worker_namespace` in `components/src/dynamo/common/utils/namespace.py`).
+    /// 4. Otherwise exactly the namespace.
+    pub fn from_namespace_prefix_and_suffix(
+        namespace: Option<&str>,
+        namespace_prefix: Option<&str>,
+        worker_suffix: Option<&str>,
+    ) -> Self {
         // Prefix takes precedence if both are specified
         if let Some(prefix) = namespace_prefix {
-            if prefix.is_empty() || is_global_namespace(prefix) {
+            if is_global_namespace(prefix) {
                 return NamespaceFilter::Global;
             }
             return NamespaceFilter::Prefix(prefix.to_string());
         }
 
-        if let Some(ns) = namespace {
-            if ns.is_empty() || is_global_namespace(ns) {
-                return NamespaceFilter::Global;
-            }
-            return NamespaceFilter::Exact(ns.to_string());
+        let Some(ns) = namespace.filter(|ns| !is_global_namespace(ns)) else {
+            return NamespaceFilter::Global;
+        };
+        match worker_suffix.filter(|suffix| !suffix.is_empty()) {
+            Some(suffix) => NamespaceFilter::Exact(format!("{ns}-{suffix}")),
+            None => NamespaceFilter::Exact(ns.to_string()),
         }
-
-        NamespaceFilter::Global
     }
 
     /// Check if a given namespace matches this filter.
@@ -97,6 +119,76 @@ mod tests {
             NamespaceFilter::from_namespace_and_prefix(Some("exact"), Some("prefix")),
             NamespaceFilter::Prefix("prefix".to_string())
         );
+    }
+
+    #[test]
+    fn test_from_namespace_prefix_and_suffix_precedence() {
+        let cases = [
+            (
+                "prefix wins over a suffix that is also set",
+                Some("ns"),
+                Some("ns"),
+                Some("abc123"),
+                NamespaceFilter::Prefix("ns".to_string()),
+            ),
+            (
+                "an empty prefix means every namespace",
+                Some("ns"),
+                Some(""),
+                Some("abc123"),
+                NamespaceFilter::Global,
+            ),
+            (
+                "a global prefix wins over a suffix that is also set",
+                Some("ns"),
+                Some(GLOBAL_NAMESPACE),
+                Some("abc123"),
+                NamespaceFilter::Global,
+            ),
+            (
+                "suffix composes the worker namespace",
+                Some("ns"),
+                None,
+                Some("abc123"),
+                NamespaceFilter::Exact("ns-abc123".to_string()),
+            ),
+            (
+                "an empty suffix counts as absent",
+                Some("ns"),
+                None,
+                Some(""),
+                NamespaceFilter::Exact("ns".to_string()),
+            ),
+            (
+                "no namespace means every namespace, suffix or not",
+                None,
+                None,
+                Some("abc123"),
+                NamespaceFilter::Global,
+            ),
+            (
+                "an empty namespace means every namespace, suffix or not",
+                Some(""),
+                None,
+                Some("abc123"),
+                NamespaceFilter::Global,
+            ),
+            (
+                "the global namespace already contains its suffixed workers",
+                Some(GLOBAL_NAMESPACE),
+                None,
+                Some("abc123"),
+                NamespaceFilter::Global,
+            ),
+        ];
+
+        for (description, namespace, prefix, suffix, expected) in cases {
+            assert_eq!(
+                NamespaceFilter::from_namespace_prefix_and_suffix(namespace, prefix, suffix),
+                expected,
+                "{description}"
+            );
+        }
     }
 
     #[test]

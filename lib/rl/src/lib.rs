@@ -26,7 +26,7 @@ use dynamo_runtime::{
     DistributedRuntime,
     component::{Client, Instance, TransportType},
     discovery::{DiscoveryInstance, DiscoveryQuery},
-    namespace::{GLOBAL_NAMESPACE, NamespaceFilter, is_global_namespace},
+    namespace::{GLOBAL_NAMESPACE, NamespaceFilter},
     pipeline::{
         SingleIn,
         network::egress::push_router::{PushRouter, RouterMode},
@@ -97,99 +97,17 @@ pub struct RlDiscoveryConfig {
     pub max_concurrent_probes: usize,
 }
 
-/// Resolve the namespace scope for RL discovery from the three namespace inputs.
-///
-/// This is deliberately pure — it reads no environment — so the composition rule can be
-/// tested without mutating process-global state.
-///
-/// Precedence, highest first:
-///
-/// 1. `namespace_prefix` (`DYN_NAMESPACE_PREFIX`): match every namespace under that
-///    prefix, or every namespace at all when the prefix is the global one. Kubernetes
-///    deployments get this on the frontend container automatically, and it is what lets
-///    one listener see several worker generations during a rolling update.
-/// 2. `worker_suffix` (`DYN_NAMESPACE_WORKER_SUFFIX`): match exactly `{base}-{suffix}`.
-/// 3. Neither: match `base` exactly.
-///
-/// `base` is `namespace` (`DYN_NAMESPACE`) whenever that variable is set, and
-/// [`DEFAULT_NAMESPACE`] only when it is unset. An explicitly empty value is kept, so a
-/// deployment that sets `DYN_NAMESPACE=` is searched under the same empty base its
-/// workers register with.
-///
-/// Both rules mirror `get_worker_namespace` in
-/// `components/src/dynamo/common/utils/namespace.py`, which is how workers pick the
-/// namespace they register under. Its `os.environ.get("DYN_NAMESPACE", "dynamo")` falls
-/// back only for an unset variable, and its `if suffix:` skips an empty suffix; the
-/// composition is a single ASCII hyphen, no trimming, no case folding.
-///
-/// The prefix has no counterpart in that helper. An empty one would match every
-/// namespace, so it counts as absent rather than as a scope over everything.
-///
-/// A prefix of [`GLOBAL_NAMESPACE`] is the one exception: it means every namespace, the
-/// same reading `NamespaceFilter::from_namespace_and_prefix` gives it for model
-/// discovery. The operator produces exactly that input — `ComputeDynamoNamespace`
-/// returns the literal `dynamo` for a component with `globalDynamoNamespace: true`, and
-/// the frontend passes it through as `DYN_NAMESPACE_PREFIX`. Since that field is
-/// per-component, a deployment can set it on the frontend alone; leaving it a literal
-/// prefix here would let the frontend route to a worker that `/v1/rl/workers` cannot
-/// see.
-///
-/// The no-prefix, no-suffix case still stays [`NamespaceFilter::Exact`] rather than going
-/// through `NamespaceFilter::from_namespace_and_prefix`, because that constructor also
-/// maps a `dynamo` *namespace* to `NamespaceFilter::Global`. Routing the default through
-/// it would silently widen RL discovery from one namespace to all of them for everyone
-/// who leaves `DYN_NAMESPACE` unset.
-pub fn resolve_namespace_filter(
-    namespace: Option<&str>,
-    namespace_prefix: Option<&str>,
-    worker_suffix: Option<&str>,
-) -> NamespaceFilter {
-    fn present(value: Option<&str>) -> Option<&str> {
-        value.filter(|value| !value.is_empty())
-    }
-
-    if let Some(prefix) = present(namespace_prefix) {
-        if is_global_namespace(prefix) {
-            return NamespaceFilter::Global;
-        }
-        return NamespaceFilter::Prefix(prefix.to_string());
-    }
-
-    let base = namespace.unwrap_or(DEFAULT_NAMESPACE);
-    match present(worker_suffix) {
-        Some(suffix) => NamespaceFilter::Exact(format!("{base}-{suffix}")),
-        None => NamespaceFilter::Exact(base.to_string()),
-    }
-}
-
 /// The scope reported back to the caller in [`RlWorkersResponse::namespace`].
 ///
 /// Protocol version 1 types that field as a plain string, so a prefix scope reports the
 /// prefix itself. `Global` has no string form of its own and reports [`GLOBAL_NAMESPACE`],
-/// which is also the `DYN_NAMESPACE_PREFIX` value [`resolve_namespace_filter`] turns into
-/// `Global`, so a global scope reports the same string either way.
+/// which is also the namespace or prefix value that resolves to `Global`, so a global
+/// scope reports the same string either way.
 fn namespace_scope(filter: &NamespaceFilter) -> &str {
     match filter {
         NamespaceFilter::Global => GLOBAL_NAMESPACE,
         NamespaceFilter::Exact(namespace) => namespace,
         NamespaceFilter::Prefix(prefix) => prefix,
-    }
-}
-
-/// Whether `namespace` is inside `filter` for the purposes of RL discovery.
-///
-/// [`NamespaceFilter::Prefix`] matches on a bare `starts_with`, which also admits a
-/// sibling deployment whose name merely begins with the prefix: under
-/// `DYN_NAMESPACE_PREFIX=myns-dgd` it would take in `myns-dgd2`. The endpoints reached
-/// here are RL control endpoints, so the scope is the prefix itself plus the
-/// hyphen-delimited worker generations beneath it — the same shape
-/// `DYN_NAMESPACE_WORKER_SUFFIX` produces.
-fn namespace_in_scope(filter: &NamespaceFilter, namespace: &str) -> bool {
-    match filter {
-        NamespaceFilter::Prefix(prefix) => namespace
-            .strip_prefix(prefix.as_str())
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-')),
-        filter => filter.matches(namespace),
     }
 }
 
@@ -283,20 +201,11 @@ impl RlDiscoveryState {
         Self::new_with_namespace_filter(config, namespace_filter)
     }
 
-    /// Constructs the listener state using namespace-scope environment variables.
+    /// Constructs the listener state with an explicit discovery scope.
     ///
-    /// This is deliberately separate from [`Self::new`] so callers that supply an
-    /// explicit configuration retain an exact namespace scope.
-    pub fn new_from_env(config: RlDiscoveryConfig) -> Self {
-        let namespace_filter = resolve_namespace_filter(
-            Some(&config.namespace),
-            std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
-            std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
-        );
-        Self::new_with_namespace_filter(config, namespace_filter)
-    }
-
-    fn new_with_namespace_filter(
+    /// The HTTP frontend passes the [`NamespaceFilter`] it resolved for model discovery,
+    /// so `/v1/rl/workers` lists exactly the namespaces the frontend routes to.
+    pub fn new_with_namespace_filter(
         config: RlDiscoveryConfig,
         namespace_filter: NamespaceFilter,
     ) -> Self {
@@ -410,9 +319,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .unwrap_or_default()
         .into_iter()
         .filter(|instance| match instance {
-            DiscoveryInstance::Model { namespace, .. } => {
-                namespace_in_scope(&state.namespace_filter, namespace)
-            }
+            DiscoveryInstance::Model { namespace, .. } => state.namespace_filter.matches(namespace),
             _ => true,
         })
         .collect();
@@ -424,7 +331,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
             DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
             _ => None,
         })
-        .filter(|endpoint| namespace_in_scope(&state.namespace_filter, &endpoint.namespace))
+        .filter(|endpoint| state.namespace_filter.matches(&endpoint.namespace))
         .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
         .filter(|endpoint| {
             config
@@ -1024,35 +931,6 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn from_env_discovers_worker_in_suffix_namespace() {
-        temp_env::async_with_vars(
-            [
-                ("DYN_NAMESPACE", Some("ns")),
-                ("DYN_NAMESPACE_PREFIX", None::<&str>),
-                ("DYN_NAMESPACE_WORKER_SUFFIX", Some("abc123")),
-            ],
-            async {
-                let distributed = test_runtime().await;
-                let started = start_rl_endpoint(&distributed, "ns-abc123").await;
-                let state = RlDiscoveryState::new_from_env(RlDiscoveryConfig::from_env(
-                    distributed.clone(),
-                ));
-
-                let workers = list_workers(&state).await.expect("list");
-                let namespaces: Vec<&str> = workers
-                    .iter()
-                    .map(|worker| worker.namespace.as_str())
-                    .collect();
-                assert_eq!(namespaces, ["ns-abc123"]);
-
-                started.shutdown().await.expect("endpoint shutdown");
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
     async fn explicit_config_ignores_environment_namespace_scope() {
         temp_env::async_with_vars(
             [
@@ -1076,105 +954,37 @@ mod tests {
         .await;
     }
 
-    #[test]
-    fn prefix_scope_stops_at_a_hyphen() {
-        let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
+    /// Issue #15726: the frontend routes to `myns2` under prefix `myns` (literal
+    /// `starts_with`), so the RL listing must include it too.
+    #[tokio::test]
+    async fn list_workers_prefix_scope_is_literal_like_model_discovery() {
+        let distributed = test_runtime().await;
+        let sibling = start_rl_endpoint(&distributed, "myns2").await;
+        let other = start_rl_endpoint(&distributed, "other").await;
+        let state = discovery_state(&distributed, NamespaceFilter::Prefix("myns".to_string()));
 
-        assert!(namespace_in_scope(&filter, "myns-dgd"));
-        assert!(namespace_in_scope(&filter, "myns-dgd-abc123"));
-        assert!(!namespace_in_scope(&filter, "myns-dgd2"));
-        assert!(!namespace_in_scope(&filter, "myns"));
+        let workers = list_workers(&state).await.expect("list");
+        let namespaces: Vec<&str> = workers.iter().map(|w| w.namespace.as_str()).collect();
+        assert_eq!(namespaces, ["myns2"]);
+
+        sibling.shutdown().await.expect("endpoint shutdown");
+        other.shutdown().await.expect("endpoint shutdown");
     }
 
-    #[test]
-    fn global_prefix_scope_matches_model_discovery() {
-        let filter = resolve_namespace_filter(Some("ns"), Some(GLOBAL_NAMESPACE), None);
+    #[tokio::test]
+    async fn list_workers_global_scope_lists_every_namespace() {
+        let distributed = test_runtime().await;
+        let generation = start_rl_endpoint(&distributed, "mydgd-9ed17bcc").await;
+        let default = start_rl_endpoint(&distributed, GLOBAL_NAMESPACE).await;
+        let state = discovery_state(&distributed, NamespaceFilter::Global);
 
-        assert_eq!(
-            filter,
-            NamespaceFilter::from_namespace_and_prefix(Some("ns"), Some(GLOBAL_NAMESPACE)),
-            "a frontend with globalDynamoNamespace must not route to workers RL cannot see"
-        );
-        assert!(namespace_in_scope(&filter, "mydgd-9ed17bcc"));
-        assert!(namespace_in_scope(&filter, GLOBAL_NAMESPACE));
-        assert_eq!(namespace_scope(&filter), GLOBAL_NAMESPACE);
-    }
+        let workers = list_workers(&state).await.expect("list");
+        let namespaces: Vec<&str> = workers.iter().map(|w| w.namespace.as_str()).collect();
+        assert_eq!(namespaces, [GLOBAL_NAMESPACE, "mydgd-9ed17bcc"]);
+        assert_eq!(namespace_scope(&state.namespace_filter), GLOBAL_NAMESPACE);
 
-    #[test]
-    fn resolve_namespace_filter_precedence() {
-        let cases = [
-            (
-                "prefix wins over a suffix that is also set",
-                Some("ns"),
-                Some("ns"),
-                Some("abc123"),
-                NamespaceFilter::Prefix("ns".to_string()),
-            ),
-            (
-                "suffix composes the worker namespace",
-                Some("ns"),
-                None,
-                Some("abc123"),
-                NamespaceFilter::Exact("ns-abc123".to_string()),
-            ),
-            (
-                "an empty suffix counts as absent",
-                Some("ns"),
-                None,
-                Some(""),
-                NamespaceFilter::Exact("ns".to_string()),
-            ),
-            (
-                "nothing set falls back to the default namespace",
-                None,
-                None,
-                None,
-                NamespaceFilter::Exact(DEFAULT_NAMESPACE.to_string()),
-            ),
-            (
-                "an explicitly empty namespace is kept, not defaulted",
-                Some(""),
-                None,
-                None,
-                NamespaceFilter::Exact(String::new()),
-            ),
-            (
-                "an explicitly empty namespace still takes the suffix",
-                Some(""),
-                None,
-                Some("abc123"),
-                NamespaceFilter::Exact("-abc123".to_string()),
-            ),
-            (
-                "an empty prefix counts as absent rather than matching everything",
-                Some("ns"),
-                Some(""),
-                None,
-                NamespaceFilter::Exact("ns".to_string()),
-            ),
-            (
-                "a global prefix means every namespace, as it does for model discovery",
-                Some("ns"),
-                Some(GLOBAL_NAMESPACE),
-                None,
-                NamespaceFilter::Global,
-            ),
-            (
-                "a global prefix wins over a suffix that is also set",
-                Some("ns"),
-                Some(GLOBAL_NAMESPACE),
-                Some("abc123"),
-                NamespaceFilter::Global,
-            ),
-        ];
-
-        for (description, namespace, prefix, suffix, expected) in cases {
-            assert_eq!(
-                resolve_namespace_filter(namespace, prefix, suffix),
-                expected,
-                "{description}"
-            );
-        }
+        generation.shutdown().await.expect("endpoint shutdown");
+        default.shutdown().await.expect("endpoint shutdown");
     }
 
     #[tokio::test]

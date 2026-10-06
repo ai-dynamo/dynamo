@@ -224,6 +224,16 @@ async fn run_with_router_plugins(
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
     http_service_builder =
         http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+    // Resolve the discovery scope once: model discovery and the RL worker listing must
+    // see the same namespaces. The worker suffix composes with a non-global namespace
+    // the same way workers apply it when they register.
+    let worker_suffix = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok();
+    let namespace_filter = NamespaceFilter::from_namespace_prefix_and_suffix(
+        local_model.namespace(),
+        local_model.namespace_prefix(),
+        worker_suffix.as_deref(),
+    );
+    http_service_builder = http_service_builder.namespace_filter(Some(namespace_filter.clone()));
     for extension in frontend_route_extensions {
         http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
     }
@@ -243,11 +253,6 @@ async fn run_with_router_plugins(
             let migration_limit = model.migration_limit();
             let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
-            // Create namespace filter from model configuration
-            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
-                model.namespace(),
-                model.namespace_prefix(),
-            );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();

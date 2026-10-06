@@ -122,11 +122,14 @@ use super::error::{
     http_action_for_error, overload_status_code,
 };
 
+/// Build the RL worker discovery router, scoped to the frontend's resolved
+/// `namespace_filter` so `/v1/rl/workers` lists the namespaces the frontend routes to.
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
+    namespace_filter: crate::namespace::NamespaceFilter,
 ) -> anyhow::Result<axum::Router> {
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
-    let state = dynamo_rl::RlDiscoveryState::new_from_env(config);
+    let state = dynamo_rl::RlDiscoveryState::new_with_namespace_filter(config, namespace_filter);
     Ok(dynamo_rl::rl_router(state))
 }
 
