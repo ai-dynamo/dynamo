@@ -5,7 +5,6 @@ package lpx
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -88,10 +87,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 		return nil, nil, err
 	}
 
-	var (
-		resources []client.Object
-		digest    = sha256.New()
-	)
+	var resources []client.Object
 
 	for _, groupName := range slices.Sorted(maps.Keys(plans)) {
 		workload, plan := workloads[groupName], plans[groupName]
@@ -121,7 +117,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 			}
 		}
 
-		// Component order fixes both rendering and the graph's immutable workload digest.
+		// Keep workload templates in canonical component order.
 		pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, rendered.Cliques...)
 		pcs.Spec.Template.PodCliqueScalingGroupConfigs = append(pcs.Spec.Template.PodCliqueScalingGroupConfigs, rendered.ScalingGroup)
 		resources = append(resources, rendered.Resources...)
@@ -144,10 +140,8 @@ func (r *graphReconciler) renderPodCliqueSet(
 			resources = append(resources, service)
 		}
 
-		writeIdentityHashField(digest, groupName, workload.Digest().String())
 	}
 
-	pcs.Annotations[lpx.WorkloadDigestAnnotation] = fmt.Sprintf("sha256:%x", digest.Sum(nil))
 	stampDeploymentIdentity(deployment, pcs, resources)
 
 	// Enforce the aggregate size budget after identity and discovery metadata are final.
