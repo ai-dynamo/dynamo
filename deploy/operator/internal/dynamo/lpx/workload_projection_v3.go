@@ -17,20 +17,49 @@ const (
 	v3CompilerEnvelopeSchema = "dynamo.lpx.v3-capnp/v1"
 	v3ProjectionVersion      = "v3-hx-capnp/v1"
 	v3LPUDevice              = "lpu"
-	v3HXLogicalDeviceCount   = 16
 )
 
 func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
 	runtimeBuild := *intent.BuildSnapshot.build
 	manifestPartitions := runtimeBuild.Partitions
-	selectedPropSyncChains := runtimeBuild.SelectedPropSyncChains
 
 	ioFPGACount, ioFanoutFactor := runtimeBuild.IOFPGACount, runtimeBuild.IOFanoutFactor
 
+	edgePositions, err := validateSelectedPropSyncGraph(manifestPartitions, runtimeBuild.SelectedPropSyncChains, "selected V3 prop-sync chain")
+	if err != nil {
+		return nil, err
+	}
+	if intent.Pipeline != PipelineLPX && len(edgePositions) != len(manifestPartitions)-1 {
+		return nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
+	}
+
+	partitions := manifestPartitions
+	if len(edgePositions) == len(manifestPartitions)-1 {
+		partitions = packPropSyncPartitions(manifestPartitions)
+	}
+	if len(partitions) < len(manifestPartitions) {
+		if intent.Pipeline == PipelineLPX {
+			return nil, fmt.Errorf("packed HX prop-sync requires an LPU-only workload")
+		}
+		edgePositions = nil
+
+		partition := &partitions[0]
+		nodes, width := int64(partition.effectiveNodeCount()), int64(partition.DevicesPerNode)
+		switch {
+		case nodes <= 8:
+			partition.HXExtent = []int64{width, nodes, 1, 1}
+		case nodes <= 16 && nodes%2 == 0:
+			partition.HXExtent = []int64{width, nodes / 2, 2, 1}
+		case nodes == 32:
+			partition.HXExtent = []int64{width, 8, 2, 2}
+		default:
+			return nil, fmt.Errorf("packed chain chip count %d does not fit a supported HX extent", partition.Topology.ChipCount)
+		}
+	}
+
 	// Selected chains are represented by the allocation metadata and connectors below.
 	runtimeBuild.SelectedPropSyncChains = nil
-
-	allocationMetadata, connectors, err := projectV3PropSync(manifestPartitions, selectedPropSyncChains, intent.Pipeline)
+	allocationMetadata, connectors, err := projectV3PropSync(partitions, edgePositions)
 	if err != nil {
 		return nil, err
 	}
@@ -43,8 +72,8 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 
 	// Count runtime endpoints while binding ordered partitions into projection identity.
 	agentReplicas := 0
-	for index, partition := range manifestPartitions {
-		agentReplicas += int(partition.HXExtent[1] * partition.HXExtent[2] * partition.HXExtent[3])
+	for index, partition := range partitions {
+		agentReplicas += partition.effectiveNodeCount()
 		for modelIndex := range transcripts {
 			transcripts[modelIndex].intField("ordered-compiler-id-index", int64(index))
 			transcripts[modelIndex].uint32Field("ordered-compiler-id", uint32(partition.SourcePartitionID))
@@ -66,7 +95,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 			pipeline:               intent.Pipeline,
 			configuredBuild:        runtimeBuild,
 			allocationMetadata:     allocationMetadata,
-			partitions:             manifestPartitions,
+			partitions:             partitions,
 			connectors:             connectors,
 			agentReplicas:          agentReplicas,
 		})
@@ -74,19 +103,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	return dst, nil
 }
 
-func projectV3PropSync(
-	partitions []BuildPartition,
-	chains [][]int,
-	pipeline Pipeline,
-) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
-	edgePositions, err := validateSelectedPropSyncGraph(partitions, chains, "selected V3 prop-sync chain", false)
-	if err != nil {
-		return nil, nil, err
-	}
-	if pipeline != PipelineLPX && len(edgePositions) != len(partitions)-1 {
-		return nil, nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
-	}
-
+func projectV3PropSync(partitions []BuildPartition, edgePositions []int) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
 	// Project each physical partition into the V3 allocation metadata envelope.
 	partitionInfo := make(map[string]any, len(partitions)+1)
 	partitionInfo["num_partitions"] = len(partitions)
@@ -99,15 +116,24 @@ func projectV3PropSync(
 	}
 
 	// Project validated edges into runtime metadata and scheduler connector order.
+	const maxConnections = 8192
+	remainingConnections := maxConnections
 	propSyncPairs := make([]any, 0)
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, 0, len(edgePositions))
 	for _, fromPosition := range edgePositions {
 		source := partitions[fromPosition]
-		destinationID := partitions[fromPosition+1].SourcePartitionID
-		endpointCount := source.HXExtent[1] * source.HXExtent[2] * source.HXExtent[3]
-		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, v3HXLogicalDeviceCount)
-		connections := make([][2]int64, v3HXLogicalDeviceCount)
-		sourceOffset := source.HXExtent[0]*endpointCount - v3HXLogicalDeviceCount
+		destination := partitions[fromPosition+1]
+		if source.DevicesPerNode > remainingConnections {
+			return nil, nil, fmt.Errorf("HX prop-sync graph exceeds %d logical connections", maxConnections)
+		}
+		remainingConnections -= source.DevicesPerNode
+		if capacity := destination.effectiveNodeCount() * destination.DevicesPerNode; source.DevicesPerNode > capacity {
+			return nil, nil, fmt.Errorf("HX prop-sync destination partition %d has %d devices, need %d", destination.SourcePartitionID, capacity, source.DevicesPerNode)
+		}
+
+		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, source.DevicesPerNode)
+		connections := make([][2]int64, source.DevicesPerNode)
+		sourceOffset := int64((source.effectiveNodeCount() - 1) * source.DevicesPerNode)
 		for logicalDevice := range logicalConnections {
 			from := sourceOffset + int64(logicalDevice)
 			logicalConnections[logicalDevice] = lpxv1alpha1.HxLogicalConnection{
@@ -119,7 +145,7 @@ func projectV3PropSync(
 		acceptableLaneMultiplicities := []int64{4, 2, 1}
 		propSyncPairs = append(propSyncPairs, map[string]any{
 			"source_partition":    source.SourcePartitionID,
-			"dest_partition":      destinationID,
+			"dest_partition":      destination.SourcePartitionID,
 			"connections":         connections,
 			"num_supported_lanes": acceptableLaneMultiplicities,
 		})

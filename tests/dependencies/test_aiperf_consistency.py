@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_epd_aiperf_version_gate_matches_release() -> None:
+    """Keep the EPD version check aligned with the supported AIPerf release."""
     path = ROOT / "benchmarks/multimodal/sweep/experiments/epd/run_experiment.py"
     module = ast.parse(path.read_text(encoding="utf-8"))
     versions = [
@@ -41,6 +42,7 @@ def test_epd_aiperf_version_gate_matches_release() -> None:
 
 
 def test_aiperf_install_pins_match() -> None:
+    """Require benchmark packages and container images to pin the same AIPerf."""
     with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
         dependencies = tomllib.load(handle)["project"]["dependencies"]
     benchmark_pin = next(

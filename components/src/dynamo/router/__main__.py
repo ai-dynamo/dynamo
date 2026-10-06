@@ -18,6 +18,7 @@ from typing import Optional
 
 import uvloop
 
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
 from dynamo.router.args import (
     DynamoRouterConfig,
@@ -139,7 +140,7 @@ class StandaloneRouterHandler:
             raise RuntimeError("Router not initialized")
 
         scores = await self.kv_router.get_overlap_scores(
-            request["token_ids"],
+            token_ids_to_list(request["token_ids"]),
             request.get("router_config_override"),
             request.get("block_mm_infos"),
             request.get("lora_name"),
