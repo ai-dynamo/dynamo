@@ -4,13 +4,14 @@
 package validation_test
 
 import (
+	"strings"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
-	"strings"
 )
 
 // lpxDGDAdmissionCases builds fresh LPX scenarios for the single native DGD admission table.
