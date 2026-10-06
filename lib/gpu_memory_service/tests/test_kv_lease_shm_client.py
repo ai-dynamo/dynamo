@@ -1560,3 +1560,45 @@ def test_shared_memory_lease_seal_is_atomic_and_idempotent(tmp_path):
             client.seal([leases[0], leases[0]])
     finally:
         client.close()
+
+
+def test_reserved_headroom_stays_lock_free_and_never_dips(tmp_path, monkeypatch):
+    """Acquisition above a reservation stays lock-free; the headroom is exact."""
+    from gpu_memory_service.integrations.common import kv_lease_client as klc
+
+    client = SharedMemoryKVLeaseClient(
+        str(tmp_path / "ring"),
+        namespace="reserve",
+        owner_id="primary",
+        total_blocks=32,
+        reservation_path=str(tmp_path / "reservation.json"),
+    )
+    if not client._supports_shm_reservation():
+        pytest.skip("native ring without shared-memory reservations")
+    reservation = klc.KVLeaseReservation(reserved_blocks=8)
+    klc._write_reservation_file(client.reservation_path, reservation)
+    klc._write_reservation_mmap(client._rust, client._mmap, reservation)
+    assert client.free_count() == 24
+
+    def locked(*_args, **_kwargs):
+        raise AssertionError("acquire above the headroom took the locked path")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_acquire_with_reservation_lock", locked)
+        held = client.acquire(20)
+        held += client.acquire(4, preferred_blocks=[31])
+    assert len(held) == 24 and client.raw_free_count() == 8
+
+    # The last eight blocks are headroom: neither path may take them.
+    with pytest.raises(RuntimeError, match="reserved"):
+        client.acquire(1)
+    assert (
+        client._rust.kv_lease_acquire(
+            client._mmap, [], 1, True, False, int(client._owner_hash)
+        )
+        == []
+    )
+    assert client.raw_free_count() == 8
+
+    client.release(held[:1])
+    assert len(client.acquire(1)) == 1

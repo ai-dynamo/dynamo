@@ -659,6 +659,66 @@ unsafe fn try_acquire_lease_block(
     Some((block_id, generation))
 }
 
+/// Claim one FREE block without letting the free count drop to `floor`.
+///
+/// The free count is decremented by compare-and-swap before the block state
+/// is claimed, so concurrent acquirers in any process can never jointly take
+/// the count below the reserved headroom. A failed state claim gives the
+/// count back. Returns Err(()) once the floor is reached.
+unsafe fn try_acquire_lease_block_above_floor(
+    ptr: *mut u8,
+    total_blocks: u32,
+    block_id: u32,
+    owner_hash: u64,
+    floor: u64,
+) -> Result<Option<(u32, u32)>, ()> {
+    if block_id >= total_blocks {
+        return Ok(None);
+    }
+    let base = lease_record_off(block_id);
+    let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
+    // Skip obviously unavailable blocks before touching the shared count.
+    if (*state_ptr).load(Ordering::Acquire) != LEASE_STATE_FREE {
+        return Ok(None);
+    }
+    let free_count_ptr = ptr.add(L_FREE_COUNT) as *const AtomicU64;
+    let mut free = (*free_count_ptr).load(Ordering::Acquire);
+    loop {
+        if free <= floor {
+            return Err(());
+        }
+        match (*free_count_ptr).compare_exchange_weak(
+            free,
+            free - 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => free = observed,
+        }
+    }
+    if (*state_ptr)
+        .compare_exchange(
+            LEASE_STATE_FREE,
+            LEASE_STATE_TRANSITION,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        (*free_count_ptr).fetch_add(1, Ordering::AcqRel);
+        return Ok(None);
+    }
+    let generation_ptr = ptr.add(base + LR_GENERATION) as *const AtomicU32;
+    let owner_ptr = ptr.add(base + LR_OWNER_HASH) as *const AtomicU64;
+    let generation = (*generation_ptr)
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    (*owner_ptr).store(owner_hash, Ordering::Release);
+    (*state_ptr).store(LEASE_STATE_LEASED, Ordering::Release);
+    Ok(Some((block_id, generation)))
+}
+
 #[inline(always)]
 fn reservation_applies_to_owner(
     reserved_blocks: u32,
@@ -1043,8 +1103,28 @@ unsafe fn acquire_lease_blocks(
     allow_partial: bool,
     strict_preferred: bool,
     owner_hash: u64,
+    floor: Option<u64>,
 ) -> PyResult<Vec<(u32, u32)>> {
     let mut acquired: Vec<(u32, u32)> = Vec::with_capacity(count as usize);
+    let mut floor_reached = false;
+    // With reserved headroom, claim only while the free count stays above it.
+    let claim = |block_id: u32| -> Result<Option<(u32, u32)>, ()> {
+        match floor {
+            Some(floor) => try_acquire_lease_block_above_floor(
+                ptr,
+                total_blocks,
+                block_id,
+                owner_hash,
+                floor,
+            ),
+            None => Ok(try_acquire_lease_block(
+                ptr,
+                total_blocks,
+                block_id,
+                owner_hash,
+            )),
+        }
+    };
 
     for block_id in preferred_blocks.iter().copied() {
         if acquired.len() >= count as usize {
@@ -1053,12 +1133,17 @@ unsafe fn acquire_lease_blocks(
         if acquired.iter().any(|(existing, _)| *existing == block_id) {
             continue;
         }
-        if let Some(lease) = try_acquire_lease_block(ptr, total_blocks, block_id, owner_hash) {
-            acquired.push(lease);
+        match claim(block_id) {
+            Ok(Some(lease)) => acquired.push(lease),
+            Ok(None) => {}
+            Err(()) => {
+                floor_reached = true;
+                break;
+            }
         }
     }
 
-    if !strict_preferred && acquired.len() < count as usize {
+    if !floor_reached && !strict_preferred && acquired.len() < count as usize {
         for block_id in 0..total_blocks {
             if acquired.len() >= count as usize {
                 break;
@@ -1066,8 +1151,10 @@ unsafe fn acquire_lease_blocks(
             if preferred_blocks.contains(&block_id) {
                 continue;
             }
-            if let Some(lease) = try_acquire_lease_block(ptr, total_blocks, block_id, owner_hash) {
-                acquired.push(lease);
+            match claim(block_id) {
+                Ok(Some(lease)) => acquired.push(lease),
+                Ok(None) => {}
+                Err(()) => break,
             }
         }
     }
@@ -1112,6 +1199,16 @@ fn kv_lease_acquire(
     unsafe {
         let total_blocks = validate_lease_buffer(ptr, buf_len)?;
         let _mutation = enter_lease_mutation(ptr)?;
+        let (reserved_blocks, reserved_owner_hash, _epoch) = load_lease_reservation(ptr);
+        let floor = if reservation_applies_to_owner(
+            reserved_blocks,
+            reserved_owner_hash,
+            owner_hash,
+        ) {
+            Some(reserved_blocks as u64)
+        } else {
+            None
+        };
         acquire_lease_blocks(
             ptr,
             total_blocks,
@@ -1120,14 +1217,18 @@ fn kv_lease_acquire(
             allow_partial,
             strict_preferred,
             owner_hash,
+            floor,
         )
     }
 }
 
 /// Acquire KV block leases only if no reservation applies to this owner.
 ///
-/// Returns None when a transition reservation is active or becomes active
-/// during acquisition; callers should retry under the reservation lock.
+/// Under an active reservation, blocks are claimed only while the shared free
+/// count stays above the reserved headroom, which keeps this path lock-free
+/// for the common case. Returns None when the headroom would be needed or the
+/// reservation changes during acquisition; callers then retry under the
+/// reservation lock, which reports the shortage.
 #[pyfunction]
 #[pyo3(signature = (
     buf,
@@ -1158,23 +1259,32 @@ fn kv_lease_acquire_lockless_if_unreserved(
         let _mutation = enter_lease_mutation(ptr)?;
         let (before_reserved_blocks, before_reserved_owner_hash, before_epoch) =
             load_lease_reservation(ptr);
-        if reservation_applies_to_owner(
+        let floor = if reservation_applies_to_owner(
             before_reserved_blocks,
             before_reserved_owner_hash,
             owner_hash,
         ) {
-            return Ok(None);
-        }
+            Some(before_reserved_blocks as u64)
+        } else {
+            None
+        };
 
         let acquired = acquire_lease_blocks(
             ptr,
             total_blocks,
             &preferred_blocks,
             count,
-            allow_partial,
+            // Under headroom a shortfall defers to the locked path below
+            // instead of raising here.
+            allow_partial || floor.is_some(),
             strict_preferred,
             owner_hash,
+            floor,
         )?;
+        if floor.is_some() && !allow_partial && acquired.len() < count as usize {
+            release_acquired_lease_blocks(ptr, &acquired);
+            return Ok(None);
+        }
 
         let (after_reserved_blocks, after_reserved_owner_hash, after_epoch) =
             load_lease_reservation(ptr);
