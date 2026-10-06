@@ -29,7 +29,7 @@ from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -665,7 +665,10 @@ class MultimodalRequestProcessor:
                             ) from exc
                 except UrlValidationError as e:
                     raise HttpStatusError(400, str(e), source) from e
-                except HttpStatusError:
+                except (HttpStatusError, HttpConfigurationError):
+                    # An untrusted egress proxy is deployment configuration,
+                    # not a bad request. It carries no status, so the generic
+                    # handler below would make it a 400.
                     raise
                 except MissingMediaDecoderError as e:
                     # A missing decoder is deployment configuration, not a bad

@@ -484,6 +484,60 @@ async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_video_through_an_untrusted_proxy_is_not_a_client_error(
+    monkeypatch,
+) -> None:
+    """The shared client refuses a fetch that an untrusted proxy would carry.
+
+    That is deployment configuration, not a bad request, so the type must
+    reach the caller: the bindings map an exception with no status to a 500.
+    The generic video handler used to wrap it in a 400. This drives the real
+    fetch: the public IP literal needs no DNS lookup, and the proxy check
+    refuses the fetch before any connection.
+    """
+    from dynamo.common.http import HttpConfigurationError, close_http_client
+
+    for name in (
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "DYN_MM_ALLOW_INTERNAL",
+        "DYN_MM_TRUST_EGRESS_PROXY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    try:
+        with pytest.raises(HttpConfigurationError) as exc_info:
+            await processor.process_openai_request(
+                {
+                    "multi_modal_data": {
+                        "video_url": [{"Url": "https://93.184.216.34/v.mp4"}]
+                    },
+                    "token_ids": [1],
+                },
+                embeddings=None,
+                ep_disaggregated_params=None,
+            )
+    finally:
+        await close_http_client()
+
+    assert not isinstance(exc_info.value, HttpStatusError)
+    assert "DYN_MM_TRUST_EGRESS_PROXY" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "request_extra, expected",
     [
