@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import textwrap
@@ -173,3 +174,43 @@ def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
         entry for entry in release.entry_points if entry.name == "aiconfigurator"
     )
     assert legacy_cli.value == "aisimulate.legacy_cli.entrypoint:main"
+
+
+def test_pinned_aisimulate_exports_replay_layout_helpers() -> None:
+    if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
+        pytest.skip("AISimulate supports Python 3.11 through 3.13")
+
+    # The exact dependency pin owns this private layout protocol. Fail this
+    # installed-package check when an upgrade removes or changes its contract.
+    from aisimulate.config.engine import resolve_block_size
+    from aisimulate.runner import _kv_layout_id
+
+    block_size = resolve_block_size("vllm", None)
+    rank = {
+        "backend": "vllm",
+        "block_size": block_size,
+        "kv_cache_bytes_per_token": 1024,
+        "timing_model": {
+            "config": {
+                "model": "resolved-model",
+                "tp": 2,
+                "backend_version": "fixture-version",
+                "pp": 1,
+                "dcp": 2,
+                "kvcache_quant_mode": "fp8",
+                "attention_backend": "fixture-attention",
+            }
+        },
+    }
+    assert json.loads(_kv_layout_id(rank, "fallback-model", 1)) == {
+        "model": "resolved-model",
+        "backend": "vllm",
+        "tp": 2,
+        "block_size": block_size,
+        "bytes_per_token": 1024,
+        "backend_version": "fixture-version",
+        "pp": 1,
+        "dcp": 2,
+        "kvcache_quant_mode": "fp8",
+        "attention_backend": "fixture-attention",
+    }

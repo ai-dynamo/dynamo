@@ -698,6 +698,121 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
     assert seen["supports_disaggregated_attention_dp"] is True
 
 
+@pytest.mark.parametrize("supported", [False, True])
+def test_agentic_capabilities_follow_engine_support_in_offline_mode(
+    monkeypatch, supported
+):
+    native = replace(
+        simulation.EngineReplayRunnerFactory().capabilities(),
+        supports_agentic_host_offload=supported,
+        supports_agentic_snapshots=supported,
+        supports_agentic_warmup=supported,
+        supports_agentic_profile=supported,
+    )
+    monkeypatch.setattr(
+        simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
+    )
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+    assert capabilities.supported_execution_modes == ("offline",)
+    assert capabilities.supports_agentic_host_offload is supported
+    assert capabilities.supports_agentic_snapshots is supported
+    assert capabilities.supports_agentic_warmup is supported
+    assert capabilities.supports_agentic_profile is supported
+    # Dynamo's composed runtime retains its pre-existing HBM speculation support.
+    assert capabilities.supports_agentic_speculative_decoding
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("alias", ["aic_nextn", "nextn", "speculation"])
+def test_agentic_speculation_capability_does_not_bypass_g2_scope(nested, alias):
+    rank = {
+        "engine_type": "vllm",
+        "native_host_offload": {"num_host_blocks": 8},
+        alias: {"nextn": 2} if alias == "speculation" else 2,
+    }
+    deployment = replace(
+        _agg_deployment(),
+        num_workers=1,
+        agg_engine_args={"rank": rank} if nested else rank,
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_format": "weka", "agentic_lanes": 1},
+        goal={"target": "throughput"},
+    )
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+    with pytest.raises(ValueError, match="requires speculative decoding disabled"):
+        capabilities.require_compatible(spec)
+    rank.pop("native_host_offload")
+    capabilities.require_compatible(spec)
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize(
+    "speculation", [{"aic_nextn": 2}, {"decode_speedup_ratio": 2.0}]
+)
+def test_hbm_agentic_speculation_runs_through_native_replay(tmp_path, speculation):
+    trace = tmp_path / "hbm-agentic.jsonl"
+    trace.write_text(
+        json.dumps(
+            {
+                "id": "hbm-play",
+                "models": ["target-model"],
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "requests": [
+                    {
+                        "t": 0,
+                        "type": "s",
+                        "model": "target-model",
+                        "in": 4,
+                        "out": 7,
+                        "hash_ids": [1],
+                        "api_time": 0.1,
+                    }
+                ],
+            }
+        )
+        + "\n"
+    )
+    base_args = {
+        "engine_type": "vllm",
+        "block_size": 4,
+        "num_gpu_blocks": 8,
+        "max_num_batched_tokens": 16,
+        "max_num_seqs": 1,
+        "timing_model": {"type": "fixed", "prefill_ms": 2, "decode_ms": 8},
+    }
+    spec = ReplaySpec(
+        backend_deployment=replace(
+            _agg_deployment(), num_workers=1, agg_engine_args=base_args
+        ),
+        workload={
+            "source_type": "trace",
+            "load_type": "trace_timestamps",
+            "trace_format": "weka",
+            "trace_path": str(trace),
+            "trace_block_size": 4,
+            "agentic_lanes": 1,
+        },
+        goal={"target": "throughput"},
+    )
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+    baseline = runner.run(spec)
+    accelerated = runner.run(
+        replace(
+            spec,
+            backend_deployment=replace(
+                spec.backend_deployment, agg_engine_args={**base_args, **speculation}
+            ),
+        )
+    )
+    assert baseline.metrics["completed_requests"] == 1
+    assert accelerated.metrics["completed_requests"] == 1
+    assert accelerated.metrics["total_output_tokens"] == 7
+    assert accelerated.metrics["duration_ms"] < baseline.metrics["duration_ms"]
+
+
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(

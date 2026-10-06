@@ -65,6 +65,13 @@ impl AgenticReplayOptions {
         lanes: Option<usize>,
         max_sim_time_ms: Option<f64>,
     ) -> Result<WorkloadDriver> {
+        // Snapshot lanes independently sample the corpus and may outnumber
+        // source plays; only finite replay caps lanes to the play count.
+        let lanes = if self.snapshot.is_some() {
+            lanes
+        } else {
+            super::effective_agentic_lanes(lanes, trace.play_count())
+        };
         self.validate(lanes, max_sim_time_ms)?;
         let Some(snapshot) = self.snapshot else {
             return trace
@@ -168,7 +175,11 @@ mod tests {
 
     #[test]
     fn finite_workload_preserves_timestamps_and_scales_timers_once() {
-        for (lanes, first_ms, second_ms) in [(None, 100.0, 220.0), (Some(1), 0.0, 120.0)] {
+        for (lanes, first_ms, second_ms) in [
+            (None, 100.0, 220.0),
+            (Some(1), 0.0, 120.0),
+            (Some(3), 0.0, 120.0),
+        ] {
             let mut regular = AgenticReplayOptions::default()
                 .into_driver(recorded_graph(), 4, true, lanes, None)
                 .unwrap();

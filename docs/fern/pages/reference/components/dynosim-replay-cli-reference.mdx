@@ -252,7 +252,8 @@ Mooncake-delta traces. No connector configuration is required.
 
 For AgentX graphs, G2 requires vLLM, one aggregated worker or one prefill plus
 one decode worker, attention DP=1 on every role, static worker pools, and no
-speculative decoding. Tensor parallelism may exceed one. These AgentX limits
+speculative decoding (`ais_nextn` and `ais_perf_config.speculation` unset,
+`decode_speedup_ratio=1.0`). Tensor parallelism may exceed one. These AgentX limits
 also apply when a Dynamo trace contains agent context but `agentic_lanes` is
 omitted. Ordinary traces retain their existing topology support; a standard
 Dynamo trace with two workers and attention DP=2 is covered by the G2 tests.
@@ -266,10 +267,17 @@ must supply a compatible `kv_layout_id` for a shared pool. Host-tier events
 remain distinct from GPU residency, while the KV router retains its configured
 host-tier weighting. P-to-D handoff uses GPU-resident hashes.
 
+`kv_bytes_per_token` describes P-to-D transfer size;
+`kv_cache_bytes_per_token` describes the physical cache footprint used by G2.
+Set both when the geometries differ. With host offload enabled, an omitted cache
+size falls back to the transfer size. Automatic shared-layout identity requires
+a resolved, positive cache size.
+
 The Python `run_trace_replay` API also accepts `agentic_snapshot` (a mapping
 containing `seed`), `agentic_warmup` (default `False`), and `agentic_profile`
 (AISimulate's duration, response-grace, and cancellation-drain options).
-Snapshots require positive `agentic_lanes`; warmup and profiling require a
+These phase controls require offline replay. Snapshots require positive
+`agentic_lanes`; warmup and profiling require a
 snapshot. Profiling cannot be combined with `max_sim_time_ms`. Warmup retains
 G1/G2 state across the measurement barrier. Results retain `agentic_snapshots`,
 `agentic_phases`, and `agentic_profile` when those phases are enabled.

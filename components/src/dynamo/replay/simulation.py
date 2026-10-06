@@ -85,11 +85,15 @@ class DynamoReplayRunnerFactory:
                 "weka",
             ),
             supports_agentic_lanes=engine_capabilities.supports_agentic_lanes,
-            supports_agentic_host_offload=True,
-            supports_agentic_speculative_decoding=False,
-            supports_agentic_snapshots=True,
-            supports_agentic_warmup=True,
-            supports_agentic_profile=True,
+            supports_agentic_host_offload=(
+                engine_capabilities.supports_agentic_host_offload
+            ),
+            # The composed mocker path preserves HBM-only MTP and decode-speedup
+            # support. The shared G2 gate and native guard reject that combination.
+            supports_agentic_speculative_decoding=True,
+            supports_agentic_snapshots=engine_capabilities.supports_agentic_snapshots,
+            supports_agentic_warmup=engine_capabilities.supports_agentic_warmup,
+            supports_agentic_profile=engine_capabilities.supports_agentic_profile,
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
             supported_agentic_topologies=tuple(

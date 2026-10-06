@@ -813,3 +813,113 @@ def test_ais_sdk_accepts_only_canonical_identity():
         MockEngineArgs(aic_backend="vllm")
     with pytest.raises(TypeError):
         MockEngineArgs(ais_backend="vllm")
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+@pytest.mark.parametrize("configured_block_size", [None, 128])
+def test_shared_layout_uses_resolved_engine_geometry(backend, configured_block_size):
+    replay = _load_replay_main()
+    raw = {
+        "engine_type": backend,
+        "block_size": configured_block_size,
+        "kv_cache_bytes_per_token": 1024,
+        "kv_bytes_per_token": 4096,
+        "native_host_offload": {"scope": "cluster_shared", "num_host_blocks": 8},
+    }
+
+    lowered = replay.lower_upstream_engine_args(raw)
+    args = replay.load_engine_args(lowered)
+    layout = json.loads(lowered["native_host_offload"]["kv_layout_id"])
+
+    assert args.block_size == layout["block_size"] == lowered["block_size"]
+    native_geometry = {"engine_type": backend}
+    if configured_block_size is not None:
+        native_geometry["block_size"] = configured_block_size
+    assert (
+        args.block_size
+        == MockEngineArgs.from_json(json.dumps(native_geometry)).block_size
+    )
+    assert args.kv_cache_bytes_per_token == layout["bytes_per_token"] == 1024
+    assert args.kv_bytes_per_token == 4096
+
+
+def test_shared_layout_respects_sglang_page_size():
+    replay = _load_replay_main()
+    lowered = replay.lower_upstream_engine_args(
+        {
+            "engine_type": "sglang",
+            "sglang": {"page_size": 16},
+            "kv_cache_bytes_per_token": 1024,
+            "native_host_offload": {"scope": "cluster_shared", "num_host_blocks": 8},
+        }
+    )
+    assert replay.load_engine_args(lowered).block_size == 16
+    assert (
+        json.loads(lowered["native_host_offload"]["kv_layout_id"])["block_size"] == 16
+    )
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_shared_layout_materializes_documented_host_geometry_fallback(explicit_null):
+    replay = _load_replay_main()
+    raw = {
+        "kv_bytes_per_token": 2048,
+        "native_host_offload": {"scope": "cluster_shared", "num_host_blocks": 8},
+    }
+    if explicit_null:
+        raw["kv_cache_bytes_per_token"] = None
+    lowered = replay.lower_upstream_engine_args(raw)
+    assert lowered["kv_cache_bytes_per_token"] == 2048
+    assert replay.load_engine_args(lowered).kv_cache_bytes_per_token == 2048
+    assert (
+        json.loads(lowered["native_host_offload"]["kv_layout_id"])["bytes_per_token"]
+        == 2048
+    )
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        {},
+        {"kv_cache_bytes_per_token": None},
+        {"kv_cache_bytes_per_token": 0},
+        {"kv_cache_bytes_per_token": -1},
+        {"kv_cache_bytes_per_token": True},
+    ],
+)
+def test_shared_layout_rejects_unresolved_or_invalid_cache_geometry(geometry):
+    replay = _load_replay_main()
+    with pytest.raises(
+        ValueError, match="requires resolved positive kv_cache_bytes_per_token"
+    ):
+        replay.lower_upstream_engine_args(
+            {
+                **geometry,
+                "native_host_offload": {
+                    "scope": "cluster_shared",
+                    "num_host_blocks": 8,
+                },
+            }
+        )
+
+
+def test_nested_replay_geometry_keeps_handoff_separate_from_cache():
+    replay = _load_replay_main()
+    lowered = replay.lower_upstream_engine_args(
+        {
+            "rank": {
+                "backend": "vllm",
+                "kv_transfer_bytes_per_token": 4096,
+                "kv_cache_bytes_per_token": 1024,
+                "native_host_offload": {
+                    "scope": "cluster_shared",
+                    "num_host_blocks": 8,
+                    "kv_layout_id": "fixture-quantized-kv-layout",
+                },
+            }
+        }
+    )
+    args = replay.load_engine_args(lowered)
+    assert "kv_transfer_bytes_per_token" not in lowered
+    assert lowered["kv_bytes_per_token"] == args.kv_bytes_per_token == 4096
+    assert lowered["kv_cache_bytes_per_token"] == args.kv_cache_bytes_per_token == 1024

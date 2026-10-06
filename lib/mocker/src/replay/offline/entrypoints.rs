@@ -27,7 +27,6 @@ use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode,
     ReplayTelemetryOptions, ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
-    effective_agentic_lanes,
 };
 use crate::scheduler::RouterEventVisibility;
 
@@ -84,13 +83,14 @@ fn validate_agentic_host_offload(
             "agentic host offload requires attention DP=1 on every role"
         );
         anyhow::ensure!(
-            args.ais_nextn.is_none()
+            args.decode_speedup_ratio == 1.0
+                && args.ais_nextn.is_none()
                 && args.ais_perf_config.as_ref().is_none_or(|config| {
                     config
                         .get("speculation")
                         .is_none_or(serde_json::Value::is_null)
                 }),
-            "agentic replay requires speculative decoding disabled"
+            "agentic host offload requires speculative decoding disabled"
         );
     }
     Ok(())
@@ -648,11 +648,6 @@ pub(crate) fn simulate_agentic_trace_workload(
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    let agentic_lanes = if agentic_options.snapshot.is_some() {
-        agentic_lanes
-    } else {
-        effective_agentic_lanes(agentic_lanes, trace.play_count())
-    };
     let driver = agentic_options.into_driver(
         trace,
         args.block_size,
@@ -692,11 +687,6 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
-    let agentic_lanes = if agentic_options.snapshot.is_some() {
-        agentic_lanes
-    } else {
-        effective_agentic_lanes(agentic_lanes, trace.play_count())
-    };
     let driver = agentic_options.into_driver(
         trace,
         config.prefill_args.block_size,
@@ -983,7 +973,19 @@ mod agentic_host_offload_tests {
         invalid.ais_nextn = Some(1);
         invalid_roles.push((
             invalid,
-            "agentic replay requires speculative decoding disabled",
+            "agentic host offload requires speculative decoding disabled",
+        ));
+        let mut invalid = args(None);
+        invalid.decode_speedup_ratio = 2.0;
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires speculative decoding disabled",
+        ));
+        let mut invalid = args(None);
+        invalid.ais_perf_config = Some(serde_json::json!({"speculation": {"nextn": 2}}));
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires speculative decoding disabled",
         ));
         for (invalid, expected) in invalid_roles {
             for roles in [
@@ -1066,10 +1068,15 @@ mod agentic_host_offload_tests {
         let mut hbm = args(None);
         hbm.engine_type = EngineType::Sglang;
         hbm.dp_size = 2;
+        hbm.decode_speedup_ratio = 2.0;
+        validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
+        hbm.decode_speedup_ratio = 1.0;
+        hbm.ais_nextn = Some(2);
         validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
 
         let mut offloaded = args(Some("cluster_shared"));
         offloaded.dp_size = 2;
+        offloaded.decode_speedup_ratio = 2.0;
         validate_agentic_host_offload(
             &ReplayRuntimeInput::Requests(VecDeque::new()),
             &[(2, &offloaded)],

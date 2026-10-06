@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 from aisimulate.capacity import materialize_aic_num_gpu_blocks
+from aisimulate.config.engine import resolve_block_size
+from aisimulate.runner import _kv_layout_id
 
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import (
@@ -126,6 +128,8 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
         raw.update(nested)
         for source, target in (
             ("backend", "engine_type"),
+            # MockEngineArgs uses this name for P/D transfer bytes; retain the
+            # independent physical kv_cache_bytes_per_token field unchanged.
             ("kv_transfer_bytes_per_token", "kv_bytes_per_token"),
         ):
             if source in raw:
@@ -171,21 +175,44 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
         and host.get("scope") == "cluster_shared"
         and host.get("kv_layout_id") is None
     ):
-        # Reuse AISimulate's resolved KV identity rather than inventing a
-        # connector-specific layout ID. Native nested ranks require an explicit ID.
-        from aisimulate.runner import _kv_layout_id
-
+        # AISimulate's pinned release owns the layout identity; its private
+        # helper is covered by the installed-package compatibility test. Native
+        # nested ranks require an explicit ID.
         backend = raw.get("engine_type", identity.get("backend", "vllm"))
         if not isinstance(backend, str) or backend not in {"vllm", "sglang", "trtllm"}:
             raise ValueError(f"unsupported engine_type for host offload: {backend!r}")
+        block_size = raw.get("block_size")
+        if block_size is None and backend == "sglang":
+            block_size = (raw.get("sglang") or {}).get("page_size")
+        if block_size is not None and (
+            not isinstance(block_size, int)
+            or isinstance(block_size, bool)
+            or block_size <= 0
+        ):
+            raise ValueError(
+                "automatic cluster_shared layout requires positive block_size"
+            )
+        cache_bytes = raw.get("kv_cache_bytes_per_token")
+        if cache_bytes is None:
+            # Match MockEngineArgs' documented host-offload fallback. An
+            # explicit cache size always wins over the P/D transfer geometry.
+            cache_bytes = raw.get("kv_bytes_per_token")
+        if (
+            not isinstance(cache_bytes, int)
+            or isinstance(cache_bytes, bool)
+            or cache_bytes <= 0
+        ):
+            raise ValueError(
+                "automatic cluster_shared layout requires resolved positive "
+                "kv_cache_bytes_per_token (or kv_bytes_per_token host fallback)"
+            )
+        # Use identical resolved geometry in both the hash and actual engine.
+        raw["block_size"] = resolve_block_size(backend, block_size)
+        raw["kv_cache_bytes_per_token"] = cache_bytes
         rank = {
             "backend": backend,
-            "block_size": raw.get(
-                "block_size", {"vllm": 64, "sglang": 1, "trtllm": 32}[backend]
-            ),
-            "kv_cache_bytes_per_token": raw.get(
-                "kv_cache_bytes_per_token", raw.get("kv_bytes_per_token")
-            ),
+            "block_size": raw["block_size"],
+            "kv_cache_bytes_per_token": cache_bytes,
             "timing_model": {"config": raw.get("ais_perf_config", {})},
         }
         raw["native_host_offload"] = {

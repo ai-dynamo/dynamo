@@ -957,7 +957,7 @@ pub fn run_mocker_trace_replay(
         }
         if replay_concurrency.is_some() {
             return Err(PyValueError::new_err(
-                "agentic_snapshot requires agentic trace input without replay_concurrency",
+                "agentic phases require agentic trace input without replay_concurrency",
             ));
         }
         if !matches!(
@@ -1430,6 +1430,8 @@ fn run_loaded_dynamo_request_trace(
                 );
             }
             let trace = if agentic_options.snapshot.is_some() {
+                // Snapshot sampling uses recorded source time; normalizing
+                // here would change the sampled frontier and cache state.
                 trace
             } else {
                 trace.normalize_starts()
