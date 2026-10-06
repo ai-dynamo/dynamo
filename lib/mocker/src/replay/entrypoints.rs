@@ -2455,18 +2455,21 @@ pub fn simulate_concurrency_live_workload_with_router_mode_and_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
+    use crate::common::perf_model::PerfModel;
+    use crate::common::protocols::{EngineType, NativeHostOffloadConfig, SglangArgs, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use crate::replay::ReplayRuntimeObservers;
     use aisimulate_core::replay::{
         ForwardPassSnapshot, ReplayRequestPool, ReplayScalingDecision, ReplayScalingPolicy,
         ReplayScalingSnapshot,
     };
+    use aisimulate_core::replay::{PerRequestRecord, PerRequestRoutingRecord};
     use rstest::rstest;
     use std::cell::RefCell;
     use std::collections::BTreeSet;
     use std::io::Write;
     use std::rc::Rc;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
@@ -2878,6 +2881,163 @@ mod tests {
             num_prefill_workers: 1,
             num_decode_workers: 1,
         }
+    }
+
+    /// vLLM args whose G1 holds exactly one 10-token request (3 blocks), so
+    /// any later request on the same rank evicts the previous prompt. Decode
+    /// steps are slow so a two-token request keeps its worker busy for ~100 ms.
+    fn host_offload_args(host_offload: Option<NativeHostOffloadConfig>) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(3)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(1))
+            .kv_cache_bytes_per_token(Some(1024))
+            .native_host_offload(host_offload)
+            .perf_model(Arc::new(PerfModel::Fixed {
+                prefill_ms: 1.0,
+                decode_ms: 100.0,
+            }))
+            .build()
+            .unwrap()
+    }
+
+    fn prompt_request(id: u128, first_token: u32, arrival_ms: f64, output: usize) -> DirectRequest {
+        DirectRequest {
+            tokens: (first_token..first_token + 10).collect(),
+            max_output_tokens: output,
+            uuid: Some(Uuid::from_u128(id)),
+            arrival_timestamp_ms: Some(arrival_ms),
+            ..Default::default()
+        }
+    }
+
+    fn replay_with_records(
+        args: MockEngineArgs,
+        requests: Vec<DirectRequest>,
+        num_workers: usize,
+    ) -> TraceSimulationReport {
+        simulate_trace_requests_with_router_mode_and_runtime_observers(
+            args,
+            None,
+            None,
+            requests,
+            num_workers,
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            SlaThresholds::default(),
+            ReplayRuntimeObservers::default(),
+        )
+        .unwrap()
+    }
+
+    fn record(report: &TraceSimulationReport, id: u128) -> &PerRequestRecord {
+        let uuid = Uuid::from_u128(id).to_string();
+        report
+            .per_request
+            .iter()
+            .find(|record| record.uuid == uuid)
+            .expect("request record")
+    }
+
+    /// A finishes on one worker, B pins the other, then C evicts A from the
+    /// first worker's G1. A's repeat has no G1 copy anywhere, and when it
+    /// arrives both workers are decoding: C (3 blocks) on A's worker, the
+    /// shorter B (2 blocks) on the other, so load alone prefers B's worker.
+    fn evicted_prefix_requests() -> Vec<DirectRequest> {
+        vec![
+            prompt_request(1, 0, 0.0, 1),
+            // B pins the other worker (one slow decode step) while A runs.
+            DirectRequest {
+                tokens: (1_000..1_005).collect(),
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(2)),
+                arrival_timestamp_ms: Some(0.5),
+                ..Default::default()
+            },
+            // C lands on A's idle worker, evicts A from that worker's G1, and
+            // is still decoding when A repeats.
+            prompt_request(3, 2_000, 20.0, 2),
+            prompt_request(4, 0, 50.0, 1),
+        ]
+    }
+
+    fn route(report: &TraceSimulationReport, id: u128) -> PerRequestRoutingRecord {
+        let history = &record(report, id).routing_history;
+        assert_eq!(history.len(), 1);
+        history[0].clone()
+    }
+
+    #[test]
+    fn without_host_offload_the_repeat_follows_load() {
+        let report = replay_with_records(host_offload_args(None), evicted_prefix_requests(), 2);
+        assert_eq!(report.request_counts.completed_requests, 4);
+        assert_eq!(
+            route(&report, 4).logical_worker_id,
+            route(&report, 2).logical_worker_id
+        );
+    }
+
+    #[test]
+    fn dp_rank_local_host_offload_routes_repeat_to_the_owning_worker() {
+        let host_offload = NativeHostOffloadConfig::new(64).with_bandwidths(0.0, 0.0);
+        let report = replay_with_records(
+            host_offload_args(Some(host_offload)),
+            evicted_prefix_requests(),
+            2,
+        );
+        assert_eq!(report.request_counts.completed_requests, 4);
+        assert_ne!(
+            route(&report, 1).logical_worker_id,
+            route(&report, 2).logical_worker_id
+        );
+        assert_eq!(
+            route(&report, 3).logical_worker_id,
+            route(&report, 1).logical_worker_id
+        );
+        // Only A's first worker holds A, in its private G2. The router sees it
+        // through HostPinned events and sends the repeat there.
+        let repeat_route = route(&report, 4);
+        assert_eq!(
+            repeat_route.logical_worker_id,
+            route(&report, 1).logical_worker_id
+        );
+        // Two G2 blocks at the default host_cache_hit_weight of 0.75 score 1.5,
+        // rounded like the production router's overlap metric.
+        assert_eq!(repeat_route.best_available_overlap_blocks, Some(2));
+        assert_eq!(repeat_route.selected_overlap_blocks, Some(2));
+        let repeat = record(&report, 4);
+        assert_eq!(repeat.first_admission_g1_reused_input_tokens, Some(0));
+        assert_eq!(repeat.first_admission_host_reused_input_tokens, Some(8));
+    }
+
+    #[test]
+    fn cluster_shared_host_offload_is_scored_by_kv_router() {
+        let host_offload = NativeHostOffloadConfig::new(64)
+            .with_bandwidths(0.0, 0.0)
+            .cluster_shared("test-kv-layout");
+        let requests = evicted_prefix_requests();
+
+        let report = replay_with_records(host_offload_args(Some(host_offload)), requests, 2);
+        assert_eq!(report.request_counts.completed_requests, 4);
+        assert_ne!(
+            route(&report, 1).logical_worker_id,
+            route(&report, 2).logical_worker_id
+        );
+        assert_eq!(
+            route(&report, 3).logical_worker_id,
+            route(&report, 1).logical_worker_id
+        );
+        let repeat = record(&report, 4);
+        assert_eq!(repeat.first_admission_g1_reused_input_tokens, Some(0));
+        assert_eq!(repeat.first_admission_host_reused_input_tokens, Some(8));
+        // The router saw A only through HostPinned events: two shared G2 blocks
+        // at 0.75 score 1.5 blocks, rounded to 2 for best, selected and tokens.
+        let repeat_route = route(&report, 4);
+        assert_eq!(repeat_route.best_available_overlap_blocks, Some(2));
+        assert_eq!(repeat_route.selected_overlap_blocks, Some(2));
+        assert_eq!(repeat_route.reported_overlap_tokens, Some(8));
     }
 
     fn attention_dp_requests(count: u32, spacing_ms: f64) -> Vec<DirectRequest> {
