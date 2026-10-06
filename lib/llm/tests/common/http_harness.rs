@@ -68,6 +68,14 @@ impl HarnessService {
     }
 
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+        Self::start_with_storage(engine, None).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn start_with_storage(
+        engine: Arc<ScriptedChatEngine>,
+        storage: Option<Arc<dynamo_llm::http::service::response_store::ResponseStorage>>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -78,6 +86,7 @@ impl HarnessService {
             .host("127.0.0.1")
             .enable_chat_endpoints(true)
             .enable_cmpl_endpoints(false)
+            .response_storage(storage)
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
             .build()

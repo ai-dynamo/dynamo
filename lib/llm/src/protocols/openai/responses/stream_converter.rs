@@ -904,6 +904,17 @@ impl ResponseStreamConverter {
         events.push(self.make_sse_event(&item_done));
     }
 
+    /// Snapshot used for persistence before emitting the terminal success event.
+    pub fn final_response(&self) -> super::NvResponse {
+        super::NvResponse {
+            inner: self.make_response(self.terminal_status(), self.completed_output()),
+            nvext: None,
+            presence_penalty: self.params.presence_penalty.unwrap_or(0.0),
+            frequency_penalty: self.params.frequency_penalty.unwrap_or(0.0),
+            store: self.params.store.unwrap_or(false),
+        }
+    }
+
     /// Emit remaining output completion events and `response.completed` at stream end.
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();

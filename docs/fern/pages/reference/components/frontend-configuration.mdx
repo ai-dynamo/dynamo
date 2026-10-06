@@ -892,3 +892,45 @@ All endpoint paths can be overridden via environment variables:
     Custom per-request fields for routing, preprocessing, and response metadata.
   </Card>
 </CardGroup>
+
+## Responses storage
+
+Responses storage is disabled by default. Set `DYN_RESPONSE_STORE_BACKEND=memory`
+to enable `previous_response_id`, `GET /v1/responses/{response_id}`, and
+`DELETE /v1/responses/{response_id}`. Inference workers need no storage flags.
+These environment variables are read when the frontend starts:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DYN_RESPONSE_STORE_BACKEND` | `disabled` | `disabled` or `memory` |
+| `DYN_RESPONSE_STORE_TTL_SECS` | `3600` | Retention after storing a terminal response; 1 second to 365 days |
+| `DYN_RESPONSE_STORE_MAX_BYTES` | `268435456` | Total serialized record and key bytes |
+| `DYN_RESPONSE_STORE_MAX_ENTRIES` | `10000` | Maximum number of retained responses |
+| `DYN_RESPONSE_STORE_MAX_RECORD_BYTES` | `8388608` | Maximum record and key size; also bounds replay history before generation |
+
+With storage enabled, requests store their results unless `store:false` is set.
+With storage disabled, responses report `store:false`, and continuation is rejected.
+`store:false` can still reference an existing stored response; it only prevents
+storage of the new result. Continuation reconstructs history before normal model
+routing. It does not reserve GPU KV cache or require the same inference worker.
+Current-request instructions and tools must be supplied again when needed.
+
+Memory storage belongs to one frontend process and is lost on restart. Route
+retrieval and continuation to that same frontend. Records are scoped by a hash
+of the HTTP Authorization credential. This does not authenticate clients: deploy
+behind authentication, preserve a stable per-caller credential, and do not treat
+`user` or `safety_identifier` as access controls. Calls without Authorization share
+one anonymous scope; calls sharing a credential share a scope.
+
+Each record includes the full continuation history. Deleting or expiring an ancestor
+does not invalidate descendants. TTL does not refresh on reads. Expired records
+are invisible immediately and swept every 30 seconds. Capacity limits reject writes
+without evicting unexpired records. The byte limit is serialized storage, not process
+RSS; active generation and serialization require additional memory.
+
+Missing, deleted, or expired IDs return 404. Oversized records return 413 and full
+storage returns 507. Storage is committed before returning a successful stored
+response. If storage fails after streaming has begun, the stream terminates with
+`response.failed` instead of claiming successful persistence. Generation may already
+have completed when a capacity error occurs; clients should size limits accordingly.
+Background execution remains unsupported in this change.

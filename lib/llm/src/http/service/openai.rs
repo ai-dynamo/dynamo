@@ -53,6 +53,7 @@ use super::{
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
+    response_store::{self, StoreError},
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
@@ -4096,15 +4097,23 @@ async fn handler_responses(
     )
     .await;
 
-    let response =
-        tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
-            .await
-            .map_err(|e| {
-                ErrorMessage::internal_server_error_with_details(
-                    "Failed to await responses task",
-                    format!("{e:?}"),
-                )
-            })?;
+    let response = tokio::spawn(
+        responses(
+            state,
+            template,
+            request,
+            stream_handle,
+            response_store::credential_scope(&headers),
+        )
+        .in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await responses task",
+            format!("{e:?}"),
+        )
+    })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -4121,6 +4130,7 @@ async fn responses(
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
     stream_handle: ConnectionHandle,
+    storage_scope: String,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -4177,6 +4187,14 @@ async fn responses(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
+
+    let prepared = response_store::prepare(state.response_storage(), &storage_scope, &mut request)
+        .await
+        .map_err(|error| {
+            let response = response_store_error(error);
+            inflight_guard.mark_error(extract_error_type_from_response(&response));
+            response
+        })?;
 
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
@@ -4438,7 +4456,18 @@ async fn responses(
                 }
                 yield terminal_event.map_err(axum::Error::new);
             } else {
-                converter.append_end_events(&mut events);
+                let persisted = if let Some(prepared) = &prepared {
+                    prepared.persist(&converter.final_response()).await
+                } else { Ok(()) };
+                if let Err(error) = persisted {
+                    producer_error_signal.set(ErrorType::Internal);
+                    let terminal = converter.append_error_events(ErrorObject {
+                        code: "server_error".to_string(), message: error.to_string(),
+                    }, &mut events);
+                    events.push(terminal);
+                } else {
+                    converter.append_end_events(&mut events);
+                }
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
@@ -4512,6 +4541,13 @@ async fn responses(
                     err_response
                 })?;
 
+        if let Some(prepared) = &prepared {
+            prepared.persist(&response).await.map_err(|error| {
+                let response = response_store_error(error);
+                inflight_guard.mark_error(extract_error_type_from_response(&response));
+                response
+            })?;
+        }
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
         // assembled but never delivered. Override to cancelled.
@@ -4548,11 +4584,6 @@ pub fn validate_response_unsupported_fields(
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
-        ));
-    }
-    if inner.previous_response_id.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
         ));
     }
     if inner.prompt.is_some() {
@@ -5058,6 +5089,65 @@ fn get_model_readiness(
     Ok(Json(model.namespace_readiness()).into_response())
 }
 
+fn response_store_error(error: StoreError) -> ErrorResponse {
+    let status = match error {
+        StoreError::Disabled | StoreError::NotFinished => StatusCode::BAD_REQUEST,
+        StoreError::NotFound => StatusCode::NOT_FOUND,
+        StoreError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        StoreError::Capacity => StatusCode::INSUFFICIENT_STORAGE,
+        StoreError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        StoreError::InvalidRecord => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(ErrorMessage {
+            message: error.to_string(),
+            error_type: if status.is_client_error() {
+                "invalid_request_error"
+            } else {
+                "server_error"
+            }
+            .into(),
+            code: status.as_u16(),
+            details: None,
+            metric_error_type: None,
+        }),
+    )
+}
+
+async fn retrieve_response(
+    State((state, _)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ErrorResponse> {
+    let storage = state
+        .response_storage()
+        .ok_or_else(|| response_store_error(StoreError::Disabled))?;
+    let record = storage
+        .get(&response_store::credential_scope(&headers), &id)
+        .await
+        .map_err(response_store_error)?;
+    Ok(Json(record.response).into_response())
+}
+
+async fn delete_response(
+    State((state, _)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ErrorResponse> {
+    let storage = state
+        .response_storage()
+        .ok_or_else(|| response_store_error(StoreError::Disabled))?;
+    if !storage
+        .delete(&response_store::credential_scope(&headers), &id)
+        .await
+        .map_err(response_store_error)?
+    {
+        return Err(response_store_error(StoreError::NotFound));
+    }
+    Ok(Json(serde_json::json!({"id":id, "object":"response", "deleted":true})).into_response())
+}
+
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoints
 /// (`/v1/responses` and `/v1/responses/input_tokens`).
 /// If not path is provided, the default path is `/v1/responses`
@@ -5077,13 +5167,17 @@ pub fn responses_router(
     let input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
+    let record_path = format!("{}/{{response_id}}", path.trim_end_matches('/'));
+    let get_doc = RouteDoc::new(Method::GET, &record_path);
+    let delete_doc = RouteDoc::new(Method::DELETE, &record_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
         .route(&input_tokens_path, post(handler_responses_input_tokens))
+        .route(&record_path, get(retrieve_response).delete(delete_response))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc, input_tokens_doc], router)
+    (vec![doc, input_tokens_doc, get_doc, delete_doc], router)
 }
 
 async fn images(
@@ -8178,10 +8272,6 @@ mod tests {
         #[allow(clippy::type_complexity)]
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
             ("background", Box::new(|r| r.background = Some(true))),
-            (
-                "previous_response_id",
-                Box::new(|r| r.previous_response_id = Some("prev-id".into())),
-            ),
             (
                 "prompt",
                 Box::new(|r| {

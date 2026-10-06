@@ -371,6 +371,12 @@ pub mod kvbm {
 
 /// LLM (Language Model) inference environment variables
 pub mod llm {
+    pub const DYN_RESPONSE_STORE_BACKEND: &str = "DYN_RESPONSE_STORE_BACKEND";
+    pub const DYN_RESPONSE_STORE_TTL_SECS: &str = "DYN_RESPONSE_STORE_TTL_SECS";
+    pub const DYN_RESPONSE_STORE_MAX_BYTES: &str = "DYN_RESPONSE_STORE_MAX_BYTES";
+    pub const DYN_RESPONSE_STORE_MAX_ENTRIES: &str = "DYN_RESPONSE_STORE_MAX_ENTRIES";
+    pub const DYN_RESPONSE_STORE_MAX_RECORD_BYTES: &str = "DYN_RESPONSE_STORE_MAX_RECORD_BYTES";
+
     /// Delay between tokens emitted by the token echo engine, in milliseconds.
     pub const DYN_TOKEN_ECHO_DELAY_MS: &str = "DYN_TOKEN_ECHO_DELAY_MS";
 
@@ -1113,6 +1119,11 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
+            llm::DYN_RESPONSE_STORE_BACKEND,
+            llm::DYN_RESPONSE_STORE_TTL_SECS,
+            llm::DYN_RESPONSE_STORE_MAX_BYTES,
+            llm::DYN_RESPONSE_STORE_MAX_ENTRIES,
+            llm::DYN_RESPONSE_STORE_MAX_RECORD_BYTES,
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,

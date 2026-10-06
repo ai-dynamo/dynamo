@@ -135,6 +135,7 @@ async fn track_inflight_inference(
 
 /// HTTP service shared state
 pub struct State {
+    response_storage: Option<Arc<super::response_store::ResponseStorage>>,
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     discovery_client: Arc<dyn Discovery>,
@@ -153,6 +154,7 @@ pub struct State {
 /// `MetricsConfig` initializes the per-service metrics object, while
 /// `FrontendApiConfig` is retained in `State` for route and handler decisions.
 struct StateConfig {
+    response_storage: Option<Arc<super::response_store::ResponseStorage>>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
@@ -526,6 +528,10 @@ impl StateFlags {
 }
 
 impl State {
+    pub fn response_storage(&self) -> Option<&Arc<super::response_store::ResponseStorage>> {
+        self.response_storage.as_ref()
+    }
+
     fn new(
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
@@ -533,6 +539,7 @@ impl State {
         config: StateConfig,
     ) -> Self {
         Self {
+            response_storage: config.response_storage,
             manager,
             metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
             discovery_client,
@@ -717,6 +724,10 @@ pub struct HttpService {
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct HttpServiceConfig {
+    /// Override the optional response store (otherwise configured from environment).
+    #[builder(default)]
+    response_storage: Option<Arc<super::response_store::ResponseStorage>>,
+
     #[builder(default = "8787")]
     port: u16,
 
@@ -909,6 +920,25 @@ impl HttpService {
             anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
         }
 
+        let storage_cancel = cancel_token.child_token();
+        let _storage_cleanup = storage_cancel.clone().drop_guard();
+        if let Some(storage) = self.state.response_storage() {
+            let storage = storage.clone();
+            let cancel = storage_cancel;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = interval.tick() => {
+                            if let Err(error) = storage.store.purge_expired().await {
+                                tracing::warn!(%error, "Response store expiration failed");
+                            }
+                        }
+                    }
+                }
+            });
+        }
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
@@ -1307,6 +1337,10 @@ impl HttpServiceConfigBuilder {
             discovery_client,
             cancel_token,
             StateConfig {
+                response_storage: match config.response_storage {
+                    Some(storage) => Some(storage),
+                    None => super::response_store::ResponseStorage::from_env()?,
+                },
                 metrics_config,
                 frontend_api_config,
                 nvext_enabled,
