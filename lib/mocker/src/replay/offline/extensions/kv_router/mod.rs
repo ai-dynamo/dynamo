@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
@@ -37,8 +36,9 @@ use crate::common::protocols::MockEngineArgs;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
-    replay_slots, replay_worker_config, replay_workers_with_configs,
+    ReplayNoopPublisher, ReplaySelector, ReplayWorkerConfig, replay_router_config,
+    replay_router_role, replay_selector_with_seed, replay_slots, replay_worker_config,
+    replay_workers_with_configs,
 };
 use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use aisimulate_core::replay::{
@@ -305,7 +305,16 @@ impl PendingRequest {
             token_seq: self.token_seq.take(),
             isl_tokens: self.isl_tokens,
             overlap: OverlapSignals {
-                tier_overlap_blocks: TierOverlapBlocks::default(),
+                // Replay's primary index holds device-resident blocks only.
+                tier_overlap_blocks: TierOverlapBlocks {
+                    device: self
+                        .overlaps
+                        .scores
+                        .iter()
+                        .map(|(worker, overlap)| (*worker, *overlap as usize))
+                        .collect(),
+                    ..TierOverlapBlocks::default()
+                },
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
@@ -341,7 +350,7 @@ pub(crate) struct OfflineReplayRouter {
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
-    selector: DefaultWorkerSelector,
+    selector: ReplaySelector,
     pending: PolicyQueue<PendingRequest>,
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -361,18 +370,13 @@ impl KvRouterPlacement {
         num_workers: usize,
         selector_seed: Option<u64>,
     ) -> Result<Self> {
-        let router = match selector_seed {
-            Some(seed) => OfflineReplayRouter::new_with_selector_seed(
-                args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-                Some(seed),
-            )?,
-            None => {
-                OfflineReplayRouter::new(args, router_config, prefill_load_estimator, num_workers)?
-            }
-        };
+        let router = OfflineReplayRouter::new_with_selector_seed(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            selector_seed,
+        )?;
         Ok(Self { router })
     }
 
@@ -535,6 +539,7 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
 }
 
 impl OfflineReplayRouter {
+    #[cfg(test)]
     pub(crate) fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
@@ -562,7 +567,7 @@ impl OfflineReplayRouter {
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector_with_seed(&config, selector_seed)?;
+        let selector = replay_selector_with_seed(&config, selector_seed, replay_router_role(args))?;
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
@@ -1403,6 +1408,72 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Uuid::from_u128(2)]
         );
+    }
+
+    #[test]
+    fn replay_routes_through_a_configured_catalog_policy() {
+        let policy_file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "worker_selection:\n  aggregated: hash\n  instances:\n    - name: hash\n      type: chwbl\n",
+        )
+        .unwrap();
+        let chwbl = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let targets = |config| {
+            let mut router =
+                OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
+            (1..=2)
+                .map(|uuid| {
+                    router
+                        .on_request_arrival(&request(uuid, 7), None, 0.0)
+                        .unwrap()
+                        .admissions[0]
+                        .worker_idx
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // The default selector moves the second identical prompt to the idle worker; CHWBL keeps
+        // it on the prefix's owner, which stays within its load bound.
+        let default = targets(KvRouterConfig::default());
+        assert_ne!(default[0], default[1]);
+        let hashed = targets(chwbl);
+        assert_eq!(hashed[0], hashed[1]);
+    }
+
+    #[test]
+    fn replay_passes_device_overlap_to_catalog_policies() {
+        let policy_file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "worker_selection:\n  aggregated: two-tier\n  instances:\n    - name: two-tier\n      type: dynamo-two-tier-cost-fn\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event_for_rank(
+                1,
+                0,
+                1,
+                hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        // Two-tier reads device-tier overlap; without it, the idle-worker tie goes to worker 0.
+        let effects = router
+            .on_request_arrival(&target, Some(hashes), 0.0)
+            .unwrap();
+        assert_eq!(effects.admissions[0].worker_idx, 1);
     }
 
     #[test]

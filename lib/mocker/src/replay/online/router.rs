@@ -27,7 +27,7 @@ use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs,
 };
 use crate::replay::router_shared::{
-    ReplayScheduler, replay_router_config, replay_selector, replay_slots,
+    ReplayScheduler, replay_router_config, replay_router_role, replay_selector, replay_slots,
     replay_workers_with_configs,
 };
 use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
@@ -200,7 +200,7 @@ impl KvReplayRouter {
         let slots = replay_slots(args, &workers_with_configs);
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
-        let selector = replay_selector(&config)?;
+        let selector = replay_selector(&config, replay_router_role(args))?;
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
@@ -302,7 +302,15 @@ impl KvReplayRouter {
                 request.tokens.len(),
                 token_seq,
                 None,
-                TierOverlapBlocks::default(),
+                TierOverlapBlocks {
+                    // Replay's primary index holds device-resident blocks only.
+                    device: overlaps
+                        .scores
+                        .iter()
+                        .map(|(worker, overlap)| (*worker, *overlap as usize))
+                        .collect(),
+                    ..TierOverlapBlocks::default()
+                },
                 effective_overlap_blocks,
                 effective_cached_tokens,
                 None,
