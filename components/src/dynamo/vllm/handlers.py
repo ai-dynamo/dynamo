@@ -1273,7 +1273,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._deferred_aborts: dict[str, _DeferredAbort] = {}
 
         self._multimodal_request_processor = VllmMultimodalRequestProcessor(
-            model=config.model,
+            model=config.model_source_path,
             engine_client=engine,
             enable_multimodal=enable_multimodal,
             enable_frontend_decoding=enable_frontend_decoding,
@@ -1362,7 +1362,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             config.engine_args,
         )
         encoder = AsyncVisionEncoder(backend)
-        encoder.load(config.model)
+        encoder.load(config.model_source_path)
         # Assign only after a successful load so a failed load (which already shut
         # its own thread down) leaves _custom_encoder None.
         self._custom_encoder = encoder
@@ -1370,7 +1370,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         logger.info(
             "Loaded CustomEncoder %s from %s with %s",
             custom_encoder_class,
-            config.model,
+            config.model_source_path,
             type(adapter).__name__,
         )
 

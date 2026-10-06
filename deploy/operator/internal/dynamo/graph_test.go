@@ -1394,6 +1394,7 @@ func TestGenerateComponentContext(t *testing.T) {
 				tt.namespace,
 				tt.numberOfNodes,
 				DiscoveryContext{Backend: tt.discoveryBackend, Mode: configv1alpha1.KubeDiscoveryModePod},
+				configv1alpha1.InfrastructureConfiguration{},
 			)
 			require.NoError(t, err)
 
@@ -1753,7 +1754,7 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 				},
 			}
 
-			AddStandardEnvVars(container, operatorConfig)
+			AddStandardEnvVars(container, operatorConfig.Infrastructure)
 			envByName := envVarsToMap(container.Env)
 
 			if tt.wantNATS {
@@ -1936,7 +1937,7 @@ func TestAddTransportTLSEnvVars(t *testing.T) {
 				Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 			}
 			tc.set(&operatorConfig.Infrastructure)
-			AddTransportTLSEnvVars(container, operatorConfig)
+			AddTransportTLSEnvVars(container, operatorConfig.Infrastructure)
 			envByName := envVarsToMap(container.Env)
 			assert.Equal(t, tc.want, envByName[tc.env])
 		})
@@ -1948,7 +1949,7 @@ func TestAddTransportTLSEnvVars(t *testing.T) {
 		operatorConfig := &configv1alpha1.OperatorConfiguration{
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 		}
-		AddTransportTLSEnvVars(container, operatorConfig)
+		AddTransportTLSEnvVars(container, operatorConfig.Infrastructure)
 		envByName := envVarsToMap(container.Env)
 		for _, tc := range tlsCases {
 			assert.NotContains(t, envByName, tc.env)
@@ -10002,7 +10003,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx, err := generateComponentContext(betaComponent(t, component), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx, err := generateComponentContext(betaComponent(t, component), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{})
 	require.NoError(t, err)
 	assert.Equal(t, "abc123", compCtx.WorkerHashSuffix)
 
@@ -10010,7 +10011,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 	component2 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
 	}
-	compCtx2, err := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx2, err := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{})
 	require.NoError(t, err)
 	assert.Empty(t, compCtx2.WorkerHashSuffix)
 
@@ -10019,7 +10020,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash},
 	}
-	compCtxLegacy, err := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtxLegacy, err := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{})
 	require.NoError(t, err)
 	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
@@ -10028,7 +10029,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeFrontend,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx3, err := generateComponentContext(betaComponent(t, component3), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx3, err := generateComponentContext(betaComponent(t, component3), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{})
 	require.NoError(t, err)
 	assert.Empty(t, compCtx3.WorkerHashSuffix)
 }
@@ -10086,6 +10087,7 @@ func TestGenerateComponentContext_RuntimeVersion(t *testing.T) {
 				"ns",
 				1,
 				DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod},
+				configv1alpha1.InfrastructureConfiguration{},
 			)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
@@ -10105,9 +10107,10 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 
 	// With suffix
 	container, err := w.GetBaseContainer(ComponentContext{
-		DynamoNamespace:  "ns-dgd",
-		ComponentType:    commonconsts.ComponentTypeWorker,
-		WorkerHashSuffix: "abc123",
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "ns-dgd",
+		ComponentType:        commonconsts.ComponentTypeWorker,
+		WorkerHashSuffix:     "abc123",
 	})
 	assert.NoError(t, err)
 	found := false
@@ -10121,8 +10124,9 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 
 	// Without suffix — env var should NOT be present
 	container2, err := w.GetBaseContainer(ComponentContext{
-		DynamoNamespace: "ns-dgd",
-		ComponentType:   commonconsts.ComponentTypeWorker,
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "ns-dgd",
+		ComponentType:        commonconsts.ComponentTypeWorker,
 	})
 	assert.NoError(t, err)
 	for _, env := range container2.Env {
@@ -10134,8 +10138,9 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 	f := NewFrontendDefaults()
 	container, err := f.GetBaseContainer(ComponentContext{
-		DynamoNamespace: "myns-mydgd",
-		ComponentType:   commonconsts.ComponentTypeFrontend,
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "myns-mydgd",
+		ComponentType:        commonconsts.ComponentTypeFrontend,
 	})
 	assert.NoError(t, err)
 	found := false
@@ -10152,8 +10157,9 @@ func TestBaseComponentDefaults_ContainerNameOnlyInContainerDiscoveryMode(t *test
 	w := NewWorkerDefaults()
 
 	podModeContainer, err := w.GetBaseContainer(ComponentContext{
-		DynamoNamespace: "ns-dgd",
-		ComponentType:   commonconsts.ComponentTypeWorker,
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "ns-dgd",
+		ComponentType:        commonconsts.ComponentTypeWorker,
 		Discovery: DiscoveryContext{
 			Backend: configv1alpha1.DiscoveryBackendKubernetes,
 			Mode:    configv1alpha1.KubeDiscoveryModePod,
@@ -10165,8 +10171,9 @@ func TestBaseComponentDefaults_ContainerNameOnlyInContainerDiscoveryMode(t *test
 	assert.NotContains(t, podModeEnv, "DYN_KUBE_DISCOVERY_MODE")
 
 	containerModeContainer, err := w.GetBaseContainer(ComponentContext{
-		DynamoNamespace: "ns-dgd",
-		ComponentType:   commonconsts.ComponentTypeWorker,
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "ns-dgd",
+		ComponentType:        commonconsts.ComponentTypeWorker,
 		Discovery: DiscoveryContext{
 			Backend: configv1alpha1.DiscoveryBackendKubernetes,
 			Mode:    configv1alpha1.KubeDiscoveryModeContainer,
@@ -10184,6 +10191,65 @@ func envVarsToMap(envs []corev1.EnvVar) map[string]string {
 		out[env.Name] = env.Value
 	}
 	return out
+}
+
+func TestFrontendSidecarRuntimeDefaults(t *testing.T) {
+	for _, mode := range []string{"pod", "container"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Log("Configure a worker in main with a separately named frontend and no native Dynamo sidecar")
+			natsOverride := corev1.EnvVar{Name: "NATS_SERVER", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "nats"}, Key: "url"},
+			}}
+			config := &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{
+				NATSAddress: "nats://nats:4222", ETCDAddress: "etcd:2379",
+				ModelExpressURL: "http://model-express:8000", PrometheusEndpoint: "http://prometheus:9090",
+				TCPTLSCertPath: "/certs/tls.crt", NATSTLSCAPath: "/certs/ca.crt",
+			}}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				FrontendSidecar: ptr.To("router"),
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: mode,
+					}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: "main", Image: "worker:1.5.0", Env: []corev1.EnvVar{natsOverride, {Name: "DYN_TCP_TLS_CERT_PATH", Value: "/worker/tls.crt"}}},
+						{Name: "router", Image: "frontend:1.5.0"},
+					}},
+				},
+			}
+
+			t.Log("Render both runtime containers through the production PodSpec path")
+			pod, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, &mockSecretsRetriever{},
+				"test-dgd", "test-ns", RoleMain, 1, config,
+				commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+			require.Len(t, pod.Containers, 2)
+
+			t.Log("Verify infrastructure defaults, user overrides, and mode-specific discovery identities")
+			for _, container := range pod.Containers {
+				env := envVarsToMap(container.Env)
+				assert.Equal(t, "etcd:2379", env["ETCD_ENDPOINTS"])
+				assert.Equal(t, "http://model-express:8000", env["MODEL_EXPRESS_URL"])
+				assert.Equal(t, "http://prometheus:9090", env["PROMETHEUS_ENDPOINT"])
+				assert.Equal(t, "/certs/ca.crt", env["NATS_TLS_CA_CERT_PATH"])
+				if container.Name == "main" {
+					assert.Contains(t, container.Env, natsOverride)
+					assert.Equal(t, "/worker/tls.crt", env["DYN_TCP_TLS_CERT_PATH"])
+				} else {
+					assert.Equal(t, "nats://nats:4222", env["NATS_SERVER"])
+					assert.Equal(t, "/certs/tls.crt", env["DYN_TCP_TLS_CERT_PATH"])
+				}
+				if mode == "container" {
+					assert.Equal(t, container.Name, env["CONTAINER_NAME"])
+					assert.Equal(t, mode, env["DYN_KUBE_DISCOVERY_MODE"])
+				} else {
+					assert.NotContains(t, env, "CONTAINER_NAME")
+					assert.NotContains(t, env, "DYN_KUBE_DISCOVERY_MODE")
+				}
+			}
+		})
+	}
 }
 
 func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {

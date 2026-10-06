@@ -129,7 +129,7 @@ and sets `--router-mode kv` with a matching frontend and worker block size.
 The Dynamo SGLang image includes both routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
-- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.19.
+- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.21.
 - The CUDA image includes the codec-limited VP8/VP9 frontend decoder.
 
 Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
@@ -559,7 +559,7 @@ Controls how many threads the encoder uses to fetch and load images concurrently
 export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 ```
 
-Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/v0.5.19/python/sglang/srt/disaggregation/encoder/server.py) internally).
+Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/v0.5.21/python/sglang/srt/disaggregation/encoder/server.py) internally).
 
 ## Profiling
 
