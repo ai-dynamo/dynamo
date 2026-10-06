@@ -1300,6 +1300,7 @@ fn reasoning_parser_extra_args_do_not_reach_the_engine() {
     let extra = request.extra_args.as_mut().unwrap();
     extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
     extra["reasoning_ended"] = json!(false);
+    consume_reasoning_parser_args(&mut request.extra_args);
     let converted = build_generate_request(
         request,
         "request-1".to_string(),

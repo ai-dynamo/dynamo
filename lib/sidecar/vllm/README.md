@@ -193,7 +193,8 @@ per-request reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`)
 that the gRPC protocol cannot carry. If a Dynamo parser flag is set and vLLM
 reports its own reasoning parser, the sidecar exits at startup. With no engine
 reasoning parser, vLLM never reads that metadata, so the sidecar removes it, and
-a required or named `tool_choice` starts at the first output token.
+a required or named `tool_choice` starts at the first output token. If vLLM runs
+its own reasoning parser, a request that carries this metadata still fails.
 
 Requests that require visible stop-token preservation or `max_thinking_tokens`
 still fail explicitly in the gRPC request converter. These limitations affect

@@ -22,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
-    ResponseState, build_generate_request, data_parallel_rank, normalize_response_options,
-    request_has_multimodal_input,
+    ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
+    normalize_response_options, request_has_multimodal_input,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -788,7 +788,10 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let request = normalize_response_options(request)?;
+        let mut request = normalize_response_options(request)?;
+        if self.model.reasoning_parser().is_none() {
+            consume_reasoning_parser_args(&mut request.extra_args);
+        }
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
