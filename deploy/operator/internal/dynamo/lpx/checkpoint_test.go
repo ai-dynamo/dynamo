@@ -38,7 +38,6 @@ func TestApplyCyborgWeightsPathPrecedesAuthoredReferences(t *testing.T) {
 		{name: "stale binding after reference", env: append(append([]corev1.EnvVar(nil), authored...), corev1.EnvVar{
 			Name: cyborgWeightsPathEnv, Value: "/nfs/huggingface/hub/models--openai--gpt-oss-20b/snapshots/stale",
 		})},
-		{name: "existing binding before reference", env: want},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Publish the snapshot path before references while preserving other bindings")

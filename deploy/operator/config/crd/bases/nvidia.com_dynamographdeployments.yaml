@@ -11533,14 +11533,20 @@ spec:
                               leaves checkpoint selection to the Cyborg container.
                             properties:
                               model:
-                                description: model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+                                description: |-
+                                  model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+                                  It follows the Hub's repository-ID rules: an optional namespace and a
+                                  name of at most 96 characters, each starting and ending with a letter,
+                                  digit, or underscore.
                                 maxLength: 256
                                 minLength: 1
-                                pattern: ^([A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$
+                                pattern: ^([A-Za-z0-9_]([A-Za-z0-9_.-]*[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$
                                 type: string
                                 x-kubernetes-validations:
                                   - message: model must not contain '--' or '..'
                                     rule: '!self.contains(''--'') && !self.contains(''..'')'
+                                  - message: model must not end with '.git'
+                                    rule: '!self.endsWith(''.git'')'
                               provider:
                                 description: provider selects the checkpoint source. Only `HuggingFace` is supported.
                                 enum:
@@ -21143,14 +21149,20 @@ spec:
                               leaves checkpoint selection to the Cyborg container.
                             properties:
                               model:
-                                description: model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+                                description: |-
+                                  model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+                                  It follows the Hub's repository-ID rules: an optional namespace and a
+                                  name of at most 96 characters, each starting and ending with a letter,
+                                  digit, or underscore.
                                 maxLength: 256
                                 minLength: 1
-                                pattern: ^([A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$
+                                pattern: ^([A-Za-z0-9_]([A-Za-z0-9_.-]*[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]{0,94}[A-Za-z0-9_])?$
                                 type: string
                                 x-kubernetes-validations:
                                   - message: model must not contain '--' or '..'
                                     rule: '!self.contains(''--'') && !self.contains(''..'')'
+                                  - message: model must not end with '.git'
+                                    rule: '!self.endsWith(''.git'')'
                               provider:
                                 description: provider selects the checkpoint source. Only `HuggingFace` is supported.
                                 enum:

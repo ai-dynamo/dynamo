@@ -9,11 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"net/url"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -56,18 +54,18 @@ func newLPXModelRegistry(config *configv1alpha1.OperatorConfiguration) (lpx.Mode
 	return registry, nil
 }
 
-// reconcileModelDownloads gates startup on downloaded builds and checkpoints. A
-// successful observation remains usable during periodic refreshes of a Ready
-// deployment. deployment and dgd are non-nil.
+// reconcileModelDownloads gates startup on downloaded builds. A successful
+// observation remains usable during periodic refreshes of a Ready deployment.
+// deployment and dgd are non-nil.
 func (r *graphReconciler) reconcileModelDownloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
 ) (ctrl.Result, error) {
 	var (
-		lastCheckedAt *metav1.Time
-		existing      v1alpha1.ModelDownloadStatus
-		recheck       bool
+		lastCheckedAt  *metav1.Time
+		existingBuilds []string
+		recheck        bool
 	)
 
 	if modelDownload := deployment.Status.ModelDownload; modelDownload != nil {
@@ -76,12 +74,12 @@ func (r *graphReconciler) reconcileModelDownloads(
 		recheck = ready && deployment.Status.ObservedGeneration == deployment.Generation && lastCheckedAt != nil
 
 		if lastCheckedAt != nil && time.Since(lastCheckedAt.Time) < modelDownloadRefreshInterval {
-			existing = v1alpha1.ModelDownloadStatus{Builds: modelDownload.Builds, Checkpoints: modelDownload.Checkpoints}
+			existingBuilds = modelDownload.Builds
 		}
 	}
 
-	downloaded, pending, err := ensureModelsDownloaded(ctx, dgd, r.modelRegistry, existing)
-	if err != nil || len(pending) > 0 {
+	downloaded, ready, err := ensureModelsDownloaded(ctx, dgd, r.modelRegistry, existingBuilds)
+	if err != nil || !ready {
 		if recheck {
 			if err != nil {
 				log.FromContext(ctx).Error(err, "Unable to refresh model downloads")
@@ -89,69 +87,62 @@ func (r *graphReconciler) reconcileModelDownloads(
 			return ctrl.Result{}, nil
 		}
 
-		deployment.Status.ModelDownload = &downloaded
+		deployment.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{Builds: downloaded}
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 
-		setReadyCondition(deployment, v1beta1.DGDStatePending, modelDownloadPendingMessage+": "+strings.Join(pending, ", "))
+		setReadyCondition(deployment, v1beta1.DGDStatePending, modelDownloadPendingMessage)
 		return ctrl.Result{RequeueAfter: modelDownloadRequeueAfter}, nil
 	}
 
-	if len(downloaded.Builds) == 0 && len(downloaded.Checkpoints) == 0 {
+	if len(downloaded) == 0 {
 		deployment.Status.ModelDownload = nil
 		return ctrl.Result{}, nil
 	}
 
-	if len(existing.Builds) == 0 && len(existing.Checkpoints) == 0 {
+	if len(existingBuilds) == 0 {
 		lastCheckedAt = new(metav1.Now())
 	}
 
-	downloaded.LastCheckedAt = lastCheckedAt
-	deployment.Status.ModelDownload = &downloaded
+	deployment.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{Builds: downloaded, LastCheckedAt: lastCheckedAt}
 	return ctrl.Result{}, nil
 }
 
-// ensureModelsDownloaded checks the DGD's remote builds and checkpoints that are
-// not in existing. It returns the downloaded subset, without LastCheckedAt, and
-// the identities of downloads still in progress, builds before checkpoints.
-// dgd is non-nil.
 func ensureModelsDownloaded(
 	ctx context.Context,
 	dgd *v1beta1.DynamoGraphDeployment,
 	registry lpx.ModelRegistry,
-	existing v1alpha1.ModelDownloadStatus,
-) (v1alpha1.ModelDownloadStatus, []string, error) {
+	existingBuilds []string,
+) ([]string, bool, error) {
 	builds, err := collectBuilds(dgd, registry)
 	if err != nil {
-		return v1alpha1.ModelDownloadStatus{}, nil, err
+		return nil, false, err
 	}
-	checkpoints := collectCheckpoints(dgd)
 
-	if len(builds) == 0 && len(checkpoints) == 0 {
-		return v1alpha1.ModelDownloadStatus{}, nil, nil
+	if len(builds) == 0 {
+		return nil, true, nil
 	}
 
 	var (
-		downloaded     v1alpha1.ModelDownloadStatus
-		pending        []string
+		downloaded     = make([]string, 0, len(builds))
 		downloadErrors []error
 	)
 
-	// Share one check budget across every build and checkpoint download.
 	ctx, cancel := context.WithTimeout(ctx, modelDownloadCheckTimeout)
 	defer cancel()
-	perDownloadTimeout := modelDownloadCheckTimeout / time.Duration(len(builds)+len(checkpoints))
+
+	perBuildTimeout := modelDownloadCheckTimeout / time.Duration(len(builds))
 
 	for _, buildURL := range builds {
 		build := buildURL.String()
 
-		if slices.Contains(existing.Builds, build) {
-			downloaded.Builds = append(downloaded.Builds, build)
+		if slices.Contains(existingBuilds, build) {
+			downloaded = append(downloaded, build)
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(ctx, perDownloadTimeout)
+		ctx, cancel := context.WithTimeout(ctx, perBuildTimeout)
 		buildDownloaded, err := registry.EnsureDownloaded(ctx, buildURL)
 		cancel()
 
@@ -160,38 +151,13 @@ func ensureModelsDownloaded(
 			continue
 		}
 		if !buildDownloaded {
-			pending = append(pending, build)
 			continue
 		}
 
-		downloaded.Builds = append(downloaded.Builds, build)
+		downloaded = append(downloaded, build)
 	}
 
-	for _, checkpoint := range checkpoints {
-		key := lpx.CheckpointKey(checkpoint)
-
-		if slices.Contains(existing.Checkpoints, key) {
-			downloaded.Checkpoints = append(downloaded.Checkpoints, key)
-			continue
-		}
-
-		ctx, cancel := context.WithTimeout(ctx, perDownloadTimeout)
-		checkpointDownloaded, err := registry.EnsureCheckpointDownloaded(ctx, checkpoint)
-		cancel()
-
-		if err != nil {
-			downloadErrors = append(downloadErrors, fmt.Errorf("ensure checkpoint %q is downloaded: %w", key, err))
-			continue
-		}
-		if !checkpointDownloaded {
-			pending = append(pending, key)
-			continue
-		}
-
-		downloaded.Checkpoints = append(downloaded.Checkpoints, key)
-	}
-
-	return downloaded, pending, errors.Join(downloadErrors...)
+	return downloaded, len(downloaded) == len(builds), errors.Join(downloadErrors...)
 }
 
 func collectBuilds(dgd *v1beta1.DynamoGraphDeployment, registry lpx.ModelRegistry) ([]url.URL, error) {
@@ -223,21 +189,4 @@ func collectBuilds(dgd *v1beta1.DynamoGraphDeployment, registry lpx.ModelRegistr
 	})
 
 	return builds, nil
-}
-
-// collectCheckpoints returns the DGD's distinct checkpoints sorted by key. dgd is non-nil.
-func collectCheckpoints(dgd *v1beta1.DynamoGraphDeployment) []*v1beta1.LPXCheckpoint {
-	checkpointsByKey := make(map[string]*v1beta1.LPXCheckpoint)
-	for _, component := range dgd.Spec.Components {
-		if component.LPX != nil && component.LPX.Checkpoint != nil {
-			checkpointsByKey[lpx.CheckpointKey(component.LPX.Checkpoint)] = component.LPX.Checkpoint
-		}
-	}
-
-	keys := slices.Sorted(maps.Keys(checkpointsByKey))
-	checkpoints := make([]*v1beta1.LPXCheckpoint, len(keys))
-	for index, key := range keys {
-		checkpoints[index] = checkpointsByKey[key]
-	}
-	return checkpoints
 }

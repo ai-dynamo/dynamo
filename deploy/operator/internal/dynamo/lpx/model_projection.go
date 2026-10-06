@@ -75,6 +75,11 @@ type ModelProjection struct {
 	checkpoint *dynamov1beta1.LPXCheckpoint
 }
 
+// Checkpoint returns the checkpoint projected into the Cyborg conductor, or nil.
+func (p *ModelProjection) Checkpoint() *dynamov1beta1.LPXCheckpoint {
+	return p.checkpoint
+}
+
 // AgentReplicas returns the number of LPU Agent Pods that the projection requires.
 func (p *ModelProjection) AgentReplicas() int {
 	return p.agentReplicas

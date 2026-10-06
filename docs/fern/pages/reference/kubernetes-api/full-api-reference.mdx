@@ -3658,8 +3658,8 @@ See [LPXCheckpointProvider](#lpxcheckpointprovider).
 </ParamField>
 
 <ParamField path="model" type="string" required={true}>
-model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
-**Validation:** MaxLength: 256  MinLength: 1  Pattern: `^([A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$`  Required: \&#123;\&#125;
+model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`. It follows the Hub's repository-ID rules: an optional namespace and a name of at most 96 characters, each starting and ending with a letter, digit, or underscore.
+**Validation:** MaxLength: 256  MinLength: 1  Pattern: `^([A-Za-z0-9_]([A-Za-z0-9_.-]*[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]\{0,94\}[A-Za-z0-9_])?$`  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="revision" type="string" required={true}>

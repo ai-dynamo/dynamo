@@ -77,6 +77,8 @@ _Appears in:_
 | `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Retained automatic<br />checkpoints are not valid checkpointRef targets.<br /> |
 
 
+
+
 #### CheckpointMode
 
 _Underlying type:_ _string_
@@ -2505,7 +2507,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `provider` _[LPXCheckpointProvider](#lpxcheckpointprovider)_ | provider selects the checkpoint source. Only `HuggingFace` is supported. |  | Enum: [HuggingFace] <br />Required: \{\} <br /> |
-| `model` _string_ | model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`. |  | MaxLength: 256 <br />MinLength: 1 <br />Pattern: `^([A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$` <br />Required: \{\} <br /> |
+| `model` _string_ | model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.<br />It follows the Hub's repository-ID rules: an optional namespace and a<br />name of at most 96 characters, each starting and ending with a letter,<br />digit, or underscore. |  | MaxLength: 256 <br />MinLength: 1 <br />Pattern: `^([A-Za-z0-9_]([A-Za-z0-9_.-]*[A-Za-z0-9_])?/)?[A-Za-z0-9_]([A-Za-z0-9_.-]\{0,94\}[A-Za-z0-9_])?$` <br />Required: \{\} <br /> |
 | `revision` _string_ | revision is the full 40-character commit SHA of the repository snapshot.<br />Branches and tags are not accepted because they can move. |  | Pattern: `^[0-9a-f]\{40\}$` <br />Required: \{\} <br /> |
 
 

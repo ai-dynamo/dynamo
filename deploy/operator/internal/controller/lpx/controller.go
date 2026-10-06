@@ -184,10 +184,22 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return result, err
 	}
 
-	return r.reconcileWorkloads(ctx, deployment, dgd, pcs, pcsgs, pclqs, requests)
+	// Resolve and render every workload before deleting the running PCS.
+	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Hold rendering until Model Express has every resolved Cyborg checkpoint.
+	if result, err := r.reconcileCheckpointDownloads(ctx, deployment, workloads); err != nil || result.RequeueAfter > 0 {
+		return result, err
+	}
+
+	return r.reconcileWorkloads(ctx, deployment, dgd, workloads, plans, pcs, pcsgs, pclqs, requests)
 }
 
-// reconcileWorkloads consumes owned observations; DGD and deployment are non-nil.
+// reconcileWorkloads consumes resolved workloads, their plans, and owned
+// observations; DGD and deployment are non-nil.
 // A nil pcs means initial creation, with no pcsgs, pclqs or requests. Otherwise
 // pcsgs contains every configured group; pclqs contains owned, non-deleting cliques.
 // On error, Reconcile persists status before applying deadline retries.
@@ -195,17 +207,13 @@ func (r *graphReconciler) reconcileWorkloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
+	workloads map[string]*lpx.Workload,
+	plans map[string]*lpx.MaterializationPlan,
 	pcs *grovev1alpha1.PodCliqueSet,
 	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
 	pclqs map[string]*grovev1alpha1.PodClique,
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
 ) (result ctrl.Result, err error) {
-	// Resolve and render every workload before deleting the running PCS.
-	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Share the rendered identities with capacity management and request publication.
 	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans)
 	if err != nil {
