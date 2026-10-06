@@ -246,3 +246,61 @@ async fn capacity_failure_never_acknowledges_storage_and_unknown_history_skips_e
     assert_eq!(retained, first);
     svc.shutdown().await;
 }
+
+#[tokio::test]
+async fn failed_stream_is_retrievable_with_the_same_partial_output_and_error() {
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
+    let mut script = load_agent_fixture("text.sse").await.unwrap();
+    let finish = script
+        .iter()
+        .position(|chunk| {
+            chunk.data.as_ref().is_some_and(|data| {
+                data.inner
+                    .choices
+                    .iter()
+                    .any(|choice| choice.finish_reason.is_some())
+            })
+        })
+        .unwrap();
+    script.truncate(finish);
+    let error = DynamoError::builder()
+        .error_type(DynamoErrorType::Backend(BackendError::InvalidArgument))
+        .message("scripted failure")
+        .build();
+    let svc = HarnessService::start_with_storage(
+        Arc::new(ScriptedChatEngine::with_backend_error(script, error)),
+        Some(ResponseStorage::memory(StoreConfig::default()).unwrap()),
+    )
+    .await;
+    let response = svc
+        .client
+        .post(format!("{}/v1/responses", svc.base_url))
+        .json(&json!({"model":MODEL,"input":"hello","stream":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let events = parse_json_sse(&response.text().await.unwrap())
+        .await
+        .unwrap();
+    let failed = &events
+        .iter()
+        .find(|event| event.event == "response.failed")
+        .unwrap()
+        .data["response"];
+    let stored: Value = svc
+        .client
+        .get(format!(
+            "{}/v1/responses/{}",
+            svc.base_url,
+            failed["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(&stored, failed);
+    svc.shutdown().await;
+}

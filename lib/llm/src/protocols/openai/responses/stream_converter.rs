@@ -48,6 +48,8 @@ pub struct ResponseStreamConverter {
     /// Preserved Responses API-specific request context for faithful response reconstruction.
     api_context: Option<ResponsesContext>,
     created_at: u64,
+    completed_at: std::sync::OnceLock<u64>,
+    terminal_error: Option<ErrorObject>,
     sequence_number: u64,
     // Text message tracking
     message_item_id: String,
@@ -134,6 +136,8 @@ impl ResponseStreamConverter {
             params,
             api_context: None,
             created_at,
+            completed_at: std::sync::OnceLock::new(),
+            terminal_error: None,
             sequence_number: 0,
             message_item_id: format!("msg_{}", Uuid::new_v4().simple()),
             message_started: false,
@@ -288,12 +292,12 @@ impl ResponseStreamConverter {
 
     fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
         let completed_at = if status == Status::Completed {
-            Some(
+            Some(*self.completed_at.get_or_init(|| {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs(),
-            )
+                    .as_secs()
+            }))
         } else {
             None
         };
@@ -904,10 +908,19 @@ impl ResponseStreamConverter {
         events.push(self.make_sse_event(&item_done));
     }
 
-    /// Snapshot used for persistence before emitting the terminal success event.
+    /// Snapshot used for persistence before emitting the terminal event.
     pub fn final_response(&self) -> super::NvResponse {
+        let mut inner = if self.terminal_error.is_some() {
+            self.make_response(
+                Status::Failed,
+                self.output_with_status(OutputStatus::Incomplete),
+            )
+        } else {
+            self.make_response(self.terminal_status(), self.completed_output())
+        };
+        inner.error = self.terminal_error.clone();
         super::NvResponse {
-            inner: self.make_response(self.terminal_status(), self.completed_output()),
+            inner,
             nvext: None,
             presence_penalty: self.params.presence_penalty.unwrap_or(0.0),
             frequency_penalty: self.params.frequency_penalty.unwrap_or(0.0),
@@ -972,6 +985,7 @@ impl ResponseStreamConverter {
         error: ErrorObject,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) -> Result<Event, anyhow::Error> {
+        self.terminal_error = Some(error.clone());
         let output_status = OutputStatus::Incomplete;
         self.append_active_reasoning_done_events(events, output_status);
         self.close_open_message_item(events, output_status);

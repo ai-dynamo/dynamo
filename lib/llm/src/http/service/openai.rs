@@ -4426,6 +4426,11 @@ async fn responses(
                 if terminal_failure {
                     producer_error_signal.set(ErrorType::Internal);
                     producer_ctx.kill();
+                    if let Some(prepared) = &prepared {
+                        if let Err(error) = prepared.persist(&converter.final_response()).await {
+                            tracing::warn!(%error, "Could not persist failed response");
+                        }
+                    }
 
                     let terminal_event = events
                         .pop()
@@ -4446,6 +4451,11 @@ async fn responses(
 
             if let Some(error) = backend_error {
                 let terminal_event = converter.append_error_events(error, &mut events);
+                if let Some(prepared) = &prepared {
+                    if let Err(error) = prepared.persist(&converter.final_response()).await {
+                        tracing::warn!(%error, "Could not persist failed response");
+                    }
+                }
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
