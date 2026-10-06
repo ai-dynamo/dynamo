@@ -63,6 +63,7 @@ pub struct MockerServerConfig {
     pub max_concurrent_requests: usize,
     pub kv_host: String,
     pub kv_port: u16,
+    pub is_request_recording_enabled: bool,
 }
 
 impl Default for MockerServerConfig {
@@ -75,6 +76,7 @@ impl Default for MockerServerConfig {
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
             kv_host: "127.0.0.1".to_string(),
             kv_port: 5600,
+            is_request_recording_enabled: false,
         }
     }
 }
@@ -114,10 +116,7 @@ pub struct TrtllmMockerService {
     engine: LiveEngine,
     request_permits: Arc<Semaphore>,
     inflight: Arc<DashMap<String, InFlight>>,
-    /// Requests the server accepted, so a test can assert what the client put
-    /// on the wire rather than only what came back. Bounded: this runs as a
-    /// long-lived process under load and the prompts are not worth retaining.
-    received: Arc<Mutex<VecDeque<pb::GenerateRequest>>>,
+    received: Option<Arc<Mutex<VecDeque<pb::GenerateRequest>>>>,
     /// Test hook: holds a request between registering it and handing it to the
     /// scheduler. That window is the one place an `Abort` cannot be carried out
     /// by `LiveEngine::cancel`, and it is too narrow to hit by racing.
@@ -248,6 +247,9 @@ impl TrtllmMockerService {
             extra: None,
         };
 
+        let received = config
+            .is_request_recording_enabled
+            .then(|| Arc::new(Mutex::new(VecDeque::new())));
         Ok(Self {
             config: Arc::new(config),
             model_info: Arc::new(model_info),
@@ -266,7 +268,7 @@ impl TrtllmMockerService {
             )?,
             request_permits: Arc::new(Semaphore::new(max_concurrent_requests)),
             inflight: Arc::new(DashMap::new()),
-            received: Arc::new(Mutex::new(VecDeque::new())),
+            received,
             #[cfg(test)]
             submit_gate: None,
         })
@@ -304,9 +306,12 @@ impl TrtllmMockerService {
 
     /// Requests the server accepted, oldest first, up to `MAX_RECORDED_REQUESTS`.
     pub fn received_requests(&self) -> Vec<pb::GenerateRequest> {
-        self.received
+        let Some(received) = &self.received else {
+            return Vec::new();
+        };
+        received
             .lock()
-            .expect("received lock poisoned")
+            .unwrap_or_else(|poison| poison.into_inner())
             .iter()
             .cloned()
             .collect()
@@ -323,7 +328,7 @@ impl TrtllmMockerService {
     ) -> Result<
         (
             PreparedRequest,
-            LiveRequest,
+            anyhow::Result<LiveRequest>,
             OwnedSemaphorePermit,
             InFlightGuard,
             Arc<AtomicBool>,
@@ -337,8 +342,8 @@ impl TrtllmMockerService {
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
         let request = request.into_inner();
-        let prepared =
-            PreparedRequest::new(request.clone(), &self.config).map_err(|status| *status)?;
+        let recorded = self.received.as_ref().map(|_| request.clone());
+        let mut prepared = PreparedRequest::new(request, &self.config).map_err(|status| *status)?;
         // Claim the id before submitting: LiveEngine would otherwise reject the
         // duplicate with an anyhow that surfaces as an opaque INTERNAL.
         let claimed = Arc::new(AtomicBool::new(false));
@@ -368,15 +373,26 @@ impl TrtllmMockerService {
             gate.notified().await;
         }
 
-        let live = self
-            .engine
-            .submit(prepared.direct_request())
-            .await
-            .map_err(|error| {
-                Status::internal(format!("Mocker request submission failed: {error}"))
-            })?;
+        let direct = prepared.direct_request();
+        let live = async {
+            if prepared.has_kv_session {
+                let (registration, live) = self.engine.prepare_request(direct)?;
+                // Register before checking for an Abort that beat scheduler submission.
+                if claimed.load(Ordering::Acquire) {
+                    drop(registration);
+                } else {
+                    self.engine.submit_decode_prepared(registration).await?;
+                }
+                Ok(live)
+            } else {
+                self.engine.submit(direct).await
+            }
+        }
+        .await;
+        if live.is_ok()
+            && let (Some(received), Some(request)) = (&self.received, recorded)
         {
-            let mut received = self.received.lock().expect("received lock poisoned");
+            let mut received = received.lock().unwrap_or_else(|poison| poison.into_inner());
             if received.len() == MAX_RECORDED_REQUESTS {
                 received.pop_front();
             }
@@ -425,8 +441,6 @@ fn candidate_modes() -> Vec<i32> {
     ]
 }
 
-/// The only place a `GenerateResponse` is built, so no call site can emit one
-/// with an empty `event` oneof -- which the sidecar rejects outright.
 /// Why the response loop stopped. Keeping the reason separate from the terminal
 /// event is what lets the terminal be emitted in exactly one place.
 enum Exit {
@@ -502,16 +516,32 @@ impl pb::inference_server::Inference for TrtllmMockerService {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
-        let (prepared, mut live, permit, guard, claimed) = self.start_generation(request).await?;
+        let (prepared, live, permit, guard, claimed) = self.start_generation(request).await?;
         let config = Arc::clone(&self.config);
 
         let stream = async_stream::try_stream! {
             let _permit = permit;
             let _guard = guard;
-            let request_id = prepared.request_id.clone();
+            let request_id = prepared.request_id.as_str();
+            let mut live = match live {
+                Ok(live) => live,
+                Err(error) => {
+                    if claimed.swap(true, Ordering::AcqRel) {
+                        yield prepared.finished(pb::FinishReason::Cancelled, 0, None);
+                    } else {
+                        yield engine_error(
+                            request_id,
+                            pb::ErrorCode::Internal,
+                            &format!("Mocker request submission failed: {error}"),
+                            false,
+                        );
+                    }
+                    return;
+                }
+            };
 
             if let Some(prompt) = prepared.prompt_output() {
-                yield response(&request_id, pb::generate_response::Event::Prompt(prompt));
+                yield response(request_id, pb::generate_response::Event::Prompt(prompt));
             }
 
             let mut generated = 0usize;
@@ -545,7 +575,7 @@ impl pb::inference_server::Inference for TrtllmMockerService {
                 let position = generated;
                 generated += 1;
                 yield response(
-                    &request_id,
+                    request_id,
                     pb::generate_response::Event::Token(prepared.token_output(token_id, position)),
                 );
                 if signal.completed {
@@ -575,20 +605,20 @@ impl pb::inference_server::Inference for TrtllmMockerService {
                     // capacity here would teach the sidecar a mapping no real
                     // server produces.
                     Exit::Rejected => yield engine_error(
-                        &request_id,
+                        request_id,
                         pb::ErrorCode::Internal,
                         "request exceeds the simulated KV-cache capacity",
                         false,
                     ),
                     Exit::MissingToken => yield engine_error(
-                        &request_id,
+                        request_id,
                         pb::ErrorCode::Internal,
                         "Mocker output signal is missing a token ID",
                         false,
                     ),
                     // The sidecar fails a stream that ends without a terminal.
                     Exit::Closed => yield engine_error(
-                        &request_id,
+                        request_id,
                         pb::ErrorCode::Internal,
                         "Mocker output channel closed before a terminal response",
                         false,
@@ -598,7 +628,7 @@ impl pb::inference_server::Inference for TrtllmMockerService {
                         // request; a `finished` after it reads as "request
                         // complete" and the decode leg never runs.
                         yield prefill_ready(
-                            &request_id,
+                            request_id,
                             prepared.prefill_ready(&config),
                             prepared.usage(generated, cached_tokens),
                         );

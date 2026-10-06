@@ -134,9 +134,9 @@ bootstrap socket, NIXL connection, or KV data movement is created.
 
 - Token-ID prompts only; no tokenizer or model is loaded.
 - One output sequence with deterministic synthetic tokens and logprobs.
-- Length termination only; sampling, stops, EOS, and structured decoding are
-  not simulated.
-- `Abort` releases Mocker scheduler state but does not synthesize SGLang's
-  `finish_reason: {"type": "abort"}` terminal; a caller still polling that
-  gRPC stream receives `Internal` when its output channel closes.
+- Length and explicit stop-token termination follow SGLang's `min_new_tokens`
+  and `ignore_eos` controls. Sampling, string stops, model EOS, and structured
+  decoding are not simulated.
+- `Abort` releases Mocker scheduler state and terminates the gRPC stream with
+  `Cancelled`, matching SGLang's native gRPC bridge.
 - One Mocker data-parallel rank per server process.

@@ -9,8 +9,12 @@ as it would to a real TensorRT-LLM engine — no GPU, no model weights.
 
 Token IDs, logprobs, and the disaggregated handoff are synthetic but
 deterministic for a given `--seed`. KV-cache accounting, batching, admission,
-and prefill/decode timing come from the Mocker scheduler, so capacity and
-scheduling behave like a real deployment.
+and prefill/decode timing come from the Mocker scheduler using the configured
+engine's scheduling policy.
+
+Request recording is disabled by default. Tests that inspect
+`received_requests()` enable `MockerServerConfig::is_request_recording_enabled`;
+the recorder retains at most 256 accepted requests.
 
 ## Aggregated
 
@@ -78,23 +82,19 @@ two legs' token accounting matches a real engine's.
 - Text prompts are rejected: the server has no tokenizer and expects
   `token_ids`, which is what the sidecar always sends.
 - Multimodal media and per-request LoRA are rejected.
-- **The decode role recomputes the prompt.** A decode request submits its full
-  prompt to the scheduler as a normal request, so the simulated engine reserves
-  and prefills tokens that a real decode worker would have received over the
-  transceiver. Disaggregated capacity, cache-hit metrics, and prefill timing are
-  therefore not faithful on the decode leg; request/response behaviour and the
-  handoff contract are. The vLLM and SGLang mocker servers model it the same
-  way. Use aggregated mode for capacity work until the mocker core grows
-  handoff-aware admission.
+- A validated decode handoff reserves destination KV space and starts decoding
+  without recomputing the prompt. The handoff represents a completed transfer;
+  no KV bytes move between mocker processes and network transfer time is not
+  simulated. A decode request that bypasses prefill still computes its prompt.
 - Guided decoding is rejected with `UNIMPLEMENTED`; rejected requests are not recorded.
 
 ## `--context-length` interacts with capacity
 
-The sidecar turns an omitted `max_tokens` into `context_length - prompt_len`,
-and the TensorRT-LLM scheduling policy (`guaranteed_no_evict`) reserves that
-whole budget at admission and never preempts. With the 32768 default and a small
-`num_gpu_blocks`, a request that omits `max_tokens` is rejected for capacity
-rather than truncated. Lower `--context-length` for small-KV experiments.
+The sidecar turns an omitted `max_tokens` into `context_length - prompt_len`.
+The scheduler caps that budget to the total KV-pool capacity minus the prompt
+length, then reserves through completion under `guaranteed_no_evict` without
+preemption. A prompt that leaves no room for output is rejected. Set an explicit
+`max_tokens` or lower `--context-length` for small-KV experiments.
 
 ## Engine arguments
 
