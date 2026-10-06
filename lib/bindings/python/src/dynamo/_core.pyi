@@ -2543,6 +2543,7 @@ def run_mocker_trace_replay(
     telemetry_sample_interval_ms: float = 1_000.0,
     telemetry_callback: Optional[ReplayTelemetryCallback] = None,
     telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
+    kv_event_lag_ms: Optional[float] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2578,6 +2579,12 @@ def run_mocker_trace_replay(
     ``wall_time_ms``; time the outer call for end-to-end persistence overhead.
     The JSONL target is opened on the first sample; after a write failure,
     completed prior lines remain and the failing final line may be partial.
+
+    ``kv_event_lag_ms`` delays the KV cache events (blocks stored and removed)
+    the router's indexer observes by that much simulated time. Prefill and
+    request completions stay immediate, as a live router observes them in-band
+    on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
+    KV-router replay only.
     """
     ...
 
@@ -2636,6 +2643,7 @@ def run_mocker_synthetic_trace_replay(
     telemetry_sample_interval_ms: float = 1_000.0,
     telemetry_callback: Optional[ReplayTelemetryCallback] = None,
     telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
+    kv_event_lag_ms: Optional[float] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
