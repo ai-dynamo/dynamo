@@ -430,6 +430,7 @@ def _aic_engine_args(backend: str, role: str, dp_size: int = 1) -> dict:
         ("mtp", "vllm", "round_robin"),
         ("mtp", "sglang", "kv_router"),
         ("ngram", "vllm", "round_robin"),
+        ("ngram", "sglang", "kv_router"),
         ("eagle3", "sglang", "kv_router"),
         ("dflash", "vllm", "kv_router"),
         ("dspark", "sglang", "round_robin"),

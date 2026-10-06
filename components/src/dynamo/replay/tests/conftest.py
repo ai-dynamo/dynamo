@@ -17,7 +17,7 @@ def draft_checkpoint(tmp_path):
         block_size=8,
         target_layer_ids=[0, 1, 2],
         dflash_config={"target_layer_ids": [0, 1, 2]},
-        markov_rank=8,
+        markov_rank=256,
     )
     draft = tmp_path / "draft"
     draft.mkdir()

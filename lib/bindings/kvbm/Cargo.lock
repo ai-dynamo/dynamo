@@ -35,7 +35,7 @@ dependencies = [
 [[package]]
 name = "aisimulate-core"
 version = "0.13.0"
-source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=825e438446acb6e26b3879554d7a0a908da31474#825e438446acb6e26b3879554d7a0a908da31474"
+source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=b2b488d7db95a14390282b85f22ec3fffbeb5bd5#b2b488d7db95a14390282b85f22ec3fffbeb5bd5"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
