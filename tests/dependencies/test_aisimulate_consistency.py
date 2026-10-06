@@ -137,22 +137,47 @@ def test_dynamo_pins_matching_aisimulate_sources() -> None:
     )
 
 
-def test_container_stages_the_pinned_aisimulate_wheel() -> None:
-    wheel_builder = (ROOT / "container/templates/wheel_builder.Dockerfile").read_text(
-        encoding="utf-8"
-    )
+@pytest.mark.parametrize(
+    "framework,target",
+    [
+        ("dynamo", "runtime"),
+        ("dynamo", "frontend"),
+        ("dynamo", "planner"),
+        ("triton", "runtime"),
+        ("vllm", "runtime"),
+        ("sglang", "runtime"),
+        ("trtllm", "runtime"),
+    ],
+)
+def test_container_stages_the_pinned_aisimulate_wheel(framework, target) -> None:
+    from types import SimpleNamespace
 
-    assert "requirements.aisimulate.txt" in wheel_builder
+    import yaml
+
+    from container.render import _make_jinja_env, _render_context
+
+    directory = ROOT / "container"
+    context = yaml.safe_load((directory / "context.yaml").read_text())
+    args = SimpleNamespace(
+        framework=framework,
+        target=target,
+        device="cuda",
+        platform="multi",
+        cuda_version={"trtllm": "13.1", "triton": "13.4"}.get(framework, "13.0"),
+        make_efa=False,
+    )
+    dockerfile = (
+        _make_jinja_env(directory)
+        .get_template("Dockerfile.template")
+        .render(context=context, **_render_context(args, context))
+    )
     assert (
         "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
-        in wheel_builder
+        in dockerfile
     )
-    assert "--no-deps" in wheel_builder
-    assert "python -m pip wheel" in wheel_builder
-    assert "--config-settings=build-args=--locked" in wheel_builder
-    assert "COPY aisimulate" not in wheel_builder
-    assert "/opt/dynamo/aisimulate" not in wheel_builder
-    assert not (ROOT / "aisimulate").exists()
+    assert "python -m pip wheel" in dockerfile
+    assert "--config-settings=build-args=--locked" in dockerfile
+    assert "/opt/dynamo/wheelhouse/aisimulate*.whl" in dockerfile
 
 
 def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:

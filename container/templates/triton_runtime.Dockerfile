@@ -123,7 +123,8 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     # packages the Triton base lacks come from PyPI.
     uv pip install \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/aisimulate*.whl && \
     \
     # Triton's Python bindings (from the release image) and the tritonclient gRPC client.
     uv pip install --no-deps /opt/tritonserver/python/tritonserver*.whl && \

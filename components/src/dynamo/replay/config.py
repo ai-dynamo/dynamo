@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 from aisimulate.capacity import materialize_aic_num_gpu_blocks
-from aisimulate.config.engine import SpeculationConfig
+from aisimulate.config.engine import NgramSpeculationConfig, SpeculationConfig
 from pydantic import TypeAdapter
 
 from dynamo.mocker import MockEngineArgs
@@ -145,13 +145,7 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
         if raw.get("ais_perf_config") is not None:
             raise ValueError("speculation cannot be combined with ais_perf_config")
         if any(
-            raw.get(name) not in (None, 0)
-            for name in (
-                "aic_nextn",
-                "ais_nextn",
-                "aic_verify_width",
-                "ais_verify_width",
-            )
+            raw.get(name) not in (None, 0) for name in ("aic_nextn", "ais_nextn")
         ) or any(
             raw.get(name) is not None
             for name in (
@@ -179,14 +173,13 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
             **timing,
             "config": {**cost, "speculation": config.cost_config()},
         }
-        raw.update(
-            aic_nextn=config.max_accepted_draft_tokens,
-            aic_verify_width=config.verify_width,
-            aic_nextn_accept_rates=",".join(
+        raw.update(aic_nextn=config.num_speculative_tokens, aic_mtp_seed=config.seed)
+        if isinstance(config, NgramSpeculationConfig):
+            raw["aic_nextn_accept_rates"] = ",".join(
                 format(rate, ".17g") for rate in config.acceptance_rates
-            ),
-            aic_mtp_seed=config.seed,
-        )
+            )
+        else:
+            raw["aic_nextn_accepted"] = config.expected_accepted_tokens
     expected = raw.pop("aic_nextn_accepted", None)
     if expected is not None:
         from aisimulate.runner import _accept_rates_for_expected
@@ -211,7 +204,7 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
     for name in tuple(raw):
         if name.startswith("aic_"):
             value = raw.pop(name)
-            if name in {"aic_nextn_accept_rates", "aic_mtp_seed", "aic_verify_width"}:
+            if name in {"aic_nextn_accept_rates", "aic_mtp_seed"}:
                 raw["ais_" + name[4:]] = value
             elif name == "aic_nextn" and (
                 chosen is not None or "ais_perf_config" not in raw

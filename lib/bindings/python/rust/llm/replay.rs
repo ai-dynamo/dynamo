@@ -286,7 +286,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None, ais_verify_width=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -325,7 +325,6 @@ impl MockEngineArgs {
         trtllm: Option<TrtllmArgs>,
         max_model_len: Option<usize>,
         ais_perf_config: Option<&Bound<'_, PyAny>>,
-        ais_verify_width: Option<usize>,
     ) -> PyResult<Self> {
         let ais_nextn_accept_rates_explicit =
             has_explicit_accept_rates(ais_nextn_accept_rates.as_deref());
@@ -363,7 +362,6 @@ impl MockEngineArgs {
                     .transpose()?,
             )
             .ais_nextn(ais_nextn)
-            .ais_verify_width(ais_verify_width)
             .ais_nextn_accept_rates(ais_nextn_accept_rates)
             .ais_mtp_seed(ais_mtp_seed.unwrap_or(42))
             .gpu_memory_utilization(gpu_memory_utilization)
@@ -613,11 +611,6 @@ impl MockEngineArgs {
     }
 
     #[getter]
-    fn ais_verify_width(&self) -> Option<usize> {
-        self.inner.ais_verify_width
-    }
-
-    #[getter]
     fn ais_nextn_accept_rates(&self) -> Option<String> {
         self.inner.ais_nextn_accept_rates.clone()
     }
@@ -711,7 +704,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None, ais_verify_width=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -727,7 +720,6 @@ impl MockEngineArgs {
         free_gpu_memory_fraction: Option<f64>,
         enable_prefix_caching: Option<bool>,
         worker_type: Option<String>,
-        ais_verify_width: Option<usize>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         let mut num_gpu_blocks_explicit = self.num_gpu_blocks_explicit;
@@ -747,9 +739,6 @@ impl MockEngineArgs {
         if let Some(blocks) = num_gpu_blocks {
             inner.num_gpu_blocks = blocks;
             num_gpu_blocks_explicit = true;
-        }
-        if let Some(width) = ais_verify_width {
-            inner.ais_verify_width = Some(width);
         }
         if let Some(nextn) = ais_nextn {
             inner.ais_nextn = Some(nextn);
@@ -2162,10 +2151,7 @@ fn materialize_replay_mocker_args(
                 )?
                 .extract()?;
         }
-        let callback = create_ais_callback(py, config)?;
-        if let Some(speculation) = callback.speculation_metadata() {
-            args.resolve_speculation(speculation).map_err(to_pyerr)?;
-        }
+        let callback = create_ais_callback(py, config, &mut args.ais_nextn)?;
         args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
     }
     Ok(args)

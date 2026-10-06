@@ -28,11 +28,6 @@ pub trait DecodeInterpolator: Send + Sync {
 /// Callback trait for direct AIS SDK calls.
 /// Implementors call the Rust AIS core API.
 pub trait AisCallback: Send + Sync {
-    /// Speculative round geometry from the same resolved cost model.
-    fn speculation_metadata(&self) -> Option<&aisimulate_core::ResolvedSpeculationConfig> {
-        None
-    }
-
     /// Predict prefill latency in ms.
     /// Parameters: (batch_size, effective_isl, prefix)
     fn predict_prefill(

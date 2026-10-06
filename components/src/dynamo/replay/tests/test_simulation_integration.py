@@ -449,12 +449,12 @@ def test_real_agentic_speculation_prices_full_bursts(
     trace = tmp_path / "agentic-long-output.jsonl"
     trace.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     params = {
-        "mtp": {"depth": 7},
+        "mtp": {"depth": 3},
         "ngram": {"num_speculative_tokens": 3},
-        "eagle3": {"tree_shape": [1, 2, 4], "verify_token_budget": 16},
-        "dflash": {},
-        "dspark": {"num_draft_tokens": 7},
-        "draft_model": {"num_speculative_tokens": 7},
+        "eagle3": {"tree_shape": [1, 1, 1]},
+        "dflash": {"num_draft_tokens": 3},
+        "dspark": {"num_draft_tokens": 3},
+        "draft_model": {"num_speculative_tokens": 3},
     }[kind]
     selection = {
         "kind": kind,
@@ -526,10 +526,7 @@ def test_real_agentic_speculation_prices_full_bursts(
     # Different draft graphs can cost more than AR. Every scheme must execute
     # its configured burst through the same native sampler and finish the DAG.
     native = runner._engine_args(args)
-    assert native.ais_nextn == (3 if kind in {"eagle3", "ngram"} else 7)
-    assert native.ais_verify_width == (
-        16 if kind == "eagle3" else 4 if kind == "ngram" else 8
-    )
+    assert native.ais_nextn == 3
     assert native.ais_perf_config["speculation"]["kind"] == kind
 
 
@@ -658,17 +655,34 @@ def test_auto_agentic_capacity_remains_authored(entry, capacity):
 
 
 @pytest.mark.pre_merge
-def test_generic_draft_capacity_is_not_automatically_estimated():
+@pytest.mark.parametrize("invalid", ["capacity", "tree", "depth", "conflict"])
+def test_native_speculation_rejects_unsupported_controls(draft_checkpoint, invalid):
     from dynamo.replay import run_synthetic_trace_replay
 
     args = _aic_engine_args("vllm", "aggregated")
-    args.pop("num_gpu_blocks")
     args["ais_perf_config"] = args.pop("timing_model")["config"]
-    args["ais_perf_config"]["speculation"] = {"kind": "mtp", "params": {"depth": 2}}
+    method = {"kind": "mtp", "params": {"depth": 2}}
+    if invalid == "capacity":
+        args.pop("num_gpu_blocks")
+        message = "explicitly configured positive num_gpu_blocks"
+    elif invalid == "tree":
+        path, draft = draft_checkpoint
+        method = {
+            "kind": "eagle3",
+            "params": {"tree_shape": [1, 2]},
+            "draft_model_path": path,
+            "draft_config": draft,
+        }
+        message = "tree|chain"
+    elif invalid == "depth":
+        method["params"]["depth"] = 6
+        message = "1.*5"
+    else:
+        args["ais_nextn"] = 1
+        message = "conflicts with the resolved AIS scheme"
+    args["ais_perf_config"]["speculation"] = method
     args["ais_nextn_accept_rates"] = "1,0.5"
-    with pytest.raises(
-        ValueError, match="explicitly configured positive num_gpu_blocks"
-    ):
+    with pytest.raises(ValueError, match=message):
         run_synthetic_trace_replay(
             8,
             8,

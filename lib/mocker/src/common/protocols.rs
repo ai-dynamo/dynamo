@@ -442,7 +442,6 @@ struct MockEngineArgsSerde {
     #[serde(rename = "tensor_parallel_size")]
     ais_tp_size: OptionalConfigValue<usize>,
     ais_nextn: OptionalConfigValue<usize>,
-    ais_verify_width: OptionalConfigValue<usize>,
     ais_nextn_accept_rates: OptionalConfigValue<String>,
     ais_mtp_seed: OptionalConfigValue<u64>,
     gpu_memory_utilization: OptionalConfigValue<f64>,
@@ -671,18 +670,13 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub ais_comm_dtype: Option<String>,
 
-    /// Maximum accepted draft tokens in one speculative round.
+    /// MTP/Eagle speculative-decoding draft-token count (1..=5).
     /// The mocker samples accepted drafts while AIS supplies undiscounted
     /// verification-round latency.
     #[builder(default = "None")]
-    #[validate(range(min = 1))]
+    #[validate(range(min = 1, max = 5))]
     #[serde(rename = "ais_nextn")]
     pub ais_nextn: Option<usize>,
-
-    /// Target verification width, independently resolved from accepted progress.
-    #[builder(default = "None")]
-    #[validate(range(min = 2))]
-    pub ais_verify_width: Option<usize>,
 
     /// Conditional acceptance rates for draft tokens, comma-separated.
     /// Entry i is P(draft i accepted | every earlier draft was accepted).
@@ -1030,9 +1024,6 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(ais_nextn) = compat.ais_nextn.into_nullable() {
             builder = builder.ais_nextn(ais_nextn);
         }
-        if let Some(width) = compat.ais_verify_width.into_nullable() {
-            builder = builder.ais_verify_width(width);
-        }
         if let Some(ais_nextn_accept_rates) = compat.ais_nextn_accept_rates.into_nullable() {
             builder = builder.ais_nextn_accept_rates(ais_nextn_accept_rates);
         }
@@ -1306,15 +1297,7 @@ impl MockEngineArgs {
     fn validate_config(&mut self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
-        // Canonical schemes resolve their geometry once during cost-model
-        // construction. Keep authored rates intact until that boundary.
-        let canonical_speculation = self
-            .ais_perf_config
-            .as_ref()
-            .and_then(|config| config.get("speculation"))
-            .is_some_and(|speculation| !speculation.is_null());
-        if let Some(nextn) = self.ais_nextn.filter(|_| !canonical_speculation) {
-            anyhow::ensure!(nextn <= 5, "legacy ais_nextn must be in 1..=5");
+        if let Some(nextn) = self.ais_nextn {
             let rates = crate::common::speculative::normalize_conditional_accept_rates(
                 nextn,
                 self.ais_nextn_accept_rates.as_deref(),
@@ -1322,30 +1305,6 @@ impl MockEngineArgs {
             self.ais_nextn_accept_rates =
                 Some(crate::common::speculative::format_accept_rates(&rates));
         }
-        Ok(())
-    }
-
-    /// Apply geometry resolved by the same AIS model that supplies timing.
-    pub fn resolve_speculation(
-        &mut self,
-        speculation: &aisimulate_core::ResolvedSpeculationConfig,
-    ) -> anyhow::Result<()> {
-        let accepted = speculation.max_accepted_draft_tokens as usize;
-        let verify_width = speculation.verify_width as usize;
-        anyhow::ensure!(
-            self.ais_nextn.is_none_or(|depth| depth == accepted)
-                && self
-                    .ais_verify_width
-                    .is_none_or(|width| width == verify_width),
-            "speculative scheduler controls conflict with the resolved AIS scheme"
-        );
-        self.ais_nextn = Some(accepted);
-        self.ais_verify_width = Some(verify_width);
-        let rates = crate::common::speculative::normalize_conditional_accept_rates(
-            accepted,
-            self.ais_nextn_accept_rates.as_deref(),
-        )?;
-        self.ais_nextn_accept_rates = Some(crate::common::speculative::format_accept_rates(&rates));
         Ok(())
     }
 
@@ -1656,48 +1615,6 @@ mod tests {
         .unwrap();
         assert_eq!(args.ais_gemm_dtype.as_deref(), Some("fp8_block"));
         assert_eq!(args.ais_kv_cache_dtype.as_deref(), Some("fp8"));
-    }
-
-    #[test]
-    fn canonical_scheme_resolves_scheduler_without_rewriting_cost() {
-        let cost = json!({
-            "model": "model", "system": "h200_sxm", "backend": "vllm",
-            "worker_type": "aggregated",
-            "speculation": {
-                "kind": "eagle3", "params": {"tree_shape": [1, 2, 4], "verify_token_budget": 16},
-                "draft_model_path": "draft-revision", "draft_config": {"hidden_size": 128}
-            }
-        });
-        let mut args = MockEngineArgs::from_json_str(
-            &json!({
-                "ais_nextn_accept_rates": "1,1,0.4", "ais_mtp_seed": 73,
-                "ais_perf_config": cost,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert_eq!(args.ais_nextn, None);
-        let resolved = aisimulate_core::ResolvedSpeculationConfig {
-            kind: "eagle3".into(),
-            verify_width: 16,
-            max_accepted_draft_tokens: 3,
-        };
-        args.resolve_speculation(&resolved).unwrap();
-        assert_eq!(args.ais_nextn, Some(3));
-        assert_eq!(args.ais_verify_width, Some(16));
-        assert_eq!(args.ais_nextn_accept_rates.as_deref(), Some("1,1,0.4"));
-        assert_eq!(args.ais_mtp_seed, 73);
-        assert_eq!(args.ais_perf_config, Some(cost));
-        for (accepted, verify_width) in [(Some(2), None), (None, Some(4))] {
-            args.ais_nextn = accepted;
-            args.ais_verify_width = verify_width;
-            assert!(
-                args.resolve_speculation(&resolved)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("conflict with the resolved AIS scheme")
-            );
-        }
     }
 
     #[test]

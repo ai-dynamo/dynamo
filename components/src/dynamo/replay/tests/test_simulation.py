@@ -827,18 +827,18 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
 
 
 @pytest.mark.parametrize(
-    "kind,params,accepted,width",
+    "kind,params",
     [
-        ("mtp", {"depth": 6}, 6, 7),
-        ("ngram", {"num_speculative_tokens": 3}, 3, 4),
-        ("eagle3", {"tree_shape": [1, 2, 4], "verify_token_budget": 16}, 3, 16),
-        ("dflash", {}, 7, 8),
-        ("dspark", {"num_draft_tokens": 7}, 7, 8),
-        ("draft_model", {"num_speculative_tokens": 7}, 7, 8),
+        ("mtp", {"depth": 3}),
+        ("ngram", {"num_speculative_tokens": 3}),
+        ("eagle3", {"tree_shape": [1, 1, 1]}),
+        ("dflash", {"num_draft_tokens": 3}),
+        ("dspark", {"num_draft_tokens": 3}),
+        ("draft_model", {"num_speculative_tokens": 3}),
     ],
 )
-def test_generic_lowering_preserves_scheme_identity_and_geometry(
-    monkeypatch, draft_checkpoint, kind, params, accepted, width
+def test_generic_lowering_preserves_scheme_identity_and_acceptance(
+    monkeypatch, draft_checkpoint, kind, params
 ):
     from dynamo.replay import config
 
@@ -855,11 +855,10 @@ def test_generic_lowering_preserves_scheme_identity_and_geometry(
     raw["speculation"] = {**method, "expected_accepted_tokens": 2.4, "seed": 73}
     lowered = config.lower_upstream_engine_args(raw)
     assert lowered["ais_perf_config"]["speculation"] == method
-    assert lowered["ais_nextn"] == accepted
-    assert lowered["ais_verify_width"] == width
+    assert lowered["ais_nextn"] == 3
     assert lowered["ais_mtp_seed"] == 73
     rates = list(map(float, lowered["ais_nextn_accept_rates"].split(",")))
-    assert rates == pytest.approx([1, 1, 0.4] + [0] * (accepted - 3))
+    assert rates == pytest.approx([1, 1, 0.4])
 
 
 @pytest.mark.parametrize(

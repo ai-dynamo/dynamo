@@ -121,7 +121,6 @@ pub(crate) fn engine_components(
         speedup_ratio: args.speedup_ratio,
         decode_speedup_ratio: args.decode_speedup_ratio,
         aic_nextn: args.ais_nextn,
-        aic_verify_width: args.ais_verify_width,
         aic_nextn_accept_rates: args.ais_nextn_accept_rates.clone(),
         aic_mtp_seed: args.ais_mtp_seed,
         worker_type,
