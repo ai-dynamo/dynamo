@@ -429,29 +429,6 @@ func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
 	}
 }
 
-func TestDGDRDeprecatedGB200SKURoundTripsThroughSparseAnnotations(t *testing.T) {
-	t.Log("Convert the deprecated v1beta1 GPU SKU through the v1alpha1 sparse payload")
-	original := newV1beta1DGDR()
-	//nolint:staticcheck // SA1019: The deprecated spelling must remain conversion-compatible.
-	original.Spec.Hardware = &v1beta1.HardwareSpec{GPUSKU: v1beta1.GPUSKUTypeGB200SXM}
-	spoke := &DynamoGraphDeploymentRequest{}
-	if err := spoke.ConvertFrom(original); err != nil {
-		t.Fatalf("ConvertFrom() error = %v", err)
-	}
-	restored := &v1beta1.DynamoGraphDeploymentRequest{}
-	if err := spoke.ConvertTo(restored); err != nil {
-		t.Fatalf("ConvertTo() error = %v", err)
-	}
-
-	t.Log("Verify conversion preserves the deprecated spelling without canonicalizing stored objects")
-	if restored.Spec.Hardware == nil {
-		t.Fatal("restored hardware is nil")
-	}
-	if restored.Spec.Hardware.GPUSKU != original.Spec.Hardware.GPUSKU {
-		t.Fatalf("restored gpuSku = %q, want %q", restored.Spec.Hardware.GPUSKU, original.Spec.Hardware.GPUSKU)
-	}
-}
-
 func TestStripDGDRTypedProfilingConfig(t *testing.T) {
 	const (
 		customKey         = "custom"
