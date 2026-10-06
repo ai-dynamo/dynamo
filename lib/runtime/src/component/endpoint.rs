@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -325,25 +326,8 @@ fn build_transport_type_inner(
 ) -> Result<TransportType> {
     match mode {
         RequestPlaneMode::Tcp => {
-            let tcp_host = crate::utils::tcp_rpc_host_from_env();
-            // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
-            // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
-            let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .filter(|&p| p != 0)
-                .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
-
-            // Include instance_id and endpoint name for proper TCP routing.
-            // Format: host:port/instance_id_hex/endpoint_name
-            // This ensures each worker has a unique routing key when multiple workers
-            // share the same TCP server (e.g., --num-workers > 1).
-            let tcp_endpoint = format!(
-                "{}:{}/{:x}/{}",
-                tcp_host, tcp_port, connection_id, endpoint_id.name
-            );
-
-            Ok(TransportType::Tcp(tcp_endpoint))
+            let address = crate::pipeline::network::manager::get_actual_tcp_rpc_address()?;
+            Ok(tcp_transport_type(address, endpoint_id, connection_id))
         }
         RequestPlaneMode::Nats => Ok(TransportType::Nats(nats::instance_subject(
             endpoint_id,
@@ -352,11 +336,19 @@ fn build_transport_type_inner(
     }
 }
 
+fn tcp_transport_type(
+    address: SocketAddr,
+    endpoint_id: &EndpointId,
+    connection_id: u64,
+) -> TransportType {
+    TransportType::Tcp(format!("{address}/{connection_id:x}/{}", endpoint_id.name))
+}
+
 /// Build transport type, ensuring TCP server is initialized when needed.
 ///
-/// In TCP mode with an OS-assigned port (`DYN_TCP_RPC_PORT` unset or invalid), the server must bind
-/// before we can construct a correct transport address. This helper ensures that initialization
-/// occurs, then delegates to the internal builder.
+/// In TCP mode the server must bind before discovery can publish the concrete
+/// advertised address. This helper ensures that initialization occurs, then
+/// delegates to the internal builder.
 pub async fn build_transport_type(
     endpoint: &Endpoint,
     endpoint_id: &EndpointId,
@@ -364,19 +356,7 @@ pub async fn build_transport_type(
 ) -> Result<TransportType> {
     let mode = endpoint.drt().request_plane();
 
-    // For TCP with OS-assigned ports, we must ensure the server is initialized
-    // (bound to a port) before we can construct a correct transport address.
-    let has_fixed_port = match mode {
-        RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .filter(|&p| p != 0)
-            .is_some(),
-        RequestPlaneMode::Nats => true, // NATS doesn't need port init
-    };
-
-    if !has_fixed_port {
-        // Ensure request plane server is initialized before building transport.
+    if mode == RequestPlaneMode::Tcp {
         let _ = endpoint.drt().request_plane_server().await?;
     }
 
@@ -469,5 +449,29 @@ impl Endpoint {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_transport_uses_concrete_ipv4_and_bracketed_ipv6_addresses() {
+        let endpoint_id = EndpointId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            name: "generate".to_string(),
+        };
+
+        for (address, expected) in [
+            ("192.0.2.10:1234", "192.0.2.10:1234/2a/generate"),
+            ("[2001:db8::10]:1234", "[2001:db8::10]:1234/2a/generate"),
+        ] {
+            let transport = tcp_transport_type(address.parse().unwrap(), &endpoint_id, 0x2a);
+            assert_eq!(transport.address(), expected);
+            assert!(!transport.address().starts_with("0.0.0.0"));
+            assert!(!transport.address().starts_with("[::]"));
+        }
     }
 }
