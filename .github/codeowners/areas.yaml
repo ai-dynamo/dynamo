@@ -223,6 +223,7 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+  - gyms/planner-gym/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -438,7 +439,6 @@ areas:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
   - components/src/dynamo/common/tests/test_snapshot*
-  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/
   - lib/gpu_memory_service/

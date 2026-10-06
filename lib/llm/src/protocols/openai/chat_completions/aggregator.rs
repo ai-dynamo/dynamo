@@ -3,6 +3,7 @@
 
 use futures::{Stream, StreamExt, TryStreamExt};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
@@ -142,6 +143,8 @@ pub struct DeltaAggregator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Aggregated nvext field from stream responses
     nvext: Option<serde_json::Value>,
+    /// Prompt logprobs captured from the terminal chunk.
+    prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -173,6 +176,7 @@ struct DeltaChoice {
 
     /// Optional reasoning content for the chat choice.
     reasoning_content: Option<String>,
+    refusal: Option<String>,
 
     /// Accumulated content parts for multimodal responses
     content_parts: Vec<dynamo_protocols::types::ChatCompletionResponseContentPart>,
@@ -371,6 +375,7 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             service_tier: None,
             nvext: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -406,6 +411,10 @@ impl DeltaAggregator {
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
 
+                    if let Some(prompt_logprobs) = delta.prompt_logprobs {
+                        aggregator.prompt_logprobs = Some(prompt_logprobs);
+                    }
+
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
                         let choice_role = choice.delta.role;
@@ -422,6 +431,7 @@ impl DeltaAggregator {
                                     tool_call_chunks: BTreeMap::new(),
                                     tool_calls: None,
                                     reasoning_content: None,
+                                    refusal: None,
                                     content_parts: Vec::new(),
                                 });
 
@@ -439,6 +449,10 @@ impl DeltaAggregator {
                                     state_choice.content_parts.extend(parts.clone());
                                 }
                             }
+                        }
+
+                        if let Some(refusal) = &choice.delta.refusal {
+                            state_choice.refusal.get_or_insert_with(String::new).push_str(refusal);
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -868,6 +882,7 @@ impl DeltaAggregator {
                 choices,
                 service_tier: aggregator.service_tier,
             },
+            prompt_logprobs: aggregator.prompt_logprobs,
             nvext: aggregator.nvext,
         };
 
@@ -921,7 +936,7 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
                     .unwrap_or(dynamo_protocols::types::Role::Assistant),
                 content,
                 tool_calls: delta.tool_calls,
-                refusal: None,
+                refusal: delta.refusal,
                 function_call: None,
                 audio: None,
                 reasoning_content: delta.reasoning_content,
@@ -1056,6 +1071,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
 
@@ -1104,6 +1120,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
         Annotated {
@@ -1225,6 +1242,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
         let annotated = Annotated {
@@ -1283,6 +1301,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
         Annotated {
@@ -1599,6 +1618,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_refusal_fragments_survive_aggregation() {
+        let chunks = ["I cannot ", "help with that."].into_iter().map(|text| {
+            let mut chunk = create_test_delta(0, "", None, None, None, None);
+            chunk.data.as_mut().unwrap().inner.choices[0].delta.refusal = Some(text.to_string());
+            chunk
+        });
+        let response =
+            DeltaAggregator::apply(Box::pin(stream::iter(chunks)), ParsingOptions::default())
+                .await
+                .unwrap();
+        assert_eq!(
+            response.inner.choices[0].message.refusal.as_deref(),
+            Some("I cannot help with that.")
+        );
+        assert!(response.inner.choices[0].message.content.is_none());
+    }
+
+    #[tokio::test]
     async fn test_single_delta() {
         // Create a sample delta
         let annotated_delta = create_test_delta(
@@ -1633,6 +1670,7 @@ mod tests {
             choice.message.content.as_ref().unwrap(),
             &ChatCompletionMessageContent::Text("Hello,".to_string())
         );
+        assert!(choice.message.refusal.is_none());
         assert!(choice.finish_reason.is_none());
         assert_eq!(choice.message.role, dynamo_protocols::types::Role::User);
         assert!(response.inner.service_tier.is_none());
@@ -1912,6 +1950,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
 
@@ -2895,6 +2934,7 @@ mod tests {
             tool_call_chunks: BTreeMap::new(),
             tool_calls: None,
             reasoning_content: Some("Analyzing the question.".to_string()),
+            refusal: None,
             content_parts: vec![],
         };
 

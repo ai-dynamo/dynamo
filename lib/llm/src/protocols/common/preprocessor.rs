@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
-use super::timing::RequestTracker;
+use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
@@ -642,6 +642,13 @@ where
 }
 
 impl PreprocessedRequest {
+    pub fn phase(&self) -> RequestPhase {
+        self.tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or_default()
+    }
+
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
     }
@@ -1001,6 +1008,29 @@ mod tests {
         assert_eq!(guided["require_reasoning"], true);
         let back: PreprocessedRequest = serde_json::from_value(guided).unwrap();
         assert!(back.require_reasoning);
+    }
+
+    #[test]
+    fn disabled_reasoning_with_thinking_budget_serde_round_trip() {
+        let req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions {
+                max_thinking_tokens: Some(0),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .require_reasoning(false)
+            .build()
+            .unwrap();
+
+        let value = serde_json::to_value(&req).unwrap();
+        assert!(value.get("require_reasoning").is_none());
+        assert_eq!(value["stop_conditions"]["max_thinking_tokens"], 0);
+        let back: PreprocessedRequest = serde_json::from_value(value).unwrap();
+        assert!(!back.require_reasoning);
+        assert_eq!(back.stop_conditions.max_thinking_tokens, Some(0));
     }
 
     /// Canary payloads carry only engine-relevant fields. All other required
