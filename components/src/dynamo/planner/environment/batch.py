@@ -129,9 +129,13 @@ class OpenMetricsOnlineTrafficSource:
     healthy exporter before the selected labelset exists from unavailable
     telemetry. Once observed, that counter must remain present; a gap resets
     the baseline so its cumulative value cannot become a one-tick rate spike.
-    The same scrape must contain exactly one non-negative integral frontend
-    active-request gauge with the expected model labels. Missing or ambiguous
-    concurrency is unsafe for idle targeting and invalidates the observation.
+    The frontend active-request gauge is created lazily per model, so a cold
+    frontend may not export the selected model's series until it serves its
+    first inference request. An absent series is reported as
+    ``frontend_active_requests=None`` (unknown) while the rate observation is
+    preserved; the policy never treats unknown concurrency as idle, so idle
+    downscaling stays blocked until the gauge appears. A present but ambiguous,
+    mislabeled, negative, or non-integral gauge invalidates the observation.
     """
 
     def __init__(
@@ -240,7 +244,7 @@ class OpenMetricsOnlineTrafficSource:
                     f"{self._match_labels!r}"
                 )
             counter = sum(counter_values)
-            frontend_active_requests = _single_exact_integral_metric(
+            frontend_active_requests = _optional_single_exact_integral_metric(
                 payload,
                 metric_name=self._active_metric_name,
                 match_labels=self._active_match_labels,
@@ -1091,31 +1095,44 @@ def _sum_matching_metric(
     return sum(values)
 
 
-def _single_exact_integral_metric(
+def _optional_single_exact_integral_metric(
     samples: OpenMetricsSamples,
     *,
     metric_name: str,
     match_labels: Mapping[str, str],
     context: str,
-) -> int:
-    """Return one strict, exactly labeled non-negative integer gauge.
+) -> Optional[int]:
+    """Return one strict, exactly labeled non-negative integer gauge, or None.
 
-    Concurrency is a safety input, so silently summing duplicate series or
-    accepting a schema/selector mismatch would be unsafe. Reject the complete
-    scrape instead and let the collector omit this optional traffic source.
+    Labeled Prometheus gauges are created lazily: registering a ``GaugeVec``
+    exports nothing for a label value until that child is first touched. The
+    frontend only creates a model's active-request child when the model
+    handles its first inference request, so a cold frontend legitimately
+    exposes no series (or only other models' series) for the selected model.
+    That is reported as ``None`` (concurrency unknown), which the policy
+    already treats as "not idle": it blocks idle downscaling without
+    discarding the valid request-rate observation that admission depends on.
+
+    Concurrency is still a safety input, so a schema/selector mismatch (a
+    series whose label keys differ from the selector), duplicate exact series,
+    or a negative/non-integral value rejects the complete scrape rather than
+    being summed or guessed at.
     """
 
     entries = samples.get(metric_name, [])
-    if not entries:
-        raise ValueError(f"required OpenMetrics sample {metric_name!r} was missing")
+    expected_keys = set(match_labels)
+    for labels, _ in entries:
+        if set(dict(labels)) != expected_keys:
+            raise ValueError(
+                f"OpenMetrics sample {metric_name!r} has series labeled "
+                f"{dict(labels)!r}, which does not match selector keys "
+                f"{sorted(expected_keys)!r}"
+            )
     exact_entries = [
         value for labels, value in entries if dict(labels) == dict(match_labels)
     ]
     if not exact_entries:
-        raise ValueError(
-            f"OpenMetrics sample {metric_name!r} had no series exactly matching "
-            f"{dict(match_labels)!r}"
-        )
+        return None
     if len(exact_entries) != 1:
         raise ValueError(
             f"required OpenMetrics sample {metric_name!r} must have exactly one "
