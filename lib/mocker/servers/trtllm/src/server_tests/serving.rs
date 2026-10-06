@@ -72,6 +72,11 @@ fn generation_output_limit_is_one_million_tokens() {
         assert_eq!(prepared.max_output_tokens, max_tokens as usize);
     }
 
+    let mut omitted = request("req-default", 1);
+    omitted.stopping.as_mut().unwrap().max_tokens = None;
+    let prepared = PreparedRequest::new(omitted, &config).unwrap();
+    assert_eq!(prepared.max_output_tokens, 20);
+
     let error = PreparedRequest::new(request("req-too-big", 1_000_001), &config).unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
     assert!(

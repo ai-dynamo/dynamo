@@ -26,7 +26,7 @@ async fn model_info_reports_a_positive_context_length_for_any_model_name() {
             "asked about {model:?}"
         );
         assert_eq!(info.model_id, "mocker-model");
-        assert_eq!(info.max_output_tokens, Some(1_000_000));
+        assert_eq!(info.max_output_tokens, Some(32_768));
     }
 }
 
