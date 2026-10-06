@@ -412,7 +412,7 @@ class TestVllmRendererApi:
             omni_version = Version(omni.__version__).release[:2]
             expected_request_fields += {
                 (0, 29): ("additional_information", "model_intermediate_buffer"),
-                (0, 30): (
+                (0, 31): (
                     "additional_information",
                     "model_intermediate_buffer",
                     "payload_sender_info",
@@ -424,7 +424,7 @@ class TestVllmRendererApi:
                     "is_segment_finished",
                     "new_prompt_len_snapshot",
                 ),
-                (0, 30): (
+                (0, 31): (
                     "multimodal_output",
                     "pooling_output_payload",
                     "is_segment_finished",
