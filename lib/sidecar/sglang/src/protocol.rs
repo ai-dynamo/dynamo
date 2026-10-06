@@ -67,7 +67,36 @@ pub(crate) fn build_generate_request(
         }
     }
 
-    let guided = request.sampling_options.guided_decoding.as_ref();
+    let guided_decoding = request
+        .sampling_options
+        .guided_decoding
+        .as_ref()
+        .and_then(|guided| {
+            let constraint = if let Some(schema) = guided.json.as_ref() {
+                Some(pb::guided_decoding::Constraint::JsonSchema(
+                    json_value_to_string(schema),
+                ))
+            } else if let Some(regex) = guided.regex.as_ref() {
+                Some(pb::guided_decoding::Constraint::Regex(regex.clone()))
+            } else if let Some(grammar) = guided.grammar.as_ref() {
+                Some(pb::guided_decoding::Constraint::Ebnf(grammar.clone()))
+            } else if let Some(choice) = guided.choice.as_ref().filter(|value| !value.is_empty()) {
+                Some(pb::guided_decoding::Constraint::Choice(
+                    pb::ChoiceConstraint {
+                        values: choice.clone(),
+                    },
+                ))
+            } else {
+                guided
+                    .structural_tag
+                    .as_ref()
+                    .map(json_value_to_string)
+                    .map(pb::guided_decoding::Constraint::StructuralTag)
+            };
+            constraint.map(|constraint| pb::GuidedDecoding {
+                constraint: Some(constraint),
+            })
+        });
     let sampling_params = pb::SamplingParams {
         temperature: request.sampling_options.temperature,
         top_p: request.sampling_options.top_p,
@@ -82,10 +111,9 @@ pub(crate) fn build_generate_request(
         stop_token_ids,
         ignore_eos: request.stop_conditions.ignore_eos,
         n: request.sampling_options.n.map(i32::from),
-        json_schema: guided
-            .and_then(|value| value.json.as_ref())
-            .map(json_value_to_string),
-        regex: guided.and_then(|value| value.regex.clone()),
+        seed: request.sampling_options.seed,
+        guided_decoding,
+        ..Default::default()
     };
 
     let output_options = &request.output_options;
@@ -114,6 +142,11 @@ pub(crate) fn build_generate_request(
         .routing
         .as_ref()
         .and_then(|routing| routing.lora_name.clone());
+    let priority = request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.priority);
+    let kv_hints = request.kv_hint.as_ref().map(kv_hint_to_proto).transpose()?;
 
     let mut trace_headers = HashMap::new();
     dynamo_runtime::logging::inject_trace_headers_into_map(&mut trace_headers);
@@ -131,12 +164,42 @@ pub(crate) fn build_generate_request(
         routed_dp_rank,
         trace_headers,
         session_id: None,
+        priority,
+        require_reasoning: Some(request.require_reasoning),
+        max_thinking_tokens: request.stop_conditions.max_thinking_tokens,
+        kv_hints,
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
             bootstrap_host,
             bootstrap_port,
         )?,
+    })
+}
+
+fn kv_hint_to_proto(
+    hint: &dynamo_backend_common::KvHint,
+) -> Result<pb::KvHintsEnvelope, DynamoError> {
+    let actions = hint
+        .actions
+        .iter()
+        .map(|action| {
+            let payload = Value::Object(action.payload.clone().into_iter().collect());
+            Ok(pb::KvHintAction {
+                action_id: action.action_id.clone(),
+                action_type: action.action_type.clone(),
+                action_version: action.action_version.clone(),
+                payload: Some(dynamo_sidecar_common::json_to_struct(
+                    payload,
+                    "kv hint action payload",
+                )?),
+            })
+        })
+        .collect::<Result<Vec<_>, DynamoError>>()?;
+    Ok(pb::KvHintsEnvelope {
+        protocol_version: hint.protocol_version.clone(),
+        message_id: hint.message_id.clone(),
+        actions,
     })
 }
 
@@ -190,16 +253,6 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "length_penalty is not represented by SGLang's native gRPC proto",
         ));
     }
-    if request.sampling_options.seed.is_some() {
-        return Err(client::invalid_request(
-            "seed is not represented by SGLang's native gRPC proto",
-        ));
-    }
-    if request.stop_conditions.max_thinking_tokens.is_some() {
-        return Err(client::invalid_request(
-            "thinking_token_budget (max_thinking_tokens) is not represented by SGLang's native gRPC proto",
-        ));
-    }
     if request
         .sampling_options
         .include_stop_str_in_output
@@ -219,33 +272,35 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "visible stop-token semantics are not represented by SGLang's native gRPC proto",
         ));
     }
-    if let Some(guided) = request.sampling_options.guided_decoding.as_ref()
-        && (guided
-            .choice
+    if let Some(guided) = request.sampling_options.guided_decoding.as_ref() {
+        let constraint_count = [
+            guided.json.is_some(),
+            guided.regex.is_some(),
+            guided
+                .choice
+                .as_ref()
+                .is_some_and(|value| !value.is_empty()),
+            guided.grammar.is_some(),
+            guided.structural_tag.is_some(),
+        ]
+        .into_iter()
+        .filter(|is_set| *is_set)
+        .count();
+        if constraint_count > 1 {
+            return Err(client::invalid_request(
+                "the native SGLang gRPC proto accepts only one guided-decoding constraint",
+            ));
+        }
+        if guided
+            .backend
             .as_ref()
             .is_some_and(|value| !value.is_empty())
-            || guided.grammar.is_some()
-            || guided
-                .backend
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
             || guided.whitespace_pattern.is_some()
-            || guided.structural_tag.is_some())
-    {
-        return Err(client::invalid_request(
-            "the native SGLang gRPC proto currently supports only JSON-schema and regex guided decoding",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.priority)
-        .unwrap_or(0)
-        != 0
-    {
-        return Err(client::invalid_request(
-            "engine priority is not represented by SGLang's native gRPC proto",
-        ));
+        {
+            return Err(client::invalid_request(
+                "guided-decoding backend and whitespace modifiers are not represented by SGLang's native gRPC proto",
+            ));
+        }
     }
     Ok(())
 }

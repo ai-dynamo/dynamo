@@ -29,6 +29,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
+    supports_external_mm_hashes,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
@@ -450,17 +451,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
-        """Probe whether engine.async_generate accepts ``mm_hashes``.
+        """Prepare caller hashes when engine.async_generate accepts them.
 
-        SGLang accepted the kwarg starting with the upstream interop PR; older
-        builds (and forks lacking the patch) raise TypeError if we pass it.
-        Probing the signature once at init keeps the request hot path free of
-        repeated inspection. Returns ``False`` when the kwarg is absent — the
-        request still completes, MM-aware routing just falls back to the
-        text-prefix overlap signal.
+        Older builds (and forks lacking the interop patch) raise TypeError if
+        we pass it. Supported releases accept it but may apply the hash after
+        constructing padded multimodal IDs; the compatibility helper repairs
+        that derived data once per tokenized request.
         """
-        probe = filter_supported_async_generate_kwargs(engine, {"mm_hashes": None})
-        return "mm_hashes" in probe
+        return supports_external_mm_hashes(engine)
 
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
