@@ -136,6 +136,7 @@ def _utf8_bytes(token: str | None) -> list[int] | None:
 def _chat_choice_logprobs(
     records: list[dict[str, Any]],
     top_count: int | None,
+    tokenizer: TokenizerLike,
     return_tokens_as_token_ids: bool = False,
 ) -> dict[str, Any] | None:
     """Build OpenAI ``choices[].logprobs`` from normalized worker records.
@@ -217,8 +218,8 @@ def _chat_choice_logprobs(
             selected_token = f"token_id:{token_id}"
             selected_bytes = _utf8_bytes(selected_token)
         elif selected_token is None:
-            selected_token = ""
-            selected_bytes = None
+            selected_token = tokenizer.decode(token_id)
+            selected_bytes = list(selected_token.encode("utf-8", errors="replace"))
         content.append(
             {
                 "token": selected_token,
@@ -332,6 +333,7 @@ def _apply_choice_logprobs(
     choice["logprobs"] = _chat_choice_logprobs(
         taken,
         top_count,
+        tokenizer=post.tokenizer,
         return_tokens_as_token_ids=return_tokens_as_token_ids,
     )
 

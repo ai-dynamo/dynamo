@@ -3700,7 +3700,7 @@ def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
     assert count(False, True) is None
 
 
-def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module):
+def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module, tokenizer):
     built = vllm_processor_module._chat_choice_logprobs(
         [
             {
@@ -3725,6 +3725,7 @@ def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module):
             }
         ],
         1,
+        tokenizer=tokenizer,
     )
     assert built is not None
     entry = built["content"][0]
@@ -3736,7 +3737,9 @@ def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module):
     ]
 
 
-def test_chat_choice_logprobs_zero_top_count_omits_alternatives(vllm_processor_module):
+def test_chat_choice_logprobs_zero_top_count_omits_alternatives(
+    vllm_processor_module, tokenizer
+):
     built = vllm_processor_module._chat_choice_logprobs(
         [
             {
@@ -3754,6 +3757,7 @@ def test_chat_choice_logprobs_zero_top_count_omits_alternatives(vllm_processor_m
             }
         ],
         0,
+        tokenizer=tokenizer,
     )
     assert built is not None
     entry = built["content"][0]
@@ -3768,7 +3772,9 @@ def test_append_worker_logprobs_drops_misaligned_chunk(vllm_processor_module):
     assert pending == []
 
 
-def test_chat_choice_logprobs_skips_non_dict_top_entry(vllm_processor_module):
+def test_chat_choice_logprobs_skips_non_dict_top_entry(
+    vllm_processor_module, tokenizer
+):
     built = vllm_processor_module._chat_choice_logprobs(
         [
             {
@@ -3787,6 +3793,7 @@ def test_chat_choice_logprobs_skips_non_dict_top_entry(vllm_processor_module):
             }
         ],
         1,
+        tokenizer=tokenizer,
     )
     assert built is not None
     assert built["content"][0]["top_logprobs"] == [
@@ -3794,7 +3801,7 @@ def test_chat_choice_logprobs_skips_non_dict_top_entry(vllm_processor_module):
     ]
 
 
-def test_chat_choice_logprobs_formats_token_ids(vllm_processor_module):
+def test_chat_choice_logprobs_formats_token_ids(vllm_processor_module, tokenizer):
     built = vllm_processor_module._chat_choice_logprobs(
         [
             {
@@ -3819,6 +3826,7 @@ def test_chat_choice_logprobs_formats_token_ids(vllm_processor_module):
             }
         ],
         2,
+        tokenizer=tokenizer,
         return_tokens_as_token_ids=True,
     )
     assert built is not None
@@ -3851,12 +3859,45 @@ def _top_entry(token_id, logprob, token="t", raw_bytes=None):
     return [entry]
 
 
-def test_choice_logprobs_cover_one_multi_token_delta(vllm_processor_module):
+def test_choice_logprobs_decode_selected_tokens_without_top_rows(
+    vllm_processor_module, tokenizer
+):
+    token_ids = tokenizer.encode("Hello world", add_special_tokens=False)
+    assert len(token_ids) == 2
+    pending: list = []
+    emitted: list = []
+    post = SimpleNamespace(tokenizer=tokenizer, _suppress_reasoning_output=False)
+    vllm_processor_module._append_worker_logprobs(
+        pending, token_ids, [-0.25, -0.5], None
+    )
+    choice: dict = {"index": 0}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output(token_ids), pending, emitted, 0
+    )
+    assert choice["logprobs"]["content"] == [
+        {
+            "token": "Hello",
+            "logprob": -0.25,
+            "bytes": list(b"Hello"),
+            "top_logprobs": [],
+        },
+        {
+            "token": " world",
+            "logprob": -0.5,
+            "bytes": list(b" world"),
+            "top_logprobs": [],
+        },
+    ]
+
+
+def test_choice_logprobs_cover_one_multi_token_delta(vllm_processor_module, tokenizer):
     pending: list = []
     emitted: list = []
     append = vllm_processor_module._append_worker_logprobs
     apply = vllm_processor_module._apply_choice_logprobs
-    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
     for token_id, logprob in ((1, -0.1), (2, -0.2), (3, -0.3)):
         append(
             pending,
@@ -3875,13 +3916,15 @@ def test_choice_logprobs_cover_one_multi_token_delta(vllm_processor_module):
     assert emitted == []
 
 
-def test_choice_logprobs_wait_for_buffered_tool_parse(vllm_processor_module):
+def test_choice_logprobs_wait_for_buffered_tool_parse(vllm_processor_module, tokenizer):
     """Non-streaming tool parsing emits one choice for every held chunk."""
     pending: list = []
     emitted: list = []
     append = vllm_processor_module._append_worker_logprobs
     apply = vllm_processor_module._apply_choice_logprobs
-    post = SimpleNamespace(_fast_plain_text=False, _suppress_reasoning_output=False)
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=False, _suppress_reasoning_output=False
+    )
     for token_id, logprob in ((1, -0.1), (2, -0.2)):
         append(
             pending,
@@ -3903,13 +3946,15 @@ def test_choice_logprobs_wait_for_buffered_tool_parse(vllm_processor_module):
     assert pending == []
 
 
-def test_choice_logprobs_keep_silent_plain_text_token(vllm_processor_module):
+def test_choice_logprobs_keep_silent_plain_text_token(vllm_processor_module, tokenizer):
     """An empty detokenized delta stays pending until the visible choice."""
     pending: list = []
     emitted: list = []
     append = vllm_processor_module._append_worker_logprobs
     apply = vllm_processor_module._apply_choice_logprobs
-    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
     append(pending, [7], [-0.7], [_top_entry(7, -0.7, token="")])
     apply(None, post, _logprob_output([7]), pending, emitted, 0)
     assert [record["token_id"] for record in pending] == [7]
@@ -3928,10 +3973,12 @@ def test_choice_logprobs_keep_silent_plain_text_token(vllm_processor_module):
     assert pending == []
 
 
-def test_choice_logprobs_use_token_id_text(vllm_processor_module):
+def test_choice_logprobs_use_token_id_text(vllm_processor_module, tokenizer):
     pending: list = []
     emitted: list = []
-    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
     vllm_processor_module._append_worker_logprobs(
         pending,
         [10],
@@ -3960,11 +4007,13 @@ def test_choice_logprobs_use_token_id_text(vllm_processor_module):
     ]
 
 
-def test_trimmed_stop_token_is_not_attached(vllm_processor_module):
+def test_trimmed_stop_token_is_not_attached(vllm_processor_module, tokenizer):
     pending: list = []
     emitted: list = []
     append = vllm_processor_module._append_worker_logprobs
-    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
     append(pending, [42], [-0.4], [_top_entry(42, -0.4, token="A", raw_bytes=[65])])
     append(pending, [99], [-1.0], [_top_entry(99, -1.0, token="<stop>")])
     choice: dict = {"index": 0, "logprobs": object()}
@@ -3981,13 +4030,17 @@ def test_trimmed_stop_token_is_not_attached(vllm_processor_module):
     assert emitted == []
 
 
-def test_misaligned_logprobs_do_not_poison_the_next_choice(vllm_processor_module):
+def test_misaligned_logprobs_do_not_poison_the_next_choice(
+    vllm_processor_module, tokenizer
+):
     """A prefix mismatch drops the leftover record so the next chunk can align."""
     pending: list = []
     emitted: list = []
     append = vllm_processor_module._append_worker_logprobs
     apply = vllm_processor_module._apply_choice_logprobs
-    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
     append(pending, [3], [-0.3], [_top_entry(3, -0.3, raw_bytes=[116])])
     missed: dict = {"index": 0, "logprobs": object()}
     apply(missed, post, _logprob_output([4]), pending, emitted, 0)
