@@ -103,13 +103,45 @@ fn load_thresholds_from_env() -> Result<LoadThresholdConfig> {
             .map_err(|_| anyhow::anyhow!("invalid value for {key}: {raw:?}"))
     }
 
-    let config = LoadThresholdConfig {
-        active_decode_blocks_threshold: parse(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD)?,
-        active_prefill_tokens_threshold: parse(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD)?,
-        active_prefill_tokens_threshold_frac: parse(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC)?,
-    };
-    config.validate().map_err(anyhow::Error::msg)?;
-    Ok(config)
+    let decode = parse(DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD)?;
+    let prefill = parse(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD)?;
+    let prefill_frac = parse(DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC)?;
+
+    // `validate` names struct fields; check one variable at a time so the error
+    // names the one the operator set.
+    for (key, single) in [
+        (
+            DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD,
+            LoadThresholdConfig {
+                active_decode_blocks_threshold: decode,
+                ..Default::default()
+            },
+        ),
+        (
+            DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD,
+            LoadThresholdConfig {
+                active_prefill_tokens_threshold: prefill,
+                ..Default::default()
+            },
+        ),
+        (
+            DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC,
+            LoadThresholdConfig {
+                active_prefill_tokens_threshold_frac: prefill_frac,
+                ..Default::default()
+            },
+        ),
+    ] {
+        single
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid value for {key}: {error}"))?;
+    }
+
+    Ok(LoadThresholdConfig {
+        active_decode_blocks_threshold: decode,
+        active_prefill_tokens_threshold: prefill,
+        active_prefill_tokens_threshold_frac: prefill_frac,
+    })
 }
 
 fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
