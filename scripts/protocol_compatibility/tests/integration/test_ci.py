@@ -38,6 +38,7 @@ class AssessmentWorkflowTests(unittest.TestCase):
             == "Install tooling dependency and run source-only regression tests"
         )
         self.assertIn("discover -s scripts/protocol_compatibility/tests -t .", tests)
+        self.assertIn("-r scripts/protocol_compatibility/requirements.txt", tests)
         candidate = json.loads(
             (
                 ROOT

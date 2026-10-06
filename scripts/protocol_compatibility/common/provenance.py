@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,9 @@ def tool_provenance() -> dict[str, Any]:
     )
     return {
         "python_version": platform.python_version(),
+        "parser_versions": {
+            name: version(name) for name in ("tree-sitter", "tree-sitter-rust")
+        },
         "tools_sha256": {
             "scripts/protocol_compatibility/"
             + path.relative_to(package)

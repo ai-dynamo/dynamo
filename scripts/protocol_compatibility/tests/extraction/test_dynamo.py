@@ -25,6 +25,78 @@ def extractor(source):
 
 
 class DynamoContractTests(unittest.TestCase):
+    def test_tree_sitter_rejects_recovered_syntax_without_partial_index(self):
+        for source in (
+            "struct Good {} struct Broken { pub value: }",
+            "struct Broken { pub value: String",
+            "/* unterminated",
+        ):
+            with self.subTest(source=source):
+                sources = RustSources()
+                with self.assertRaisesRegex(RustUnknown, "syntax"):
+                    sources.add("fixture.rs", source)
+                self.assertEqual(sources.items, [])
+                self.assertEqual(sources.sources, {})
+
+    def test_tree_sitter_keeps_const_generic_braces_inside_declaration(self):
+        instance = extractor(
+            """
+            #[derive(Deserialize)] struct Request<const N: usize = { 2 + 2 }> {
+                pub model: String,
+            }
+            """
+        )
+        fields, _ = instance.fields(instance.sources.resolve("Request", ""))
+        self.assertEqual(set(fields), {"model"})
+        self.assertEqual(fields["model"].wire_type, {"type": "string"})
+
+    def test_tree_sitter_handles_lifetimes_unicode_and_raw_identifiers(self):
+        instance = extractor(
+            """
+            #[derive(Deserialize)] struct Request {
+                #[serde(rename = r#"模式"#)] pub r#type: String,
+            }
+            impl<'de> Deserialize<'de> for Other {
+                fn deserialize() { let café = '{'; }
+            }
+            """
+        )
+        fields, _ = instance.fields(instance.sources.resolve("Request", ""))
+        self.assertEqual(set(fields), {"模式"})
+        method = next(item for item in instance.sources.items if item.kind == "fn")
+        self.assertIn("Deserialize", method.owner)
+        self.assertIn("café", method.body)
+        self.assertIn("'{'", method.body)
+
+    def test_tree_sitter_does_not_read_declarations_inside_macros_or_functions(self):
+        instance = extractor(
+            """
+            macro_rules! define { () => { struct Fake {} }; }
+            define!();
+            fn helper() { struct Local {} }
+            #[derive(Deserialize)] struct Real { pub n: u32 }
+            """
+        )
+        names = {item.name for item in instance.sources.items}
+        self.assertNotIn("Fake", names)
+        self.assertNotIn("Local", names)
+        self.assertIn("Real", names)
+
+    def test_tuple_struct_does_not_become_empty_object(self):
+        instance = extractor("#[derive(Deserialize)] struct Request(String);")
+        with self.assertRaises(RustUnknown):
+            instance.fields(instance.sources.resolve("Request", ""))
+
+    def test_tree_sitter_literal_projection_preserves_empty_and_raw_strings(self):
+        for source, expected in (
+            ('r#""#', '""'),
+            ('r###"a { b }"###', '"a { b }"'),
+            ('"a { b }"', '"a { b }"'),
+            ("'{'", "'{'"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(tokens(source), [expected])
+
     def test_nested_placement_survives_partial_schema_and_follows_aliases(self):
         instance = extractor(
             """

@@ -7,6 +7,7 @@ import hashlib
 import subprocess
 import sys
 import unittest
+from importlib.metadata import version
 
 from scripts.protocol_compatibility.common.paths import ROOT
 from scripts.protocol_compatibility.common.provenance import tool_provenance
@@ -89,6 +90,10 @@ class PackageTests(unittest.TestCase):
         }
         self.assertEqual(provenance["tools_sha256"], expected)
         self.assertEqual(provenance["python_version"], sys.version.split()[0])
+        self.assertEqual(
+            provenance["parser_versions"],
+            {name: version(name) for name in ("tree-sitter", "tree-sitter-rust")},
+        )
         for part in (
             "inputs",
             "extraction",

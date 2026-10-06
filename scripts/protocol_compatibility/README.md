@@ -25,9 +25,11 @@ and the separately scoped behavioral test workflow are not completed by this cha
 
 ## Commands
 
-Run from the repository root with Python 3.12 and `PyYAML==6.0.2`:
+Run from the repository root with Python 3.12. In an isolated environment,
+install the pinned tooling dependencies (not Dynamo or the inference engine):
 
 ```sh
+python -m pip install -r scripts/protocol_compatibility/requirements.txt
 python -m scripts.protocol_compatibility --help
 python -m scripts.protocol_compatibility assess --help
 python -m scripts.protocol_compatibility check-pins --help
@@ -77,6 +79,22 @@ fixtures stay next to their backend tests. SGLang and TensorRT-LLM remain future
 adapters, not implied coverage.
 
 ## Development
+
+Rust declaration discovery uses Tree-sitter and its Rust grammar; Python uses
+the standard-library `ast` parser. Parser package versions are recorded in report
+provenance. Rust syntax-error recovery is rejected as a coverage gap, not accepted
+as a complete declaration. Parsing does not expand macros, execute build scripts,
+resolve every type, or establish Serde/Pydantic behavior: the bounded contract
+interpreters still report unsupported semantics explicitly.
+
+The Rust interpreter retains token-list helpers for its supported attributes and
+types; these consume parsed nodes, not a hand-written Rust lexer. Tree-sitter was
+chosen over a `syn` helper to retain a Python-only tooling installation. Griffe
+can resolve Python imports/re-exports, but its unextended static visitor selects
+one value for `if FLAG: Payload = int; else: Payload = str` (tested with 2.3.0).
+B1 must instead mark this as conditional/unknown. Keeping that diagnostic and
+per-root dependency provenance would require additional adapters, so Griffe has
+not been adopted. Neither choice introduces native-schema export.
 
 Run the complete source-only suite in the permitted validation environment:
 

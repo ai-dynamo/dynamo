@@ -55,7 +55,7 @@ jobs:
           python-version: '3.12'
       - name: Install tooling dependency and run source-only regression tests
         run: |
-          python -m pip install PyYAML==6.0.2
+          python -m pip install -r scripts/protocol_compatibility/requirements.txt
           python -m unittest discover -s scripts/protocol_compatibility/tests -t . -q
       - name: Prepare immutable source inputs
         shell: bash

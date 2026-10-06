@@ -206,7 +206,8 @@ Keep these invariants when changing the tooling or a framework version:
 
 ## Prerequisites
 
-Use Python 3.12 and `PyYAML==6.0.2`, a Dynamo Git repository containing the selected
+Use Python 3.12 with the [pinned tooling dependencies](../../../scripts/protocol_compatibility/requirements.txt),
+a Dynamo Git repository containing the selected
 commits, and a vLLM Git repository containing the selected upstream commits. Local
 uncommitted runtime changes are not assessed: create an identifiable commit first.
 The extractor's own dirty source state is separately identified by tool hashes.

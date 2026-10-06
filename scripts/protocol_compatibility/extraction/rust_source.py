@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded Rust source reader for serde wire declarations, not a Rust compiler.
+"""Tree-sitter syntax reader with bounded Serde interpretation, not a compiler.
 
-Comments and strings are lexed before balancing delimiters. Unsupported syntax
-is diagnosed by the consumer. No build scripts, macros, or dependencies execute.
+Rust syntax and declaration boundaries come from the pinned Rust grammar.
+Error-recovered trees are rejected. Token-list helpers below interpret only the
+supported attribute/type subset; they do not discover Rust declarations.
+No build scripts, macros, or dependencies execute.
 Registry sources are read from archives whose checksum matches Cargo.lock.
 """
 
@@ -11,11 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import tarfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import tree_sitter_rust
+from tree_sitter import Language, Node, Parser
 
 from scripts.protocol_compatibility.common.provenance import digest
 from scripts.protocol_compatibility.common.source import git
@@ -25,58 +29,38 @@ class RustUnknown(ValueError):
     """The bounded source reader cannot establish a requested contract fact."""
 
 
+def parse(source: str) -> Node:
+    root = (
+        Parser(Language(tree_sitter_rust.language())).parse(source.encode()).root_node
+    )
+    if root.has_error:
+        raise RustUnknown(
+            "Rust syntax error or unsupported syntax in tree-sitter grammar"
+        )
+    return root
+
+
+def node_tokens(node: Node) -> list[str]:
+    """Project parsed syntax into the contract interpreter's token vocabulary."""
+    if node.type in {"line_comment", "block_comment"}:
+        return []
+    if node.type == "raw_string_literal":
+        content = next(
+            child for child in node.children if child.type == "string_content"
+        )
+        return [json.dumps(content.text.decode())]
+    if node.type in {"string_literal", "char_literal"} or not node.children:
+        return [node.text.decode()]
+    return [token for child in node.children for token in node_tokens(child)]
+
+
 def tokens(source: str) -> list[str]:
-    result = []
-    position = 0
-    while position < len(source):
-        if source[position].isspace():
-            position += 1
-            continue
-        if source.startswith("//", position):
-            end = source.find("\n", position)
-            position = len(source) if end < 0 else end + 1
-            continue
-        if source.startswith("/*", position):
-            depth = 1
-            position += 2
-            while position < len(source) and depth:
-                if source.startswith("/*", position):
-                    depth += 1
-                    position += 2
-                elif source.startswith("*/", position):
-                    depth -= 1
-                    position += 2
-                else:
-                    position += 1
-            if depth:
-                raise RustUnknown("unterminated Rust comment")
-            continue
-        raw = re.match(r'(?:b|c)?r(#+)?"', source[position:])
-        if raw:
-            closing = '"' + (raw[1] or "")
-            end = source.find(closing, position + raw.end())
-            if end < 0:
-                raise RustUnknown("unterminated raw Rust string")
-            result.append(json.dumps(source[position + raw.end() : end]))
-            position = end + len(closing)
-            continue
-        literal = re.match(
-            r"""(?:b|c)?"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])' """,
-            source[position:],
-            re.VERBOSE | re.DOTALL,
-        )
-        if literal:
-            result.append(literal[0])
-            position += literal.end()
-            continue
-        token = re.match(
-            r"r#[A-Za-z_]\w*|[A-Za-z_]\w*|\d[\w.]*|::|->|=>|[^\s]", source[position:]
-        )
-        if token is None:
-            raise RustUnknown("unrecognized Rust token")
-        result.append(token[0])
-        position += token.end()
-    return result
+    # A token-tree wrapper accepts type/attribute fragments without guessing their
+    # Rust syntactic context. Full source files always go through parse() directly.
+    root = parse("protocol_tokens! {" + source + "\n}")
+    invocation = root.named_children[0]
+    tree = next(child for child in invocation.children if child.type == "token_tree")
+    return node_tokens(tree)[1:-1]
 
 
 def group(items: list[str], start: int) -> tuple[list[str], int]:
@@ -176,10 +160,11 @@ class RustSources:
     modules: dict[str, str] = field(default_factory=dict)
 
     def add(self, path: str, source: str, crate: str = "dynamo_llm") -> None:
+        root = parse(source)  # Reject the entire file before mutating the index.
         self.sources[path] = source
         self.modules[path] = self.module_path(path, crate)
         self.imports[path] = {}
-        self._items(tokens(source), path, crate)
+        self._items(root, path, crate)
 
     @staticmethod
     def module_path(path: str, crate: str) -> str:
@@ -231,46 +216,40 @@ class RustSources:
         imported = self.imports.get(source, {}).get(head)
         return (imported + separator + tail) if imported else name
 
-    def _items(
-        self, sequence: list[str], path: str, crate: str, owner: str = ""
-    ) -> None:
-        position = 0
-        while position < len(sequence):
-            attrs, position = attributes(sequence, position)
-            if position >= len(sequence):
-                break
-            start = position
-            while position < len(sequence) and sequence[position] not in {"{", ";"}:
-                position += 1
-            header = sequence[start:position]
-            if position == len(sequence):
-                break
-            if sequence[position] == "{":
-                body, position = group(sequence, position)
-            else:
-                body = []
-                position += 1
+    def _items(self, root: Node, path: str, crate: str, owner: str = "") -> None:
+        pending = []
+        for node in root.named_children:
+            if node.type in {"line_comment", "block_comment"}:
+                continue
+            if node.type == "attribute_item":
+                pending.append(node_tokens(node)[2:-1])
+                continue
+            attrs, pending = pending, []
             if any(attr[:2] == ["cfg", "("] and "test" in attr for attr in attrs):
                 continue
-            if "use" in header:
-                index = header.index("use")
-                imported = header[index + 1 :] + (["{", *body, "}"] if body else [])
-                if imported:
-                    self.add_import(imported, path)
+            if node.type == "use_declaration":
+                self.add_import(node_tokens(node.child_by_field_name("argument")), path)
                 continue
-            kinds = [
-                kind
-                for kind in ("struct", "enum", "type", "fn", "const", "impl", "mod")
-                if kind in header
+            kind = {"function_item": "fn"}.get(
+                node.type, node.type.removesuffix("_item")
+            )
+            if kind not in {"struct", "enum", "type", "fn", "const", "impl", "mod"}:
+                continue
+            body_node = node.child_by_field_name("body")
+            header = [
+                token
+                for child in node.children
+                if child != body_node and child.type != ";"
+                for token in node_tokens(child)
             ]
-            if not kinds:
-                continue
-            kind = kinds[0]
-            offset = header.index(kind)
-            name = header[offset + 1] if offset + 1 < len(header) else ""
             if kind in {"impl", "mod"}:
-                self._items(body, path, crate, " ".join(header))
+                if body_node is not None:
+                    self._items(body_node, path, crate, " ".join(header))
                 continue
+            name = node.child_by_field_name("name").text.decode().removeprefix("r#")
+            body = node_tokens(body_node) if body_node is not None else []
+            if body and body[0] == "{":
+                body = body[1:-1]
             self.items.append(
                 RustItem(name, kind, path, crate, attrs, header, body, owner)
             )
