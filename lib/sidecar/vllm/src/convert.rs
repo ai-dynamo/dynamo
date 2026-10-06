@@ -207,10 +207,10 @@ pub(crate) fn build_generate_request(
     if mode.is_encode()
         && media
             .iter()
-            .any(|item| item.modality() != pb::Modality::Image)
+            .any(|item| !matches!(item.modality(), pb::Modality::Image | pb::Modality::Video))
     {
         return Err(client::invalid_argument(
-            "encode requests support image media only",
+            "encode requests support image and video media only",
         ));
     }
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
@@ -1192,17 +1192,6 @@ fn validate_request(
     if mode.is_encode() && !has_media {
         return Err(client::invalid_argument(
             "encode requests require multimodal media",
-        ));
-    }
-    if mode.is_encode()
-        && request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .iter()
-                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
-        })
-    {
-        return Err(client::invalid_argument(
-            "encode requests support image media only",
         ));
     }
     if mode.is_encode() && request.encoder_result.is_some() {
