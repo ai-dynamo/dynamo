@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use dynamo_backend_common::{
-    AsyncEngineContext, DisaggregationMode, FinishReason, GenerateContext, LLMEngine,
-    OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
+    AsyncEngineContext, BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext,
+    LLMEngine, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
 use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
@@ -201,8 +201,9 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     decode.start(1).await.unwrap();
 
     let prefill_outputs = collect(&prefill, request(3)).await;
-    assert_eq!(prefill_outputs.len(), 1);
+    assert_eq!(prefill_outputs.len(), 2);
     assert!(prefill_outputs[0].token_ids.is_empty());
+    assert!(prefill_outputs[0].finish_reason.is_none());
     let handoff = prefill_outputs[0]
         .disaggregated_params
         .clone()
@@ -210,6 +211,8 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     assert_eq!(handoff["bootstrap_host"], "127.0.0.1");
     assert_eq!(handoff["bootstrap_port"], 8_998);
     assert!(handoff["bootstrap_room"].is_number());
+    assert_eq!(prefill_outputs[1].finish_reason, Some(FinishReason::Length));
+    assert!(prefill_outputs[1].disaggregated_params.is_none());
 
     let mut decode_request = request(3);
     decode_request.prefill_result = Some(PrefillResult {
@@ -227,32 +230,37 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
 #[tokio::test]
 async fn sidecar_abort_releases_mocker_work() {
     let mut args = fast_engine_args();
-    args.speedup_ratio = 0.001;
+    args.speedup_ratio = 0.1;
     let server = RunningServer::start(ServerMode::Aggregated, args).await;
-    let engine = Arc::new(sidecar(&server.endpoint, DisaggregationMode::Aggregated).await);
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
 
-    let context = dynamo_backend_common::testing::mock_context();
-    let stream = engine
-        .generate(
-            request(10_000),
-            GenerateContext::new(Arc::clone(&context), None),
-        )
-        .await
-        .unwrap();
-    let consumer = tokio::spawn(async move { stream.collect::<Vec<_>>().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let context = dynamo_backend_common::testing::mock_context();
+        let mut stream = engine
+            .generate(
+                request(10_000),
+                GenerateContext::new(Arc::clone(&context), None),
+            )
+            .await
+            .unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert!(!first.token_ids.is_empty());
+        assert!(first.finish_reason.is_none());
+        engine.abort(Arc::clone(&context)).await;
+        let outputs = stream.collect::<Vec<_>>().await;
+        let (terminal, preceding) = outputs.split_last().expect("Abort must return an error");
+        assert!(
+            preceding
+                .iter()
+                .all(|output| output.as_ref().unwrap().finish_reason.is_none())
+        );
+        assert_eq!(
+            terminal.as_ref().unwrap_err().error_type(),
+            ErrorType::Backend(BackendError::Cancelled)
+        );
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while server.service.active_request_count() == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("request should reach the Mocker scheduler");
-
-    engine.abort(Arc::clone(&context)).await;
-    let mut metrics = server.service.metrics_receiver();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut metrics = server.service.metrics_receiver();
         loop {
             let snapshot = metrics.borrow_and_update().clone();
             if server.service.active_request_count() == 0
@@ -263,10 +271,16 @@ async fn sidecar_abort_releases_mocker_work() {
             }
             metrics.changed().await.unwrap();
         }
+        let recovered = collect(&engine, request(1)).await;
+        assert_eq!(recovered[0].token_ids.len(), 1);
+        assert_eq!(
+            recovered.last().unwrap().finish_reason,
+            Some(FinishReason::Length)
+        );
+        assert_eq!(server.service.active_request_count(), 0);
     })
     .await
-    .expect("Abort should release scheduler work promptly");
-    consumer.abort();
+    .expect("Abort should cancel scheduler work and permit another request");
 }
 
 #[tokio::test]
@@ -317,4 +331,19 @@ async fn request_cancellation_is_isolated_and_shutdown_reaches_grpc_streams() {
     })
     .await
     .expect("request cancellation and engine shutdown must finish promptly");
+}
+
+#[path = "../../tests/common/mod.rs"]
+mod common;
+
+#[tokio::test]
+async fn sidecar_relays_stored_and_evicted_blocks() {
+    let mut args = fast_engine_args();
+    args.enable_prefix_caching = true;
+    args.num_gpu_blocks = 8;
+    let block_size = u32::try_from(args.block_size).unwrap();
+    let server = RunningServer::start(ServerMode::Aggregated, args).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    common::check_kv_events(&engine, block_size).await;
 }

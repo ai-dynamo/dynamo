@@ -28,9 +28,12 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import split_served_model_names
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_cache_metadata_compat import enable_kv_cache_metadata_compat
 
 from . import envs
 
@@ -64,6 +67,12 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     # rest vLLM args
     engine_args: AsyncEngineArgs
 
+    @property
+    def model_source_path(self) -> str:
+        return (
+            self.engine_args.model if needs_local_model_path(self.model) else self.model
+        )
+
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         DynamoVllmConfig.validate(self)
@@ -76,13 +85,38 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
 
 
 def parse_args(argv: list[str] | None = None) -> Config:
-    """Parse command-line arguments for the vLLM backend.
+    """Parse vLLM arguments without fetching; workers use parse_args_with_model_fetch.
 
     Args:
         argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
     Returns:
         Config: Parsed configuration object.
     """
+    return _build_config(*_parse_cli_args(argv))
+
+
+async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
+    """Parse worker arguments, resolving NGC sources before engine validation.
+
+    Only metadata is fetched here; worker startup fetches weights after
+    validation. Hugging Face sources retain their existing acquisition path.
+
+    Args:
+        argv: Command-line arguments. ``None`` means ``sys.argv[1:]``.
+
+    Returns:
+        The validated configuration, retaining the original source in ``model``.
+    """
+    dynamo_config, vllm_args = _parse_cli_args(argv)
+    if needs_local_model_path(dynamo_config.model):
+        vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
+        if not vllm_args.served_model_name:
+            vllm_args.served_model_name = [dynamo_config.model]
+    return _build_config(dynamo_config, vllm_args)
+
+
+def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]:
+    """Split Dynamo and vLLM arguments while preserving the original model source."""
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
@@ -126,7 +160,11 @@ def parse_args(argv: list[str] | None = None) -> Config:
     # vllm will update the model name to the full path of the model, which will break the dynamo logic,
     # as we use the model name as served_model_name (if served_model_name is not set)
     dynamo_config.model = vllm_args.model
+    return dynamo_config, vllm_args
 
+
+def _build_config(dynamo_config: Config, vllm_args: argparse.Namespace) -> Config:
+    enable_kv_cache_metadata_compat()
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 
     # Attach engine_args before validate(): the --enable-lora exclusivity rules
@@ -260,7 +298,7 @@ def update_dynamo_config_with_engine(
             "When using --disaggregation-mode prefill, you must explicitly "
             "provide --kv-transfer-config. Example:\n"
             "  --kv-transfer-config "
-            '\'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\''
+            '\'{"kv_connector":"NixlConnector","kv_role":"kv_producer"}\''
         )
 
     # Clear connector list (no longer used for vLLM)
@@ -418,11 +456,27 @@ def update_engine_config_with_dynamo(
                     f"is set to '{existing_ext}'. Remove it or unset "
                     f"DYN_FPM_GC_POLICY."
                 )
+        if dynamo_config.benchmark_randomize_kda_state:
+            if engine_config.worker_cls not in ("auto", RANDOM_KDA_WORKER):
+                raise ValueError(
+                    "Random KDA benchmarking requires the standard --worker-cls auto"
+                )
+            if (
+                engine_config.load_format == "gms"
+                or os.environ.get("DYN_GMS_USE_V1") == "true"
+            ):
+                raise ValueError(
+                    "Random KDA benchmarking does not support the GMS worker"
+                )
+            defaults["worker_cls"] = RANDOM_KDA_WORKER
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
+            "randomize_kda_state": dynamo_config.benchmark_randomize_kda_state,
+            "hybrid_live_state": dynamo_config.benchmark_hybrid_live_state,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "max_batch_size": dynamo_config.benchmark_max_batch_size,
             "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
         }
         explicit_points = dynamo_config._benchmark_points
@@ -548,7 +602,7 @@ def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
     return False
 
 
-def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
+def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str:
     """Convert a legacy --connector list to the equivalent --kv-transfer-config JSON.
 
     Used in error messages to help users migrate.
@@ -566,7 +620,7 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
             )
         elif c == "nixl":
             multi_connectors.append(
-                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+                {"kv_connector": "NixlConnector", "kv_role": nixl_role}
             )
         elif c == "kvbm":
             multi_connectors.append(
@@ -615,9 +669,16 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
             "no connector. Simply remove the --connector flag."
         )
 
+    if dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
+        nixl_role = "kv_producer"
+    elif dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
+        nixl_role = "kv_consumer"
+    else:
+        nixl_role = "kv_both"
+
     # Active connectors: show migration path
     if normalized:
-        equiv = _connector_to_kv_transfer_json(normalized)
+        equiv = _connector_to_kv_transfer_json(normalized, nixl_role)
         raise ValueError(
             "--connector is no longer supported for the vLLM backend. "
             "Use --kv-transfer-config instead.\n"
@@ -628,7 +689,7 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
     if env_connector is not None:
         env_values = [v.strip().lower() for v in env_connector.split() if v.strip()]
         if env_values and not all(v in ("none", "null") for v in env_values):
-            equiv = _connector_to_kv_transfer_json(env_values)
+            equiv = _connector_to_kv_transfer_json(env_values, nixl_role)
             raise ValueError(
                 "The DYN_CONNECTOR environment variable is no longer supported "
                 "for the vLLM backend. Use --kv-transfer-config instead.\n"

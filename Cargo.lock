@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.12.0-dev.1"
+version = "0.13.0-dev.202609300000000061"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4db6a085073ecb1c2569f796ba44742ed4681f8f4060daaed2456ef4ea9b652"
+checksum = "ed49bec0f9d606037ed2bf95b88895382f6b94c8289f479c6ed0d4b26dad1452"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -49,13 +49,17 @@ dependencies = [
  "parquet",
  "pep440_rs",
  "quick_cache",
+ "rand 0.8.6",
  "rand 0.9.4",
+ "rand_chacha 0.3.1",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_yaml",
  "sha2 0.10.9",
  "slotmap",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
@@ -690,7 +694,7 @@ dependencies = [
  "http 1.4.1",
  "http-body 1.0.1",
  "http-body-util",
- "md-5",
+ "md-5 0.10.6",
  "pin-project-lite",
  "sha1",
  "sha2 0.10.9",
@@ -1046,6 +1050,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64-simd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1124,7 +1134,7 @@ version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
@@ -1144,7 +1154,7 @@ version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
@@ -1200,9 +1210,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
-version = "2.11.1"
+version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 dependencies = [
  "serde_core",
 ]
@@ -1380,9 +1390,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.63"
+version = "1.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556e016178bb5662a08681bbe0f00f8e17631781a4dfc8c45e466e4b185ec27f"
+checksum = "a3eb0f42d6c360dc3f8a821f6bf2fdea7f72bfd36b3076eb0e6d1e9e0752fff4"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2345,7 +2355,7 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "objc2",
 ]
 
@@ -2392,7 +2402,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2411,6 +2421,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "temp-env",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2420,7 +2431,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-bench"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2462,16 +2473,24 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-builtin"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
+ "async-trait",
+ "criterion",
  "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
+ "rustc-hash 2.1.2",
  "serde",
  "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "dynamo-custom-policy-example-catalog"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-custom-policy-example-disagg-filter-score-pick",
  "dynamo-custom-policy-example-simple-filter-score-pick",
@@ -2482,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-disagg-filter-score-pick"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2490,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-epp"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "dynamo-custom-policy-example-catalog",
@@ -2501,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-simple-filter-score-pick"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2509,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-simple-stacked-score-pick"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2517,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-soft-pin-repin"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2525,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2539,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-epp-sidecar"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2558,12 +2577,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-ext-proc"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.8.4",
  "bytes",
  "dashmap",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols",
@@ -2598,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -2610,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2620,6 +2641,7 @@ dependencies = [
  "chrono",
  "criterion",
  "crossbeam-queue",
+ "crossbeam-utils",
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",
@@ -2628,6 +2650,7 @@ dependencies = [
  "dynamo-truthy",
  "fastrand",
  "flume 0.12.0",
+ "futures-util",
  "indexmap 2.14.0",
  "once_cell",
  "ordered-float 4.6.0",
@@ -2658,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2675,7 +2698,7 @@ dependencies = [
  "axum-server",
  "base64 0.22.1",
  "bincode 2.0.1",
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "blake3",
  "bs62",
  "bytemuck",
@@ -2689,6 +2712,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-bench",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2729,7 +2753,7 @@ dependencies = [
  "ndarray 0.16.1",
  "nix 0.26.4",
  "nixl-sys",
- "object_store",
+ "object_store 0.12.5",
  "offset-allocator",
  "oneshot",
  "opentelemetry",
@@ -2777,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2796,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2804,7 +2828,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
- "dynamo-data-gen",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
@@ -2830,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker-backend"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2851,9 +2875,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "8.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e78ad3396a91e388a6ab6e4e9f66236238793076b5d0b80c37671134f54bcfa5"
+checksum = "e316d4d0f5082257f1629ca61973eafc17cee3e6ee0c24f7a55a61beeff40d97"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2874,9 +2898,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.3.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e2277648c57af9f41943c1c6abf573ed42ddbad9d05f2e4053e9d66e9a41182"
+checksum = "e3dba2a81c6382dc217fb4caa2b5b03a7e80d5bda6694a3c002ee9eeefa84336"
 dependencies = [
  "anyhow",
  "num-traits",
@@ -2891,9 +2915,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.4.1"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbaf3179de1accba21fcad16eb22b5e113722084265e0315e808e32150088ee7"
+checksum = "9ef02e31ca224ca8db24b88a990b7db3eb2b99c77697b0d8ae44feaa32709e38"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2908,9 +2932,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.1.2"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ae2eaa139651c535aeaad8856c5546709608931ccd4d24d3a529f6c5233c4b6"
+checksum = "cc939c7664a55184c789a2878d0d1ac270f4df9844491c10cfe7958d90c81916"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2926,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "axum 0.8.4",
@@ -2934,6 +2958,8 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "serial_test",
+ "temp-env",
  "tokio",
  "tracing",
  "url",
@@ -2941,7 +2967,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2957,7 +2983,6 @@ dependencies = [
  "console-subscriber",
  "criterion",
  "crossbeam-queue",
- "cudarc",
  "dashmap",
  "derive-getters",
  "derive_builder",
@@ -2969,6 +2994,7 @@ dependencies = [
  "figment",
  "fs4",
  "futures",
+ "h2 0.4.14",
  "humantime",
  "jsonschema",
  "k8s-openapi",
@@ -2978,8 +3004,10 @@ dependencies = [
  "log",
  "lru 0.16.4",
  "mio 1.2.2",
+ "nix 0.30.1",
  "notify",
  "nuid",
+ "nvtx",
  "once_cell",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -3014,6 +3042,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic 0.14.6",
+ "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",
@@ -3026,13 +3055,16 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-mocker"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "clap",
  "dynamo-backend-common",
+ "dynamo-kv-router",
+ "dynamo-llm",
  "dynamo-mocker",
+ "dynamo-runtime",
  "dynamo-sglang-sidecar",
  "futures",
  "serde_json",
@@ -3046,36 +3078,52 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-kv-router",
+ "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "rand 0.9.4",
  "reqwest 0.12.28",
+ "rmp-serde",
+ "serde",
  "serde_json",
+ "tempfile",
+ "tmq",
  "tokio",
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-runtime",
  "futures",
+ "prost-types 0.13.5",
+ "prost-types 0.14.3",
+ "serde_json",
+ "temp-env",
  "tokio",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tracing",
@@ -3083,10 +3131,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sidecar-testkit"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-mocker",
+ "dynamo-runtime",
+ "dynamo-sglang-mocker",
+ "dynamo-sglang-sidecar",
+ "dynamo-vllm-mocker",
+ "dynamo-vllm-sidecar",
+ "futures",
+ "libc",
+ "prost-types 0.14.3",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic 0.14.6",
+ "tonic-health 0.14.6",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
-version = "1.8.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed232a9d254149a4e2e14f0a7d77f59bd64161964c0ba55267beea3955650faa"
+checksum = "cac05c279739c1c192898450ff2445e2e65e0ab99d4682ab664072efb68e45cb"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3107,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -3124,8 +3199,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-trtllm-mocker"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "clap",
+ "dashmap",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-trtllm-sidecar",
+ "futures",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic-health 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-trtllm-sidecar"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3135,6 +3233,8 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -3146,21 +3246,23 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-vllm-mocker"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "blake3",
  "clap",
  "dynamo-backend-common",
+ "dynamo-kv-router",
+ "dynamo-llm",
  "dynamo-mocker",
+ "dynamo-runtime",
  "dynamo-vllm-sidecar",
  "futures",
  "prost-types 0.14.3",
@@ -3175,17 +3277,23 @@ dependencies = [
 
 [[package]]
 name = "dynamo-vllm-sidecar"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
  "prost-types 0.14.3",
+ "reqwest 0.12.28",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -3197,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-worker-selection-policy-catalog"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
 ]
@@ -3476,9 +3584,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35ff8cf975d8f772e7d4c3be439659b0b23b1ae1086ebee7204573807053ff7f"
+checksum = "102017e5eb15d2d2d5308f5bcb537390e38b0547174000f408d1f9d6aa62a369"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
@@ -3543,20 +3651,20 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg-next"
-version = "8.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c4bd5ab1ac61f29c634df1175d350ded29cf74c3c6d4f7030431a5ae3c7d5d"
+checksum = "6380599799e175191eb7ffe82c97f36a2a90a36cbc54c738a903e5287d7f516a"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "ffmpeg-sys-next",
  "libc",
 ]
 
 [[package]]
 name = "ffmpeg-sys-next"
-version = "8.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a314bc0e022a33a99567ed4bd2576bd58ffd8fcff7891c29194cfecc26a62547"
+checksum = "9b939bf79dd5949412a4b81cfe21a07f48ea21b47fcbb5f57816c8c2de5ae30b"
 dependencies = [
  "bindgen 0.72.1",
  "cc",
@@ -3601,9 +3709,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.9"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "fixedbitset"
@@ -4966,6 +5074,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5207,7 +5324,7 @@ version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "libc",
 ]
 
@@ -5322,7 +5439,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -5330,7 +5447,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-config"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "dynamo-memory",
@@ -5350,7 +5467,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-consolidator"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
@@ -5375,7 +5492,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-engine"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -5415,7 +5532,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-kernels"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "clap",
  "cudarc",
@@ -5426,7 +5543,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5455,7 +5572,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -5505,7 +5622,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdynamo_llm"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -5865,6 +5982,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "md5"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6046,16 +6173,15 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f875f7116f2619fb7e5992aed440c414f720f04321f98c1dbb2343b6c9f105b6"
+checksum = "56f80d83a885aff05ce27544fec671fa9c166535e4a76b88f369b02be0ff88ca"
 dependencies = [
  "anyhow",
  "clap",
  "colored",
  "futures",
  "modelexpress-common",
- "prost 0.13.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -6068,9 +6194,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba0cfbaf2de6c537a7f8a466045ad2da0dfe3638152c247034d866048859b5a5"
+checksum = "8b929b0c7d8515819f7858d809620afdee4cb2e37cdefc328cbbfd1f3466c698"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6083,8 +6209,10 @@ dependencies = [
  "google-cloud-storage",
  "hf-hub 0.4.3",
  "jiff",
+ "object_store 0.14.2",
  "prost 0.13.5",
  "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
@@ -6226,7 +6354,7 @@ version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22f9786d56d972959e1408b6a93be6af13b9c1392036c5c1fafa08a1b0c6ee87"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "byteorder",
  "derive_builder",
  "getset",
@@ -6274,7 +6402,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "cfg-if",
  "cfg_aliases",
  "libc",
@@ -6287,7 +6415,7 @@ version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "cfg-if",
  "cfg_aliases",
  "libc",
@@ -6373,7 +6501,7 @@ version = "6.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6205bd8bb1e454ad2e27422015fb5e4f2bcc7e08fa8f27058670d208324a4d2d"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "filetime",
  "inotify",
  "kqueue",
@@ -6548,7 +6676,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73ad74d880bb43877038da939b7427bba67e9dd42004a18b809ba7d87cee241c"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "objc2",
  "objc2-foundation",
 ]
@@ -6569,7 +6697,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "dispatch2",
  "objc2",
 ]
@@ -6580,7 +6708,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "dispatch2",
  "objc2",
  "objc2-core-foundation",
@@ -6613,7 +6741,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cde0dfb48d25d2b4862161a4d5fcc0e3c24367869ad306b0c9ec0073bfed92d"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -6631,7 +6759,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "block2",
  "libc",
  "objc2",
@@ -6644,7 +6772,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "180788110936d59bab6bd83b6060ffdfffb3b922ba1396b312ae795e1de9d81d"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "objc2",
  "objc2-core-foundation",
 ]
@@ -6655,7 +6783,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96c1358452b371bf9f104e21ec536d37a650eb10f7ee379fff67d2e08d537f1f"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
@@ -6667,7 +6795,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "block2",
  "objc2",
  "objc2-cloud-kit",
@@ -6710,10 +6838,10 @@ dependencies = [
  "humantime",
  "hyper 1.10.1",
  "itertools 0.14.0",
- "md-5",
+ "md-5 0.10.6",
  "parking_lot",
  "percent-encoding",
- "quick-xml",
+ "quick-xml 0.38.4",
  "rand 0.9.4",
  "reqwest 0.12.28",
  "ring",
@@ -6726,6 +6854,45 @@ dependencies = [
  "tracing",
  "url",
  "walkdir",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
+name = "object_store"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1796bc93603f78c5760a69f2d58badc9618d22adade0a95385bb2adbae4eb94"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "crc-fast",
+ "form_urlencoded",
+ "futures-channel",
+ "futures-core",
+ "futures-util",
+ "http 1.4.1",
+ "http-body-util",
+ "humantime",
+ "hyper 1.10.1",
+ "itertools 0.15.0",
+ "md-5 0.11.0",
+ "parking_lot",
+ "percent-encoding",
+ "quick-xml 0.41.0",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "ring",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
  "wasm-bindgen-futures",
  "web-time",
 ]
@@ -6764,7 +6931,7 @@ version = "6.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc3cbf698f9438986c11a880c90a6d04b9de27575afd28bbf45b154b6c709e2"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "libc",
  "once_cell",
  "onig_sys",
@@ -7330,7 +7497,7 @@ version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "crc32fast",
  "fdeflate",
  "flate2",
@@ -7520,7 +7687,7 @@ checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
 dependencies = [
  "bit-set 0.8.0",
  "bit-vec 0.8.0",
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "num-traits",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
@@ -7701,7 +7868,7 @@ version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "memchr",
  "unicase",
 ]
@@ -7766,6 +7933,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "quick_cache"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7779,9 +7956,9 @@ dependencies = [
 
 [[package]]
 name = "quinn"
-version = "0.11.9"
+version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9e20a958963c291dc322d98411f541009df2ced7b5a4f2bd52337638cfccf20"
+checksum = "4051e23e9185c255a7e33ef59cdbca87a22d359052eecd22fc6b901fb37d9d11"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -7799,9 +7976,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.17"
+version = "0.11.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
+checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "bytes",
  "getrandom 0.4.2",
@@ -8086,7 +8263,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
 ]
 
 [[package]]
@@ -8254,6 +8431,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2 0.4.14",
  "http 1.4.1",
  "http-body 1.0.1",
  "http-body-util",
@@ -8341,7 +8519,7 @@ version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4147b952f3f819eca0e99527022f7d6a8d05f111aeb0a62960c74eb283bec8fc"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "once_cell",
  "serde",
  "serde_derive",
@@ -8533,7 +8711,7 @@ version = "0.38.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
@@ -8546,7 +8724,7 @@ version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
@@ -8646,7 +8824,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f021ff72cabf5e2cd6d8ec8813d376a8445a228dc610ab56c27bd9054cda70d4"
 dependencies = [
  "aho-corasick",
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "compact_str",
  "get-size2",
  "is-macro",
@@ -8664,7 +8842,7 @@ version = "0.15.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01e6ee78bd9671fb5766664b2695fe1f2a92a961f4d9101646c570d8acdb1e0b"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "bstr",
  "compact_str",
  "get-size2",
@@ -8824,7 +9002,7 @@ version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "libc",
@@ -9514,7 +9692,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01c412864d599d4750d0c3d684d7e093ec05e5309681ef5252cc1096a437f6e0"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "bytemuck",
  "lazy_static",
  "log",
@@ -9659,7 +9837,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c879d448e9d986b661742763247d3693ed13609438cf3d006f51f5368a5ba6b"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "core-foundation 0.9.4",
  "system-configuration-sys 0.6.0",
 ]
@@ -10437,7 +10615,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
  "base64 0.22.1",
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "bytes",
  "futures-util",
  "http 1.4.1",
@@ -11055,9 +11233,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "video-rs"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2633ec4c2a8aeb7c0e970f75ba99122a75841e9f7b34d5225366d0e61a870a8c"
+checksum = "aa25096b140b3015e39eb6db66a9dfd0d326a6e3cf952d848f5997c0e9546e53"
 dependencies = [
  "ffmpeg-next",
  "tracing",
@@ -11072,9 +11250,9 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "vllm-proto"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "520830f75f6a97b9423e5f9155fd4a6aa5578b247dea7d31adb49a5ce5f6e817"
+checksum = "77383505a016d5090ecf460297c815752339669aee187e29111baf444cd6e171"
 dependencies = [
  "prost 0.14.3",
  "prost-types 0.14.3",
@@ -11251,7 +11429,7 @@ version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
 dependencies = [
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "hashbrown 0.15.5",
  "indexmap 2.14.0",
  "semver",
@@ -11758,7 +11936,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
 dependencies = [
  "anyhow",
- "bitflags 2.11.1",
+ "bitflags 2.13.2",
  "indexmap 2.14.0",
  "log",
  "serde",

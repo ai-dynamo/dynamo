@@ -4,7 +4,7 @@
 //! Shared stale-child cleanup machinery for rooted tree structures.
 //!
 //! Provides a throttled, one-in-flight sweep that unlinks empty child nodes
-//! from their parent. It is used by [`ConcurrentRadixTree`](super::concurrent_radix_tree),
+//! from their parent. It is used by
 //! [`ConcurrentRadixTreeCompressed`](super::concurrent_radix_tree_compressed)
 //! and the sequence-side
 //! [`PromptMembershipTrie`](super::sequences::prompt_membership_trie::PromptMembershipTrie),

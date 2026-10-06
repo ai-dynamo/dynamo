@@ -13,7 +13,7 @@ description = "Dynamo SGLang sidecar for an out-of-process engine exposed throug
 
 [package.metadata.cargo-machete]
 # Referenced by protobuf code generated into OUT_DIR.
-ignored = ["prost"]
+ignored = ["prost", "prost-types"]
 
 [[bin]]
 name = "dynamo-sglang-sidecar"
@@ -21,6 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
@@ -31,6 +32,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -38,6 +40,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 prost = { workspace = true }
+prost-types = { workspace = true }
 tonic = { workspace = true }
 
 [build-dependencies]
@@ -45,3 +48,8 @@ tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
+dynamo-kv-router = { workspace = true }
+rmp-serde = { workspace = true }
+tempfile = { workspace = true }
+tmq = { workspace = true }
+tracing-subscriber = { workspace = true }

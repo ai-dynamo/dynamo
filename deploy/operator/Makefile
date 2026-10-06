@@ -4,10 +4,10 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
-ENVTEST_PACKAGES ?= ./internal/controller ./internal/webhook/validation
+ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/validation ./cmd/crd-apply
 ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
-CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller
+CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...
 CLUSTERTEST_TIMEOUT ?= 30m
 CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
 CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
@@ -251,12 +251,16 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	echo "Removing DGD-only provider overrides from standalone DynamoComponentDeployment schemas"
 	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= del(.providerOverride) | (.spec.versions[].schema.openAPIV3Schema.properties.spec.properties.roles.items.properties) |= del(.providerOverride)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	echo "Removing DGD-only LPX fields and validation rules from standalone DynamoComponentDeployment schemas"
+	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec) |= (del(.properties.lpx) | (select(has("x-kubernetes-validations"))."x-kubernetes-validations") |= map(select(.rule | test("\\b(self|oldSelf)\\.lpx\\b") | not)))' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
 	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
 	# The annotation value bound matches Kubernetes' total annotation size limit.
 	echo "Adding nested v1beta1 pod template CEL validation"
 	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.roles.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.components.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamographdeployments.yaml
+	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.components.items.properties.roles.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamographdeployments.yaml
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
@@ -304,7 +308,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/cmd($$|/)') -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/cmd($$|/)') ./cmd/crd-apply -coverprofile cover.out
 
 .PHONY: envtest
 envtest: setup-envtest ## Run envtest-backed operator tests.
@@ -660,6 +664,7 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 	# Post-process duplicate anchors and fields pruned from standalone DCD CRDs.
 	python3 docs/fix-api-anchors.py ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+	python3 ../../docs/fern/scripts/gen_kubernetes_api.py
 
 HELM_CHART_DIR := ../helm/charts/platform
 

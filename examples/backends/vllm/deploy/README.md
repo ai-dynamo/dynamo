@@ -59,6 +59,12 @@ Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet,
 - `worker`: Single worker, `hostIPC: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
 - `LMCacheEngine` (separate CR): per-node DaemonSet that imports the worker's KV-cache IPC handles and serves cache hits over ZMQ
 
+### 8. **Aggregated KVCR Deployments** (`kvcr/`)
+
+Two-node aggregated deployments with a process-local KVCR tier or a resilient
+KVCR memory-service sidecar. See [`kvcr/README.md`](./kvcr/README.md) for image,
+RDMA, and lifecycle requirements.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

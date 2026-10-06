@@ -30,7 +30,10 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.sglang._compat import sglang_uses_mla_backend
+from dynamo.sglang._compat import (
+    sglang_uses_mla_backend,
+    supports_disagg_prefill_cancel_anytime,
+)
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
@@ -40,7 +43,17 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
-from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
+from dynamo.sglang.engine_generate import (
+    DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+    SGLANG_GENERATE_CAPABILITY,
+)
+from dynamo.sglang.gateway import (
+    GATEWAY_ENGINE_ID_KEY,
+    GATEWAY_WORKERS_KEY,
+    effective_gateway_workers,
+    gateway_engine_id,
+)
+from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
@@ -146,14 +159,14 @@ async def _register_model_with_runtime_config(
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
 
-    if dynamo_args.use_sglang_tokenizer:
+    if dynamo_args.use_sglang_tokenizer and not (
+        output_type.supports_embedding() or output_type.supports_rerank()
+    ):
         logging.warning(
             "Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
-        # Only override output_type for chat models, not for embeddings
-        if output_type != ModelType.Embedding:
-            output_type = ModelType.Chat
+        output_type = ModelType.Chat
 
     if runtime_config is not None and _supports_engine_generate(
         input_type, output_type, worker_type
@@ -209,7 +222,8 @@ async def _register_model_with_runtime_config(
             input_type,
             output_type,
             endpoint,
-            _register_model_source_path(engine, server_args),
+            dynamo_args.model_source_uri
+            or _register_model_source_path(engine, server_args),
             server_args.served_model_name,
             kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
@@ -401,10 +415,35 @@ async def get_runtime_config(
     runtime_config = ModelRuntimeConfig()
     runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
+    llm_handler = not dynamo_args.enable_multimodal
+    # Both disaggregated legs implement exact-RID cancellation before output,
+    # including waiting until the scheduler has accepted the request.
+    if (
+        server_args.disaggregation_mode
+        in {
+            "prefill",
+            "decode",
+        }
+        and llm_handler
+        and supports_disagg_prefill_cancel_anytime(engine)
+    ):
+        runtime_config.set_engine_specific(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+            json.dumps(True),
+        )
     # Multimodal encode workers have no tokenizer manager and delegate
     # generation overflow handling to their downstream backend.
     if engine is not None:
         publish_token_budget(runtime_config, _get_token_budget(engine, server_args))
+        # Hash forwarding currently exists on SGLang's aggregated generation
+        # path. Do not advertise exact video routing to disaggregated workers,
+        # whose prefill/decode handlers would otherwise publish incompatible
+        # KV-event placeholder hashes.
+        if dynamo_args.frontend_decoding and server_args.disaggregation_mode in (
+            None,
+            "null",
+        ):
+            publish_sglang_qwen_video_processor_contract(runtime_config, engine)
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
@@ -455,6 +494,16 @@ async def get_runtime_config(
                 "Failed to attach SGLang worker group metadata to registration: %s",
                 e,
             )
+
+    gateway_engine = gateway_engine_id()
+    if gateway_engine is not None:
+        runtime_config.set_engine_specific(
+            GATEWAY_ENGINE_ID_KEY, json.dumps(gateway_engine)
+        )
+        runtime_config.set_engine_specific(
+            GATEWAY_WORKERS_KEY,
+            json.dumps(effective_gateway_workers(server_args, dynamo_args)),
+        )
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
