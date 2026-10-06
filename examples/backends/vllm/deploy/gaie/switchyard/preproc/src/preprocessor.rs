@@ -54,8 +54,16 @@ pub fn headers(input: &[(String, String)]) -> anyhow::Result<(http::HeaderMap, V
             remove.push(key.clone());
         }
         let name = http::HeaderName::from_bytes(key.as_bytes())?;
-        anyhow::ensure!(!map.contains_key(&name), "duplicate request header");
-        map.insert(name, http::HeaderValue::from_str(value)?);
+        let unique = key.starts_with("x-switchyard-")
+            || matches!(
+                key.as_str(),
+                "content-type" | "content-length" | "content-encoding"
+            );
+        anyhow::ensure!(
+            !(unique && map.contains_key(&name)),
+            "duplicate request header"
+        );
+        map.append(name, http::HeaderValue::from_str(value)?);
     }
     anyhow::ensure!(method.as_deref() == Some("POST"), "only POST is supported");
     anyhow::ensure!(
@@ -102,8 +110,22 @@ mod tests {
     #[test]
     fn strips_forged_routing_headers_and_rejects_duplicate_session() {
         let mut input = input();
+        input.extend([
+            ("cookie".into(), "a=1".into()),
+            ("Cookie".into(), "b=2".into()),
+            ("via".into(), "proxy-a".into()),
+            ("via".into(), "proxy-b".into()),
+        ]);
         input.push(("x-dynamo-worker-id".into(), "forged".into()));
-        let (_, remove) = headers(&input).unwrap();
+        let (map, remove) = headers(&input).unwrap();
+        assert_eq!(
+            map.get_all("cookie").iter().collect::<Vec<_>>(),
+            ["a=1", "b=2"]
+        );
+        assert_eq!(
+            map.get_all("via").iter().collect::<Vec<_>>(),
+            ["proxy-a", "proxy-b"]
+        );
         for key in [
             MODEL_HEADER,
             "x-gateway-destination-endpoint",
@@ -117,10 +139,19 @@ mod tests {
         ] {
             assert!(remove.iter().any(|value| value == key));
         }
-        input.extend([
-            ("x-switchyard-session-id".into(), "a".into()),
-            ("x-switchyard-session-id".into(), "b".into()),
-        ]);
-        assert!(headers(&input).is_err());
+        for key in [
+            "x-switchyard-session-id",
+            "x-switchyard-agent-id",
+            "content-type",
+            "content-length",
+            "content-encoding",
+        ] {
+            let mut duplicate = input.clone();
+            duplicate.extend([(key.into(), "a".into()), (key.into(), "b".into())]);
+            assert_eq!(
+                headers(&duplicate).unwrap_err().to_string(),
+                "duplicate request header"
+            );
+        }
     }
 }

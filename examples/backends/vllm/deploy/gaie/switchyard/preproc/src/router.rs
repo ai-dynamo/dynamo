@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap},
     path::Path,
     sync::Mutex,
     time::{Duration, Instant},
@@ -28,10 +28,13 @@ use switchyard_runner::Runner;
 use crate::request;
 
 pub const MODEL_HEADER: &str = "x-gateway-model-name";
+// Match SDK 0.3's idle TTL; its retained state is reclaimed by an hourly sweep.
+const SESSION_TTL: Duration = Duration::from_secs(60 * 60);
+type SessionIdentity = (String, String, Option<String>);
 
 pub struct Router {
     runner: Runner,
-    sessions: Mutex<HashSet<(String, String, Option<String>)>>,
+    sessions: Mutex<HashMap<SessionIdentity, Instant>>,
 }
 
 impl Router {
@@ -43,7 +46,7 @@ impl Router {
     pub fn new(runner: Runner) -> Self {
         Self {
             runner,
-            sessions: Mutex::new(HashSet::new()),
+            sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -81,12 +84,17 @@ impl Router {
             ensure!(session.len() <= 256, "session id exceeds 256 bytes");
             let identity = (route_id.as_str().to_owned(), session.clone(), agent);
             let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
-            if !sessions.contains(&identity) && sessions.len() >= 4096 {
+            let now = Instant::now();
+            if !sessions.contains_key(&identity) && sessions.len() >= 4096 {
+                sessions.retain(|_, seen| now.duration_since(*seen) < SESSION_TTL);
+            }
+            if !sessions.contains_key(&identity) && sessions.len() >= 4096 {
                 return Err(
                     crate::server::Error::new(503, "session identity capacity exceeded").into(),
                 );
             }
-            sessions.insert(identity);
+            // The SDK can retain session state even when decide fails or is cancelled.
+            sessions.insert(identity, now);
         }
         let mut original_ir = request.llm_request.clone();
         original_ir.model = None;
@@ -125,7 +133,6 @@ fn replace_model(body: &[u8], model: &str) -> Result<Vec<u8>, serde_json::Error>
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use std::collections::HashMap;
 
     fn router() -> Router {
         Router::new(Runner::from_toml(include_str!("../config/routes.toml")).unwrap())
@@ -144,6 +151,38 @@ mod tests {
         let mut h = http::HeaderMap::new();
         h.insert("x-switchyard-session-id", id.parse().unwrap());
         h
+    }
+
+    #[tokio::test]
+    async fn session_capacity_recovers_after_idle_expiry() {
+        let r = router();
+        let quiet = serde_json::to_vec(&neutral()).unwrap();
+        {
+            let mut sessions = r.sessions.lock().unwrap();
+            for i in 0..4096 {
+                sessions.insert(("auto".into(), i.to_string(), None), Instant::now());
+            }
+        }
+        let error = r.decide(&quiet, &session("new")).await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::server::Error>()
+                .unwrap()
+                .status_code,
+            503
+        );
+        {
+            let mut sessions = r.sessions.lock().unwrap();
+            for seen in sessions.values_mut() {
+                *seen = Instant::now() - SESSION_TTL;
+            }
+        }
+        r.decide(&quiet, &session("0")).await.unwrap();
+        r.decide(&quiet, &session("new")).await.unwrap();
+        let sessions = r.sessions.lock().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.contains_key(&("auto".into(), "0".into(), None)));
+        assert!(sessions.contains_key(&("auto".into(), "new".into(), None)));
     }
 
     #[tokio::test]

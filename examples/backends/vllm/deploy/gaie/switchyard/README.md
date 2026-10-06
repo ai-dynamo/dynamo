@@ -110,8 +110,10 @@ rule in [http-routes.yaml](http-routes.yaml). Use policies that select a model w
 a response or rewriting the request.
 
 The example supports text and function-tool history on `/v1/chat/completions`, with requests up
-to 2 MiB and a response timeout of 120 seconds. Session state resets when PreProc restarts, and
-updates briefly interrupt routing. This single-replica example does not provide high availability.
+to 2 MiB and a response timeout of 120 seconds. PreProc admits up to 4,096 session identities
+active within the past hour; idle admission slots are reused. The SDK reclaims idle state on
+its own hourly sweep. Session state resets when PreProc restarts, and updates briefly interrupt
+routing. This single-replica example does not provide high availability.
 
 ## Remove
 
