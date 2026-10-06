@@ -3419,6 +3419,32 @@ class SelectionServiceError(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    class EngineMetrics:
+        """Metrics handle provided to an engine's registration hook."""
+
+        def register_prometheus_expfmt_callback(
+            self, callback: Callable[[], str]
+        ) -> None: ...
+
+        def register_prometheus_typed_callback(
+            self,
+            callback: Callable[
+                [],
+                list[
+                    tuple[
+                        str,
+                        str,
+                        str,
+                        str,
+                        list[tuple[str, list[tuple[str, str]], float, float | None]],
+                    ]
+                ],
+            ],
+        ) -> None: ...
+
+        @property
+        def auto_labels(self) -> Dict[str, str]: ...
+
     @staticmethod
     def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
         """Run the native SGLang sidecar with CLI-style arguments."""

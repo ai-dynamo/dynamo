@@ -5,6 +5,7 @@
 
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -13,12 +14,19 @@ from pytest_httpserver import HTTPServer
 
 from tests.utils.managed_process import DynamoFrontendProcess
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+    pytest.mark.gpu_0,
+    pytest.mark.forked,
+]
 
 
-@pytest.fixture(scope="session")
-def httpserver_listen_address() -> tuple[str, int]:
-    return "127.0.0.1", 0
+@pytest.fixture
+def httpserver() -> Iterator[HTTPServer]:
+    # Stop the server thread before a later test forks the pytest process.
+    with HTTPServer(host="127.0.0.1", port=0) as server:
+        yield server
 
 
 @pytest.mark.timeout(60)
@@ -30,6 +38,8 @@ def test_batch_jobs_through_actual_dynamo_frontend(
     httpserver: HTTPServer,
     enabled: bool,
 ) -> None:
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.delenv("no_proxy", raising=False)
     for name in (
         "DYN_BATCH_GATEWAY_URL",
         "DYN_FRONTEND_ROUTE_EXTENSIONS",
