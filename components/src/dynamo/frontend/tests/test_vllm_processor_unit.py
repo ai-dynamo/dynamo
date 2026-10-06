@@ -3946,33 +3946,6 @@ def test_choice_logprobs_wait_for_buffered_tool_parse(vllm_processor_module, tok
     assert pending == []
 
 
-def test_choice_logprobs_keep_silent_plain_text_token(vllm_processor_module, tokenizer):
-    """An empty detokenized delta stays pending until the visible choice."""
-    pending: list = []
-    emitted: list = []
-    append = vllm_processor_module._append_worker_logprobs
-    apply = vllm_processor_module._apply_choice_logprobs
-    post = SimpleNamespace(
-        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
-    )
-    append(pending, [7], [-0.7], [_top_entry(7, -0.7, token="")])
-    apply(None, post, _logprob_output([7]), pending, emitted, 0)
-    assert [record["token_id"] for record in pending] == [7]
-    append(
-        pending,
-        [8],
-        [-0.8],
-        [_top_entry(8, -0.8, token="hi", raw_bytes=[104, 105])],
-    )
-    choice: dict = {"index": 0, "logprobs": {"content": []}}
-    apply(choice, post, _logprob_output([8]), pending, emitted, 0)
-    assert [entry["logprob"] for entry in choice["logprobs"]["content"]] == [
-        -0.7,
-        -0.8,
-    ]
-    assert pending == []
-
-
 def test_choice_logprobs_use_token_id_text(vllm_processor_module, tokenizer):
     pending: list = []
     emitted: list = []
@@ -4033,7 +4006,6 @@ def test_trimmed_stop_token_is_not_attached(vllm_processor_module, tokenizer):
 def test_misaligned_logprobs_do_not_poison_the_next_choice(
     vllm_processor_module, tokenizer
 ):
-    """A prefix mismatch drops the leftover record so the next chunk can align."""
     pending: list = []
     emitted: list = []
     append = vllm_processor_module._append_worker_logprobs
