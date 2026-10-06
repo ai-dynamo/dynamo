@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 # fresh GMS sessions after a crash adds avoidable handshake latency.
 _proof_session_lock = threading.Lock()
 _proof_sessions: dict[tuple[int, str], Any] = {}
+# backend -> (writer cohort, rank) of this CUDA worker, for fault hints.
+_writer_identity: dict[str, tuple[str, int]] = {}
 
 
 def _replace_proof_session(socket_path: str, session: Any | None) -> None:
@@ -366,6 +368,7 @@ def register_gpu_client(
     the engine initializes CUDA. The daemon intentionally retains it after this
     short RPC session disconnects so a successor can identify a crashed cohort.
     """
+    _writer_identity[backend_name] = (cohort, rank)
     if not gms_mps_provider_enabled(backend_name):
         if gpu_crash_interlock_enabled(backend_name):
             raise RuntimeError("GPU crash interlock requires the GMS MPS provider")
@@ -420,7 +423,9 @@ def arm_gpu_crash_interlock(notification_fd: int | None, *, backend_name: str) -
         # TP peers block on it. The watchdog turns it into the process death
         # that retires the writer cohort.
         if _process_lifetime_enabled():
-            start_gpu_fault_watchdog(backend_name)
+            start_gpu_fault_watchdog(
+                backend_name, on_fault=_reporting_fail_stop(backend_name)
+            )
         return
     try:
         import signal
@@ -444,6 +449,81 @@ def arm_gpu_crash_interlock(notification_fd: int | None, *, backend_name: str) -
         os.close(notification_fd)
         raise
     start_gpu_fault_watchdog(backend_name)
+
+
+def _reporting_fail_stop(backend_name: str):
+    """Fail stop after telling the TP leader, as GMS does under MPS.
+
+    Without MPS no daemon observes the fault, and the dying worker's launcher
+    keeps heartbeating while it shuts down, so the leader would only notice
+    after its liveness timeout. The hint is best effort and never proof;
+    writer-cohort retirement stays authoritative. The socket is connected
+    now, while the worker is healthy.
+    """
+    identity = _writer_identity.get(backend_name)
+    address = os.environ.get("DYN_GMS_RANK_LIVENESS_CONNECT_ADDR", "")
+    socket = None
+    if identity is not None and address:
+        try:
+            import zmq
+
+            socket = zmq.Context.instance().socket(zmq.DEALER)
+            socket.setsockopt(zmq.LINGER, 200)
+            socket.connect(address)
+        except Exception:  # noqa: BLE001
+            logger.warning("[GMS] fault watchdog cannot reach %s", address)
+            socket = None
+
+    def report_and_stop(exc: BaseException) -> None:
+        if identity is not None:
+            cohort, rank = identity
+            source = "gpu-fault-watchdog"
+            try:
+                from gpu_memory_service.common.gpu_failure_marker import (
+                    publish_gpu_failure_marker,
+                )
+
+                publish_gpu_failure_marker(
+                    cohort, rank=rank, pid=os.getpid(), source=source
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("[GMS] could not publish the GPU failure marker")
+            if socket is not None:
+                try:
+                    import zmq
+
+                    socket.send_multipart(
+                        [
+                            b"gpu-failed-v1",
+                            cohort.encode(),
+                            str(rank).encode(),
+                            str(os.getpid()).encode(),
+                            source.encode(),
+                        ],
+                        flags=zmq.NOBLOCK,
+                    )
+                    socket.close()  # LINGER flushes the hint before the kill.
+                except Exception:  # noqa: BLE001
+                    logger.warning("[GMS] could not send the GPU fault hint")
+        _fail_stop(backend_name, exc)
+
+    return report_and_stop
+
+
+def _fail_stop(backend_name: str, exc: BaseException) -> None:
+    import signal
+
+    logger.critical(
+        "[GMS] %s CUDA context faulted (%s); killing this worker",
+        backend_name,
+        str(exc).splitlines()[0] if str(exc) else type(exc).__name__,
+    )
+    # Not SIGABRT: the interlock would park this process so GMS can certify
+    # MPS termination, which a faulted context can never provide (MPS
+    # answers 700, 806, then 201). The parked process only delayed the
+    # writer fence by about 0.6 s at TP16. Process death closes the
+    # interlock socket, which reports the crash just as fast.
+    os.kill(os.getpid(), signal.SIGKILL)
 
 
 def _gpu_fault_watchdog_interval_s() -> float:
@@ -505,22 +585,7 @@ def start_gpu_fault_watchdog(backend_name: str, on_fault=None) -> bool:
     device = torch.cuda.current_device()
     stream = torch.cuda.Stream(device=device)
 
-    def fail_stop(exc: BaseException) -> None:
-        import signal
-
-        logger.critical(
-            "[GMS] %s CUDA context faulted (%s); killing this worker",
-            backend_name,
-            str(exc).splitlines()[0] if str(exc) else type(exc).__name__,
-        )
-        # Not SIGABRT: the interlock would park this process so GMS can certify
-        # MPS termination, which a faulted context can never provide (MPS
-        # answers 700, 806, then 201). The parked process only delayed the
-        # writer fence by about 0.6 s at TP16. Process death closes the
-        # interlock socket, which reports the crash just as fast.
-        os.kill(os.getpid(), signal.SIGKILL)
-
-    handler = on_fault or fail_stop
+    handler = on_fault or (lambda exc: _fail_stop(backend_name, exc))
 
     def watch() -> None:
         torch.cuda.set_device(device)

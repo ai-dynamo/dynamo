@@ -562,8 +562,39 @@ def test_fault_watchdog_without_interlock_only_under_process_isolation(
     monkeypatch.setenv("DYN_GMS_GPU_ISOLATION", isolation)
     monkeypatch.delenv("DYN_GMS_EXPERIMENTAL_PROCESS_LIFETIME_RECLAIM", raising=False)
     calls = []
-    monkeypatch.setattr(gq, "start_gpu_fault_watchdog", calls.append)
+    monkeypatch.setattr(
+        gq, "start_gpu_fault_watchdog", lambda backend, **_kw: calls.append(backend)
+    )
 
     gq.arm_gpu_crash_interlock(None, backend_name="sglang")
 
     assert calls == started
+
+
+def test_process_isolation_fault_reports_to_the_tp_leader(monkeypatch, tmp_path):
+    """The leader learns of the fault at once, not after its liveness timeout."""
+    zmq = pytest.importorskip("zmq")
+    from gpu_memory_service.common.gpu_failure_marker import (
+        gpu_failure_marker_path,
+        read_gpu_failure_marker,
+    )
+    from gpu_memory_service.integrations.common import gpu_quiescence as gq
+
+    router = zmq.Context.instance().socket(zmq.ROUTER)
+    port = router.bind_to_random_port("tcp://127.0.0.1")
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS_CONNECT_ADDR", f"tcp://127.0.0.1:{port}")
+    cohort = str(tmp_path / "writers" / "cohort-a")
+    (tmp_path / "writers").mkdir()
+    monkeypatch.setitem(gq._writer_identity, "vllm", (cohort, 1))
+    stopped = []
+    monkeypatch.setattr(gq, "_fail_stop", lambda backend, exc: stopped.append(backend))
+
+    gq._reporting_fail_stop("vllm")(RuntimeError("illegal memory access"))
+
+    assert router.poll(5000)
+    frames = router.recv_multipart()
+    router.close(0)
+    assert frames[1:4] == [b"gpu-failed-v1", cohort.encode(), b"1"]
+    assert frames[5] == b"gpu-fault-watchdog"
+    assert read_gpu_failure_marker(gpu_failure_marker_path(cohort))[0] == 1
+    assert stopped == ["vllm"]
