@@ -135,13 +135,18 @@ def test_apply_thinking_budget_rejects_unsupported_server_config(overrides, mess
         )
 
 
-def test_apply_thinking_budget_ignores_budget_when_request_reasoning_disabled():
+@pytest.mark.parametrize(
+    "reasoning_fields", [{"require_reasoning": False}, {}], ids=["false", "omitted"]
+)
+def test_apply_thinking_budget_ignores_budget_when_request_reasoning_disabled(
+    reasoning_fields,
+):
     sampling = {"custom_params": {"thinking_budget": 8, "other": True}}
     original = deepcopy(sampling)
     actual = apply_thinking_budget(
         {
             "stop_conditions": {"max_thinking_tokens": 32},
-            "require_reasoning": False,
+            **reasoning_fields,
         },
         sampling,
         _server_args(),
@@ -150,26 +155,57 @@ def test_apply_thinking_budget_ignores_budget_when_request_reasoning_disabled():
     assert sampling == original
 
 
-def test_apply_thinking_budget_rejects_missing_request_reasoning():
+@pytest.mark.parametrize("require_reasoning", [None, 0, 1, "false", [], {}])
+def test_apply_thinking_budget_rejects_malformed_request_reasoning(require_reasoning):
     with pytest.raises(InvalidArgument, match="requires reasoning to be enabled"):
         apply_thinking_budget(
             {
                 "stop_conditions": {"max_thinking_tokens": 32},
+                "require_reasoning": require_reasoning,
             },
             {},
             _server_args(),
         )
 
 
-def test_disabled_reasoning_does_not_bypass_unsupported_server_validation():
-    with pytest.raises(InvalidArgument, match="--enable-strict-thinking"):
+@pytest.mark.parametrize(
+    "reasoning_fields", [{"require_reasoning": False}, {}], ids=["false", "omitted"]
+)
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"enable_strict_thinking": False}, "--enable-strict-thinking"),
+        ({"reasoning_parser": None}, "--reasoning-parser"),
+        ({"skip_tokenizer_init": True}, "--skip-tokenizer-init"),
+    ],
+)
+def test_disabled_reasoning_does_not_bypass_unsupported_server_validation(
+    reasoning_fields, overrides, message
+):
+    with pytest.raises(InvalidArgument, match=message):
         apply_thinking_budget(
             {
                 "stop_conditions": {"max_thinking_tokens": 32},
-                "require_reasoning": False,
+                **reasoning_fields,
             },
             {},
-            _server_args(enable_strict_thinking=False),
+            _server_args(**overrides),
+        )
+
+
+@pytest.mark.parametrize(
+    "reasoning_fields", [{"require_reasoning": False}, {}], ids=["false", "omitted"]
+)
+@pytest.mark.parametrize("value", [True, -1, 2**32, 1.5, "32"])
+def test_disabled_reasoning_does_not_bypass_budget_validation(reasoning_fields, value):
+    with pytest.raises(InvalidArgument, match="must be an integer"):
+        apply_thinking_budget(
+            {
+                "stop_conditions": {"max_thinking_tokens": value},
+                **reasoning_fields,
+            },
+            {},
+            _server_args(),
         )
 
 

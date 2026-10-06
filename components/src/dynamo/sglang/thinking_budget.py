@@ -137,7 +137,9 @@ def apply_thinking_budget(
 
     _validate_server_config(server_args, engine)
 
-    if request.get("require_reasoning") is False:
+    # Rust omits require_reasoning when false on preprocessed requests.
+    require_reasoning = request.get("require_reasoning", False)
+    if require_reasoning is False:
         custom_params = result.get("custom_params")
         if isinstance(custom_params, Mapping) and "thinking_budget" in custom_params:
             result["custom_params"] = {
@@ -147,7 +149,7 @@ def apply_thinking_budget(
             }
         return result
 
-    if request.get("require_reasoning") is not True:
+    if require_reasoning is not True:
         raise InvalidArgument(
             "thinking_token_budget requires reasoning to be enabled for the request"
         )

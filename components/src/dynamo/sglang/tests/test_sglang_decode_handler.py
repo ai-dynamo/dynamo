@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
@@ -1191,6 +1192,22 @@ def test_build_sampling_params_maps_thinking_budget_for_token_requests():
     )
 
     assert sampling_params["custom_params"] == {"thinking_budget": 32}
+
+
+@pytest.mark.parametrize("budget", [0, 32])
+def test_build_sampling_params_ignores_budget_when_wire_omits_false_reasoning(budget):
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    # Rust omits require_reasoning when preprocessing disables thinking.
+    request = json.loads(
+        '{"model":"test-model","token_ids":[1,2,3],'
+        '"sampling_options":{},"output_options":{},'
+        f'"stop_conditions":{{"max_tokens":128,"max_thinking_tokens":{budget}}}}}'
+    )
+
+    sampling_params = handler._build_sampling_params(request)
+
+    assert sampling_params["max_new_tokens"] == 128
+    assert "custom_params" not in sampling_params
 
 
 def test_build_sampling_params_rejects_budget_with_sglang_tokenizer():
