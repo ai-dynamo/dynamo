@@ -313,17 +313,22 @@ fn log_selection<C: WorkerConfigLike>(
         .copied()
         .unwrap_or(0);
 
-    if request.pinned_worker == Some(worker) {
-        tracing::info!(
-            request_id,
-            "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
-            worker_type,
-            worker.worker_id,
-            worker.dp_rank,
-            cost,
-            effective_overlap_blocks,
-        );
-    } else if worker_type == "decode" {
+    // Every routed request logs one "Selected worker" line; `selection` records how the
+    // worker was chosen (issue #15728: affinity hits used to log a different message).
+    let selection = if request.affinity_target.is_some_and(|target| {
+        target.worker_id == worker.worker_id
+            && target
+                .dp_rank
+                .is_none_or(|dp_rank| dp_rank == worker.dp_rank)
+    }) {
+        "session_affinity"
+    } else if request.pinned_worker == Some(worker) {
+        "pinned"
+    } else {
+        "kv"
+    };
+
+    if worker_type == "decode" {
         tracing::info!(
             router_mode = "kv",
             request_id,
@@ -333,6 +338,7 @@ fn log_selection<C: WorkerConfigLike>(
             logit = cost,
             host_pinned_blocks,
             disk_blocks,
+            selection,
             "Selected worker"
         );
     } else {
@@ -350,6 +356,7 @@ fn log_selection<C: WorkerConfigLike>(
             host_pinned_blocks,
             disk_blocks,
             total_kv_blocks = ?total_kv_blocks,
+            selection,
             "Selected worker"
         );
     }

@@ -294,7 +294,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Explicitly pinned requests and equal-overlap ties are excluded; session-affinity selections are compared against the best eligible worker. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">

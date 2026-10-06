@@ -121,6 +121,27 @@ fn non_max_overlap_selection<C: WorkerConfigLike>(
     })
 }
 
+/// Highest raw cached-prefix tokens over workers eligible under `eligibility`, starting
+/// from the selector's own maximum. Workers with no overlap contribute zero, so only the
+/// workers present in the tier overlap maps are visited.
+fn best_eligible_raw_cached_tokens<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    selector_max: usize,
+    block_size: u32,
+) -> usize {
+    let tiers = &request.overlap.tier_overlap_blocks;
+    tiers
+        .device
+        .keys()
+        .chain(tiers.host_pinned.keys())
+        .chain(tiers.disk.keys())
+        .filter(|&&worker| eligibility.validate_worker_rank(workers, worker).is_ok())
+        .map(|&worker| request.raw_cached_tokens_for(worker, block_size))
+        .fold(selector_max, usize::max)
+}
+
 fn target_cached_prefix_blocks(request: &SchedulingRequest, target: WorkerWithDpRank) -> u32 {
     let device = request
         .overlap
@@ -1641,14 +1662,39 @@ impl<
                     eligibility,
                     self.block_size,
                 ))
-                .map(|selection| {
+                .map(|mut selection| {
+                    // A session-affinity selection is measured against every worker the
+                    // router could otherwise have picked, so cache-quality metrics keep
+                    // meaning "best eligible worker" when affinity made the call. Explicit
+                    // pins (no affinity target) keep the selection eligibility.
+                    let metrics_eligibility = if request.affinity_target.is_some() {
+                        let unconstrained = RoutingEligibility::new(
+                            request.allowed_worker_ids.as_ref(),
+                            overloaded_worker_ids.as_ref(),
+                            None,
+                            &request.routing_constraints,
+                        )
+                        .with_available_workers(available_worker_ids.as_deref());
+                        if let Some(max_raw_cached_tokens) = &mut selection.max_raw_cached_tokens {
+                            *max_raw_cached_tokens = best_eligible_raw_cached_tokens(
+                                &workers,
+                                request,
+                                unconstrained,
+                                *max_raw_cached_tokens,
+                                self.block_size,
+                            );
+                        }
+                        unconstrained
+                    } else {
+                        eligibility
+                    };
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()
                     {
                         non_max_overlap_selection(
                             &workers,
                             request,
-                            eligibility,
+                            metrics_eligibility,
                             selection.worker,
                             selection.effective_overlap_blocks,
                         )
@@ -3497,6 +3543,107 @@ policy_classes:
                 },
             )
         );
+    }
+
+    #[tokio::test]
+    async fn affinity_pinned_selection_reports_non_max_overlap() {
+        let (queue, _slots) = make_queue(2, 16, 64, None);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(queue.set_non_max_overlap_selection_observer(Arc::new(
+            move |request_id, event| {
+                observer_tx
+                    .send((request_id.to_string(), event))
+                    .expect("observer receiver should remain open");
+            }
+        )));
+        let pinned_request = |request_id: &str, affinity: bool| {
+            let (mut request, response_rx) = make_request(request_id, 64);
+            request
+                .overlap
+                .effective_overlap_blocks
+                .extend([(worker0, 8.0), (worker1, 2.0)]);
+            request.pinned_worker = Some(worker1);
+            request.affinity_target = affinity.then(|| worker1.into());
+            (request, response_rx)
+        };
+
+        // An explicit pin is the caller's choice, not a router decision: no event.
+        let (request, response_rx) = pinned_request("explicit-pin", false);
+        queue.enqueue(request).await;
+        assert_eq!(response_rx.await.unwrap().unwrap().best_worker, worker1);
+
+        let (request, response_rx) = pinned_request("affinity-pin", true);
+        queue.enqueue(request).await;
+        assert_eq!(response_rx.await.unwrap().unwrap().best_worker, worker1);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), observer_rx.recv())
+            .await
+            .expect("observer did not run")
+            .expect("observer channel closed");
+        assert_eq!(event.1.overlap_blocks_lost(), 6.0);
+        assert_eq!(
+            event,
+            (
+                "affinity-pin".to_string(),
+                NonMaxOverlapSelection {
+                    selected_worker: worker1,
+                    highest_overlap_worker: worker0,
+                    highest_overlap_blocks: 8.0,
+                    selected_overlap_blocks: 2.0,
+                },
+            )
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), observer_rx.recv())
+                .await
+                .is_err(),
+            "explicit pin must not report a non-max-overlap selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn affinity_pinned_selection_reports_best_eligible_raw_cache() {
+        let (queue, _slots) = make_queue(2, 16, 64, None);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let select = |request_id: &str, affinity: bool, allowed: Option<HashSet<WorkerId>>| {
+            let (mut request, response_rx) = make_request(request_id, 64);
+            request
+                .overlap
+                .tier_overlap_blocks
+                .device
+                .extend([(worker0, 4), (worker1, 1)]);
+            request.pinned_worker = Some(worker1);
+            request.affinity_target = affinity.then(|| worker1.into());
+            request.allowed_worker_ids = allowed;
+            let queue = Arc::clone(&queue);
+            async move {
+                queue.enqueue(request).await;
+                response_rx.await.unwrap().unwrap()
+            }
+        };
+
+        let response = select("affinity-pin", true, None).await;
+        assert_eq!(response.best_worker, worker1);
+        assert_eq!(response.selected_raw_cached_tokens, Some(16));
+        assert_eq!(response.max_raw_cached_tokens, Some(64));
+
+        // Explicit pins keep measuring against the pinned worker only.
+        let response = select("explicit-pin", false, None).await;
+        assert_eq!(response.selected_raw_cached_tokens, Some(16));
+        assert_eq!(response.max_raw_cached_tokens, Some(16));
+
+        // Routing eligibility still applies: a disallowed worker is not "best eligible".
+        let response = select(
+            "affinity-pin-disallowed-best",
+            true,
+            Some(HashSet::from([worker1.worker_id])),
+        )
+        .await;
+        assert_eq!(response.selected_raw_cached_tokens, Some(16));
+        assert_eq!(response.max_raw_cached_tokens, Some(16));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
