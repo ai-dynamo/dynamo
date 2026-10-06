@@ -555,6 +555,52 @@ def test_project_scale_to_merges_batch_floor_after_plugin_proposal():
     assert decision.num_decode == 4
 
 
+@pytest.mark.parametrize(
+    "proposed",
+    [
+        pytest.param({"decode"}, id="propose"),
+        # A custom RECONCILE plugin set decode with no PROPOSE target.
+        pytest.param(set(), id="reconcile-only"),
+    ],
+)
+def test_project_scale_to_batch_floor_raises_explicit_target_from_any_stage(
+    proposed,
+):
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    wc = WorkerCounts(ready_num_decode=5, expected_num_decode=5)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="decode", replicas=1)],
+        proposed=proposed,
+        targeted={"decode"},
+    )
+
+    decision = adapter._project_scale_to(outcome, wc, batch_replica_floor=3)
+
+    assert decision is not None
+    assert decision.num_decode == 3
+
+
+@pytest.mark.parametrize(
+    "proposed",
+    [pytest.param({"decode"}, id="propose"), pytest.param(set(), id="reconcile-only")],
+)
+def test_project_scale_to_batch_floor_blocks_explicit_downscale_below_floor(
+    proposed,
+):
+    # ready == desired == floor: a SET below the floor must not scale down.
+    adapter = OrchestratorEngineAdapter(_agg_config_throughput_on(), _caps())
+    wc = WorkerCounts(ready_num_decode=3, expected_num_decode=3)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="decode", replicas=1)],
+        proposed=proposed,
+        targeted={"decode"},
+    )
+
+    decision = adapter._project_scale_to(outcome, wc, batch_replica_floor=3)
+
+    assert decision is None or decision.num_decode == 3
+
+
 @pytest.mark.parametrize("pipeline_action", ["apply", "skip_no_targets"])
 def test_project_scale_to_batch_idle_target_scales_stable_decode_to_zero(
     pipeline_action,

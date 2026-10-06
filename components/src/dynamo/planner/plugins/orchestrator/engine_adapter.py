@@ -1481,15 +1481,22 @@ class OrchestratorEngineAdapter:
         # raise an explicit plugin target or synthesize a decode target when
         # the plugin pipeline has no opinion. Do not echo the ready baseline
         # when it already satisfies the floor: that remains a true no-op.
+        # Any explicit decode override counts as plugin intent, whether it came
+        # from PROPOSE or from a custom RECONCILE plugin: checking only PROPOSE
+        # provenance would compare the floor against the stale desired count
+        # and let a RECONCILE-only SET below the floor through unrepaired.
         batch_floor_needed = False
         if (
             batch_replica_floor is not None
             and batch_floor_allowed
             and mode in ("disagg", "decode", "agg")
         ):
+            decode_targeted = (
+                decode_proposed or decode_key in outcome.targeted_components
+            )
             batch_floor_baseline = (
                 num_d
-                if decode_proposed
+                if decode_targeted
                 else (
                     worker_counts.expected_num_decode
                     if worker_counts.expected_num_decode is not None
