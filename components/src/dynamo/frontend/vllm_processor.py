@@ -159,9 +159,9 @@ def _chat_choice_logprobs(
         ranked_position = sorted(
             (entry for entry in raw_position if isinstance(entry, dict)),
             key=lambda entry: (
-                entry.get("rank")
-                if isinstance(entry.get("rank"), int)
-                and not isinstance(entry.get("rank"), bool)
+                rank
+                if isinstance(rank := entry.get("rank"), int)
+                and not isinstance(rank, bool)
                 else 10**9
             ),
         )
