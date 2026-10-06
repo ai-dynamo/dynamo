@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared parsers for structured router log events used by e2e tests."""
+"""Shared parsers for structured router and runtime events used by e2e tests."""
 
 from __future__ import annotations
 
@@ -263,3 +263,23 @@ def wait_for_kv_event_diagnostics(
                 f"observed {len(diagnostics)}"
             )
         time.sleep(poll_interval_s)
+
+
+def has_upstream_cancellation(log_content: str, request_id: str) -> bool:
+    """Match the receiving runtime's structured Stop event, not client intent."""
+    for line in log_content.splitlines():
+        start = line.find("{")
+        if start < 0:
+            continue
+        try:
+            event = json.loads(line[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and (
+            event.get("target") == "request_span"
+            and event.get("request_id") == request_id
+            and event.get("cancellation.source") == "upstream"
+            and event.get("cancellation.signal") == "stop"
+        ):
+            return True
+    return False

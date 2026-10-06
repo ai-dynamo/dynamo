@@ -161,8 +161,10 @@ fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()
     let bootstrap = dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args_async(cli_argv)
         .map_err(sidecar_startup_to_pyerr)?;
 
+    // Argument errors were handled above. Remote discovery remains a runtime
+    // failure for this launcher, including when it runs during bootstrap.
     py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
-        .map_err(sidecar_run_to_pyerr)
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
 }
 
 // ---------------------------------------------------------------------------

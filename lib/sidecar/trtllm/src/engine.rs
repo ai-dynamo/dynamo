@@ -37,11 +37,9 @@ pub struct TrtllmSidecarEngine {
     /// Disaggregation role this worker plays. Selects the `context_only` /
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
-    client: OnceCell<TrtllmClient>,
-    /// Engine limits resolved at `start` from `--context-length` and
-    /// `Control.GetModelInfo`, so `generate` can derive a default `max_tokens`
-    /// for requests that omit one.
-    limits: OnceCell<ModelLimits>,
+    /// Connection and limits may be discovered in the cancellable sidecar bootstrap.
+    connection: OnceCell<(TrtllmClient, ModelLimits)>,
+    started: OnceCell<()>,
     cancel: CancellationToken,
 }
 
@@ -57,8 +55,8 @@ impl TrtllmSidecarEngine {
             transport,
             model,
             mode,
-            client: OnceCell::new(),
-            limits: OnceCell::new(),
+            connection: OnceCell::new(),
+            started: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -86,7 +84,7 @@ impl TrtllmSidecarEngine {
         DynamoError,
     > {
         let parsed = Self::from_parsed(<Args as clap::Parser>::parse())?;
-        Ok(std::future::ready(Ok(parsed)))
+        Ok(Self::bootstrap(parsed))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -99,7 +97,7 @@ impl TrtllmSidecarEngine {
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         let initialized = Self::from_parsed(args)?;
-        Ok(std::future::ready(Ok(initialized)))
+        Ok(Self::bootstrap(initialized))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -156,14 +154,22 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
-}
 
-#[async_trait]
-impl LLMEngine for TrtllmSidecarEngine {
-    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-        if self.client.initialized() {
-            return Err(client::engine_shutdown(ALREADY_STARTED));
-        }
+    async fn bootstrap(
+        (engine, config): (Self, WorkerConfig),
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        // Worker deliberately lets engine.start() finish before cleanup. Discover
+        // here so signals can cancel a stalled remote connection without waiting
+        // for that worker shutdown deadline. Dropping discovery only drops gRPC
+        // clients; it does not leave a partially loaded in-process engine.
+        engine
+            .connection
+            .get_or_try_init(|| engine.connect())
+            .await?;
+        Ok((engine, config))
+    }
+
+    async fn connect(&self) -> Result<(TrtllmClient, ModelLimits), DynamoError> {
         tracing::info!(
             endpoint = %self.endpoint,
             connections = self.transport.connections.get(),
@@ -174,13 +180,12 @@ impl LLMEngine for TrtllmSidecarEngine {
         // connecting is what stops the two stages spending a full budget each.
         let deadline = startup_deadline(self.transport.startup_deadline)?;
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
-        let connection_count = client.connection_count();
 
         // `--context-length` wins over what the engine reports, and is the
         // only source when the engine reports nothing usable. The resolved
         // value backs both the registered window and the default-`max_tokens`
         // path in `convert::max_tokens`.
-        let mut model = self.model.clone();
+        let model = &self.model;
         let limits = match model.context_length {
             // Configured: the engine is consulted once, to cross-check the
             // value and to learn its output cap. It may not answer at all --
@@ -248,15 +253,27 @@ impl LLMEngine for TrtllmSidecarEngine {
                     })?
             }
         };
-        model.context_length = limits.context_length;
-        let _ = self.limits.set(limits);
+        Ok((client, limits))
+    }
+}
 
-        self.client
-            .set(client)
+#[async_trait]
+impl LLMEngine for TrtllmSidecarEngine {
+    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+        if self.started.initialized() {
+            return Err(client::engine_shutdown(ALREADY_STARTED));
+        }
+        // Synchronous constructors retain deferred discovery; the CLI and Python
+        // sidecar launcher reuse the connection prepared by their async bootstrap.
+        let (client, limits) = self.connection.get_or_try_init(|| self.connect()).await?;
+        self.started
+            .set(())
             .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
+        let mut model = self.model.clone();
+        model.context_length = limits.context_length;
         tracing::info!(
             endpoint = %self.endpoint,
-            connections = connection_count,
+            connections = client.connection_count(),
             model = %model.source,
             context_length = ?limits.context_length,
             max_output_tokens = ?limits.max_output_tokens,
@@ -270,16 +287,17 @@ impl LLMEngine for TrtllmSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let client = self
-            .client
+        let (client, limits) = self
+            .connection
             .get()
+            .filter(|_| self.started.initialized())
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
         let proto_request = build_generate_request(
             &request,
             &request_id,
             &self.model.source,
-            self.limits.get().copied(),
+            Some(*limits),
             self.mode,
         )?;
         let mut state = ResponseState::new(&request, self.mode);
@@ -366,7 +384,7 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(client) = self.client.get() else {
+        let Some((client, _)) = self.connection.get().filter(|_| self.started.initialized()) else {
             return;
         };
         if let Err(error) = client.abort(ctx.id().to_string()).await {

@@ -8,6 +8,8 @@ import importlib.util
 import json
 import os
 import pathlib
+import shlex
+import sys
 
 import pytest
 
@@ -18,16 +20,30 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.sidecar_checks import (
+    assert_cancellation_and_recovery,
+    assert_kv_transfer,
+)
+from tests.serve.trtllm_checks import assert_handoff_parity_and_cancellation
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
-from tests.utils.gpu_args import map_cuda_visible_devices
-from tests.utils.payload_builder import LONG_PROMPT_FOR_CACHING, chat_payload_default
-from tests.utils.payloads import ChatPayload, DisaggregatedChatPayload
+from tests.utils.gpu_args import build_trtllm_override_args, map_cuda_visible_devices
+from tests.utils.payload_builder import (
+    LONG_PROMPT_FOR_CACHING,
+    chat_payload_default,
+    chat_payload_with_logprobs,
+)
+from tests.utils.payloads import (
+    ChatPayload,
+    DisaggregatedChatPayload,
+    GuidedDecodingChatPayload,
+)
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
     deallocate_ports,
     reserved_ports,
 )
+from tests.utils.test_output import resolve_test_output_path
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -96,6 +112,93 @@ def _disaggregated_chat_payload() -> DisaggregatedChatPayload:
     )
 
 
+def _trtllm_compatibility_payloads():
+    logprobs = chat_payload_with_logprobs(
+        content="Count from one to ten.",
+        expected_response=[],
+        max_tokens=8,
+        top_logprobs=2,
+        stream=True,
+        extra_body={
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "nvext": {"extra_fields": ["prompt_token_ids"]},
+        },
+    )
+    logprobs.expected_finish_reason = "length"
+    logprobs.expected_completion_tokens = 8
+    logprobs.min_token_chunks = 2
+    structured = GuidedDecodingChatPayload(
+        body={
+            "messages": [{"role": "user", "content": "Return a successful status."}],
+            "max_tokens": 64,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "status",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"ok": {"type": "boolean", "const": True}},
+                        "required": ["ok"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_json={"ok": True},
+        expected_finish_reason="stop",
+        needs_token_ids=True,
+    )
+    return [chat_payload_default(), logprobs, structured]
+
+
+def _trtllm_handoff_payload():
+    payload = _disaggregated_chat_payload()
+    payload.body.update(
+        max_tokens=8,
+        ignore_eos=True,
+        logprobs=True,
+        top_logprobs=0,
+        chat_template_kwargs={"enable_thinking": False},
+        nvext={
+            "extra_fields": ["worker_id", "completion_token_ids", "prompt_token_ids"]
+        },
+    )
+    payload.expected_finish_reason = "length"
+    payload.expected_completion_tokens = 8
+    return payload
+
+
+def _trtllm_transfer_probe_env(tmp_path):
+    # Preserve the launcher's binding check/install invocations; only substitute
+    # the serve module. EngineProcess still owns startup, readiness and teardown.
+    wrapper = tmp_path / "trtllm-python"
+    python = shlex.quote(sys.executable)
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1" == "-m" && "$2" == "tensorrt_llm.commands.serve" ]]; then\n'
+        "  shift 2\n"
+        f'  exec {python} -m tests.serve.trtllm_transfer_probe "$@"\n'
+        "fi\n"
+        f'exec {python} "$@"\n'
+    )
+    wrapper.chmod(0o700)
+    probe = tmp_path / "transfers.jsonl"
+    probe.write_text("")
+    return probe, {
+        "TRTLLM_PYTHON": str(wrapper),
+        "DYN_TEST_TRANSFER_PROBE": str(probe),
+        "PYTHONPATH": os.pathsep.join(
+            [WORKSPACE_DIR, os.environ.get("PYTHONPATH", "")]
+        ),
+    }
+
+
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
 # has not been profiled for the sidecar launch path. Add one once measured, to
 # admit these into the parallel stage alongside the equivalent dynamo.{backend}
@@ -142,6 +245,7 @@ sidecar_configs = {
         marks=[
             pytest.mark.trtllm,
             pytest.mark.gpu_1,
+            pytest.mark.requested_trtllm_kv_tokens(4096),
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
             pytest.mark.skipif(
@@ -156,9 +260,7 @@ sidecar_configs = {
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
         },
-        request_payloads=[
-            chat_payload_default(),
-        ],
+        request_payloads=_trtllm_compatibility_payloads(),
     ),
     "trtllm_disaggregated": EngineConfig(
         name="trtllm_disaggregated",
@@ -203,7 +305,7 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[_disaggregated_chat_payload()],
+        request_payloads=[_trtllm_handoff_payload()],
     ),
     "vllm_disaggregated": EngineConfig(
         name="vllm_disaggregated",
@@ -261,6 +363,8 @@ def test_serve_deployment(
     num_system_ports,
     predownload_models,
     monkeypatch,
+    tmp_path,
+    discovery_backend,
 ):
     """Launch a native engine and sidecar deployment and validate chat completion."""
     assert (
@@ -305,8 +409,92 @@ def test_serve_deployment(
                 engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"] = str(
                     engine_ports[4]
                 )
+            validate_transfer = None
+            if backend == "trtllm":
+                probe_path, probe_env = _trtllm_transfer_probe_env(tmp_path)
+                engine_env.update(probe_env)
+                engine_env["DYN_LOGGING_CONSOLE_FORMAT"] = "jsonl"
+
+                def validate_transfer():
+                    payload = _trtllm_handoff_payload().with_model(config.model)
+                    payload.port = config.frontend_port
+                    result = assert_kv_transfer(
+                        backend=backend,
+                        payload=payload,
+                        prefill_port=int(engine_env["TRTLLM_PREFILL_GRPC_PORT"]),
+                        decode_port=int(engine_env["TRTLLM_DECODE_GRPC_PORT"]),
+                        probe_path=probe_path,
+                    )
+                    assert_handoff_parity_and_cancellation(
+                        model=config.model,
+                        namespace=engine_env["DYN_NAMESPACE"],
+                        discovery_backend=discovery_backend,
+                        prefill_port=int(engine_env["TRTLLM_PREFILL_GRPC_PORT"]),
+                        decode_port=int(engine_env["TRTLLM_DECODE_GRPC_PORT"]),
+                        probe_path=probe_path,
+                        result=result,
+                        worker_log=pathlib.Path(
+                            resolve_test_output_path(request.node.name)
+                        )
+                        / "bash.log.txt",
+                    )
+                    # A fresh transfer must still succeed through the real router
+                    # after cancellation released both workers' resources.
+                    assert_kv_transfer(
+                        backend=backend,
+                        payload=payload,
+                        prefill_port=int(engine_env["TRTLLM_PREFILL_GRPC_PORT"]),
+                        decode_port=int(engine_env["TRTLLM_DECODE_GRPC_PORT"]),
+                        probe_path=probe_path,
+                    )
+
             run_serve_deployment(
-                config, request, ports=dynamo_dynamic_ports, extra_env=engine_env
+                config,
+                request,
+                ports=dynamo_dynamic_ports,
+                extra_env=engine_env,
+                post_validation=validate_transfer,
+            )
+    elif config.name == "trtllm_aggregated":
+        # The explicit engine config takes precedence over the launcher's file,
+        # so include the same scheduler/marker KV budget with the grammar backend.
+        memory_env = dict(os.environ)
+        memory_env.setdefault(
+            "_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS",
+            str(request.node.get_closest_marker("requested_trtllm_kv_tokens").args[0]),
+        )
+        memory_args = build_trtllm_override_args(memory_env)
+        engine_config = tmp_path / "engine.json"
+        engine_config.write_text(
+            json.dumps(
+                {"guided_decoding_backend": "xgrammar", **json.loads(memory_args[1])}
+            )
+        )
+        config.script_args = ["--extra_llm_api_options", str(engine_config)]
+        probe_path, probe_env = _trtllm_transfer_probe_env(tmp_path)
+        namespace = f"sidecar-agg-{generate_random_suffix()}"
+        monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
+        monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+        monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
+        with reserved_ports(1, start_port=DynamoPortRange.SERVE.value) as engine_ports:
+            run_serve_deployment(
+                config,
+                request,
+                ports=dynamo_dynamic_ports,
+                extra_env={
+                    **probe_env,
+                    "DYN_NAMESPACE": namespace,
+                    "TRTLLM_GRPC_PORT": str(engine_ports[0]),
+                },
+                post_validation=lambda: assert_cancellation_and_recovery(
+                    backend="trtllm",
+                    model=config.model,
+                    namespace=namespace,
+                    frontend_port=config.frontend_port,
+                    engine_port=engine_ports[0],
+                    discovery_backend=discovery_backend,
+                    probe_path=probe_path,
+                ),
             )
     elif config.name == "vllm_aggregated":
         with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:

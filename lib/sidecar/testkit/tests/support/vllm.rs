@@ -32,8 +32,8 @@ use tonic_health::pb::{
 };
 
 use super::{
-    FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
-    fast_engine_args, sidecar_command, wait_scheduler_idle,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture,
+    SidecarFixture, WireFixture, fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
 pub struct Fixture {
@@ -511,7 +511,7 @@ impl Protocol for Adapter {
     }
 }
 
-impl ProcessFixture for Fixture {
+impl DiscoveryFixture for Fixture {
     fn set_served_model_name(&self, name: &str) {
         *self.served_model_name.lock().unwrap() = Some(name.to_owned());
     }
@@ -533,12 +533,14 @@ impl ProcessFixture for Fixture {
     fn assert_unhealthy_startup(logs: &str) {
         assert!(logs.contains("did not become SERVING"), "{logs}");
     }
+}
 
+impl ProcessFixture for Fixture {
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }
 
-    fn command() -> Command {
+    fn command(_model: &str) -> Command {
         let mut command = sidecar_command("dynamo-vllm-sidecar", "DYNAMO_VLLM_SIDECAR");
         command.env_remove("VLLM_HTTP_ENDPOINT");
         command
@@ -566,6 +568,7 @@ impl ProcessFixture for Fixture {
 }
 
 impl HandoffFixture for Fixture {
+    const KV_BLOCK_SIZE: u32 = 4;
     const HAS_BOOTSTRAP: bool = false;
 
     fn assert_handoff(

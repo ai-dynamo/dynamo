@@ -418,58 +418,67 @@ async fn cleanup_terminates_an_in_flight_request() {
 /// prefill worker's blocks with no leg left to claim them. Shutdown still wins.
 #[tokio::test]
 async fn a_cancelled_decode_dispatch_is_not_abandoned_mid_flight() {
-    let service = FakeTrtllm::default();
-    service.hang_before_stream.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = Arc::new(engine_in_mode(
-        &server.endpoint,
-        1,
-        DisaggregationMode::Decode,
-    ));
-    engine.start(0).await.expect("start");
+    for cancel_before_dispatch in [true, false] {
+        let service = FakeTrtllm::default();
+        service.hang_before_stream.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let engine = Arc::new(engine_in_mode(
+            &server.endpoint,
+            1,
+            DisaggregationMode::Decode,
+        ));
+        engine.start(0).await.expect("start");
 
-    let mut decode_request = request();
-    decode_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
-        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
-        prompt_tokens_details: None,
-    });
-    let context = dynamo_backend_common::testing::mock_context();
-    let mut dispatch = tokio::spawn({
-        let engine = Arc::clone(&engine);
-        let context = context.clone();
-        async move {
-            engine
-                .generate(decode_request, GenerateContext::new(context, None))
-                .await
+        let mut decode_request = request();
+        decode_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
+            disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+            prompt_tokens_details: None,
+        });
+        let context = dynamo_backend_common::testing::mock_context();
+        if cancel_before_dispatch {
+            context.stop_generating();
         }
-    });
+        let mut dispatch = tokio::spawn({
+            let engine = Arc::clone(&engine);
+            let context = context.clone();
+            async move {
+                engine
+                    .generate(decode_request, GenerateContext::new(context, None))
+                    .await
+            }
+        });
 
-    // The fake records the request before it withholds response headers, which
-    // is exactly the window this test is about: the engine has the request and
-    // the sidecar does not know it yet.
-    while server.service.requests.lock().await.is_empty() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    context.stop_generating();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+        // The fake records the request before it withholds response headers, which
+        // is exactly the window this test is about: the engine has the request and
+        // the sidecar does not know it yet.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while server.service.requests.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancelled decode must still dispatch to claim the prefill KV");
+        context.stop_generating();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+                .await
+                .is_err(),
+            "the dispatch must outlive the client's cancellation"
+        );
+
+        engine.cleanup().await.expect("cleanup");
+        let mut stream = tokio::time::timeout(Duration::from_secs(5), dispatch)
             .await
-            .is_err(),
-        "the dispatch must outlive the client's cancellation"
-    );
-
-    engine.cleanup().await.expect("cleanup");
-    let mut stream = tokio::time::timeout(Duration::from_secs(5), dispatch)
-        .await
-        .expect("shutdown must release the dispatch")
-        .expect("dispatch task")
-        .expect("generate");
-    let terminal = stream
-        .next()
-        .await
-        .expect("a terminal item")
-        .expect("terminal");
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+            .expect("shutdown must release the dispatch")
+            .expect("dispatch task")
+            .expect("generate");
+        let terminal = stream
+            .next()
+            .await
+            .expect("a terminal item")
+            .expect("terminal");
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    }
 }
 
 /// Argument parsing decides where each worker registers. A disaggregated leg
@@ -539,4 +548,48 @@ fn parsed_arguments_map_onto_the_worker_registration() {
         .is_err(),
         "an empty model path has nothing to tokenize with"
     );
+}
+
+// Regression: eager discovery must neither bypass Worker start nor reconnect
+// during that non-cancellable phase after bootstrap has already succeeded.
+#[tokio::test]
+async fn bootstrap_discovers_once_but_requires_start_before_serving() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let bootstrap = TrtllmSidecarEngine::try_from_args_async(vec![
+        "dynamo-trtllm-sidecar".into(),
+        "--grpc-endpoint".into(),
+        server.endpoint.clone(),
+        "--model-path".into(),
+        "model-source".into(),
+    ])
+    .unwrap();
+    let (engine, _) = bootstrap.await.unwrap();
+    assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(request(), GenerateContext::new(context, None))
+        .await;
+    let error = result.err().expect("bootstrap must not enable generation");
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(dynamo_backend_common::BackendError::EngineShutdown)
+    );
+    assert!(server.service.requests.lock().await.is_empty());
+
+    // Metadata was resolved already; a transient Control failure cannot make
+    // Worker repeat discovery and hang in its non-cancellable start phase.
+    server
+        .service
+        .unavailable_model_info
+        .store(true, Ordering::SeqCst);
+    let config = engine.start(0).await.unwrap();
+    assert_eq!(config.llm.unwrap().context_length, Some(4096));
+    assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
+    let outputs = collect(&engine, request()).await;
+    assert_eq!(outputs[0].token_ids, [42]);
+    assert_eq!(
+        outputs.last().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    engine.cleanup().await.unwrap();
 }

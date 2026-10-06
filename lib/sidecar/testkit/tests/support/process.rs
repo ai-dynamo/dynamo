@@ -202,7 +202,7 @@ impl Process {
         };
         let stdout = env.root.path().join(format!("{role}.stdout"));
         let stderr = env.root.path().join(format!("{role}.stderr"));
-        let mut command = F::command();
+        let mut command = F::command(&env.model);
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();
             if key_text.starts_with("DYN_")
