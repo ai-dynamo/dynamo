@@ -179,7 +179,8 @@ class GPUQuiescenceManager:
             )
         if crash_interlock and not self.configured(backend):
             raise ValueError(
-                "GPU crash interlock requires DYN_GMS_GPU_QUIESCENCE_PROVIDER=gms-mps"
+                "GPU crash interlock requires DYN_GMS_GPU_ISOLATION=mps "
+                "(or DYN_GMS_GPU_QUIESCENCE_PROVIDER=gms-mps)"
             )
         if crash_interlock:
             self._ensure_failure_notifier(client.failure_notify_addr)
@@ -262,8 +263,12 @@ class GPUQuiescenceManager:
                 conflicting.setdefault(
                     (registered.backend, registered.cohort), []
                 ).append(key)
+        from gpu_memory_service.common.gpu_isolation import default_reclaim_policy
+
         best_effort = (
-            os.environ.get("DYN_GMS_FAILOVER_RECLAIM_POLICY", "gpu-proof").strip()
+            os.environ.get(
+                "DYN_GMS_FAILOVER_RECLAIM_POLICY", default_reclaim_policy()
+            ).strip()
             == "process-death-timeout"
         )
         for previous_cohort, keys in conflicting.items():
@@ -472,10 +477,14 @@ class GPUQuiescenceManager:
 
     @staticmethod
     def configured(backend: str) -> bool:
+        from gpu_memory_service.common.gpu_isolation import default_quiescence_provider
+
         backend_env = backend.upper().replace("-", "_")
         provider = os.environ.get(
             f"DYN_{backend_env}_GMS_GPU_QUIESCENCE_PROVIDER",
-            os.environ.get("DYN_GMS_GPU_QUIESCENCE_PROVIDER", ""),
+            os.environ.get(
+                "DYN_GMS_GPU_QUIESCENCE_PROVIDER", default_quiescence_provider() or ""
+            ),
         )
         return provider.strip().lower() == "gms-mps"
 

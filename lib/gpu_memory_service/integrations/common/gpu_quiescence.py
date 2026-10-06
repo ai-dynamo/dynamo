@@ -83,9 +83,28 @@ def _provider_name(backend_name: str) -> str:
     )
     if configured:
         return configured
+    from gpu_memory_service.common.gpu_isolation import default_quiescence_provider
+
+    mode_default = default_quiescence_provider()
+    if mode_default is not None:
+        return mode_default
     return (
         "external-command" if _configured_command(backend_name) else "quarantine-only"
     )
+
+
+def _process_lifetime_enabled() -> bool:
+    """The process-lifetime provider is opt-in: the isolation mode or the flag."""
+    from gpu_memory_service.common.gpu_isolation import gpu_isolation_mode
+
+    return (
+        gpu_isolation_mode() == "process"
+        or os.environ.get("DYN_GMS_EXPERIMENTAL_PROCESS_LIFETIME_RECLAIM") == "1"
+    )
+
+
+def mps_client_possible() -> bool:
+    return _mps_client_possible()
 
 
 def _mps_client_possible() -> bool:
@@ -107,7 +126,7 @@ def gpu_quiescence_provider_configured(backend_name: str) -> bool:
     return (
         (
             provider == "process-lifetime"
-            and os.environ.get("DYN_GMS_EXPERIMENTAL_PROCESS_LIFETIME_RECLAIM") == "1"
+            and _process_lifetime_enabled()
             and not _mps_client_possible()
         )
         or provider == "gms-mps"
@@ -250,11 +269,12 @@ def _prove_process_lifetime(predecessor_cohort: str | None) -> GPUQuiescenceProo
     default or silently enabled in a production deployment. MPS is excluded
     because its server owns a context independently of the client process.
     """
-    if os.environ.get("DYN_GMS_EXPERIMENTAL_PROCESS_LIFETIME_RECLAIM") != "1":
+    if not _process_lifetime_enabled():
         return GPUQuiescenceProof(
             False,
             "process-lifetime",
-            "experimental process-lifetime reclaim was not explicitly enabled",
+            "process-lifetime reclaim was not enabled "
+            "(set DYN_GMS_GPU_ISOLATION=process)",
         )
     if _mps_client_possible():
         return GPUQuiescenceProof(
@@ -277,16 +297,20 @@ def _prove_process_lifetime(predecessor_cohort: str | None) -> GPUQuiescenceProo
     return GPUQuiescenceProof(
         retired,
         "process-lifetime",
-        "all predecessor writer guards exited and cohort is tombstoned"
-        if retired
-        else "predecessor writer cohort is still live or not retired",
+        (
+            "all predecessor writer guards exited and cohort is tombstoned"
+            if retired
+            else "predecessor writer cohort is still live or not retired"
+        ),
     )
 
 
 def gpu_crash_interlock_enabled(backend_name: str) -> bool:
+    from gpu_memory_service.common.gpu_isolation import default_crash_interlock
+
     raw = os.environ.get(
         _backend_env(backend_name, "GPU_CRASH_INTERLOCK"),
-        os.environ.get("DYN_GMS_GPU_CRASH_INTERLOCK", "0"),
+        os.environ.get("DYN_GMS_GPU_CRASH_INTERLOCK", default_crash_interlock()),
     )
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 

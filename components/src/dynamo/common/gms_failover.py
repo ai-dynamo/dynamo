@@ -40,7 +40,9 @@ _RECLAIM_RETRY_MAX_SECS = 5.0
 
 
 def reclaim_policy() -> str:
-    policy = os.environ.get(RECLAIM_POLICY_ENV, "gpu-proof").strip()
+    from gpu_memory_service.common.gpu_isolation import default_reclaim_policy
+
+    policy = os.environ.get(RECLAIM_POLICY_ENV, default_reclaim_policy()).strip()
     if policy not in _RECLAIM_POLICIES:
         raise ValueError(
             f"{RECLAIM_POLICY_ENV}={policy!r} must be one of {_RECLAIM_POLICIES}"
@@ -170,10 +172,31 @@ def frozen_predecessor_enabled(
         raise RuntimeError(
             f"{FROZEN_PREDECESSOR_ENV}=1 requires GMS_KV_DIRECTORY_MANIFEST"
         )
+    from gpu_memory_service.common.gpu_isolation import (
+        ISOLATION_ENV,
+        gpu_isolation_mode,
+    )
     from gpu_memory_service.integrations.common.gpu_quiescence import (
         gpu_quiescence_provider_configured,
+        mps_client_possible,
     )
 
+    # Reject a mode that contradicts the process environment at boot rather
+    # than leaving a takeover to discover it.
+    try:
+        isolation = gpu_isolation_mode()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if isolation == "process" and mps_client_possible():
+        raise RuntimeError(
+            f"{ISOLATION_ENV}=process requires engines that are not MPS clients; "
+            "unset CUDA_MPS_PIPE_DIRECTORY or use mps"
+        )
+    if isolation == "mps" and not mps_client_possible():
+        raise RuntimeError(
+            f"{ISOLATION_ENV}=mps requires engines to run as MPS clients "
+            "(set CUDA_MPS_PIPE_DIRECTORY)"
+        )
     if not gpu_quiescence_provider_configured(backend_name):
         raise RuntimeError(
             f"{FROZEN_PREDECESSOR_ENV}=1 requires a GPU-quiescence provider "

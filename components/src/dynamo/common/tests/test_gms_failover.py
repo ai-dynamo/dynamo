@@ -1571,6 +1571,43 @@ def test_frozen_predecessor_rejects_invalid_reclaim_policy_at_boot(
         gms_failover.frozen_predecessor_enabled("vllm")
 
 
+def _isolation_env(monkeypatch, mode, *, mps):
+    _frozen_env(monkeypatch)
+    for name in (
+        "DYN_GMS_GPU_QUIESCENCE_PROVIDER",
+        "DYN_GMS_FAILOVER_RECLAIM_POLICY",
+        "CUDA_MPS_PIPE_DIRECTORY",
+        "DYN_GMS_MPS_PIPE_DIRECTORY",
+        "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DYN_GMS_GPU_ISOLATION", mode)
+    from gpu_memory_service.integrations.common import gpu_quiescence
+
+    monkeypatch.setattr(gpu_quiescence, "_mps_client_possible", lambda: mps)
+
+
+@pytest.mark.parametrize(
+    ("mode", "mps", "policy"),
+    [("process", False, "process-death-timeout"), ("mps", True, "gpu-proof")],
+)
+def test_isolation_mode_alone_configures_frozen_failover(
+    monkeypatch, mode, mps, policy
+):
+    _isolation_env(monkeypatch, mode, mps=mps)
+    assert gms_failover.frozen_predecessor_enabled("vllm")
+    assert gms_failover.reclaim_policy() == policy
+
+
+@pytest.mark.parametrize(("mode", "mps"), [("process", True), ("mps", False)])
+def test_isolation_mode_contradicting_the_environment_fails_boot(
+    monkeypatch, mode, mps
+):
+    _isolation_env(monkeypatch, mode, mps=mps)
+    with pytest.raises(RuntimeError, match="DYN_GMS_GPU_ISOLATION"):
+        gms_failover.frozen_predecessor_enabled("vllm")
+
+
 @pytest.mark.parametrize(
     ("policy", "inherit"), [("gpu-proof", False), ("process-death-timeout", True)]
 )

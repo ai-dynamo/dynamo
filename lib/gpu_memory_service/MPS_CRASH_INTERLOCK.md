@@ -1,5 +1,27 @@
 # GMS MPS crash interlock
 
+## Choosing an isolation mode
+
+Set one variable to choose how a failover isolates the dead predecessor's GPU
+work:
+
+| `DYN_GMS_GPU_ISOLATION` | Engines run | Quiescence provider | Crash interlock | Reclaim policy |
+|---|---|---|---|---|
+| `mps` | as MPS clients | `gms-mps` | on | `gpu-proof` |
+| `process` | as plain CUDA processes | `process-lifetime` | off | `process-death-timeout` |
+| unset | as configured | individual settings below | individual setting | `gpu-proof` |
+
+In `process` mode, the driver tears down a process's CUDA context when it
+exits, and the predecessor is fenced by its writer-cohort lifetime guards.
+Reclaim of frozen pages waits `DYN_GMS_FAILOVER_PROCESS_DEATH_GRACE_SECS`
+after confirmed process death. Takeover does not wait for reclaim.
+
+Any individual variable still overrides the mode. A mode that contradicts the
+environment fails the engine boot: `process` with an MPS pipe configured, or
+`mps` without one.
+
+## MPS crash interlock
+
 The crash interlock is an optional, best-effort bridge between a catchable
 engine-process crash and GMS's MPS quiescence provider. It reduces the unsafe
 window in which a failed CUDA process can still submit work against persistent
