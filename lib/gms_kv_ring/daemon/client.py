@@ -29,6 +29,17 @@ class DaemonError(RuntimeError):
     pass
 
 
+class PreparedDirectoryItem(dict):
+    """A directory publication item already in wire form.
+
+    Fields match what ``directory_publish_batch_message`` produces: hex
+    ``content_hash`` (and optional ``local_key``), ``slot_ids``,
+    ``generations``, ``ranges``, ``tier``, ``sealed`` and ``active``. It is
+    sent as is, without a normalizing copy, so the caller must not mutate it
+    after publishing.
+    """
+
+
 class DaemonClient:
     def __init__(
         self,
@@ -125,6 +136,9 @@ class DaemonClient:
         """Normalize one directory publication without performing I/O."""
         payload_items = []
         for item in items:
+            if type(item) is PreparedDirectoryItem:
+                payload_items.append(item)
+                continue
             slot_ids = item.get("slot_ids")
             if slot_ids is None:
                 slot_ids = [item["slot_id"]]

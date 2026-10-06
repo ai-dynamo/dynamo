@@ -150,6 +150,9 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
                 raise RuntimeError("directory unavailable")
             for item in items:
                 content_hash = item["content_hash"]
+                if isinstance(content_hash, str):
+                    # Wire-form (prepared) items carry hex, as the daemon does.
+                    content_hash = bytes.fromhex(content_hash)
                 if not item.get("sealed", True):
                     self.entries.pop(content_hash, None)
                     continue
@@ -442,8 +445,9 @@ def test_completed_hbm_blocks_use_daemon_owned_publication_pipeline():
     client.seal.assert_called_once_with([lease])
     directory.publish_deferred.assert_called_once()
     item = directory.publish_deferred.call_args.args[0][0]
-    assert item["slot_id"] == 7
-    assert item["generation"] == 11
+    assert item["slot_ids"] == [7]
+    assert item["generations"] == [11]
+    assert item["local_key"] == b"native-hash".hex()
     assert item["active"] is False
     directory.publish.assert_not_called()
 

@@ -15,6 +15,7 @@ from gms_kv_ring.common.content_directory import (
     ContentDirectory,
     async_directory_work_enabled,
 )
+from gms_kv_ring.daemon.client import PreparedDirectoryItem
 from gpu_memory_service.integrations.common.kv_lease_client import (
     GMSKVLeaseClient,
     KVLease,
@@ -550,17 +551,21 @@ def _publish_hbm_blocks(self, blocks, *, active: bool) -> bool:
     try:
         engine_id = _directory_pool_id()
         publisher = getattr(directory, "publish_deferred", directory.publish)
+        # Built directly in wire form: the publication message then passes
+        # items through instead of normalizing a copy of each one.
         published = publisher(
             [
-                {
-                    "content_hash": key,
-                    "local_key": bytes(block.block_hash),
-                    "engine_id": engine_id,
-                    "slot_id": int(block.block_id),
-                    "generation": int(lease.generation),
-                    "tier": "hbm",
-                    "active": active,
-                }
+                PreparedDirectoryItem(
+                    content_hash=key.hex(),
+                    local_key=bytes(block.block_hash).hex(),
+                    engine_id=engine_id,
+                    slot_ids=[int(block.block_id)],
+                    generations=[int(lease.generation)],
+                    ranges=[],
+                    tier="hbm",
+                    sealed=True,
+                    active=bool(active),
+                )
                 for block, lease, key in publish_pairs
             ]
         )
@@ -1513,9 +1518,17 @@ def _free_blocks(self, ordered_blocks, *, admission_blocks=None):
 
 
 def _request_is_tracked(coordinator, request_id: str) -> bool:
+    managers = coordinator.single_type_managers
+    if len(managers) == 1:
+        # The common single KV-cache-group layout: two dict lookups.
+        manager = managers[0]
+        return (
+            request_id in manager.req_to_blocks
+            or request_id in manager.num_cached_block
+        )
     return any(
         request_id in manager.req_to_blocks or request_id in manager.num_cached_block
-        for manager in coordinator.single_type_managers
+        for manager in managers
     )
 
 

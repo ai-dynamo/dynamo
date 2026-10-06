@@ -451,7 +451,10 @@ class ContentDirectory:
         try:
             keys = set()
             for item in items:
-                keys.add(("hash", bytes(item["content_hash"])))
+                content_hash = item["content_hash"]
+                if isinstance(content_hash, str):
+                    content_hash = bytes.fromhex(content_hash)
+                keys.add(("hash", bytes(content_hash)))
                 slots = item.get("slot_ids")
                 if slots is None:
                     slots = [item["slot_id"]]

@@ -86,7 +86,7 @@ def test_dormant_eviction_never_releases_a_block_in_use():
     assert pool._gms_kv_leases_by_block == {1: busy_lease}
     assert evicted == [idle]
     # The in-use block is republished as ACTIVE, so no peer can adopt it.
-    assert [item["slot_id"] for item in published] == [1]
+    assert [item["slot_ids"][0] for item in published] == [1]
     assert published[0]["active"] is True
 
 

@@ -814,3 +814,25 @@ def test_disconnect_releases_only_that_connections_claims():
     assert promoted["promoted"] is True
     assert entries[("manifest", hashes[0])]["_claim_count"] == 0
     assert entries[("manifest", hashes[1])]["_claim_count"] == 0
+
+
+def test_prepared_publication_items_pass_through_unchanged():
+    from gms_kv_ring.daemon.client import DaemonClient, PreparedDirectoryItem
+
+    prepared = PreparedDirectoryItem(
+        content_hash="ab" * 32,
+        engine_id="e",
+        slot_ids=[1],
+        generations=[2],
+        ranges=[],
+        tier="hbm",
+        sealed=True,
+        active=False,
+    )
+    raw = {"content_hash": b"\xcd" * 32, "engine_id": "e", "slot_id": 3}
+    message = DaemonClient.directory_publish_batch_message(
+        "m", "w", [prepared, raw], 4, "vllm"
+    )
+    assert message["items"][0] is prepared
+    assert message["items"][1]["content_hash"] == "cd" * 32
+    assert message["items"][1]["slot_ids"] == [3]
