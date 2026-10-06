@@ -67,7 +67,7 @@ def _has_arg(args: list[str], key: str) -> bool:
 def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
     args = list(args)
     parsed_args = break_arguments(args)
-    if _has_arg(parsed_args, "--cuda-graph-bs") or _has_arg(
+    if _has_arg(parsed_args, "--cuda-graph-bs-decode") or _has_arg(
         parsed_args, "--disable-cuda-graph"
     ):
         return args
@@ -85,7 +85,7 @@ def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
             default=1,
         )
         safe_bs = max(1, dp_size)
-        args = append_argument(args, ["--cuda-graph-bs", str(safe_bs)])
+        args = append_argument(args, ["--cuda-graph-bs-decode", str(safe_bs)])
     return args
 
 

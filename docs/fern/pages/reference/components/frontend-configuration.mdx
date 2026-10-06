@@ -532,8 +532,10 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
   Environment variable: `DYN_REQUEST_PLANE`
 </ParamField>
 
-<ParamField path="--event-plane" type="string" default="auto">
-  Event publishing transport. Defaults to `zmq` for `file`/`mem` discovery and `nats` for `etcd`/`kubernetes`.
+<ParamField path="--event-plane" type="string" default="zmq">
+  Event publishing transport. ZMQ is the default for every discovery backend, including `etcd`
+  and `kubernetes`, when neither `--event-plane` nor `DYN_EVENT_PLANE` is set. Set
+  `--event-plane nats` or `DYN_EVENT_PLANE=nats` to use NATS instead.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
 
