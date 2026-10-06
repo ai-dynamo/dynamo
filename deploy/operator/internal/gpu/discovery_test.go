@@ -286,6 +286,24 @@ func TestDiscoverGPUsFiltered_MixedSKU(t *testing.T) {
 	})
 }
 
+func TestDiscoverGPUsFiltered_LegacyGB200Selector(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "gb200-node",
+			Labels: map[string]string{
+				LabelGPUCount:   "4",
+				LabelGPUProduct: "NVIDIA GB200",
+				LabelGPUMemory:  "189471",
+			},
+		},
+	}
+
+	//nolint:staticcheck // SA1019: Exercise compatibility with the deprecated selector.
+	info, err := DiscoverGPUsFiltered(context.Background(), newFakeClient(node), nvidiacomv1beta1.GPUSKUTypeGB200SXM)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeGB200, info.System)
+}
+
 func TestDiscoverGPUsFiltered_HomogeneousCountsAllNodes(t *testing.T) {
 	ctx := context.Background()
 
@@ -1190,6 +1208,34 @@ func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEqual(t, info1.System, info2.System, "different SKU filters should return different results")
 	})
+}
+
+func TestDiscoverGPUsFromDCGMFiltered_LegacyGB200Selector(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcgm-gb200",
+			Namespace: "gpu-operator",
+			Labels:    map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+		},
+		Spec:   corev1.PodSpec{NodeName: "gb200-node"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	discovery := NewGPUDiscovery(func(context.Context, string) (*GPUInfo, error) {
+		return &GPUInfo{NodeName: "gb200-node", GPUsPerNode: 4, Model: "NVIDIA GB200", VRAMPerGPU: 189471}, nil
+	})
+
+	//nolint:staticcheck // SA1019: Exercise compatibility with the deprecated selector.
+	info, err := discovery.DiscoverGPUsFromDCGMFiltered(
+		context.Background(),
+		k8sClient,
+		nil,
+		nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeGB200, info.System)
 }
 
 func TestDiscoverGPUsFromDCGMFiltered_DetectsRDMAAvailableLabel(t *testing.T) {

@@ -373,7 +373,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
 	for _, n := range allNodes {
-		if filterSKU != "" && n.sku != filterSKU {
+		if !matchesDiscoveredSKU(filterSKU, n.sku) {
 			continue
 		}
 		if bestNode == nil ||
@@ -829,7 +829,7 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
 	for _, n := range allNodes {
-		if filterSKU != "" && n.sku != filterSKU {
+		if !matchesDiscoveredSKU(filterSKU, n.sku) {
 			continue
 		}
 		if bestNode == nil ||
@@ -984,6 +984,16 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	}
 
 	return ""
+}
+
+// matchesDiscoveredSKU keeps the deprecated GB200 selector compatible without rewriting it.
+func matchesDiscoveredSKU(filterSKU, discoveredSKU nvidiacomv1beta1.GPUSKUType) bool {
+	if filterSKU == "" || filterSKU == discoveredSKU {
+		return true
+	}
+
+	//nolint:staticcheck // SA1019: Existing selectors must continue to match GB200 nodes.
+	return filterSKU == nvidiacomv1beta1.GPUSKUTypeGB200SXM && discoveredSKU == nvidiacomv1beta1.GPUSKUTypeGB200
 }
 
 // normalize standardizes a GPU product string to simplify matching.
