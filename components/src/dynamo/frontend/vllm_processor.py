@@ -838,14 +838,20 @@ class VllmProcessor:
             # Forward multimodal URLs so the backend handler can load the media.
             # Only skip when ALL features were transferred — a partial transfer
             # (some features had data=None due to processor cache) still needs
-            # URLs for the backend to process the missing features.
+            # URLs for the backend to process the missing features. A shm
+            # transfer never counts: a backend on another node cannot open the
+            # segment and needs the URLs for its fallback.
             n_features = (
                 len(vllm_preproc.mm_features) if vllm_preproc.mm_features else 0
             )
             n_with_data = sum(
                 1 for f in (vllm_preproc.mm_features or []) if f.data is not None
             )
-            all_transferred = nixl_transferred and n_with_data == n_features
+            all_transferred = (
+                nixl_transferred
+                and not self.use_shm_transfer
+                and n_with_data == n_features
+            )
             if not all_transferred:
                 if mm_data:
                     dynamo_preproc["multi_modal_data"] = mm_data

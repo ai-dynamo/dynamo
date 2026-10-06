@@ -1554,6 +1554,126 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
 
 
 @pytest.mark.asyncio
+@pytest.mark.multimodal
+@pytest.mark.parametrize(
+    ("transfer_mode", "transfer_key", "forwards_media"),
+    [("shm", "mm_kwargs_shm", True), ("nixl", "mm_kwargs_nixl", False)],
+)
+async def test_generator_forwards_media_unless_transfer_reaches_any_node(
+    vllm_processor_module,
+    monkeypatch,
+    transfer_mode,
+    transfer_key,
+    forwards_media,
+):
+    """A backend on another node cannot open the frontend's shm segment; without
+    the media URLs its fallback renders a text-only prompt."""
+    monkeypatch.setenv("DYNAMO_MM_TRANSFER", transfer_mode)
+    image_url = "data:image/png;base64,iVBORw0KGgo="
+
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset()
+
+    request_for_sampling = RequestForSampling(
+        max_completion_tokens=None,
+        max_tokens=1,
+        cache_salt=None,
+        mm_processor_kwargs=None,
+        top_k=None,
+        min_p=None,
+    )
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=request_for_sampling,
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt": "Describe"},
+                prompt_token_ids=list(range(16)),
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *_, **__: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        return SimpleNamespace(
+            sampling_params=sampling_params,
+            prompt_token_ids=list(range(16)),
+            mm_features=[
+                SimpleNamespace(
+                    modality="image",
+                    mm_hash="a" * 64,
+                    data=object(),
+                    mm_position=SimpleNamespace(offset=0, length=16),
+                )
+            ],
+        )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=SimpleNamespace(
+            generation_config_fields={},
+            renderer=SimpleNamespace(
+                process_for_engine_async=AsyncMock(return_value={})
+            ),
+            process_inputs=process_inputs,
+            model_config=None,
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    processor._sender = SimpleNamespace(
+        prepare=AsyncMock(return_value=({transfer_key: {"modality": "image"}}, [])),
+        cleanup=AsyncMock(),
+    )
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id, request, dynamo_preproc, *args, **kwargs
+    ):
+        captured.update(dynamo_preproc)
+        yield {}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+
+    async for _ in processor._generator_inner(
+        {
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "Describe"},
+                    ],
+                }
+            ],
+        }
+    ):
+        pass
+
+    assert transfer_key in captured["extra_args"]
+    assert ("multi_modal_data" in captured) is forwards_media
+    if forwards_media:
+        assert image_url in json.dumps(captured["multi_modal_data"])
+
+
+@pytest.mark.asyncio
 async def test_generator_inner_forwards_reasoning_parser_and_model_config(
     vllm_processor_module,
     monkeypatch,
