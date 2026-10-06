@@ -141,6 +141,38 @@ async fn generate_rejects_invalid_requests() {
 }
 
 #[tokio::test]
+async fn omitted_max_new_tokens_uses_native_default() {
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let mut omitted = request("omitted-max-new-tokens");
+    let sampling = omitted.sampling_params.as_mut().unwrap();
+    sampling.max_new_tokens = None;
+    sampling.ignore_eos = Some(true);
+    let responses = service
+        .generate(Request::new(omitted))
+        .await
+        .unwrap()
+        .into_inner()
+        .map(|response| response.unwrap())
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        responses
+            .iter()
+            .map(|response| response.output_ids.len())
+            .sum::<usize>(),
+        128
+    );
+    let terminal = responses.last().unwrap();
+    assert!(terminal.finished);
+    assert_eq!(terminal.meta_info["completion_tokens"], "128");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&terminal.meta_info["finish_reason"]).unwrap(),
+        json!({"type": "length", "length": 128})
+    );
+}
+
+#[tokio::test]
 async fn zero_top_logprobs_omits_top_logprob_metadata() {
     let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
     let mut selected_only = request("selected-only-logprobs");
