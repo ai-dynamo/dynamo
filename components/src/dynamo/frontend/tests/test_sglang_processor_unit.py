@@ -1452,6 +1452,60 @@ def test_structured_response_content_and_reasoning_gate(
 @pytest.mark.core
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize(
+    "use_pool,separate_reasoning,budget",
+    [(False, True, 16), (False, False, 0), (True, True, 0), (True, False, 16)],
+)
+def test_gpt_oss_budget_uses_harmony_reasoning_without_think_template(
+    tokenizer, monkeypatch, use_pool, separate_reasoning, budget
+):
+    tokenizer = copy.deepcopy(tokenizer)
+    tokenizer.chat_template = "{{ messages[0]['content'] }}"
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Return a short answer."}],
+        "thinking_token_budget": budget,
+        "separate_reasoning": separate_reasoning,
+    }
+    if use_pool:
+        for name, value in {
+            "_w_tokenizer": tokenizer,
+            "_w_reasoning_parser_name": "gpt-oss",
+            "_w_tool_call_parser_name": None,
+            "_w_template_force_reasoning": False,
+            "_w_default_thinking_mode": None,
+        }.items():
+            monkeypatch.setattr(sglang_processor_module, name, value)
+        result = _preprocess_worker(request, MODEL, None).dynamo_preproc
+    else:
+        pre = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name="gpt-oss",
+        )
+        result = _build_dynamo_preproc(
+            request,
+            pre.prompt_token_ids,
+            MODEL,
+            None,
+            reasoning_parser=pre.reasoning_parser,
+            force_reasoning=pre.force_reasoning,
+        )
+    assert result["require_reasoning"] is True
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "128")
+    server_args = types.SimpleNamespace(
+        enable_strict_thinking=True,
+        reasoning_parser="gpt-oss",
+        skip_tokenizer_init=False,
+    )
+    assert apply_thinking_budget(result, {}, server_args) == {
+        "custom_params": {"thinking_budget": budget}
+    }
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
     "use_pool, response_format",
     [
         pytest.param(

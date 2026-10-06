@@ -152,6 +152,10 @@ def resolve_request_force_reasoning(
     if not reasoning_parser_name:
         return False
 
+    # SGLang forces Harmony reasoning regardless of the template's <think> tags.
+    if reasoning_parser_name == "gpt-oss":
+        return True
+
     kwargs = (
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
