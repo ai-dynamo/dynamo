@@ -3518,7 +3518,118 @@ func TestRenderMultinodePodTemplateSpecs_VLLMMultinodeDRA(t *testing.T) {
 	assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, worker.Resources.Claims)
 }
 
-func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing.T) {
+func TestRenderMultinodePodTemplateSpecs_CompleteRolePodTemplates_15(t *testing.T) {
+	t.Log("Create an LWS component with distinct complete leader and worker templates")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "role-templates",
+			Namespace: "default",
+			Labels:    map[string]string{"template-source": "dcd"},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkSGLang),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name: v1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{"template-source": "leader"},
+								Annotations: map[string]string{
+									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+								},
+							},
+							Spec: corev1.PodSpec{
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "devices", ResourceClaimTemplateName: ptr.To("leader-devices")}},
+								Containers: []corev1.Container{{
+									Name:    commonconsts.MainContainerName,
+									Image:   "sglang-leader:1.5.0",
+									Command: []string{"python3"},
+									Args: []string{
+										"-m", "dynamo.sglang",
+										"--nnodes", "2",
+										"--node-rank", "$(DYNAMO_RANK)",
+										"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+										"--user-owned-launch", "leader",
+									},
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
+								}},
+							},
+						},
+					},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{"template-source": "worker"},
+								Annotations: map[string]string{
+									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+								},
+							},
+							Spec: corev1.PodSpec{
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "devices", ResourceClaimTemplateName: ptr.To("worker-devices")}},
+								Containers: []corev1.Container{{
+									Name:    commonconsts.MainContainerName,
+									Image:   "sglang-worker:1.5.0",
+									Command: []string{"python3"},
+									Args: []string{
+										"-m", "dynamo.sglang",
+										"--nnodes", "2",
+										"--node-rank", "$(DYNAMO_RANK)",
+										"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+										"--user-owned-launch", "worker",
+									},
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dcd).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+
+	leader, worker, err := reconciler.workloadRenderer().renderMultinodePodTemplateSpecs(t.Context(), dcd)
+	require.NoError(t, err)
+
+	t.Log("Verify LWS receives each complete role template and preserves user-owned launch arguments")
+	assert.Equal(t, "sglang-leader:1.5.0", leader.Spec.Containers[0].Image)
+	assert.Equal(t, "leader", leader.Labels["template-source"])
+	assert.Equal(t, "leader-devices", *leader.Spec.ResourceClaims[0].ResourceClaimTemplateName)
+	assert.Equal(t, []string{
+		"-m", "dynamo.sglang",
+		"--nnodes", "2",
+		"--node-rank", "$(DYNAMO_RANK)",
+		"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+		"--user-owned-launch", "leader",
+	}, leader.Spec.Containers[0].Args)
+	assert.NotContains(t, strings.Join(leader.Spec.Containers[0].Args, " "), "LWS_")
+	assert.Equal(t, "sglang-worker:1.5.0", worker.Spec.Containers[0].Image)
+	assert.Equal(t, "worker", worker.Labels["template-source"])
+	assert.Equal(t, "worker-devices", *worker.Spec.ResourceClaims[0].ResourceClaimTemplateName)
+	assert.Equal(t, []string{
+		"-m", "dynamo.sglang",
+		"--nnodes", "2",
+		"--node-rank", "$(DYNAMO_RANK)",
+		"--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500",
+		"--user-owned-launch", "worker",
+	}, worker.Spec.Containers[0].Args)
+	assert.NotContains(t, strings.Join(worker.Spec.Containers[0].Args, " "), "LWS_")
+
+}
+
+func TestRenderMultinodePodTemplateSpecs_CompleteRolePodTemplates_16(t *testing.T) {
 	t.Log("Create an LWS component with distinct complete leader and worker templates")
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
