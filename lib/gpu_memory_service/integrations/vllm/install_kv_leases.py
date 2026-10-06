@@ -1092,6 +1092,7 @@ def _evict_dormant_directory_blocks(
         required_blocks,
         eligible_slot_ids=eligible_slot_ids,
         engine_id=_directory_pool_id(),
+        compact=True,
     )
     released = _apply_capacity_victims(self, victims)
     if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
@@ -1140,6 +1141,7 @@ def _submit_async_capacity(self, required_blocks: int, additional_blocks=()) -> 
         int(required_blocks),
         eligible_slot_ids=eligible_slot_ids,
         engine_id=_directory_pool_id(),
+        compact=True,
     )
     return True
 

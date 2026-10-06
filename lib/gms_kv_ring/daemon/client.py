@@ -429,7 +429,14 @@ class DaemonClient:
         *,
         eligible_slot_ids: list[int] | None = None,
         engine_id: str | None = None,
+        compact: bool = False,
     ) -> tuple[list[dict], bool]:
+        """Retire dormant HBM records; ``compact`` omits hashes from victims.
+
+        A compact victim carries only ``slot_ids`` and ``generations``. An
+        older daemon ignores the request flag and returns full victims, which
+        are returned unchanged.
+        """
         resp = self._ok(
             {
                 "op": "directory_ensure_hbm_capacity",
@@ -443,8 +450,19 @@ class DaemonClient:
                     else {}
                 ),
                 **({"engine_id": str(engine_id)} if engine_id is not None else {}),
+                **({"compact_victims": True} if compact else {}),
             }
         )
+        if "victim_slot_ids" in resp:
+            return (
+                [
+                    {"slot_ids": slot_ids, "generations": generations}
+                    for slot_ids, generations in zip(
+                        resp["victim_slot_ids"], resp["victim_generations"]
+                    )
+                ],
+                bool(resp.get("rejected_stale_writer", False)),
+            )
         victims = []
         for item in resp.get("victims") or []:
             victims.append(

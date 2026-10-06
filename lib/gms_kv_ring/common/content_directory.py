@@ -992,11 +992,13 @@ class ContentDirectory:
         *,
         eligible_slot_ids: list[int] | None = None,
         engine_id: str | None = None,
+        compact: bool = False,
     ) -> list[dict]:
         """Retire the coldest dormant records until required_blocks are free.
 
         With eligible_slot_ids and the pool's engine_id, the daemon resolves
-        just those slots instead of scanning the whole directory.
+        just those slots instead of scanning the whole directory. ``compact``
+        victims carry only slot ids and generations.
         """
         if required_blocks <= 0:
             return []
@@ -1012,6 +1014,7 @@ class ContentDirectory:
                     else {}
                 ),
                 **({"engine_id": engine_id} if engine_id is not None else {}),
+                **({"compact": True} if compact else {}),
             ),
             [],
             retryable=False,

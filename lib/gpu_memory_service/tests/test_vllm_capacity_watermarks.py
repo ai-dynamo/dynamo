@@ -90,7 +90,7 @@ def test_capacity_retires_only_native_lru_candidates():
         enabled = True
 
         def ensure_hbm_capacity(
-            self, required, *, eligible_slot_ids=None, engine_id=None
+            self, required, *, eligible_slot_ids=None, engine_id=None, compact=False
         ):
             seen.append((required, eligible_slot_ids))
             return [
@@ -186,7 +186,7 @@ def test_async_capacity_retirement_runs_off_the_engine_thread(monkeypatch):
         authoritative = True
 
         def ensure_hbm_capacity(
-            self, required, *, eligible_slot_ids=None, engine_id=None
+            self, required, *, eligible_slot_ids=None, engine_id=None, compact=False
         ):
             calls.append((threading.current_thread().name, required, eligible_slot_ids))
             assert gate.wait(5)

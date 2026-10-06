@@ -33,11 +33,13 @@ def _directory_record_change_locked(
     entry: Optional[dict],
     *,
     scope: str = "",
+    notify: bool = True,
 ) -> int:
     """Append one public upsert/delete after its mutation is committed.
 
     The caller holds the content-hash lock. Revisions are global to the
     daemon, while consumers filter by manifest and optional engine scope.
+    Batch callers pass ``notify=False`` and wake readers once at the end.
     """
     daemon._content_directory_revision += 1
     revision = int(daemon._content_directory_revision)
@@ -50,13 +52,16 @@ def _directory_record_change_locked(
             "entry": None if entry is None else _directory_public_entry(entry),
         }
     )
-    daemon._content_hash_lock.notify_all()
+    if notify:
+        daemon._content_hash_lock.notify_all()
     return revision
 
 
 def _directory_remove_locked(
     daemon: "GmsKvCacheManager",
     key: tuple[str, bytes],
+    *,
+    notify: bool = True,
 ) -> bool:
     """Remove one directory entry and its reverse slot mappings."""
     entry = daemon._content_directory.pop(key, None)
@@ -73,6 +78,7 @@ def _directory_remove_locked(
         key,
         None,
         scope=str(entry.get("_scope", "")),
+        notify=notify,
     )
     return True
 
@@ -658,6 +664,7 @@ def handle_directory_ensure_hbm_capacity(
         eligible = None if eligible is None else {int(value) for value in eligible}
         engine_id = msg.get("engine_id")
         engine_id = None if engine_id is None else str(engine_id)
+        compact = bool(msg.get("compact_victims", False))
     except (KeyError, TypeError, ValueError) as exc:
         return {"ok": False, "error": f"malformed capacity request: {exc}"}
     with daemon._content_hash_lock:
@@ -705,33 +712,48 @@ def handle_directory_ensure_hbm_capacity(
             and entry.get("state") == "ready"
             and int(entry.get("_claim_count", 0)) == 0
             and (
-                eligible is None or set(entry.get("slot_ids") or ()).issubset(eligible)
+                eligible is None
+                or all(slot in eligible for slot in entry.get("slot_ids") or ())
             )
         ]
         candidates.sort(key=lambda pair: int(pair[1].get("_last_access_seq", 0)))
         victims = []
+        # Compact form: per-victim slot and generation lists only. Callers
+        # that retire by slot do not need content hashes back.
+        victim_slot_ids = []
+        victim_generations = []
         freed = 0
         for key, entry in candidates:
-            victims.append(
-                {
-                    "content_hash": key[1].hex(),
-                    "engine_id": str(entry["engine_id"]),
-                    "slot_ids": [int(value) for value in entry["slot_ids"]],
-                    "generations": [
-                        int(value) for value in entry.get("generations") or []
-                    ],
-                }
-            )
-            freed += len(entry["slot_ids"])
-            _directory_remove_locked(daemon, key)
+            slot_ids = [int(value) for value in entry["slot_ids"]]
+            generations = [int(value) for value in entry.get("generations") or []]
+            if compact:
+                victim_slot_ids.append(slot_ids)
+                victim_generations.append(generations)
+            else:
+                victims.append(
+                    {
+                        "content_hash": key[1].hex(),
+                        "engine_id": str(entry["engine_id"]),
+                        "slot_ids": slot_ids,
+                        "generations": generations,
+                    }
+                )
+            freed += len(slot_ids)
+            _directory_remove_locked(daemon, key, notify=False)
             if freed >= required:
                 break
-        return {
+        if freed:
+            daemon._content_hash_lock.notify_all()
+        response = {
             "ok": True,
             "victims": victims,
             "freed_blocks": freed,
             "rejected_stale_writer": False,
         }
+        if compact:
+            response["victim_slot_ids"] = victim_slot_ids
+            response["victim_generations"] = victim_generations
+        return response
 
 
 def handle_directory_hbm_inventory(

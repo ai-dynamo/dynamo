@@ -519,7 +519,7 @@ def test_capacity_retires_only_native_free_eligible_slots(monkeypatch, eligible)
     monkeypatch.setattr(
         rpc_directory,
         "_directory_remove_locked",
-        lambda daemon, key: daemon._content_directory.pop(key),
+        lambda daemon, key, **_kw: daemon._content_directory.pop(key),
     )
     response = handle_directory_ensure_hbm_capacity(
         daemon,
@@ -568,7 +568,7 @@ def test_capacity_with_engine_id_matches_full_scan_without_scanning(monkeypatch)
     monkeypatch.setattr(
         rpc_directory,
         "_directory_remove_locked",
-        lambda daemon, key: daemon._content_directory.pop(key),
+        lambda daemon, key, **_kw: daemon._content_directory.pop(key),
     )
     request = {
         "manifest_id": "manifest",
@@ -595,6 +595,16 @@ def test_capacity_with_engine_id_matches_full_scan_without_scanning(monkeypatch)
     assert indexed == scanned
     assert {v["slot_ids"][0] for v in indexed["victims"]}.isdisjoint({5, 6})
     assert len(indexed["victims"]) == 6
+
+    compact = handle_directory_ensure_hbm_capacity(
+        build(), {**request, "engine_id": "engine", "compact_victims": True}
+    )
+    assert compact["victims"] == []
+    assert compact["victim_slot_ids"] == [v["slot_ids"] for v in scanned["victims"]]
+    assert compact["victim_generations"] == [
+        v["generations"] for v in scanned["victims"]
+    ]
+    assert compact["freed_blocks"] == scanned["freed_blocks"]
 
 
 @pytest.mark.parametrize(
