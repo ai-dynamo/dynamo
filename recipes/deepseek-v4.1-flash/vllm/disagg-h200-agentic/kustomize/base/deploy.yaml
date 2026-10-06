@@ -155,7 +155,7 @@ spec:
             claimName: shared-model-cache
     replicas: 1
     sharedMemorySize: 200Gi
-    type: worker
+    type: prefill
   - name: DecodeWorker
     podTemplate:
       spec:
@@ -254,4 +254,4 @@ spec:
             claimName: shared-model-cache
     replicas: 1
     sharedMemorySize: 200Gi
-    type: worker
+    type: decode

@@ -53,7 +53,7 @@ spec:
               cpu: '16'
               memory: 128Gi
   - name: PrefillWorker
-    type: worker
+    type: prefill
     replicas: 1
     sharedMemorySize: 200Gi
     podTemplate:
@@ -173,7 +173,7 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
   - name: DecodeWorker
-    type: worker
+    type: decode
     replicas: 1
     sharedMemorySize: 200Gi
     podTemplate:
