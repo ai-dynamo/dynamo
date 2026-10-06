@@ -48,8 +48,8 @@ def direct_compare(native: Contract, dynamo: Contract) -> list[Finding]:
                         path,
                         "ambiguous_input",
                         "Multiple Dynamo input slots match.",
-                        original.facts(),
-                        [item.facts() for item in candidates],
+                        original.contract_facts(),
+                        [item.contract_facts() for item in candidates],
                         category="coverage",
                     )
                 )
@@ -69,7 +69,7 @@ def direct_compare(native: Contract, dynamo: Contract) -> list[Finding]:
                             "placement_candidate",
                             "No matching top-level declaration; same-named nested Dynamo inputs exist. "
                             "These are different public locations, not established aliases or semantic equivalents.",
-                            original.facts(),
+                            original.contract_facts(),
                             {
                                 "nested_inputs": [
                                     {
@@ -86,39 +86,22 @@ def direct_compare(native: Contract, dynamo: Contract) -> list[Finding]:
                         )
                     )
                 wildcard = local.additional_properties
-                admission = local.untyped_handling.get(path)
-                if admission is not None:
-                    findings.append(
-                        finding(
-                            endpoint,
-                            path,
-                            "handling",
-                            "Explicit admission rejection for this untyped native input."
-                            if "reject" in admission.effects
-                            else "Untyped input has a conditional handling path.",
-                            original.facts(),
-                            admission.facts(),
-                            category="compatibility"
-                            if admission.complete
-                            else "coverage",
-                            sources=original.source + admission.evidence,
-                        )
-                    )
-                    continue
                 unresolved = not local.fields_complete or wildcard is not None
                 findings.append(
                     finding(
                         endpoint,
                         path,
-                        "handling",
-                        "No typed input slot; passthrough/custom handling is unresolved."
+                        "input_slot",
+                        "No typed input slot; passthrough/custom input constraints are unresolved."
                         if unresolved
-                        else "No Dynamo input or handling path identified.",
-                        original.facts(),
-                        wildcard.facts() if wildcard else None,
+                        else "No matching Dynamo input declaration identified.",
+                        original.contract_facts(),
+                        {
+                            "additional_properties": wildcard is not None,
+                            "fields_complete": local.fields_complete,
+                        },
                         category="coverage" if unresolved else "compatibility",
-                        sources=original.source
-                        + (wildcard.evidence if wildcard else []),
+                        sources=original.source,
                     )
                 )
                 continue
@@ -136,7 +119,7 @@ def direct_compare(native: Contract, dynamo: Contract) -> list[Finding]:
                         if upstream.fields_complete
                         else "Native input inventory incomplete; ownership unresolved.",
                         None,
-                        current.facts(),
+                        current.contract_facts(),
                         category="dynamo_specific"
                         if upstream.fields_complete
                         else "coverage",
@@ -191,12 +174,10 @@ def compare_field(
                 native.path,
                 aspect,
                 message,
-                native.facts(),
-                dynamo.facts(),
+                native.contract_facts(),
+                dynamo.contract_facts(),
                 category=category,
-                sources=native.source
-                + dynamo.source
-                + (dynamo.handling.evidence if dynamo.handling else []),
+                sources=native.source + dynamo.source,
             )
         )
 
@@ -214,22 +195,44 @@ def compare_field(
             add(aspect, f"{aspect} comparison is unresolved.", "coverage")
         elif left != right:
             add(aspect, f"Declared {aspect} differs; intent is not inferred.")
-    handling = dynamo.handling
-    if handling is None or not handling.complete:
-        add(
-            "handling",
-            "Identified effects: "
-            + (", ".join(handling.effects) if handling and handling.effects else "none")
-            + ". Handling coverage is incomplete; acceptance is not support.",
-            "coverage",
-        )
-    elif "reject" in handling.effects:
-        add("handling", "An explicit rejection path exists; inspect its conditions.")
-    elif handling.conditions:
-        add(
-            "handling",
-            "Handling is conditional; inspect pipeline/backend/version requirements.",
-        )
-    elif not handling.effects:
-        add("handling", "No handling path identified.")
     return results
+
+
+def investigation_notes(native: Contract, dynamo: Contract) -> list[Finding]:
+    """Source observations are advisory, never contract or runtime verdicts."""
+    notes = []
+    for endpoint, upstream in sorted(native.endpoints.items()):
+        local = dynamo.endpoints.get(endpoint)
+        if local is None:
+            continue
+        for path, original in sorted(upstream.fields.items()):
+            matches = [
+                item
+                for item in local.fields.values()
+                if set(item.wire_names) & set(original.wire_names)
+            ]
+            current = matches[0] if len(matches) == 1 else local.fields.get(path)
+            handling = (
+                current.handling
+                if current
+                else local.untyped_handling.get(path, local.additional_properties)
+            )
+            notes.append(
+                finding(
+                    endpoint,
+                    path,
+                    "handling",
+                    "Source investigation only; invocation and runtime effects are unverified.",
+                    original.contract_facts(),
+                    handling.facts() if handling else None,
+                    category="investigation",
+                    sources=original.source + (handling.evidence if handling else []),
+                )
+            )
+            notes[-1].decision_status = "advisory"
+            notes[
+                -1
+            ].next_action = (
+                "Use source references to select or investigate behavioral tests."
+            )
+    return notes

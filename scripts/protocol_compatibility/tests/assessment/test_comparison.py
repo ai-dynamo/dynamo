@@ -53,7 +53,8 @@ def assessment(native, dynamo, **kwargs):
 
 def registry(report, **overrides):
     return {
-        "schema": "dynamo-native-decisions/v1",
+        "schema": "dynamo-native-decisions/v2",
+        "layer": "contract",
         "decisions": [
             {
                 "identity": item["identity"],
@@ -74,6 +75,71 @@ def registry(report, **overrides):
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_contract_complete_without_handling_or_behavior_tests(self):
+        native, dynamo = contracts()
+        dynamo.endpoints[ENDPOINT].fields["temperature"].handling = None
+        dynamo.endpoints[ENDPOINT].additional_properties = Handling()
+        enabled = assessment(native, dynamo)
+        disabled = assessment(native, dynamo, investigate=False)
+        self.assertEqual(enabled["exit_code"], 0)
+        self.assertEqual(enabled["gates"], disabled["gates"])
+        self.assertEqual(enabled["findings"], disabled["findings"])
+        self.assertEqual(enabled["behavioral_conformance"]["status"], "not_assessed")
+        self.assertTrue(enabled["investigation"]["notes"])
+        self.assertEqual(disabled["investigation"]["notes"], [])
+
+    def test_missing_schema_blocks_even_with_reviewed_disposition(self):
+        native, dynamo = contracts()
+        dynamo.endpoints[ENDPOINT].fields["temperature"].wire_type = None
+        first = assessment(native, dynamo)
+        report = assessment(native, dynamo, decisions=registry(first))
+        self.assertEqual(report["gates"]["review"], "complete")
+        self.assertEqual(report["gates"]["extraction"], "incomplete")
+        self.assertEqual(report["exit_code"], 1)
+
+    def test_legacy_report_migration_preserves_notes_without_approval(self):
+        from dataclasses import asdict
+
+        from scripts.protocol_compatibility.common.contracts import finding
+
+        native, dynamo = contracts()
+        dynamo.endpoints[ENDPOINT].fields["temperature"].default = {
+            "kind": "value",
+            "value": 0.5,
+        }
+        old = assessment(native, dynamo)
+        old["schema"] = "dynamo-native-assessment/v1"
+        old["findings"][0]["dynamo"]["handling"] = {"effects": ["forward"]}
+        old["findings"].append(
+            asdict(
+                finding(
+                    ENDPOINT,
+                    "temperature",
+                    "handling",
+                    "Unknown old handling",
+                    {},
+                    {},
+                    category="coverage",
+                )
+            )
+        )
+        old["findings"][0]["decision_status"] = "applicable"
+        report = assessment(native, dynamo, previous=old)
+        self.assertEqual(report["findings"][0]["lifecycle"], "unchanged")
+        self.assertEqual(report["findings"][0]["decision_status"], "missing")
+        self.assertEqual(report["retired_findings"], [])
+        self.assertEqual(len(report["history_migration"]["legacy_investigation"]), 1)
+        self.assertTrue(
+            all(
+                not item["approval_carried"]
+                for item in report["history_migration"]["mappings"]
+            )
+        )
+        legacy = registry(report)
+        legacy["schema"] = "dynamo-native-decisions/v1"
+        with self.assertRaisesRegex(ValueError, "re-review"):
+            assessment(native, dynamo, decisions=legacy)
+
     def test_lost_nested_coverage_does_not_resolve_placement_candidate(self):
         native, dynamo = contracts()
         dynamo.endpoints[ENDPOINT].fields = {}
@@ -147,15 +213,17 @@ class ComparisonTests(unittest.TestCase):
         endpoint.additional_properties = Handling()
         endpoint.untyped_handling["temperature"] = Handling(["reject"], complete=True)
         report = assessment(native, dynamo)
-        self.assertEqual(report["findings"][0]["category"], "compatibility")
-        self.assertIn("admission rejection", report["findings"][0]["observation"])
-        self.assertEqual(report["findings"][0]["dynamo"]["effects"], ["reject"])
+        self.assertEqual(report["findings"][0]["category"], "coverage")
+        self.assertEqual(report["findings"][0]["aspect"], "input_slot")
+        self.assertEqual(
+            report["investigation"]["notes"][0]["dynamo"]["effects"], ["reject"]
+        )
 
     def test_baseline_finds_old_gap_even_without_upstream_change(self):
         native, dynamo = contracts()
         dynamo.endpoints[ENDPOINT].fields = {}
         report = assessment(native, dynamo)
-        self.assertEqual(report["findings"][0]["aspect"], "handling")
+        self.assertEqual(report["findings"][0]["aspect"], "input_slot")
         self.assertEqual(report["exit_code"], 1)
         again = assessment(native, dynamo, previous=report)
         self.assertEqual(again["findings"][0]["lifecycle"], "unchanged")
@@ -227,8 +295,12 @@ class ComparisonTests(unittest.TestCase):
             complete=True,
         )
         report = assessment(native, dynamo)
-        self.assertIn("rejection", report["findings"][0]["observation"])
-        self.assertEqual(report["exit_code"], 1)
+        self.assertEqual(report["findings"], [])
+        self.assertEqual(
+            report["investigation"]["notes"][0]["dynamo"]["effects"], ["reject"]
+        )
+        self.assertEqual(report["exit_code"], 0)
+        self.assertEqual(report["behavioral_conformance"]["status"], "not_assessed")
 
     def test_static_decision_matches_facts_and_survives_unrelated_commit_opt_in(self):
         native, dynamo = contracts()
@@ -241,7 +313,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(second["findings"][0]["decision_status"], "applicable")
         self.assertEqual(second["gates"]["review"], "complete")
 
-    def test_contract_or_handling_change_invalidates_decision(self):
+    def test_contract_decision_is_independent_of_handling_change(self):
         for change in ("default", "implementation"):
             with self.subTest(change=change):
                 native, dynamo = contracts()
@@ -254,9 +326,13 @@ class ComparisonTests(unittest.TestCase):
                 else:
                     item.handling.evidence = [{"semantic_sha256": "different body"}]
                 report = assessment(native, dynamo, previous=old, decisions=decisions)
-                self.assertEqual(report["findings"][0]["lifecycle"], "changed")
                 self.assertEqual(
-                    report["findings"][0]["decision_status"], "stale_facts"
+                    report["findings"][0]["lifecycle"],
+                    "changed" if change == "default" else "unchanged",
+                )
+                self.assertEqual(
+                    report["findings"][0]["decision_status"],
+                    "stale_facts" if change == "default" else "applicable",
                 )
 
     def test_runtime_evidence_never_carried_between_revisions(self):

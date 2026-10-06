@@ -65,10 +65,10 @@ class DynamoContractTests(unittest.TestCase):
         self.assertEqual(placement.category, "coverage")
         self.assertIn("not established aliases", placement.observation)
         self.assertEqual(len(placement.dynamo["nested_inputs"]), 2)
-        # A nearby nested declaration must not stand in for root input handling.
+        # A nearby nested declaration must not stand in for a root input slot.
         self.assertTrue(
             any(
-                item.path == "temperature" and item.aspect == "handling"
+                item.path == "temperature" and item.aspect == "input_slot"
                 for item in findings
             )
         )

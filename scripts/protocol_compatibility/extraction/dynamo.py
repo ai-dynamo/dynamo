@@ -522,7 +522,7 @@ class DynamoContractExtractor:
             "Wire placement, streaming serialization and runtime behavior remain unverified."
         )
 
-    def extract(self, revision: str) -> Contract:
+    def extract(self, revision: str, *, investigate: bool = True) -> Contract:
         endpoints = {}
         for endpoint, name in REQUESTS.items():
             result = EndpointContract()
@@ -550,10 +550,11 @@ class DynamoContractExtractor:
             except RustUnknown as error:
                 self.problem(endpoint, "*", "fields", str(error))
                 continue
-            apply_admission(self.sources, result, name)
+            if investigate:
+                apply_admission(self.sources, result, name)
             result.nested_inputs = self.nested_inputs(result.fields)
             for path, item in result.fields.items():
-                if item.handling is None:
+                if investigate and item.handling is None:
                     item.handling = self.handling(item, endpoint)
                 unknown = [
                     aspect
@@ -592,9 +593,13 @@ class DynamoContractExtractor:
 
 
 def extract_dynamo(
-    repo: Path, revision: str, crate_cache: Path | None = None
+    repo: Path,
+    revision: str,
+    crate_cache: Path | None = None,
+    *,
+    investigate: bool = True,
 ) -> Contract:
     revision = commit(repo, revision)
     return DynamoContractExtractor(load_sources(repo, revision, crate_cache)).extract(
-        revision
+        revision, investigate=investigate
     )

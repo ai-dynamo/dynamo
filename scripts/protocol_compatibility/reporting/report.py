@@ -140,7 +140,8 @@ def full_facts(item: dict[str, Any]) -> list[str]:
 
 def render_assessment(report: dict[str, Any]) -> str:
     gates = report["gates"]
-    counts = Counter(item["lifecycle"] for item in report["findings"])
+    counts = Counter(item["category"] for item in report["findings"])
+    investigation = report["investigation"]
     lines = [
         "# Dynamo–vLLM compatibility assessment",
         "",
@@ -151,22 +152,26 @@ def render_assessment(report: dict[str, Any]) -> str:
         "",
         f'Scope: {code(report["scope"])}',
         "",
-        "Request declarations and selected source handling only. Response schemas,",
-        "streaming wire contracts, and exhaustive behavior are deferred.",
+        "Stage 1 compares declared request contracts. Stage 2 requires separate behavioral tests.",
+        "Source investigation is optional and cannot approve or block either stage.",
         "",
         "| Check | Result |",
         "| --- | --- |",
-        f'| Extraction | {text(gates["extraction"])} |',
-        f'| Review | {text(gates["review"])} |',
-        f'| Runtime conformance | {text(gates["runtime_conformance"])} |',
-        f'| Release policy | {text(gates["release"]["status"])} |',
-        f'| CLI exit code | {report["exit_code"]} |',
+        f'| Contract extraction | {text(gates["extraction"])} |',
+        f'| Contract review | {text(gates["review"])} |',
+        f'| Contract policy | {text(gates["release"]["status"])} |',
+        f'| Behavioral conformance | {text(report["behavioral_conformance"]["status"])} |',
+        f'| Source investigation (advisory) | {text(investigation["status"])} |',
+        f'| Contract CLI exit code | {report["exit_code"]} |',
         "",
         "Reviewed, handled, and zero differences do **not** establish runtime parity or release approval.",
         "",
-        f"Current findings: {code(dict(sorted(counts.items())))}. "
-        f'Review actions: {len(gates["pending"])}. '
-        f'Lost-coverage findings: {len(gates["lost_coverage"])}.',
+        f'Declared contract differences: {counts["compatibility"]}. '
+        f'Contract coverage gaps: {counts["coverage"]}. '
+        f'Dynamo-only inputs: {counts["dynamo_specific"]}.',
+        f'Contract review actions: {len(gates["pending"])}. '
+        f'Lost contract coverage: {len(gates["lost_coverage"])}. '
+        f'Advisory investigation notes: {len(investigation["notes"])}.',
         "",
     ]
     if report["previous_revisions"]:
@@ -187,35 +192,39 @@ def render_assessment(report: dict[str, Any]) -> str:
         )
     sections = [
         (
-            "New compatibility findings",
+            "Stage 1: new declared contract differences",
             lambda item: item["lifecycle"] == "new"
             and item["category"] == "compatibility",
         ),
         (
-            "Changed compatibility findings",
+            "Stage 1: changed declared contract differences",
             lambda item: item["lifecycle"] == "changed"
             and item["category"] == "compatibility",
         ),
         (
-            "Existing compatibility differences (review status below)",
+            "Stage 1: existing declared contract differences",
             lambda item: item["lifecycle"] == "unchanged"
             and item["category"] == "compatibility",
         ),
         (
-            "Behavior-sensitive source changes",
-            lambda item: item["category"] == "behavior",
-        ),
-        (
-            "Coverage diagnostics and unresolved comparisons",
+            "Stage 1: contract coverage gaps",
             lambda item: item["category"] == "coverage",
         ),
         (
             "Dynamo-specific inputs (not automatically defects)",
             lambda item: item["category"] == "dynamo_specific",
         ),
+        (
+            "Optional investigation: source handling and upstream changes",
+            lambda item: item["category"] in {"investigation", "behavior"},
+        ),
     ]
     for title, predicate in sections:
-        selected = [item for item in report["findings"] if predicate(item)]
+        selected = [
+            item
+            for item in report["findings"] + investigation["notes"]
+            if predicate(item)
+        ]
         lines.extend([f"## {title}", ""])
         if not selected:
             lines.extend(["None observed within this assessment's coverage.", ""])
@@ -284,12 +293,27 @@ def render_assessment(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Stage 2: behavioral conformance",
+            "",
+            "Not assessed. No servers or behavioral tests were executed by this command.",
+            "Use a separately scoped test suite with exact source/model/configuration evidence.",
+            "Contract success and source notes cannot establish behavioral acceptance.",
+            "",
+            "## History migration",
+            "",
+            (
+                "Legacy combined observations were mapped to contract history or retained as "
+                "investigation evidence in report.json; legacy approvals were not carried forward."
+                if report.get("history_migration")
+                else "No legacy history migration in this run."
+            ),
+            "",
             "## Artifacts and next steps",
             "",
-            "1. Review findings above; record decisions separately from generated inventories.",
-            "2. Restore required extraction coverage before treating the result as complete.",
-            "3. Run targeted conformance tests for behavior that static inspection cannot establish.",
-            "4. Regenerate this assessment with the reviewed registry and agreed support policy.",
+            "1. Restore contract coverage; fix declared differences or record scoped exceptions.",
+            "2. Reassess with contract decisions and policy; tracked gaps are not fixes.",
+            "3. Separately run the agreed behavioral suite, including schema-identical behavior.",
+            "4. Consult optional source notes to investigate failures, not to approve compatibility.",
             "",
             "[Machine-readable assessment](report.json), [native inventory](native-contract.json),",
             "[Dynamo inventory](dynamo-contract.json), [native source snapshot](native-source.json).",

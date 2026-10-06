@@ -1,4 +1,5 @@
 {
-  "schema": "dynamo-native-decisions/v1",
+  "schema": "dynamo-native-decisions/v2",
+  "layer": "contract",
   "decisions": []
 }

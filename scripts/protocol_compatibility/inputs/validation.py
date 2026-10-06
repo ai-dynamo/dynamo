@@ -47,10 +47,19 @@ def fingerprint(value: Any, label: str) -> None:
 
 def validate_previous(previous: Any, scope: dict[str, Any]) -> None:
     previous = object_value(previous, "previous assessment")
-    if previous.get("schema") != "dynamo-native-assessment/v1":
+    if previous.get("schema") not in {
+        "dynamo-native-assessment/v1",
+        "dynamo-native-assessment/v2",
+    }:
         raise ValueError("previous assessment is not a direct comparison report")
     revision_pair(previous.get("revisions"), "previous revisions")
-    if previous.get("scope") != scope:
+    previous_scope = dict(object_value(previous.get("scope"), "previous scope"))
+    if (
+        previous["schema"] == "dynamo-native-assessment/v1"
+        and previous_scope.get("level") == "request_fields_and_selected_source_behavior"
+    ):
+        previous_scope["level"] = "request_contract"
+    if previous_scope != scope:
         raise ValueError("previous assessment scope differs; establish a new baseline")
     identities = set()
     for key in ("findings", "retired_findings"):
@@ -75,6 +84,12 @@ def validate_previous(previous: Any, scope: dict[str, Any]) -> None:
                 "behavior",
             }:
                 raise ValueError(f"invalid previous finding category: {identity}")
+            if previous["schema"].endswith("/v2") and (
+                item["category"] == "behavior" or item["aspect"] == "handling"
+            ):
+                raise ValueError(
+                    "v2 contract history cannot contain investigation notes"
+                )
             allowed = (
                 {"new", "changed", "unchanged"}
                 if key == "findings"
@@ -97,14 +112,21 @@ def validate_previous(previous: Any, scope: dict[str, Any]) -> None:
 
 def validate_registry(registry: Any, dispositions: frozenset[str]) -> None:
     registry = object_value(registry, "decision registry")
-    if registry.get("schema") != "dynamo-native-decisions/v1":
+    if registry == {"schema": "dynamo-native-decisions/v1", "decisions": []}:
+        return  # Empty historical registry grants no approvals.
+    if (
+        registry.get("schema") != "dynamo-native-decisions/v2"
+        or registry.get("layer") != "contract"
+    ):
         raise ValueError(
-            "use the direct-comparison decision schema, not B1 upstream-pair decisions"
+            "use dynamo-native-decisions/v2 with layer=contract; re-review legacy approvals"
         )
     identities = set()
     for record in list_value(registry.get("decisions"), "decisions"):
         record = object_value(record, "decision")
         identity = text_value(record.get("identity"), "decision identity")
+        if identity.endswith(":handling") or "#@behavior/" in identity:
+            raise ValueError("investigation notes cannot approve or block contracts")
         if identity in identities:
             raise ValueError(f"duplicate decision: {identity}")
         identities.add(identity)
@@ -150,5 +172,9 @@ def validate_policy(policy: Any) -> None:
     )
     for identity in required:
         text_value(identity, "required finding identity")
+        if identity.endswith(":handling") or "#@behavior/" in identity:
+            raise ValueError(
+                "support policy must reference contract findings, not investigation"
+            )
     if len(required) != len(set(required)):
         raise ValueError("duplicate support-policy finding identity")

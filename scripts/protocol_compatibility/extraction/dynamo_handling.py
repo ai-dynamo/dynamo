@@ -12,11 +12,7 @@ from __future__ import annotations
 import json
 import re
 
-from scripts.protocol_compatibility.common.contracts import (
-    EndpointContract,
-    FieldContract,
-    Handling,
-)
+from scripts.protocol_compatibility.common.contracts import EndpointContract, Handling
 from scripts.protocol_compatibility.extraction.rust_source import (
     RustItem,
     RustSources,
@@ -127,8 +123,9 @@ def apply_admission(
             or (item.name == "resolve" and "SamplingTarget" in item.owner)
         )
     ]
-    # Only declared and explicitly admitted inputs are materialized. Their
-    # detailed validation schema stays unknown until a source rule proves it.
+    # Runtime admission is investigation evidence, not a typed declaration.
+    # Never add inferred fields to the contract inventory: toggling source
+    # investigation must not change schema coverage or contract fingerprints.
     for name in sorted(accepted):
         if name in contract.fields:
             continue
@@ -159,12 +156,8 @@ def apply_admission(
                     ],
                 }
             )
-        contract.fields[name] = FieldContract(
-            name,
-            [name],
-            required=False,
-            source=[declaration.evidence()],
-            handling=Handling(sorted(effects), conditions, evidence, complete=False),
+        contract.untyped_handling[name] = Handling(
+            sorted(effects), conditions, evidence, complete=False
         )
     known_decl = named(
         sources, "VLLM_REQUEST_FIELDS", "/compatibility/vllm_fields.rs", "const"

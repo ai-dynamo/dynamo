@@ -69,17 +69,18 @@ class AdmissionExtractionTests(unittest.TestCase):
         )
         apply_admission(sources(), contract, "NvCreateChatCompletionRequest")
         self.assertEqual(
-            contract.fields["sampling_x"].handling.effects,
+            contract.untyped_handling["sampling_x"].effects,
             ["forward", "interpret", "reject"],
         )
-        self.assertFalse(contract.fields["sampling_x"].handling.complete)
+        self.assertFalse(contract.untyped_handling["sampling_x"].complete)
+        self.assertEqual(contract.fields, {})
         self.assertEqual(contract.untyped_handling["unhandled_y"].effects, ["reject"])
         self.assertTrue(contract.untyped_handling["unhandled_y"].complete)
         self.assertNotIn("unhandled_y", contract.fields)
         self.assertTrue(
             any(
                 condition.get("stage") == "worker_capability_and_legacy_target"
-                for condition in contract.fields["sampling_x"].handling.conditions
+                for condition in contract.untyped_handling["sampling_x"].conditions
             )
         )
 
@@ -107,8 +108,8 @@ class AdmissionExtractionTests(unittest.TestCase):
         for source, contract in zip((before, after), contracts):
             apply_admission(source, contract, "NvCreateChatCompletionRequest")
         self.assertNotEqual(
-            contracts[0].fields["sampling_x"].handling.facts(),
-            contracts[1].fields["sampling_x"].handling.facts(),
+            contracts[0].untyped_handling["sampling_x"].facts(),
+            contracts[1].untyped_handling["sampling_x"].facts(),
         )
 
 

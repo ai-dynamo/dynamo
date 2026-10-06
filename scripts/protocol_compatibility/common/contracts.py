@@ -70,6 +70,10 @@ class FieldContract:
             "handling": self.handling.facts() if self.handling else None,
         }
 
+    def contract_facts(self) -> dict[str, Any]:
+        """Declaration-only identity; source handling has its own evidence layer."""
+        return {key: value for key, value in self.facts().items() if key != "handling"}
+
 
 @dataclass
 class EndpointContract:
@@ -105,15 +109,12 @@ class Contract:
         return asdict(self)
 
     def complete(self) -> bool:
+        """Contract coverage only, independent of optional source investigation."""
         return (
             bool(self.endpoints)
             and not self.diagnostics
             and all(
                 endpoint.fields_complete
-                and (
-                    endpoint.additional_properties is None
-                    or endpoint.additional_properties.complete
-                )
                 and all(
                     bool(item.wire_names)
                     and all(
@@ -125,10 +126,6 @@ class Contract:
                             item.default,
                             item.constraints,
                         )
-                    )
-                    and (
-                        self.target != "dynamo"
-                        or (item.handling is not None and item.handling.complete)
                     )
                     for item in endpoint.fields.values()
                 )

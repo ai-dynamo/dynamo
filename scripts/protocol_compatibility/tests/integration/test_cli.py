@@ -45,6 +45,14 @@ def dynamo_source(fields="pub model: String", attributes=""):
 
 
 class AssessmentIntegrationTests(unittest.TestCase):
+    def test_contract_only_run_is_independent_of_optional_investigation(self):
+        _, enabled = self.assess()
+        _, disabled = self.assess(extra=("--no-investigation",))
+        self.assertEqual(enabled["findings"], disabled["findings"])
+        self.assertEqual(enabled["gates"], disabled["gates"])
+        self.assertEqual(disabled["investigation"]["status"], "disabled")
+        self.assertEqual(disabled["behavioral_conformance"]["status"], "not_assessed")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -157,12 +165,12 @@ class AssessmentIntegrationTests(unittest.TestCase):
         ).read_bytes()
         folder, first = self.assess()
         self.assertEqual(
-            self.get_finding(first, "missing", "handling")["lifecycle"], "new"
+            self.get_finding(first, "missing", "input_slot")["lifecycle"], "new"
         )
         decisions = registry(first, carry_static_disposition=True)
-        _, reviewed = self.assess(previous=folder, decisions=decisions)
+        _, reviewed = self.assess(previous=folder, decisions=decisions, expected=0)
         self.assertEqual(reviewed["gates"]["review"], "complete")
-        self.assertEqual(reviewed["gates"]["extraction"], "incomplete")
+        self.assertEqual(reviewed["gates"]["extraction"], "complete")
         self.assertTrue(
             all(item["lifecycle"] == "unchanged" for item in reviewed["findings"])
         )
@@ -175,11 +183,11 @@ class AssessmentIntegrationTests(unittest.TestCase):
             self.get_finding(changed, "model", "required")["lifecycle"], "new"
         )
         self.assertEqual(
-            self.get_finding(changed, "model", "handling")["decision_status"],
-            "stale_facts",
+            self.get_finding(changed, "model", "required")["decision_status"],
+            "missing",
         )
         self.assertEqual(
-            self.get_finding(changed, "missing", "handling")["decision_status"],
+            self.get_finding(changed, "missing", "input_slot")["decision_status"],
             "applicable",
         )
         self.assertEqual((self.dynamo / "pins.json").read_bytes(), original_pin)
@@ -257,7 +265,7 @@ class AssessmentIntegrationTests(unittest.TestCase):
         self.upstream_sha = self.commit(self.native)
         _, changed = self.assess(previous=folder)
         self.assertEqual(
-            self.get_finding(changed, "added", "handling")["lifecycle"], "new"
+            self.get_finding(changed, "added", "input_slot")["lifecycle"], "new"
         )
         removed = next(
             item for item in changed["retired_findings"] if item["path"] == "missing"
@@ -273,7 +281,10 @@ class AssessmentIntegrationTests(unittest.TestCase):
         self.upstream_sha = self.commit(self.native)
         _, behavior = self.assess(previous=folder)
         self.assertTrue(
-            any(item["category"] == "behavior" for item in behavior["findings"])
+            any(
+                item["category"] == "behavior"
+                for item in behavior["investigation"]["notes"]
+            )
         )
         self.assertEqual(
             first["contracts"]["native"]["endpoints"],
@@ -417,7 +428,7 @@ class AssessmentIntegrationTests(unittest.TestCase):
             record["carry_static_disposition"] = True
         self.write(self.native, NATIVE_PATH, "# formatting only\n\n" + native_source())
         self.upstream_sha = self.commit(self.native)
-        _, current = self.assess(previous=folder, decisions=decisions)
+        _, current = self.assess(previous=folder, decisions=decisions, expected=0)
         self.assertTrue(
             all(item["lifecycle"] == "unchanged" for item in current["findings"])
         )

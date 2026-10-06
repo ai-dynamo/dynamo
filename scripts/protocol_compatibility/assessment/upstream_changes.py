@@ -57,7 +57,9 @@ def behavior_findings(
     old = previous.get("selected_behavior", {})
     prior_findings = {
         item["identity"]: item
-        for item in previous["findings"]
+        for item in (
+            previous["findings"] + previous.get("investigation", {}).get("notes", [])
+        )
         if item["category"] == "behavior"
     }
     results = []

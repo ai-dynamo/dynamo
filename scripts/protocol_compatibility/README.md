@@ -10,6 +10,15 @@ needs action? Initial coverage is vLLM chat-completion and completion request
 contracts, plus selected upstream behavioral-source changes. Static analysis does
 not establish runtime parity. Start with the generated `report.md`.
 
+The accepted [layered assessment design](../../lib/llm/docs/dynamo-vllm-protocol-assessment.md#design-decision-layered-compatibility-assessment)
+separates contract comparison, behavioral conformance, and optional source
+investigation. It lets developers complete contract work before independently
+addressing behavior. Assessment v2 implements contract-only findings and gates;
+source investigation is advisory and can be skipped with `--no-investigation`.
+Behavioral conformance stays `not_assessed`: this command never launches servers
+or substitutes source references for runtime tests. Native-schema export migration
+and the separately scoped behavioral test workflow are not completed by this change.
+
 ## Commands
 
 Run from the repository root with Python 3.12 and `PyYAML==6.0.2`:

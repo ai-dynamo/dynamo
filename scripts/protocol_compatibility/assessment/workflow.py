@@ -35,16 +35,19 @@ def assess(args: argparse.Namespace) -> int:
     # Exact commits are required by both extractors. A candidate comparison is
     # read-only: no pin adoption, Git checkout, or engine execution occurs.
     native, snapshot = extract_native(args.upstream_repo, args.upstream_commit)
-    dynamo = extract_dynamo(args.dynamo_repo, args.dynamo_commit, args.crate_cache)
+    investigate = not getattr(args, "no_investigation", False)
+    dynamo = extract_dynamo(
+        args.dynamo_repo, args.dynamo_commit, args.crate_cache, investigate=investigate
+    )
     scope = {
         "target": "vllm",
         "endpoints": sorted(native.endpoints),
         "pipeline": args.pipeline,
-        "level": "request_fields_and_selected_source_behavior",
+        "level": "request_contract",
     }
     if previous is not None:
         validate_previous(previous, scope)
-    selected = selected_behavior(snapshot)
+    selected = selected_behavior(snapshot) if investigate else {}
     report = build_assessment(
         native,
         dynamo,
@@ -53,6 +56,7 @@ def assess(args: argparse.Namespace) -> int:
         decisions=decisions,
         behavior=behavior_findings(selected, previous),
         policy=policy,
+        investigate=investigate,
     )
     report["selected_behavior"] = selected
     report["provenance"] = {
@@ -74,8 +78,11 @@ def assess(args: argparse.Namespace) -> int:
         )
     (args.output_dir / "report.md").write_text(render_assessment(report))
     print(
-        f'Extraction: {report["gates"]["extraction"]}; review: {report["gates"]["review"]}; '
-        f'{len(report["findings"])} findings. Runtime parity not established. See {args.output_dir / "report.md"}'
+        f'Contract extraction: {report["gates"]["extraction"]}; review: {report["gates"]["review"]}; '
+        f'{sum(item["category"] == "compatibility" for item in report["findings"])} declared differences; '
+        f'{sum(item["category"] == "coverage" for item in report["findings"])} contract coverage gaps; '
+        f'{len(report["investigation"]["notes"])} advisory notes. '
+        f'Behavioral conformance: not assessed. See {args.output_dir / "report.md"}'
     )
     return report["exit_code"]
 
@@ -104,6 +111,7 @@ def run_configured(args: argparse.Namespace) -> int:
         "pipeline": args.pipeline,
         "decisions": args.decisions,
         "support_policy": args.support_policy,
+        "no_investigation": getattr(args, "no_investigation", False),
     }
     if baseline_sha:
         baseline_sha = commit(args.dynamo_repo, baseline_sha)

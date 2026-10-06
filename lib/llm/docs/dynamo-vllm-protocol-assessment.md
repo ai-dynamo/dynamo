@@ -5,17 +5,173 @@ SPDX-License-Identifier: Apache-2.0
 
 # Assess Dynamo against vLLM serve
 
+## Design decision: layered compatibility assessment
+
+Status: contract/investigation separation is implemented in assessment format v2.
+Behavioral conformance remains a separate test workflow, not executed or approved
+by the static CLI. Native-schema export migration is still in progress.
+
+### Context and decision
+
+Developers must be able to identify and address contract differences, then
+separately establish behavioral conformance. A source-analysis limitation must
+not be presented as a protocol mismatch or as incomplete schema extraction.
+Keep one discoverable workflow, but separate mechanisms, evidence, counts,
+review decisions, and acceptance gates:
+
+```text
+Pinned Dynamo + pinned native server + explicit endpoint/platform scope
+                              |
+          1. Compare declared request contracts
+             -> fix differences or review exceptions -> reassess
+                              |
+          2. Establish scoped behavioral conformance
+             -> run targeted tests -> fix or review exceptions -> retest
+
+Optional source investigation assists either stage; it is not a prerequisite.
+```
+
+This is a developer sequence, not a requirement to finish every field before
+testing any behavior. Stage 2 can start for a selected subset while other contract
+work continues. Each stage must be independently runnable and report its own
+result. A contract-only run must not start serving workloads or require a prior
+report, an upstream version change, or completion of source-path analysis.
+
+### Stage 1: contract differences
+
+Compare one selected Dynamo revision directly against the configured native pin,
+or an explicitly selected native revision. The first run reports longstanding
+differences without requiring history. B1's initial target is vLLM serve, primarily
+chat completions, with completions included for compatibility; other server
+adapters and response-schema comparison are not implied by this design change.
+
+Use implementation-owned schema exports, supported metadata, and a structural
+diff to compare field placement/names/aliases, types and nesting, requiredness,
+nullability, declared defaults, and expressible constraints. These describe the
+declared request contract, not every input accepted by arbitrary runtime code.
+The exporter migration is the planned implementation, not a current capability.
+
+Report separately:
+
+- Contract differences, with exact values, source/schema references and direction
+  of the difference. A wider Dynamo input domain is not automatically a defect.
+- Contract coverage gaps, such as missing referenced schemas, unsupported keywords,
+  or custom deserialization that makes an in-scope declared shape uncertain.
+- Dynamo-only inputs, informational unless an explicit contract requirement is
+  violated; do not count them as native-field mismatches.
+
+The developer restores required schema coverage, fixes unintended differences,
+records scoped exceptions with rationale/owner/evidence, and reassesses. A reviewed
+tracked gap is not a fix: contract review can be complete while acceptance remains
+blocked by the selected support policy. A coverage-gap disposition alone cannot
+make extraction complete. Scope exclusions require an explicit reviewed scope
+change, not merely a decision on a finding.
+
+Stage 1 is sufficient for the selected contract scope when required contract facts
+are available, required differences are fixed or covered by approved exceptions,
+and the contract review/policy gates pass. Its success says nothing about execution,
+forwarding, response projection, or behavioral conformance.
+
+### Stage 2: behavioral conformance
+
+Use a separate test mechanism, reusing existing differential/runtime infrastructure
+where suitable. For an agreed finite support scope, compare Dynamo and the native
+server with equivalent model/tokenizer revisions, backend settings, requests, and
+serving paths. Record exact server/Dynamo commits, test versions, configuration,
+and raw results. Explicit expectations cover reviewed intentional divergences;
+do not silently normalize away the behavior under test.
+
+Tests may cover runtime validation and defaults, interpretation/forwarding,
+conditional rejection, response projection, errors and streaming behavior as
+promised by that scope. Define assertions and tolerances appropriate to each test;
+do not require byte-identical stochastic model output to establish protocol behavior.
+Behavior tests are needed even when Stage 1 finds no schema difference.
+
+Report pass, fail, blocked, and not tested separately, with coverage denominators
+and scoped exceptions. Missing or stale test evidence is not a pass. Stage 2 is
+sufficient only when the required suite has applicable passing evidence or approved
+exceptions under the behavioral support policy. Not every native-server feature
+is automatically required, and review alone cannot substitute for execution.
+
+This stage is not implemented by B1's current static command. Contract-only success
+must display behavioral conformance as not assessed. Overall acceptance, when
+requested, requires both stage-specific acceptance results for the agreed scope;
+neither stage overwrites or implicitly approves the other.
+
+### Optional source investigation
+
+Retain useful references and fingerprints for validators, forwarding, rejection,
+transformation and projection paths as investigation notes. Upstream source changes
+can help select tests even when schemas do not change. These are hypotheses and
+review aids, not proof of runtime reachability or conformance.
+
+Notes have independent provenance, freshness and unresolved status. Missing or
+incomplete tracing must not fail the contract gate, inflate contract-difference
+counts, or be counted as failed behavioral tests. A source-only change can stale
+an investigation note or require behavioral retesting without invalidating an
+unchanged schema-only decision. If investigation discovers a schema-export defect,
+record a separate evidence-backed contract coverage gap rather than silently
+changing the stage's result.
+
+### Reporting, applicability and acceptance criteria
+
+One top-level report should link independent contract results, behavioral results
+and optional investigation notes. Do not publish a combined "compatibility issue"
+count or one undifferentiated coverage gate. Show contract coverage/review/policy,
+behavioral test coverage/outcomes/policy, and investigation availability separately.
+No new commands or artifact filenames in this section are an implemented CLI promise.
+
+Decision identities, fingerprints and applicability must be layer-scoped. Keep
+exact revision/configuration applicability for runtime evidence; unchanged schema
+facts do not carry runtime evidence forward. Preserve findings and decisions during
+migration with an explicit old-to-new mapping and review any changed meaning.
+
+Implementation acceptance requires demonstrations that:
+
+1. An initial contract assessment needs neither comparison history nor behavior tests.
+2. A contract defect or missing required schema fails Stage 1, but missing source
+   tracing does not. Source investigation can be disabled without changing its result.
+3. Complete contract facts and approved differences allow Stage 1 to pass while
+   Stage 2 remains not assessed; no overall parity claim is emitted.
+4. A behavioral regression with unchanged schemas fails Stage 2 independently.
+5. Reviewed gaps, absent/stale tests and loss of coverage cannot silently become passes.
+6. Historical handling observations remain available as investigation evidence,
+   while contract decisions no longer depend on unrelated handling fingerprints.
+
+### Options and consequences
+
+Keeping the former combined static gate required fewer changes but conflated
+unknown execution paths with missing contract facts. Completely disconnected
+tools make scope/provenance and decisions harder to find. The selected approach
+uses separate mechanisms behind one entry point/report index: more explicit
+result interfaces, but independently actionable stages and unambiguous claims.
+
+The implemented split separates declaration fingerprints, completeness, review
+gates and report counts from advisory source notes. The default keeps investigation
+available; `--no-investigation` skips optional handling and source-change analysis.
+Both modes must return identical contract findings/gates for identical inputs.
+JSON `findings`, `retired_findings`, and `gates` now describe contracts only;
+`investigation` holds non-gating notes and `behavioral_conformance` is `not_assessed`.
+The legacy `gates.runtime_conformance` reminder is retained for consumers, but is
+not a behavioral result or a contract gate. CLI exit 0 is not overall acceptance.
+
+Behavioral suite selection, execution and evidence evaluation remain separate work.
+Existing endpoint tests can be reused, but merely linking a test or recording a
+runtime evidence URL does not make this CLI evaluate or approve it.
+
+## Current implementation
+
 Use the direct assessment to answer: **what differs, what changed, what remains
 unresolved, and what needs action?** Start with `report.md`, not an inventory diff.
-One workflow combines direct comparison with selected upstream source-change
-analysis. Unlike an upstream-only diff, it discovers longstanding Dynamo gaps
+One workflow exposes contract comparison and optional source investigation as
+separate layers. Unlike an upstream-only diff, it discovers longstanding Dynamo gaps
 even when upstream has not changed. See the [tooling package](../../../scripts/protocol_compatibility/README.md)
 for its module layout and command reference.
 
 ## Scope and invariants
 
 The initial adapter compares vLLM serve request declarations against Dynamo's
-effective Rust request declarations and selected handling paths:
+effective Rust request declarations; selected handling paths are advisory:
 
 - `/v1/chat/completions` is the primary endpoint.
 - `/v1/completions` is included for compatibility.
@@ -245,11 +401,24 @@ and `runtime`; runtime entries additionally require exact `revisions` and `scope
 
 Matching is deterministic: identity, fingerprint, scope, then revisions. A reviewer
 may set `carry_static_disposition: true` to retain an unchanged static decision
-across revisions; it does not carry runtime evidence. Changed contract or handling
-facts invalidate the decision. Source-location moves alone do not. Evidence URLs
+across revisions; it does not carry runtime evidence. Changed contract facts
+invalidate the decision; handling-only changes do not. Source-location moves alone do not. Evidence URLs
 are references, not fetched or independently verified by this tool.
 
-The consolidated tooling has one decision registry. Experimental upstream-pair
+The contract registry uses `dynamo-native-decisions/v2` with `"layer": "contract"`.
+Wrap the illustrative entry above in its `decisions` array. Nonempty v1 registries
+are rejected: re-review and bind decisions to the new contract-only fingerprints;
+an empty v1 registry is harmless and remains accepted. Handling/source notes cannot
+be placed in the contract registry or `required_findings_absent` policy list.
+
+Previous direct v1 reports are accepted as history, not as approvals. The
+`history_migration` object records an explicit mapping and retains legacy handling
+observations as investigation evidence. Contract observations receive declaration-only
+fingerprints; missing native input slots are now explicit `input_slot` observations.
+Their old handling observations are not mislabeled as resolved contract defects.
+V2 reports keep the migration record when history is carried forward.
+
+The consolidated tooling has one contract decision registry. Experimental upstream-pair
 decisions from earlier B1 revisions are not accepted or silently reinterpreted.
 Retain those historical reports as evidence, then review the corresponding direct
 finding and create an entry with its own identity, facts, scope, and evidence.
@@ -260,12 +429,12 @@ extraction and review gates.
 
 | Gate | What it establishes |
 | --- | --- |
-| Extraction | Required facts were assessed within the declared static scope |
-| Review | Required findings have applicable reviewed dispositions |
+| Extraction | Required declaration facts were assessed within the contract scope |
+| Review | Required contract findings have applicable reviewed dispositions |
 | Runtime conformance | Not established by this static command; requires scoped test evidence |
 | Release policy | Only the supplied static policy was checked; runtime release approval remains separate |
 
-Exit 0 means the enforced static gates passed. Exit 1 means a report was generated
+Exit 0 means the enforced contract gates passed. Exit 1 means a report was generated
 and coverage, review, lost-history, or support-policy action remains. Exit 2 means
 invalid inputs or a tool/Git failure. Malformed decisions cannot approve findings.
 Unchanged findings with applicable decisions need no repeated triage; historical
@@ -319,15 +488,16 @@ not prove the effects of validators or request-time overrides.
 
 Rust extraction follows declarations, import aliases/reexports, flattening,
 selected serde attributes, and the lockfile-verified declaration crates. Custom
-deserializers, conditional definitions, recursive schemas, unsupported enum forms,
-and unproven handling paths remain explicit coverage gaps. B5 admission vocabulary
+deserializers, conditional definitions, recursive schemas and unsupported enum forms
+remain explicit contract coverage gaps. Unproven handling paths remain advisory
+investigation notes. B5 admission vocabulary
 is combined with its actual validation and passthrough code, not treated as a
 support allowlist.
 
 Known nested object locations are retained separately even if a sibling type is
 unresolved. Same-named nested fields, such as a native root input versus a field
 under `nvext`, are placement candidates for review, not inferred aliases or
-semantic equivalents. They do not replace the missing root input's handling
+semantic equivalents. They do not replace the missing root input's declaration
 finding. Custom deserializers do not grant declaration-only nested locations;
 arrays, maps and enum alternatives remain in structural schemas. Segment arrays
 distinguish literal dotted JSON keys from nested object paths.
