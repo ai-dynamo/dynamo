@@ -146,7 +146,7 @@ class HttpArgGroup(ArgGroup):
             default=100,
             arg_type=int,
             dest="max_connections",
-            help="Pool size cap per connect-time policy (aiohttp TCPConnector.limit). The aiohttp client keeps one pool per connect-time policy outcome, at most two, so a deployment that sets DYN_MM_ALLOW_INTERNAL=1 and also issues stricter per-request policies can reach twice this value in total.",
+            help="Pool size cap per connect-time policy (aiohttp TCPConnector.limit). The aiohttp client keeps one pool per connect-time policy outcome, at most three: one that may reach private addresses (DYN_MM_ALLOW_INTERNAL=1), one for strict direct fetches, and one for strict fetches through a trusted egress proxy (DYN_MM_TRUST_EGRESS_PROXY=1). The total can therefore reach three times this value.",
         )
         add_argument(
             g,

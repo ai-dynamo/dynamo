@@ -120,9 +120,13 @@ def _cm_raising(exc_factory):
 
 def _make_client_with_session(session) -> AiohttpClient:
     client = AiohttpClient()
-    # Both strictness keys map to the same double, so a test does not have to
-    # care which session the policy under test selects.
-    client._sessions = {True: session, False: session}
+    # Every session key maps to the same double, so a test does not have to
+    # care which session the policy and the proxy under test select.
+    client._sessions = {
+        (True, False): session,
+        (False, False): session,
+        (False, True): session,
+    }
     return client
 
 
@@ -355,7 +359,9 @@ async def test_no_proxy_exempts_a_host_from_the_gate(monkeypatch) -> None:
 
     client = AiohttpClient()
     # Must not raise: NO_PROXY sends this host direct.
-    await client._require_trusted_egress_proxy("https://example.com/x.png")
+    assert (
+        await client._require_trusted_egress_proxy("https://example.com/x.png") is False
+    )
     # A host NOT covered by NO_PROXY is still gated, which is the control.
     with pytest.raises(HttpConfigurationError):
         await client._require_trusted_egress_proxy("https://other.invalid/x.png")
@@ -390,8 +396,11 @@ async def test_the_opt_in_allows_a_proxied_fetch(monkeypatch) -> None:
         monkeypatch.setenv(name, "http://proxy.internal:3128")
 
     client = AiohttpClient()
-    # Returns without raising, which is the whole assertion.
-    await client._require_trusted_egress_proxy("https://example.com/x.png")
+    # An http URL, so the configured HTTP_PROXY applies: the gate returns, and
+    # reports that a proxy carries the fetch.
+    assert (
+        await client._require_trusted_egress_proxy("http://example.com/x.png") is True
+    )
     await client.close()
 
 
@@ -399,20 +408,23 @@ async def test_the_opt_in_allows_a_proxied_fetch(monkeypatch) -> None:
 async def test_each_policy_pool_gets_the_full_connection_limit(monkeypatch) -> None:
     """The cap is per connect-time policy, and the help text says so.
 
-    Two pools can coexist, each with the configured limit, so a deployment
-    that enables internal access and also issues stricter per-request policies
-    can reach twice the value. Pinned here so the number and the documented
-    meaning cannot drift apart silently.
+    Three pools can coexist, each with the configured limit: permissive,
+    strict direct, and strict through a trusted proxy. So a deployment that
+    enables internal access, issues stricter per-request policies and trusts
+    a proxy for some hosts can reach three times the value. Pinned here so the
+    number and the documented meaning cannot drift apart silently.
     """
     monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
     client = AiohttpClient()
     try:
         permissive = await client._get_session(True)
         strict = await client._get_session(False)
+        proxied = await client._get_session(False, via_proxy=True)
         limit = client._config.max_connections
-        assert permissive is not strict
+        assert len({id(permissive), id(strict), id(proxied)}) == 3
         assert permissive.connector.limit == limit
         assert strict.connector.limit == limit
+        assert proxied.connector.limit == limit
     finally:
         await client.close()
 

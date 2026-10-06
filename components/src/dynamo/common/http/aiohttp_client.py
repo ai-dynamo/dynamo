@@ -53,13 +53,16 @@ class AiohttpClient(HttpClient):
 
     def __init__(self, config=None) -> None:
         super().__init__(config)
-        # Keyed by whether the connector may return private addresses. At most
-        # two entries, so a request that asks for a stricter policy than the
-        # deployment baseline gets a connector that actually enforces it.
-        self._sessions: dict[bool, aiohttp.ClientSession] = {}
+        # Keyed by (whether the connector may return private addresses, whether
+        # it dials an egress proxy). A request that asks for a stricter policy
+        # than the deployment baseline gets a connector that actually enforces
+        # it, and only a proxied fetch gets the connector that resolves the
+        # proxy unfiltered. At most three entries: a permissive connector
+        # filters nothing, so it is never split by proxy.
+        self._sessions: dict[tuple[bool, bool], aiohttp.ClientSession] = {}
         # aiohttp marks an injected resolver as externally owned, so closing a
         # session never closes it. Hold each one and close it ourselves.
-        self._resolvers: dict[bool, BlocklistResolver] = {}
+        self._resolvers: dict[tuple[bool, bool], BlocklistResolver] = {}
 
     def _effective_timeout(self, timeout: float) -> aiohttp.ClientTimeout:
         # The override caps ``total`` (whole request). ``sock_connect``
@@ -91,7 +94,7 @@ class AiohttpClient(HttpClient):
         return env_allows and policy.allow_private_ips
 
     @staticmethod
-    async def _require_trusted_egress_proxy(url: str) -> None:
+    async def _require_trusted_egress_proxy(url: str) -> bool:
         """Refuse a protected fetch that a proxy would put out of our reach.
 
         When a proxy applies, the connector dials the proxy and the proxy
@@ -104,9 +107,10 @@ class AiohttpClient(HttpClient):
         Asks aiohttp which proxy applies to *this* URL rather than whether any
         proxy variable is set, so ``NO_PROXY`` is honored and a fetch that
         would go direct is not refused.
+
+        Returns whether a trusted proxy carries the fetch, so the caller can
+        give only that fetch the connector that resolves the proxy unfiltered.
         """
-        if os.getenv(DYN_MM_TRUST_EGRESS_PROXY, "").strip() == "1":
-            return
         try:
             # aiohttp runs this same helper through asyncio.to_thread because
             # it does proxy-bypass discovery and .netrc file reads. Match that
@@ -115,7 +119,9 @@ class AiohttpClient(HttpClient):
         except LookupError:
             # No proxy for this URL, so aiohttp dials the origin and the
             # connect-time check governs it.
-            return
+            return False
+        if os.getenv(DYN_MM_TRUST_EGRESS_PROXY, "").strip() == "1":
+            return True
         raise HttpConfigurationError(
             f"{describe_media_source(url)} would be fetched through an egress "
             "proxy, so the connect-time address check cannot govern the "
@@ -123,9 +129,13 @@ class AiohttpClient(HttpClient):
             "proxy enforces destination policy, or unset the proxy"
         )
 
-    def _build_session(self, allow_private_ips: bool) -> aiohttp.ClientSession:
-        resolver = BlocklistResolver(allow_private_ips=allow_private_ips)
-        self._resolvers[allow_private_ips] = resolver
+    def _build_session(
+        self, allow_private_ips: bool, via_proxy: bool
+    ) -> aiohttp.ClientSession:
+        resolver = BlocklistResolver(
+            allow_private_ips=allow_private_ips, via_proxy=via_proxy
+        )
+        self._resolvers[(allow_private_ips, via_proxy)] = resolver
         connector = aiohttp.TCPConnector(
             limit=self._config.max_connections,
             # Single-origin fan-out is the whole point; capping per-host
@@ -140,12 +150,15 @@ class AiohttpClient(HttpClient):
         )
         return aiohttp.ClientSession(connector=connector, trust_env=True)
 
-    async def _get_session(self, allow_private_ips: bool) -> aiohttp.ClientSession:
+    async def _get_session(
+        self, allow_private_ips: bool, via_proxy: bool = False
+    ) -> aiohttp.ClientSession:
+        key = (allow_private_ips, via_proxy)
         async with self._lock:
-            session = self._sessions.get(allow_private_ips)
+            session = self._sessions.get(key)
             if session is None or session.closed:
-                session = self._build_session(allow_private_ips)
-                self._sessions[allow_private_ips] = session
+                session = self._build_session(allow_private_ips, via_proxy)
+                self._sessions[key] = session
                 logger.info(
                     "aiohttp backend initialized: limit=%d, limit_per_host=0, "
                     "keepalive_timeout=%.1fs%s",
@@ -166,11 +179,12 @@ class AiohttpClient(HttpClient):
         policy: Optional[UrlValidationPolicy] = None,
     ) -> bytes:
         allow_private = self._connect_allows_private(policy)
+        via_proxy = False
         # Only when the check is meant to bite. If private destinations are
         # already permitted for this fetch, the proxy gate protects nothing.
         if not allow_private:
-            await self._require_trusted_egress_proxy(url)
-        session = await self._get_session(allow_private)
+            via_proxy = await self._require_trusted_egress_proxy(url)
+        session = await self._get_session(allow_private, via_proxy)
         client_timeout = self._effective_timeout(timeout)
         try:
             async with session.get(
@@ -208,11 +222,12 @@ class AiohttpClient(HttpClient):
         policy: Optional[UrlValidationPolicy] = None,
     ) -> tuple[bytes | None, str | None]:
         allow_private = self._connect_allows_private(policy)
+        via_proxy = False
         # Only when the check is meant to bite. If private destinations are
         # already permitted for this fetch, the proxy gate protects nothing.
         if not allow_private:
-            await self._require_trusted_egress_proxy(url)
-        session = await self._get_session(allow_private)
+            via_proxy = await self._require_trusted_egress_proxy(url)
+        session = await self._get_session(allow_private, via_proxy)
         client_timeout = self._effective_timeout(timeout)
         try:
             async with session.get(
