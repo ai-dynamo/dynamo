@@ -4,10 +4,6 @@
 import copy
 import unittest
 
-from scripts.protocol_compatibility.assessment.upstream_changes import (
-    behavior_findings,
-    selected_behavior,
-)
 from scripts.protocol_compatibility.reporting.report import (
     evidence_link,
     fact_summary,
@@ -68,35 +64,6 @@ class AssessmentReportTests(unittest.TestCase):
         output = render_assessment(assessment(native, dynamo))
         self.assertNotIn("<script>", output)
         self.assertIn("&lt;script&gt;", output)
-
-    def test_validator_body_change_with_identical_fields_is_selected(self):
-        snapshot = {
-            "modules": {
-                "vllm/entrypoints/openai/protocol.py": {
-                    "contract": {
-                        "classes": {
-                            "ChatCompletionRequest": {
-                                "fields": {"n": {}},
-                                "methods": {"validate_n": "old"},
-                            }
-                        },
-                        "functions": {"unrelated_helper": "old"},
-                    }
-                }
-            }
-        }
-        baseline = selected_behavior(snapshot)
-        snapshot["modules"]["vllm/entrypoints/openai/protocol.py"]["contract"][
-            "classes"
-        ]["ChatCompletionRequest"]["methods"]["validate_n"] = "new"
-        current = selected_behavior(snapshot)
-        findings = behavior_findings(
-            current, {"selected_behavior": baseline, "findings": []}
-        )
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].category, "behavior")
-        self.assertEqual(findings[0].native["affected_fields"], ["n"])
-        self.assertNotIn("unrelated_helper", str(current))
 
 
 if __name__ == "__main__":

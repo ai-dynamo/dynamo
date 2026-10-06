@@ -118,80 +118,6 @@ class DynamoContractTests(unittest.TestCase):
         ]
         self.assertEqual(paths, [["nvext", "literal.key"], ["nvext", "next"]])
 
-    def projection_fixture(self, changed=False, include_candidate=True):
-        sources = RustSources()
-        sources.add(
-            "lib/llm/src/protocols/openai/fixture.rs",
-            """
-            #[derive(Deserialize)] struct NvCreateChatCompletionRequest {
-                pub prompt_logprobs: Option<i64>
-            }
-            #[derive(Deserialize)] struct NvCreateCompletionRequest {
-                pub prompt_logprobs: Option<i64>
-            }
-            impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
-                fn get_prompt_logprobs(&self) { self.prompt_logprobs }
-            }
-            """,
-        )
-        sources.add(
-            "lib/llm/src/protocols/openai/chat_completions/delta.rs",
-            """
-            impl NvCreateChatCompletionRequest {
-                fn response_generator(&self) {
-                    generator.capture = self.prompt_logprobs.is_some();
-                }
-            }
-            """,
-        )
-        if include_candidate:
-            sources.add(
-                "lib/llm/src/protocols/openai/chat_completions/aggregator.rs",
-                "impl Aggregator { fn apply() { if delta.internal_prompt_logprobs.is_some() "
-                "{ result.prompt_logprobs = "
-                + ("None" if changed else "delta.internal_prompt_logprobs")
-                + "; } } }",
-            )
-        # A same-named payload in another endpoint is deliberately irrelevant.
-        sources.add(
-            "lib/llm/src/protocols/openai/completions/aggregator.rs",
-            "impl Aggregator { fn apply() { result.prompt_logprobs = None; } }",
-        )
-        return DynamoContractExtractor(sources).extract("a" * 40)
-
-    def test_request_accessors_and_projection_candidates_are_endpoint_scoped(self):
-        contract = self.projection_fixture()
-        chat = contract.endpoints["/v1/chat/completions"].fields["prompt_logprobs"]
-        completion = contract.endpoints["/v1/completions"].fields["prompt_logprobs"]
-        self.assertEqual(chat.handling.effects, ["interpret"])
-        self.assertIn("remain unverified", chat.handling.projection)
-        self.assertFalse(chat.handling.complete)
-        self.assertEqual(
-            {entry["symbol"] for entry in chat.handling.evidence},
-            {"get_prompt_logprobs", "response_generator", "apply"},
-        )
-        self.assertTrue(
-            all(
-                "/completions/" not in entry["path"] for entry in chat.handling.evidence
-            )
-        )
-        self.assertEqual(completion.handling.effects, [])
-        self.assertIsNone(completion.handling.projection)
-
-    def test_projection_body_change_invalidates_handling_facts(self):
-        first = self.projection_fixture()
-        changed = self.projection_fixture(changed=True)
-        self.assertNotEqual(
-            first.endpoints["/v1/chat/completions"].fields["prompt_logprobs"].facts(),
-            changed.endpoints["/v1/chat/completions"].fields["prompt_logprobs"].facts(),
-        )
-
-    def test_missing_projection_candidate_stays_unresolved(self):
-        contract = self.projection_fixture(include_candidate=False)
-        field = contract.endpoints["/v1/chat/completions"].fields["prompt_logprobs"]
-        self.assertIn("downstream projection unresolved", field.handling.projection)
-        self.assertFalse(field.handling.complete)
-
     def test_remote_derive_keeps_declarations_without_claiming_wrapper_completeness(
         self,
     ):
@@ -367,25 +293,6 @@ class DynamoContractTests(unittest.TestCase):
         self.assertFalse(any(item.name == "Fake" for item in instance.sources.items))
         self.assertEqual(instance.sources.resolve("Real", "").kind, "struct")
         self.assertIn('"x { y"', tokens('r#"x { y"#'))
-
-    def test_handling_has_source_evidence_not_support_claim(self):
-        instance = extractor(
-            """
-        #[derive(Deserialize)] struct Request { pub temperature: f32 }
-        fn validate_temperature(request: &Request) {
-            if request.temperature > 1.0 { bail!("too high"); }
-        }
-        fn backend_extra_args(request: &Request) {
-            extra.insert("temperature", request.temperature);
-        }
-        """
-        )
-        fields, _ = instance.fields(instance.sources.resolve("Request", ""))
-        handling = instance.handling(fields["temperature"], "/v1/chat/completions")
-        self.assertEqual(handling.effects, ["forward", "interpret", "reject"])
-        self.assertFalse(handling.complete)
-        self.assertEqual(len(handling.evidence), 2)
-        self.assertTrue(all(item["semantic_sha256"] for item in handling.evidence))
 
 
 if __name__ == "__main__":

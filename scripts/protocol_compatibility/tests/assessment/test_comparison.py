@@ -79,14 +79,21 @@ class ComparisonTests(unittest.TestCase):
         native, dynamo = contracts()
         dynamo.endpoints[ENDPOINT].fields["temperature"].handling = None
         dynamo.endpoints[ENDPOINT].additional_properties = Handling()
-        enabled = assessment(native, dynamo)
-        disabled = assessment(native, dynamo, investigate=False)
-        self.assertEqual(enabled["exit_code"], 0)
-        self.assertEqual(enabled["gates"], disabled["gates"])
-        self.assertEqual(enabled["findings"], disabled["findings"])
-        self.assertEqual(enabled["behavioral_conformance"]["status"], "not_assessed")
-        self.assertTrue(enabled["investigation"]["notes"])
-        self.assertEqual(disabled["investigation"]["notes"], [])
+        report = assessment(native, dynamo)
+        self.assertEqual(report["exit_code"], 0)
+        self.assertEqual(report["behavioral_conformance"]["status"], "not_assessed")
+        self.assertEqual(report["investigation"]["status"], "not_implemented")
+        self.assertEqual(report["investigation"]["notes"], [])
+
+    def test_contract_only_preserves_prior_advisory_history(self):
+        native, dynamo = contracts()
+        previous = assessment(native, dynamo)
+        note = {"identity": "old-note", "fingerprint": "a" * 64}
+        previous["investigation"]["notes"] = [note]
+        current = assessment(native, dynamo, previous=previous)
+        self.assertEqual(current["investigation"]["notes"], [])
+        self.assertEqual(current["investigation"]["unobserved_notes"], [note])
+        self.assertEqual(current["gates"], previous["gates"])
 
     def test_missing_schema_blocks_even_with_reviewed_disposition(self):
         native, dynamo = contracts()
@@ -206,7 +213,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(item["decision_status"], "stale_facts")
         self.assertEqual(item["decision"]["current_runtime_evidence"], [])
 
-    def test_explicit_untyped_rejection_is_not_mislabeled_unknown_passthrough(self):
+    def test_untyped_source_rejection_does_not_fill_contract_coverage(self):
         native, dynamo = contracts()
         endpoint = dynamo.endpoints[ENDPOINT]
         endpoint.fields = {}
@@ -215,9 +222,7 @@ class ComparisonTests(unittest.TestCase):
         report = assessment(native, dynamo)
         self.assertEqual(report["findings"][0]["category"], "coverage")
         self.assertEqual(report["findings"][0]["aspect"], "input_slot")
-        self.assertEqual(
-            report["investigation"]["notes"][0]["dynamo"]["effects"], ["reject"]
-        )
+        self.assertEqual(report["investigation"]["notes"], [])
 
     def test_baseline_finds_old_gap_even_without_upstream_change(self):
         native, dynamo = contracts()
@@ -287,7 +292,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(report["findings"][0]["category"], "coverage")
         self.assertIn("passthrough", report["findings"][0]["observation"])
 
-    def test_conditional_rejection_needs_review(self):
+    def test_source_rejection_is_not_a_contract_verdict(self):
         native, dynamo = contracts()
         dynamo.endpoints[ENDPOINT].fields["temperature"].handling = Handling(
             ["reject"],
@@ -296,9 +301,7 @@ class ComparisonTests(unittest.TestCase):
         )
         report = assessment(native, dynamo)
         self.assertEqual(report["findings"], [])
-        self.assertEqual(
-            report["investigation"]["notes"][0]["dynamo"]["effects"], ["reject"]
-        )
+        self.assertEqual(report["investigation"]["notes"], [])
         self.assertEqual(report["exit_code"], 0)
         self.assertEqual(report["behavioral_conformance"]["status"], "not_assessed")
 

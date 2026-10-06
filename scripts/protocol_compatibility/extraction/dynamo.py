@@ -1,15 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Extract Dynamo serde declarations and bounded implementation handling evidence.
+"""Extract Dynamo serde request declarations, not implementation behavior.
 
-No runtime support is inferred from a Rust field alone. Custom deserialization,
-unknown macros/types, and unidentified forwarding paths remain explicit gaps in
-coverage. The evidence is source-derived at the selected commit.
+Custom deserialization and unknown macros/types remain explicit contract gaps.
+Handling/projection analysis belongs to the separate source-investigation layer.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -23,10 +21,6 @@ from scripts.protocol_compatibility.common.contracts import (
     canonical_union,
 )
 from scripts.protocol_compatibility.common.source import commit
-from scripts.protocol_compatibility.extraction.dynamo_handling import (
-    apply_admission,
-    predicates,
-)
 from scripts.protocol_compatibility.extraction.rust_source import (
     RustItem,
     RustSources,
@@ -332,79 +326,6 @@ class DynamoContractExtractor:
             "le": 2 ** (width - (1 if match[1] == "i" else 0)) - 1,
         }
 
-    def handling(self, item: FieldContract, endpoint: str) -> Handling:
-        evidence, effects, conditions = [], set(), []
-        projection = None
-        field_name = item.path
-        for function in self.sources.items:
-            if function.kind != "fn" or function.crate != "dynamo_llm":
-                continue
-            # Request-specific impls must not leak between chat and completion.
-            if (
-                "NvCreate" in function.owner
-                and REQUESTS[endpoint] not in function.owner
-            ):
-                continue
-            text = " ".join(function.body)
-            access = re.search(r"\.\s*" + re.escape(field_name) + r"\b", text)
-            keyed = json.dumps(field_name) in function.body
-            if not access and not keyed:
-                continue
-            request_method = REQUESTS[endpoint] in function.owner.split()
-            if request_method and (
-                function.name.startswith("get_")
-                or function.name in {"validate", "response_generator"}
-            ):
-                effects.add("interpret")
-                evidence.append(function.evidence())
-                conditions.append(
-                    {
-                        "stage": "request_accessor_or_transformation",
-                        "function": function.name,
-                        "owner": function.owner,
-                        "predicates": predicates(function),
-                        "detail": "source access identified; invocation and downstream semantics are not proven",
-                    }
-                )
-                if function.name == "validate" and any(
-                    token in function.body for token in {"bail", "Err", "map_err"}
-                ):
-                    effects.add("reject")
-                if function.name == "response_generator":
-                    projection = self.projection_evidence(
-                        field_name, function, evidence, conditions
-                    )
-            if function.name.startswith(("validate_", "normalize_", "extract_")):
-                effects.add("interpret")
-                evidence.append(function.evidence())
-                if any(token in function.body for token in {"bail", "Err"}):
-                    effects.add("reject")
-                    conditions.append(
-                        {
-                            "kind": "source_predicate",
-                            "function": function.name,
-                            "detail": "validation is conditional; inspect the cited implementation",
-                        }
-                    )
-            if (
-                function.name in {"sampling_passthrough_args", "backend_extra_args"}
-                and "insert" in function.body
-            ):
-                effects.add("forward")
-                evidence.append(function.evidence())
-                conditions.append(
-                    {
-                        "transport": "preprocessed_rpc",
-                        "stage": function.name,
-                        "detail": "forwarding path identified, downstream behavior unverified",
-                    }
-                )
-        # These are observations of selected implementation paths, never a
-        # whole-program proof. Unidentified paths remain part of coverage.
-        return Handling(
-            sorted(effects), conditions, evidence, complete=False, projection=projection
-        )
-
     def nested_inputs(
         self,
         fields: dict[str, FieldContract],
@@ -475,54 +396,7 @@ class DynamoContractExtractor:
                 continue
         return result
 
-    def projection_evidence(
-        self,
-        field_name: str,
-        generator: RustItem,
-        evidence: list[dict[str, Any]],
-        conditions: list[dict[str, Any]],
-    ) -> str:
-        """Link a request's response-generator read to bounded source candidates.
-
-        Same-named payloads are useful review evidence, not a proven data-flow
-        edge. Keep that distinction in the report and never mark complete. Only
-        the generator's endpoint module is searched, so chat evidence cannot
-        silently stand in for completion behavior (or vice versa).
-        """
-        directory = generator.source.rsplit("/", 1)[0]
-        if not generator.source.endswith("/delta.rs"):
-            return "Request field is read by response_generator; downstream projection unresolved."
-        pattern = re.compile(r"\.\s*(?:internal_)?" + re.escape(field_name) + r"\b")
-        candidates = [
-            function
-            for function in self.sources.items
-            if function.kind == "fn"
-            and function.crate == "dynamo_llm"
-            and function is not generator
-            and function.source
-            in {directory + "/delta.rs", directory + "/aggregator.rs"}
-            and pattern.search(" ".join(function.body))
-        ]
-        for function in candidates:
-            evidence.append(function.evidence())
-            conditions.append(
-                {
-                    "stage": "response_projection_candidate",
-                    "function": function.name,
-                    "source": function.source,
-                    "predicates": predicates(function),
-                    "detail": "same-named payload access in the endpoint delta/aggregation path; not a proven data-flow edge",
-                }
-            )
-        if not candidates:
-            return "Request field is read by response_generator; downstream projection unresolved."
-        return (
-            "Request field is read by response_generator; same-named payload accesses "
-            "are linked in this endpoint's delta/aggregation implementation. "
-            "Wire placement, streaming serialization and runtime behavior remain unverified."
-        )
-
-    def extract(self, revision: str, *, investigate: bool = True) -> Contract:
+    def extract(self, revision: str) -> Contract:
         endpoints = {}
         for endpoint, name in REQUESTS.items():
             result = EndpointContract()
@@ -550,12 +424,8 @@ class DynamoContractExtractor:
             except RustUnknown as error:
                 self.problem(endpoint, "*", "fields", str(error))
                 continue
-            if investigate:
-                apply_admission(self.sources, result, name)
             result.nested_inputs = self.nested_inputs(result.fields)
             for path, item in result.fields.items():
-                if investigate and item.handling is None:
-                    item.handling = self.handling(item, endpoint)
                 unknown = [
                     aspect
                     for aspect, value in item.facts().items()
@@ -587,7 +457,6 @@ class DynamoContractExtractor:
             {
                 "extraction": "bounded Rust source analysis; no compilation or macro execution",
                 "dependencies": self.sources.dependencies,
-                "handling_scope": "selected validation/normalization/passthrough, request accessors and endpoint response-generator/projection candidates; not end-to-end support",
             },
         )
 
@@ -596,10 +465,8 @@ def extract_dynamo(
     repo: Path,
     revision: str,
     crate_cache: Path | None = None,
-    *,
-    investigate: bool = True,
 ) -> Contract:
     revision = commit(repo, revision)
     return DynamoContractExtractor(load_sources(repo, revision, crate_cache)).extract(
-        revision, investigate=investigate
+        revision
     )

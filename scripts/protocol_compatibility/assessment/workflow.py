@@ -17,7 +17,6 @@ from ..inputs.revisions import selected_pin
 from ..inputs.validation import object_value, validate_previous
 from ..reporting.report import code, render_assessment
 from .policy import build_assessment
-from .upstream_changes import behavior_findings, selected_behavior
 
 
 def read_json(path: Path | None) -> dict[str, Any] | None:
@@ -35,10 +34,7 @@ def assess(args: argparse.Namespace) -> int:
     # Exact commits are required by both extractors. A candidate comparison is
     # read-only: no pin adoption, Git checkout, or engine execution occurs.
     native, snapshot = extract_native(args.upstream_repo, args.upstream_commit)
-    investigate = not getattr(args, "no_investigation", False)
-    dynamo = extract_dynamo(
-        args.dynamo_repo, args.dynamo_commit, args.crate_cache, investigate=investigate
-    )
+    dynamo = extract_dynamo(args.dynamo_repo, args.dynamo_commit, args.crate_cache)
     scope = {
         "target": "vllm",
         "endpoints": sorted(native.endpoints),
@@ -47,18 +43,18 @@ def assess(args: argparse.Namespace) -> int:
     }
     if previous is not None:
         validate_previous(previous, scope)
-    selected = selected_behavior(snapshot) if investigate else {}
     report = build_assessment(
         native,
         dynamo,
         scope=scope,
         previous=previous,
         decisions=decisions,
-        behavior=behavior_findings(selected, previous),
         policy=policy,
-        investigate=investigate,
     )
-    report["selected_behavior"] = selected
+    # Retain old advisory history for a separately installed investigation layer.
+    report["selected_behavior"] = (
+        previous.get("selected_behavior", {}) if previous else {}
+    )
     report["provenance"] = {
         **tool_provenance(),
         "native_snapshot_sha256": digest(snapshot),
@@ -81,7 +77,7 @@ def assess(args: argparse.Namespace) -> int:
         f'Contract extraction: {report["gates"]["extraction"]}; review: {report["gates"]["review"]}; '
         f'{sum(item["category"] == "compatibility" for item in report["findings"])} declared differences; '
         f'{sum(item["category"] == "coverage" for item in report["findings"])} contract coverage gaps; '
-        f'{len(report["investigation"]["notes"])} advisory notes. '
+        "Source investigation: not implemented. "
         f'Behavioral conformance: not assessed. See {args.output_dir / "report.md"}'
     )
     return report["exit_code"]
@@ -111,7 +107,6 @@ def run_configured(args: argparse.Namespace) -> int:
         "pipeline": args.pipeline,
         "decisions": args.decisions,
         "support_policy": args.support_policy,
-        "no_investigation": getattr(args, "no_investigation", False),
     }
     if baseline_sha:
         baseline_sha = commit(args.dynamo_repo, baseline_sha)

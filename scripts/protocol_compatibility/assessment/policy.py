@@ -9,7 +9,7 @@ from typing import Any
 
 from ..common.contracts import Contract, Finding
 from ..inputs.validation import validate_policy, validate_previous, validate_registry
-from .comparison import direct_compare, investigation_notes
+from .comparison import direct_compare
 from .lifecycle import classify, contract_history
 
 DISPOSITIONS = frozenset(
@@ -70,17 +70,12 @@ def build_assessment(
     scope: dict[str, Any],
     previous: dict[str, Any] | None = None,
     decisions: dict[str, Any] | None = None,
-    behavior: list[Finding] | None = None,
     policy: dict[str, Any] | None = None,
-    investigate: bool = True,
 ) -> dict[str, Any]:
     if previous is not None:
         validate_previous(previous, scope)
     previous = contract_history(previous)
     findings = direct_compare(native, dynamo)
-    notes = (
-        investigation_notes(native, dynamo) + (behavior or []) if investigate else []
-    )
     old_notes = {
         item["identity"]: item
         for item in (
@@ -92,16 +87,6 @@ def build_assessment(
             else []
         )
     }
-    for note in notes:
-        note.decision_status = "advisory"
-        note.next_action = (
-            "Use source references to select or investigate behavioral tests."
-        )
-        prior = old_notes.get(note.identity)
-        if prior:
-            note.lifecycle = (
-                "unchanged" if prior["fingerprint"] == note.fingerprint else "changed"
-            )
     retired = classify(findings, previous, native, dynamo)
     revisions = {"dynamo": dynamo.revision, "vllm": native.revision}
     if decisions is not None:
@@ -156,14 +141,11 @@ def build_assessment(
             "release": release,
         },
         "investigation": {
-            "status": "available" if investigate else "disabled",
+            "status": "not_implemented",
             "gating": False,
-            "notes": [asdict(item) for item in notes],
-            "unobserved_notes": [
-                item
-                for identity, item in old_notes.items()
-                if identity not in {note.identity for note in notes}
-            ],
+            "notes": [],
+            # Preserve historical advisory evidence without running analyzers.
+            "unobserved_notes": list(old_notes.values()),
         },
         "behavioral_conformance": {
             "status": "not_assessed",
