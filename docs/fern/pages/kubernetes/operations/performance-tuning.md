@@ -112,12 +112,14 @@ measured traffic.
 ## Bound frontend host memory growth
 
 The frontend allocates host memory per request for tokenization, routing bookkeeping, and response
-assembly. With the default glibc allocator, freed memory may be retained in allocator arenas instead
-of being returned to the operating system, so frontend resident memory can climb to a high-water
-mark under load and may not drop when the load stops. This retention is allocator behavior rather
-than a leak.
+assembly. By default, its Python and C/C++ code allocate from glibc and its Rust code from mimalloc.
+glibc may retain freed memory in allocator arenas instead of returning it to the operating system,
+so frontend resident memory can climb to a high-water mark under load and may not drop when the
+load stops. This retention is allocator behavior rather than a leak.
 
-To bound the retained footprint, preload jemalloc with decay enabled on the frontend container. See
+To bound the retained footprint, preload jemalloc with decay enabled on the frontend container,
+either with `DYN_FRONTEND_JEMALLOC=1` or through `LD_PRELOAD`. jemalloc then serves the frontend's
+Rust allocations as well. See
 [Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator)
 for the `LD_PRELOAD` and `MALLOC_CONF` values and for which container images ship `libjemalloc2`.
 

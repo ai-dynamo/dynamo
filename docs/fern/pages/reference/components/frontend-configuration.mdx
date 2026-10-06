@@ -721,8 +721,9 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 ## Host memory allocator
 
 The frontend performs per-request host-memory allocations. Under high CPU load, allocator
-contention can cap frontend throughput before the GPU workers saturate. The frontend does not
-preload jemalloc by default.
+contention can cap frontend throughput before the GPU workers saturate. By default, the frontend's
+Rust code allocates from mimalloc, which the Dynamo Python extension links in, and its Python and
+C/C++ code allocate from glibc. The frontend does not preload jemalloc by default.
 
 <Note>
 Whether the container image ships jemalloc depends on how the image is built. Images built with
@@ -733,8 +734,8 @@ dev targets), as well as the standalone frontend entrypoint image do not. Verify
 `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`; if the library is missing, either build a custom
 frontend image that includes it, or install it from an initContainer into a shared volume mounted
 by both containers and point `LD_PRELOAD` at the copied library path. Pointing `LD_PRELOAD` at a
-path that does not exist only prints a loader warning, and the process continues with the default
-glibc allocator.
+`libjemalloc` path that does not exist only prints a loader warning, and the process then serves
+all allocations, including Rust's, from glibc.
 </Note>
 
 <Note>
@@ -744,8 +745,19 @@ glibc allocator.
   volume with an initContainer or use a custom image.
 </Note>
 
+<ParamField path="DYN_FRONTEND_JEMALLOC" type="boolean" default="false">
+  Preload jemalloc so that it serves all of the frontend's host allocations, including the Rust
+  allocations that otherwise go to mimalloc. Accepts `1`, `true`, or `yes` (case-insensitive). The
+  frontend re-executes itself once with jemalloc added to `LD_PRELOAD`, so child processes inherit
+  the preload. If the frontend cannot find `libjemalloc`, it prints a warning and continues with its
+  default allocators.
+</ParamField>
+
 <ParamField path="LD_PRELOAD" type="string" default="unset">
-  Preload jemalloc for the frontend process. The library path depends on the container architecture:
+  Preload jemalloc for the frontend process. jemalloc then serves its Python, C/C++, and Rust
+  allocations: the Dynamo Python extension moves its Rust allocations off mimalloc in any process
+  whose `LD_PRELOAD` names a `libjemalloc` library. The library path depends on the container
+  architecture:
 
   ```bash
   # x86_64
@@ -781,6 +793,19 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
   Validate allocator changes with the same AIPerf workload before and after enabling them. See
   [Bound frontend host memory growth](../../kubernetes/operations/performance-tuning.md#bound-frontend-host-memory-growth)
   for the symptom this addresses and how to measure the effect.
+</ParamField>
+
+<ParamField path="MIMALLOC_ALLOW_THP" type="string" default="unset">
+  Controls transparent huge pages (THP) for mimalloc, which the Dynamo Python extension loads in
+  every process that imports it, including when jemalloc serves the Rust allocations.
+
+  - Unset: mimalloc does not advise its memory for huge pages (`MADV_HUGEPAGE`), because the advice
+    raises resident memory both under load and while idle. The rest of the process follows the
+    host's THP policy, and on hosts where THP is `always`, the kernel can still back mimalloc's
+    memory with huge pages.
+  - `1`: mimalloc advises its memory for huge pages.
+  - `0`: mimalloc disables THP for the whole process when it loads, which also covers glibc,
+    jemalloc, and Python memory.
 </ParamField>
 
 ## HTTP endpoints

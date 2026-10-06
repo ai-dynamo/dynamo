@@ -1,34 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-/// Keeps mimalloc's arenas out of transparent huge pages unless `MIMALLOC_ALLOW_THP` says
-/// otherwise; glibc, which held these allocations before, never asked for them.
-///
-/// mimalloc advises each arena it reserves for huge pages. In a many-threaded process each
-/// thread's sparse pages then fault in whole 2 MiB pages, and khugepaged refills partly freed
-/// ones while idle.
-///
-/// Must run before the extension's first Rust allocation, which reserves the first arena.
-#[cfg(feature = "mimalloc")]
-fn configure_allocator() {
-    // libmimalloc-sys does not export this option; pin the mimalloc 3.3 enum it indexes.
-    const _: () = assert!(libmimalloc_sys::_mi_option_last == 47);
-    const MI_OPTION_ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
-    // SAFETY: both calls only touch mimalloc's option state, and module init runs before
-    // this extension starts any thread. Initializing first keeps the environment
-    // authoritative and means mimalloc saw THP allowed at startup, so it skips the
-    // process-wide PR_SET_THP_DISABLE and leaves other libraries' memory to the host's
-    // THP policy.
-    unsafe {
-        libmimalloc_sys::mi_process_init();
-        libmimalloc_sys::mi_option_set_default(MI_OPTION_ALLOW_THP, 0);
-    }
-}
-
 use dynamo_llm::local_model::{
     LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
 };
@@ -107,6 +79,8 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+#[cfg(feature = "mimalloc")]
+mod allocator;
 mod backend;
 mod context;
 mod engine;
@@ -313,13 +287,12 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
 }
 
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Model teardown trims glibc arenas, which no longer hold this extension's Rust
-    // allocations; also return mimalloc's freed memory.
+    // Model teardown trims glibc arenas; when mimalloc holds this extension's Rust
+    // allocations instead, also return its freed memory.
     #[cfg(feature = "mimalloc")]
-    dynamo_llm::discovery::register_allocator_trim_hook(|| {
-        // SAFETY: mi_collect only releases memory mimalloc already considers free.
-        unsafe { libmimalloc_sys::mi_collect(true) }
-    });
+    if allocator::uses_mimalloc() {
+        dynamo_llm::discovery::register_allocator_trim_hook(allocator::collect);
+    }
 
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
@@ -505,7 +478,7 @@ fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "mimalloc")]
-    configure_allocator();
+    allocator::configure();
     register_core_with_router_plugins(m)
 }
 
@@ -514,7 +487,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "mimalloc")]
-    configure_allocator();
+    allocator::configure();
     register_core(m)
 }
 
