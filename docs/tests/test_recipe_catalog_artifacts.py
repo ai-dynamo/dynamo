@@ -41,7 +41,7 @@ catalog_validate = load_catalog_validator("recipe_catalog_validate")
         (
             "kimi-k3",
             (
-                "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-dev.1",
+                "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-post.1",
                 "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-kimi-k3-dev.1",
             ),
         ),
@@ -133,10 +133,10 @@ def test_recipe_specific_images_are_catalog_owned(
             "kimi-k3",
             (
                 {
-                    "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-dev.1",
-                    "source_revision": "f7f0c719e57aebffa3d386ff14b387c94fdaedad",
+                    "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-post.1",
+                    "source_revision": "b83b1d9304ebfc624709ac46db32b1b6f1ff1615",
                     "source_kind": "github-release",
-                    "release_tag": "v1.5.0-kimi-k3-dev.1",
+                    "release_tag": "v1.5.0-kimi-k3-post.1",
                     "release_state": "prerelease",
                 },
                 {

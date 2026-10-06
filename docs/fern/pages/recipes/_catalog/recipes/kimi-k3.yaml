@@ -201,7 +201,7 @@ targets:
     asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 32.9 output tok/s/GPU, 56.1 user tok/s P50, TTFT P50 828 ms at concurrency 28 over 2 workers (15% agentic trace subset, synthetic acc_len=4.05)
+    summary: 42.2 output tok/s/GPU, 66.0 user tok/s P50, TTFT P50 493 ms at concurrency 28 over 2 workers (15% agentic trace subset, synthetic acc_len=4.05)
 - id: sglang-disagg-gb200
   recommended: false
   hardware:
@@ -227,7 +227,7 @@ targets:
     tool: aiperf
     asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
-    available: true
-    summary: 29.3 output tok/s/GPU, 77.9 user tok/s P50, TTFT P50 3090 ms at concurrency 24 (2P1D, 15% agentic trace subset, synthetic acc_len=4.05)
+    available: false
+    summary: TBD
 related_benchmarks: []
 maintainer: null
