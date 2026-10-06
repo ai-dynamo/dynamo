@@ -970,8 +970,17 @@ class ContentDirectory:
         )
 
     def ensure_hbm_capacity(
-        self, required_blocks: int, *, eligible_slot_ids: list[int] | None = None
+        self,
+        required_blocks: int,
+        *,
+        eligible_slot_ids: list[int] | None = None,
+        engine_id: str | None = None,
     ) -> list[dict]:
+        """Retire the coldest dormant records until required_blocks are free.
+
+        With eligible_slot_ids and the pool's engine_id, the daemon resolves
+        just those slots instead of scanning the whole directory.
+        """
         if required_blocks <= 0:
             return []
         return self._writer_call(
@@ -985,6 +994,7 @@ class ContentDirectory:
                     if eligible_slot_ids is not None
                     else {}
                 ),
+                **({"engine_id": engine_id} if engine_id is not None else {}),
             ),
             [],
             retryable=False,

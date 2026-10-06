@@ -428,6 +428,7 @@ class DaemonClient:
         required_blocks: int,
         *,
         eligible_slot_ids: list[int] | None = None,
+        engine_id: str | None = None,
     ) -> tuple[list[dict], bool]:
         resp = self._ok(
             {
@@ -441,6 +442,7 @@ class DaemonClient:
                     if eligible_slot_ids is not None
                     else {}
                 ),
+                **({"engine_id": str(engine_id)} if engine_id is not None else {}),
             }
         )
         victims = []

@@ -537,6 +537,66 @@ def test_capacity_retires_only_native_free_eligible_slots(monkeypatch, eligible)
     assert ("manifest", bytes([7]) * 32) in entries
 
 
+def test_capacity_with_engine_id_matches_full_scan_without_scanning(monkeypatch):
+    """Named eligible slots resolve through the slot index, same LRU victims."""
+    from gms_kv_ring.daemon import rpc_directory
+
+    def build():
+        entries = {}
+        by_slot = {}
+        for page in range(1, 41):
+            content_hash = bytes([page]) * 32
+            entries[("manifest", content_hash)] = {
+                "tier": "hbm",
+                "state": "ready" if page != 5 else "active",
+                "engine_id": "engine",
+                "slot_ids": [page],
+                "generations": [3],
+                "_claim_count": 1 if page == 6 else 0,
+                # Not insertion order, so the LRU sort decides.
+                "_last_access_seq": (page * 7) % 41,
+            }
+            by_slot[("manifest", "engine", page)] = content_hash
+        return SimpleNamespace(
+            _content_hash_lock=threading.Condition(),
+            _content_directory_writer_id="writer",
+            _content_directory_epoch=4,
+            _content_directory=entries,
+            _content_directory_by_slot=by_slot,
+        )
+
+    monkeypatch.setattr(
+        rpc_directory,
+        "_directory_remove_locked",
+        lambda daemon, key: daemon._content_directory.pop(key),
+    )
+    request = {
+        "manifest_id": "manifest",
+        "writer_id": "writer",
+        "expected_epoch": 4,
+        "required_blocks": 6,
+        "eligible_slot_ids": list(range(2, 30)),
+    }
+    scanned = handle_directory_ensure_hbm_capacity(build(), dict(request))
+
+    indexed_daemon = build()
+    # A full scan would iterate the directory; the index path must not.
+    entries = indexed_daemon._content_directory
+
+    class NoScan(dict):
+        def items(self):
+            raise AssertionError("full directory scan")
+
+    indexed_daemon._content_directory = NoScan(entries)
+    indexed = handle_directory_ensure_hbm_capacity(
+        indexed_daemon, {**request, "engine_id": "engine"}
+    )
+
+    assert indexed == scanned
+    assert {v["slot_ids"][0] for v in indexed["victims"]}.isdisjoint({5, 6})
+    assert len(indexed["victims"]) == 6
+
+
 @pytest.mark.parametrize(
     ("pending_generations", "expected_hit"),
     [(None, False), ([4], True)],

@@ -204,7 +204,9 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
                 self.entries[value]["state"] = "ready"
             return len(hashes)
 
-        def ensure_hbm_capacity(self, required, *, eligible_slot_ids=None):
+        def ensure_hbm_capacity(
+            self, required, *, eligible_slot_ids=None, engine_id=None
+        ):
             self.ensure_calls.append(required)
             eligible = None if eligible_slot_ids is None else set(eligible_slot_ids)
             victims = []

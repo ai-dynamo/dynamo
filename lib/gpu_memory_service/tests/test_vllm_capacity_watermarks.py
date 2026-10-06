@@ -68,7 +68,9 @@ def test_capacity_retires_only_native_lru_candidates():
     class Directory:
         enabled = True
 
-        def ensure_hbm_capacity(self, required, *, eligible_slot_ids=None):
+        def ensure_hbm_capacity(
+            self, required, *, eligible_slot_ids=None, engine_id=None
+        ):
             seen.append((required, eligible_slot_ids))
             return [
                 {

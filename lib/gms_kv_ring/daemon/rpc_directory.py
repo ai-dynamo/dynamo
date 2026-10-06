@@ -656,6 +656,8 @@ def handle_directory_ensure_hbm_capacity(
         required = max(0, int(msg.get("required_blocks", 0)))
         eligible = msg.get("eligible_slot_ids")
         eligible = None if eligible is None else {int(value) for value in eligible}
+        engine_id = msg.get("engine_id")
+        engine_id = None if engine_id is None else str(engine_id)
     except (KeyError, TypeError, ValueError) as exc:
         return {"ok": False, "error": f"malformed capacity request: {exc}"}
     with daemon._content_hash_lock:
@@ -672,11 +674,34 @@ def handle_directory_ensure_hbm_capacity(
                 "freed_blocks": 0,
                 "rejected_stale_writer": False,
             }
+        if eligible is not None and engine_id is not None:
+            # The caller named its pool and the exact slots it may give up.
+            # Resolve them through the reverse slot index instead of scanning
+            # every record: the scan cost grows with the directory, and the
+            # engine waits on this call while it holds a full cache.
+            keys = {}
+            for slot_id in eligible:
+                content_hash = daemon._content_directory_by_slot.get(
+                    (manifest_id, engine_id, slot_id)
+                )
+                if content_hash is not None:
+                    keys[(manifest_id, content_hash)] = None
+            pairs = ((key, daemon._content_directory.get(key)) for key in keys)
+            pairs = (
+                (key, entry)
+                for key, entry in pairs
+                if entry is not None and str(entry.get("engine_id")) == engine_id
+            )
+        else:
+            pairs = (
+                (key, entry)
+                for key, entry in daemon._content_directory.items()
+                if key[0] == manifest_id
+            )
         candidates = [
             (key, entry)
-            for key, entry in daemon._content_directory.items()
-            if key[0] == manifest_id
-            and entry.get("tier") == "hbm"
+            for key, entry in pairs
+            if entry.get("tier") == "hbm"
             and entry.get("state") == "ready"
             and int(entry.get("_claim_count", 0)) == 0
             and (

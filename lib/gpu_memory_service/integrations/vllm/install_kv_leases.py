@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import logging
 import os
 from collections.abc import Callable
@@ -111,36 +112,44 @@ def _failover_directory_standby() -> bool | None:
     )
 
 
-def _preferred_block_ids(free_block_queue, limit: int) -> list[int]:
-    """Return a bounded prefix of local free block IDs without walking
-    vLLM's entire free list. The real queue is a linked list; unit-test
-    fakes may only expose get_all_free_blocks().
+def _iter_preferred_block_ids(free_block_queue):
+    """Yield local free block IDs, oldest first, walking only as far as asked.
+
+    The real queue is a linked list; unit-test fakes may only expose
+    get_all_free_blocks().
     """
-    if limit <= 0:
-        return []
-    out: list[int] = []
     head = getattr(free_block_queue, "fake_free_list_head", None)
     block = getattr(head, "next_free_block", None) if head is not None else None
+    seen = set()
     while block is not None and getattr(block, "next_free_block", None) is not None:
         if not getattr(block, "is_null", False):
-            out.append(int(block.block_id))
-            if len(out) >= limit:
-                return out
+            block_id = int(block.block_id)
+            seen.add(block_id)
+            yield block_id
         block = getattr(block, "next_free_block", None)
+    if getattr(head, "next_free_block", None) is not None:
+        # The native linked queue was completely traversed. Falling through
+        # to get_all_free_blocks() walks it again, and list membership below
+        # makes a nearly-full shadow cache quadratic on every retirement.
+        return
 
     get_all = getattr(free_block_queue, "get_all_free_blocks", None)
     if get_all is None:
-        return out
+        return
     for block in get_all():
         if getattr(block, "is_null", False):
             continue
         block_id = int(block.block_id)
-        if block_id in out:
-            continue
-        out.append(block_id)
-        if len(out) >= limit:
-            break
-    return out
+        if block_id not in seen:
+            seen.add(block_id)
+            yield block_id
+
+
+def _preferred_block_ids(free_block_queue, limit: int) -> list[int]:
+    """Return a bounded prefix of local free block IDs."""
+    if limit <= 0:
+        return []
+    return list(itertools.islice(_iter_preferred_block_ids(free_block_queue), limit))
 
 
 def _preferred_candidate_limit(num_blocks: int) -> int:
@@ -949,16 +958,17 @@ def _evict_dormant_directory_blocks(
     )
     eligible_slot_ids = []
     leases_by_block = self._gms_kv_leases_by_block
-    candidate_ids = _preferred_block_ids(
-        self.free_block_queue, int(self.num_gpu_blocks)
-    )
-    seen = set(candidate_ids)
-    for block in additional_blocks:
-        block_id = int(block.block_id)
-        if block_id not in seen:
-            candidate_ids.append(block_id)
-            seen.add(block_id)
-    for block_id in candidate_ids:
+    # Walk the free queue lazily: it can hold the whole pool, and only the
+    # oldest candidate_limit eligible blocks are needed. A full Python walk
+    # per retirement stalled every running stream for tens of milliseconds.
+    seen = set()
+    for block_id in itertools.chain(
+        _iter_preferred_block_ids(self.free_block_queue),
+        (int(block.block_id) for block in additional_blocks),
+    ):
+        if block_id in seen:
+            continue
+        seen.add(block_id)
         block = self.blocks[block_id]
         if block.block_hash is None or block_id not in leases_by_block:
             continue
@@ -968,7 +978,9 @@ def _evict_dormant_directory_blocks(
     if not eligible_slot_ids:
         return 0
     victims = directory.ensure_hbm_capacity(
-        required_blocks, eligible_slot_ids=eligible_slot_ids
+        required_blocks,
+        eligible_slot_ids=eligible_slot_ids,
+        engine_id=_directory_pool_id(),
     )
     leases = []
     restored = []

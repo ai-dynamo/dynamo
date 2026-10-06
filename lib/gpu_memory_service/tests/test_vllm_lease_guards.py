@@ -58,7 +58,7 @@ def test_dormant_eviction_never_releases_a_block_in_use():
     published = []
     directory = SimpleNamespace(
         enabled=True,
-        ensure_hbm_capacity=lambda _n, eligible_slot_ids: [
+        ensure_hbm_capacity=lambda _n, eligible_slot_ids, engine_id=None: [
             {"slot_ids": [1], "generations": [5]},
             {"slot_ids": [2], "generations": [7]},
         ],
