@@ -47,6 +47,11 @@ def assess_command(argv: list[str]) -> int:
     )
     parser.add_argument("--decisions", type=Path)
     parser.add_argument("--support-policy", type=Path)
+    parser.add_argument(
+        "--no-investigation",
+        action="store_true",
+        help="skip optional source handling/change analysis; contract gates are unchanged",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.upstream_commit:

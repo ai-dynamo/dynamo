@@ -45,12 +45,13 @@ def dynamo_source(fields="pub model: String", attributes=""):
 
 
 class AssessmentIntegrationTests(unittest.TestCase):
-    def test_contract_only_run_does_not_require_source_investigation(self):
-        _, report = self.assess()
-        self.assertEqual(report["investigation"]["status"], "not_implemented")
-        self.assertEqual(report["investigation"]["notes"], [])
-        self.assertEqual(report["selected_behavior"], {})
-        self.assertEqual(report["behavioral_conformance"]["status"], "not_assessed")
+    def test_contract_only_run_is_independent_of_optional_investigation(self):
+        _, enabled = self.assess()
+        _, disabled = self.assess(extra=("--no-investigation",))
+        self.assertEqual(enabled["findings"], disabled["findings"])
+        self.assertEqual(enabled["gates"], disabled["gates"])
+        self.assertEqual(disabled["investigation"]["status"], "disabled")
+        self.assertEqual(disabled["behavioral_conformance"]["status"], "not_assessed")
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -197,10 +198,9 @@ class AssessmentIntegrationTests(unittest.TestCase):
             self.upstream_sha,
             "missing",
             "Next action",
-            "| Contract extraction | complete |",
+            "incomplete",
         ):
             self.assertIn(text, markdown)
-        self.assertEqual(first["gates"]["extraction"], "complete")
 
     def test_nested_alias_change_and_coverage_loss_not_resolved(self):
         self.write(
@@ -280,10 +280,11 @@ class AssessmentIntegrationTests(unittest.TestCase):
         )
         self.upstream_sha = self.commit(self.native)
         _, behavior = self.assess(previous=folder)
-        self.assertEqual(behavior["investigation"]["notes"], [])
-        self.assertEqual(
-            [(item["identity"], item["fingerprint"]) for item in behavior["findings"]],
-            [(item["identity"], item["fingerprint"]) for item in first["findings"]],
+        self.assertTrue(
+            any(
+                item["category"] == "behavior"
+                for item in behavior["investigation"]["notes"]
+            )
         )
         self.assertEqual(
             first["contracts"]["native"]["endpoints"],

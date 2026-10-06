@@ -7,15 +7,13 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Design decision: layered compatibility assessment
 
-Status: B1 (`codex/vllm-protocol-tooling`) implements the request-contract base
-in assessment format v2. Optional source investigation and its tests are a
-separate stacked change (`codex/vllm-source-investigation`).
-Behavioral conformance remains a separate, unimplemented test workflow.
-Native-schema export migration is still in progress on its own branch.
-
-There are two acceptance layers (contract and behavior), plus optional supporting
-investigation—not three sequential acceptance gates. The design below describes
-their relationship; the current implementation section describes B1 alone.
+Status: `codex/vllm-source-investigation` adds optional investigation to the
+independently reviewable contract-only B1 base (`codex/vllm-protocol-tooling`).
+There are two acceptance layers (contract and behavior), plus supporting
+investigation—not three sequential acceptance gates.
+Contract/investigation separation uses assessment format v2.
+Behavioral conformance remains a separate test workflow, not executed or approved
+by the static CLI. Native-schema export migration is still in progress.
 
 ### Context and decision
 
@@ -152,14 +150,12 @@ tools make scope/provenance and decisions harder to find. The selected approach
 uses separate mechanisms behind one entry point/report index: more explicit
 result interfaces, but independently actionable stages and unambiguous claims.
 
-The base implements declaration fingerprints, completeness, review gates and
-contract counts without source investigation. JSON `findings`, `retired_findings`,
-and `gates` describe contracts only; `investigation.status` is `not_implemented`
-and `behavioral_conformance.status` is `not_assessed`.
-Previously recorded advisory notes remain under `investigation.unobserved_notes`;
-legacy v1 migration records remain available. Neither is regenerated or evaluated.
-The optional stacked investigation layer must preserve identical contract
-findings/gates for the same inputs.
+The implemented split separates declaration fingerprints, completeness, review
+gates and report counts from advisory source notes. The default keeps investigation
+available; `--no-investigation` skips optional handling and source-change analysis.
+Both modes must return identical contract findings/gates for identical inputs.
+JSON `findings`, `retired_findings`, and `gates` now describe contracts only;
+`investigation` holds non-gating notes and `behavioral_conformance` is `not_assessed`.
 The legacy `gates.runtime_conformance` reminder is retained for consumers, but is
 not a behavioral result or a contract gate. CLI exit 0 is not overall acceptance.
 
@@ -171,23 +167,23 @@ runtime evidence URL does not make this CLI evaluate or approve it.
 
 Use the direct assessment to answer: **what differs, what changed, what remains
 unresolved, and what needs action?** Start with `report.md`, not an inventory diff.
-The base runs contract comparison independently of source investigation.
-Unlike an upstream-only diff, it discovers longstanding Dynamo gaps
+One workflow exposes contract comparison and optional source investigation as
+separate layers. Unlike an upstream-only diff, it discovers longstanding Dynamo gaps
 even when upstream has not changed. See the [tooling package](../../../scripts/protocol_compatibility/README.md)
 for its module layout and command reference.
 
 ## Scope and invariants
 
 The initial adapter compares vLLM serve request declarations against Dynamo's
-effective Rust request declarations:
+effective Rust request declarations; selected handling paths are advisory:
 
 - `/v1/chat/completions` is the primary endpoint.
 - `/v1/completions` is included for compatibility.
 
 SGLang and TensorRT-LLM adapters are not implemented. Response schemas, streaming
 wire contracts, error behavior, tokenizer/model behavior, and exhaustive runtime
-conformance are deferred. Source-projection investigation belongs to the optional
-stacked change and would not establish response parity.
+conformance are deferred. Known response-projection implications may appear as
+handling evidence, but are not response-parity claims.
 
 Keep these invariants when changing the tooling or a framework version:
 
@@ -197,7 +193,7 @@ Keep these invariants when changing the tooling or a framework version:
    engine modules to discover their declarations.
 3. Preserve unknown facts and coverage failures. Missing extraction is not a
    permissive schema, support, a resolved gap, or a successful compatibility check.
-4. Do not infer behavior from declarations. A typed field, accepted input,
+4. Derive handling from implementation sources. A typed field, accepted input,
    passthrough vocabulary, or forwarding path alone does not establish support.
 5. Separate observations from reviewed decisions and runtime evidence. Never
    manufacture an intentional divergence or carry runtime evidence across versions.
@@ -345,8 +341,8 @@ These are real source revisions, not synthetic models:
   `ced6857afa0ea7b2e3f0846a62e1394e90f15607`.
 
 Use the candidate command above with these values and `--platform cpu`. The
-baseline and current reports contain both revision pairs, contract differences,
-and gate outcomes. This is a pre-adoption bump rehearsal;
+baseline and current reports contain both revision pairs, differences, selected
+behavioral changes, and gate outcomes. This is a pre-adoption bump rehearsal;
 it is not a claim that those Dynamo runtime pins were changed. Counts depend on
 the extractor source and are recorded in the generated artifacts. The current
 bounded extraction has known unresolved facts, so exit 1 is expected until the
@@ -354,8 +350,8 @@ required coverage and review work are addressed.
 
 ## Read and review findings
 
-The report separates declared contract differences, Dynamo-only
-inputs, and contract coverage diagnostics. Short
+The report separates structural differences, handling observations, Dynamo-only
+inputs, selected upstream behavior changes, and coverage diagnostics. Short
 summaries lead each finding; expandable facts retain exact values and fingerprints.
 Source and evidence links connect observations to their pinned implementations.
 
@@ -497,9 +493,10 @@ not prove the effects of validators or request-time overrides.
 Rust extraction follows declarations, import aliases/reexports, flattening,
 selected serde attributes, and the lockfile-verified declaration crates. Custom
 deserializers, conditional definitions, recursive schemas and unsupported enum forms
-remain explicit contract coverage gaps. Handling paths and B5 admission/forwarding
-analysis are outside the base. A passthrough vocabulary is not a typed schema
-or support allowlist.
+remain explicit contract coverage gaps. Unproven handling paths remain advisory
+investigation notes. B5 admission vocabulary
+is combined with its actual validation and passthrough code, not treated as a
+support allowlist.
 
 Known nested object locations are retained separately even if a sibling type is
 unresolved. Same-named nested fields, such as a native root input versus a field
@@ -509,10 +506,19 @@ finding. Custom deserializers do not grant declaration-only nested locations;
 arrays, maps and enum alternatives remain in structural schemas. Segment arrays
 distinguish literal dotted JSON keys from nested object paths.
 
-The optional investigation branch owns request-accessor, validation, forwarding,
-response-projection and selected upstream behavior-change analysis, including
-their tests. Shared source snapshots may retain method fingerprints for provenance
-and inventory generation; B1 does not interpret them as handling or conformance.
+Selected request accessors (`get_*`), validation methods, and `response_generator`
+reads identify frontend interpretation candidates. A response-generator read also
+links same-named payload accesses in that endpoint's delta and aggregation source.
+These links include implementation fingerprints and source predicates, so changes
+invalidate prior handling facts. They are review evidence, not proven data-flow
+edges: invocation, effective response placement, streaming serialization, and
+runtime behavior remain unverified. Another endpoint's same-named payload is not
+substituted when the selected endpoint has no identified projection candidate.
+
+Behavior-change candidates are grouped request-class method bodies and selected
+validator/normalizer helpers in endpoint source modules. Affected field lists are
+candidate scope, not whole-program dataflow proof. Unrelated module bindings are
+not automatically triage requirements. Broader behavior stays outside this scope.
 
 Run the source-only regression suite with:
 

@@ -22,11 +22,11 @@ class PackageTests(unittest.TestCase):
             timeout=30,
         )
 
-    def test_contract_base_has_no_investigation_implementation(self):
+    def test_optional_investigation_layer_is_installed(self):
         package = ROOT / "scripts/protocol_compatibility"
-        self.assertFalse((package / "extraction/dynamo_handling.py").exists())
-        self.assertFalse((package / "assessment/upstream_changes.py").exists())
-        self.assertNotIn("--no-investigation", self.invoke("assess", "--help").stdout)
+        self.assertTrue((package / "extraction/dynamo_handling.py").exists())
+        self.assertTrue((package / "assessment/upstream_changes.py").exists())
+        self.assertIn("--no-investigation", self.invoke("assess", "--help").stdout)
 
     def test_all_public_commands_have_help(self):
         for command in (
