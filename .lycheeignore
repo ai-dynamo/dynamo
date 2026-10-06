@@ -47,6 +47,10 @@
 # URL returns 404 until merge.
 ^https://github\.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget$
 
+# The Nemotron Speech example lands with its voice docs page, so its main-branch
+# links return 404 until merge. Remove this entry after merge.
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline(#.*)?$
+
 # The sidecar Dockerfile is introduced by the same PR as its docs link,
 # so the blob/main URL returns 404 until merge. Remove this entry after merge.
 ^https://github\.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile$
@@ -85,6 +89,21 @@
 # the page is live.
 ^https://docs\.nvidia\.com/dynamo/dev/recipes/deepseek-v4-1-flash$
 
+# The TokenSpeed example is introduced with its docs link in the same PR.
+# Its canonical main-branch URL returns 404 until merge. Cleanup tracked in:
+# https://github.com/ai-dynamo/dynamo/issues/15025
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/backends/tokenspeed$
+
 # Introduced by the same PR as its docs link: the K-EXAONE 2.0 recipe does not exist on main
 # until this PR merges, so these blob/main URLs 404 during review. Remove after merge.
 ^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/k-exaone-2\.0
+
+# Introduced by the same PR as their docs links: the A.X-K2 H200 recipe trees (perf/h200,
+# vllm/agg-h200, vllm/disagg-h200) do not exist on main until this PR merges, so these
+# tree/blob main URLs 404 during review. Remove after merge.
+^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/ax-k2/(perf/h200|vllm/(agg|disagg)-h200)
+
+# Motif-3 recipe files land on the release/1.5.0-motif-3-post.1 branch, so their
+# canonical blob/main and tree/main links 404 from CI until they reach main.
+# Remove this entry once the recipe is on main.
+^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/(recipes/motif-3|docs/fern/pages/recipes/model-recipes/motif-3\.mdx)

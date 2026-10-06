@@ -10,6 +10,7 @@
 # active ones in recipes/<id>.yaml.
 schema_version: 1
 recipes:
+- motif-3
 - glm-5-3-flash
 - glm-5-2
 - glm-5-nvfp4

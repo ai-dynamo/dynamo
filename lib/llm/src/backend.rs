@@ -27,11 +27,12 @@ use futures::stream::{self, StreamExt};
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::{
+    error::{DynamoError, ErrorClass},
     pipeline::{
         AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
         SingleIn, async_trait,
     },
-    protocols::annotated::Annotated,
+    protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
 use crate::protocols::{
@@ -70,6 +71,7 @@ struct DecoderUnfoldState {
     decoders: HashMap<u32, Decoder>,
     finished_choices: HashSet<u32>,
     validate_engine_decode: bool,
+    no_stop_trim: bool,
     /// Set to true when all expected choices are finished locally, causing the stream to end
     finished: bool,
     /// Tokenizer used to decode top-logprob token_ids when the backend omits text
@@ -110,10 +112,11 @@ fn fill_missing_top_logprob_text(
 }
 
 struct DecoderParams {
-    prompt_token_ids: Vec<TokenIdType>,
+    prompt_token_ids: Arc<Vec<TokenIdType>>,
     stop_conditions: StopConditions,
     skip_special_tokens: bool,
     include_stop_str_in_output: bool,
+    no_stop_trim: bool,
     tracker: Option<Arc<RequestTracker>>,
     n: u32,
     // Withheld hidden-stop-sequence prefix carried over from a migrated attempt's last
@@ -129,7 +132,7 @@ struct DecoderParams {
 impl DecoderParams {
     fn from_request(request: &PreprocessedRequest) -> Self {
         Self {
-            prompt_token_ids: request.token_ids.as_ref().clone(),
+            prompt_token_ids: Arc::clone(&request.token_ids),
             stop_conditions: request.stop_conditions.clone(),
             // Default to true to match upstream framework behavior:
             //   vLLM/sgLang/TRT-LLM: SamplingParams.skip_special_tokens defaults True
@@ -137,6 +140,7 @@ impl DecoderParams {
             // (e.g. DeepSeek-V4 producing token id 0 = `<｜begin▁of▁sentence｜>`
             // mid-output) leak the token's text into `content` / `reasoning_content`.
             skip_special_tokens: request.output_options.skip_special_tokens.unwrap_or(true),
+            no_stop_trim: request.output_options.no_stop_trim.unwrap_or(false),
             include_stop_str_in_output: request
                 .sampling_options
                 .include_stop_str_in_output
@@ -188,6 +192,7 @@ impl Backend {
                 tokenizer.decode_stream(&params.prompt_token_ids, params.skip_special_tokens),
                 params.stop_conditions.clone(),
                 params.include_stop_str_in_output,
+                params.no_stop_trim,
                 params.tracker.clone(),
                 // Every choice starts from the same carried-over withheld prefix. This
                 // only matters for `n == 1` migration retries in practice; a fresh
@@ -202,6 +207,7 @@ impl Backend {
             decoders,
             finished_choices: HashSet::new(),
             validate_engine_decode: self.validate_engine_decode,
+            no_stop_trim: params.no_stop_trim,
             finished: false,
             tokenizer: tokenizer.clone(),
             skip_special_tokens: params.skip_special_tokens,
@@ -314,10 +320,36 @@ impl
                         );
                     }
 
+                    // A worker may send already-trimmed text alongside the raw
+                    // IDs. Re-decode those IDs for no_stop_trim instead of using
+                    // the text fast path. Text-only output cannot honor this
+                    // option; don't silently return trimmed or empty content.
+                    // Empty stop trailers are valid after this choice emitted IDs.
+                    if state.no_stop_trim
+                        && let Some(data) = &output.data
+                        && data.token_ids.is_empty()
+                        && (data.text.as_ref().is_some_and(|text| !text.is_empty())
+                            || data.tokens.as_ref().is_some_and(|tokens| !tokens.is_empty())
+                            || (data.finish_reason == Some(FinishReason::Stop)
+                                && state
+                                    .decoders
+                                    .get(&data.index.unwrap_or(0))
+                                    .is_none_or(|decoder| decoder.generated_tokens == 0)))
+                    {
+                        state.stream.context().stop_generating();
+                        state.finished = true;
+                        let error = DynamoError::builder()
+                            .class(ErrorClass::BackendProtocol)
+                            .message("no_stop_trim requires backend token IDs through the matched stop; the backend omitted them")
+                            .build();
+                        return Some((Annotated::from_err(error), state));
+                    }
+
                     // if we have a data field without an event, then we might need to update the data
                     if let Some(data) = &output.data
                         && data.text.is_some()
                         && !state.validate_engine_decode
+                        && !state.no_stop_trim
                     {
                         // Text already decoded; track finish for this choice
                         let choice_idx = data.index.unwrap_or(0);
@@ -652,6 +684,9 @@ pub struct Decoder {
     // stop_reason can report user-triggered token stops without reporting EOS.
     user_stop_ids: HashSet<TokenIdType>,
 
+    // Include matched stop token text while preserving its stopping reason.
+    no_stop_trim: bool,
+
     // text sequences that if found in the response will trigger a stop condition after the
     // minimum number of tokens have been generated (excluded from output)
     hidden_stop_sequences: Vec<String>,
@@ -751,6 +786,7 @@ impl Decoder {
         decode_stream: DecodeStream,
         stop_condition: StopConditions,
         include_stop_str_in_output: bool,
+        no_stop_trim: bool,
         tracker: Option<Arc<RequestTracker>>,
         // Withheld hidden-stop-sequence prefix to resume from, e.g. after a migration
         // retry (see `PreprocessedRequest::jail_seed`). `None` starts unseeded, as before.
@@ -779,11 +815,12 @@ impl Decoder {
         // Categorize stop sequences based on include_stop_str_in_output:
         // - When true: user-provided stop sequences go to visible (included in output)
         // - When false: user-provided stop sequences go to hidden (excluded from output)
-        let (hidden_stop_sequences, visible_stop_sequences) = if include_stop_str_in_output {
-            (Vec::new(), stop_condition.stop.unwrap_or_default())
-        } else {
-            (stop_condition.stop.unwrap_or_default(), Vec::new())
-        };
+        let (hidden_stop_sequences, visible_stop_sequences) =
+            if include_stop_str_in_output || no_stop_trim {
+                (Vec::new(), stop_condition.stop.unwrap_or_default())
+            } else {
+                (stop_condition.stop.unwrap_or_default(), Vec::new())
+            };
 
         // Calculate jail_max_bytes considering both hidden and visible stop sequences
         let jail_max_bytes = hidden_stop_sequences
@@ -806,6 +843,7 @@ impl Decoder {
             hidden_stop_ids,
             visible_stop_ids,
             user_stop_ids,
+            no_stop_trim,
             hidden_stop_sequences,
             visible_stop_sequences,
             min_tokens: stop_condition.min_tokens.unwrap_or(0),
@@ -873,14 +911,13 @@ impl Decoder {
             } else {
                 StopTrigger::HiddenStopTokenDetected(token_id)
             };
-            // This token's own text stays hidden, as before. But any text still withheld
-            // from an earlier, never-completed hidden-stop-sequence prefix match is not
-            // part of *this* stop and must still reach the caller.
-            return Ok(StepResult::with_stop_trigger(
-                None,
-                self.flush_jailed(),
-                trigger,
-            ));
+            // Release any earlier withheld prefix before this stop token's own text.
+            let token = if self.no_stop_trim { token } else { None };
+            let mut released = self.flush_jailed();
+            if let Some(text) = &token {
+                released.get_or_insert_default().push_str(text);
+            }
+            return Ok(StepResult::with_stop_trigger(token, released, trigger));
         }
 
         // check stop sequences - the jail will always hold at least the largest stop sequence
@@ -1115,6 +1152,18 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn decoder_params_share_prompt_and_preserve_request_copy_on_write() {
+        let mut request = jailing_request(2);
+        request.token_ids = Arc::new(vec![1, 2, 3]);
+        let params = DecoderParams::from_request(&request);
+
+        assert!(Arc::ptr_eq(&params.prompt_token_ids, &request.token_ids));
+        Arc::make_mut(&mut request.token_ids).push(4);
+        assert_eq!(params.prompt_token_ids.as_slice(), &[1, 2, 3]);
+        assert_eq!(request.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
     fn test_char_boundary_drain() {
         let mut s = String::from("helloñworld"); // 12 bytes total ñ is 2 bytes
         let max_bytes = 6; // 12 - 6 = 6 which is inside ñ
@@ -1182,6 +1231,10 @@ mod tests {
                 [103] => "<|user|>",
                 [101, 103] => "Okay<|user|>",
                 [101, 103, 102] => "Okay<|user|> Okay",
+                [104] => "<|return|>",
+                [105] => "<|ghissue|>",
+                [101, 104] => "Okay<|return|>",
+                [101, 105] => "Okay<|ghissue|>",
                 _ => anyhow::bail!("unexpected token IDs: {token_ids:?}"),
             };
             Ok(traits::DecodeResult::Complete(token.to_string()))
@@ -1194,7 +1247,10 @@ mod tests {
         engine_decodes_text: bool,
     }
 
-    struct SyntheticSglangStopEngine;
+    #[derive(Default)]
+    struct SyntheticSglangStopEngine {
+        outputs: Option<Vec<LLMEngineOutput>>,
+    }
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
@@ -1214,13 +1270,17 @@ mod tests {
                     ..Default::default()
                 })
             };
-            let outputs = vec![
-                // Choice 0 stops inside this chunk; its suffix must be removed.
-                output(0, vec![101, 103, 102]),
-                // It keeps generating while choice 1 is unfinished; drop this chunk.
-                output(0, vec![102]),
-                output(1, vec![101, 103]),
-            ];
+            let outputs = if let Some(outputs) = &self.outputs {
+                outputs.iter().cloned().map(Annotated::from_data).collect()
+            } else {
+                vec![
+                    // Choice 0 stops inside this chunk; its suffix must be removed.
+                    output(0, vec![101, 103, 102]),
+                    // It keeps generating while choice 1 is unfinished; drop this chunk.
+                    output(0, vec![102]),
+                    output(1, vec![101, 103]),
+                ]
+            };
 
             Ok(ResponseStream::new(
                 Box::pin(futures::stream::iter(outputs)),
@@ -1390,7 +1450,7 @@ mod tests {
             .build()
             .expect("valid preprocessed request");
         let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
-            Arc::new(SyntheticSglangStopEngine);
+            Arc::new(SyntheticSglangStopEngine::default());
 
         let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
             .await
@@ -1446,6 +1506,249 @@ mod tests {
         assert_eq!(generator.get_usage().completion_tokens, 2);
     }
 
+    #[tokio::test]
+    async fn test_no_stop_trim_raw_completion_output() {
+        use crate::protocols::common::{
+            OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        };
+        use crate::protocols::openai::completions::NvCreateCompletionRequest;
+
+        for no_stop_trim in [Some(false), Some(true)] {
+            for user_stop in [false, true] {
+                for (ids, worker_text, finish, unsupported) in [
+                    (vec![101, 103], None, Some(FinishReason::Stop), false),
+                    (
+                        vec![101, 103],
+                        Some("Okay"),
+                        Some(FinishReason::Stop),
+                        false,
+                    ),
+                    (vec![], Some("Okay"), Some(FinishReason::Stop), true),
+                    (vec![], Some(""), Some(FinishReason::Stop), true),
+                    // Empty length/usage trailers and heartbeats need no detokenization.
+                    (vec![], Some(""), Some(FinishReason::Length), false),
+                    (vec![], Some(""), None, false),
+                ] {
+                    let mut body = serde_json::json!({
+                        "model": "test-model", "prompt": "hi", "skip_special_tokens": false,
+                        "nvext": {"extra_fields": ["completion_token_ids", "stop_reason"]}
+                    });
+                    if let Some(value) = no_stop_trim {
+                        body["no_stop_trim"] = value.into();
+                    }
+                    if user_stop {
+                        body["stop_token_ids"] = serde_json::json!([103]);
+                    }
+                    let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+                    let mut stops = request.extract_stop_conditions().unwrap();
+                    stops.stop_token_ids_hidden = Some(vec![103]);
+                    let input = PreprocessedRequest::builder()
+                        .model("test-model".to_string())
+                        .token_ids(vec![])
+                        .stop_conditions(stops)
+                        .sampling_options(request.extract_sampling_options().unwrap())
+                        .output_options(request.extract_output_options().unwrap())
+                        .build()
+                        .unwrap();
+                    let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+                    let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+                    let engine: ServerStreamingEngine<
+                        PreprocessedRequest,
+                        Annotated<LLMEngineOutput>,
+                    > = Arc::new(SyntheticSglangStopEngine {
+                        outputs: Some(vec![LLMEngineOutput {
+                            token_ids: ids.clone(),
+                            text: worker_text.map(str::to_string),
+                            stop_reason: (worker_text.is_some() && user_stop && !ids.is_empty())
+                                .then_some(StopReason::Int(103)),
+                            finish_reason: finish.clone(),
+                            index: Some(0),
+                            ..Default::default()
+                        }]),
+                    });
+                    let mut stream =
+                        Operator::generate(backend.as_ref(), SingleIn::new(input), engine)
+                            .await
+                            .unwrap();
+                    let output = stream.next().await.unwrap();
+                    if no_stop_trim == Some(true) && unsupported {
+                        let error = output.error.expect("missing IDs must be rejected");
+                        assert_eq!(error.class(), ErrorClass::BackendProtocol);
+                        assert!(matches!(
+                            crate::http::service::error::http_action_for_error(&error),
+                            crate::http::service::error::ClientErrorAction::Respond {
+                                status: axum::http::StatusCode::BAD_GATEWAY,
+                                ..
+                            }
+                        ));
+                        assert!(
+                            error
+                                .to_string()
+                                .contains("no_stop_trim requires backend token IDs")
+                        );
+                        assert!(stream.next().await.is_none());
+                        continue;
+                    }
+                    let output = output.data.unwrap();
+                    assert_eq!(output.token_ids, ids);
+                    assert_eq!(output.finish_reason, finish);
+                    assert_eq!(
+                        output.stop_reason,
+                        (user_stop && !ids.is_empty()).then_some(StopReason::Int(103))
+                    );
+                    let mut generator = request.response_generator("raw-test".to_string());
+                    let response = generator.choice_from_postprocessor(output).unwrap();
+                    let expected = if ids.is_empty() {
+                        worker_text.unwrap_or_default()
+                    } else if no_stop_trim == Some(true) {
+                        "Okay<|user|>"
+                    } else {
+                        "Okay"
+                    };
+                    assert_eq!(response.inner.choices[0].text, expected);
+                    assert_eq!(
+                        response.nvext.as_ref().unwrap()["completion_token_ids"],
+                        serde_json::json!(ids)
+                    );
+                    assert_eq!(generator.get_usage().completion_tokens, ids.len() as u32);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_stop_trim_terminal_trailers_require_ids_per_choice() {
+        for (index, text, tokens, should_fail) in [
+            (0, None, None, false),
+            (1, None, None, true),
+            (0, Some("trimmed"), None, true),
+            (0, None, Some(vec![Some("trimmed".to_string())]), true),
+        ] {
+            let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+            let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+            let request = PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![])
+                .stop_conditions(StopConditions::default())
+                .sampling_options(SamplingOptions {
+                    n: Some(2),
+                    ..Default::default()
+                })
+                .output_options(OutputOptions {
+                    no_stop_trim: Some(true),
+                    ..Default::default()
+                })
+                .build()
+                .unwrap();
+            let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+                Arc::new(SyntheticSglangStopEngine {
+                    outputs: Some(vec![
+                        LLMEngineOutput {
+                            token_ids: vec![101],
+                            index: Some(0),
+                            ..Default::default()
+                        },
+                        LLMEngineOutput {
+                            index: Some(index),
+                            text: text.map(str::to_string),
+                            tokens,
+                            finish_reason: Some(FinishReason::Stop),
+                            ..Default::default()
+                        },
+                    ]),
+                });
+            let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+                .await
+                .unwrap();
+            let first = stream.next().await.unwrap().data.unwrap();
+            assert_eq!(first.index, Some(0));
+            assert_eq!(first.text.as_deref(), Some("Okay"));
+            assert_eq!(first.token_ids, vec![101]);
+            assert!(first.finish_reason.is_none());
+
+            let trailer = stream.next().await.unwrap();
+            if should_fail {
+                assert_eq!(
+                    trailer.error.expect("missing IDs must be rejected").class(),
+                    ErrorClass::BackendProtocol
+                );
+            } else {
+                assert!(trailer.error.is_none());
+                let trailer = trailer.data.unwrap();
+                assert_eq!(trailer.index, Some(0));
+                assert!(trailer.token_ids.is_empty());
+                assert!(trailer.text.as_deref().unwrap_or_default().is_empty());
+                assert_eq!(trailer.finish_reason, Some(FinishReason::Stop));
+            }
+            assert!(stream.next().await.is_none());
+        }
+    }
+
+    #[test]
+    fn test_no_stop_trim_marker_stops_in_unary_and_chunked_output() {
+        let (stop_id, marker) = (104, "<|return|>");
+        for kind in ["eos", "user", "string"] {
+            for no_stop_trim in [false, true] {
+                for streaming in [false, true] {
+                    let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+                    let stops = StopConditions {
+                        stop_token_ids: (kind == "user").then_some(vec![stop_id]),
+                        stop_token_ids_hidden: (kind == "eos").then_some(vec![stop_id]),
+                        stop: (kind == "string").then(|| vec![marker.to_string()]),
+                        ..Default::default()
+                    };
+                    // include_stop_str_in_output alone must not expose EOS IDs;
+                    // no_stop_trim must retain strings even when it is false.
+                    let mut decoder = Decoder::new(
+                        crate::tokenizers::DecodeStream::new(tokenizer, &[], false),
+                        stops,
+                        kind != "string",
+                        no_stop_trim,
+                        None,
+                        None,
+                    );
+                    let mut text = if streaming {
+                        decoder.process_token_ids(&[101]).unwrap().text.unwrap()
+                    } else {
+                        String::new()
+                    };
+                    let ids = if streaming {
+                        vec![stop_id, 999]
+                    } else {
+                        vec![101, stop_id, 999]
+                    };
+                    let result = decoder.process_token_ids(&ids).unwrap();
+                    text.push_str(result.text.as_deref().unwrap_or_default());
+                    assert_eq!(
+                        text,
+                        if no_stop_trim {
+                            format!("Okay{marker}")
+                        } else {
+                            "Okay".to_string()
+                        }
+                    );
+                    match (kind, result.stop_trigger.unwrap()) {
+                        ("user", StopTrigger::UserStopTokenDetected(id))
+                        | ("eos", StopTrigger::HiddenStopTokenDetected(id)) => {
+                            assert_eq!(id, stop_id)
+                        }
+                        ("string", StopTrigger::VisibleStopSequenceDetected(seq))
+                            if no_stop_trim =>
+                        {
+                            assert_eq!(seq, marker)
+                        }
+                        ("string", StopTrigger::HiddenStopSequenceDetected(seq))
+                            if !no_stop_trim =>
+                        {
+                            assert_eq!(seq, marker)
+                        }
+                        other => panic!("unexpected stop: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
     /// should propagate the error. In the backend unfold closure, this error
     /// gets caught and converted to FinishReason::Error.
@@ -1455,7 +1758,7 @@ mod tests {
         let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
         let stop_conditions = StopConditions::default();
 
-        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, false, None, None);
 
         let result = decoder.process_token_ids(&[42]);
         assert!(
@@ -1478,7 +1781,7 @@ mod tests {
         let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
         let stop_conditions = StopConditions::default();
 
-        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, false, None, None);
 
         let result = decoder.process_token_ids(&[42]);
         let err = result.err().expect("should be Err");
