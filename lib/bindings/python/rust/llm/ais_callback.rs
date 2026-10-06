@@ -138,10 +138,7 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
         serde_json::from_value(config.clone()).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
         })?;
-    let nextn = config
-        .speculation
-        .as_ref()
-        .map_or(config.nextn, |spec| spec.num_speculative_tokens());
+    let legacy_nextn = config.nextn;
     let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;
@@ -150,6 +147,13 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
             "AIS estimator is not ready; Router/Mocker requires a ready model because it has no FPM training source",
         ));
     }
+    let nextn = model
+        .provenance()
+        .and_then(|provenance| provenance.config.speculation.as_ref())
+        .map(|speculation| speculation.replay_depth())
+        .transpose()
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
+        .unwrap_or(legacy_nextn);
     if nextn > 0
         && model.provenance().is_some_and(|p| {
             p.selected_estimation_mode == aisimulate_core::EstimationMode::FpmInterpolation
@@ -166,10 +170,19 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
 pub(super) fn create_ais_callback(
     _py: Python<'_>,
     config: &serde_json::Value,
+    nextn: &mut Option<usize>,
 ) -> PyResult<Arc<dyn AisCallback>> {
     #[cfg(feature = "ais-forward-pass")]
     {
-        Ok(Arc::new(build_model(config)?))
+        let callback = build_model(config)?;
+        let depth = callback.nextn as usize;
+        if nextn.is_some_and(|authored| authored != depth) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "ais_nextn conflicts with the resolved AIS scheme",
+            ));
+        }
+        *nextn = (depth > 0).then_some(depth);
+        Ok(Arc::new(callback))
     }
     #[cfg(not(feature = "ais-forward-pass"))]
     Err(pyo3::exceptions::PyRuntimeError::new_err(

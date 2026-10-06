@@ -556,7 +556,7 @@ def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
     monkeypatch.setattr(
         simulation.DynamoReplayRunner,
         "_engine_args",
-        staticmethod(lambda _payload: CapacityArgs()),
+        staticmethod(lambda _payload, **_kwargs: CapacityArgs()),
     )
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
@@ -745,7 +745,7 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     ).backend_deployment
     args = simulation.DynamoReplayRunner._engine_args(deployment.agg_engine_args)
     metadata = deployment.performance_model_metadata["aggregated"]["config"]
-    assert "model_path" in metadata
+    assert metadata["model"] == raw["engine"]["model"]
     config = _ais_session_kwargs(metadata, args)["config"]
     assert config == args.ais_perf_config
     assert config["database_mode"] == "SOL"
@@ -824,3 +824,77 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     assert args.ais_perf_config is None
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
     assert report.metrics["completed_requests"] == raw["traffic"]["stop"]["requests"]
+
+
+@pytest.mark.parametrize(
+    "kind,params",
+    [
+        ("mtp", {"depth": 3}),
+        ("ngram", {"num_speculative_tokens": 3}),
+        ("eagle3", {"tree_shape": [1, 1, 1]}),
+        ("dflash", {"num_draft_tokens": 3}),
+        ("dspark", {"num_draft_tokens": 3}),
+        ("draft_model", {"num_speculative_tokens": 3}),
+    ],
+)
+def test_generic_lowering_preserves_scheme_identity_and_acceptance(
+    monkeypatch, draft_checkpoint, kind, params
+):
+    from dynamo.replay import config
+
+    monkeypatch.setattr(config, "materialize_aic_num_gpu_blocks", lambda raw: dict(raw))
+    path, draft = draft_checkpoint
+    method = {"kind": kind, "params": params}
+    if kind not in {"mtp", "ngram"}:
+        method.update(draft_model_path=path, draft_config=draft)
+    cost = {"model": "target", "system": "h200_sxm", "backend": "vllm"}
+    raw = {
+        "num_gpu_blocks": 100,
+        "timing_model": {"type": "external", "provider": "aic", "config": cost},
+    }
+    raw["speculation"] = {**method, "expected_accepted_tokens": 2.4, "seed": 73}
+    lowered = config.lower_upstream_engine_args(raw)
+    assert lowered["ais_perf_config"]["speculation"] == method
+    assert lowered["ais_nextn"] == 3
+    assert lowered["ais_mtp_seed"] == 73
+    rates = list(map(float, lowered["ais_nextn_accept_rates"].split(",")))
+    assert rates == pytest.approx([1, 1, 0.4])
+
+
+@pytest.mark.parametrize(
+    "conflict", ["ais_perf_config", "aic_nextn", "ais_nextn_accept_rates"]
+)
+def test_public_speculation_rejects_competing_controls(conflict):
+    from dynamo.replay.config import lower_upstream_engine_args
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        lower_upstream_engine_args(
+            {
+                "speculation": {
+                    "kind": "mtp",
+                    "params": {"depth": 2},
+                    "expected_accepted_tokens": 1.5,
+                    "seed": 42,
+                },
+                conflict: {} if conflict == "ais_perf_config" else 2,
+            }
+        )
+
+
+@pytest.mark.parametrize("expected", [0.0, 1.5, 2.0])
+def test_legacy_expected_acceptance_uses_the_engine_sampler(expected):
+    from dynamo.replay.config import lower_upstream_engine_args
+
+    lowered = lower_upstream_engine_args(
+        {"aic_nextn": 2, "aic_nextn_accepted": expected}
+    )
+    first, second = map(float, lowered["ais_nextn_accept_rates"].split(","))
+    assert first + first * second == pytest.approx(expected)
+    with pytest.raises(ValueError, match="cannot set both"):
+        lower_upstream_engine_args(
+            {
+                "aic_nextn": 2,
+                "aic_nextn_accepted": expected,
+                "aic_nextn_accept_rates": "1,1",
+            }
+        )

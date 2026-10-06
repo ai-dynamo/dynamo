@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 from aisimulate.capacity import materialize_aic_num_gpu_blocks
+from aisimulate.config.engine import NgramSpeculationConfig, SpeculationConfig
+from pydantic import TypeAdapter
 
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import (
@@ -138,6 +140,61 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
                 identity, worker_type=raw.get("worker_type", "aggregated")
             ),
         }
+    chosen = raw.pop("speculation", None)
+    if chosen is not None:
+        if raw.get("ais_perf_config") is not None:
+            raise ValueError("speculation cannot be combined with ais_perf_config")
+        if any(
+            raw.get(name) not in (None, 0) for name in ("aic_nextn", "ais_nextn")
+        ) or any(
+            raw.get(name) is not None
+            for name in (
+                "aic_nextn_accepted",
+                "aic_nextn_accept_rates",
+                "ais_nextn_accept_rates",
+                "aic_mtp_seed",
+                "ais_mtp_seed",
+            )
+        ):
+            raise ValueError(
+                "speculation cannot be combined with legacy speculative fields"
+            )
+        config = TypeAdapter(SpeculationConfig).validate_python(chosen)
+        timing = raw.get("timing_model") or {}
+        if timing.get("type") != "external" or timing.get("provider") != "aic":
+            raise ValueError("speculation requires an AIS timing configuration")
+        cost = dict(timing.get("config", {}))
+        if cost.get("nextn") not in (None, 0) or cost.get("speculation") not in (
+            None,
+            config.cost_config(),
+        ):
+            raise ValueError("speculation conflicts with timing_model configuration")
+        raw["timing_model"] = {
+            **timing,
+            "config": {**cost, "speculation": config.cost_config()},
+        }
+        raw.update(aic_nextn=config.num_speculative_tokens, aic_mtp_seed=config.seed)
+        if isinstance(config, NgramSpeculationConfig):
+            raw["aic_nextn_accept_rates"] = ",".join(
+                format(rate, ".17g") for rate in config.acceptance_rates
+            )
+        else:
+            raw["aic_nextn_accepted"] = config.expected_accepted_tokens
+    expected = raw.pop("aic_nextn_accepted", None)
+    if expected is not None:
+        from aisimulate.runner import _accept_rates_for_expected
+
+        depth = raw.get("aic_nextn")
+        if type(depth) is not int or depth <= 0:
+            raise ValueError("aic_nextn_accepted requires a positive aic_nextn")
+        if (
+            raw.get("aic_nextn_accept_rates") is not None
+            or raw.get("ais_nextn_accept_rates") is not None
+        ):
+            raise ValueError("cannot set both aic_nextn_accepted and acceptance rates")
+        raw["aic_nextn_accept_rates"] = _accept_rates_for_expected(
+            depth, expected, role=raw.get("worker_type", "aggregated")
+        )
     raw = _materialize_capacity(raw)
     raw.pop("cuda_graph_reserved_bytes", None)
     if identity.get("attention_dp_size") is not None:
@@ -149,9 +206,31 @@ def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
             value = raw.pop(name)
             if name in {"aic_nextn_accept_rates", "aic_mtp_seed"}:
                 raw["ais_" + name[4:]] = value
-            elif name == "aic_nextn" and "ais_perf_config" not in raw:
+            elif name == "aic_nextn" and (
+                chosen is not None or "ais_perf_config" not in raw
+            ):
                 raw["ais_nextn"] = value
     return raw
+
+
+def native_engine_args_payload(
+    lowered: Mapping[str, Any], *, authored: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Preserve capacity provenance through the native constructor boundary."""
+    native = dict(lowered)
+    native.pop("num_gpu_blocks_is_explicit", None)
+    cost = lowered.get("ais_perf_config") or {}
+    speculative = (
+        lowered.get("ais_nextn") or cost.get("nextn") or cost.get("speculation")
+    )
+    if speculative and not authored.get(
+        "num_gpu_blocks_is_explicit", bool(authored.get("num_gpu_blocks"))
+    ):
+        # The native loader may discover an Agentic trace after Python's
+        # preflight. Leave inferred capacity unauthored for that late gate;
+        # ordinary replay materializes the same AIC capacity natively.
+        native.pop("num_gpu_blocks", None)
+    return native
 
 
 def resolve_planner_profile_data(
@@ -174,6 +253,7 @@ def load_engine_args(
     raw = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
     if not isinstance(raw, dict):
         raise TypeError("engine arguments must contain a JSON object")
+    authored = dict(raw)
     worker_type = raw.pop("worker_type", None)
     if worker_type is not None:
         if "is_prefill" in raw or "is_decode" in raw:
@@ -197,4 +277,6 @@ def load_engine_args(
             else:
                 del raw["planner_profile_data"]
     resolve_ais_num_gpu_blocks(raw)
-    return MockEngineArgs.from_json(json.dumps(raw))
+    return MockEngineArgs.from_json(
+        json.dumps(native_engine_args_payload(raw, authored=authored))
+    )

@@ -811,7 +811,9 @@ async fn select_engine(
             };
 
             if let Some(config) = mocker_args.ais_perf_config.as_ref() {
-                let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
+                let callback = Python::with_gil(|py| {
+                    create_ais_callback(py, config, &mut mocker_args.ais_nextn)
+                })?;
                 mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
             }
 

@@ -100,6 +100,8 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         benchmark_project = tomllib.load(handle)["project"]
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings_cargo = tomllib.load(handle)
+    with (ROOT / "Cargo.toml").open("rb") as handle:
+        workspace_cargo = tomllib.load(handle)
     requirement_sets = [
         (
             "pyproject.toml project.dependencies",
@@ -139,7 +141,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
     assert "aic-forward-pass" not in features
     assert dependencies["aisimulate-core"] == {
-        "version": "=0.13.0-dev.202609300000000061",
+        **workspace_cargo["workspace"]["dependencies"]["aisimulate-core"],
         "optional": True,
         "features": ["python"],
     }

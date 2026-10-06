@@ -35,7 +35,7 @@ from dynamo.replay.api import (
     run_synthetic_trace_replay,
     run_trace_replay,
 )
-from dynamo.replay.config import lower_upstream_engine_args
+from dynamo.replay.config import lower_upstream_engine_args, native_engine_args_payload
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -75,6 +75,8 @@ class DynamoReplayRunnerFactory:
             supports_disaggregated_attention_dp=(
                 engine_capabilities.supports_disaggregated_attention_dp
             ),
+            supports_mtp_expected_acceptance=True,
+            supports_agentic_speculative_decoding=True,
             supported_execution_modes=("offline",),
             supported_trace_formats=(
                 "mooncake",
@@ -167,14 +169,20 @@ class DynamoReplayRunner:
         metrics, metadata = self._normalize_report(report, output_requirements)
         trace_format = spec.workload.get("trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
-        if trace_format in {"weka", "agentic_mooncake"} or (
-            trace_format == "dynamo" and agentic_lanes is not None
+        if (
+            trace_format in {"weka", "agentic_mooncake"}
+            or (trace_format == "dynamo" and agentic_lanes is not None)
+            or "agentic_graph" in metadata
         ):
             metadata.update(
                 agentic_qualification=self.capabilities.agentic_qualification,
                 agentic_input_format=trace_format,
                 agentic_lanes=agentic_lanes,
             )
+            if isinstance(metadata.get("native_report"), dict):
+                metadata["native_report"][
+                    "agentic_qualification"
+                ] = self.capabilities.agentic_qualification
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
 
@@ -312,6 +320,8 @@ class DynamoReplayRunner:
             ais_config = raw_engine_args.get("ais_perf_config")
             if isinstance(ais_config, Mapping):
                 candidates.append(ais_config.get("model"))
+            timing = raw_engine_args.get("timing_model") or {}
+            candidates.append(timing.get("config", {}).get("model"))
         for model in candidates:
             if isinstance(model, str) and model.strip():
                 return model.strip()
@@ -322,10 +332,15 @@ class DynamoReplayRunner:
         raise ValueError("agentic execution requires a configured target model")
 
     @staticmethod
-    def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
+    def _engine_args(
+        payload: dict[str, JSONValue] | None, *, capacity_estimate=False
+    ) -> MockEngineArgs:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        return MockEngineArgs.from_json(json.dumps(lower_upstream_engine_args(payload)))
+        lowered = lower_upstream_engine_args(payload)
+        if not capacity_estimate:
+            lowered = native_engine_args_payload(lowered, authored=payload)
+        return MockEngineArgs.from_json(json.dumps(lowered))
 
     def _run_trace(
         self,
@@ -586,7 +601,7 @@ def _kv_load_concurrency(spec: ReplaySpec) -> int:
         payload = deployment.agg_engine_args
         replicas = deployment.num_workers
         role = "aggregated"
-    args = DynamoReplayRunner._engine_args(payload)
+    args = DynamoReplayRunner._engine_args(payload, capacity_estimate=True)
     capacity_tokens = (
         args.num_gpu_blocks * args.block_size * max(args.dp_size, 1) * max(replicas, 1)
     )

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,9 @@ from aisimulate.sweeper.score import objective_value
 from aisimulate.sweeper.search import Sweeper
 from aisimulate.sweeper.search_space import enumerate_branches
 
+from dynamo.mocker import MockEngineArgs
 from dynamo.planner.simulation import create_provider as create_planner_provider
+from dynamo.replay import run_trace_replay
 from dynamo.replay.simulation import DynamoReplayRunnerFactory
 from dynamo.router.simulation import create_provider as create_router_provider
 
@@ -396,3 +399,294 @@ def test_real_runner_preserves_disaggregated_agentic_dependencies(
     assert join["dispatched_at_ms"] == pytest.approx(
         max(root["terminal_time_ms"], child["terminal_time_ms"]) + 1
     )
+
+
+def _aic_engine_args(backend: str, role: str, dp_size: int = 1) -> dict:
+    args = _fixed_engine_args(backend, role, dp_size)
+    model = Path(__file__).parent / "e2e/configs/unified_cli/fixtures/tiny-model"
+    args["timing_model"] = {
+        "type": "external",
+        "provider": "aic",
+        "config": {
+            "model": str(model.resolve()),
+            "system": "h200_sxm",
+            "backend": backend,
+            "backend_version": "0.24.0" if backend == "vllm" else "0.5.14",
+            "worker_type": role,
+            "tp": dp_size,
+            "attention_dp": dp_size,
+            "estimation_mode": "op_level",
+        },
+    }
+    return args
+
+
+@pytest.mark.pre_merge
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    "kind,backend,router_mode",
+    [
+        ("mtp", "vllm", "round_robin"),
+        ("mtp", "sglang", "kv_router"),
+        ("ngram", "vllm", "round_robin"),
+        ("eagle3", "sglang", "kv_router"),
+        ("dflash", "vllm", "kv_router"),
+        ("dspark", "sglang", "round_robin"),
+        ("draft_model", "vllm", "round_robin"),
+    ],
+)
+@pytest.mark.parametrize("deployment_mode", ["agg", "disagg"])
+def test_real_agentic_speculation_prices_full_bursts(
+    tmp_path, draft_checkpoint, kind, backend, router_mode, deployment_mode
+):
+    source = (
+        Path(__file__).parent
+        / "e2e/configs/unified_cli/fixtures/traces/agentic-mooncake.jsonl"
+    )
+    rows = [json.loads(line) for line in source.read_text().splitlines()]
+    for row in rows[1:]:
+        row["output_length"] = 32
+    trace = tmp_path / "agentic-long-output.jsonl"
+    trace.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    params = {
+        "mtp": {"depth": 3},
+        "ngram": {"num_speculative_tokens": 3},
+        "eagle3": {"tree_shape": [1, 1, 1]},
+        "dflash": {"num_draft_tokens": 3},
+        "dspark": {"num_draft_tokens": 3},
+        "draft_model": {"num_speculative_tokens": 3},
+    }[kind]
+    selection = {
+        "kind": kind,
+        "params": params,
+        "expected_accepted_tokens": 2.4,
+        "seed": 42,
+    }
+    if kind not in {"mtp", "ngram"}:
+        path, draft = draft_checkpoint
+        selection.update(draft_model_path=path, draft_config=draft)
+    role = "aggregated" if deployment_mode == "agg" else "decode"
+    args = _aic_engine_args(backend, role)
+    args["speculation"] = selection
+    if deployment_mode == "agg":
+        engines = {"agg_engine_args": args, "num_workers": 2}
+    else:
+        engines = {
+            "prefill_engine_args": _aic_engine_args(backend, "prefill"),
+            "decode_engine_args": args,
+            "num_prefill_workers": 1,
+            "num_decode_workers": 2,
+        }
+        engines["prefill_engine_args"]["speculation"] = selection
+    spec = ReplaySpec(
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode=deployment_mode,
+            backend=backend,
+            backend_version="0.24.0" if backend == "vllm" else "0.5.14",
+            **engines,
+        ),
+        workload={
+            "trace_path": str(trace),
+            "trace_format": "agentic_mooncake",
+            "trace_block_size": 4,
+            "agentic_lanes": 1,
+        },
+        goal={"target": "throughput"},
+        adapters={
+            "dynamo.router": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.router",
+                        kind="placement_policy",
+                        api_version=1,
+                        config={"router_mode": router_mode, "router_config": {}},
+                    ),
+                )
+            )
+        },
+    )
+    output = ReplayOutputRequirements(capture_per_request=True)
+    runner = DynamoReplayRunnerFactory().create(0)
+    try:
+        report = runner.run(spec, output_requirements=output)
+    finally:
+        runner.close()
+    assert report.metrics["completed_requests"] == 3
+    assert report.metrics["total_output_tokens"] == 96
+    assert report.metrics["completed_trajectories"] == 1
+    assert report.metrics["incomplete_trajectories"] == 0
+    assert report.metrics["duration_ms"] > 0
+    assert report.metadata["agentic_qualification"] == "functional_only"
+    assert (
+        report.metadata["native_report"]["agentic_qualification"] == "functional_only"
+    )
+    records = report.metadata["native_report"]["per_request"]
+    assert len(records) == 3
+    assert all(record["output_length"] == 32 for record in records)
+    # Different draft graphs can cost more than AR. Every scheme must execute
+    # its configured burst through the same native sampler and finish the DAG.
+    native = runner._engine_args(args)
+    assert native.ais_nextn == 3
+    assert native.ais_perf_config["speculation"]["kind"] == kind
+
+
+@pytest.mark.pre_merge
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize(
+    "missing", ["capacity", "rates", "aic_cost", "none", "rates_overridden"]
+)
+@pytest.mark.parametrize("construction", ["json", "constructor"])
+def test_native_auto_agentic_trace_enforces_speculative_assumptions(
+    missing, construction
+):
+    args = _aic_engine_args("vllm", "aggregated")
+    args["ais_perf_config"] = args.pop("timing_model")["config"]
+    args["ais_perf_config"]["nextn"] = 2
+    args["ais_nextn_accept_rates"] = "1,0.5"
+    expected = {
+        "capacity": "explicit.*num_gpu_blocks",
+        "rates": "explicit.*ais_nextn_accept_rates",
+        "aic_cost": "AIS timing configuration",
+    }
+    if missing == "capacity":
+        args.pop("num_gpu_blocks")
+    elif missing in {"rates", "rates_overridden"}:
+        args.pop("ais_nextn_accept_rates")
+    elif missing == "aic_cost":
+        args.pop("ais_perf_config")
+        args["ais_nextn"] = 2
+        args["timing_model"] = {"type": "fixed", "prefill_ms": 1, "decode_ms": 1}
+    else:
+        args = _fixed_engine_args("vllm", "aggregated")
+    if construction == "json":
+        native = MockEngineArgs.from_json(json.dumps(args))
+    else:
+        # The constructor's default non-AIC timing is also inadmissible for SD.
+        args.pop("timing_model", None)
+        native = MockEngineArgs(**args)
+    if missing == "rates":
+        native = native.with_overrides(ais_mtp_seed=43)
+    elif missing == "rates_overridden":
+        native = native.with_overrides(ais_nextn_accept_rates="1,0.5")
+    trace = (
+        Path(__file__).parent
+        / "e2e/configs/unified_cli/fixtures/traces/dynamo-agentic.jsonl"
+    )
+    kwargs = dict(
+        trace_files=str(trace),
+        trace_format="dynamo",
+        trace_block_size=4,
+        extra_engine_args=native,
+        execution_model="target-model",
+    )
+    if missing in {"none", "rates_overridden"}:
+        report = run_trace_replay(**kwargs)
+        assert report.summary["completed_requests"] == 4
+    else:
+        with pytest.raises(Exception, match=expected[missing]):
+            run_trace_replay(**kwargs)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("entry", ["runner", "loader"])
+@pytest.mark.parametrize("capacity", ["missing", "inferred", "explicit"])
+def test_auto_agentic_capacity_remains_authored(entry, capacity):
+    from dynamo.replay.config import load_engine_args
+
+    args = _aic_engine_args("vllm", "aggregated")
+    if capacity == "missing":
+        args.pop("num_gpu_blocks")
+    elif capacity == "inferred":
+        args["num_gpu_blocks_is_explicit"] = False
+    trace = str(
+        Path(__file__).parent
+        / "e2e/configs/unified_cli/fixtures/traces/dynamo-agentic.jsonl"
+    )
+    if entry == "loader":
+        args["ais_perf_config"] = args.pop("timing_model")["config"]
+        args["ais_perf_config"]["speculation"] = {
+            "kind": "mtp",
+            "params": {"depth": 2},
+        }
+        args["ais_nextn_accept_rates"] = "1,0.5"
+        engine = load_engine_args(args)
+
+        def run():
+            return run_trace_replay(
+                trace,
+                trace_format="dynamo",
+                extra_engine_args=engine,
+                execution_model="target-model",
+            )
+
+    else:
+        args["speculation"] = {
+            "kind": "mtp",
+            "params": {"depth": 2},
+            "expected_accepted_tokens": 1.5,
+            "seed": 42,
+        }
+        spec = ReplaySpec(
+            backend_deployment=BackendDeploymentSpec(
+                deployment_mode="agg",
+                backend="vllm",
+                backend_version="0.24.0",
+                agg_engine_args=args,
+                num_workers=1,
+            ),
+            workload={"trace_path": trace, "trace_format": "dynamo"},
+            goal={},
+        )
+
+        def run():
+            return DynamoReplayRunnerFactory().create(0).run(spec)
+
+    if capacity != "explicit":
+        with pytest.raises(
+            Exception, match="explicitly configured positive num_gpu_blocks"
+        ):
+            run()
+    else:
+        report = run()
+        assert (report.summary if entry == "loader" else report.metrics)[
+            "completed_requests"
+        ] == 4
+
+
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("invalid", ["capacity", "tree", "depth", "conflict"])
+def test_native_speculation_rejects_unsupported_controls(draft_checkpoint, invalid):
+    from dynamo.replay import run_synthetic_trace_replay
+
+    args = _aic_engine_args("vllm", "aggregated")
+    args["ais_perf_config"] = args.pop("timing_model")["config"]
+    method = {"kind": "mtp", "params": {"depth": 2}}
+    if invalid == "capacity":
+        args.pop("num_gpu_blocks")
+        message = "explicitly configured positive num_gpu_blocks"
+    elif invalid == "tree":
+        path, draft = draft_checkpoint
+        method = {
+            "kind": "eagle3",
+            "params": {"tree_shape": [1, 2]},
+            "draft_model_path": path,
+            "draft_config": draft,
+        }
+        message = "tree|chain"
+    elif invalid == "depth":
+        method["params"]["depth"] = 6
+        message = "1.*5"
+    else:
+        args["ais_nextn"] = 1
+        message = "conflicts with the resolved AIS scheme"
+    args["ais_perf_config"]["speculation"] = method
+    args["ais_nextn_accept_rates"] = "1,0.5"
+    with pytest.raises(ValueError, match=message):
+        run_synthetic_trace_replay(
+            8,
+            8,
+            1,
+            extra_engine_args=MockEngineArgs.from_json(json.dumps(args)),
+            replay_concurrency=1,
+        )

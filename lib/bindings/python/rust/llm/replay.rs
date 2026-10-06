@@ -270,6 +270,7 @@ impl TrtllmArgs {
 pub struct MockEngineArgs {
     inner: RsMockEngineArgs,
     num_gpu_blocks_explicit: bool,
+    ais_nextn_accept_rates_explicit: bool,
 }
 
 impl MockEngineArgs {
@@ -325,6 +326,8 @@ impl MockEngineArgs {
         max_model_len: Option<usize>,
         ais_perf_config: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        let ais_nextn_accept_rates_explicit =
+            has_explicit_accept_rates(ais_nextn_accept_rates.as_deref());
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
         let preemption_mode = parse_preemption_mode(preemption_mode)?;
@@ -404,6 +407,7 @@ impl MockEngineArgs {
         Ok(Self {
             inner,
             num_gpu_blocks_explicit,
+            ais_nextn_accept_rates_explicit,
         })
     }
 
@@ -416,6 +420,11 @@ impl MockEngineArgs {
             .get("num_gpu_blocks")
             .and_then(serde_json::Value::as_u64)
             .is_some();
+        let ais_nextn_accept_rates_explicit = has_explicit_accept_rates(
+            config
+                .get("ais_nextn_accept_rates")
+                .and_then(serde_json::Value::as_str),
+        );
         if let Some(perf_config) = config.get_mut("ais_perf_config")
             && !perf_config.is_null()
         {
@@ -433,6 +442,7 @@ impl MockEngineArgs {
             .map(|inner| Self {
                 inner,
                 num_gpu_blocks_explicit,
+                ais_nextn_accept_rates_explicit,
             })
             .map_err(|e| PyException::new_err(format!("Failed to parse MockEngineArgs JSON: {e}")))
     }
@@ -713,6 +723,7 @@ impl MockEngineArgs {
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         let mut num_gpu_blocks_explicit = self.num_gpu_blocks_explicit;
+        let mut ais_nextn_accept_rates_explicit = self.ais_nextn_accept_rates_explicit;
         if let Some(port) = bootstrap_port {
             inner.bootstrap_port = Some(port);
         }
@@ -733,6 +744,7 @@ impl MockEngineArgs {
             inner.ais_nextn = Some(nextn);
         }
         if let Some(rates) = ais_nextn_accept_rates {
+            ais_nextn_accept_rates_explicit = has_explicit_accept_rates(Some(&rates));
             inner.ais_nextn_accept_rates = Some(rates);
         }
         if let Some(seed) = ais_mtp_seed {
@@ -758,6 +770,7 @@ impl MockEngineArgs {
             .map(|inner| Self {
                 inner,
                 num_gpu_blocks_explicit,
+                ais_nextn_accept_rates_explicit,
             })
             .map_err(|e| {
                 PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))
@@ -788,6 +801,48 @@ fn validate_kv_event_lag_ms(
         ));
     }
     Ok(lag_ms)
+}
+
+fn has_explicit_accept_rates(rates: Option<&str>) -> bool {
+    rates.is_some_and(|rates| !rates.trim().is_empty())
+}
+
+/// Retain authored assumptions before replay materialization fills capacity and
+/// converts the Python wrapper into scheduler arguments. Defer enforcement until
+/// the trace is known to be agentic so legacy standard replay keeps its defaults.
+fn agentic_speculation_assumptions(
+    engines: &[(&str, Option<&MockEngineArgs>)],
+) -> Result<(), String> {
+    for (role, engine) in engines {
+        let Some(engine) = engine else { continue };
+        let args = &engine.inner;
+        let canonical_speculation = args
+            .ais_perf_config
+            .as_ref()
+            .and_then(|config| config.get("speculation"))
+            .is_some_and(|speculation| !speculation.is_null());
+        if args.ais_nextn.unwrap_or(0) == 0 && !canonical_speculation {
+            continue;
+        }
+        if !engine.num_gpu_blocks_explicit || args.num_gpu_blocks == 0 {
+            return Err(format!(
+                "agentic speculation requires explicitly configured positive num_gpu_blocks for {role}"
+            ));
+        }
+        if !engine.ais_nextn_accept_rates_explicit
+            || !has_explicit_accept_rates(args.ais_nextn_accept_rates.as_deref())
+        {
+            return Err(format!(
+                "agentic speculation requires explicit ais_nextn_accept_rates for {role}; acceptance must be an authored assumption"
+            ));
+        }
+        if args.ais_perf_config.is_none() {
+            return Err(format!(
+                "agentic speculation requires an AIS timing configuration for {role}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn replay_canonical_path(path: &Path) -> Option<PathBuf> {
@@ -896,6 +951,21 @@ pub fn run_mocker_trace_replay(
             "capture_per_request only supports replay_mode='offline'",
         ));
     }
+    let trace_format = parse_trace_file_format(trace_format)?;
+    let known_agentic = matches!(
+        trace_format,
+        TraceFileFormat::AgenticMooncake | TraceFileFormat::Weka
+    );
+    let agentic_speculation = agentic_speculation_assumptions(&[
+        ("aggregated", extra_engine_args.as_ref()),
+        ("prefill", prefill_engine_args.as_ref()),
+        ("decode", decode_engine_args.as_ref()),
+    ]);
+    if known_agentic {
+        agentic_speculation
+            .as_ref()
+            .map_err(|error| PyValueError::new_err(error.clone()))?;
+    }
     let args_selection = load_replay_args_selection(
         py,
         extra_engine_args,
@@ -906,7 +976,6 @@ pub fn run_mocker_trace_replay(
         num_decode_workers,
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
-    let trace_format = parse_trace_file_format(trace_format)?;
     let weka_options =
         parse_weka_import_options(trace_format, weka_nested_timestamp_basis).map_err(to_pyerr)?;
     let execution_model = match execution_model {
@@ -1027,6 +1096,9 @@ pub fn run_mocker_trace_replay(
             };
             if matches!(&trace, DynamoRequestTrace::Agentic(_)) && execution_model.is_none() {
                 anyhow::bail!("agentic execution requires a configured target model");
+            }
+            if matches!(&trace, DynamoRequestTrace::Agentic(_)) && !known_agentic {
+                agentic_speculation.map_err(anyhow::Error::msg)?;
             }
             return run_loaded_dynamo_request_trace(
                 args_selection,
@@ -2044,6 +2116,16 @@ fn materialize_replay_mocker_args(
         .map_err(|error| PyException::new_err(error.to_string()))?;
     if let Some(config) = args.ais_perf_config.as_ref() {
         if !extra_args.num_gpu_blocks_explicit() {
+            if config
+                .get("speculation")
+                .and_then(|spec| spec.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind != "ngram")
+            {
+                return Err(PyValueError::new_err(
+                    "speculation requires explicitly configured positive num_gpu_blocks",
+                ));
+            }
             let kwargs = pyo3::types::PyDict::new(py);
             kwargs.set_item("block_size", args.block_size)?;
             kwargs.set_item(
@@ -2069,7 +2151,7 @@ fn materialize_replay_mocker_args(
                 )?
                 .extract()?;
         }
-        let callback = create_ais_callback(py, config)?;
+        let callback = create_ais_callback(py, config, &mut args.ais_nextn)?;
         args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
     }
     Ok(args)

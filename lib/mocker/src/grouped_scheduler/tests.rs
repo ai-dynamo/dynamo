@@ -587,6 +587,7 @@ async fn synthetic_midpass_kv_is_deferred_until_completion_before_fpm() {
                 result: CommandResult::Applied,
                 lifecycle_events: Vec::new(),
                 kv_events: vec![KvEvent {
+                    tier: aisimulate_core::engine::KvEventTier::Device,
                     event_id: 1,
                     dp_rank: 0,
                     data: KvEventData::Removed {

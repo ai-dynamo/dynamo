@@ -102,6 +102,7 @@ mod tests {
         blocks: &[(u64, u64, &[u32])],
     ) -> KvEvent {
         KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id,
             dp_rank,
             data: KvEventData::Stored(StoredBlocks {
@@ -143,6 +144,7 @@ mod tests {
         assert_eq!(token_ids, Some(vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]]));
 
         let (event, token_ids) = dynamo_kv_event(KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id: 18,
             dp_rank: 3,
             data: KvEventData::Removed {
@@ -193,6 +195,7 @@ mod tests {
         assert_eq!(matches.scores.get(&worker), Some(&2));
 
         let removed = dynamo_kv_event(KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id: 3,
             dp_rank: 3,
             data: KvEventData::Removed {
