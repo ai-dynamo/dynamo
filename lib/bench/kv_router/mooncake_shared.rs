@@ -237,6 +237,24 @@ pub(crate) struct MergedMooncakeBenchmark {
     block_size: u32,
 }
 
+#[allow(dead_code)]
+impl MergedMooncakeBenchmark {
+    pub(crate) fn from_parts(worker_traces: Vec<Vec<WorkerTrace>>, block_size: u32) -> Self {
+        Self {
+            worker_traces: WorkerTimelines::new(worker_traces),
+            block_size,
+        }
+    }
+
+    pub(crate) fn worker_traces(&self) -> std::slice::Iter<'_, Vec<WorkerTrace>> {
+        self.worker_traces.iter()
+    }
+
+    pub(crate) fn block_size(&self) -> u32 {
+        self.block_size
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct MooncakeTraceTotals {
     pub(crate) requests: usize,

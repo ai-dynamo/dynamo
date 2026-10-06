@@ -17,8 +17,8 @@ use dynamo_kv_router::protocols::KvCacheEventData;
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
 
 use super::mooncake_shared::{
-    PreparedMooncakeBenchmark, WarmupEvent, WorkerTraceEntry, merge_worker_traces,
-    prepare_scaled_benchmark_global,
+    MergedMooncakeBenchmark, PreparedMooncakeBenchmark, WarmupEvent, WorkerTraceEntry,
+    merge_worker_traces, prepare_scaled_benchmark_global,
 };
 use super::scaling_diag::PrepTimings;
 
@@ -58,14 +58,78 @@ impl AgenticEngine {
     }
 }
 
-/// Load the pool (failing closed on an expected SHA-256), capture, merge, and rescale.
-pub(crate) async fn prepare_agentic_benchmark(
+/// [`prepare_agentic_benchmark`] through an on-disk corpus cache: when `cache` exists it is
+/// loaded (its key must equal `key`, and its content digest must verify) instead of
+/// re-capturing; otherwise the capture runs and, if a cache path is given, is written there
+/// before the per-trial rescale. Returns the agentic provenance as JSON.
+pub(crate) async fn prepare_agentic_benchmark_cached(
     pool_path: &Path,
     expected_pool_sha256: Option<&str>,
     config: &AgenticCorpusConfig,
     engine: AgenticEngine,
     benchmark_duration_ms: u64,
-) -> anyhow::Result<(PreparedMooncakeBenchmark, PrepTimings, AgenticPrepReport)> {
+    cache: Option<&Path>,
+    key: serde_json::Value,
+) -> anyhow::Result<(PreparedMooncakeBenchmark, PrepTimings, serde_json::Value)> {
+    let mut timings = PrepTimings::default();
+    if let Some(path) = cache.filter(|path| path.exists()) {
+        let started = Instant::now();
+        let (merged, warmup_events, mut report, digest) = corpus_cache::read(path, &key)?;
+        timings.trace_load_ms = started.elapsed().as_secs_f64() * 1e3;
+        let started = Instant::now();
+        let mut prepared = prepare_scaled_benchmark_global(merged, benchmark_duration_ms);
+        prepared.warmup_events = warmup_events;
+        check_worker_order(&prepared)?;
+        report["merged_corpus_digest"] = prepared_corpus_digest(&prepared).into();
+        report["corpus_cache"] = serde_json::json!({
+            "path": path.display().to_string(),
+            "digest": digest,
+            "loaded": true,
+            "load_ms": timings.trace_load_ms,
+        });
+        timings.merge_and_rescale_ms = started.elapsed().as_secs_f64() * 1e3;
+        return Ok((prepared, timings, report));
+    }
+    let (merged, warmup_events, mut report, capture_timings) =
+        capture_agentic(pool_path, expected_pool_sha256, config, engine).await?;
+    timings = capture_timings;
+    let cache_json = match cache {
+        Some(path) => {
+            let started = Instant::now();
+            let report_json = serde_json::to_value(&report)?;
+            let digest = corpus_cache::write(path, &key, &report_json, &merged, &warmup_events)?;
+            serde_json::json!({
+                "path": path.display().to_string(),
+                "digest": digest,
+                "loaded": false,
+                "write_ms": started.elapsed().as_secs_f64() * 1e3,
+            })
+        }
+        None => serde_json::Value::Null,
+    };
+    let started = Instant::now();
+    let mut prepared = prepare_scaled_benchmark_global(merged, benchmark_duration_ms);
+    prepared.warmup_events = warmup_events;
+    check_worker_order(&prepared)?;
+    report.merged_corpus_digest = prepared_corpus_digest(&prepared);
+    timings.merge_and_rescale_ms += started.elapsed().as_secs_f64() * 1e3;
+    let mut report = serde_json::to_value(&report)?;
+    report["corpus_cache"] = cache_json;
+    Ok((prepared, timings, report))
+}
+
+/// Load the pool (failing closed on an expected SHA-256), capture, and merge (no rescale).
+async fn capture_agentic(
+    pool_path: &Path,
+    expected_pool_sha256: Option<&str>,
+    config: &AgenticCorpusConfig,
+    engine: AgenticEngine,
+) -> anyhow::Result<(
+    MergedMooncakeBenchmark,
+    Vec<WarmupEvent>,
+    AgenticPrepReport,
+    PrepTimings,
+)> {
     let mut timings = PrepTimings::default();
     let started = Instant::now();
     let (pool, pool_sha256) = AgenticPool::read(pool_path)?;
@@ -87,22 +151,36 @@ pub(crate) async fn prepare_agentic_benchmark(
         nested_timestamp_basis: pool.nested_timestamp_basis.clone(),
         ..AgenticPrepReport::default()
     };
-
     let started = Instant::now();
     let engine_args = engine.mock_engine_args()?;
     report.engine_type = if engine.sglang { "sglang" } else { "vllm" }.to_string();
     let (artifacts, warmups) =
         generate_agentic_artifacts(Arc::new(pool), config, engine_args, &mut report).await?;
     timings.simulation_ms = started.elapsed().as_secs_f64() * 1e3;
-
     let started = Instant::now();
     let warmup_events = merge_warmup_events(warmups);
     let merged = merge_worker_traces(artifacts, engine.block_size)?;
+    timings.merge_and_rescale_ms = started.elapsed().as_secs_f64() * 1e3;
+    Ok((merged, warmup_events, report, timings))
+}
+
+/// Load the pool (failing closed on an expected SHA-256), capture, merge, and rescale.
+#[allow(dead_code)]
+pub(crate) async fn prepare_agentic_benchmark(
+    pool_path: &Path,
+    expected_pool_sha256: Option<&str>,
+    config: &AgenticCorpusConfig,
+    engine: AgenticEngine,
+    benchmark_duration_ms: u64,
+) -> anyhow::Result<(PreparedMooncakeBenchmark, PrepTimings, AgenticPrepReport)> {
+    let (merged, warmup_events, mut report, mut timings) =
+        capture_agentic(pool_path, expected_pool_sha256, config, engine).await?;
+    let started = Instant::now();
     let mut prepared = prepare_scaled_benchmark_global(merged, benchmark_duration_ms);
     prepared.warmup_events = warmup_events;
     check_worker_order(&prepared)?;
     report.merged_corpus_digest = prepared_corpus_digest(&prepared);
-    timings.merge_and_rescale_ms = started.elapsed().as_secs_f64() * 1e3;
+    timings.merge_and_rescale_ms += started.elapsed().as_secs_f64() * 1e3;
     Ok((prepared, timings, report))
 }
 
@@ -217,4 +295,236 @@ pub(crate) fn prepared_corpus_digest(prepared: &PreparedMooncakeBenchmark) -> St
         }
     }
     format!("{:016x}", hasher.digest())
+}
+
+/// Binary corpus cache: the merged, not yet rescaled per-worker timelines plus the warm-up
+/// prefix and the capture provenance. Lookups are raw little-endian u64 arrays; KV events are
+/// MessagePack. An xxh3 digest of everything after the magic is stored as the trailer.
+mod corpus_cache {
+    use std::io::{BufReader, BufWriter, Read, Write};
+    use std::path::Path;
+
+    use anyhow::{Context, ensure};
+    use dynamo_kv_router::protocols::{KvCacheEvent, LocalBlockHash, StorageTier};
+    use xxhash_rust::xxh3::Xxh3;
+
+    use super::super::mooncake_shared::{
+        MergedMooncakeBenchmark, WarmupEvent, WorkerTrace, WorkerTraceEntry,
+    };
+
+    const MAGIC: &[u8; 8] = b"AGCORPC1";
+
+    struct Writer<W: Write> {
+        inner: W,
+        hasher: Xxh3,
+    }
+
+    impl<W: Write> Writer<W> {
+        fn put(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.hasher.update(bytes);
+            self.inner.write_all(bytes)
+        }
+        fn u64(&mut self, value: u64) -> std::io::Result<()> {
+            self.put(&value.to_le_bytes())
+        }
+        fn blob(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.u64(bytes.len() as u64)?;
+            self.put(bytes)
+        }
+    }
+
+    struct Reader<R: Read> {
+        inner: R,
+        hasher: Xxh3,
+    }
+
+    impl<R: Read> Reader<R> {
+        fn take(&mut self, bytes: &mut [u8]) -> std::io::Result<()> {
+            self.inner.read_exact(bytes)?;
+            self.hasher.update(bytes);
+            Ok(())
+        }
+        fn u64(&mut self) -> std::io::Result<u64> {
+            let mut bytes = [0u8; 8];
+            self.take(&mut bytes)?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+        fn blob(&mut self) -> anyhow::Result<Vec<u8>> {
+            let len = usize::try_from(self.u64()?)?;
+            ensure!(
+                len < (1 << 34),
+                "corpus cache blob length {len} is implausible"
+            );
+            let mut bytes = vec![0u8; len];
+            self.take(&mut bytes)?;
+            Ok(bytes)
+        }
+    }
+
+    fn encode_event(event: &KvCacheEvent, tier: StorageTier) -> anyhow::Result<Vec<u8>> {
+        Ok(rmp_serde::to_vec(&(event, tier))?)
+    }
+
+    fn decode_event(bytes: &[u8]) -> anyhow::Result<(KvCacheEvent, StorageTier)> {
+        Ok(rmp_serde::from_slice(bytes)?)
+    }
+
+    /// Write the cache atomically (temp file + rename) and return its hex digest.
+    pub(super) fn write(
+        path: &Path,
+        key: &serde_json::Value,
+        report: &serde_json::Value,
+        merged: &MergedMooncakeBenchmark,
+        warmup: &[WarmupEvent],
+    ) -> anyhow::Result<String> {
+        let tmp = path.with_extension("partial");
+        let file = std::fs::File::create(&tmp)
+            .with_context(|| format!("creating corpus cache {}", tmp.display()))?;
+        let mut inner = BufWriter::with_capacity(1 << 24, file);
+        inner.write_all(MAGIC)?;
+        let mut out = Writer {
+            inner,
+            hasher: Xxh3::new(),
+        };
+        out.blob(&serde_json::to_vec(
+            &serde_json::json!({ "key": key, "report": report }),
+        )?)?;
+        out.u64(u64::from(merged.block_size()))?;
+        out.u64(merged.worker_traces().len() as u64)?;
+        let mut hashes = Vec::new();
+        for trace in merged.worker_traces() {
+            out.u64(trace.len() as u64)?;
+            for entry in trace {
+                out.u64(entry.timestamp_us)?;
+                match &entry.entry {
+                    WorkerTraceEntry::Request(request) => {
+                        out.u64(0)?;
+                        out.u64(request.len() as u64)?;
+                        hashes.clear();
+                        for hash in request {
+                            hashes.extend_from_slice(&hash.0.to_le_bytes());
+                        }
+                        out.put(&hashes)?;
+                    }
+                    WorkerTraceEntry::Event {
+                        event,
+                        storage_tier,
+                    } => {
+                        out.u64(1)?;
+                        out.blob(&encode_event(event, *storage_tier)?)?;
+                    }
+                }
+            }
+        }
+        out.u64(warmup.len() as u64)?;
+        for event in warmup {
+            out.u64(event.worker as u64)?;
+            out.blob(&encode_event(&event.event, event.storage_tier)?)?;
+        }
+        let digest = out.hasher.digest();
+        out.inner.write_all(&digest.to_le_bytes())?;
+        out.inner.flush()?;
+        drop(out);
+        std::fs::rename(&tmp, path)?;
+        Ok(format!("{digest:016x}"))
+    }
+
+    /// Read a cache, failing closed on a key or digest mismatch.
+    pub(super) fn read(
+        path: &Path,
+        key: &serde_json::Value,
+    ) -> anyhow::Result<(
+        MergedMooncakeBenchmark,
+        Vec<WarmupEvent>,
+        serde_json::Value,
+        String,
+    )> {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("opening corpus cache {}", path.display()))?;
+        let mut inner = BufReader::with_capacity(1 << 24, file);
+        let mut magic = [0u8; 8];
+        inner.read_exact(&mut magic)?;
+        ensure!(&magic == MAGIC, "{} is not a corpus cache", path.display());
+        let mut input = Reader {
+            inner,
+            hasher: Xxh3::new(),
+        };
+        let header: serde_json::Value = serde_json::from_slice(&input.blob()?)?;
+        ensure!(
+            &header["key"] == key,
+            "corpus cache key mismatch: cache {} vs requested {}",
+            header["key"],
+            key
+        );
+        let block_size = u32::try_from(input.u64()?)?;
+        let workers = usize::try_from(input.u64()?)?;
+        let mut traces = Vec::with_capacity(workers);
+        let mut bytes = Vec::new();
+        for _ in 0..workers {
+            let len = usize::try_from(input.u64()?)?;
+            let mut trace = Vec::with_capacity(len);
+            for _ in 0..len {
+                let timestamp_us = input.u64()?;
+                let entry = match input.u64()? {
+                    0 => {
+                        let count = usize::try_from(input.u64()?)?;
+                        bytes.resize(count * 8, 0);
+                        input.take(&mut bytes)?;
+                        WorkerTraceEntry::Request(
+                            bytes
+                                .chunks_exact(8)
+                                .map(|chunk| {
+                                    LocalBlockHash(u64::from_le_bytes(chunk.try_into().unwrap()))
+                                })
+                                .collect(),
+                        )
+                    }
+                    1 => {
+                        let (event, storage_tier) = decode_event(&input.blob()?)?;
+                        WorkerTraceEntry::Event {
+                            event,
+                            storage_tier,
+                        }
+                    }
+                    tag => anyhow::bail!("corpus cache entry tag {tag} is unknown"),
+                };
+                trace.push(WorkerTrace {
+                    entry,
+                    timestamp_us,
+                });
+            }
+            traces.push(trace);
+        }
+        let warmup_len = usize::try_from(input.u64()?)?;
+        let mut warmup = Vec::with_capacity(warmup_len);
+        for _ in 0..warmup_len {
+            let worker = usize::try_from(input.u64()?)?;
+            let (event, storage_tier) = decode_event(&input.blob()?)?;
+            warmup.push(WarmupEvent {
+                worker,
+                event,
+                storage_tier,
+            });
+        }
+        let digest = input.hasher.digest();
+        let mut trailer = [0u8; 8];
+        input.inner.read_exact(&mut trailer)?;
+        ensure!(
+            u64::from_le_bytes(trailer) == digest,
+            "corpus cache {} failed its digest check",
+            path.display()
+        );
+        let mut rest = [0u8; 1];
+        ensure!(
+            input.inner.read(&mut rest)? == 0,
+            "corpus cache {} has trailing bytes",
+            path.display()
+        );
+        Ok((
+            MergedMooncakeBenchmark::from_parts(traces, block_size),
+            warmup,
+            header["report"].clone(),
+            format!("{digest:016x}"),
+        ))
+    }
 }

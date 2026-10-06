@@ -10,11 +10,9 @@ mod mooncake_shared;
 #[path = "scaling_diag.rs"]
 mod scaling_diag;
 
-use agentic_prep::{AgenticEngine, prepare_agentic_benchmark};
+use agentic_prep::{AgenticEngine, prepare_agentic_benchmark_cached};
 use clap::{Parser, Subcommand, ValueEnum};
-use dynamo_bench::kv_router_common::agentic::{
-    AgenticCorpusConfig, AgenticPool, AgenticPrepReport,
-};
+use dynamo_bench::kv_router_common::agentic::{AgenticCorpusConfig, AgenticPool};
 use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
@@ -253,6 +251,11 @@ struct Args {
     /// its KV events are applied untimed before the measured window.
     #[clap(long, default_value = "0")]
     agentic_warmup_sim_ms: u64,
+
+    /// Agentic corpus cache: loaded instead of re-capturing when it exists (its key must
+    /// match these arguments), otherwise written after the capture.
+    #[clap(long)]
+    agentic_corpus_cache: Option<String>,
 
     /// Allow closed-loop lanes to run out of plays before the cap (plumbing smokes only).
     #[clap(long)]
@@ -713,7 +716,7 @@ fn benchmark_config(args: &Args, benchmark_duration_ms: u64) -> MooncakeBenchmar
 type PreparedInput = (
     PreparedMooncakeBenchmark,
     PrepTimings,
-    Option<AgenticPrepReport>,
+    Option<serde_json::Value>,
 );
 
 async fn prepare_benchmark(
@@ -725,17 +728,34 @@ async fn prepare_benchmark(
         return Ok(None);
     };
     if args.workload == Workload::Agentic {
-        let (prepared, timings, report) = prepare_agentic_benchmark(
+        let config = agentic_corpus_config(args)?;
+        let engine = AgenticEngine {
+            num_gpu_blocks: args.common.num_gpu_blocks,
+            block_size: args.common.block_size,
+            speedup_ratio: args.agentic_speedup_ratio,
+            sglang: args.agentic_engine == "sglang",
+        };
+        let key = serde_json::json!({
+            "pool_sha256": args.agentic_pool_sha256,
+            "engine": args.agentic_engine,
+            "block_size": engine.block_size,
+            "num_gpu_blocks": engine.num_gpu_blocks,
+            "speedup_ratio": engine.speedup_ratio,
+            "config": config,
+        });
+        if args.agentic_corpus_cache.is_some() && args.agentic_pool_sha256.is_none() {
+            anyhow::bail!("--agentic-corpus-cache requires --agentic-pool-sha256");
+        }
+        let (prepared, timings, report) = prepare_agentic_benchmark_cached(
             std::path::Path::new(path),
             args.agentic_pool_sha256.as_deref(),
-            &agentic_corpus_config(args)?,
-            AgenticEngine {
-                num_gpu_blocks: args.common.num_gpu_blocks,
-                block_size: args.common.block_size,
-                speedup_ratio: args.agentic_speedup_ratio,
-                sglang: args.agentic_engine == "sglang",
-            },
+            &config,
+            engine,
             benchmark_duration_ms,
+            args.agentic_corpus_cache
+                .as_deref()
+                .map(std::path::Path::new),
+            key,
         )
         .await?;
         return Ok(Some((prepared, timings, Some(report))));
@@ -762,10 +782,8 @@ async fn prepare_benchmark(
     Ok(Some((prepared, timings, None)))
 }
 
-fn agentic_json(report: Option<AgenticPrepReport>) -> anyhow::Result<Option<serde_json::Value>> {
-    report
-        .map(|report| serde_json::to_value(report).map_err(Into::into))
-        .transpose()
+fn agentic_json(report: Option<serde_json::Value>) -> anyhow::Result<Option<serde_json::Value>> {
+    Ok(report)
 }
 
 #[derive(serde::Serialize)]

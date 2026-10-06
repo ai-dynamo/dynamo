@@ -21,7 +21,9 @@ mod scaling_diag;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agentic_prep::{AgenticEngine, check_worker_order, prepare_agentic_benchmark};
+use agentic_prep::{
+    AgenticEngine, check_worker_order, prepare_agentic_benchmark, prepare_agentic_benchmark_cached,
+};
 use dynamo_bench::kv_router_common::agentic::{
     AgenticCorpusConfig, AgenticPool, AgenticPrepReport,
 };
@@ -366,4 +368,58 @@ async fn agentic_scores_match_the_reference_for_crtc_and_nested_map() {
         .await
         .unwrap();
     assert!(report.pass, "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn corpus_cache_round_trips_and_rejects_a_different_key() {
+    let pool = PoolFile::new("cache");
+    let cache = std::env::temp_dir().join(format!("agentic-cache-{}.bin", std::process::id()));
+    let _ = std::fs::remove_file(&cache);
+    let config = AgenticCorpusConfig {
+        warmup_sim_ms: 10_000,
+        ..config()
+    };
+    let key = serde_json::json!({"case": "round-trip"});
+    let run = |window_ms: u64, key: serde_json::Value| {
+        prepare_agentic_benchmark_cached(
+            &pool.0,
+            None,
+            &config,
+            SGLANG_PAGE1,
+            window_ms,
+            Some(&cache),
+            key,
+        )
+    };
+    let (written, _, written_report) = run(10_000, key.clone()).await.unwrap();
+    let (loaded, _, loaded_report) = run(10_000, key.clone()).await.unwrap();
+    assert_eq!(written_report["corpus_cache"]["loaded"], false);
+    assert_eq!(loaded_report["corpus_cache"]["loaded"], true);
+    assert_eq!(
+        written_report["corpus_cache"]["digest"],
+        loaded_report["corpus_cache"]["digest"]
+    );
+    assert_eq!(
+        written_report["merged_corpus_digest"],
+        loaded_report["merged_corpus_digest"]
+    );
+    assert_eq!(written.warmup_events.len(), loaded.warmup_events.len());
+    assert!(!loaded.warmup_events.is_empty());
+    assert_eq!(
+        written.totals.total_block_ops(),
+        loaded.totals.total_block_ops()
+    );
+    // A different window rescales the cached timeline instead of re-capturing.
+    let (_, _, rescaled) = run(5_000, key).await.unwrap();
+    assert_eq!(rescaled["corpus_cache"]["loaded"], true);
+    assert_ne!(
+        rescaled["merged_corpus_digest"],
+        loaded_report["merged_corpus_digest"]
+    );
+    assert!(
+        run(10_000, serde_json::json!({"case": "other"}))
+            .await
+            .is_err()
+    );
+    let _ = std::fs::remove_file(&cache);
 }
