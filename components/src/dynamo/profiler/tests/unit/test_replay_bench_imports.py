@@ -27,7 +27,6 @@ def bench_without_aisimulate(monkeypatch):
     attempts = []
 
     def without_aisimulate(name, *args, **kwargs):
-        """Record and reject AISimulate imports, including cached modules."""
         if name.split(".")[0] in {"aisimulate", "aisimulate_core"}:
             attempts.append(name)
             raise ModuleNotFoundError("AISimulate is unavailable", name=name)
@@ -62,7 +61,6 @@ def bench_without_aisimulate(monkeypatch):
 
 
 def test_aic_comparison_requires_aisimulate_at_call_time(bench_without_aisimulate):
-    """Importing is safe; invoking an AIC comparison requires AISimulate."""
     bench, attempts = bench_without_aisimulate
     assert attempts == []
     spec = SimpleNamespace(
