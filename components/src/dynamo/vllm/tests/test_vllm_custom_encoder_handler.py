@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import torch
 
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm import handlers
+from dynamo.vllm.args import Config
 from dynamo.vllm.handlers import DecodeWorkerHandler
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     Qwen3VLImageEncoding,
@@ -62,6 +64,54 @@ def _qwen_adapter():
         ),
         SimpleNamespace(),
     )
+
+
+@pytest.mark.parametrize("model", ["ngc://example/team/model:1", "example/model"])
+def test_multimodal_handler_loads_model_source_and_preserves_identity(
+    monkeypatch, tmp_path, model
+):
+    """NGC consumers load resolved files while HF and public names stay unchanged."""
+    config = Config()
+    config.model = model
+    config.engine_args = SimpleNamespace(
+        model=str(tmp_path),
+        load_format="auto",
+        trust_remote_code=False,
+        enable_prompt_embeds=True,
+    )
+    config.custom_encoder_class = f"{__name__}._Backend"
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        get_hidden_size=lambda: 4,
+        is_multimodal_model=False,
+    )
+    engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_external_lb=True, data_parallel_rank=0
+            )
+        )
+    )
+    processor = Mock()
+    encoder = Mock()
+    monkeypatch.setattr(handlers, "VllmEngineMonitor", Mock())
+    monkeypatch.setattr(handlers, "VllmMultimodalRequestProcessor", processor)
+    monkeypatch.setattr(handlers, "AsyncVisionEncoder", Mock(return_value=encoder))
+
+    handler = DecodeWorkerHandler(
+        runtime=Mock(),
+        config=config,
+        engine=engine,
+        default_sampling_params=None,
+        model_config=model_config,
+        enable_multimodal=True,
+    )
+
+    expected_source = str(tmp_path) if model.startswith("ngc://") else model
+    assert processor.call_args.kwargs["model"] == expected_source
+    encoder.load.assert_called_once_with(expected_source)
+    assert handler._served_model_name == model
+    assert config.model == model
 
 
 async def test_custom_encoder_handler_returns_adapter_prepared_prompt():

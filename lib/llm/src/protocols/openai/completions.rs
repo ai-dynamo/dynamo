@@ -49,6 +49,11 @@ pub struct NvCreateCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
 
+    /// Preserve matched stop strings and stop/EOS tokens in raw completion text.
+    /// Special-token decoding is still controlled by `skip_special_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_stop_trim: Option<bool>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(
         flatten,
@@ -449,6 +454,10 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
         self.return_tokens_as_token_ids
     }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
+        self.no_stop_trim
+    }
 }
 
 /// Implements `ValidateRequest` for `NvCreateCompletionRequest`,
@@ -509,6 +518,33 @@ impl ValidateRequest for NvCreateCompletionRequest {
 #[cfg(test)]
 mod conversion_error_tests {
     use super::*;
+
+    #[test]
+    fn no_stop_trim_is_validated_and_carried_to_the_decoder() {
+        for no_stop_trim in [None, Some(false), Some(true)] {
+            let mut body =
+                serde_json::json!({"model": "test", "prompt": "hi", "skip_special_tokens": false});
+            if let Some(value) = no_stop_trim {
+                body["no_stop_trim"] = value.into();
+            }
+            let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+            ValidateRequest::validate(&request).unwrap();
+            let options = request.extract_output_options().unwrap();
+            assert_eq!(options.no_stop_trim, no_stop_trim);
+            assert_eq!(options.skip_special_tokens, Some(false));
+            let round_trip: common::OutputOptions =
+                serde_json::from_value(serde_json::to_value(options).unwrap()).unwrap();
+            assert_eq!(round_trip.no_stop_trim, no_stop_trim);
+        }
+        for value in [serde_json::json!("true"), serde_json::json!(1)] {
+            assert!(
+                serde_json::from_value::<NvCreateCompletionRequest>(serde_json::json!({
+                    "model": "test", "prompt": "hi", "no_stop_trim": value
+                }))
+                .is_err()
+            );
+        }
+    }
 
     /// `anyhow!("{e}")` builds a fresh error with no source, which drops the
     /// `DynamoError` and sends a caller error to `ErrorMessage::from_anyhow` as a 500.
