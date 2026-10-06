@@ -29,7 +29,6 @@ switchyard-translation = "=0.3.0"
 anyhow = "1"
 axum = "0.8"
 http = "1"
-serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net"] }
 tonic = "0.13.1"
