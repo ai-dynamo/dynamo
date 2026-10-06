@@ -37,8 +37,8 @@ from dynamo.replay.api import (
 )
 from dynamo.replay.config import (
     lower_upstream_engine_args,
-    mtp_config_type,
     native_engine_args_payload,
+    speculation_config_adapter,
     validate_speculation_payload,
 )
 
@@ -79,7 +79,7 @@ class DynamoReplayRunnerFactory:
         """Advertise the backend/topology and Dynamo hook support."""
 
         engine_capabilities = EngineReplayRunnerFactory().capabilities()
-        mtp_supported = mtp_config_type(required=False) is not None
+        speculation_supported = speculation_config_adapter(required=False) is not None
         return _DynamoRunnerCapabilities(
             # Runner-owned constant: do not inherit the consumer package's default,
             # otherwise an old Dynamo wheel can self-certify against a newer spec.
@@ -94,8 +94,8 @@ class DynamoReplayRunnerFactory:
             supports_disaggregated_attention_dp=(
                 engine_capabilities.supports_disaggregated_attention_dp
             ),
-            supports_mtp_expected_acceptance=mtp_supported,
-            supports_agentic_speculative_decoding=mtp_supported,
+            supports_mtp_expected_acceptance=speculation_supported,
+            supports_agentic_speculative_decoding=speculation_supported,
             supported_execution_modes=("offline",),
             supported_trace_formats=(
                 "mooncake",

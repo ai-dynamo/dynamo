@@ -2022,6 +2022,7 @@ class MockEngineArgs:
         trtllm: Optional[TrtllmArgs] = None,
         max_model_len: Optional[int] = None,
         ais_perf_config: Optional[Mapping[str, Any]] = None,
+        ais_verify_width: Optional[int] = None,
     ) -> None:
         ...
 
@@ -2122,6 +2123,9 @@ class MockEngineArgs:
     def ais_nextn(self) -> Optional[int]: ...
 
     @property
+    def ais_verify_width(self) -> Optional[int]: ...
+
+    @property
     def ais_nextn_accept_rates(self) -> Optional[str]: ...
 
     @property
@@ -2170,6 +2174,7 @@ class MockEngineArgs:
         free_gpu_memory_fraction: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
+        ais_verify_width: Optional[int] = None,
     ) -> "MockEngineArgs": ...
 
 class WorkerType:

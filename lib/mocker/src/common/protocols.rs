@@ -442,6 +442,7 @@ struct MockEngineArgsSerde {
     #[serde(rename = "tensor_parallel_size")]
     ais_tp_size: OptionalConfigValue<usize>,
     ais_nextn: OptionalConfigValue<usize>,
+    ais_verify_width: OptionalConfigValue<usize>,
     ais_nextn_accept_rates: OptionalConfigValue<String>,
     ais_mtp_seed: OptionalConfigValue<u64>,
     gpu_memory_utilization: OptionalConfigValue<f64>,
@@ -670,13 +671,18 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub ais_comm_dtype: Option<String>,
 
-    /// MTP/Eagle speculative-decoding draft-token count (1..=5).
+    /// Maximum accepted draft tokens in one speculative round.
     /// The mocker samples accepted drafts while AIS supplies undiscounted
     /// verification-round latency.
     #[builder(default = "None")]
-    #[validate(range(min = 1, max = 5))]
+    #[validate(range(min = 1))]
     #[serde(rename = "ais_nextn")]
     pub ais_nextn: Option<usize>,
+
+    /// Target verification width, independently resolved from accepted progress.
+    #[builder(default = "None")]
+    #[validate(range(min = 2))]
+    pub ais_verify_width: Option<usize>,
 
     /// Conditional acceptance rates for draft tokens, comma-separated.
     /// Entry i is P(draft i accepted | every earlier draft was accepted).
@@ -822,7 +828,12 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
-    if args.ais_nextn.is_none() && args.ais_nextn_accept_rates.is_some() {
+    let canonical_speculation = args
+        .ais_perf_config
+        .as_ref()
+        .and_then(|config| config.get("speculation"))
+        .is_some_and(|speculation| !speculation.is_null());
+    if args.ais_nextn.is_none() && args.ais_nextn_accept_rates.is_some() && !canonical_speculation {
         return Err(mock_engine_args_validation_error(
             "mtp_rates_without_nextn",
             "ais_nextn_accept_rates requires ais_nextn".to_string(),
@@ -1019,6 +1030,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(ais_nextn) = compat.ais_nextn.into_nullable() {
             builder = builder.ais_nextn(ais_nextn);
         }
+        if let Some(width) = compat.ais_verify_width.into_nullable() {
+            builder = builder.ais_verify_width(width);
+        }
         if let Some(ais_nextn_accept_rates) = compat.ais_nextn_accept_rates.into_nullable() {
             builder = builder.ais_nextn_accept_rates(ais_nextn_accept_rates);
         }
@@ -1181,18 +1195,7 @@ impl MockEngineArgs {
             canonical.speculation.is_none() || canonical.nextn == 0,
             "canonical speculation cannot be combined with nextn"
         );
-        let nextn = canonical
-            .speculation
-            .as_ref()
-            .map_or(canonical.nextn, |spec| spec.num_speculative_tokens());
-        let config = serde_json::to_value(canonical)?;
-        anyhow::ensure!(
-            config
-                .pointer("/speculation/kind")
-                .and_then(serde_json::Value::as_str)
-                != Some("ngram"),
-            "Mocker does not implement ngram draft scheduling; use a supported scheduler speculation mode"
-        );
+        let config = serde_json::to_value(&canonical)?;
         let role = match self.worker_type {
             WorkerType::Aggregated => "aggregated",
             WorkerType::Prefill => "prefill",
@@ -1252,24 +1255,23 @@ impl MockEngineArgs {
             );
             self.dp_size = u32::try_from(dp)?;
         }
-        let nextn = usize::try_from(nextn)?;
-        anyhow::ensure!(
-            self.ais_nextn.unwrap_or(0) == 0 || self.ais_nextn == Some(nextn),
-            "canonical nextn conflicts with scheduler ais_nextn"
-        );
-        self.ais_nextn = (nextn != 0).then_some(nextn);
-        if config
-            .pointer("/speculation/kind")
-            .and_then(serde_json::Value::as_str)
-            == Some("mtp")
-        {
+        if canonical.speculation.is_some() {
+            // Geometry is resolved by the canonical model, not duplicated here.
             anyhow::ensure!(
                 self.ais_nextn_accept_rates
                     .as_deref()
                     .is_some_and(|rates| !rates.trim().is_empty()),
-                "canonical MTP requires explicit ais_nextn_accept_rates; acceptance must be an authored assumption"
+                "canonical speculation requires explicit ais_nextn_accept_rates; acceptance must be an authored assumption"
             );
+        } else {
+            let nextn = canonical.nextn as usize;
+            anyhow::ensure!(
+                self.ais_nextn.unwrap_or(0) == 0 || self.ais_nextn == Some(nextn),
+                "canonical nextn conflicts with scheduler ais_nextn"
+            );
+            self.ais_nextn = (nextn != 0).then_some(nextn);
         }
+
         Ok(())
     }
 
@@ -1304,7 +1306,15 @@ impl MockEngineArgs {
     fn validate_config(&mut self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
-        if let Some(nextn) = self.ais_nextn {
+        // Canonical schemes resolve their geometry once during cost-model
+        // construction. Keep authored rates intact until that boundary.
+        let canonical_speculation = self
+            .ais_perf_config
+            .as_ref()
+            .and_then(|config| config.get("speculation"))
+            .is_some_and(|speculation| !speculation.is_null());
+        if let Some(nextn) = self.ais_nextn.filter(|_| !canonical_speculation) {
+            anyhow::ensure!(nextn <= 5, "legacy ais_nextn must be in 1..=5");
             let rates = crate::common::speculative::normalize_conditional_accept_rates(
                 nextn,
                 self.ais_nextn_accept_rates.as_deref(),
@@ -1312,6 +1322,30 @@ impl MockEngineArgs {
             self.ais_nextn_accept_rates =
                 Some(crate::common::speculative::format_accept_rates(&rates));
         }
+        Ok(())
+    }
+
+    /// Apply geometry resolved by the same AIS model that supplies timing.
+    pub fn resolve_speculation(
+        &mut self,
+        speculation: &aisimulate_core::ResolvedSpeculationConfig,
+    ) -> anyhow::Result<()> {
+        let accepted = speculation.max_accepted_draft_tokens as usize;
+        let verify_width = speculation.verify_width as usize;
+        anyhow::ensure!(
+            self.ais_nextn.is_none_or(|depth| depth == accepted)
+                && self
+                    .ais_verify_width
+                    .is_none_or(|width| width == verify_width),
+            "speculative scheduler controls conflict with the resolved AIS scheme"
+        );
+        self.ais_nextn = Some(accepted);
+        self.ais_verify_width = Some(verify_width);
+        let rates = crate::common::speculative::normalize_conditional_accept_rates(
+            accepted,
+            self.ais_nextn_accept_rates.as_deref(),
+        )?;
+        self.ais_nextn_accept_rates = Some(crate::common::speculative::format_accept_rates(&rates));
         Ok(())
     }
 
@@ -1625,49 +1659,46 @@ mod tests {
     }
 
     #[test]
-    fn canonical_mtp_materializes_scheduler_without_rewriting_cost() {
-        let args = MockEngineArgs::from_json_str(
+    fn canonical_scheme_resolves_scheduler_without_rewriting_cost() {
+        let cost = json!({
+            "model": "model", "system": "h200_sxm", "backend": "vllm",
+            "worker_type": "aggregated",
+            "speculation": {
+                "kind": "eagle3", "params": {"tree_shape": [1, 2, 4], "verify_token_budget": 16},
+                "draft_model_path": "draft-revision", "draft_config": {"hidden_size": 128}
+            }
+        });
+        let mut args = MockEngineArgs::from_json_str(
             &json!({
-                "ais_nextn_accept_rates": "1,1,0.4",
-                "ais_mtp_seed": 42,
-                "ais_perf_config": {
-                    "model": "model", "system": "h200_sxm", "backend": "vllm",
-                    "worker_type": "aggregated",
-                    "speculation": {"kind": "mtp", "params": {"num_speculative_tokens": 3}}
-                }
+                "ais_nextn_accept_rates": "1,1,0.4", "ais_mtp_seed": 73,
+                "ais_perf_config": cost,
             })
             .to_string(),
         )
         .unwrap();
-
+        assert_eq!(args.ais_nextn, None);
+        let resolved = aisimulate_core::ResolvedSpeculationConfig {
+            kind: "eagle3".into(),
+            verify_width: 16,
+            max_accepted_draft_tokens: 3,
+            draft_weights_bytes: 1024.0,
+        };
+        args.resolve_speculation(&resolved).unwrap();
         assert_eq!(args.ais_nextn, Some(3));
+        assert_eq!(args.ais_verify_width, Some(16));
         assert_eq!(args.ais_nextn_accept_rates.as_deref(), Some("1,1,0.4"));
-        assert_eq!(args.ais_mtp_seed, 42);
-        let config = args.ais_perf_config.unwrap();
-        assert_eq!(config["speculation"]["kind"], "mtp");
-        assert!(config.get("nextn").is_none());
-    }
-
-    #[test]
-    fn canonical_mtp_rejects_conflicting_scheduler_depth() {
-        let error = MockEngineArgs::from_json_str(
-            &json!({
-                "ais_nextn": 2,
-                "ais_perf_config": {
-                    "model": "model", "system": "h200_sxm", "backend": "vllm",
-                    "worker_type": "aggregated",
-                    "speculation": {"kind": "mtp", "params": {"num_speculative_tokens": 3}}
-                }
-            })
-            .to_string(),
-        )
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("conflicts with scheduler ais_nextn")
-        );
+        assert_eq!(args.ais_mtp_seed, 73);
+        assert_eq!(args.ais_perf_config, Some(cost));
+        for (accepted, verify_width) in [(Some(2), None), (None, Some(4))] {
+            args.ais_nextn = accepted;
+            args.ais_verify_width = verify_width;
+            assert!(
+                args.resolve_speculation(&resolved)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("conflict with the resolved AIS scheme")
+            );
+        }
     }
 
     #[test]
@@ -1686,18 +1717,24 @@ mod tests {
     }
 
     #[test]
-    fn canonical_ngram_remains_unsupported() {
-        let error = MockEngineArgs::from_json_str(
-            &json!({"ais_perf_config": {
+    fn canonical_schemes_preserve_the_complete_cost_identity() {
+        for kind in ["mtp", "ngram", "eagle3", "dflash", "dspark", "draft_model"] {
+            let cost = json!({
                 "model": "model", "system": "h200_sxm", "backend": "vllm",
-                "worker_type": "aggregated",
-                "speculation": {"kind": "ngram", "params": {"num_speculative_tokens": 3}}
-            }})
-            .to_string(),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("does not implement ngram"));
+                "worker_type": "aggregated", "speculation": {
+                    "kind": kind, "params": {"num_speculative_tokens": 3},
+                    "draft_model_path": "draft-revision", "draft_config": {"hidden_size": 128}
+                }
+            });
+            let args = MockEngineArgs::from_json_str(
+                &json!({
+                    "ais_perf_config": cost, "ais_nextn_accept_rates": "1,1,0.4",
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(args.ais_perf_config, Some(cost));
+        }
     }
 
     #[test]

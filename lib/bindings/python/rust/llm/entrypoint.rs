@@ -812,6 +812,9 @@ async fn select_engine(
 
             if let Some(config) = mocker_args.ais_perf_config.as_ref() {
                 let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
+                if let Some(speculation) = callback.speculation_metadata() {
+                    mocker_args.resolve_speculation(speculation)?;
+                }
                 mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
             }
 

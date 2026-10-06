@@ -17,7 +17,7 @@ use std::time::Duration;
 #[cfg(feature = "ais-forward-pass")]
 pub(super) struct RustAisCallback {
     model: ForwardPassPerfModel,
-    nextn: u32,
+    verify_width: u32,
 }
 
 #[cfg(feature = "ais-forward-pass")]
@@ -53,12 +53,12 @@ fn prefill_metrics(
 fn decode_metrics(
     batch_size: usize,
     context: usize,
-    nextn: u32,
+    verify_width: u32,
 ) -> anyhow::Result<ForwardPassMetrics> {
     // FPM counts are already packed. Preserve the former static-engine adapter's
     // verification width explicitly, without applying attention-DP a second time.
     let batch = checked_count(batch_size, "batch size")?
-        .checked_mul(nextn + 1)
+        .checked_mul(verify_width)
         .ok_or_else(|| anyhow::anyhow!("AIS verification batch exceeds u32"))?;
     let context = checked_count(context, "decode context")?;
     Ok(ForwardPassMetrics {
@@ -94,6 +94,10 @@ impl RustAisCallback {
 
 #[cfg(feature = "ais-forward-pass")]
 impl AisCallback for RustAisCallback {
+    fn speculation_metadata(&self) -> Option<&aisimulate_core::ResolvedSpeculationConfig> {
+        self.model.speculation_metadata()
+    }
+
     fn predict_prefill(
         &self,
         batch_size: usize,
@@ -111,7 +115,7 @@ impl AisCallback for RustAisCallback {
             let context = isl
                 .checked_add(step)
                 .ok_or_else(|| anyhow::anyhow!("AIS decode context overflow"))?;
-            total += self.estimate(decode_metrics(batch_size, context, self.nextn)?)?
+            total += self.estimate(decode_metrics(batch_size, context, self.verify_width)?)?
                 * (osl - step).min(stride) as f64;
         }
         Ok(total)
@@ -138,10 +142,8 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
         serde_json::from_value(config.clone()).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid AIS perf config: {e}"))
         })?;
-    let nextn = config
-        .speculation
-        .as_ref()
-        .map_or(config.nextn, |spec| spec.num_speculative_tokens());
+    let legacy_nextn = config.nextn;
+    let has_speculation = config.speculation.is_some() || legacy_nextn > 0;
     let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;
@@ -150,7 +152,10 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
             "AIS estimator is not ready; Router/Mocker requires a ready model because it has no FPM training source",
         ));
     }
-    if nextn > 0
+    let verify_width = model
+        .speculation_metadata()
+        .map_or(legacy_nextn + 1, |speculation| speculation.verify_width);
+    if has_speculation
         && model.provenance().is_some_and(|p| {
             p.selected_estimation_mode == aisimulate_core::EstimationMode::FpmInterpolation
         })
@@ -159,7 +164,10 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
             "AIS canonical FPM queries do not yet support speculative FPM interpolation; use op_level",
         ));
     }
-    Ok(RustAisCallback { model, nextn })
+    Ok(RustAisCallback {
+        model,
+        verify_width,
+    })
 }
 
 #[cfg_attr(not(feature = "ais-forward-pass"), allow(unused_variables))]
@@ -202,16 +210,18 @@ mod tests {
         assert_eq!(prefill.num_prefill_requests, 7);
         assert_eq!(prefill.sum_prefill_tokens, 672);
         assert_eq!(prefill.sum_prefill_kv_tokens, 224);
-        let decode = decode_metrics(7, 129, 2).unwrap().scheduled_requests;
-        assert_eq!(decode.num_decode_requests, 21);
-        assert_eq!(decode.sum_decode_kv_tokens, 2709);
+        for width in [3, 16] {
+            let decode = decode_metrics(7, 129, width).unwrap().scheduled_requests;
+            assert_eq!(decode.num_decode_requests, 7 * width);
+            assert_eq!(decode.sum_decode_kv_tokens, 903 * width);
+        }
     }
 
     #[test]
     fn oversized_scheduler_work_is_rejected_instead_of_wrapping() {
         assert!(prefill_metrics(u32::MAX as usize, 2, 0).is_err());
         assert!(prefill_metrics(u32::MAX as usize, 1, 2).is_err());
-        assert!(decode_metrics(u32::MAX as usize, 1, 1).is_err());
-        assert!(decode_metrics(u32::MAX as usize, 2, 0).is_err());
+        assert!(decode_metrics(u32::MAX as usize, 1, 2).is_err());
+        assert!(decode_metrics(u32::MAX as usize, 2, 1).is_err());
     }
 }

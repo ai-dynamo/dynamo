@@ -865,27 +865,128 @@ def test_mtp_lowering_reuses_acceptance_controls(monkeypatch, selection, expecte
         assert lowered["ais_perf_config"]["nextn"] == 2
         assert "speculation" not in lowered["ais_perf_config"]
     else:
-        assert lowered["ais_perf_config"]["speculation"] == method
+        assert lowered["ais_perf_config"]["speculation"] == (
+            {"kind": "mtp", "params": {"depth": 2}}
+            if selection == "canonical"
+            else method
+        )
+        assert lowered["ais_verify_width"] == 3
 
 
 @pytest.mark.parametrize(
     "raw",
     [
-        {"speculation": {"kind": "ngram"}},
-        {"ais_perf_config": {"speculation": {"kind": "ngram"}}},
+        {"speculation": {"kind": "unknown"}},
         {"aic_nextn": 2, "ais_nextn": 3},
         {"aic_nextn": 2, "aic_nextn_accepted": 1, "aic_nextn_accept_rates": "1,0"},
         {"speculation": {"kind": "mtp"}, "aic_nextn_accepted": 0},
         {"speculation": {"kind": "mtp"}, "ais_mtp_seed": 0},
         {"aic_nextn": False},
+        {"aic_verify_width": False},
+        {"aic_nextn": False, "speculation": {"kind": "mtp"}},
         {"aic_nextn": -1},
     ],
 )
-def test_mtp_lowering_rejects_unsupported_or_conflicting_controls(raw):
+def test_speculation_lowering_rejects_invalid_or_conflicting_controls(raw):
     from dynamo.replay.config import lower_upstream_engine_args
 
     with pytest.raises(ValueError):
         lower_upstream_engine_args(raw)
+
+
+@pytest.mark.parametrize("entry", ["public", "canonical"])
+@pytest.mark.parametrize(
+    "kind,params,accepted,width",
+    [
+        ("mtp", {"depth": 6}, 6, 7),
+        ("ngram", {"num_speculative_tokens": 7}, 7, 8),
+        ("eagle3", {"tree_shape": [1, 2, 4], "verify_token_budget": 16}, 3, 16),
+        ("dflash", {}, 7, 8),
+        ("dspark", {"num_draft_tokens": 7}, 7, 8),
+        ("draft_model", {"num_speculative_tokens": 7}, 7, 8),
+    ],
+)
+def test_generic_lowering_preserves_scheme_identity_and_geometry(
+    monkeypatch, draft_checkpoint, entry, kind, params, accepted, width
+):
+    from dynamo.replay import config
+
+    monkeypatch.setattr(config, "materialize_aic_num_gpu_blocks", lambda raw: dict(raw))
+    path, draft = draft_checkpoint
+    method = {"kind": kind, "params": params}
+    if kind not in {"mtp", "ngram"}:
+        method.update(draft_model_path=path, draft_config=draft)
+    cost = {"model": "target", "system": "h200_sxm", "backend": "vllm"}
+    raw = {
+        "num_gpu_blocks": 100,
+        "timing_model": {"type": "external", "provider": "aic", "config": cost},
+    }
+    if entry == "public":
+        raw["speculation"] = {**method, "expected_accepted_tokens": 2.4, "seed": 73}
+    else:
+        cost["speculation"] = method
+        raw.update(aic_nextn_accepted=2.4, aic_mtp_seed=73)
+    lowered = config.lower_upstream_engine_args(raw)
+    assert lowered["ais_perf_config"]["speculation"] == method
+    assert lowered["ais_nextn"] == accepted
+    assert lowered["ais_verify_width"] == width
+    assert lowered["ais_mtp_seed"] == 73
+    rates = list(map(float, lowered["ais_nextn_accept_rates"].split(",")))
+    assert rates == pytest.approx([1, 1, 0.4] + [0] * (accepted - 3))
+
+
+@pytest.mark.parametrize("control,value", [("aic_nextn", 7), ("aic_verify_width", 4)])
+def test_canonical_tree_rejects_conflicting_scheduler_controls(
+    draft_checkpoint, control, value
+):
+    from dynamo.replay.config import lower_upstream_engine_args
+
+    path, draft = draft_checkpoint
+    with pytest.raises(ValueError, match="scheduler controls conflict"):
+        lower_upstream_engine_args(
+            {
+                "ais_perf_config": {
+                    "speculation": {
+                        "kind": "eagle3",
+                        "params": {"tree_shape": [1, 2, 4], "verify_token_budget": 16},
+                        "draft_model_path": path,
+                        "draft_config": draft,
+                    }
+                },
+                "aic_nextn_accept_rates": "1,1,0.4",
+                control: value,
+            }
+        )
+
+
+def test_canonical_tree_resolves_draft_identity_and_preserves_authored_rates(
+    monkeypatch, draft_checkpoint
+):
+    from dynamo.replay import config
+
+    monkeypatch.setattr(config, "materialize_aic_num_gpu_blocks", lambda raw: dict(raw))
+    path, draft = draft_checkpoint
+    lowered = config.lower_upstream_engine_args(
+        {
+            "ais_perf_config": {
+                "speculation": {
+                    "kind": "eagle3",
+                    "params": {"tree_shape": [1, 2, 4], "verify_token_budget": 16},
+                    "draft_model_path": path,
+                }
+            },
+            # Native CSV padding/truncation remains owned by the sampler.
+            "ais_nextn_accept_rates": "1, 0.5",
+            "ais_mtp_seed": 73,
+        }
+    )
+    method = lowered["ais_perf_config"]["speculation"]
+    assert method["draft_model_path"] == path
+    assert method["draft_config"] == draft
+    assert lowered["ais_nextn"] == 3
+    assert lowered["ais_verify_width"] == 16
+    assert lowered["ais_nextn_accept_rates"] == "1, 0.5"
+    assert lowered["ais_mtp_seed"] == 73
 
 
 def test_non_speculative_replay_does_not_require_new_config(monkeypatch):

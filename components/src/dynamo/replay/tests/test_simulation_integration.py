@@ -424,11 +424,21 @@ def _aic_engine_args(backend: str, role: str, dp_size: int = 1) -> dict:
 
 @pytest.mark.pre_merge
 @pytest.mark.timeout(60)
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
-@pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
+@pytest.mark.parametrize(
+    "kind,backend,router_mode",
+    [
+        ("mtp", "vllm", "round_robin"),
+        ("mtp", "sglang", "kv_router"),
+        ("ngram", "vllm", "round_robin"),
+        ("eagle3", "sglang", "kv_router"),
+        ("dflash", "vllm", "kv_router"),
+        ("dspark", "sglang", "round_robin"),
+        ("draft_model", "vllm", "round_robin"),
+    ],
+)
 @pytest.mark.parametrize("deployment_mode", ["agg", "disagg"])
-def test_real_agentic_mtp_prices_full_bursts(
-    tmp_path, backend, router_mode, deployment_mode
+def test_real_agentic_speculation_prices_full_bursts(
+    tmp_path, draft_checkpoint, kind, backend, router_mode, deployment_mode
 ):
     source = (
         Path(__file__).parent
@@ -483,19 +493,41 @@ def test_real_agentic_mtp_prices_full_bursts(
             )
         },
     )
-    speculative = {
-        **args,
-        "speculation": {
-            "kind": "mtp",
+    if kind == "mtp":
+        selection = {
+            "kind": kind,
             "num_speculative_tokens": 2,
             "expected_accepted_tokens": 1.5,
             "seed": 42,
-        },
-    }
+        }
+    else:
+        params = {
+            "ngram": {"num_speculative_tokens": 7},
+            "eagle3": {"tree_shape": [1, 2, 4], "verify_token_budget": 16},
+            "dflash": {},
+            "dspark": {"num_draft_tokens": 7},
+            "draft_model": {"num_speculative_tokens": 7},
+        }[kind]
+        selection = {
+            "kind": kind,
+            "params": params,
+            "expected_accepted_tokens": 2.4,
+            "seed": 42,
+        }
+        if kind != "ngram":
+            path, draft = draft_checkpoint
+            selection.update(draft_model_path=path, draft_config=draft)
+    speculative = {**args, "speculation": selection}
     field = "agg_engine_args" if deployment_mode == "agg" else "decode_engine_args"
+    overrides = {field: speculative}
+    if deployment_mode == "disagg":
+        overrides["prefill_engine_args"] = {
+            **spec.backend_deployment.prefill_engine_args,
+            "speculation": selection,
+        }
     speculative_spec = replace(
         spec,
-        backend_deployment=replace(spec.backend_deployment, **{field: speculative}),
+        backend_deployment=replace(spec.backend_deployment, **overrides),
     )
     output = ReplayOutputRequirements(capture_per_request=True)
     runner = DynamoReplayRunnerFactory().create(0)
@@ -518,7 +550,16 @@ def test_real_agentic_mtp_prices_full_bursts(
         records = result.metadata["native_report"]["per_request"]
         assert len(records) == 3
         assert all(record["output_length"] == 32 for record in records)
-    assert report.metrics["duration_ms"] < baseline.metrics["duration_ms"]
+    if kind == "mtp":
+        assert report.metrics["duration_ms"] < baseline.metrics["duration_ms"]
+    # Different draft graphs can cost more than AR. Every scheme must execute
+    # its configured burst through the same native sampler and finish the DAG.
+    native = runner._engine_args(speculative)
+    assert native.ais_nextn == (2 if kind == "mtp" else 3 if kind == "eagle3" else 7)
+    assert native.ais_verify_width == (
+        3 if kind == "mtp" else 16 if kind == "eagle3" else 8
+    )
+    assert native.ais_perf_config["speculation"]["kind"] == kind
 
 
 @pytest.mark.pre_merge
@@ -537,7 +578,7 @@ def test_native_auto_agentic_trace_enforces_speculative_assumptions(
     expected = {
         "capacity": "explicit.*num_gpu_blocks",
         "rates": "explicit.*ais_nextn_accept_rates",
-        "aic_cost": "op_level",
+        "aic_cost": "AIS timing configuration",
     }
     if missing == "capacity":
         args.pop("num_gpu_blocks")

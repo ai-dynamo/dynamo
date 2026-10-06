@@ -286,7 +286,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None, ais_verify_width=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -325,6 +325,7 @@ impl MockEngineArgs {
         trtllm: Option<TrtllmArgs>,
         max_model_len: Option<usize>,
         ais_perf_config: Option<&Bound<'_, PyAny>>,
+        ais_verify_width: Option<usize>,
     ) -> PyResult<Self> {
         let ais_nextn_accept_rates_explicit =
             has_explicit_accept_rates(ais_nextn_accept_rates.as_deref());
@@ -362,6 +363,7 @@ impl MockEngineArgs {
                     .transpose()?,
             )
             .ais_nextn(ais_nextn)
+            .ais_verify_width(ais_verify_width)
             .ais_nextn_accept_rates(ais_nextn_accept_rates)
             .ais_mtp_seed(ais_mtp_seed.unwrap_or(42))
             .gpu_memory_utilization(gpu_memory_utilization)
@@ -611,6 +613,11 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn ais_verify_width(&self) -> Option<usize> {
+        self.inner.ais_verify_width
+    }
+
+    #[getter]
     fn ais_nextn_accept_rates(&self) -> Option<String> {
         self.inner.ais_nextn_accept_rates.clone()
     }
@@ -704,7 +711,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None, ais_verify_width=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -720,6 +727,7 @@ impl MockEngineArgs {
         free_gpu_memory_fraction: Option<f64>,
         enable_prefix_caching: Option<bool>,
         worker_type: Option<String>,
+        ais_verify_width: Option<usize>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         let mut num_gpu_blocks_explicit = self.num_gpu_blocks_explicit;
@@ -739,6 +747,9 @@ impl MockEngineArgs {
         if let Some(blocks) = num_gpu_blocks {
             inner.num_gpu_blocks = blocks;
             num_gpu_blocks_explicit = true;
+        }
+        if let Some(width) = ais_verify_width {
+            inner.ais_verify_width = Some(width);
         }
         if let Some(nextn) = ais_nextn {
             inner.ais_nextn = Some(nextn);
@@ -810,76 +821,36 @@ fn has_explicit_accept_rates(rates: Option<&str>) -> bool {
 /// Retain authored assumptions before replay materialization fills capacity and
 /// converts the Python wrapper into scheduler arguments. Defer enforcement until
 /// the trace is known to be agentic so legacy standard replay keeps its defaults.
-fn agentic_speculation_models(
+fn agentic_speculation_assumptions(
     engines: &[(&str, Option<&MockEngineArgs>)],
-) -> Result<Vec<String>, String> {
-    let mut models = Vec::new();
+) -> Result<(), String> {
     for (role, engine) in engines {
         let Some(engine) = engine else { continue };
         let args = &engine.inner;
-        if args.ais_nextn.unwrap_or(0) == 0 {
+        let canonical_speculation = args
+            .ais_perf_config
+            .as_ref()
+            .and_then(|config| config.get("speculation"))
+            .is_some_and(|speculation| !speculation.is_null());
+        if args.ais_nextn.unwrap_or(0) == 0 && !canonical_speculation {
             continue;
         }
         if !engine.num_gpu_blocks_explicit || args.num_gpu_blocks == 0 {
             return Err(format!(
-                "agentic MTP requires explicitly configured positive num_gpu_blocks for {role}"
+                "agentic speculation requires explicitly configured positive num_gpu_blocks for {role}"
             ));
         }
         if !engine.ais_nextn_accept_rates_explicit
             || !has_explicit_accept_rates(args.ais_nextn_accept_rates.as_deref())
         {
             return Err(format!(
-                "agentic MTP requires explicit ais_nextn_accept_rates for {role}; acceptance must be an authored assumption"
+                "agentic speculation requires explicit ais_nextn_accept_rates for {role}; acceptance must be an authored assumption"
             ));
         }
-        let Some(config) = args.ais_perf_config.as_ref() else {
+        if args.ais_perf_config.is_none() {
             return Err(format!(
-                "agentic MTP requires AIS op_level timing for {role}"
+                "agentic speculation requires an AIS timing configuration for {role}"
             ));
-        };
-        let explicit_mtp = config
-            .pointer("/speculation/kind")
-            .and_then(serde_json::Value::as_str)
-            == Some("mtp");
-        let mode = config
-            .get("estimation_mode")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("auto");
-        let fallback = config
-            .get("fallback_policy")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("deny");
-        // Explicit MTP's best_available path is op-level-only, including auto.
-        // Legacy NextN has no such guarantee, so do not admit an FPM fallback.
-        if !(explicit_mtp && matches!(mode, "auto" | "op_level")
-            || mode == "op_level" && fallback == "deny")
-        {
-            return Err(format!(
-                "agentic MTP requires AIS op_level timing for {role}; legacy NextN requires estimation_mode='op_level' and fallback_policy='deny'"
-            ));
-        }
-        let model = config
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| format!("agentic MTP requires an AIS model identity for {role}"))?;
-        models.push(model.to_owned());
-    }
-    Ok(models)
-}
-
-fn validate_agentic_speculation(
-    py: Python<'_>,
-    models: &Result<Vec<String>, String>,
-) -> PyResult<()> {
-    let models = models
-        .as_ref()
-        .map_err(|error| PyValueError::new_err(error.clone()))?;
-    if !models.is_empty() {
-        let validate = py
-            .import("aisimulate_core.sdk.models.helpers")?
-            .getattr("validate_mtp_model_path")?;
-        for model in models {
-            validate.call1((model,))?;
         }
     }
     Ok(())
@@ -996,13 +967,15 @@ pub fn run_mocker_trace_replay(
         trace_format,
         TraceFileFormat::AgenticMooncake | TraceFileFormat::Weka
     );
-    let agentic_speculation = agentic_speculation_models(&[
+    let agentic_speculation = agentic_speculation_assumptions(&[
         ("aggregated", extra_engine_args.as_ref()),
         ("prefill", prefill_engine_args.as_ref()),
         ("decode", decode_engine_args.as_ref()),
     ]);
     if known_agentic {
-        validate_agentic_speculation(py, &agentic_speculation)?;
+        agentic_speculation
+            .as_ref()
+            .map_err(|error| PyValueError::new_err(error.clone()))?;
     }
     let args_selection = load_replay_args_selection(
         py,
@@ -1136,7 +1109,7 @@ pub fn run_mocker_trace_replay(
                 anyhow::bail!("agentic execution requires a configured target model");
             }
             if matches!(&trace, DynamoRequestTrace::Agentic(_)) && !known_agentic {
-                Python::with_gil(|py| validate_agentic_speculation(py, &agentic_speculation))?;
+                agentic_speculation.map_err(anyhow::Error::msg)?;
             }
             return run_loaded_dynamo_request_trace(
                 args_selection,
@@ -1993,9 +1966,9 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MockEngineArgs as PyMockEngineArgs, agentic_speculation_models, build_synthetic_requests,
-        fpm_snapshots_to_json, has_explicit_accept_rates, reconcile_replay_dp_topology,
-        validate_disagg_replay_mode,
+        MockEngineArgs as PyMockEngineArgs, agentic_speculation_assumptions,
+        build_synthetic_requests, fpm_snapshots_to_json, has_explicit_accept_rates,
+        reconcile_replay_dp_topology, validate_disagg_replay_mode,
     };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
     use dynamo_mocker::loadgen::ArrivalSpec;
@@ -2024,9 +1997,8 @@ mod tests {
     #[test]
     fn agentic_sd_off_needs_no_speculative_assumptions() {
         assert!(
-            agentic_speculation_models(&[("aggregated", Some(&PyMockEngineArgs::default()))])
-                .unwrap()
-                .is_empty()
+            agentic_speculation_assumptions(&[("aggregated", Some(&PyMockEngineArgs::default()))])
+                .is_ok()
         );
     }
 
@@ -2035,14 +2007,14 @@ mod tests {
         let mut args = speculative_args();
         args.num_gpu_blocks_explicit = false;
         assert!(
-            agentic_speculation_models(&[("decode", Some(&args))])
+            agentic_speculation_assumptions(&[("decode", Some(&args))])
                 .unwrap_err()
                 .contains("explicitly configured positive num_gpu_blocks for decode")
         );
         args.num_gpu_blocks_explicit = true;
         args.inner.num_gpu_blocks = 0;
         assert!(
-            agentic_speculation_models(&[("decode", Some(&args))])
+            agentic_speculation_assumptions(&[("decode", Some(&args))])
                 .unwrap_err()
                 .contains("positive num_gpu_blocks")
         );
@@ -2055,61 +2027,51 @@ mod tests {
         // remain distinct from an authored acceptance assumption.
         args.ais_nextn_accept_rates_explicit = false;
         assert!(
-            agentic_speculation_models(&[("aggregated", Some(&args))])
+            agentic_speculation_assumptions(&[("aggregated", Some(&args))])
                 .unwrap_err()
                 .contains("explicit ais_nextn_accept_rates")
         );
         args.ais_nextn_accept_rates_explicit = true;
-        assert_eq!(
-            agentic_speculation_models(&[("aggregated", Some(&args))]).unwrap(),
-            vec!["target-model"]
-        );
+        assert!(agentic_speculation_assumptions(&[("aggregated", Some(&args))]).is_ok());
         assert!(!has_explicit_accept_rates(None));
         assert!(!has_explicit_accept_rates(Some(" \t")));
         assert!(has_explicit_accept_rates(Some("0,0")));
     }
 
     #[test]
-    fn agentic_speculation_rejects_fixed_timing_and_fpm_cost() {
+    fn agentic_speculation_leaves_estimator_selection_to_ais() {
         let mut args = speculative_args();
         args.inner.ais_perf_config = None;
         assert!(
-            agentic_speculation_models(&[("aggregated", Some(&args))])
+            agentic_speculation_assumptions(&[("aggregated", Some(&args))])
                 .unwrap_err()
-                .contains("AIS op_level timing")
+                .contains("AIS timing configuration")
         );
-        for mode in ["fpm_regression", "fpm_interpolation", "auto"] {
+        // Only authored replay assumptions are checked here. Constructing the
+        // canonical cost model still applies the existing estimator contract.
+        for mode in ["op_level", "fpm_regression", "fpm_interpolation", "auto"] {
             args.inner.ais_perf_config = Some(serde_json::json!({
-                "model": "target-model",
-                "estimation_mode": mode,
+                "model": "target-model", "estimation_mode": mode,
             }));
-            assert!(
-                agentic_speculation_models(&[("aggregated", Some(&args))])
-                    .unwrap_err()
-                    .contains("AIS op_level timing")
-            );
+            assert!(agentic_speculation_assumptions(&[("aggregated", Some(&args))]).is_ok());
         }
-        args.inner.ais_perf_config = Some(serde_json::json!({
-            "model": "target-model",
-            "estimation_mode": "op_level",
-            "fallback_policy": "allow",
-        }));
-        assert!(agentic_speculation_models(&[("aggregated", Some(&args))]).is_err());
     }
 
     #[test]
-    fn agentic_explicit_mtp_can_select_op_level_through_auto() {
+    fn agentic_canonical_scheme_requires_assumptions_before_geometry_resolution() {
         let mut args = speculative_args();
-        let config = args.inner.ais_perf_config.as_mut().unwrap();
-        config["estimation_mode"] = serde_json::json!("auto");
-        config["speculation"] = serde_json::json!({
-            "kind": "mtp",
-            "params": {"num_speculative_tokens": 2},
+        args.inner.ais_nextn = None;
+        args.inner.ais_perf_config.as_mut().unwrap()["speculation"] = serde_json::json!({
+            "kind": "eagle3", "params": {"tree_shape": [1, 2, 4]},
         });
-        assert_eq!(
-            agentic_speculation_models(&[("aggregated", Some(&args))]).unwrap(),
-            vec!["target-model"]
+        args.num_gpu_blocks_explicit = false;
+        assert!(
+            agentic_speculation_assumptions(&[("aggregated", Some(&args))])
+                .unwrap_err()
+                .contains("positive num_gpu_blocks")
         );
+        args.num_gpu_blocks_explicit = true;
+        assert!(agentic_speculation_assumptions(&[("aggregated", Some(&args))]).is_ok());
     }
 
     #[test]
@@ -2118,9 +2080,12 @@ mod tests {
         let mut decode = speculative_args();
         decode.ais_nextn_accept_rates_explicit = false;
         assert!(
-            agentic_speculation_models(&[("prefill", Some(&prefill)), ("decode", Some(&decode)),])
-                .unwrap_err()
-                .contains("for decode")
+            agentic_speculation_assumptions(&[
+                ("prefill", Some(&prefill)),
+                ("decode", Some(&decode)),
+            ])
+            .unwrap_err()
+            .contains("for decode")
         );
     }
 
@@ -2305,6 +2270,9 @@ fn materialize_replay_mocker_args(
                 .extract()?;
         }
         let callback = create_ais_callback(py, config)?;
+        if let Some(speculation) = callback.speculation_metadata() {
+            args.resolve_speculation(speculation).map_err(to_pyerr)?;
+        }
         args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
     }
     Ok(args)
