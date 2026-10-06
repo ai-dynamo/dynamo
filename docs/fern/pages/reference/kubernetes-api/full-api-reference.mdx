@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 172 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 174 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">74 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -3644,6 +3644,44 @@ preferredWeight is required and used only when enforcement is "preferred". Highe
 </ParamField>
 </Accordion>
 
+<Accordion id="lpxcheckpoint" title="LPXCheckpoint">
+LPXCheckpoint identifies one immutable model checkpoint.
+
+
+**Kind:** `type`
+**Appears in:** [LPXConfig](#lpxconfig)
+
+<ParamField path="provider" type="LPXCheckpointProvider" required={true}>
+provider selects the checkpoint source. Only `HuggingFace` is supported.
+See [LPXCheckpointProvider](#lpxcheckpointprovider).
+**Validation:** Enum: [HuggingFace]  Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="model" type="string" required={true}>
+model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+**Validation:** MaxLength: 256  MinLength: 1  Pattern: `^([A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$`  Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="revision" type="string" required={true}>
+revision is the full 40-character commit SHA of the repository snapshot. Branches and tags are not accepted because they can move.
+**Validation:** Pattern: `^[0-9a-f]\{40\}$`  Required: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="lpxcheckpointprovider" title="LPXCheckpointProvider">
+LPXCheckpointProvider identifies the source of an LPX checkpoint.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [HuggingFace]
+**Appears in:** [LPXCheckpoint](#lpxcheckpoint)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>HuggingFace</Badge> LPXCheckpointProviderHuggingFace downloads a Hugging Face Hub model repository.
+</Accordion>
+
 <Accordion id="lpxconfig" title="LPXConfig">
 LPXConfig identifies the component's compiled model and configures scheduling.
 
@@ -3659,6 +3697,12 @@ buildId references the immutable model build.
 <ParamField path="scheduling" type="SchedulingSpec">
 scheduling configures this component's LPX scheduling attempts. Omission means no deadline.
 See [SchedulingSpec](#schedulingspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="checkpoint" type="LPXCheckpoint">
+checkpoint selects the model checkpoint that the Cyborg conductor reads when it runs partitions on its GPU. Model Express downloads it to model storage before the workload starts, and the operator sets `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory. Requires a hybrid build and a configured Model Express URL. Omission leaves checkpoint selection to the Cyborg container.
+See [LPXCheckpoint](#lpxcheckpoint).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 

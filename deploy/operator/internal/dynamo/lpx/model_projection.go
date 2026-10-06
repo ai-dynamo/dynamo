@@ -46,6 +46,9 @@ type ModelProjectionInput struct {
 	// LocalPartitions selects hybrid runtime partitions that run on the Cyborg GPU.
 	// Nil runs every partition on LPUs.
 	LocalPartitions *dynamov1beta1.LPXLocalPartitions
+	// Checkpoint selects the checkpoint projected into the Cyborg conductor.
+	// Nil leaves checkpoint selection to the authored Cyborg container.
+	Checkpoint *dynamov1beta1.LPXCheckpoint
 }
 
 // ModelProjection holds scheduler request inputs and runtime rendering state
@@ -67,6 +70,9 @@ type ModelProjection struct {
 	agentReplicas int
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
 	localPartitionIDs []int
+	// checkpoint is the admitted checkpoint projected into the Cyborg conductor, or nil.
+	// It is runtime configuration only and does not contribute to the digest.
+	checkpoint *dynamov1beta1.LPXCheckpoint
 }
 
 // AgentReplicas returns the number of LPU Agent Pods that the projection requires.

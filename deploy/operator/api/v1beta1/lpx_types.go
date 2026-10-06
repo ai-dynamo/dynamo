@@ -14,6 +14,15 @@ type LPXConfig struct {
 	// +optional
 	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
 
+	// checkpoint selects the model checkpoint that the Cyborg conductor reads
+	// when it runs partitions on its GPU. Model Express downloads it to model
+	// storage before the workload starts, and the operator sets
+	// `CYBORG_WEIGHTS_PATH` in the Cyborg container to its snapshot directory.
+	// Requires a hybrid build and a configured Model Express URL. Omission
+	// leaves checkpoint selection to the Cyborg container.
+	// +optional
+	Checkpoint *LPXCheckpoint `json:"checkpoint,omitempty"`
+
 	// experimental groups opt-in LPX options whose API shape may change in
 	// breaking ways between v1beta1 releases.
 	// +optional
@@ -68,6 +77,36 @@ type LPXLocalPartitions struct {
 	// +kubebuilder:validation:items:Minimum=0
 	// +kubebuilder:validation:items:Maximum=4294967295
 	IDs []int64 `json:"ids,omitempty"`
+}
+
+// LPXCheckpointProvider identifies the source of an LPX checkpoint.
+// +kubebuilder:validation:Enum=HuggingFace
+type LPXCheckpointProvider string
+
+const (
+	// LPXCheckpointProviderHuggingFace downloads a Hugging Face Hub model repository.
+	LPXCheckpointProviderHuggingFace LPXCheckpointProvider = "HuggingFace"
+)
+
+// LPXCheckpoint identifies one immutable model checkpoint.
+type LPXCheckpoint struct {
+	// provider selects the checkpoint source. Only `HuggingFace` is supported.
+	// +required
+	Provider LPXCheckpointProvider `json:"provider"`
+
+	// model is the Hugging Face repository ID, such as `openai/gpt-oss-20b`.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^([A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$`
+	// +kubebuilder:validation:XValidation:rule="!self.contains('--') && !self.contains('..')",message="model must not contain '--' or '..'"
+	Model string `json:"model"`
+
+	// revision is the full 40-character commit SHA of the repository snapshot.
+	// Branches and tags are not accepted because they can move.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	Revision string `json:"revision"`
 }
 
 // SchedulingSpec configures LPX scheduling attempts.

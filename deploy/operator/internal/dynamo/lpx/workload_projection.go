@@ -42,6 +42,17 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	if err != nil {
 		return nil, err
 	}
+
+	// Attach the conductor checkpoint, which only a hybrid Cyborg runtime consumes.
+	if intent.Checkpoint != nil {
+		if intent.Pipeline != PipelineLPX {
+			return nil, fmt.Errorf("%w: checkpoint requires a hybrid build with a Cyborg conductor", ErrUnsupportedRuntime)
+		}
+		for _, projection := range projections[len(dst):] {
+			projection.checkpoint = intent.Checkpoint
+		}
+	}
+
 	// Bound the component's physical build before runtime expansion and request publication.
 	projection := projections[len(dst)]
 	boundedPartitions := len(projection.partitions)

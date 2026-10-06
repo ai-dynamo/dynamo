@@ -121,6 +121,7 @@ func ResolveWorkload(
 			RuntimeBuildRef: model.BuildID,
 			BuildSnapshot:   snapshot,
 			LocalPartitions: model.LocalPartitions(),
+			Checkpoint:      model.Checkpoint,
 		}
 		projected, err := appendModelProjections(projections, intent)
 		if err != nil {
