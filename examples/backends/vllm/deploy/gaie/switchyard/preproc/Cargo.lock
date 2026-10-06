@@ -1987,7 +1987,6 @@ dependencies = [
  "switchyard-translation",
  "tokio",
  "tokio-stream",
- "toml",
  "tonic",
  "tonic-build",
  "tracing",

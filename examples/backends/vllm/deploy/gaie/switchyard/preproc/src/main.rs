@@ -13,7 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod config;
 mod error;
 mod json;
 mod proto;
@@ -39,42 +38,12 @@ use crate::{
     server::{MAX_BODY, MAX_CONCURRENT, MAX_IN_FLIGHT, Preproc},
 };
 
-#[derive(Clone)]
-struct Admin {
-    ready: Arc<AtomicBool>,
-    router: Arc<Router>,
-    capacity: Arc<Semaphore>,
-}
-
-async fn readiness(State(admin): State<Admin>) -> StatusCode {
-    if admin.ready.load(Ordering::Relaxed) {
+async fn readiness(State(ready): State<Arc<AtomicBool>>) -> StatusCode {
+    if ready.load(Ordering::Relaxed) {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     }
-}
-
-async fn metrics(State(admin): State<Admin>) -> ([(http::HeaderName, &'static str); 1], String) {
-    let mut body = String::from("# TYPE switchyard_routing_decisions_total counter\n");
-    let mut count = 0;
-    for (target, counter) in &admin.router.selections {
-        let selected = counter.load(Ordering::Relaxed);
-        count += selected;
-        body.push_str(&format!(
-            "switchyard_routing_decisions_total{{target=\"{target}\"}} {selected}\n"
-        ));
-    }
-    body.push_str(&format!(
-        "# TYPE switchyard_preproc_errors_total counter\nswitchyard_preproc_errors_total {}\n# TYPE switchyard_decision_seconds summary\nswitchyard_decision_seconds_count {}\nswitchyard_decision_seconds_sum {}\n# TYPE switchyard_preproc_active_streams gauge\nswitchyard_preproc_active_streams {}\n",
-        admin.router.errors.load(Ordering::Relaxed),
-        count,
-        admin.router.decision_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0,
-        MAX_CONCURRENT - admin.capacity.available_permits()
-    ));
-    (
-        [(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        body,
-    )
 }
 
 #[tokio::main]
@@ -86,22 +55,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let router = Arc::new(Router::load(
         std::env::var("ROUTES_CONFIG").unwrap_or_else(|_| "config/routes.toml".into()),
-        std::env::var("POOL_BINDINGS_CONFIG")
-            .unwrap_or_else(|_| "config/pool-bindings.toml".into()),
     )?);
     let capacity = Arc::new(Semaphore::new(MAX_CONCURRENT));
     let ready = Arc::new(AtomicBool::new(true));
     let (shutdown, receiver) = watch::channel(false);
-    let admin = Admin {
-        ready: ready.clone(),
-        router: router.clone(),
-        capacity: capacity.clone(),
-    };
     let http = HttpRouter::new()
         .route("/healthz", get(|| async { StatusCode::OK }))
         .route("/readyz", get(readiness))
-        .route("/metrics", get(metrics))
-        .with_state(admin);
+        .with_state(ready.clone());
     let listener = tokio::net::TcpListener::bind(
         std::env::var("ADMIN_ADDR").unwrap_or_else(|_| "0.0.0.0:9003".into()),
     )

@@ -15,7 +15,7 @@
 
 use std::{
     pin::Pin,
-    sync::{Arc, atomic::Ordering},
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -33,7 +33,7 @@ use crate::{
             processing_response,
         },
     },
-    router::{Router, TARGET_HEADER},
+    router::{MODEL_HEADER, Router},
 };
 
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
@@ -99,7 +99,7 @@ fn headers(input: ext::HttpHeaders) -> anyhow::Result<(http::HeaderMap, Vec<Stri
     let mut method = None;
     let mut path = None;
     let mut remove = [
-        TARGET_HEADER,
+        MODEL_HEADER,
         "x-gateway-destination-endpoint",
         "x-worker-instance-id",
         "x-prefill-instance-id",
@@ -178,19 +178,19 @@ impl Preproc {
             .message()
             .await?
             .ok_or_else(|| anyhow::anyhow!("missing request headers"))?;
-        let buffered = first
-            .protocol_config
-            .as_ref()
-            .is_some_and(|p| p.request_body_mode == BodySendMode::Buffered as i32);
         let process_response = first
             .protocol_config
             .as_ref()
             .is_none_or(|p| p.response_body_mode != 0);
         anyhow::ensure!(
-            first.protocol_config.as_ref().is_none_or(|p| buffered
-                || (p.request_body_mode == BodySendMode::FullDuplexStreamed as i32
-                    && p.send_body_without_waiting_for_header_response)),
-            "Buffered or FullDuplexStreamed request processing is required"
+            first
+                .protocol_config
+                .as_ref()
+                .is_none_or(
+                    |p| p.request_body_mode == BodySendMode::FullDuplexStreamed as i32
+                        && p.send_body_without_waiting_for_header_response
+                ),
+            "FullDuplexStreamed request processing is required"
         );
         anyhow::ensure!(
             first
@@ -204,21 +204,6 @@ impl Preproc {
             anyhow::bail!("request headers must arrive first");
         };
         let (headers, remove) = headers(first)?;
-        if buffered {
-            output
-                .send(Ok(response(processing_response::Response::RequestHeaders(
-                    ext::HeadersResponse {
-                        response: Some(ext::CommonResponse {
-                            header_mutation: Some(ext::HeaderMutation {
-                                set_headers: vec![],
-                                remove_headers: remove.clone(),
-                            }),
-                            ..Default::default()
-                        }),
-                    },
-                ))))
-                .await?;
-        }
         let mut body = Vec::new();
         loop {
             let request = input
@@ -235,48 +220,41 @@ impl Preproc {
             if chunk.end_of_stream {
                 break;
             }
-            anyhow::ensure!(!buffered, "complete Buffered body is required");
         }
-        let (body, target) = self.router.decide(&body, &headers).await?;
+        let (body, model) = self.router.decide(&body, &headers).await?;
         if body.len() > MAX_BODY {
             return Err(
                 crate::error::Reject::new(413, "rewritten request body exceeds 2 MiB").into(),
             );
         }
-        let mut mutation = ext::HeaderMutation {
-            set_headers: vec![
-                set_header(TARGET_HEADER, &target),
-                set_header("content-length", &body.len().to_string()),
-            ],
-            remove_headers: vec![],
-        };
-        let body_mutation = if buffered {
-            ext::body_mutation::Mutation::Body(body)
-        } else {
-            // v1.0 routes as soon as headers are acknowledged. Publish the decision first.
-            mutation.remove_headers = remove;
-            output
-                .send(Ok(response(processing_response::Response::RequestHeaders(
-                    ext::HeadersResponse {
-                        response: Some(ext::CommonResponse {
-                            header_mutation: Some(mutation.clone()),
-                            ..Default::default()
+        // v1.0 matches routes on the header reply, before it consumes the replacement body.
+        output
+            .send(Ok(response(processing_response::Response::RequestHeaders(
+                ext::HeadersResponse {
+                    response: Some(ext::CommonResponse {
+                        header_mutation: Some(ext::HeaderMutation {
+                            set_headers: vec![
+                                set_header(MODEL_HEADER, &model),
+                                set_header("content-length", &body.len().to_string()),
+                            ],
+                            remove_headers: remove,
                         }),
-                    },
-                ))))
-                .await?;
-            ext::body_mutation::Mutation::StreamedResponse(ext::StreamedBodyResponse {
-                body,
-                end_of_stream: true,
-            })
-        };
+                        ..Default::default()
+                    }),
+                },
+            ))))
+            .await?;
         output
             .send(Ok(response(processing_response::Response::RequestBody(
                 ext::BodyResponse {
                     response: Some(ext::CommonResponse {
-                        header_mutation: buffered.then_some(mutation),
                         body_mutation: Some(ext::BodyMutation {
-                            mutation: Some(body_mutation),
+                            mutation: Some(ext::body_mutation::Mutation::StreamedResponse(
+                                ext::StreamedBodyResponse {
+                                    body,
+                                    end_of_stream: true,
+                                },
+                            )),
                         }),
                         ..Default::default()
                     }),
@@ -342,13 +320,11 @@ impl ExternalProcessor for Preproc {
         request: Request<Streaming<ext::ProcessingRequest>>,
     ) -> Result<Response<Self::ProcessStream>, Status> {
         let Ok(stream) = self.streams.clone().try_acquire_owned() else {
-            self.router.errors.fetch_add(1, Ordering::Relaxed);
             return Ok(Response::new(Box::pin(tokio_stream::iter([Ok(
                 error_response(503, "processor stream limit reached"),
             )]))));
         };
         let Ok(permit) = self.capacity.clone().try_acquire_owned() else {
-            self.router.errors.fetch_add(1, Ordering::Relaxed);
             return Ok(Response::new(Box::pin(tokio_stream::iter([Ok(
                 error_response(503, "preprocessor concurrency limit reached"),
             )]))));
@@ -388,7 +364,6 @@ impl ExternalProcessor for Preproc {
                 Err(_) => Some(error_response(504, "preprocessing deadline exceeded")),
             };
             if let Some(failure) = failure {
-                this.router.errors.fetch_add(1, Ordering::Relaxed);
                 let _ = tokio::time::timeout(Duration::from_millis(100), sender.send(Ok(failure)))
                     .await;
             }
@@ -432,7 +407,7 @@ mod tests {
             raw_value: vec![],
         }]))
         .unwrap();
-        assert!(remove.contains(&TARGET_HEADER.to_owned()));
+        assert!(remove.contains(&MODEL_HEADER.to_owned()));
         assert!(remove.contains(&"x-gateway-destination-endpoint".to_owned()));
         assert!(remove.contains(&"x-dynamo-worker-id".to_owned()));
         for alias in [
@@ -462,11 +437,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let service = Preproc {
             router: Arc::new(Router::new(
-                crate::config::Config::from_toml(
-                    include_str!("../config/routes.toml"),
-                    include_str!("../config/pool-bindings.toml"),
-                )
-                .unwrap(),
+                switchyard_runner::Runner::from_toml(include_str!("../config/routes.toml"))
+                    .unwrap(),
             )),
             capacity: Arc::new(Semaphore::new(1)),
             streams: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
@@ -493,79 +465,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grpc_acknowledges_headers_before_body_and_mutates_route_and_length() {
-        let (mut client, shutdown) = start().await;
-        let (send, receive) = mpsc::channel(2);
-        send.send(ext::ProcessingRequest {
-            request: Some(processing_request::Request::RequestHeaders(request(vec![]))),
-            protocol_config: Some(ext::ProtocolConfiguration {
-                request_body_mode: BodySendMode::Buffered as i32,
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-        let mut output = client
-            .process(ReceiverStream::new(receive))
-            .await
-            .unwrap()
-            .into_inner();
-        let header = tokio::time::timeout(Duration::from_secs(1), output.message())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            header.response,
-            Some(processing_response::Response::RequestHeaders(_))
-        ));
-        let body = serde_json::to_vec(&serde_json::json!({"model":"auto", "messages":[{"role":"user", "content":"hello"}], "unknown":{"keep":true}})).unwrap();
-        send.send(ext::ProcessingRequest {
-            request: Some(processing_request::Request::RequestBody(ext::HttpBody {
-                body,
-                end_of_stream: true,
-            })),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-        let body = output.message().await.unwrap().unwrap();
-        let Some(processing_response::Response::RequestBody(body)) = body.response else {
-            panic!("expected body mutation")
-        };
-        let common = body.response.unwrap();
-        let mutation = common.header_mutation.unwrap();
-        let values = mutation
-            .set_headers
-            .into_iter()
-            .map(|h| {
-                let h = h.header.unwrap();
-                (h.key, String::from_utf8(h.raw_value).unwrap())
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(values[TARGET_HEADER], "qwen-small");
-        let Some(ext::body_mutation::Mutation::Body(bytes)) =
-            common.body_mutation.unwrap().mutation
-        else {
-            panic!("expected replacement body")
-        };
-        assert_eq!(values["content-length"], bytes.len().to_string());
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["model"], "Qwen/Qwen3-0.6B");
-        assert_eq!(json["unknown"], serde_json::json!({"keep":true}));
-        assert!(output.message().await.unwrap().is_none());
-        let _ = shutdown.send(());
-    }
-
-    #[tokio::test]
     async fn grpc_rejects_bad_json_and_bounds_stream_wait_and_concurrency() {
         let (mut client, shutdown) = start().await;
         let (send, receive) = mpsc::channel(2);
         send.send(ext::ProcessingRequest {
             request: Some(processing_request::Request::RequestHeaders(request(vec![]))),
             protocol_config: Some(ext::ProtocolConfiguration {
-                request_body_mode: BodySendMode::Buffered as i32,
+                request_body_mode: BodySendMode::FullDuplexStreamed as i32,
+                send_body_without_waiting_for_header_response: true,
                 ..Default::default()
             }),
             ..Default::default()
@@ -577,7 +484,6 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        output.message().await.unwrap().unwrap();
         let (_send2, receive2) = mpsc::channel::<ext::ProcessingRequest>(1);
         let mut rejected = client
             .process(ReceiverStream::new(receive2))
@@ -609,7 +515,8 @@ mod tests {
         send.send(ext::ProcessingRequest {
             request: Some(processing_request::Request::RequestHeaders(request(vec![]))),
             protocol_config: Some(ext::ProtocolConfiguration {
-                request_body_mode: BodySendMode::Buffered as i32,
+                request_body_mode: BodySendMode::FullDuplexStreamed as i32,
+                send_body_without_waiting_for_header_response: true,
                 ..Default::default()
             }),
             ..Default::default()
@@ -621,7 +528,6 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        output.message().await.unwrap().unwrap();
         let error = tokio::time::timeout(Duration::from_secs(6), output.message())
             .await
             .unwrap()
@@ -689,7 +595,7 @@ mod tests {
                 .into_iter()
                 .any(|h| h
                     .header
-                    .is_some_and(|h| h.key == TARGET_HEADER && h.raw_value == b"qwen-small"))
+                    .is_some_and(|h| h.key == MODEL_HEADER && h.raw_value == b"Qwen/Qwen3-0.6B"))
         );
         let Some(processing_response::Response::RequestBody(reply)) =
             output.message().await.unwrap().unwrap().response
@@ -724,7 +630,8 @@ mod tests {
                 ext::ProcessingRequest {
                     request: Some(processing_request::Request::RequestHeaders(request(vec![]))),
                     protocol_config: Some(ext::ProtocolConfiguration {
-                        request_body_mode: BodySendMode::Buffered as i32,
+                        request_body_mode: BodySendMode::FullDuplexStreamed as i32,
+                        send_body_without_waiting_for_header_response: true,
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -740,10 +647,6 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(matches!(
-            second.message().await.unwrap().unwrap().response,
-            Some(processing_response::Response::RequestHeaders(_))
-        ));
         let Some(processing_response::Response::ImmediateResponse(error)) =
             second.message().await.unwrap().unwrap().response
         else {
