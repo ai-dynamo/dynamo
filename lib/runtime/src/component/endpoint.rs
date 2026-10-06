@@ -55,7 +55,7 @@ fn endpoint_device_type() -> Option<DeviceType> {
 /// Dropping this handle does not stop the endpoint. Call [`shutdown`](Self::shutdown)
 /// for scoped endpoint lifetimes, or [`wait`](Self::wait) for the traditional
 /// runtime-owned lifetime. The descriptor may not yet be published to discovery when
-/// [`EndpointConfigBuilder::initially_registered`] is false.
+/// started with [`EndpointConfigBuilder::start_without_registration`].
 pub struct StartedEndpoint {
     instance: Instance,
     shutdown_token: CancellationToken,
@@ -98,22 +98,6 @@ pub struct EndpointConfig {
     #[builder(default = "true")]
     graceful_shutdown: bool,
 
-    /// Whether to publish this endpoint instance to discovery during startup.
-    ///
-    /// The request-plane handler and local health-check target are started regardless.
-    /// A deferred endpoint can be published later with
-    /// [`Endpoint::register_endpoint_instance`].
-    ///
-    /// With the default `true`, discovery contains the endpoint when startup
-    /// returns. With `false`, it remains absent until explicitly registered,
-    /// even if the handler is healthy. This is only a startup policy: runtime
-    /// does not observe engine pause/resume or decide controller admission.
-    /// A higher-level lifecycle owner must perform later registration and
-    /// withdrawal. Deferral does not reject callers that already have the exact
-    /// request-plane address, drain requests, or enforce a weight version.
-    #[builder(default = "true")]
-    initially_registered: bool,
-
     /// Health check payload for this endpoint
     /// This payload will be sent to the endpoint during health checks
     /// to verify it's responding properly
@@ -147,16 +131,26 @@ impl EndpointConfigBuilder {
         self.start_with_registration().await?.wait().await
     }
 
-    /// Start an endpoint and return once its exact request-plane instance is callable.
+    /// Start an endpoint and return once its request plane is callable and its
+    /// instance is registered in discovery.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
-        let (
-            endpoint,
-            handler,
-            metrics_labels,
-            graceful_shutdown,
-            initially_registered,
-            health_check_payload,
-        ) = self.build_internal()?.dissolve();
+        self.start_internal(true).await
+    }
+
+    /// Start the request plane and any configured health-check target without publishing
+    /// the instance to discovery. Publish it later with
+    /// [`Endpoint::register_endpoint_instance`].
+    ///
+    /// This only defers discovery registration: callers with the exact address
+    /// can still send requests. It does not drain requests, enforce weight versions,
+    /// or automatically register the endpoint when the handler becomes healthy.
+    pub async fn start_without_registration(self) -> Result<StartedEndpoint> {
+        self.start_internal(false).await
+    }
+
+    async fn start_internal(self, register_with_discovery: bool) -> Result<StartedEndpoint> {
+        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
+            self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -267,7 +261,7 @@ impl EndpointConfigBuilder {
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
-        let discovery_instance = if initially_registered {
+        let discovery_instance = if register_with_discovery {
             match discovery.register(discovery_spec).await {
                 Ok(instance) => instance,
                 Err(e) => {
@@ -504,7 +498,10 @@ mod tests {
 
     type TestIngress = Ingress<SingleIn<String>, ManyOut<Annotated<String>>>;
 
-    async fn endpoint_count(drt: &crate::DistributedRuntime, endpoint: &str) -> usize {
+    async fn endpoint_instances(
+        drt: &crate::DistributedRuntime,
+        endpoint: &str,
+    ) -> Vec<crate::discovery::DiscoveryInstance> {
         drt.discovery()
             .list(DiscoveryQuery::Endpoint {
                 namespace: "deferred_registration_test".to_string(),
@@ -513,7 +510,6 @@ mod tests {
             })
             .await
             .unwrap()
-            .len()
     }
 
     #[tokio::test]
@@ -536,17 +532,21 @@ mod tests {
             .start_with_registration()
             .await
             .unwrap();
-        assert_eq!(endpoint_count(&drt, "automatic").await, 1);
+        assert_eq!(
+            endpoint_instances(&drt, "automatic").await,
+            vec![crate::discovery::DiscoveryInstance::Endpoint(
+                automatic.instance().clone()
+            )]
+        );
 
         let deferred_endpoint = component.endpoint("deferred");
         let deferred = deferred_endpoint
             .endpoint_builder()
             .handler(TestIngress::new())
-            .initially_registered(false)
-            .start_with_registration()
+            .start_without_registration()
             .await
             .unwrap();
-        assert_eq!(endpoint_count(&drt, "deferred").await, 0);
+        assert!(endpoint_instances(&drt, "deferred").await.is_empty());
 
         deferred_endpoint
             .register_endpoint_instance()
@@ -556,7 +556,12 @@ mod tests {
             .register_endpoint_instance()
             .await
             .unwrap();
-        assert_eq!(endpoint_count(&drt, "deferred").await, 1);
+        assert_eq!(
+            endpoint_instances(&drt, "deferred").await,
+            vec![crate::discovery::DiscoveryInstance::Endpoint(
+                deferred.instance().clone()
+            )]
+        );
 
         deferred_endpoint
             .unregister_endpoint_instance()
@@ -566,11 +571,35 @@ mod tests {
             .unregister_endpoint_instance()
             .await
             .unwrap();
-        assert_eq!(endpoint_count(&drt, "deferred").await, 0);
+        assert!(endpoint_instances(&drt, "deferred").await.is_empty());
 
         deferred.shutdown().await.unwrap();
+        assert!(endpoint_instances(&drt, "deferred").await.is_empty());
+
+        for register_later in [false, true] {
+            let endpoint = component.endpoint(if register_later {
+                "registered_later"
+            } else {
+                "never_registered"
+            });
+            let started = endpoint
+                .endpoint_builder()
+                .handler(TestIngress::new())
+                .start_without_registration()
+                .await
+                .unwrap();
+            assert!(endpoint_instances(&drt, &endpoint.name).await.is_empty());
+            if register_later {
+                endpoint.register_endpoint_instance().await.unwrap();
+                assert_eq!(endpoint_instances(&drt, &endpoint.name).await.len(), 1);
+            }
+            started.shutdown().await.unwrap();
+            assert!(endpoint_instances(&drt, &endpoint.name).await.is_empty());
+        }
+
         automatic.shutdown().await.unwrap();
-        assert_eq!(endpoint_count(&drt, "automatic").await, 0);
+        assert!(endpoint_instances(&drt, "automatic").await.is_empty());
+        assert_eq!(drt.graceful_shutdown_tracker().get_count(), 0);
         runtime.shutdown();
     }
 
