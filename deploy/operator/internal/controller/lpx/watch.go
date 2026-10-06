@@ -172,6 +172,8 @@ func podCliquePredicate() predicate.Funcs {
 				return false
 			}
 			return commoncontroller.PodCliqueStatusChangeIsSignificant(oldClique, newClique) ||
+				(oldClique.Status.UpdateProgress == nil || oldClique.Status.UpdateProgress.UpdateEndedAt != nil) !=
+					(newClique.Status.UpdateProgress == nil || newClique.Status.UpdateProgress.UpdateEndedAt != nil) ||
 				oldClique.Generation != newClique.Generation ||
 				!maps.Equal(oldClique.Annotations, newClique.Annotations) ||
 				!maps.Equal(oldClique.Labels, newClique.Labels) ||

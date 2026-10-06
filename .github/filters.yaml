@@ -9,6 +9,7 @@
 #   deploy   -> deploy tests
 #   dgdr     -> DGDR deploy tests
 #   planner  -> dynamo build-test
+#   planner_gym -> Planner Gym CPU tests and packaging
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
@@ -333,6 +334,12 @@ dgdr:
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
 
+
+planner_gym:
+  - 'gyms/planner-gym/**'
+  - '.github/workflows/pre-merge.yml'
+  - '.github/actions/changed-files/**'
+  - '.github/filters.yaml'
 
 planner:
   - 'container/templates/planner.Dockerfile'

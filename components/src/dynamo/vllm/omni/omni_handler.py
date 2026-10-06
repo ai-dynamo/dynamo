@@ -849,7 +849,7 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(prompt=req.prompt)
         if nvext.negative_prompt is not None:
-            prompt.negative_prompt = nvext.negative_prompt
+            prompt["negative_prompt"] = nvext.negative_prompt
 
         if image is not None:
             prompt["multi_modal_data"] = {"image": image}
