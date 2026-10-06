@@ -3,7 +3,8 @@
 
 use super::*;
 use axum::http::{Method, Uri};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
@@ -95,6 +96,70 @@ fn client() -> reqwest::Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+#[tokio::test]
+async fn keeps_client_controlled_uris_and_headers_on_the_configured_origin() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (canary_sender, mut canary_requests) = mpsc::channel(1);
+        let canary =
+            Server::start(Router::new().fallback(echo_request).with_state(canary_sender)).await;
+        let (sender, mut captured) = mpsc::channel(1);
+        let upstream = Server::start(Router::new().fallback(echo_request).with_state(sender)).await;
+        let (_, proxy) =
+            router(&upstream.origin, None, None, 1024, CancellationToken::new()).unwrap();
+        let proxy = Server::start(proxy).await;
+        let canary_url = Url::parse(&canary.origin).unwrap();
+        let upstream_url = Url::parse(&upstream.origin).unwrap();
+        for (target, status) in [
+            (
+                format!("{}/v1/files/file-1?next={}", canary.origin, canary.origin),
+                StatusCode::MULTI_STATUS,
+            ),
+            (
+                format!("/v1/files/http%3A%2F%2F{}", canary_url.authority()),
+                StatusCode::MULTI_STATUS,
+            ),
+            (
+                "/v1/files/%2e%2e/content".to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            // Exercise absolute-form and encoded paths without client-side rewriting.
+            let mut connection = TcpStream::connect(Url::parse(&proxy.origin).unwrap().authority())
+                .await
+                .unwrap();
+            connection
+                .write_all(
+                    format!(
+                        "GET {target} HTTP/1.1\r\nHost: {}\r\nX-Forwarded-Host: {}\r\nConnection: close\r\n\r\n",
+                        canary_url.authority(),
+                        canary_url.authority(),
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            connection.read_to_end(&mut response).await.unwrap();
+            assert!(response.starts_with(format!("HTTP/1.1 {}", status.as_u16()).as_bytes()));
+            assert!(canary_requests.try_recv().is_err());
+            if status == StatusCode::BAD_REQUEST {
+                assert!(captured.try_recv().is_err());
+                continue;
+            }
+            let forwarded = captured.recv().await.unwrap();
+            assert_eq!(forwarded.headers[header::HOST], upstream_url.authority());
+            let target: Uri = target.parse().unwrap();
+            assert_eq!(forwarded.uri.path(), target.path());
+            assert_eq!(forwarded.uri.query(), target.query());
+        }
+        proxy.stop().await;
+        upstream.stop().await;
+        canary.stop().await;
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
