@@ -1002,7 +1002,9 @@ def test_prediction_rejects_null_for_effective_active_interval(overrides) -> Non
 
 @pytest.mark.parametrize("independent", [False, True])
 @pytest.mark.parametrize("target", ["throughput", "goodput"])
-def test_default_search_filters_dimensions_and_roundtrips(target, independent) -> None:
+def test_default_search_filters_dimensions_and_roundtrips(
+    target, independent, monkeypatch, tmp_path
+) -> None:
     adapter = create_provider()
     context = _sweep_context(target=target)
     config = (
@@ -1038,6 +1040,18 @@ def test_default_search_filters_dimensions_and_roundtrips(target, independent) -
     selection = {name: values[-1] for name, values in choices.items()}
     spec = adapter.materialize_candidate(plan, selection, _candidate_context())
     assert spec.config["policy"] == "enabled"
+    for name, value in {
+        "PROMETHEUS_ENDPOINT": "https://unused.invalid",
+        "PROMETHEUS_TOKEN": "unused-token",
+        "PROMETHEUS_TOKEN_FILE": str(tmp_path / "missing-token"),
+        "PROMETHEUS_SSL_VERIFY": "true",
+        "PROMETHEUS_EXTRA_QUERY_PARAMS": "missing-equals",
+        "PROMETHEUS_CA_BUNDLE": str(tmp_path / "missing-ca.pem"),
+        "DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS": "invalid-timeout",
+        "PLANNER_PROMETHEUS_PORT": "invalid-port",
+    }.items():
+        monkeypatch.setenv(name, value)
+    assert adapter.materialize_candidate(plan, selection, _candidate_context()) == spec
     predicted = adapter.compile_prediction(
         spec.config, _prediction_context(context.goal["sla"])
     )

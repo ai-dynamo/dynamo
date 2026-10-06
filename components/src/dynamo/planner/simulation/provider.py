@@ -39,6 +39,7 @@ from pydantic import (
 )
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.planner.config.defaults import SLAPlannerDefaults
 from dynamo.planner.config.planner_config import PlannerConfig
 
 from .config import PlannerRecommendationConfig, Policy
@@ -1119,7 +1120,21 @@ def _planner_config_payload(
         if mode in ("agg", "disagg", "decode"):
             payload["decode_scale_up_kv_rate"] = 90.0
             payload["decode_scale_down_kv_rate"] = 70.0
-    resolved = PlannerConfig.model_validate(payload)
+    # Offline materialization must not read the live Prometheus connection settings.
+    resolved = PlannerConfig.model_validate(
+        {
+            **payload,
+            "metric_pulling_prometheus_endpoint": "",
+            "metric_pulling_prometheus_token": None,
+            "metric_pulling_prometheus_token_file": None,
+            "metric_pulling_prometheus_ssl_verify": False,
+            "metric_pulling_prometheus_ca_bundle": None,
+            "metric_pulling_prometheus_request_timeout_seconds": (
+                SLAPlannerDefaults.metric_pulling_prometheus_request_timeout_seconds
+            ),
+            "metric_reporting_prometheus_port": 0,
+        }
+    )
     for interval, enabled in (
         ("throughput_adjustment_interval_seconds", resolved.enable_throughput_scaling),
         ("load_adjustment_interval_seconds", resolved.enable_load_scaling),
