@@ -92,6 +92,8 @@ macOS uses a portable sleep-plus-spin timer for correctness tests only.
 The router benches (`mooncake_bench`, `active_sequences_bench`,
 `approximate_lru_bench`) use mimalloc as the global allocator, matching the
 Python extension that runs the router in production (`lib/bindings/python`).
+They keep mimalloc's default transparent-huge-page advice, as `dynamo.frontend`
+does; other processes that load the extension turn it off.
 The allocator is part of the measured system. Under glibc malloc, CRTC event
 workers serialize on arena locks: write capacity stops rising after about 16
 event workers and falls beyond that. Compare allocators or event-worker counts

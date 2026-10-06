@@ -5,6 +5,30 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Keeps mimalloc's arenas out of transparent huge pages unless `MIMALLOC_ALLOW_THP` says
+/// otherwise; glibc, which held these allocations before, never asked for them.
+///
+/// mimalloc advises each arena it reserves for huge pages. In a many-threaded process each
+/// thread's sparse pages then fault in whole 2 MiB pages, and khugepaged refills partly freed
+/// ones while idle. `dynamo.frontend` opts back in for its dense heap.
+///
+/// Must run before the extension's first Rust allocation, which reserves the first arena.
+#[cfg(feature = "mimalloc")]
+fn configure_allocator() {
+    // libmimalloc-sys does not export this option; pin the mimalloc 3.3 enum it indexes.
+    const _: () = assert!(libmimalloc_sys::_mi_option_last == 47);
+    const MI_OPTION_ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
+    // SAFETY: both calls only touch mimalloc's option state, and module init runs before
+    // this extension starts any thread. Initializing first keeps the environment
+    // authoritative and means mimalloc saw THP allowed at startup, so it skips the
+    // process-wide PR_SET_THP_DISABLE and leaves other libraries' memory to the host's
+    // THP policy.
+    unsafe {
+        libmimalloc_sys::mi_process_init();
+        libmimalloc_sys::mi_option_set_default(MI_OPTION_ALLOW_THP, 0);
+    }
+}
+
 use dynamo_llm::local_model::{
     LocalModel, register_model_card, update_model_taints as update_model_taints_rs,
 };
@@ -480,6 +504,8 @@ fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(feature = "mimalloc")]
+    configure_allocator();
     register_core_with_router_plugins(m)
 }
 
@@ -487,6 +513,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(not(feature = "custom-policy"))]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(feature = "mimalloc")]
+    configure_allocator();
     register_core(m)
 }
 
