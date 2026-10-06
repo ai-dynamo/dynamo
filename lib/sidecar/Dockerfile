@@ -80,6 +80,8 @@ COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 # vendored protocol refresh. Bump the suffix whenever a sidecar build-script
 # input changes; one cold build is preferable to compiling against stale wire
 # types.
+# Generation v3 also discards cached workspace crates from before
+# RlDiscoveryState::new_from_env was added.
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
@@ -96,7 +98,7 @@ ARG TARGETARCH
 # build do not serialize against each other.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v2,target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v3,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
     && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
@@ -108,7 +110,7 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v2,target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v3,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar \
     && install -D target/release/dynamo-sglang-sidecar /out/dynamo-sglang-sidecar
@@ -120,7 +122,7 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v2,target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v3,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-trtllm-sidecar \
     && strip target/release/dynamo-trtllm-sidecar \
     && install -D target/release/dynamo-trtllm-sidecar /out/dynamo-trtllm-sidecar
