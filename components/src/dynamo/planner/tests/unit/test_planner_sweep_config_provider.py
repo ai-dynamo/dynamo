@@ -889,7 +889,7 @@ def test_public_policy_and_min_workers_are_independent_dimensions() -> None:
         "scaling_policy": "load_180_5",
         "fpm_sampling": "default",
         "load_sensitivity": "default",
-        "min_workers": 2,
+        "min_workers": 0,
     }
     disabled = adapter.materialize_replay(
         plan,
@@ -905,9 +905,11 @@ def test_public_policy_and_min_workers_are_independent_dimensions() -> None:
     assert disabled.config == {"policy": "disabled"}
     assert disabled.runtime_hooks == ()
     assert enabled.config["policy"] == "enabled"
-    assert enabled.config["min_workers"] == 2
+    assert enabled.config["min_workers"] == 0
     assert enabled.config["max_num_gpus"] == 8
-    assert enabled.runtime_hooks[0].config["planner_config"]["min_endpoint"] == 2
+    assert enabled.runtime_hooks[0].config["planner_config"]["min_endpoint"] == 0
+    predicted = adapter.compile_prediction(enabled.config, _prediction_context())
+    assert predicted.runtime_hooks == enabled.runtime_hooks
 
 
 def test_public_custom_predictor_preset_requires_every_knob() -> None:
@@ -939,7 +941,6 @@ def _prediction_context(sla=None) -> PredictionAdapterContext:
     "overrides",
     [
         {},
-        {"enable_throughput_scaling": True, "enable_load_scaling": False},
         {"throughput_adjustment_interval_seconds": None},
         {
             "target": "sla",

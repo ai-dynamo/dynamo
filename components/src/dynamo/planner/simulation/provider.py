@@ -665,7 +665,9 @@ class DynamoPlannerSweepConfigProvider:
         unknown = set(config) - _PUBLIC_CONFIG_FIELDS.keys() - {"policy"}
         if unknown:
             raise ValueError(f"Extra inputs are not permitted: {sorted(unknown)}")
-        policy = TypeAdapter(Policy).validate_python(config.get("policy", "disabled"))
+        policy: Policy = TypeAdapter(Policy).validate_python(
+            config.get("policy", "disabled")
+        )
         if policy == "disabled":
             return AdapterReplaySpec(config={"policy": "disabled"})
         raw_sla = context.evaluation.get("sla")
