@@ -86,6 +86,7 @@ const (
 
 // --- GPU model tokens ---
 const (
+	tokenVR200  = "VR200"
 	tokenGB200  = "GB200"
 	tokenGB10   = "GB10"
 	tokenB300   = "B300"
@@ -128,6 +129,9 @@ type gpuRule struct {
 }
 
 var gpuRules = []gpuRule{
+	// Vera Rubin
+	{token: tokenVR200, singleSKU: nvidiacomv1beta1.GPUSKUTypeVRNVL72},
+
 	// Blackwell
 	{token: tokenGB200, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB200},
 	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
@@ -956,7 +960,8 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
-		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+		// A30 and VR200 require bounded tokens to avoid matching longer model names.
+		if (rule.token == tokenA30 || rule.token == tokenVR200) && !containsModelToken(gpuProduct, rule.token) {
 			continue
 		}
 
