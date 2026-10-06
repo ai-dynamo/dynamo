@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
+use tracing::instrument::WithSubscriber;
 
 struct Server {
     origin: String,
@@ -96,6 +97,78 @@ fn client() -> reqwest::Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn failed_requests_log_bounded_classification_without_client_values() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let state = ProxyState {
+            client: client(),
+            gateway: Url::parse(&unavailable).unwrap(),
+            files_path: "/v1/files".to_string(),
+            batches_path: "/v1/batches".to_string(),
+            max_body: 1024,
+            cancel: CancellationToken::new(),
+        };
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let subscriber = tracing::Dispatch::new(subscriber);
+        let mut log_length = None;
+        for length in [8, 32 * 1024] {
+            logs.0.lock().unwrap().clear();
+            let request = Request::builder()
+                .uri(format!(
+                    "/v1/batches/batch-UNTRUSTED?secret={}&forged=%0AERROR%20UNTRUSTED%1B",
+                    "x".repeat(length)
+                ))
+                .header("authorization", "Bearer UNTRUSTED")
+                .body(Body::empty())
+                .unwrap();
+            let response = forward(State(state.clone()), request)
+                .with_subscriber(subscriber.clone())
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error["error"]["message"], "Unable to reach Batch gateway");
+            let recorded = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+            assert_eq!(recorded.matches("Batch gateway request failed").count(), 1);
+            assert!(recorded.contains("is_connect=true"));
+            assert!(recorded.contains("is_timeout=false"));
+            assert!(!recorded.contains("UNTRUSTED"));
+            assert!(!recorded.contains("secret="));
+            assert!(recorded.len() < 256);
+            assert_eq!(*log_length.get_or_insert(recorded.len()), recorded.len());
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

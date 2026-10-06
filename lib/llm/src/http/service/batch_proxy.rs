@@ -256,7 +256,13 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
             } else {
                 StatusCode::BAD_GATEWAY
             };
-            tracing::warn!(error = %error.without_url(), "Batch gateway request failed");
+            tracing::warn!(
+                is_timeout = error.is_timeout(),
+                is_connect = error.is_connect(),
+                is_body = error.is_body(),
+                is_request = error.is_request(),
+                "Batch gateway request failed"
+            );
             return proxy_error(status, "Unable to reach Batch gateway");
         }
     };
