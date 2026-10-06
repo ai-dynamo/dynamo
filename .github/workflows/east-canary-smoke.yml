@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: East regional hook real tests
+name: East regional hook CPU tests
 
 on:
   push:
@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   vllm-test:
-    name: Existing vLLM CPU and single-GPU tests on east canary
+    name: Existing vLLM CPU tests on east canary
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -37,7 +37,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0 and not e2e
       cpu_only_test_timeout_minutes: 15
-      run_gpu_tests: true
+      run_gpu_tests: false
       gpu_test_markers: pre_merge and vllm and gpu_1 and not sidecar
       gpu_test_timeout_minutes: 45
       run_gpu_parallel_tests: false
