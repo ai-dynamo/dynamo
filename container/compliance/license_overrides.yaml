@@ -313,6 +313,27 @@ overrides:
   # The .deb (DOCA 3.5.0 repo) ships no copyright file; its only SPDX tags are BSD-3-Clause.
   - { ecosystem: dpkg, name: dpdk-community,                   license: "BSD-3-Clause", source: "NVIDIA DOCA build of upstream DPDK — https://www.dpdk.org/about/legal/" }
 
+  # --- CUDA 13.4 toolkit dpkgs (vLLM cu134 runtime for Rubin) ---
+  # Same NVIDIA EULA as the 13-0 entries. The parser misreads it as GPL-3.
+  # This block lists only the 13-4 packages in the pinned arm64 image.
+  - { ecosystem: dpkg, name: cuda-compat-orin-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA — no 13-0 equivalent" }
+  - { ecosystem: dpkg, name: cuda-crt-13-4,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-13-4,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-culibos-dev-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cuobjdump-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-driver-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvcc-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-13-4,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-dev-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-13-4-config-common,  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvptxcompiler-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvvm-13-4,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+
   # --- NVIDIA DOCA SDK (cuda-dl-base 25.11 ships these) ---
   - { ecosystem: dpkg, name: doca-sdk-common,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
   - { ecosystem: dpkg, name: doca-sdk-dpdk-bridge,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
@@ -361,6 +382,7 @@ overrides:
   - { ecosystem: python, name: blinker,                   license: "MIT",       source: "blinker upstream — https://github.com/pallets-eco/blinker/blob/main/LICENSE.rst" }
   - { ecosystem: python, name: blobfile,                  license: "MIT",       source: "blobfile upstream — https://github.com/christopher-hesse/blobfile/blob/master/LICENSE" }
   - { ecosystem: python, name: cache-dit,                 license: "Apache-2.0",  source: "cache-dit upstream — https://github.com/vipshop/cache-dit/blob/main/LICENSE" }
+  - { ecosystem: python, name: cupti-python,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Software License Agreement — https://docs.nvidia.com/cupti-python/nvidia-cupti-python-license.html (torch cu134 dependency)" }
   - { ecosystem: python, name: deep-ep,                   license: "MIT",       source: "deep-ep upstream — https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
   - { ecosystem: python, name: gguf,                      license: "MIT",       source: "gguf (llama.cpp Python binding) — https://github.com/ggerganov/llama.cpp/blob/master/LICENSE" }
   - { ecosystem: python, name: google-crc32c,             license: "Apache-2.0",  source: "google-crc32c upstream — https://github.com/googleapis/python-crc32c/blob/main/LICENSE" }
@@ -383,6 +405,7 @@ overrides:
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu12, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — CUDA 12 variant split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
   - { ecosystem: python, name: nvidia-mathdx,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA MathDx SDK license — https://docs.nvidia.com/cuda/mathdx/license.html" }
   - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
+  - { ecosystem: python, name: oss-harmony,               license: "Apache-2.0",  source: "oss-harmony wheel dist-info/licenses/LICENSE — https://pypi.org/project/oss-harmony/0.0.11/#files" }
   - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }
   - { ecosystem: python, name: pathspec,                  license: "MPL-2.0",   source: "pathspec upstream — https://github.com/cpburnz/python-pathspec/blob/master/LICENSE" }
   - { ecosystem: python, name: prompt-toolkit,            license: "BSD-3-Clause",  source: "prompt-toolkit upstream — https://github.com/prompt-toolkit/python-prompt-toolkit/blob/main/LICENSE" }
