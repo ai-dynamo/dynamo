@@ -4,6 +4,23 @@
 
 set -euo pipefail
 
+# MiniMax nightly images exclude Omni because the released Omni package uses
+# removed vLLM APIs. Remove an inherited installation as well as skipping ours.
+case "${ENABLE_VLLM_OMNI:-true}" in
+  false)
+    PIP_TARGET_ARGS=()
+    if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
+      PIP_TARGET_ARGS+=(--system)
+    fi
+    uv pip uninstall "${PIP_TARGET_ARGS[@]}" vllm-omni
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("vllm_omni") is None, "vLLM-Omni must be absent when disabled"'
+    echo "vLLM-Omni explicitly disabled"
+    exit 0
+    ;;
+  true) ;;
+  *) echo "ENABLE_VLLM_OMNI must be true or false" >&2; exit 1 ;;
+esac
+
 : "${VLLM_OMNI_REF:?VLLM_OMNI_REF must be set}"
 
 VLLM_OMNI_PROTECTED_PACKAGES_FILE="${VLLM_OMNI_PROTECTED_PACKAGES_FILE:-/tmp/vllm_omni_protected_packages.txt}"

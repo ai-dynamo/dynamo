@@ -389,6 +389,7 @@ jobs:
       extra_build_args: |
         RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/ai-dynamo/vllm-base
         RUNTIME_IMAGE_TAG=vllm-nightly-8a728663c1c3
+        ENABLE_VLLM_OMNI=false
       target: runtime
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
@@ -420,6 +421,7 @@ jobs:
       extra_build_args: |
         RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/ai-dynamo/vllm-base
         RUNTIME_IMAGE_TAG=vllm-nightly-8a728663c1c3
+        ENABLE_VLLM_OMNI=false
       target: dev
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
@@ -445,6 +447,7 @@ jobs:
       extra_build_args: |
         RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/ai-dynamo/vllm-base
         RUNTIME_IMAGE_TAG=vllm-nightly-8a728663c1c3
+        ENABLE_VLLM_OMNI=false
         USER_UID=1000
         USER_GID=1000
     secrets: inherit
@@ -615,6 +618,7 @@ jobs:
       extra_build_args: |
         RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/ai-dynamo/vllm-base
         RUNTIME_IMAGE_TAG=vllm-nightly-8a728663c1c3
+        ENABLE_VLLM_OMNI=false
       target: runtime
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
