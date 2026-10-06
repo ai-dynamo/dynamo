@@ -1111,9 +1111,14 @@ class TestDecodeWorkerMultimodalBranching:
         handler._build_prompt_from_request = MagicMock(
             side_effect=RuntimeError("test stop")
         )
+        image_url = (
+            "data:image/png;base64,"
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ"
+            "/pLvAAAAAElFTkSuQmCC"
+        )
         request = {
             "token_ids": [1, 2, 3],
-            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "multi_modal_data": {"image_url": [{"Url": image_url}]},
             "sampling_options": {},
             "stop_conditions": {},
             "output_options": {},
