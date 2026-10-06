@@ -2017,6 +2017,56 @@ func TestLPXRequestListFailureUsesControllerBackoff(t *testing.T) {
 	require.Contains(t, meta.FindStatusCondition(child.Status.Conditions, "Ready").Message, readError.Error())
 }
 
+func TestLPXGroveDefaultedRollingUpdatePreservesPodCliqueSet(t *testing.T) {
+	t.Log("Observe the rendered workload with Grove's admission-defaulted rolling update policy")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	r, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
+	objects := lpxMaterializedObjects(t, r, child, dgd, desired)
+	pcs := findLPXTestPodCliqueSet(t, objects)
+	hash, err := commoncontroller.GetSpecHash(pcs, commoncontroller.WithPreservedListOrder())
+	require.NoError(t, err)
+	metav1.SetMetaDataAnnotation(&pcs.ObjectMeta, commoncontroller.NvidiaAnnotationHashKey, hash)
+	metav1.SetMetaDataAnnotation(&pcs.ObjectMeta, commoncontroller.NvidiaAnnotationGenerationKey, "1")
+	require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+	require.Nil(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate)
+	rollingUpdate := &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(int32(1))}
+	pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate = rollingUpdate
+	createLPXTestObjects(t, t.Context(), r.Client, objects...)
+	pcsUID := pcs.UID
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+
+	t.Log("Preserve the admitted PCS and publish its expected scheduler requests")
+	result, err := r.Reconcile(t.Context(), key)
+	require.NoError(t, err)
+	require.Zero(t, result)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+	require.Equal(t, pcsUID, pcs.UID)
+	require.True(t, pcs.DeletionTimestamp.IsZero())
+	require.Equal(t, rollingUpdate, pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate)
+	requests, err := r.getPipelineRequests(t.Context(), pcs)
+	require.NoError(t, err)
+	require.NotEmpty(t, desired.requests)
+	require.Len(t, requests, len(desired.requests))
+	for _, expected := range desired.requests {
+		require.Contains(t, requests, expected.Name)
+		current := requests[expected.Name]
+		require.Equal(t, expected.Spec, current.Spec)
+		require.True(t, metav1.IsControlledBy(current, pcs))
+	}
+
+	t.Log("Repeated reconciliation retains both the defaulted PCS and its published requests")
+	result, err = r.Reconcile(t.Context(), key)
+	require.NoError(t, err)
+	require.Zero(t, result)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+	require.Equal(t, pcsUID, pcs.UID)
+	require.True(t, pcs.DeletionTimestamp.IsZero())
+	require.Equal(t, rollingUpdate, pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate)
+	retained, err := r.getPipelineRequests(t.Context(), pcs)
+	require.NoError(t, err)
+	require.Equal(t, requests, retained)
+}
+
 func TestLPXCorrectsTopLevelReplicaDrift(t *testing.T) {
 	t.Log("Materialize an extra PCS ordinal after the top-level replica count drifts to two")
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
