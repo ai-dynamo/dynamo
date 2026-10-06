@@ -382,13 +382,15 @@ mod corpus_cache {
             .with_context(|| format!("creating corpus cache {}", tmp.display()))?;
         let mut inner = BufWriter::with_capacity(1 << 24, file);
         inner.write_all(MAGIC)?;
+        // The header (key and capture provenance, which holds wall times) is outside the
+        // digest, so equal corpora captured by different binaries share one digest.
+        let header = serde_json::to_vec(&serde_json::json!({ "key": key, "report": report }))?;
+        inner.write_all(&(header.len() as u64).to_le_bytes())?;
+        inner.write_all(&header)?;
         let mut out = Writer {
             inner,
             hasher: Xxh3::new(),
         };
-        out.blob(&serde_json::to_vec(
-            &serde_json::json!({ "key": key, "report": report }),
-        )?)?;
         out.u64(u64::from(merged.block_size()))?;
         out.u64(merged.worker_traces().len() as u64)?;
         let mut hashes = Vec::new();
@@ -445,11 +447,15 @@ mod corpus_cache {
         let mut magic = [0u8; 8];
         inner.read_exact(&mut magic)?;
         ensure!(&magic == MAGIC, "{} is not a corpus cache", path.display());
+        let mut len = [0u8; 8];
+        inner.read_exact(&mut len)?;
+        let mut header = vec![0u8; usize::try_from(u64::from_le_bytes(len))?];
+        inner.read_exact(&mut header)?;
+        let header: serde_json::Value = serde_json::from_slice(&header)?;
         let mut input = Reader {
             inner,
             hasher: Xxh3::new(),
         };
-        let header: serde_json::Value = serde_json::from_slice(&input.blob()?)?;
         ensure!(
             &header["key"] == key,
             "corpus cache key mismatch: cache {} vs requested {}",
