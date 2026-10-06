@@ -107,6 +107,7 @@ STUB_MODULES = [
     "dynamo._core",
     "psutil",
     "requests",
+    "urllib3",
     "numpy",
     "aisimulate",
     "aisimulate_core",
