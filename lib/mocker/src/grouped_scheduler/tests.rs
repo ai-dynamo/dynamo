@@ -474,6 +474,30 @@ async fn command_after_a_due_host_restore_drains_the_restore_first() {
 }
 
 #[tokio::test]
+async fn live_engine_rejects_cluster_shared_host_offload() {
+    let engine_args = MockEngineArgs::builder()
+        .kv_cache_bytes_per_token(Some(1024))
+        .native_host_offload(Some(
+            NativeHostOffloadConfig::new(2).cluster_shared("test-kv-layout"),
+        ))
+        .build()
+        .unwrap();
+    let Err(error) = create_grouped_scheduler(
+        engine_args,
+        vec![GroupedSchedulerRankSinks::default()],
+        None,
+    ) else {
+        panic!("live engines must reject a cluster_shared G2 pool");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("supported only in offline replay"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
 async fn same_rank_receive_burst_is_batched_into_one_native_pass() {
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
