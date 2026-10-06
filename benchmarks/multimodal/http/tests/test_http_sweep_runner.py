@@ -1,25 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests: the sweep harness must not attribute a result to a backend.
+"""Regression tests for the sweep harness.
 
-The harness used to select a backend by writing ``DYN_HTTP_BACKEND``, and it
-labeled each result with the name that the caller passed. The facade now logs
-a warning for any value other than ``aiohttp`` and uses aiohttp. A run
-requested as ``httpx`` therefore used ``AiohttpClient`` but printed under an
-``httpx`` column, so both columns of the table measured aiohttp. There is one
-backend now, so the harness takes no selector and prints no backend label.
+The harness must not attribute a result to a backend. It used to select a
+backend by writing ``DYN_HTTP_BACKEND``, and it labeled each result with the
+name that the caller passed. The facade now logs a warning for any value other
+than ``aiohttp`` and uses aiohttp. A run requested as ``httpx`` therefore used
+``AiohttpClient`` but printed under an ``httpx`` column, so both columns of the
+table measured aiohttp. There is one backend now, so the harness takes no
+selector and prints no backend label.
+
+The harness must also reach its own media server, and it must not exit 0 when
+it measured nothing.
 """
 
 from __future__ import annotations
 
 import contextlib
+import http.server
 import os
+import socket
+import threading
 
 import pytest
 
 from benchmarks.multimodal.http import sweep
-from benchmarks.multimodal.http.runner import run_one
+from benchmarks.multimodal.http.runner import RunResult, run_one
+from dynamo.common.http import _ssrf_resolver
 
 # Leave these tests unmarked. The root conftest.py then adds ``pre_merge``,
 # ``gpu_0`` and ``defaulted``, and the dynamo-runtime pipeline runs tests with
@@ -90,3 +98,135 @@ async def test_run_one_does_not_clobber_an_operator_set_backend(monkeypatch) -> 
     monkeypatch.setenv("DYN_HTTP_BACKEND", "aiohttp")
     await run_one([], timeout=1.0, request_rate=100.0)
     assert os.environ["DYN_HTTP_BACKEND"] == "aiohttp"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("labels", "expected_exit"),
+    [
+        (["HttpConnectionError"] * 3, 1),
+        (["HttpConnectionError", "HttpConnectionError", "success"], 0),
+    ],
+    ids=["every-request-failed", "one-succeeded"],
+)
+async def test_sweep_exit_status_flags_a_pair_that_measured_nothing(
+    monkeypatch, capsys, labels, expected_exit
+) -> None:
+    """A pair in which every request failed prints zero latencies, so the sweep
+    must not exit 0. One success is a measurement, and the exit stays 0."""
+
+    async def canned_run_one(urls, timeout, request_rate):
+        samples = [(0.01, label) for label in labels]
+        return RunResult(n=len(samples), wall_s=0.1, samples=samples)
+
+    @contextlib.contextmanager
+    def fake_media_server(**kwargs):
+        yield "http://media.invalid/test"
+
+    monkeypatch.setattr(sweep, "run_one", canned_run_one)
+    monkeypatch.setattr(sweep, "local_media_server", fake_media_server)
+    args = sweep.parse_args(
+        [
+            "--server-processing-time-means-ms",
+            "10",
+            "--request-rate",
+            "5",
+            "--requests",
+            "3",
+        ]
+    )
+
+    assert await sweep._run_sweep(args) == expected_exit
+    err = capsys.readouterr().err
+    failed = "every request failed at request_rate=5 mean_ms=10: HttpConnectionError=3"
+    assert (failed in err) is (expected_exit == 1)
+
+
+class _LoopbackResolver:
+    """Connect-time DNS that answers every host name with 127.0.0.1."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        return [
+            {
+                "hostname": host,
+                "host": "127.0.0.1",
+                "port": port,
+                "family": socket.AF_INET,
+                "proto": 0,
+                "flags": 0,
+            }
+        ]
+
+    async def close(self) -> None:
+        pass
+
+
+def test_main_reaches_the_local_media_server(monkeypatch) -> None:
+    """The media server runs on localhost, which the fetch path refuses by
+    default. The sweep used to fail every request there and still exit 0.
+
+    This server answers on loopback under a host name, so each fetch passes
+    the client's connect-time address check, as the real sweep's localhost URL
+    does. An IP literal would skip that check, and the test would pass without
+    the fix.
+    """
+    hits: list[str] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            hits.append(self.path)
+            body = b"image"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    @contextlib.contextmanager
+    def fake_media_server(**kwargs):
+        yield f"http://media.sweep.test:{server.server_port}/test"
+
+    monkeypatch.setattr(sweep, "local_media_server", fake_media_server)
+    monkeypatch.setattr(_ssrf_resolver, "DefaultResolver", _LoopbackResolver)
+    for name in (
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # Set, then delete: monkeypatch then restores the variable as it was before
+    # the test, which also removes the value that main() writes.
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "")
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL")
+    try:
+        exit_status = sweep.main(
+            [
+                "--server-processing-time-means-ms",
+                "1",
+                "--request-rate",
+                "50",
+                "--requests",
+                "3",
+                "--timeout",
+                "5",
+            ]
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert len(hits) == 3
+    assert exit_status == 0
