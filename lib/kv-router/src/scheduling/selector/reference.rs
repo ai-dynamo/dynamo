@@ -579,7 +579,7 @@ impl DefaultWorkerPicker {
     }
 }
 
-impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
+impl<C: WorkerConfigLike + Sync> WorkerSelector<C> for DefaultWorkerSelector {
     fn uses_exclusive_affinity_target(&self) -> bool {
         true
     }
@@ -611,6 +611,7 @@ mod tests {
 
     use rustc_hash::FxHashMap;
 
+    use super::super::no_worker_capacity;
     use super::super::test_support::*;
     use super::*;
     use crate::config::RouterConfigOverride;
@@ -625,7 +626,7 @@ mod tests {
         weights: LogitWeights,
     ) -> f64 {
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
-        let input = MaterializedSelectionInput::new(request, block_size);
+        let input = MaterializedSelectionInput::new(request, block_size, &no_worker_capacity);
         let default_context =
             DefaultScoringContext::new(&workers, request, request.eligibility(), weights);
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
@@ -1963,7 +1964,7 @@ mod tests {
             prefill_load_scale: 1.0,
             shared_cache_multiplier: 1.0,
         };
-        let input = MaterializedSelectionInput::new(&request, 16);
+        let input = MaterializedSelectionInput::new(&request, 16, &no_worker_capacity);
         let default_context =
             DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
         let custom_row = input.row(worker, None, WorkerInputs::CACHE);
