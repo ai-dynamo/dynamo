@@ -21,11 +21,11 @@ format = "openai_chat"
 base_url = "http://switchyard-gateway/v1"
 
 [targets.qwen-small]
-id = "Qwen/Qwen3-0.6B"
+id = "Qwen/Qwen3.5-27B"
 llm_client = "dynamo"
 
 [targets.qwen-large]
-id = "Qwen/Qwen3-1.7B"
+id = "Qwen/Qwen3.5-397B-A17B"
 llm_client = "dynamo"
 
 [routes.stage]

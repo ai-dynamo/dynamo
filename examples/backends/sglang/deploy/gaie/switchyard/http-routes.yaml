@@ -29,7 +29,7 @@ spec:
       headers:
       - name: X-Gateway-Model-Name
         type: Exact
-        value: Qwen/Qwen3-0.6B
+        value: Qwen/Qwen3.5-27B
     backendRefs:
     - group: inference.networking.k8s.io
       kind: InferencePool
@@ -54,7 +54,7 @@ spec:
       headers:
       - name: X-Gateway-Model-Name
         type: Exact
-        value: Qwen/Qwen3-1.7B
+        value: Qwen/Qwen3.5-397B-A17B
     backendRefs:
     - group: inference.networking.k8s.io
       kind: InferencePool

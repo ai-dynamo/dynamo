@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Switchyard model routing with SGLang and Dynamo GAIE
 
 Run Switchyard in a separate, single-replica PreProc. It chooses between
-`Qwen/Qwen3-0.6B` and `Qwen/Qwen3-1.7B` served by SGLang; Dynamo's native EPP then selects
+`Qwen/Qwen3.5-27B` and `Qwen/Qwen3.5-397B-A17B` served by SGLang; Dynamo's native EPP then selects
 a worker within that model's pool. The example adds PreProc and gateway routing to an existing GAIE deployment.
 See the [Switchyard PreProc example](https://github.com/NVIDIA-NeMo/Switchyard/tree/main/examples/dynamo-preproc)
 for the architecture diagram, service implementation and image build. This directory owns
@@ -19,12 +19,19 @@ Use an existing Kubernetes deployment with the Dynamo operator, Gateway API, GAI
 outside this example.
 
 The namespace must already contain ready model workers, native Dynamo EPPs, and two
-`InferencePool` resources named `qwen-small-pool` and `qwen-large-pool`, serving `Qwen/Qwen3-0.6B`
-and `Qwen/Qwen3-1.7B`. Start from Dynamo's existing
-[SGLang aggregated GAIE deployment](../agg.yaml) when preparing those pools. For each model,
-use its matching model ID and name the deployment `qwen-small` or `qwen-large`; the operator
-creates the corresponding `-pool` resource. Use matching Dynamo SGLang runtime and frontend
-image tags. The worker uses `--page-size 16`, matching the EPP cache block size.
+`InferencePool` resources named `qwen-small-pool` and `qwen-large-pool`, serving `Qwen/Qwen3.5-27B`
+and `Qwen/Qwen3.5-397B-A17B`. Use the topology in the
+[SGLang aggregated GAIE deployment](../agg.yaml) when preparing those pools. That template
+uses a small Qwen3 model on one GPU; replace its model IDs and size tensor parallelism and
+GPU resources for each larger model. See the model cards for
+[27B](https://huggingface.co/Qwen/Qwen3.5-27B) and
+[397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B) serving guidance.
+Name the deployments `qwen-small` and `qwen-large`; the operator creates the corresponding
+`-pool` resources. Use matching Dynamo SGLang runtime and frontend image tags, and keep the
+worker page size consistent with the EPP cache block size.
+
+Local end-to-end validation used Qwen3-0.6B and Qwen3-1.7B; the larger models have not been
+validated with this example.
 
 The SGLang GAIE template follows [agg_router.yaml](../../agg_router.yaml), with a native EPP
 and a direct-mode frontend sidecar in each worker pod. The gateway and PreProc configuration
@@ -67,7 +74,7 @@ The HTTPRoutes must report `Accepted=True` and `ResolvedRefs=True`.
 ## Verify both model choices
 
 In a second terminal, send a neutral request. The supplied `efficient_first` policy selects
-`Qwen/Qwen3-0.6B`:
+`Qwen/Qwen3.5-27B`:
 
 ```bash
 curl --fail-with-body -sS http://localhost:8000/v1/chat/completions \
@@ -75,7 +82,7 @@ curl --fail-with-body -sS http://localhost:8000/v1/chat/completions \
   -d '{"model":"auto","messages":[{"role":"user","content":"Say hello."}],"max_tokens":16}'
 ```
 
-A critical tool failure selects `Qwen/Qwen3-1.7B`:
+A critical tool failure selects `Qwen/Qwen3.5-397B-A17B`:
 
 ```bash
 curl --fail-with-body -sS http://localhost:8000/v1/chat/completions \
