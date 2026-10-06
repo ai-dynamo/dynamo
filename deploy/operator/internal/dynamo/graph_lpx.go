@@ -26,16 +26,17 @@ import (
 
 // RenderLPXPodCliqueSet constructs the shared LPX Grove envelope without workload
 // templates. Its labels include the resolved scheduler queue.
-// Pointer inputs must be non-nil and are not mutated.
+// existingPCS may be nil on creation; other pointer inputs must be non-nil and are not mutated.
 func RenderLPXPodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
 	pcsName string,
+	existingPCS *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	// Reuse the ordinary Grove defaults once for the complete LPX graph.
-	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
+	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig, existingPCS)
 	if err != nil {
 		return nil, err
 	}

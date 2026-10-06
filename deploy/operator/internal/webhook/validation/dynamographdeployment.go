@@ -32,7 +32,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -256,19 +255,11 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			`must be "mp" or "ray"`,
 		))
 	}
-	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists &&
-		value != string(grovev1alpha1.CoherentStrategy) &&
-		value != string(grovev1alpha1.RollingRecreateStrategy) &&
-		value != string(grovev1alpha1.OnDeleteStrategy) {
-		allErrs = append(allErrs, field.NotSupported(
-			annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
-			value,
-			[]string{
-				string(grovev1alpha1.CoherentStrategy),
-				string(grovev1alpha1.RollingRecreateStrategy),
-				string(grovev1alpha1.OnDeleteStrategy),
-			},
-		))
+	// Parse strategy annotations with the same value set used by the renderer.
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists {
+		if _, err := dynamo.ParseGroveUpdateStrategy(value); err != nil {
+			allErrs = append(allErrs, field.NotSupported(annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy), value, dynamo.SupportedGroveUpdateStrategies()))
+		}
 	}
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
 		allErrs = append(allErrs, field.NotSupported(

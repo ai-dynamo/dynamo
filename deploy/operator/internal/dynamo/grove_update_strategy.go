@@ -1,0 +1,104 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package dynamo
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// SupportedGroveUpdateStrategies returns the annotation values accepted by rendering and admission.
+func SupportedGroveUpdateStrategies() []string {
+	return []string{string(grovev1alpha1.CoherentStrategy), string(grovev1alpha1.RollingRecreateStrategy), string(grovev1alpha1.OnDeleteStrategy)}
+}
+
+// ParseGroveUpdateStrategy parses an exact, case-sensitive annotation value.
+func ParseGroveUpdateStrategy(value string) (grovev1alpha1.UpdateStrategyType, error) {
+	// Keep admission and rendering on the same supported value set.
+	for _, supported := range SupportedGroveUpdateStrategies() {
+		if value == supported {
+			return grovev1alpha1.UpdateStrategyType(value), nil
+		}
+	}
+	return "", fmt.Errorf("unsupported Grove update strategy annotation %q=%q: supported values are %q", consts.KubeAnnotationGroveUpdateStrategy, value, SupportedGroveUpdateStrategies())
+}
+
+// ResolveGroveUpdateStrategy selects the strategy for a non-nil DGD without mutating inputs.
+// existingPCS may be nil on creation. All strategy transitions wait for an active rollout.
+func ResolveGroveUpdateStrategy(dgd *v1beta1.DynamoGraphDeployment, existingPCS *grovev1alpha1.PodCliqueSet) (*grovev1alpha1.UpdateStrategyType, error) {
+	// Resolve explicit intent first so invalid annotations are never silently ignored.
+	var desired *grovev1alpha1.UpdateStrategyType
+	if value, exists := dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists {
+		strategy, err := ParseGroveUpdateStrategy(value)
+		if err != nil {
+			return nil, err
+		}
+		desired = ptr.To(strategy)
+	} else if compatibility.GroveCoherentUpdates.Enabled(dgd.Annotations) {
+		desired = ptr.To(grovev1alpha1.CoherentStrategy)
+	}
+
+	// Retain the strategy that initialized Grove's progress until that update finishes.
+	if existingPCS != nil && existingPCS.Status.UpdateProgress != nil && existingPCS.Status.UpdateProgress.UpdateEndedAt == nil {
+		if existingPCS.Spec.UpdateStrategy != nil {
+			return ptr.To(existingPCS.Spec.UpdateStrategy.Type), nil
+		}
+		return nil, nil
+	}
+	return desired, nil
+}
+
+// GroveCoherentUpdateInProgress reports the provider's PCS-wide scaling lock.
+// pcs may be nil before initial creation; a missing PCS has no active update.
+func GroveCoherentUpdateInProgress(pcs *grovev1alpha1.PodCliqueSet) bool {
+	return pcs != nil && pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovev1alpha1.CoherentStrategy && pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
+}
+
+// ErrGroveCoherentUnsupported identifies a cluster whose PCS schema lacks Coherent support.
+var ErrGroveCoherentUnsupported = errors.New("Grove Coherent updates require Grove v0.1.0-alpha.14 or later and its matching CRDs")
+
+// CheckGroveUpdateStrategySupport checks the installed PCS schema before writing Coherent intent.
+// reader and pcs must be non-nil. An enum proves schema support, not controller implementation support.
+func CheckGroveUpdateStrategySupport(ctx context.Context, reader client.Reader, pcs *grovev1alpha1.PodCliqueSet) error {
+	// Older strategies do not require the newly introduced Coherent capability.
+	if pcs.Spec.UpdateStrategy == nil || pcs.Spec.UpdateStrategy.Type != grovev1alpha1.CoherentStrategy {
+		return nil
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: "podcliquesets.grove.io"}, crd); err != nil {
+		return fmt.Errorf("read Grove PodCliqueSet CRD: %w", err)
+	}
+
+	// Check the served version used by this operator, including its exact strategy enum.
+	for _, version := range crd.Spec.Versions {
+		if version.Name != grovev1alpha1.SchemeGroupVersion.Version || !version.Served || version.Schema == nil || version.Schema.OpenAPIV3Schema == nil {
+			continue
+		}
+		spec := version.Schema.OpenAPIV3Schema.Properties["spec"]
+		updateStrategy := spec.Properties["updateStrategy"]
+		strategyType := updateStrategy.Properties["type"]
+		for _, value := range strategyType.Enum {
+			if string(value.Raw) == `"Coherent"` {
+				return nil
+			}
+		}
+	}
+	return ErrGroveCoherentUnsupported
+}
+
+// IsGroveCoherentScaleGuardRejection distinguishes Grove admission from RBAC Forbidden errors.
+func IsGroveCoherentScaleGuardRejection(err error) bool {
+	return apierrors.IsForbidden(err) && strings.Contains(err.Error(), "spec.replicas changes are not allowed while a coherent update is in progress on PodCliqueSet")
+}

@@ -27,10 +27,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovecrds "github.com/ai-dynamo/grove/operator/api/core/v1alpha1/crds"
 	"github.com/stretchr/testify/require"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -58,7 +60,7 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 	r := newLPXTestReconciler(t, registry, child, dgd)
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
-	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
 	objects := materializeLPXTestPCS(t, child, pcs, plans["lpx"], plans[second.ComponentName])
 	for _, object := range objects {
@@ -253,7 +255,7 @@ func TestLPXExternalCyborgCapacityValidation(t *testing.T) {
 	r := newLPXTestReconciler(t, registry, child, dgd)
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
-	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
 	objects := materializeLPXTestPCS(t, child, pcs, plans["lpx"])
 	for _, object := range objects {
@@ -915,7 +917,7 @@ func TestLPXServiceReconciliation(t *testing.T) {
 	beforeModelService := modelService.DeepCopy()
 
 	t.Log("Publish the LPX-owned endpoint with its serving-role selector")
-	_, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+	_, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
 	require.NoError(t, r.reconcileRuntimeResources(t.Context(), child, resources))
 	service := &corev1.Service{}
@@ -930,7 +932,7 @@ func TestLPXServiceReconciliation(t *testing.T) {
 	expected := service.DeepCopy()
 	for _, global := range []bool{true, false} {
 		dgd.Spec.Components[0].GlobalDynamoNamespace = global
-		_, resources, err = r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+		_, resources, err = r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 		require.NoError(t, err)
 		require.NoError(t, r.reconcileRuntimeResources(t.Context(), child, resources))
 		require.NoError(t, r.Get(t.Context(), key, service))
@@ -2631,7 +2633,7 @@ func newLPXTestScheme(t testing.TB) *k8sruntime.Scheme {
 	scheme := k8sruntime.NewScheme()
 	for _, add := range []func(*k8sruntime.Scheme) error{
 		corev1.AddToScheme, resourcev1.AddToScheme, v1alpha1.AddToScheme, v1beta1.AddToScheme,
-		grovev1alpha1.AddToScheme, lpxv1alpha1.AddToScheme,
+		grovev1alpha1.AddToScheme, lpxv1alpha1.AddToScheme, apiextensionsv1.AddToScheme,
 	} {
 		require.NoError(t, add(scheme))
 	}
@@ -3400,7 +3402,7 @@ func TestLPXWaitsForAllScalingGroups(t *testing.T) {
 			r := newLPXTestReconciler(t, registry, child, dgd)
 			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 			require.NoError(t, err)
-			pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+			pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 			require.NoError(t, err)
 			createLPXTestObjects(t, t.Context(), r.Client, materializeLPXTestPCS(t, child, pcs, plans["lpx"], plans["external"])...)
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
@@ -3480,7 +3482,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 	require.Len(t, workloads, 2)
-	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
 	require.Len(t, resources, 4)
 	names := make(map[string]bool)
@@ -3494,7 +3496,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	slices.Reverse(reordered.Spec.Components)
 	reorderedWorkloads, reorderedPlans, err := r.resolveWorkloads(t.Context(), child, reordered)
 	require.NoError(t, err)
-	reorderedPCS, reorderedResources, err := r.renderPodCliqueSet(t.Context(), child, reordered, reorderedWorkloads, reorderedPlans)
+	reorderedPCS, reorderedResources, err := r.renderPodCliqueSet(t.Context(), child, reordered, reorderedWorkloads, reorderedPlans, nil)
 	require.NoError(t, err)
 	require.Equal(t, pcs, reorderedPCS)
 	require.Equal(t, resources, reorderedResources)
@@ -3710,7 +3712,7 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 			r := newLPXTestReconciler(t, registry, child, dgd)
 			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 			require.NoError(t, err)
-			pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+			pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 			require.NoError(t, err)
 			firstPlan, secondPlan := plans["lpx"], plans["timeout-engine"]
 			secondPlan.Replicas = 2
@@ -3761,4 +3763,72 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 			require.Equal(t, requests, again)
 		})
 	}
+}
+
+func TestLPXCoherentUpdateDefersScaleAndRequestRetirement(t *testing.T) {
+	ctx := t.Context()
+	t.Log("Start with two published LPX replicas and an active coherent PCS")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
+	require.NoError(t, r.Create(ctx, crd))
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(findLPXTestPodCliqueSet(t, objects)), pcs))
+	pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.CoherentStrategy}
+	pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+	require.NoError(t, r.Update(ctx, pcs))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.NotNil(t, pcs.Status.UpdateProgress, "persist the active Grove update")
+
+	t.Log("Request scale-in and keep the annotation change pending until rollout completion")
+	liveDGD := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), liveDGD))
+	liveDGD.GetComponentByName("lpx").Replicas = ptr.To(int32(1))
+	if liveDGD.Annotations == nil {
+		liveDGD.Annotations = map[string]string{}
+	}
+	liveDGD.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = "RollingRecreate"
+	liveDGD.Generation++
+	require.NoError(t, r.Update(ctx, liveDGD))
+	liveChild := &v1alpha1.LPXGraphDeployment{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), liveChild))
+	liveChild.Generation++
+	var err error
+	liveChild.Spec.InputRevision, err = dynamo.LPXInputRevision(liveDGD, "")
+	require.NoError(t, err)
+	require.NoError(t, r.Update(ctx, liveChild))
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	for range 2 {
+		result, err := r.Reconcile(ctx, request)
+		require.NoError(t, err)
+		require.Zero(t, result)
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+		t.Logf("Observed PCS progress after reconcile: %+v", pcs.Status.UpdateProgress)
+	}
+	group := &grovev1alpha1.PodCliqueScalingGroup{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, group))
+	require.Equal(t, int32(2), group.Spec.Replicas)
+	retained := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, selected.requests[1].Name)
+	require.True(t, retained.DeletionTimestamp.IsZero())
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.Equal(t, grovev1alpha1.CoherentStrategy, pcs.Spec.UpdateStrategy.Type)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), liveChild))
+	require.True(t, meta.IsStatusConditionTrue(liveChild.Status.Conditions, "ScalingDeferred"))
+
+	t.Log("Complete the rollout and allow the queued scale-in and strategy edit")
+	pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+	require.NoError(t, r.Update(ctx, pcs))
+	for range 3 {
+		_, err = r.Reconcile(ctx, request)
+		require.NoError(t, err)
+	}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+	require.Equal(t, int32(1), group.Spec.Replicas)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.Equal(t, grovev1alpha1.RollingRecreateStrategy, pcs.Spec.UpdateStrategy.Type)
 }

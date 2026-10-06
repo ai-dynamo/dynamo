@@ -16,6 +16,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -24,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -60,7 +62,7 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("register LPR owner UID index: %w", err)
 	}
 
-	return ctrlBuilder.Owns(&corev1.ConfigMap{}).
+	return ctrlBuilder.Watches(&apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(r.mapGroveCRDToLPXGraphDeployments)).Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
 		Owns(&grovev1alpha1.PodCliqueSet{}).
 		Watches(&grovev1alpha1.PodClique{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliquePredicate())).
@@ -203,4 +205,25 @@ func podCliqueScalingGroupPredicate() predicate.Funcs {
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
+}
+
+// mapGroveCRDToLPXGraphDeployments retries owned workloads after a Grove schema upgrade.
+func (r *graphReconciler) mapGroveCRDToLPXGraphDeployments(ctx context.Context, obj client.Object) []ctrl.Request {
+	if obj.GetName() != "podcliquesets.grove.io" {
+		return nil
+	}
+	deployments := &v1alpha1.LPXGraphDeploymentList{}
+	if err := r.List(ctx, deployments); err != nil {
+		log.FromContext(ctx).Error(err, "list LPX deployments after Grove CRD change")
+		return nil
+	}
+	requests := make([]ctrl.Request, 0, len(deployments.Items))
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		if !commoncontroller.NamespaceAllowed(r.config, r.runtimeConfig, deployment, deployment.Namespace) {
+			continue
+		}
+		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}})
+	}
+	return requests
 }

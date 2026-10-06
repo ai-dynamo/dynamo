@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -103,6 +104,14 @@ func (r *groveWorkloadRenderer) Render(
 	if err != nil {
 		return nil, err
 	}
+	// Reject unsupported coherent intent before mutating any Grove workload.
+	if err := dynamo.CheckGroveUpdateStrategySupport(ctx, r.reader, desired); err != nil {
+		if errors.Is(err, dynamo.ErrGroveCoherentUnsupported) {
+			return nil, failWorkloadProgram("grove_update_strategy_unsupported", err)
+		}
+		return nil, err
+	}
+
 	prepareGroveTopologyConstraintUpgrade(desired, existingPodCliqueSet)
 	preserveGrovePodCliqueSetOrder(desired, existingPodCliqueSet)
 	preserveGrovePodCliqueSetReplicas(

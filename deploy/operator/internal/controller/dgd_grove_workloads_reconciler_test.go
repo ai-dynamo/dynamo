@@ -20,7 +20,12 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"sigs.k8s.io/yaml"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -30,6 +35,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovecrds "github.com/ai-dynamo/grove/operator/api/core/v1alpha1/crds"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -854,4 +860,87 @@ func newUnstructuredGrovePodCliqueSet() *unstructured.Unstructured {
 	object.SetAPIVersion(provideroverride.GroveAPIVersion)
 	object.SetKind(provideroverride.TargetPodCliqueSet)
 	return object
+}
+
+func TestGroveProgram_DefersScalingAndPreservesStatus(t *testing.T) {
+	t.Log("Observe a coherent PCS serving one frontend replica while the DGD requests two")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1, Annotations: map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend, Replicas: ptr.To(int32(2))}}}}
+	config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
+	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
+	secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
+	pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, secrets, nil, nil, true, nil)
+	require.NoError(t, err)
+	pcs.Generation = 1
+	pcs.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))}
+	pcs.Spec.Template.Cliques[0].Spec.Replicas = 1
+	pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+	pcs.Status.ObservedGeneration = ptr.To(int64(1))
+	pclq := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default", Generation: 1}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ScheduledReplicas: 1, ObservedGeneration: ptr.To(int64(1))}}
+	crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}}
+	require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
+	writes := 0
+	kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, pclq, crd).WithStatusSubresource(dgd).WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, func() { writes++ })).Build()
+	reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: secrets}
+
+	t.Log("Run the complete program without scaling or dropping observed component facts")
+	result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.NoError(t, err)
+	require.Zero(t, writes)
+	require.Equal(t, nvidiacomv1beta1.DGDStatePending, result.Status.State)
+	require.True(t, meta.IsStatusConditionTrue(result.Status.Conditions, "ScalingDeferred"))
+	require.Contains(t, result.Status.Components, "frontend")
+	require.NotNil(t, result.Status.Components["frontend"].GPUsPerReplica)
+	require.Equal(t, []string{"graph-0-frontend"}, result.Status.Components["frontend"].ComponentNames)
+	require.Zero(t, result.Result)
+
+	// The outer controller persists program status before the next reconciliation.
+	dgd.Status = result.Status
+
+	t.Log("Retry the authored count after Grove reports completion")
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+	pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+	require.NoError(t, kubeClient.Update(t.Context(), pcs))
+	result, err = reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.NoError(t, err)
+	require.Equal(t, 1, writes)
+	require.True(t, meta.IsStatusConditionFalse(result.Status.Conditions, "ScalingDeferred"))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(pclq), pclq))
+	require.Equal(t, int32(2), pclq.Spec.Replicas)
+}
+
+func TestGroveProgram_UnsupportedCoherentDoesNotCreatePCS(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			t.Log("Observe an older PCS schema with a new or explicitly opted-in DGD")
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend, Replicas: ptr.To(int32(1))}}}}
+			if explicit {
+				dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = "Coherent"
+				dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.1.0"
+			}
+			crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}, Spec: apiextensionsv1.CustomResourceDefinitionSpec{Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{Name: "v1alpha1", Served: true}}}}
+			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(dgd, crd).Build()
+			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
+
+			t.Log("Report the incompatibility instead of substituting a rollout strategy")
+			result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+			require.ErrorIs(t, err, dynamo.ErrGroveCoherentUnsupported)
+			ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+			require.NotNil(t, ready)
+			require.Equal(t, "grove_update_strategy_unsupported", ready.Reason)
+			require.Contains(t, ready.Message, "v0.1.0-alpha.14")
+			pcs := &grovev1alpha1.PodCliqueSet{}
+			require.True(t, apierrors.IsNotFound(kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dgd), pcs)))
+
+			t.Log("A CRD upgrade makes the same desired intent renderable")
+			require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
+			previous := &apiextensionsv1.CustomResourceDefinition{}
+			require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(crd), previous))
+			crd.ResourceVersion = previous.ResourceVersion
+			require.NoError(t, kubeClient.Update(t.Context(), crd))
+			renderer := reconciler.newGroveProgram().workloads.renderer
+			rendered, err := renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil, false)
+			require.NoError(t, err)
+			require.Equal(t, grovev1alpha1.CoherentStrategy, rendered.desired.Spec.UpdateStrategy.Type)
+		})
+	}
 }

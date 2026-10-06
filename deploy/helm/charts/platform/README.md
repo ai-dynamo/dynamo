@@ -77,14 +77,6 @@ rejected on updates.
 
 #### Operator behavior breaking changes
 
-##### Coherent updates for disaggregated Grove deployments
-
-**Change:** Grove-backed graphs containing both `type: prefill` and `type: decode` components now default to the `Coherent` PCS update strategy. Explicit `nvidia.com/grove-update-strategy` annotations take precedence; accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. Other graphs keep Grove's default strategy.
-
-**Affected:** New and existing disaggregated Grove deployments. Existing deployments adopt the default on reconciliation after an operator upgrade. Changing only this strategy leaves pod templates and worker hashes unchanged, so it does not trigger a workload rollout by itself.
-
-**Action:** Install Grove v0.1.0-alpha.14 before upgrading the Dynamo operator. Coherent updates coordinate rollout progress across components, use no surge capacity, and block scaling during an active rollout. To retain the previous strategy, set `metadata.annotations["nvidia.com/grove-update-strategy"]: RollingRecreate` on the DGD before upgrading.
-
 ##### Frontend sidecar identity in container discovery mode
 
 **Change:** The operator now sets `CONTAINER_NAME` to the container selected by
@@ -101,6 +93,18 @@ to v1.6.0. Update any tooling that depends on the frontend's previous registrati
 **Existing deployments:** Reconciliation updates the frontend container's `CONTAINER_NAME`,
 which changes the pod template and triggers the rollout even without a manifest change.
 Components without a frontend sidecar or using pod discovery are unaffected by this change.
+
+#### New behavior
+
+##### Coherent updates for new Grove deployments
+
+Grove-backed DGDs created by Dynamo 1.6.0 or later now default to `Coherent` for every component topology. The immutable operator origin version gates this default. Older and unstamped DGDs keep Grove's default; set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent` to opt in. Explicit `Coherent`, `RollingRecreate`, and `OnDelete` annotations take precedence. All strategy transitions wait until any active Grove update finishes.
+
+Coherent updates require Grove v0.1.0-alpha.14 or later and matching CRDs. The operator reports an unsupported strategy instead of falling back when the installed PCS schema lacks Coherent. Upgrade externally managed Grove controllers and CRDs together.
+
+Changed components within one PCS roll together, including a frontend changed with workers. Separate PCSes roll independently. Coherent uses no surge capacity and takes down `minAvailable` pods or scaling-group replicas per step; `minAvailable == replicas` can cause a full component outage. Grove's `maxUnavailable` defaults to `minAvailable` and cannot be lower under Coherent. DGD does not yet expose this knob.
+
+Grove rejects replica changes during coherent updates. Dynamo defers its scaling and reports `ScalingDeferred` while continuing readiness and status reconciliation. External scalers writing directly to Grove still receive the rejection. See the [DGD update strategy reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-update-strategy).
 
 #### Dependency compatibility
 

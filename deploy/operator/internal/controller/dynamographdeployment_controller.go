@@ -85,6 +85,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
@@ -366,7 +367,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	// Register Grove-owned workload watches only when the Grove feature is enabled.
 	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
-		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
+		ctrlBuilder = newGroveWatchSetup(r.Client, r.Config, r.RuntimeConfig).addTo(ctrlBuilder)
 	}
 
 	return ctrlBuilder.Complete(r)

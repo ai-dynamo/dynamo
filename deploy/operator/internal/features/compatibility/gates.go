@@ -23,6 +23,13 @@ import semver "github.com/Masterminds/semver/v3"
 // first reconciled / created the DGD resource).
 
 var (
+	// GroveCoherentUpdates defaults newly created Grove workloads to coordinated rollouts.
+	// Older and unstamped DGDs keep Grove's existing default unless explicitly opted in.
+	GroveCoherentUpdates = Gate{
+		Name:             "GroveCoherentUpdates",
+		MinOriginVersion: *semver.MustParse("1.6.0"),
+	}
+
 	// VLLMMultiprocessing gates the use of vLLM native multiprocessing (mp)
 	// instead of Ray for multi-node deployments. Enabled for DGDs originally
 	// created by operator >= 1.0.0.

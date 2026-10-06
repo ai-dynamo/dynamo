@@ -52,12 +52,22 @@ spec:
 
 Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.
 
-Starting with Dynamo 1.6.0, Grove-backed graphs containing both `type: prefill` and `type: decode` components default to `Coherent` when the annotation is absent. Other graphs retain Grove's default. Explicit annotations take precedence.
+Starting with Dynamo 1.6.0, new Grove-backed DGDs default to `Coherent` for every component topology, including aggregated, disaggregated, and LPX deployments. The operator uses the immutable `nvidia.com/dynamo-operator-origin-version` annotation to select this default. DGDs created before 1.6.0, or without an origin version, retain Grove's default. Explicit strategy annotations take precedence and apply to both PodCliqueSets in a hybrid graph.
 
-Coherent updates coordinate rollout progress across components, use no surge capacity, and block scaling during an active rollout. They require Grove v0.1.0-alpha.14 or later.
+Grove v0.1.0-alpha.14 or later and its matching CRDs are required for Coherent updates. The operator checks the installed PodCliqueSet CRD before writing Coherent intent. An unsupported schema produces an actionable failure condition; the operator does not substitute a different rollout strategy. Upgrade externally managed Grove controllers and CRDs together: a CRD capability check cannot verify the running controller's implementation.
+
+Coherent updates have three operational effects:
+
+- Components whose pod templates change in the same PodCliqueSet update roll together as a gang, including a frontend changed together with workers. Unchanged components are outside that update's scope. Separate PodCliqueSets, including the ordinary and LPX PodCliqueSets in a hybrid graph, roll independently.
+- Each coherent step takes down `minAvailable` pods for a standalone PodClique or `minAvailable` replicas for a PodCliqueScalingGroup. Coherent uses no surge capacity, so setting `minAvailable` equal to `replicas` can take the entire component offline during its update.
+- Grove rejects replica changes throughout an active coherent rollout. The Dynamo operator defers its requested scaling, continues observing workload readiness and component status, and reports `ScalingDeferred`. It retries scaling when Grove reports completion. External scalers that write directly to Grove's scale subresources still receive the admission rejection.
+
+Grove's per-component `rollingUpdate.maxUnavailable` bounds unavailable pods for a standalone PodClique or unavailable replicas for a PodCliqueScalingGroup. It defaults to the component's `minAvailable` for Coherent and cannot be smaller than `minAvailable`; for RollingRecreate it defaults to `1`. Rolling update configuration is rejected with OnDelete. See [Grove's defaulting implementation](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.14/operator/internal/webhook/admission/pcs/defaulting/podcliqueset.go).
+
+DGD does not currently expose `maxUnavailable`. The Dynamo operator leaves it unset in generated PCS templates, so Grove supplies the defaults above. Upgrading Grove alone does not add this field to the DGD API.
 
 <Note>
-  Existing disaggregated Grove deployments adopt this default when reconciled after an operator upgrade. A strategy-only change leaves pod templates and worker hashes unchanged and does not itself trigger a workload rollout. Set the annotation to `RollingRecreate` before upgrading to retain the previous strategy. See the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#v160).
+  An operator upgrade preserves the existing strategy of older DGDs. To opt an existing DGD into Coherent, set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent`. A strategy-only change leaves pod templates and worker hashes unchanged and does not itself trigger a workload rollout. All strategy transitions, including annotation changes or removal, wait until an active Grove update finishes (`status.updateProgress.updateEndedAt` is set). For LPX deployments, editing the annotation also changes the LPX input revision and causes child reconciliation. See the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#v160).
 </Note>
 
 ## Spec reference

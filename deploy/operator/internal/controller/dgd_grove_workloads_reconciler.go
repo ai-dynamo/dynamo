@@ -35,6 +35,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// groveWorkloadResult retains Grove's scaling wait alongside the complete workload observation.
+type groveWorkloadResult struct {
+	ReconcileResult
+	ScalingDeferred bool
+}
+
 // groveWorkloadsReconciler owns the complete provider workload sequence while
 // exposing no dependency on the top-level DGD controller.
 type groveWorkloadsReconciler struct {
@@ -74,23 +80,23 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	req groveReconcileRequest,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) (ReconcileResult, error) {
+) (groveWorkloadResult, error) {
 	managedComponents := req.ManagedComponents()
 
 	// A graph with only external components still reconciles graph-wide stable resources.
 	if len(managedComponents) == 0 {
 		stableResources, err := r.stableResources.Reconcile(ctx, req, nil)
 		if err != nil {
-			return ReconcileResult{}, err
+			return groveWorkloadResult{}, err
 		}
-		return checkResourcesReadiness(stableResources), nil
+		return groveWorkloadResult{ReconcileResult: checkResourcesReadiness(stableResources)}, nil
 	}
 
 	logger := log.FromContext(ctx)
 
 	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(req.DGD)
 	if err != nil {
-		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+		return groveWorkloadResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	renderedPodCliqueSet, err := r.renderer.Render(
 		ctx,
@@ -101,13 +107,13 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
-		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
+		return groveWorkloadResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
 
 	// Converge the ordinary PCS before rollout or readiness observation.
 	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, req.DGD, renderedPodCliqueSet)
 	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
+		return groveWorkloadResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
 
 	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
@@ -118,14 +124,14 @@ func (r *groveWorkloadsReconciler) Reconcile(
 			!podCliqueSetUsesGroveWorkerHashSuffix(req, renderedPodCliqueSet.existing)
 		observed, err := podCliqueSetObservesWorkerHash(req, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
 		if err != nil {
-			return ReconcileResult{}, failWorkloadProgram(
+			return groveWorkloadResult{}, failWorkloadProgram(
 				reasonRollingUpdateFailed,
 				fmt.Errorf("observe Grove worker hash before projection: %w", err),
 			)
 		}
 		if observed {
 			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, req.DGD, workerHashTransition, true); err != nil {
-				return ReconcileResult{}, failWorkloadProgram(
+				return groveWorkloadResult{}, failWorkloadProgram(
 					reasonRollingUpdateFailed,
 					fmt.Errorf("project observed Grove worker hash: %w", err),
 				)
@@ -133,14 +139,15 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	if err := r.scaler.Reconcile(ctx, req, checkpointInfos); err != nil {
+	scalingDeferred, err := r.scaler.Reconcile(ctx, req, checkpointInfos, syncedPodCliqueSet)
+	if err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
+		return groveWorkloadResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
 	stableResources, err := r.stableResources.Reconcile(ctx, req, syncedPodCliqueSet)
 	if err != nil {
-		return ReconcileResult{}, err
+		return groveWorkloadResult{}, err
 	}
 
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
@@ -149,14 +156,14 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		syncedPodCliqueSet,
 	)
 	if err != nil {
-		return ReconcileResult{}, err
+		return groveWorkloadResult{}, err
 	}
 
 	resources := append(stableResources, podCliqueSetResource)
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
-	return result, nil
+	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, nil
 }
 
 // reconcilePodCliqueSet returns the current PCS and whether it was created or updated.

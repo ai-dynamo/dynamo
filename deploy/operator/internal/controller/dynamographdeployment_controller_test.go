@@ -42,6 +42,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -71,6 +72,7 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
+		apiextensionsv1.AddToScheme,
 		snapshotv1alpha1.AddToScheme,
 	} {
 		if err := addToScheme(s); err != nil {
@@ -1302,7 +1304,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				)
 				wantFinal.ComponentStatus[component.ComponentName] = componentStatus
 			}
-			g.Expect(result).To(gomega.Equal(wantFinal))
+			g.Expect(result.ReconcileResult).To(gomega.Equal(wantFinal))
 		})
 	}
 }
@@ -3793,9 +3795,11 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				builder = builder.WithObjects(tt.existingPCS)
 			}
 			r := &DynamoGraphDeploymentReconciler{
-				Client: builder.Build(),
+				Client:        builder.Build(),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
-			reqs := newGroveWatchSetup(r.Client).
+			reqs := newGroveWatchSetup(r.Client, r.Config, r.RuntimeConfig).
 				mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
 
 			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
