@@ -404,6 +404,8 @@ fn salt_local(local: u64, worker: usize) -> u64 {
 fn sorted_unique(mut values: Vec<u64>) -> Vec<u64> {
     values.sort_unstable();
     values.dedup();
+    // Every worker's list is kept until all captures finish; drop the duplicate capacity.
+    values.shrink_to_fit();
     values
 }
 
