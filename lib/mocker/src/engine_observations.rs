@@ -11,6 +11,8 @@ use dynamo_kv_router::protocols::{
 
 use crate::common::protocols::ForwardPassSnapshot;
 
+/// Router storage tier of a native KV event. `HostPinned` events describe a
+/// G2 host pool (per-rank or cluster-shared) and must never enter the device (G1) index.
 pub(crate) fn dynamo_storage_tier(tier: KvEventTier) -> StorageTier {
     match tier {
         KvEventTier::Device => StorageTier::Device,

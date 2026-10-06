@@ -177,6 +177,7 @@ mod tests {
 
     use super::*;
     use crate::common::perf_model::{AisCallback, DecodeInterpolator, PrefillInterpolator};
+    use crate::common::protocols::NativeHostOffloadConfig;
     use aisimulate_core::engine::{Backend, SglangSchedulePolicy};
 
     struct EchoPrefill;
@@ -240,6 +241,20 @@ mod tests {
         let components = engine_components(args, false, false).unwrap();
         assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
         assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
+    }
+
+    #[test]
+    fn native_host_offload_preserves_explicit_cache_geometry() {
+        let mut args = MockerConfig::from_value(serde_json::json!({"engine": {
+            "kv_transfer_bytes_per_token": 4096,
+            "kv_cache_bytes_per_token": 2048,
+            "native_host_offload": NativeHostOffloadConfig::new(8)
+        }}))
+        .unwrap();
+        args.kv_transfer_bytes_per_token = Some(8192);
+        let components = engine_components(args, false, false).unwrap();
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(2048));
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(8192));
     }
 
     #[test]

@@ -9,6 +9,8 @@ use validator::Validate;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_tokens::Token;
 
+pub use aisimulate_core::engine::{G2Scope, NativeHostOffloadConfig};
+
 /// Trait for publishing KV cache events.
 /// This abstracts the runtime dependency so mocker components can remain generic.
 pub trait KvCacheEventSink: Send + Sync {

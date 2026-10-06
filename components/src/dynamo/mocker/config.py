@@ -33,6 +33,29 @@ def engine_limit(config: Mapping[str, Any], name: str) -> int | None:
     return config["engine"][name]
 
 
+def _build_native_host_offload(args: argparse.Namespace) -> dict | None:
+    num_host_blocks = getattr(args, "num_host_blocks", None)
+    controls = {
+        key: value
+        for key, value in (
+            (
+                "d2h_bandwidth_gbps",
+                getattr(args, "host_offload_d2h_bandwidth_gbps", None),
+            ),
+            (
+                "h2d_bandwidth_gbps",
+                getattr(args, "host_offload_h2d_bandwidth_gbps", None),
+            ),
+        )
+        if value is not None
+    }
+    if num_host_blocks is None:
+        if controls:
+            raise ValueError("--host-offload-* flags require --num-host-blocks")
+        return None
+    return {"num_host_blocks": num_host_blocks, **controls}
+
+
 def build_mocker_engine_args(args: argparse.Namespace) -> dict:
     worker_type = (
         "prefill"
@@ -135,6 +158,11 @@ def build_mocker_engine_args(args: argparse.Namespace) -> dict:
             "config": {"path": str(profile)},
         }
 
+    host_offload = _build_native_host_offload(args)
+    if host_offload is not None:
+        rank["native_host_offload"] = host_offload
+        rank["kv_cache_bytes_per_token"] = getattr(args, "kv_bytes_per_token", None)
+
     config = {
         key: getattr(args, key)
         for key in (
@@ -146,7 +174,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> dict:
         )
         if getattr(args, key, None) is not None
     }
-    runtime = {"enable_local_indexer": True}
+    runtime: dict[str, Any] = {"enable_local_indexer": True}
     if getattr(args, "reasoning", None):
         runtime["reasoning"] = json.loads(args.reasoning)
     if getattr(args, "response_replay_trace_path", None):
@@ -169,7 +197,7 @@ def apply_worker_engine_args_overrides(
     zmq_replay_port: int | None = None,
     ais_mtp_seed: int | None = None,
 ) -> dict:
-    config = copy.deepcopy(engine_args)
+    config = copy.deepcopy(dict(engine_args))
     for key, value in (
         ("bootstrap_port", bootstrap_port),
         ("zmq_kv_events_port", zmq_kv_events_port),
@@ -187,7 +215,7 @@ def apply_worker_engine_args_overrides(
 
 
 def build_runtime_config(
-    engine_args: Mapping[str, Any]
+    engine_args: Mapping[str, Any],
 ) -> tuple[int, ModelRuntimeConfig]:
     rank = engine_args["engine"]
     runtime = engine_args["dynamo"]

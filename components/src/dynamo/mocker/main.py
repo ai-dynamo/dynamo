@@ -94,6 +94,12 @@ async def worker():
         ):
             local_model_path = await prefetch_model(args.model_path)
 
+        # Auto-compute kv_bytes_per_token from model config if not explicitly set
+        if args.kv_bytes_per_token is None and args.model_path:
+            args.kv_bytes_per_token = compute_kv_bytes_per_token(
+                local_model_path or args.model_path, args.kv_cache_dtype
+            )
+
         engine_args = load_mocker_engine_args(args)
         logger.info(
             "Loaded canonical engine config from JSON file"
@@ -101,11 +107,6 @@ async def worker():
             else "Created canonical engine config from CLI arguments"
         )
 
-        # Auto-compute kv_bytes_per_token from model config if not explicitly set
-        if args.kv_bytes_per_token is None and args.model_path:
-            args.kv_bytes_per_token = compute_kv_bytes_per_token(
-                local_model_path or args.model_path, args.kv_cache_dtype
-            )
         engine_args = apply_worker_engine_args_overrides(
             engine_args, kv_bytes_per_token=args.kv_bytes_per_token
         )

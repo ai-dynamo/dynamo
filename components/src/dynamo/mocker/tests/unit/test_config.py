@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
 import sys
 from types import SimpleNamespace
@@ -369,3 +370,56 @@ _KV_TEXT_CONFIG = {
 
 def _fake_transformers(from_pretrained):
     return SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=from_pretrained))
+
+
+def test_mocker_cli_maps_native_host_offload_flags():
+    args = parse_args(
+        [
+            "--kv-bytes-per-token",
+            "1024",
+            "--num-host-blocks",
+            "128",
+            "--host-offload-d2h-bandwidth-gbps",
+            "12.5",
+            "--host-offload-h2d-bandwidth-gbps",
+            "0",
+        ]
+    )
+
+    engine_args = CONFIG.build_mocker_engine_args(args)["engine"]
+
+    # The CLI resolves shared transfer/cache geometry before upstream validation.
+    assert engine_args["kv_transfer_bytes_per_token"] == 1024
+    assert engine_args["kv_cache_bytes_per_token"] == 1024
+    assert engine_args["native_host_offload"]["num_host_blocks"] == 128
+    assert engine_args["native_host_offload"]["d2h_bandwidth_gbps"] == 12.5
+    assert engine_args["native_host_offload"]["h2d_bandwidth_gbps"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_native_host_offload_resolves_model_geometry_before_validation(
+    monkeypatch,
+):
+    # The CLI module sets this process default on import; keep it test-scoped.
+    monkeypatch.setenv("DYN_COMPUTE_THREADS", "0")
+    mocker_main = importlib.import_module("dynamo.mocker.main")
+    args = parse_args(["--model-path", "test-model", "--num-host-blocks", "16"])
+    captured = []
+
+    async def prefetch_model(_model):
+        return "/test-model"
+
+    async def launch_workers(_args, config):
+        captured.append(config)
+
+    monkeypatch.setattr(mocker_main, "parse_args", lambda: args)
+    monkeypatch.setattr(mocker_main, "prefetch_model", prefetch_model)
+    monkeypatch.setattr(mocker_main, "compute_kv_bytes_per_token", lambda *_: 2048)
+    monkeypatch.setattr(mocker_main, "launch_workers", launch_workers)
+    await mocker_main.worker()
+
+    assert len(captured) == 1
+    engine = captured[0]["engine"]
+    assert engine["kv_cache_bytes_per_token"] == 2048
+    assert engine["kv_transfer_bytes_per_token"] == 2048
+    assert engine["native_host_offload"]["num_host_blocks"] == 16
