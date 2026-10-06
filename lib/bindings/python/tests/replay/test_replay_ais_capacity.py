@@ -2,14 +2,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from collections import UserDict
+from types import MappingProxyType
 
 import pytest
 
-from dynamo._core import run_mocker_synthetic_trace_replay
+from dynamo._core import EngineType, EntrypointArgs, run_mocker_synthetic_trace_replay
 from dynamo._internal import ais
 from dynamo.mocker.config import normalize_mocker_config
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
+
+
+@pytest.mark.parametrize("mapping_type", [MappingProxyType, UserDict])
+def test_mapping_inputs_reach_native_mocker_entrypoints(mapping_type):
+    raw = {"engine": {"num_gpu_blocks": 64}}
+    config = mapping_type(raw)
+    assert normalize_mocker_config(config) == normalize_mocker_config(raw)
+    EntrypointArgs(engine_type=EngineType.Mocker, mocker_engine_args=config)
+    report = run_mocker_synthetic_trace_replay(
+        32, 2, 1, extra_engine_args=config, replay_concurrency=1
+    )
+    assert report.summary["completed_requests"] == 1
+    assert raw == {"engine": {"num_gpu_blocks": 64}}
+
+
+def test_mapping_input_does_not_accept_a_sequence_of_pairs():
+    with pytest.raises(TypeError):
+        normalize_mocker_config([("engine", {"num_gpu_blocks": 64})])
 
 
 def _config(**overrides):

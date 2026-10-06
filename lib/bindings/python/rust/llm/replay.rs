@@ -1419,10 +1419,12 @@ pub(super) fn mocker_config_from_python(
     let json: String = if let Ok(json) = value.extract::<String>() {
         json
     } else {
+        let mapping = value.downcast::<pyo3::types::PyMapping>()?;
+        let mapping = py.import("builtins")?.call_method1("dict", (mapping,))?;
         let options = pyo3::types::PyDict::new(py);
         options.set_item("allow_nan", false)?;
         py.import("json")?
-            .call_method("dumps", (value,), Some(&options))?
+            .call_method("dumps", (mapping,), Some(&options))?
             .extract()?
     };
     mocker_config_from_json(py, &json)
