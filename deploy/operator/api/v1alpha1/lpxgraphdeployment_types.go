@@ -77,19 +77,24 @@ type LPXGraphDeploymentStatus struct {
 	// components reports logical replicas by authored component name, never Agent Pods.
 	// +optional
 	Components map[string]LPXComponentStatus `json:"components,omitempty"`
-	// modelDownload retains the existing remote-build download progress.
+	// modelDownload retains remote-build and checkpoint download progress.
 	// +optional
 	ModelDownload *ModelDownloadStatus `json:"modelDownload,omitempty"`
 }
 
-// ModelDownloadStatus contains the status of remote LPU model downloads.
+// ModelDownloadStatus contains the status of remote LPU build and checkpoint downloads.
 type ModelDownloadStatus struct {
 	// builds is the sorted set of resolved remote LPU build URLs whose artifacts
 	// were successfully downloaded into model-storage.
 	// +optional
 	Builds []string `json:"builds,omitempty"`
 
-	// lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+	// checkpoints is the sorted set of selected checkpoints, as
+	// `<model>@<revision>`, that were successfully downloaded into model-storage.
+	// +optional
+	Checkpoints []string `json:"checkpoints,omitempty"`
+
+	// lastCheckedAt is the last time all remote LPU builds and checkpoints were checked with ModelExpress.
 	// +optional
 	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
 }

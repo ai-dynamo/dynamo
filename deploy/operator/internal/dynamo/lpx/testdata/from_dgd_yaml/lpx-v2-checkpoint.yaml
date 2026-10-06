@@ -1,0 +1,241 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+data:
+  lpu_servers: ""
+immutable: true
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpx-v2-checkpoint
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+  name: lpx-v2-checkpoint-324f-decode-fd884c294bcb8400
+  namespace: inference-engine
+---
+data:
+  nodes_per_partition: ""
+  partition_ids: ""
+  partition_indices: ""
+  partition_models: ""
+  partition_node_offsets: ""
+  partition_paths: ""
+  topologies: ""
+immutable: true
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpx-v2-checkpoint
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+  name: lpx-v2-checkpoint-324f-lpu-b79c921f010dd141
+  namespace: inference-engine
+---
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpx-v2-checkpoint
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    nvidia.com/dynamo-graph-deployment-name: lpx-v2-checkpoint
+  name: lpx-v2-checkpoint-324f
+  namespace: inference-engine
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeExplicit
+    cliques:
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpx-v2-checkpoint
+        nvidia.com/extra-resources-hash: fd884c294bcb84009f3f599f5ab8f4dc6a696089567f23f0a5864a094c7614b6
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:109f4369670605f2df65d763bdf37094cf5295bcac2abaa201c003a35ff90b3a
+        scheduling.lpu.nvidia.com/role: cyborg-worker
+      labels:
+        lpx.nvidia.com/serving: "true"
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: lpx-v2-checkpoint
+        nvidia.com/dynamo-namespace: inference-engine-lpx-v2-checkpoint
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: lpx-v2-checkpoint-lpu
+      name: cond
+      spec:
+        minAvailable: 1
+        podSpec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                    - gpu-node-0
+          containers:
+          - args:
+            - --dynamo-model-name
+            - meta-llama/Llama-3.2-1B-Instruct
+            - --model-card
+            - /etc/cyborg/model-card.json
+            - --use-disagg-prefill
+            - --nixl-kv-layout
+            - HND
+            - --num-layers
+            - "16"
+            - --weights-path
+            - $(CYBORG_WEIGHTS_PATH)
+            command:
+            - /usr/local/bin/cyborg-entrypoint
+            - --expand-hosts
+            - --
+            - /usr/local/bin/cyborg
+            env:
+            - name: CYBORG_WEIGHTS_PATH
+              value: /nfs/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6
+            - name: LPX_LOCAL_PARTITION_IDS
+              value: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
+            - name: GBUILD_MANIFEST_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
+            - name: CYBORG_FPGA_GPI_REPLICA_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: DYN_COMPONENT
+              value: decode
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: inference-engine-lpx-v2-checkpoint
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: lpx-v2-checkpoint
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: inference-engine
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GLUE_RDMA_PATH_MTU
+              value: "1024"
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: RDMA_PORT
+              value: "19877"
+            - name: SERVER_HOSTS_FILE
+              value: /tmp/lpu_servers
+            image: example.invalid/gpu-runtime:test
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /configs
+              name: config
+            - mountPath: /etc/cyborg/model-card.json
+              name: cyborg-model-card
+              readOnly: true
+              subPath: model-card.json
+            - mountPath: /dev/infiniband
+              name: infiniband
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+          volumes:
+          - configMap:
+              name: dgd-lpx-v2-vllm-cyborg-model-card
+            name: cyborg-model-card
+          - hostPath:
+              path: /dev/infiniband
+              type: Directory
+            name: infiniband
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lpx-v2-checkpoint-324f-decode-fd884c294bcb8400
+            name: config
+        replicas: 1
+        roleName: cond
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    podCliqueScalingGroups:
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpx-v2-checkpoint
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:109f4369670605f2df65d763bdf37094cf5295bcac2abaa201c003a35ff90b3a
+      cliqueNames:
+      - cond
+      minAvailable: 1
+      name: lpx
+      replicas: 1
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0

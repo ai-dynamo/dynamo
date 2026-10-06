@@ -312,7 +312,7 @@ spec:
                     - type
                   x-kubernetes-list-type: map
                 modelDownload:
-                  description: modelDownload retains the existing remote-build download progress.
+                  description: modelDownload retains remote-build and checkpoint download progress.
                   properties:
                     builds:
                       description: |-
@@ -321,8 +321,15 @@ spec:
                       items:
                         type: string
                       type: array
+                    checkpoints:
+                      description: |-
+                        checkpoints is the sorted set of selected checkpoints, as
+                        `<model>@<revision>`, that were successfully downloaded into model-storage.
+                      items:
+                        type: string
+                      type: array
                     lastCheckedAt:
-                      description: lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+                      description: lastCheckedAt is the last time all remote LPU builds and checkpoints were checked with ModelExpress.
                       format: date-time
                       type: string
                   type: object

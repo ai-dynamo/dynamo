@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 )
 
@@ -36,16 +37,18 @@ type defaultModelRegistry struct {
 	mxClient    modelpb.ModelServiceClient
 }
 
-// ModelRegistry resolves build references and acquires their compiler metadata.
+// ModelRegistry resolves build references, acquires their compiler metadata,
+// and ensures builds and checkpoints are downloaded.
 type ModelRegistry interface {
 	BuildURL(id string) (*url.URL, error)
 	EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error)
+	EnsureCheckpointDownloaded(ctx context.Context, checkpoint *dynamov1beta1.LPXCheckpoint) (bool, error)
 	AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error)
 }
 
 // NewModelRegistry constructs a registry rooted at modelRegistryURL. An empty
 // URL is supported for absolute build references. mxClient may be nil when GCS
-// downloads are not required.
+// build and checkpoint downloads are not required.
 func NewModelRegistry(modelRegistryURL string, mxClient modelpb.ModelServiceClient) (ModelRegistry, error) {
 	var registryURL *url.URL
 
@@ -79,45 +82,93 @@ func (r *defaultModelRegistry) EnsureDownloaded(ctx context.Context, buildURL ur
 		if r.mxClient == nil {
 			return false, fmt.Errorf("Model Express client is required for GCS model downloads")
 		}
-
-		// Request the GCS build through the current Model Express client and classify its first status.
-		rpcCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		modelName := buildURL.String()
-
-		stream, err := r.mxClient.EnsureModelDownloaded(rpcCtx, &modelpb.ModelDownloadRequest{
-			ModelName: modelName,
+		downloaded, _, err := r.ensureModelExpressDownload(ctx, &modelpb.ModelDownloadRequest{
+			ModelName: buildURL.String(),
 			Provider:  modelpb.ModelProvider_GCS,
 		})
-		if err != nil {
-			return false, fmt.Errorf("ensure model express download for %q: %w", modelName, err)
-		}
-
-		update, err := stream.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return false, fmt.Errorf("model express returned no status for %q", modelName)
-			}
-			return false, fmt.Errorf("receive model express download status for %q: %w", modelName, err)
-		}
-
-		switch update.GetStatus() {
-		case modelpb.ModelStatus_DOWNLOADED:
-			return true, nil
-		case modelpb.ModelStatus_DOWNLOADING:
-			return false, nil
-		case modelpb.ModelStatus_ERROR:
-			message := update.GetMessage()
-			if message == "" {
-				message = "model express reported download error"
-			}
-			return false, fmt.Errorf("model express download failed for %q: %s", modelName, message)
-		default:
-			return false, fmt.Errorf("model express returned unexpected status %s for %q", update.GetStatus(), modelName)
-		}
+		return downloaded, err
 	default:
 		return false, fmt.Errorf("unsupported build download scheme %q", buildURL.Scheme)
+	}
+}
+
+// EnsureCheckpointDownloaded ensures the non-nil admitted checkpoint is in model
+// storage and reports whether the download is complete. It may initiate or
+// advance a Model Express download pinned to the checkpoint revision, and fails
+// unless Model Express confirms that exact revision. The receiver must be
+// non-nil and is not mutated.
+func (r *defaultModelRegistry) EnsureCheckpointDownloaded(
+	ctx context.Context,
+	checkpoint *dynamov1beta1.LPXCheckpoint,
+) (bool, error) {
+	if checkpoint.Provider != dynamov1beta1.LPXCheckpointProviderHuggingFace {
+		return false, fmt.Errorf("unsupported checkpoint provider %q", checkpoint.Provider)
+	}
+	if r.mxClient == nil {
+		return false, fmt.Errorf("checkpoint %q requires Model Express; configure infrastructure.modelExpressURL", CheckpointKey(checkpoint))
+	}
+
+	// Request the pinned revision; Model Express resolves it before claiming a download.
+	downloaded, update, err := r.ensureModelExpressDownload(ctx, &modelpb.ModelDownloadRequest{
+		ModelName: checkpoint.Model,
+		Provider:  modelpb.ModelProvider_HUGGING_FACE,
+		Revision:  &checkpoint.Revision,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	// Servers before Model Express 0.6.0 ignore the revision and report none.
+	if update.ResolvedRevision == nil {
+		return false, fmt.Errorf(
+			"model express did not report a resolved revision for %q; checkpoint downloads require Model Express 0.6.0 or later",
+			CheckpointKey(checkpoint),
+		)
+	}
+	if resolved := update.GetResolvedRevision(); resolved != checkpoint.Revision {
+		return false, fmt.Errorf("model express resolved %q to revision %q, want %q", checkpoint.Model, resolved, checkpoint.Revision)
+	}
+	return downloaded, nil
+}
+
+// ensureModelExpressDownload sends one download request and classifies the first
+// status update. It returns the update when the status is DOWNLOADED or
+// DOWNLOADING. The receiver must have a non-nil Model Express client.
+func (r *defaultModelRegistry) ensureModelExpressDownload(
+	ctx context.Context,
+	request *modelpb.ModelDownloadRequest,
+) (bool, *modelpb.ModelStatusUpdate, error) {
+	rpcCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	modelName := request.GetModelName()
+
+	stream, err := r.mxClient.EnsureModelDownloaded(rpcCtx, request)
+	if err != nil {
+		return false, nil, fmt.Errorf("ensure model express download for %q: %w", modelName, err)
+	}
+
+	update, err := stream.Recv()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, nil, fmt.Errorf("model express returned no status for %q", modelName)
+		}
+		return false, nil, fmt.Errorf("receive model express download status for %q: %w", modelName, err)
+	}
+
+	switch update.GetStatus() {
+	case modelpb.ModelStatus_DOWNLOADED:
+		return true, update, nil
+	case modelpb.ModelStatus_DOWNLOADING:
+		return false, update, nil
+	case modelpb.ModelStatus_ERROR:
+		message := update.GetMessage()
+		if message == "" {
+			message = "model express reported download error"
+		}
+		return false, nil, fmt.Errorf("model express download failed for %q: %s", modelName, message)
+	default:
+		return false, nil, fmt.Errorf("model express returned unexpected status %s for %q", update.GetStatus(), modelName)
 	}
 }
 

@@ -25,6 +25,11 @@ func testCanonicalLPXConfig() *v1beta1.LPXConfig {
 		Scheduling: &v1beta1.SchedulingSpec{
 			AttemptDeadlineSeconds: ptr.To[int64](900),
 		},
+		Checkpoint: &v1beta1.LPXCheckpoint{
+			Provider: v1beta1.LPXCheckpointProviderHuggingFace,
+			Model:    "openai/gpt-oss-20b",
+			Revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+		},
 	}
 }
 

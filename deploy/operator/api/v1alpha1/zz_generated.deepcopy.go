@@ -1512,6 +1512,11 @@ func (in *ModelDownloadStatus) DeepCopyInto(out *ModelDownloadStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.Checkpoints != nil {
+		in, out := &in.Checkpoints, &out.Checkpoints
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.LastCheckedAt != nil {
 		in, out := &in.LastCheckedAt, &out.LastCheckedAt
 		*out = (*in).DeepCopy()
