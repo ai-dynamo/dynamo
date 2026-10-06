@@ -411,6 +411,33 @@ def test_flat_bootstrap_fpms_skip_aic_tuning_for_attention_dp(fake_engine_factor
     assert model.avg_isl == 256
 
 
+def test_agg_avg_isl_ignores_decode_only_iterations(fake_engine_factory):
+    fake = _FakeEngineModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _install_fake_engine(fake_engine_factory, fake)
+    model = PlannerEnginePerfModel(
+        worker_type="aggregated",
+        config=_config(min_observations=1),
+        capabilities=_caps(),
+    )
+
+    model.load_benchmark_fpms(
+        [_prefill_fpm(scheduled_tokens=2000)] + [_decode_fpm(requests=8)] * 4
+    )
+    assert model.avg_isl == 2000
+
+    idle = _decode_fpm(requests=0, kv_tokens=0)
+    model.load_benchmark_fpms([idle] * 16)
+    assert model.avg_isl == 0
+
+
 def test_capacity_request_passes_kv_hit_rate(fake_engine_factory):
     fake = _FakeEngineModel(
         diagnostics={
