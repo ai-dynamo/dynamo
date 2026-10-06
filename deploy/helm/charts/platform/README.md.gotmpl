@@ -48,6 +48,52 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.6.0
 
+#### CRD and admission breaking changes
+
+##### Reserved runtime init container name
+
+**Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
+sidecar mode for that component. The runtime container must specify an image and `restartPolicy: Always`.
+Dynamo defaults and runtime-version resolution target this container;
+`spec.components[*].podTemplate.spec.containers[name=main]` runs the engine.
+
+In v1alpha1, the corresponding paths are `spec.services.<service-name>.extraPodSpec.initContainers[name=runtime]`
+and `spec.services.<service-name>.extraPodSpec.mainContainer`.
+
+Only worker, prefill, and decode components support this mode. Multinode, enabled checkpoint, GPU memory
+service, and failover are currently unsupported and rejected. Support for these features is planned for a future release.
+
+**Affected:** Any deployment with `spec.components[*].podTemplate.spec.initContainers[name=runtime]`,
+including an unrelated setup container using that name.
+
+**Action:** Before upgrading, rename unrelated containers at
+`spec.components[*].podTemplate.spec.initContainers[name=runtime]`. For native Dynamo sidecars, declare
+`spec.components[*].podTemplate.spec.initContainers[name=runtime]` and specify `restartPolicy: Always`.
+
+**Existing deployments:** Components without `spec.components[*].podTemplate.spec.initContainers[name=runtime]`
+retain their current mode. Existing components with that entry adopt sidecar behavior when
+reconciled, which can change the rendered pod and trigger a rollout. Invalid combinations are
+rejected on updates.
+
+#### Operator behavior breaking changes
+
+##### Frontend sidecar identity in container discovery mode
+
+**Change:** The operator now sets `CONTAINER_NAME` to the container selected by
+`spec.components[*].frontendSidecar`, rather than `main`.
+In container discovery mode, the frontend registers as `{pod}-<name>`, where `<name>` is
+`spec.components[*].frontendSidecar`, instead of sharing the `{pod}` identity.
+
+**Affected:** Existing components with `spec.components[*].frontendSidecar` and
+`nvidia.com/dynamo-kube-discovery-mode: container`.
+
+**Action:** Plan for a one-time rollout of affected worker pods when upgrading the operator
+to v1.6.0. Update any tooling that depends on the frontend's previous registration identity.
+
+**Existing deployments:** Reconciliation updates the frontend container's `CONTAINER_NAME`,
+which changes the pod template and triggers the rollout even without a manifest change.
+Components without a frontend sidecar or using pod discovery are unaffected by this change.
+
 #### Dependency compatibility
 
 **Change:** The bundled Grove version is now `v0.1.0-alpha.14-rc1`. It provides the group-wide pod

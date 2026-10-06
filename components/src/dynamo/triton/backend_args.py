@@ -13,6 +13,8 @@ from tritonserver import RateLimitMode as TritonRateLimitMode
 from dynamo.common.configuration.utils import add_argument
 from dynamo.triton.args import Config, DynamoArgGroup
 
+_TASK_CHOICES = ("tensor", "classify")
+
 
 def _enum_arg(enum_cls, flag: str) -> Callable[[str], object]:
     """Build an argparse ``type`` that maps a member name onto a triton_runtime enum."""
@@ -401,6 +403,45 @@ class DynamoTritonArgGroup(DynamoArgGroup):
             help="Host policy as '<name>,<setting>=<value>'. May be repeated.",
         )
 
+        endpoint_group = parser.add_argument_group("Dynamo Endpoint Options")
+        add_argument(
+            endpoint_group,
+            flag_name="--task",
+            env_var="DYN_TRITON_TASK",
+            default="tensor",
+            choices=_TASK_CHOICES,
+            help=(
+                "Endpoint the worker advertises. 'tensor' (default) serves "
+                "raw Dynamo tensor inference; 'classify' serves OpenAI "
+                "/v1/classify by translating requests to a BYTES text tensor "
+                "and reading an FP32 probability output."
+            ),
+        )
+        add_argument(
+            endpoint_group,
+            flag_name="--classify-input-name",
+            env_var="DYN_TRITON_CLASSIFY_INPUT_NAME",
+            default=None,
+            help=(
+                "Explicit input tensor name for --task classify. Omit to "
+                "auto-detect the sole TYPE_STRING input in the model's "
+                "config.pbtxt; required when the model declares more than "
+                "one BYTES input."
+            ),
+        )
+        add_argument(
+            endpoint_group,
+            flag_name="--classify-output-name",
+            env_var="DYN_TRITON_CLASSIFY_OUTPUT_NAME",
+            default=None,
+            help=(
+                "Explicit output tensor name for --task classify. Omit to "
+                "auto-detect the sole TYPE_FP32 output in the model's "
+                "config.pbtxt; required when the model declares more than "
+                "one FP32 output."
+            ),
+        )
+
 
 class DynamoTritonConfig(Config):
     """Configuration for Dynamo Triton Runtime specific options."""
@@ -441,6 +482,10 @@ class DynamoTritonConfig(Config):
     cache_directory: Optional[str]
     host_policies: Optional[dict]
 
+    task: str
+    classify_input_name: Optional[str]
+    classify_output_name: Optional[str]
+
     def validate(self) -> None:
         if hasattr(super(), "validate"):
             super().validate()
@@ -449,6 +494,23 @@ class DynamoTritonConfig(Config):
             raise ValueError(
                 "--model-repository is required (or set DYN_TRITON_MODEL_REPOSITORY); "
                 "the worker is model-agnostic and does not assume a bundled repo."
+            )
+
+        if self.task not in _TASK_CHOICES:
+            raise ValueError(
+                f"--task must be one of {list(_TASK_CHOICES)}, got {self.task!r}"
+            )
+
+        # Classify-only overrides don't make sense on the tensor path; reject
+        # them early so an operator who typoed `--task tensor` doesn't spend
+        # startup wondering why their name overrides are ignored.
+        if self.task != "classify" and (
+            self.classify_input_name is not None
+            or self.classify_output_name is not None
+        ):
+            raise ValueError(
+                "--classify-input-name and --classify-output-name are only "
+                "valid with --task classify"
             )
 
         if self.backend_directory is not None and not os.path.isdir(
@@ -475,10 +537,20 @@ class DynamoTritonConfig(Config):
         (triton_runtime._api._server.Options).
         """
         opts: dict = {
-            name: getattr(self, name) for name in DynamoTritonConfig.__annotations__
+            name: getattr(self, name)
+            for name in DynamoTritonConfig.__annotations__
+            if name not in _NON_TRITON_SERVER_FIELDS
         }
         # Drop unset (None) ones for the binding's own defaults to apply.
         return {key: value for key, value in opts.items() if value is not None}
+
+
+# Fields on DynamoTritonConfig that pick the Dynamo-side endpoint behavior
+# rather than a Triton server option. They must be excluded from
+# to_server_options() so tritonserver.Server(**opts) doesn't reject them.
+_NON_TRITON_SERVER_FIELDS = frozenset(
+    ("task", "classify_input_name", "classify_output_name")
+)
 
 
 def parse_args(argv: Optional[list[str]] = None) -> DynamoTritonConfig:

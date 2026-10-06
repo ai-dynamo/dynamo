@@ -377,8 +377,7 @@ func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
 			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 
 			t.Log("Publish one request per remote workload replica, listing only remote compiler partitions")
-			_, missing, changed := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
-			require.False(t, changed)
+			_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
 			partitions := make([][]int64, 0, len(missing))
 			for _, request := range missing {
 				compilerIDs := make([]int64, 0, len(request.Spec.Partitions))
