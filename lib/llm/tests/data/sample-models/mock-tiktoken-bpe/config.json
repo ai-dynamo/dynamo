@@ -1,0 +1,11 @@
+{
+  "model_type": "kimi_k3",
+  "architectures": [
+    "KimiK3ForCausalLM"
+  ],
+  "max_position_embeddings": 32768,
+  "eos_token_id": [
+    470
+  ],
+  "vocab_size": 725
+}
