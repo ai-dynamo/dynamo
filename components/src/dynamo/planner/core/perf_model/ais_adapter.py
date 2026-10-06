@@ -346,7 +346,8 @@ class PlannerEnginePerfModel:
             self._avg_isl.add_after_first_nonzero(
                 scheduled.sum_prefill_tokens / scheduled.num_prefill_requests
             )
-        else:
+        elif scheduled.num_decode_requests == 0:
+            # Decay only when idle; agg workers run many decode-only passes.
             self._avg_isl.add_after_first_nonzero(0.0)
         if scheduled.num_decode_requests > 0:
             self._avg_decode_length.add_after_first_nonzero(
