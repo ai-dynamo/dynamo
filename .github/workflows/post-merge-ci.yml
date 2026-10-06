@@ -957,6 +957,7 @@ jobs:
     needs: [deploy-operator, vllm-copy-to-acr]
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: post-merge
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
@@ -969,6 +970,7 @@ jobs:
     needs: [deploy-operator, sglang-copy-to-acr]
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: post-merge
       framework: sglang
       profiles: '["agg", "agg_logging", "agg_router"]'
       image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
@@ -981,6 +983,7 @@ jobs:
     needs: [deploy-operator, trtllm-copy-to-acr]
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
+      dd_env: post-merge
       framework: trtllm
       profiles: '["agg", "agg_router"]'
       image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
@@ -995,6 +998,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: $/.github/workflows/shared-dgdr-deploy-test.yml
     with:
+      dd_env: post-merge
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -1004,6 +1008,7 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       DOCKERHUB_LOGIN_USER: ${{ secrets.DOCKERHUB_LOGIN_USER }}
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
   deploy-operator-checkpoint-vllm:
     name: vLLM Snapshot Operator Setup
@@ -1298,6 +1303,8 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1366,6 +1373,8 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1434,6 +1443,8 @@ jobs:
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1554,6 +1565,8 @@ jobs:
         id: deploy-test
         uses: $/.github/actions/dynamo-deploy-test
         with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
