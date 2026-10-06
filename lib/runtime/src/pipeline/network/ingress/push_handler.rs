@@ -289,10 +289,8 @@ where
             };
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
-            // Notify before the publish: a non-error chunk shows the engine is
-            // making progress even if the client has left and the send fails.
-            // Error chunks do not prove the engine is healthy, so they do not
-            // reset the canary timer.
+            // Notify before the publish: engine progress counts even if the send fails.
+            // Error chunks do not prove health, so they never reset the canary.
             if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
                 notifier.notify_one();
             }
