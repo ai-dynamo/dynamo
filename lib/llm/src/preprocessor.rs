@@ -7756,7 +7756,6 @@ mod token_data_tests {
     async fn token_prompt_is_bounded_by_model_vocab() {
         let mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        // A single token array, a batch of one, and the largest u32.
         for prompt in [
             serde_json::json!([1, 128256]),
             serde_json::json!([[1, 128256]]),
@@ -7851,7 +7850,6 @@ mod token_data_tests {
             PipelineContext::new(request)
         };
 
-        // A single token array, a batch, and the largest u32.
         for input in [
             serde_json::json!([1, 128256]),
             serde_json::json!([[1, 2], [1, 128256]]),
