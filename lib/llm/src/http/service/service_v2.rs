@@ -841,7 +841,10 @@ pub struct HttpServiceConfig {
 /// non-empty prefix is set. The frontend supplies its own resolved filter.
 fn namespace_filter_from_env() -> NamespaceFilter {
     let namespace_prefix = std::env::var("DYN_NAMESPACE_PREFIX").ok();
-    if let Some(prefix) = namespace_prefix.as_deref().filter(|prefix| !prefix.is_empty()) {
+    if let Some(prefix) = namespace_prefix
+        .as_deref()
+        .filter(|prefix| !prefix.is_empty())
+    {
         return NamespaceFilter::from_namespace_and_prefix(None, Some(prefix));
     }
 
