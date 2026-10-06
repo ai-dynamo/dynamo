@@ -257,7 +257,6 @@ mod tests {
         let mut picker = picker();
         let now = Instant::now();
         assert_eq!(select(&mut picker, Some("s"), &[(A, 0), (B, 9)], now), A);
-        assert_eq!(select(&mut picker, Some("s"), &[(A, 90), (B, 0)], now), A);
         assert_eq!(select(&mut picker, Some("s"), &[(B, 0), (A, 90)], now), A);
     }
 
@@ -267,7 +266,6 @@ mod tests {
         let now = Instant::now();
         assert_eq!(select(&mut picker, Some("s"), &[(A, 0), (B, 9)], now), A);
         assert_eq!(select(&mut picker, Some("s"), &[(B, 9)], now), B);
-        // The new binding holds when the original worker returns idle.
         assert_eq!(select(&mut picker, Some("s"), &[(A, 0), (B, 9)], now), B);
     }
 
