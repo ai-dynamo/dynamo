@@ -3,7 +3,7 @@
 
 use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -347,6 +347,11 @@ pub(crate) struct OfflineReplayRouter {
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
+    /// Simulated delay before KV events reach the indexer; `0.0` applies them synchronously.
+    /// Completions never lag: a live router learns them in-band on the response path.
+    kv_event_lag_ms: f64,
+    /// Lagged KV event batches in arrival order, keyed by the replay time they become visible.
+    lagged_kv_events: VecDeque<(f64, Vec<RouterEvent>)>,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -374,6 +379,11 @@ impl KvRouterPlacement {
             }
         };
         Ok(Self { router })
+    }
+
+    pub(in crate::replay) fn with_kv_event_lag_ms(mut self, lag_ms: f64) -> Result<Self> {
+        self.router.set_kv_event_lag_ms(lag_ms)?;
+        Ok(self)
     }
 
     fn placement(&self, admission: WorkerAdmission) -> Placement {
@@ -490,8 +500,8 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         Ok(PlacementEffects { decision, released })
     }
 
-    fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
-        let effects = self.router.on_kv_events(observation.0)?;
+    fn observe(&mut self, observation: RouterEventBatch, now_ms: f64) -> Result<Vec<Placement>> {
+        let effects = self.router.on_kv_events_at(observation.0, now_ms)?;
         Ok(self.placements(effects.admissions))
     }
 
@@ -584,7 +594,31 @@ impl OfflineReplayRouter {
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
             tracking_hash,
+            kv_event_lag_ms: 0.0,
+            lagged_kv_events: VecDeque::new(),
         })
+    }
+
+    pub(crate) fn set_kv_event_lag_ms(&mut self, lag_ms: f64) -> Result<()> {
+        if !lag_ms.is_finite() || lag_ms < 0.0 {
+            return Err(anyhow!(
+                "kv_event_lag_ms must be finite and non-negative, got {lag_ms}"
+            ));
+        }
+        self.kv_event_lag_ms = lag_ms;
+        Ok(())
+    }
+
+    /// Apply, in arrival order, every lagged KV event batch visible at `now_ms`. KV events change
+    /// no load, so this never admits queued requests on its own.
+    fn apply_due_kv_events(&mut self, now_ms: f64) -> Result<()> {
+        while let Some((_, events)) = self
+            .lagged_kv_events
+            .pop_front_if(|(visible_ms, _)| *visible_ms <= now_ms)
+        {
+            self.on_kv_events(events)?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -622,6 +656,7 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
+        self.apply_due_kv_events(now_ms)?;
         let pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
@@ -682,6 +717,20 @@ impl OfflineReplayRouter {
         })
     }
 
+    pub(crate) fn on_kv_events_at(
+        &mut self,
+        events: Vec<RouterEvent>,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        if self.kv_event_lag_ms == 0.0 {
+            return self.on_kv_events(events);
+        }
+        self.apply_due_kv_events(now_ms)?;
+        self.lagged_kv_events
+            .push_back((now_ms + self.kv_event_lag_ms, events));
+        Ok(RouterEffects::default())
+    }
+
     pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
         for event in events {
             let worker_id = event.worker_id;
@@ -702,6 +751,7 @@ impl OfflineReplayRouter {
         uuid: Uuid,
         now_ms: f64,
     ) -> Result<RouterEffects> {
+        self.apply_due_kv_events(now_ms)?;
         let decay_now = self.decay_now(now_ms);
         self.slots
             .mark_prefill_completed(&uuid.to_string(), decay_now)
@@ -716,6 +766,7 @@ impl OfflineReplayRouter {
         uuid: Uuid,
         now_ms: f64,
     ) -> Result<RouterEffects> {
+        self.apply_due_kv_events(now_ms)?;
         let decay_now = self.decay_now(now_ms);
         self.slots
             .free(&uuid.to_string(), decay_now)
@@ -780,10 +831,16 @@ impl OfflineReplayRouter {
             .unregister_worker(wid)
             .map_err(anyhow::Error::from)?;
         self.indexer.tree.remove_worker(wid);
+        // Lagged events from the removed worker would re-add blocks it no longer owns.
+        self.lagged_kv_events.retain_mut(|(_, events)| {
+            events.retain(|event| event.worker_id != wid);
+            !events.is_empty()
+        });
         Ok(())
     }
 
     pub(crate) fn on_topology_changed(&mut self, now_ms: f64) -> Result<RouterEffects> {
+        self.apply_due_kv_events(now_ms)?;
         if self.workers_with_configs.is_empty() {
             return Ok(RouterEffects::default());
         }
@@ -2034,5 +2091,150 @@ policy_classes:
             router.debug_snapshot(0.0).pending[0].uuid,
             Uuid::from_u128(2)
         );
+    }
+
+    fn admitted_uuids(effects: super::RouterEffects) -> Vec<Uuid> {
+        effects
+            .admissions
+            .iter()
+            .map(|admission| admission.uuid)
+            .collect()
+    }
+
+    #[test]
+    fn lagged_kv_events_stay_invisible_to_routing_until_due() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        let first = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&first.tokens, router.block_size);
+        router
+            .on_kv_events_at(
+                vec![store_event(
+                    0,
+                    1,
+                    hashes.local_block_hashes[0],
+                    StorageTier::Device,
+                )],
+                0.0,
+            )
+            .unwrap();
+
+        let hidden = router
+            .on_request_arrival(&first, Some(hashes.clone()), 49.0)
+            .unwrap();
+        assert_eq!(hidden.admissions[0].best_available_overlap_blocks, 0);
+        let visible = router
+            .on_request_arrival(&request(2, 7), Some(hashes), 50.0)
+            .unwrap();
+        assert_eq!(visible.admissions[0].best_available_overlap_blocks, 1);
+    }
+
+    #[test]
+    fn completions_stay_immediate_under_kv_event_lag() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        let admitted = router.debug_snapshot(0.0);
+        assert_eq!(admitted.active_tokens_by_worker, vec![(0, 64)]);
+        assert_ne!(admitted.active_blocks_by_worker, vec![(0, 0)]);
+
+        router
+            .on_prefill_completed(Uuid::from_u128(1), 10.0)
+            .unwrap();
+        assert_eq!(
+            router.debug_snapshot(10.0).active_tokens_by_worker,
+            vec![(0, 0)]
+        );
+        router
+            .on_request_completed(Uuid::from_u128(1), 20.0)
+            .unwrap();
+        assert_eq!(
+            router.debug_snapshot(20.0).active_blocks_by_worker,
+            vec![(0, 0)]
+        );
+
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        assert_eq!(router.pending_count(), 1);
+
+        let released = router
+            .on_request_completed(Uuid::from_u128(1), 10.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(released), vec![Uuid::from_u128(2)]);
+        assert_eq!(router.pending_count(), 0);
+    }
+
+    #[test]
+    fn completion_drain_applies_due_kv_events_first() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        router
+            .on_kv_events_at(vec![store_event(0, 1, 11, StorageTier::Device)], 0.0)
+            .unwrap();
+        router
+            .on_kv_events_at(vec![store_event(0, 2, 12, StorageTier::Device)], 20.0)
+            .unwrap();
+        assert_eq!(router.debug_snapshot(20.0).indexer.total_cached_blocks, 0);
+
+        // The batch due at 50 ms lands before the drain at 60 ms; the batch due at 70 ms does not.
+        let released = router
+            .on_request_completed(Uuid::from_u128(1), 60.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(released), vec![Uuid::from_u128(2)]);
+        assert_eq!(router.debug_snapshot(60.0).indexer.total_cached_blocks, 1);
+    }
+
+    #[test]
+    fn finalized_worker_removal_drops_its_lagged_kv_events() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 2).unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_kv_events_at(
+                vec![
+                    store_event(0, 1, 11, StorageTier::Device),
+                    store_event(1, 2, 12, StorageTier::Device),
+                ],
+                0.0,
+            )
+            .unwrap();
+        router.remove_worker(1).unwrap();
+        router.finalize_worker_removal(1).unwrap();
+
+        router.on_topology_changed(50.0).unwrap();
+        assert_eq!(
+            router.debug_snapshot(50.0).indexer.cached_blocks_by_worker,
+            vec![(0, 1)]
+        );
+    }
+
+    #[test]
+    fn kv_event_lag_is_validated_and_scoped_to_the_call() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        assert!(router.set_kv_event_lag_ms(-1.0).is_err());
+        assert!(router.set_kv_event_lag_ms(f64::NAN).is_err());
+        assert!(crate::replay::with_kv_event_lag_ms(f64::INFINITY, || ()).is_err());
+
+        let inside =
+            crate::replay::with_kv_event_lag_ms(25.0, crate::replay::kv_event_lag_ms).unwrap();
+        assert_eq!(inside, 25.0);
+        assert_eq!(crate::replay::kv_event_lag_ms(), 0.0);
     }
 }

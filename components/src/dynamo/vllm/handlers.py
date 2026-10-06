@@ -942,6 +942,9 @@ def build_sampling_params(
     sampling_params.detokenize = False
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
 
+    # setattr skips __post_init__ (temperature clamp, _verify_args, greedy reset),
+    # and vLLM validates before the process_inputs clone reruns it.
+    sampling_params.__post_init__()
     return sampling_params
 
 
@@ -1043,6 +1046,8 @@ def build_sampling_params_openai(
     ):
         sampling_params.thinking_token_budget = thinking_token_budget
 
+    # Same setattr gap as in build_sampling_params.
+    sampling_params.__post_init__()
     return sampling_params
 
 
@@ -4281,9 +4286,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         _apply_nvext_cache_salt(request, prompt)
 
-        # Build sampling params from request using shared utility
+        # Prefill generates only 1 token. Cap it before the builder, whose vLLM
+        # checks reject a client min_tokens above max_tokens=1.
+        stop_conditions = {
+            **(request.get("stop_conditions") or {}),
+            "max_tokens": 1,
+            "min_tokens": 1,
+        }
         sampling_params = build_sampling_params(
-            request,
+            {**request, "stop_conditions": stop_conditions},
             self.default_sampling_params,
             self.model_max_len,
             enable_rl=self.config.enable_rl,
@@ -4299,9 +4310,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             kv_protocol.prefill_request_kv_transfer_params(),
             preserve_kv_hint=True,
         )
-        # Override for prefill: only generate 1 token
-        sampling_params.max_tokens = 1
-        sampling_params.min_tokens = 1
 
         # Extract LoRA request if present
         model_name = request.get("model")
