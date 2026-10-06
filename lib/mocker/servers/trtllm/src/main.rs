@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
             max_concurrent_requests: args.max_concurrent_requests,
             kv_host: args.kv_host,
             kv_port: args.kv_port,
+            is_request_recording_enabled: false,
         },
         engine_args,
     )?;

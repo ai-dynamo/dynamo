@@ -28,6 +28,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import split_served_model_names
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
@@ -66,6 +67,12 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     # rest vLLM args
     engine_args: AsyncEngineArgs
 
+    @property
+    def model_source_path(self) -> str:
+        return (
+            self.engine_args.model if needs_local_model_path(self.model) else self.model
+        )
+
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         DynamoVllmConfig.validate(self)
@@ -78,13 +85,38 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
 
 
 def parse_args(argv: list[str] | None = None) -> Config:
-    """Parse command-line arguments for the vLLM backend.
+    """Parse vLLM arguments without fetching; workers use parse_args_with_model_fetch.
 
     Args:
         argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
     Returns:
         Config: Parsed configuration object.
     """
+    return _build_config(*_parse_cli_args(argv))
+
+
+async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
+    """Parse worker arguments, resolving NGC sources before engine validation.
+
+    Only metadata is fetched here; worker startup fetches weights after
+    validation. Hugging Face sources retain their existing acquisition path.
+
+    Args:
+        argv: Command-line arguments. ``None`` means ``sys.argv[1:]``.
+
+    Returns:
+        The validated configuration, retaining the original source in ``model``.
+    """
+    dynamo_config, vllm_args = _parse_cli_args(argv)
+    if needs_local_model_path(dynamo_config.model):
+        vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
+        if not vllm_args.served_model_name:
+            vllm_args.served_model_name = [dynamo_config.model]
+    return _build_config(dynamo_config, vllm_args)
+
+
+def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]:
+    """Split Dynamo and vLLM arguments while preserving the original model source."""
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
@@ -128,7 +160,10 @@ def parse_args(argv: list[str] | None = None) -> Config:
     # vllm will update the model name to the full path of the model, which will break the dynamo logic,
     # as we use the model name as served_model_name (if served_model_name is not set)
     dynamo_config.model = vllm_args.model
+    return dynamo_config, vllm_args
 
+
+def _build_config(dynamo_config: Config, vllm_args: argparse.Namespace) -> Config:
     enable_kv_cache_metadata_compat()
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 

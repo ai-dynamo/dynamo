@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -33,6 +34,10 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     raise_if_unextracted_multimodal,
 )
 from dynamo.sglang.request_utils import request_cache_salt
+from dynamo.sglang.thinking_budget import (
+    apply_thinking_budget,
+    thinking_budget_requested,
+)
 
 # Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
 # This remains as a compatibility fallback for older callers that still encode
@@ -121,7 +126,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 k: v for k, v in sampling_params.items() if v is not None
             }
         native_payload = native_generate_payload(inner_request)
+        has_thinking_budget = False
         if native_payload is None:
+            has_thinking_budget = thinking_budget_requested(inner_request)
+            sampling_params = apply_thinking_budget(
+                inner_request,
+                sampling_params,
+                self.config.server_args,
+                engine=self.engine,
+            )
             sampling_params["n"] = 1
             sampling_params["max_new_tokens"] = 1
 
@@ -216,13 +229,24 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 supported=getattr(self, "_supports_ordered_cancellation", False),
                 batched=False,
             )
+            output_options = inner_request.get("output_options", {}) or {}
+            # Prompt logprobs are discarded until the handoff carries their metadata.
+            logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
+                {"logprobs": output_options.get("logprobs")},
+                allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
+            )
             results = await self.engine.async_generate(
                 **input_param,
+                **logprob_kwargs,
                 **mm_kwargs,
                 **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
                 sampling_params=sampling_params,
                 stream=True,
-                **require_reasoning_kwargs(self.engine, inner_request),
+                **require_reasoning_kwargs(
+                    self.engine,
+                    inner_request,
+                    thinking_budget_requested=has_thinking_budget,
+                ),
                 bootstrap_host=bootstrap_host,
                 bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,
