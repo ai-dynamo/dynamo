@@ -316,7 +316,17 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the pinned `vllm-proto` crate.
+The vLLM engine runs in `spec.components[*].podTemplate.spec.containers[name=main]`, alongside the
+restartable Dynamo sidecar in `spec.components[*].podTemplate.spec.initContainers[name=runtime]`.
+Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo sidecar mode;
+keep `restartPolicy: Always`.
+
+The operator injects probes into `spec.components[*].podTemplate.spec.initContainers[name=runtime]`:
+`/live` for startup and liveness, and `/health` for runtime readiness, independent of engine loading.
+Kubernetes-native gRPC probes on port `50051` gate pod readiness and restart
+unhealthy engine containers, with a 30-minute startup budget; increase this for
+larger models. The engine listens on `0.0.0.0` for kubelet probes, while the
+sidecar connects over loopback.
 
 The Dynamo vLLM runtime image exposes `vllm-rs` through the
 [wrapper described above](#runtime-compatibility). On CPU and XPU, check that
@@ -327,10 +337,9 @@ upstream vLLM images and locate the binary inside the Python package.
 
 - A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature
   gate) with the Dynamo operator and a GPU node (multiple GPUs plus an RDMA fabric
-  for `disagg.yaml`). The engine runs as a native sidecar (`initContainers` with
-  `restartPolicy: Always`), which requires that version.
+  for `disagg.yaml`). The native sidecar in `spec.components[*].podTemplate.spec.initContainers[name=runtime]`
+  uses `restartPolicy: Always`, which requires that version.
 - `kubectl` set to that cluster, and a namespace to deploy into.
-- A Hugging Face token for the model.
 - A container registry you can push to and the cluster can pull from.
 
 ### 1. Build and push the sidecar image
@@ -340,7 +349,7 @@ Build and push the image to a registry your cluster can pull from:
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
+  -t <your-registry>/dynamo-sidecar:1.6.0 --push .
 ```
 
 See [Build the image](../README.md#build-the-image) for a single-architecture
@@ -349,17 +358,24 @@ build. These manifests set the container `command` to
 
 ### 2. Point the manifest at your image
 
-In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set the `main` worker image to
-the one you pushed. Add `imagePullSecrets` if your registry is private.
+In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set
+`spec.components[*].podTemplate.spec.initContainers[name=runtime].image` to the one you pushed.
+Keep the vLLM engine image in `spec.components[*].podTemplate.spec.containers[name=main].image`.
+Add `imagePullSecrets` if your registry is private.
+For a custom image tag without a semantic version, set `spec.components[*].runtimeVersionOverride`
+to the Dynamo version built into the sidecar image.
 
-### 3. Create the Hugging Face token secret
+For custom mounts on `spec.components[*].podTemplate.spec.initContainers[name=runtime]`, declare matching entries in
+`spec.components[*].podTemplate.spec.volumes`; the operator does not infer PVC volumes from
+init-container mounts. `spec.components[*].compilationCache` configures the engine in
+`spec.components[*].podTemplate.spec.containers[name=main]` and creates its pod volume; it does not
+mount the cache into `spec.components[*].podTemplate.spec.initContainers[name=runtime]`.
 
-```bash
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="$HF_TOKEN" -n <namespace>
-```
+For TLS-enabled deployments, mount the certificate Secrets on the runtime container.
+A co-located frontend also needs its own certificate mounts. See the
+[sidecar-mode TLS example](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/tls.md#dynamo-sidecar-mode).
 
-### 4. Deploy
+### 3. Deploy
 
 ```bash
 kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
@@ -371,7 +387,7 @@ Wait for the worker pod to reach `2/2 Running`:
 kubectl get pods -n <namespace> -w
 ```
 
-### 5. Send a request
+### 4. Send a request
 
 ```bash
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000 &
