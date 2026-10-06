@@ -72,10 +72,11 @@ executables; these manifests run `dynamo-sglang-sidecar` as the container
 command.
 
 > [!NOTE]
-> The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
-> server (`--grpc-port`) landed there. The KV-routing examples require
+> The engine image must be a stock SGLang **v0.5.17+** build: this is the first
+> release whose native gRPC protocol reads the typed `guided_decoding` field.
+> The KV-routing examples require
 > **v0.5.18+** because the sidecar discovers their structured KV-event
-> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.19`.
+> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.21`.
 
 ### Prerequisites
 

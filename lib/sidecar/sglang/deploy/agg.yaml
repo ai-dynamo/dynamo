@@ -41,7 +41,7 @@ spec:
         # v0.5.16+; keep this example aligned with Dynamo main's SGLang pin.
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.17
+          image: lmsysorg/sglang:v0.5.21
           restartPolicy: Always
           # gRPC HealthCheck via exec (tcpSocket/grpc: dial the pod IP, not the
           # loopback engine). startupProbe gates `main`; readinessProbe drops dead workers.

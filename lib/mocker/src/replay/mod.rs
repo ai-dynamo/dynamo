@@ -154,6 +154,35 @@ pub use entrypoints::{
 pub use offline::run_offline_handoff_conformance;
 pub use validate::validate_replay_args_mode;
 
+thread_local! {
+    static KV_EVENT_LAG_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// Run `replay` with a simulated KV event lag for offline KV-router replay.
+///
+/// Delays the KV cache events (blocks stored and removed) the router's indexer observes by
+/// `lag_ms` of simulated time. Prefill and request completions stay immediate, as a live router
+/// observes them in-band on the response path. Applies to offline KV-router replays constructed
+/// on this thread inside `replay`; `0.0` keeps synchronous updates.
+pub fn with_kv_event_lag_ms<T>(lag_ms: f64, replay: impl FnOnce() -> T) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        lag_ms.is_finite() && lag_ms >= 0.0,
+        "kv_event_lag_ms must be finite and non-negative, got {lag_ms}"
+    );
+    struct Restore(f64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            KV_EVENT_LAG_MS.with(|lag| lag.set(self.0));
+        }
+    }
+    let _restore = Restore(KV_EVENT_LAG_MS.with(|lag| lag.replace(lag_ms)));
+    Ok(replay())
+}
+
+pub(crate) fn kv_event_lag_ms() -> f64 {
+    KV_EVENT_LAG_MS.with(std::cell::Cell::get)
+}
+
 pub(crate) fn normalize_trace_requests(
     mut requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
