@@ -1986,7 +1986,7 @@ def _fake_teardown_targets(steps):
 
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_worker_teardown_surfaces_cancellation_after_metrics_unwind():
+async def test_worker_teardown_surfaces_cancellation_during_metrics_unwind():
     started = asyncio.Event()
     unwinding = asyncio.Event()
     release_metrics = asyncio.Event()
@@ -2033,7 +2033,7 @@ async def test_worker_teardown_surfaces_cancellation_after_metrics_unwind():
 
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_worker_teardown_surfaces_cancellation_after_deferred_cleanup():
+async def test_worker_teardown_surfaces_cancellation_during_deferred_cleanup():
     metrics_task = await _real_shaped_metrics_task()
     deferred_started = asyncio.Event()
     release_deferred = asyncio.Event()

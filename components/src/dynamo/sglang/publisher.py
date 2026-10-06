@@ -666,8 +666,7 @@ async def cancel_metrics_task(metrics_task: asyncio.Task) -> None:
 
     ``await metrics_task`` cannot tell the task's own cancellation from the
     caller's. ``asyncio.wait`` never raises on behalf of the task it waits on,
-    so any ``CancelledError`` escaping here is the caller's. Classifying on
-    ``metrics_task.done()`` instead looks equivalent but swallows the caller's.
+    so any ``CancelledError`` escaping here is the caller's.
     """
     metrics_task.cancel()
     await asyncio.wait([metrics_task])
@@ -771,7 +770,6 @@ async def handle_non_leader_node(
         "Running with metrics and KV event publishing for local DP ranks."
     )
 
-    body_failed = True
     try:
         if publisher.dynamo_args.use_kv_events and publishes_kv_events(
             publisher.server_args
@@ -787,6 +785,4 @@ async def handle_non_leader_node(
 
         await asyncio.Event().wait()
     finally:
-        await finish_worker_teardown(
-            metrics_task, publisher.cleanup, body_failed=body_failed
-        )
+        await finish_worker_teardown(metrics_task, publisher.cleanup, body_failed=True)
