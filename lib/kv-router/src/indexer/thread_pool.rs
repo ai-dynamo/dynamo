@@ -277,7 +277,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let backend = Arc::clone(&backend);
             let metrics = metrics.clone();
 
-            let handle = std::thread::spawn(move || {
+            let worker_loop = move || {
                 // This is observability, not recovery: if the worker panics, log
                 // through tracing and then preserve the panic for join().
                 let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -300,7 +300,12 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     );
                     std::panic::resume_unwind(panic_payload);
                 }
-            });
+            };
+            // Linux truncates thread names to 15 bytes.
+            let handle = std::thread::Builder::new()
+                .name(format!("kv-evt-{worker_idx}"))
+                .spawn(worker_loop)
+                .expect("failed to spawn KV event worker thread");
             thread_handles.push(handle);
         }
 
