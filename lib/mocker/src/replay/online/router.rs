@@ -954,7 +954,6 @@ policy_classes:
         let ReplayRouter::Kv(kv_router) = &router else {
             unreachable!("test constructed a KV replay router")
         };
-        // Only worker 1 holds the prompt, in G2; no worker holds it in G1.
         kv_router
             .indexer
             .apply_event(store_event(1, 1, 0, tokens_hash, StorageTier::HostPinned))
