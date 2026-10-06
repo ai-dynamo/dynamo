@@ -11,6 +11,7 @@ import pytest
 from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import codec_errors
+from dynamo.common.multimodal import media_source as media_source_module
 from dynamo.common.multimodal import video_loader as video_loader_module
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.multimodal.video_loader import VideoLoader
@@ -74,7 +75,7 @@ async def test_load_video_preserves_client_error(client_error):
 
 
 @pytest.mark.asyncio
-async def test_load_video_uses_vllm_media_connector():
+async def test_load_video_reads_bytes_and_decodes_with_vllm():
     loader = VideoLoader()
     # data: scheme is in the default allowlist regardless of env flags.
     loader._url_policy = UrlValidationPolicy()
@@ -103,7 +104,8 @@ async def test_http_fetch_honors_configured_media_limit(monkeypatch):
     metadata = {"fps": 1.0, "frames_indices": [0], "total_num_frames": 1}
     mock_fetch = AsyncMock(return_value=b"video")
     mock_decode = AsyncMock(return_value=(frames, metadata))
-    monkeypatch.setattr(video_loader_module, "fetch_bytes", mock_fetch)
+    # The loader reads through load_media_bytes; patch the transport under it.
+    monkeypatch.setattr(media_source_module, "fetch_bytes", mock_fetch)
     monkeypatch.setattr(loader, "_create_vllm_video_io", lambda kwargs=None: object())
     monkeypatch.setattr(loader, "_decode_video_bytes", mock_decode)
 

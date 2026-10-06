@@ -16,6 +16,7 @@ Usage:
 """
 
 import logging
+from urllib.parse import urlparse
 
 from PIL import Image
 
@@ -75,8 +76,17 @@ try:
                 # another loader should retry the same rejected URL.
                 raise
             except (ValueError, FileNotFoundError, OSError) as exc:
-                # Fall back to parent for unsupported URL schemes or local
-                # file paths that ImageLoader doesn't handle.
+                # Local paths (which ImageLoader refuses) and data: URLs it cannot
+                # decode fall back to vLLM, which reads local paths under its own
+                # allowed_local_media_path. An http(s) URL must not: ImageLoader
+                # already fetched it under Dynamo's policy, and vLLM would fetch
+                # it again following redirects without revalidating them and
+                # with no size bound. PIL reports a corrupt body as a bare
+                # OSError; surface it as the client error vLLM's decoder would.
+                if urlparse(image_url).scheme in ("http", "https"):
+                    if isinstance(exc, OSError):
+                        raise ValueError(f"Failed to load image: {exc}") from exc
+                    raise
                 logger.debug(
                     "DynamoMediaConnector: falling back to parent for %s (%s)",
                     image_url[:80],

@@ -21,8 +21,9 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
-from dynamo.common.http.url_validator import UrlValidationError
-from dynamo.common.multimodal.media_source import decode_data_uri
+from dynamo.common.http import HttpConfigurationError, HttpError
+from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.multimodal.media_source import load_media_bytes
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
@@ -100,6 +101,8 @@ class AudioGenerationHandler:
         self.media_output_http_url = media_output_http_url
         self._tts_tokenizer: Any = None
         self.audex = AudexRequestAdapter(config, engine_client)
+        # Built once, like every other media fetcher's policy.
+        self._url_policy = UrlValidationPolicy.from_env()
 
         # Cache TTS capabilities from model config at init.
         self._tts_supported_speakers: set = self._load_supported_speakers()
@@ -446,71 +449,26 @@ class AudioGenerationHandler:
 
         import soundfile as sf
 
-        if ref_audio_str.startswith(("http://", "https://")):
-            import ipaddress
-            import socket
-            from urllib.parse import urlparse
-
-            import aiohttp
-
-            parsed = urlparse(ref_audio_str)
-            if not parsed.hostname:
-                raise ValueError("Invalid ref_audio URL")
-            for info in socket.getaddrinfo(
-                parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
-            ):
-                ip_str = str(info[4][0]).split("%", 1)[0]
-                addr = ipaddress.ip_address(ip_str)
-                if addr.is_private or addr.is_loopback:
-                    raise ValueError(
-                        f"ref_audio URL resolves to blocked address: {addr}"
-                    )
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    ref_audio_str,
-                    timeout=aiohttp.ClientTimeout(
-                        total=self.config.tts_ref_audio_timeout
-                    ),
-                ) as resp:
-                    if resp.status != 200:
-                        raise ValueError(
-                            f"Failed to download ref_audio: HTTP {resp.status}"
-                        )
-                    audio_bytes = await resp.read()
-                    if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
-                        raise ValueError(
-                            f"ref_audio too large "
-                            f"({len(audio_bytes)} bytes, "
-                            f"max {self.config.tts_ref_audio_max_bytes})"
-                        )
-        elif ref_audio_str.startswith("data:"):
-            max_bytes = self.config.tts_ref_audio_max_bytes
-            # Bound the *encoded* input separately from the decoded limit. A
-            # data URI carries its payload inline, so without this an unbounded
-            # one is materialized in full before any check can look at it. The
-            # most expensive legal encoding is 4 URI characters per decoded byte
-            # (4/3 base64 characters, each percent-escaped to 3), so this cannot
-            # reject a payload that would have fit -- the exact limit is applied
-            # to the decoded bytes below, where percent escapes and padding have
-            # already been normalized away.
-            if len(ref_audio_str) > max_bytes * 4:
-                raise ValueError(
-                    f"ref_audio data URI too large (max {max_bytes} bytes decoded)"
-                )
-            try:
-                audio_bytes = decode_data_uri(ref_audio_str)
-            except UrlValidationError as exc:
-                raise ValueError(f"Invalid data: ref_audio ({exc})") from exc
-            if len(audio_bytes) > max_bytes:
-                raise ValueError(
-                    f"ref_audio data URI too large "
-                    f"({len(audio_bytes)} bytes, max {max_bytes})"
-                )
-        else:
+        if not ref_audio_str.startswith(("http://", "https://", "data:")):
             raise ValueError(
                 "ref_audio must be a URL (http/https) or base64 data URI (data:...)"
             )
+        try:
+            audio_bytes = await load_media_bytes(
+                ref_audio_str,
+                self._url_policy,
+                timeout=self.config.tts_ref_audio_timeout,
+                max_bytes=self.config.tts_ref_audio_max_bytes,
+            )
+        except HttpConfigurationError:
+            # An operator fault (an untrusted egress proxy), not the caller's
+            # bad request; the clause below would report it as one.
+            raise
+        except HttpError as exc:
+            # A status or transport failure on the caller's URL. A refused
+            # source raises UrlValidationError, already a client-fault
+            # ValueError, and passes through untouched.
+            raise ValueError(f"Failed to download ref_audio: {exc}") from exc
 
         try:
             with sf.SoundFile(io.BytesIO(audio_bytes)) as audio:

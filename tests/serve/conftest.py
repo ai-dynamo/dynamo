@@ -41,7 +41,7 @@ MULTIMODAL_VIDEO_PATH = os.path.join(
 #
 # An earlier revision of this note claimed file:// video is not hardware-decoded.
 # That is wrong for vLLM and SGLang: both read local media through
-# read_local_media_bytes and then route it to NVDEC exactly as they do http(s)
+# load_media_bytes and then route it to NVDEC exactly as they do http(s)
 # (common/multimodal/video_loader.py, sglang encode_worker_handler.py), because
 # otherwise a local H.264 file would reach only the software decoder these images
 # do not ship. TensorRT-LLM is the exception -- it has its own
@@ -66,7 +66,7 @@ MULTIMODAL_VIDEO_URL = f"http://localhost:{IMAGE_SERVER_PORT}/triangle_240p_10.m
 # The same H.264 clip addressed as a local file. Reading it is gated by
 # DYN_MM_LOCAL_PATH, which must name a directory containing the clip --
 # MULTIMODAL_MEDIA_DIR below. Worth covering separately from http: the local
-# branch has its own read path (read_local_media_bytes rather than a fetch)
+# branch has its own read path (a bounded file read rather than a fetch)
 # before it reaches the same NVDEC routing, so an http-only suite leaves the
 # whole local read, its policy gate, and its hand-off to the decoder untested.
 MULTIMODAL_VIDEO_H264_FILE_URI = (

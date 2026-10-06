@@ -29,12 +29,8 @@ from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
-from dynamo.common.http.url_validator import (
-    UrlValidationError,
-    UrlValidationPolicy,
-    validate_media_url,
-)
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
@@ -43,7 +39,10 @@ from dynamo.common.multimodal.image_loader import (
     ImageLoader,
     image_cache_scope_from_request,
 )
-from dynamo.common.multimodal.media_source import decode_data_uri, describe_media_source
+from dynamo.common.multimodal.media_source import (
+    describe_media_source,
+    load_media_bytes,
+)
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.token_ids import token_ids_to_list
@@ -591,81 +590,58 @@ class MultimodalRequestProcessor:
                         400, "Local file access is not allowed for video", source
                     )
                 try:
-                    normalized_url = await validate_media_url(url, self._url_policy)
-                    scheme = urlparse(normalized_url).scheme
-                    if scheme in ("http", "https", "data"):
-                        if scheme == "data":
-                            content = decode_data_uri(
-                                normalized_url, max_bytes=self.max_file_size_bytes
-                            )
-                        else:
-                            content = await fetch_bytes(
-                                normalized_url,
-                                30.0,
-                                policy=self._url_policy,
-                                max_bytes=self.max_file_size_bytes,
-                            )
-                        # Dual decode path: H.264/H.265 via NVDEC (hardware); other
-                        # codecs via the vendor cv2 loader. NVDEC failure falls back.
-                        nvdec_video = None
-                        codec = probe_video_codec(content)
-                        if should_use_nvdec(codec):
-                            try:
-                                nvdec_video = await asyncio.to_thread(
-                                    _nvdec_video_data, content, self.num_video_frames
-                                )
-                            except Exception as exc:  # noqa: BLE001 - fall back
-                                logging.warning(
-                                    "NVDEC decode failed (%s); using the vendor "
-                                    "video decoder",
-                                    exc,
-                                )
-                        if nvdec_video is not None:
-                            videos.append(nvdec_video)
-                        else:
-                            with tempfile.NamedTemporaryFile(
-                                suffix=".mp4"
-                            ) as video_file:
-                                await asyncio.to_thread(video_file.write, content)
-                                await asyncio.to_thread(video_file.flush)
-                                try:
-                                    videos.append(
-                                        await async_load_video(
-                                            video_file.name, self.num_video_frames
-                                        )
-                                    )
-                                except ImportError as exc:
-                                    # The vendor loader needs cv2, which the
-                                    # image deliberately omits; its bare error
-                                    # names neither codec nor remedy. Carry its
-                                    # text as the cause so the underlying
-                                    # reason still reaches the client.
-                                    raise video_decoder_missing(
-                                        "trtllm",
-                                        "opencv-python-headless",
-                                        "cv2",
-                                        codec,
-                                        cause=str(exc),
-                                    ) from exc
-                    else:
+                    content = await load_media_bytes(
+                        url,
+                        self._url_policy,
+                        timeout=30.0,
+                        max_bytes=self.max_file_size_bytes,
+                    )
+                    # Dual decode path: H.264/H.265 via NVDEC (hardware); other
+                    # codecs via the vendor cv2 loader. NVDEC failure falls back.
+                    nvdec_video = None
+                    codec = probe_video_codec(content)
+                    if should_use_nvdec(codec):
                         try:
-                            videos.append(
-                                await async_load_video(
-                                    normalized_url, self.num_video_frames
-                                )
+                            nvdec_video = await asyncio.to_thread(
+                                _nvdec_video_data, content, self.num_video_frames
                             )
-                        except ImportError as exc:
-                            # No bytes fetched on this branch, so no codec probe.
-                            raise video_decoder_missing(
-                                "trtllm",
-                                "opencv-python-headless",
-                                "cv2",
-                                None,
-                                cause=str(exc),
-                            ) from exc
+                        except Exception as exc:  # noqa: BLE001 - fall back
+                            logging.warning(
+                                "NVDEC decode failed (%s); using the vendor "
+                                "video decoder",
+                                exc,
+                            )
+                    if nvdec_video is not None:
+                        videos.append(nvdec_video)
+                    else:
+                        with tempfile.NamedTemporaryFile(suffix=".mp4") as video_file:
+                            await asyncio.to_thread(video_file.write, content)
+                            await asyncio.to_thread(video_file.flush)
+                            try:
+                                videos.append(
+                                    await async_load_video(
+                                        video_file.name, self.num_video_frames
+                                    )
+                                )
+                            except ImportError as exc:
+                                # The vendor loader needs cv2, which the
+                                # image deliberately omits; its bare error
+                                # names neither codec nor remedy. Carry its
+                                # text as the cause so the underlying
+                                # reason still reaches the client.
+                                raise video_decoder_missing(
+                                    "trtllm",
+                                    "opencv-python-headless",
+                                    "cv2",
+                                    codec,
+                                    cause=str(exc),
+                                ) from exc
                 except UrlValidationError as e:
                     raise HttpStatusError(400, str(e), source) from e
-                except HttpStatusError:
+                except (HttpStatusError, HttpConfigurationError):
+                    # HttpConfigurationError is an operator fault (e.g. an
+                    # untrusted egress proxy); the generic handler below would
+                    # report it as the caller's 400.
                     raise
                 except MissingMediaDecoderError as e:
                     # A missing decoder is deployment configuration, not a bad

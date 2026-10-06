@@ -4,21 +4,20 @@
 import asyncio
 import logging
 from typing import Any, Awaitable, Dict, Final, List
-from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
-    validate_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     audio_decoder_missing,
 )
+from dynamo.common.multimodal.media_source import load_media_bytes
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
@@ -57,29 +56,27 @@ async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
 
 
 try:
-    from vllm.multimodal.media import MediaConnector
     from vllm.multimodal.media.audio import AudioMediaIO
 except ImportError:
-    MediaConnector = None  # type: ignore[assignment]
     AudioMediaIO = None  # type: ignore[assignment]
 
 
-def _require_vllm_audio_media() -> tuple[Any, Any]:
-    """Return vLLM's audio media components, raising if not installed."""
-    if MediaConnector is None or AudioMediaIO is None:
+def _require_vllm_audio_media() -> Any:
+    """Return vLLM's audio decoder, raising if not installed."""
+    if AudioMediaIO is None:
         raise RuntimeError(
             "vLLM multimodal media components are required to decode `audio_url` "
             "inputs in the vLLM backend."
         )
-    return MediaConnector, AudioMediaIO
+    return AudioMediaIO
 
 
 class AudioLoader:
     """Async audio loader for multimodal pipelines.
 
-    Delegates URL fetching and decoding to vLLM's ``MediaConnector`` +
-    ``AudioMediaIO`` so that the exact same loading logic runs whether the
-    request arrives via ``vllm serve`` or through Dynamo.  Returns
+    Reads the URL through ``load_media_bytes`` (one policy and one size bound
+    for every scheme) and decodes with vLLM's ``AudioMediaIO``, the same
+    decoder ``vllm serve`` uses.  Returns
     ``(waveform, sample_rate)`` tuples at the native sample rate — vLLM's
     model-specific ``MultiModalDataParser`` handles resampling and channel
     normalization downstream.
@@ -100,48 +97,26 @@ class AudioLoader:
         self._enable_frontend_decoding = enable_frontend_decoding
         self._url_policy = url_policy or UrlValidationPolicy.from_env()
         self._nixl_connector = None
-        self._vllm_media_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
             run_async(self._nixl_connector.initialize)
 
-    def _get_vllm_media_connector(self) -> Any:
-        if self._vllm_media_connector is None:
-            MediaConnector, _ = _require_vllm_audio_media()
-            # Confine vLLM's own local-path access to the same prefix we enforce.
-            # Empty string matches vLLM's secure default (no local access).
-            allowed = self._url_policy.allowed_local_path or ""
-            self._vllm_media_connector = MediaConnector(
-                allowed_local_media_path=allowed
-            )
-
-        return self._vllm_media_connector
-
     def _create_vllm_audio_io(self) -> Any:
-        _, AudioMediaIO = _require_vllm_audio_media()
+        AudioMediaIO = _require_vllm_audio_media()
         return AudioMediaIO()
 
     @_nvtx.annotate("mm:audio:load_with_vllm", color="cyan")
     async def _load_audio_with_vllm(self, audio_url: str) -> tuple[np.ndarray, float]:
-        normalized_url = await validate_media_url(audio_url, self._url_policy)
-        media_io = self._create_vllm_audio_io()
-
-        # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
-        # revalidated; vLLM's own fetcher honors redirects without re-checking.
-        # data: and file:// never touch the network, so vLLM can handle them.
-        if urlparse(normalized_url).scheme in ("http", "https"):
-            content = await fetch_bytes(
-                normalized_url,
-                self._http_timeout,
-                policy=self._url_policy,
-                max_bytes=max_media_bytes(),
-            )
-            return await asyncio.to_thread(media_io.load_bytes, content)
-
-        connector = self._get_vllm_media_connector()
-        return await connector.load_from_url_async(
-            normalized_url, media_io, fetch_timeout=self._http_timeout
+        # Every scheme is read here, never by vLLM: its connector applies no
+        # size bound to file:// or data:, and its fetcher follows redirects
+        # without revalidating them.
+        content = await load_media_bytes(
+            audio_url,
+            self._url_policy,
+            timeout=self._http_timeout,
+            max_bytes=max_media_bytes(),
         )
+        return await asyncio.to_thread(self._create_vllm_audio_io().load_bytes, content)
 
     @_nvtx.annotate("mm:audio:load_audio", color="cyan")
     async def load_audio(self, audio_url: str) -> tuple[np.ndarray, float]:
@@ -204,7 +179,7 @@ class AudioLoader:
         """Load a batch of audio files from multimodal data items.
 
         Supports two paths:
-        1. Url variant: Download and decode audio via vLLM's MediaConnector
+        1. Url variant: read via load_media_bytes, decode via vLLM's AudioMediaIO
         2. Decoded variant: Read pre-decoded audio via NIXL RDMA
            (requires enable_frontend_decoding=True)
 

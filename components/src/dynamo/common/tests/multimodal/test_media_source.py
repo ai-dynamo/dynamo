@@ -12,8 +12,11 @@ set, and resolved paths must stay inside it.
 
 from __future__ import annotations
 
+import asyncio
 import base64
-from unittest.mock import MagicMock
+import os
+import urllib.parse
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -22,8 +25,7 @@ from dynamo.common.multimodal import media_source as media_source_module
 from dynamo.common.multimodal.media_source import (
     decode_data_uri,
     describe_media_source,
-    is_local_media_url,
-    read_local_media_bytes,
+    load_media_bytes,
 )
 
 pytestmark = [
@@ -32,21 +34,12 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
+
+def _load(url, policy):
+    return load_media_bytes(url, policy, timeout=1.0, max_bytes=1 << 20)
+
+
 PAYLOAD = b"\x00\x00\x00\x18ftypisom....avc1 fake h264 bytes"
-
-
-@pytest.mark.parametrize(
-    "url,expected",
-    [
-        ("file:///tmp/clip.mp4", True),
-        ("data:video/mp4;base64,AAAA", True),
-        ("http://example.com/clip.mp4", False),
-        ("https://example.com/clip.mp4", False),
-        ("s3://bucket/clip.mp4", False),
-    ],
-)
-def test_is_local_media_url(url, expected):
-    assert is_local_media_url(url) is expected
 
 
 async def test_reads_file_url_inside_allowed_prefix(tmp_path):
@@ -54,7 +47,7 @@ async def test_reads_file_url_inside_allowed_prefix(tmp_path):
     clip.write_bytes(PAYLOAD)
     policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
 
-    assert await read_local_media_bytes(clip.as_uri(), policy) == PAYLOAD
+    assert await _load(clip.as_uri(), policy) == PAYLOAD
 
 
 async def test_file_url_refused_when_local_access_disabled(tmp_path):
@@ -63,7 +56,7 @@ async def test_file_url_refused_when_local_access_disabled(tmp_path):
     clip.write_bytes(PAYLOAD)
 
     with pytest.raises(UrlValidationError, match="not permitted"):
-        await read_local_media_bytes(clip.as_uri(), UrlValidationPolicy())
+        await _load(clip.as_uri(), UrlValidationPolicy())
 
 
 async def test_file_url_cannot_escape_allowed_prefix(tmp_path):
@@ -75,7 +68,7 @@ async def test_file_url_cannot_escape_allowed_prefix(tmp_path):
     policy = UrlValidationPolicy(allowed_local_path=str(allowed))
 
     with pytest.raises(UrlValidationError):
-        await read_local_media_bytes(outside.as_uri(), policy)
+        await _load(outside.as_uri(), policy)
 
 
 async def test_file_url_cannot_escape_via_symlink(tmp_path):
@@ -89,13 +82,25 @@ async def test_file_url_cannot_escape_via_symlink(tmp_path):
     policy = UrlValidationPolicy(allowed_local_path=str(allowed))
 
     with pytest.raises(UrlValidationError):
-        await read_local_media_bytes(link.as_uri(), policy)
+        await _load(link.as_uri(), policy)
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+async def test_only_regular_files_are_read_as_media(tmp_path, kind):
+    """A directory is not media, and a FIFO must be refused rather than hang."""
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    target = allowed / "clip"
+    target.mkdir() if kind == "directory" else os.mkfifo(target)
+    policy = UrlValidationPolicy(allowed_local_path=str(allowed))
+    with pytest.raises(UrlValidationError, match="not a regular file"):
+        await asyncio.wait_for(_load(target.as_uri(), policy), timeout=5)
 
 
 async def test_reads_base64_data_uri():
     url = "data:video/mp4;base64," + base64.b64encode(PAYLOAD).decode()
     # data: carries its own bytes, so it needs no local-path permission.
-    assert await read_local_media_bytes(url, UrlValidationPolicy()) == PAYLOAD
+    assert await _load(url, UrlValidationPolicy()) == PAYLOAD
 
 
 @pytest.mark.parametrize(
@@ -108,7 +113,7 @@ async def test_reads_base64_data_uri():
 )
 async def test_malformed_data_uri_rejected(url, match):
     with pytest.raises(UrlValidationError, match=match):
-        await read_local_media_bytes(url, UrlValidationPolicy())
+        await _load(url, UrlValidationPolicy())
 
 
 @pytest.mark.parametrize("size", [3, 4, 5], ids=["no-padding", "two-pad", "one-pad"])
@@ -134,9 +139,21 @@ def test_decode_data_uri_size_bound_rejects_before_unquote(monkeypatch):
     spy.assert_not_called()
 
 
+def test_decode_data_uri_accepts_a_percent_escaped_payload_at_the_limit():
+    """Percent-escaping inflates the raw payload, so a pre-check on the raw
+    length rejected a payload whose decoded size fits exactly."""
+    raw = bytes(range(256)) * 12 + b"tail"
+    escaped = urllib.parse.quote(base64.b64encode(raw).decode(), safe="=")
+    assert len(escaped) // 4 * 3 - 2 > len(raw)  # the raw length overstates it
+    url = "data:audio/wav;base64," + escaped
+    assert decode_data_uri(url, max_bytes=len(raw)) == raw
+    with pytest.raises(UrlValidationError, match="maximum allowed size"):
+        decode_data_uri(url, max_bytes=len(raw) - 1)
+
+
 async def test_unsupported_scheme_rejected():
-    with pytest.raises(UrlValidationError, match="Unsupported local media scheme"):
-        await read_local_media_bytes("s3://bucket/clip.mp4", UrlValidationPolicy())
+    with pytest.raises(UrlValidationError, match="scheme"):
+        await _load("s3://bucket/clip.mp4", UrlValidationPolicy())
 
 
 def test_describe_media_source_elides_a_data_uri_payload() -> None:
@@ -169,3 +186,55 @@ def test_describe_media_source_survives_a_non_string() -> None:
     """The video loop labels whatever it was handed, including malformed
     items, before it has established the input is a string."""
     assert describe_media_source(None) == "<non-string media source>"  # type: ignore[arg-type]
+
+
+# --- load_media_bytes: one validation path and one bound for every scheme ---
+
+
+async def test_load_media_bytes_fetches_http_under_the_callers_policy_and_bound(
+    monkeypatch,
+):
+    seen = {}
+
+    async def fake_fetch(url, timeout, *, policy=None, max_bytes=None):
+        seen.update(url=url, timeout=timeout, policy=policy, max_bytes=max_bytes)
+        return PAYLOAD
+
+    monkeypatch.setattr(media_source_module, "fetch_bytes", fake_fetch)
+    policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+    url = "http://example.com/clip.mp4"
+    assert await load_media_bytes(url, policy, timeout=7.0, max_bytes=99) == PAYLOAD
+    assert seen == {"url": url, "timeout": 7.0, "policy": policy, "max_bytes": 99}
+
+
+async def test_load_media_bytes_refuses_a_blocked_url_before_fetching(monkeypatch):
+    fetch = AsyncMock()
+    monkeypatch.setattr(media_source_module, "fetch_bytes", fetch)
+    with pytest.raises(UrlValidationError):
+        await load_media_bytes(
+            "https://169.254.169.254/latest/meta-data",
+            UrlValidationPolicy(),
+            timeout=1.0,
+            max_bytes=None,
+        )
+    fetch.assert_not_called()
+
+
+@pytest.mark.parametrize("scheme", ["data", "file"])
+async def test_load_media_bytes_bounds_local_and_inline_sources(tmp_path, scheme):
+    """A source cannot get past the bound by being local or inline."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+    if scheme == "data":
+        url = "data:video/mp4;base64," + base64.b64encode(PAYLOAD).decode()
+    else:
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(PAYLOAD)
+        url = clip.as_uri()
+
+    assert (
+        await load_media_bytes(url, policy, timeout=1.0, max_bytes=len(PAYLOAD))
+        == PAYLOAD
+    )
+    with pytest.raises(UrlValidationError, match="exceeds"):
+        await load_media_bytes(url, policy, timeout=1.0, max_bytes=len(PAYLOAD) - 1)
