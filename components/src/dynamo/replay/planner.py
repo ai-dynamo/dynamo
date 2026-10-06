@@ -214,13 +214,15 @@ def prepare_planner_replay(
     planner_config.advisory = True
 
     if planner_config.mode == "agg":
-        extra_engine_args = extra_engine_args or normalize_mocker_config()
+        extra_engine_args = normalize_mocker_config(extra_engine_args)
         capabilities = WorkerCapabilities(decode=_engine_caps(extra_engine_args))
     elif planner_config.mode == "disagg":
         if prefill_engine_args is None or decode_engine_args is None:
             raise ValueError(
                 "disagg planner replay requires prefill and decode engine arguments"
             )
+        prefill_engine_args = normalize_mocker_config(prefill_engine_args)
+        decode_engine_args = normalize_mocker_config(decode_engine_args)
         capabilities = WorkerCapabilities(
             prefill=_engine_caps(prefill_engine_args),
             decode=_engine_caps(decode_engine_args),

@@ -34,8 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0"
-source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=74f558c7c6fcaa6a55ecd6a19e7f9d17bbc11564#74f558c7c6fcaa6a55ecd6a19e7f9d17bbc11564"
+version = "0.13.0-dev.202610060000000067"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baa4fe3c1314053a9e439cd7a7595aec5fb2b22af0ae43d48687179846e7ed32"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",

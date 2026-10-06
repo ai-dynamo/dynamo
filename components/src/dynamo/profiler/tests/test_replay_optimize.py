@@ -32,6 +32,7 @@ from dynamo.profiler.utils.replay_optimize import (
     optimize_dense_agg_with_replay,
     optimize_dense_disagg_with_replay,
 )
+from dynamo.profiler.utils.replay_optimize.example import _engine_args
 from dynamo.replay import ReplayReport
 
 pytestmark = [
@@ -444,6 +445,23 @@ def test_iter_agg_worker_states_collapses_round_robin_overlap() -> None:
     ]
     assert set(state.router_mode for state in states) == {"round_robin"}
     assert set(state.overlap_score_credit for state in states) == {0.0}
+
+
+@pytest.mark.parametrize("worker_type", ["aggregated", "prefill", "decode"])
+def test_example_engine_args_build_candidates(worker_type) -> None:
+    base_args = _engine_args(worker_type)
+    base_args["engine"]["num_gpu_blocks"] = 128
+    config = replay_optimize._build_candidate_engine_args(
+        base_args=base_args,
+        tp_size=1,
+        worker_type=worker_type,
+        backend="vllm",
+        system=_AIS_SYSTEM,
+        model=_AIS_MODEL,
+    )
+    assert config["engine"]["worker_type"] == worker_type
+    assert config["engine"]["block_size"] == 512
+    assert config["engine"]["enable_prefix_caching"] is True
 
 
 def test_candidate_engine_args_do_not_synthesize_base_only_fields(monkeypatch) -> None:
