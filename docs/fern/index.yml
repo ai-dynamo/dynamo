@@ -233,6 +233,8 @@ navigation:
             path: pages/kubernetes/operations/performance-tuning.md
           - page: LoRA Adapters
             path: pages/kubernetes/operations/lora-adapters.md
+          - page: Rolling Updates
+            path: pages/kubernetes/operations/rolling-updates.md
 
   # ==================== Local Guide ====================
   - tab: cli-guide
