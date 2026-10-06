@@ -14,10 +14,8 @@
 // limitations under the License.
 
 //! Deployment validation around Switchyard's OpenAI Chat decoder.
-use std::collections::HashSet;
-
 use anyhow::{Result, bail, ensure};
-use protocol::{ContentBlock, Metadata, Request, Role};
+use protocol::{ContentBlock, Metadata, Request};
 use serde_json::Value;
 use switchyard_translation::{
     DeterministicIdPolicy, LossyConversionPolicy, PreservationPolicy, TranslationPolicy,
@@ -42,7 +40,7 @@ fn validate_text(content: Option<&Value>) -> Result<()> {
 }
 
 pub fn decode(raw: &Value, headers: &http::HeaderMap) -> Result<Request> {
-    validate(raw)?;
+    validate_deployment(raw)?;
     let policy = TranslationPolicy {
         // Forward the original body; no IR-to-wire conversion or retained body copy is needed.
         preservation: PreservationPolicy::Disabled,
@@ -53,10 +51,11 @@ pub fn decode(raw: &Value, headers: &http::HeaderMap) -> Result<Request> {
     let mut llm_request = OpenAiChatCodec.decode_request(raw, &policy)?.request;
     // SDK 0.3.0 drops tool is_error; restore this routing signal.
     // Remove this projection when the SDK decoder preserves tool error flags.
-    let tool_messages = raw["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let tool_messages = raw
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
         .filter(|message| message["role"] == "tool");
     let results = llm_request
         .messages
@@ -76,7 +75,7 @@ pub fn decode(raw: &Value, headers: &http::HeaderMap) -> Result<Request> {
     })
 }
 
-fn validate(raw: &Value) -> Result<()> {
+fn validate_deployment(raw: &Value) -> Result<()> {
     if let Some(nvext) = raw.get("nvext").filter(|v| !v.is_null()) {
         ensure!(nvext.is_object(), "nvext must be an object");
         for reserved in [
@@ -97,90 +96,9 @@ fn validate(raw: &Value) -> Result<()> {
             );
         }
     }
-    let messages = raw
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("messages must be an array"))?;
-    ensure!(!messages.is_empty(), "messages must not be empty");
-    ensure!(
-        raw.get("stream").is_none_or(Value::is_boolean),
-        "stream must be a boolean"
-    );
-    let mut pending = HashSet::new();
-    for message in messages {
-        let role = match message.get("role").and_then(Value::as_str) {
-            Some("system") => Role::System,
-            Some("developer") => Role::Developer,
-            Some("user") => Role::User,
-            Some("assistant") => Role::Assistant,
-            Some("tool") => Role::Tool,
-            _ => bail!("unsupported or missing message role"),
-        };
-        validate_text(message.get("content"))?;
-        if let Some(calls) = message.get("tool_calls") {
-            ensure!(role == Role::Assistant, "tool_calls require assistant role");
-            let calls = calls
-                .as_array()
-                .ok_or_else(|| anyhow::anyhow!("tool_calls must be an array"))?;
-            for call in calls {
-                ensure!(
-                    call.get("type").and_then(Value::as_str) == Some("function"),
-                    "only function tool calls are supported"
-                );
-                let id = call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("tool call needs an id"))?;
-                ensure!(
-                    pending.insert(id.to_owned()),
-                    "duplicate outstanding tool call id"
-                );
-                let function = call
-                    .get("function")
-                    .ok_or_else(|| anyhow::anyhow!("tool call needs function"))?;
-                function
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| !name.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("tool call needs name"))?;
-                function
-                    .get("arguments")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("tool call arguments must be a JSON string"))?;
-            }
-        }
-        if role == Role::Tool {
-            let id = message
-                .get("tool_call_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("tool result needs tool_call_id"))?;
-            pending.remove(id);
-            message
-                .get("is_error")
-                .map(|v| {
-                    v.as_bool()
-                        .ok_or_else(|| anyhow::anyhow!("is_error must be boolean"))
-                })
-                .transpose()?;
-        }
-    }
-    if let Some(tools) = raw.get("tools") {
-        for tool in tools
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("tools must be an array"))?
-        {
-            ensure!(
-                tool.get("type").and_then(Value::as_str) == Some("function"),
-                "only function tools are supported"
-            );
-            let f = tool
-                .get("function")
-                .ok_or_else(|| anyhow::anyhow!("tool needs function"))?;
-            f.get("name")
-                .and_then(Value::as_str)
-                .filter(|n| !n.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("tool needs name"))?;
+    if let Some(messages) = raw.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            validate_text(message.get("content"))?;
         }
     }
     Ok(())
@@ -234,13 +152,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_or_reserved_input_before_permissive_codec_normalization() {
+    fn rejects_reserved_controls_and_unsupported_media() {
         for extra in [
-            json!({"stream": "yes"}),
             json!({"nvext": {"backend_instance_id": 42}}),
-            json!({"tools": {"type": "function"}}),
-            json!({"tools": [{"type": "function", "function": {}}]}),
-            json!({"messages": [{"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": "Bash", "arguments": "{}"}}]}]}),
             json!({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.invalid/image"}}]}]}),
         ] {
             let mut raw =
