@@ -17,6 +17,8 @@ service SglangService
   rpc Classify(ClassifyRequest) returns (ClassifyResponse);
   rpc Tokenize(TokenizeRequest) returns (TokenizeResponse);
   rpc Detokenize(DetokenizeRequest) returns (DetokenizeResponse);
+  rpc WatchEngineState(WatchEngineStateRequest) returns (stream EngineStateSnapshot);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
   rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
@@ -354,4 +356,18 @@ message UpdateWeightsResponse
 {
   bool success = 1;
   string message = 2;
+}
+
+// Startup recovery uses the engine incarnation to wait for a replacement.
+message ShutdownRequest {}
+message ShutdownResponse {}
+message WatchEngineStateRequest {}
+message EngineStateSnapshot
+{
+  uint64 instance_id = 1;
+  uint64 revision = 2;
+  bool healthy = 3;
+  bool is_pause = 4;
+  GetModelInfoResponse model_info = 5;
+  GetServerInfoResponse server_info = 6;
 }

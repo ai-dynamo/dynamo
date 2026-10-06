@@ -225,6 +225,22 @@ impl SglangMockerService {
 
 #[tonic::async_trait]
 impl pb::sglang_service_server::SglangService for SglangMockerService {
+    type WatchEngineStateStream = BoxStream<pb::EngineStateSnapshot>;
+
+    async fn watch_engine_state(
+        &self,
+        _request: Request<pb::WatchEngineStateRequest>,
+    ) -> Result<Response<Self::WatchEngineStateStream>, Status> {
+        unsupported("WatchEngineState")
+    }
+
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        unsupported("Shutdown")
+    }
+
     type TextGenerateStream = BoxStream<pb::TextGenerateResponse>;
     type GenerateStream = BoxStream<pb::GenerateResponse>;
     type ChatCompleteStream = BoxStream<pb::OpenAiStreamChunk>;

@@ -343,6 +343,14 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Optionally recover a failed initial bootstrap. Called only before serving,
+    /// after the worker drops the failed attempt's publishers and local indexes.
+    /// Return fresh metadata to attach new publishers and retry the startup gate.
+    /// The default preserves fail-fast startup for other engines.
+    async fn recover_startup(&self) -> Result<Option<EngineConfig>, DynamoError> {
+        Ok(None)
+    }
+
     /// Canary payload registered with the runtime's `HealthCheckManager`.
     /// `Worker` calls this once after [`start`](LLMEngine::start). Returning
     /// `Ok(None)` (default) disables active probing — the endpoint then

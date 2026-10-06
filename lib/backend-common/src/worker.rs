@@ -313,6 +313,13 @@ impl EngineKind {
         }
     }
 
+    async fn recover_startup(&self) -> Result<Option<EngineConfig>, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.recover_startup().await,
+            EngineKind::Raw(_) => Ok(None),
+        }
+    }
+
     async fn wait_for_startup(&self) -> Result<(), DynamoError> {
         match self {
             EngineKind::Llm(e) => e.wait_for_startup().await,
@@ -984,6 +991,44 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
+        // Initial serving remains gated across failed bootstrap, engine shutdown,
+        // and reconnect. Every retry attaches fresh listeners and local indexes.
+        let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
+        let mut recovered_config;
+        let mut engine_config = engine_config;
+        loop {
+            let failure = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Ok(()),
+                result = self.engine.wait_for_startup() => match result {
+                    Ok(()) => break,
+                    Err(error) => error,
+                },
+            };
+            self.publishers = None;
+            let recovered = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Ok(()),
+                result = self.engine.recover_startup() => result?,
+            };
+            recovered_config = match recovered {
+                Some(config) => config,
+                None => return Err(failure),
+            };
+            engine_config = &recovered_config;
+            let metrics =
+                crate::metrics::EngineMetrics::with_engine_config(endpoint.clone(), engine_config);
+            let lifecycle = match self.lifecycle.take() {
+                Some(lifecycle) => lifecycle,
+                None => crate::metrics::LifecycleGauges::new(&metrics, 0.0)?,
+            };
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Ok(()),
+                result = self.setup_publishing(&endpoint, engine_config, &metrics, 0.0, lifecycle) => result?,
+            }
+        }
+
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
         let rl_config = if self.config.enable_rl {
@@ -1150,18 +1195,6 @@ impl Worker {
                 )
             })?;
         }
-        // Readiness is this worker's to publish: it is not serviceable until every
-        // mandatory endpoint is registered and the engine routes are open. The
-        // hold suppresses the whole process's readiness, so covering the primary
-        // endpoint also covers the RL endpoint registered further down.
-        let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
-
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return Ok(()),
-            result = self.engine.wait_for_startup() => result?,
-        }
-
         let start_fut = builder.start_with_registration();
         tokio::pin!(start_fut);
         let primary_endpoint = tokio::select! {
@@ -4344,6 +4377,126 @@ mod handoff_and_lifecycle_tests {
                 })?;
             }
         }
+    }
+
+    struct RetryingStartupEngine {
+        stage: tokio::sync::watch::Receiver<u8>,
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LLMEngine for RetryingStartupEngine {
+        async fn start(&self, id: u64) -> Result<EngineConfig, DynamoError> {
+            DefaultsEngine.start(id).await
+        }
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            DefaultsEngine.generate(request, ctx).await
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+        async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                return Err(DynamoError::msg("missing history"));
+            }
+            let mut stage = self.stage.clone();
+            stage.wait_for(|value| *value >= 2).await.unwrap();
+            Ok(())
+        }
+        async fn recover_startup(&self) -> Result<Option<EngineConfig>, DynamoError> {
+            let mut stage = self.stage.clone();
+            stage.wait_for(|value| *value >= 1).await.unwrap();
+            Ok(Some(EngineConfig {
+                model: "recovery-test".into(),
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn startup_recovery_stays_unready_until_replacement_bootstrap_finishes() {
+        with_each_health_route_shape(|| async {
+            let endpoint = test_local_endpoint().await;
+            let health = endpoint.drt().system_health();
+            let (stage, rx) = tokio::sync::watch::channel(0);
+            let engine = Arc::new(RetryingStartupEngine {
+                stage: rx,
+                attempts: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut worker = Worker::new(engine.clone(), WorkerConfig::default());
+            let shutdown = CancellationToken::new();
+            let serve = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let shutdown = shutdown.clone();
+                async move {
+                    worker
+                        .serve_with_orchestrator(
+                            &EngineConfig {
+                                model: "recovery-test".into(),
+                                ..Default::default()
+                            },
+                            endpoint,
+                            shutdown,
+                        )
+                        .await
+                }
+            });
+            let id = endpoint.id();
+            let query = DiscoveryQuery::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+            };
+            for attempt in [1, 2] {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while engine.attempts.load(std::sync::atomic::Ordering::SeqCst) < attempt {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(!health.lock().get_health_status().0);
+                assert!(
+                    endpoint
+                        .drt()
+                        .discovery()
+                        .list(query.clone())
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                stage.send_replace(attempt as u8);
+            }
+            assert!(health_reaches(&health, true).await);
+            assert!(
+                !endpoint
+                    .drt()
+                    .discovery()
+                    .list(query)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            shutdown.cancel();
+            tokio::time::timeout(Duration::from_secs(120), serve)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]

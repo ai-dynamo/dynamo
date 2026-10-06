@@ -182,6 +182,26 @@ pub async fn discover(client: &mut Client, deadline: Instant) -> Result<Discover
     parse_discovery(model, server, models)
 }
 
+/// Read one lifecycle snapshot; this is not a background health monitor.
+pub async fn instance_id(client: &mut Client, deadline: Instant) -> Result<u64, DynamoError> {
+    let mut stream = rpc_with_deadline(
+        "WatchEngineState",
+        deadline,
+        client.watch_engine_state(pb::WatchEngineStateRequest {}),
+    )
+    .await?
+    .into_inner();
+    let snapshot = rpc_with_deadline("WatchEngineState snapshot", deadline, stream.message())
+        .await?
+        .ok_or_else(|| engine_shutdown("engine state stream ended without a snapshot"))?;
+    if snapshot.instance_id == 0 {
+        return Err(protocol_error(
+            "SGLang returned an empty engine instance ID",
+        ));
+    }
+    Ok(snapshot.instance_id)
+}
+
 pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool, DynamoError> {
     rpc_with_deadline(
         "HealthCheck",

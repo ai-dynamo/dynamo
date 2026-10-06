@@ -18,7 +18,6 @@ use dynamo_llm::kv_router::publisher::{BootstrapOutcome, ZmqBootstrapConfig};
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
 use serde_json::Value;
-use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -39,11 +38,13 @@ pub struct SglangSidecarEngine {
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
-    state: OnceCell<StartedState>,
+    state: Mutex<Option<Arc<StartedState>>>,
+    bootstrap_failure: Mutex<Option<BootstrapOutcome>>,
     cancel: CancellationToken,
 }
 
 struct StartedState {
+    instance_id: Option<u64>,
     pool: Pool,
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
@@ -53,13 +54,14 @@ struct StartedState {
 /// All configured rank listeners must finish local application before serving.
 async fn wait_for_kv_bootstrap(
     results: Vec<tokio::sync::oneshot::Receiver<BootstrapOutcome>>,
-) -> Result<(), DynamoError> {
+) -> Result<(), BootstrapOutcome> {
     futures::future::try_join_all(results.into_iter().map(|result| async move {
         match result.await {
             Ok(BootstrapOutcome::Success) => Ok(()),
-            outcome => Err(client::engine_shutdown(format!(
-                "KV bootstrap failed: {outcome:?}"
-            ))),
+            Ok(outcome) => Err(outcome),
+            Err(error) => Err(BootstrapOutcome::Uncertain {
+                reason: error.to_string(),
+            }),
         }
     }))
     .await?;
@@ -75,6 +77,38 @@ struct DiscoveredKvEventSource {
 }
 
 impl SglangSidecarEngine {
+    fn started_state(&self) -> Option<Arc<StartedState>> {
+        self.state.lock().unwrap().clone()
+    }
+
+    async fn request_shutdown(&self, control: &mut Client) -> Result<bool, DynamoError> {
+        // A response acknowledges initiation, never completion. If delivery is
+        // uncertain we may retry this idempotent RPC, but only after checking
+        // that the same engine incarnation still owns the endpoint.
+        match tokio::time::timeout(
+            self.transport.connect_attempt_timeout,
+            control.shutdown(pb::ShutdownRequest {}),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(true),
+            Ok(Err(status))
+                if matches!(
+                    status.code(),
+                    tonic::Code::Unimplemented
+                        | tonic::Code::PermissionDenied
+                        | tonic::Code::Unauthenticated
+                ) =>
+            {
+                Err(client::status_to_dynamo("Shutdown", status))
+            }
+            result => {
+                tracing::warn!(?result, "Shutdown delivery uncertain; remaining unready");
+                Ok(false)
+            }
+        }
+    }
+
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
         match argv {
             Some(argv) => Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo),
@@ -207,7 +241,8 @@ impl SglangSidecarEngine {
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
-                state: OnceCell::new(),
+                state: Mutex::default(),
+                bootstrap_failure: Mutex::default(),
                 cancel: CancellationToken::new(),
             },
             config,
@@ -262,7 +297,7 @@ impl SglangSidecarEngine {
 #[async_trait]
 impl LLMEngine for SglangSidecarEngine {
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-        if self.state.initialized() {
+        if self.state.lock().unwrap().is_some() {
             return Err(client::engine_shutdown("sglang sidecar already started"));
         }
 
@@ -270,6 +305,9 @@ impl LLMEngine for SglangSidecarEngine {
         let pool = Pool::connect(&self.endpoint, &self.transport, deadline).await?;
         let mut control = pool.control_client();
         self.await_ready(&mut control, deadline).await?;
+        // Fence discovery and replay with the same engine incarnation. Engines
+        // without KV events do not need the lifecycle RPC.
+        let instance = client::instance_id(&mut control, deadline).await;
         let discovery = client::discover(&mut control, deadline).await?;
         let observed_mode = discovery_mode(&discovery)?;
         if observed_mode != self.disaggregation_mode {
@@ -315,14 +353,18 @@ impl LLMEngine for SglangSidecarEngine {
         let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
-        self.state
-            .set(StartedState {
-                pool,
-                native_http,
-                kv_event_sources,
-                bootstrap_results: Mutex::default(),
-            })
-            .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
+        let instance_id = if kv_event_sources.is_empty() {
+            None
+        } else {
+            Some(instance?)
+        };
+        *self.state.lock().unwrap() = Some(Arc::new(StartedState {
+            instance_id,
+            pool,
+            native_http,
+            kv_event_sources,
+            bootstrap_results: Mutex::default(),
+        }));
         tracing::info!(
             model = %config.model,
             mode = ?self.disaggregation_mode,
@@ -335,12 +377,111 @@ impl LLMEngine for SglangSidecarEngine {
 
     async fn wait_for_startup(&self) -> Result<(), DynamoError> {
         let state = self
-            .state
-            .get()
+            .started_state()
             .ok_or_else(|| client::engine_shutdown("sidecar not started"))?;
         let results = std::mem::take(&mut *state.bootstrap_results.lock().unwrap());
         // With KV routing disabled no listeners or completion results exist.
-        wait_for_kv_bootstrap(results).await
+        let mut outcome = wait_for_kv_bootstrap(results).await;
+        if outcome.is_ok() {
+            if let Some(expected) = state.instance_id {
+                let mut control = state.pool.control_client();
+                let deadline = Instant::now() + self.transport.connect_attempt_timeout;
+                let ready_instance = async {
+                    if !client::health_check(&mut control, deadline).await? {
+                        return Err(client::engine_shutdown("engine unhealthy after bootstrap"));
+                    }
+                    client::instance_id(&mut control, deadline).await
+                }
+                .await;
+                match ready_instance {
+                    Ok(observed) if observed == expected => {}
+                    result => {
+                        outcome = Err(BootstrapOutcome::Uncertain {
+                            reason: format!(
+                                "engine changed or became unavailable during bootstrap: {result:?}"
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+        outcome.map_err(|failure| {
+            let error = client::engine_shutdown(format!("KV bootstrap failed: {failure:?}"));
+            *self.bootstrap_failure.lock().unwrap() = Some(failure);
+            error
+        })
+    }
+
+    async fn recover_startup(&self) -> Result<Option<EngineConfig>, DynamoError> {
+        let Some(failure) = self.bootstrap_failure.lock().unwrap().take() else {
+            return Ok(None);
+        };
+        tracing::warn!(
+            ?failure,
+            "SGLang KV bootstrap failed; keeping sidecar unready during recovery"
+        );
+        let state = self
+            .started_state()
+            .ok_or_else(|| client::engine_shutdown("sidecar not started"))?;
+        let old_instance = state.instance_id;
+        let missing = matches!(failure, BootstrapOutcome::MissingHistory { .. });
+        let mut wait_for_replacement = false;
+        let mut shutdown_acknowledged = false;
+        if missing {
+            // Recheck before Shutdown so an already observed replacement is not
+            // deliberately terminated. The RPC itself is not instance-conditional.
+            let mut control = state.pool.control_client();
+            let deadline = Instant::now() + self.transport.connect_attempt_timeout;
+            match client::instance_id(&mut control, deadline).await {
+                Ok(instance) if Some(instance) == old_instance => {
+                    tracing::warn!(
+                        ?failure,
+                        instance,
+                        "KV history unavailable; requesting configured SGLang shutdown"
+                    );
+                    shutdown_acknowledged = self.request_shutdown(&mut control).await?;
+                    tracing::info!("Waiting for replacement SGLang engine");
+                    wait_for_replacement = true;
+                }
+                _ => {} // Rediscover and retry; lack of contact is not missing history.
+            }
+        }
+        *self.state.lock().unwrap() = None;
+        drop(state);
+        loop {
+            tokio::time::sleep(self.transport.retry_interval).await;
+            let deadline = Instant::now() + self.transport.connect_attempt_timeout;
+            let attempt: Result<Option<EngineConfig>, DynamoError> = async {
+                let mut control =
+                    client::connect(&self.endpoint, &self.transport, deadline, false).await?;
+                let instance = client::instance_id(&mut control, deadline).await?;
+                if wait_for_replacement && Some(instance) == old_instance {
+                    if !shutdown_acknowledged {
+                        shutdown_acknowledged = self.request_shutdown(&mut control).await?;
+                    }
+                    return Ok(None);
+                }
+                if !client::health_check(&mut control, deadline).await? {
+                    return Ok(None);
+                }
+                let config = self.start(0).await?;
+                if wait_for_replacement
+                    && self.started_state().and_then(|state| state.instance_id) == old_instance
+                {
+                    *self.state.lock().unwrap() = None;
+                    return Ok(None);
+                }
+                Ok(Some(config))
+            }
+            .await;
+            match attempt {
+                Ok(Some(config)) => return Ok(Some(config)),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "SGLang unavailable during startup recovery; retrying")
+                }
+            }
+        }
     }
 
     async fn generate(
@@ -349,8 +490,7 @@ impl LLMEngine for SglangSidecarEngine {
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let state = self
-            .state
-            .get()
+            .started_state()
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
         if let Some(native_request) = native_http::request(
             &request,
@@ -552,7 +692,9 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(mut grpc_client) = self.state.get().map(|state| state.pool.control_client())
+        let Some(mut grpc_client) = self
+            .started_state()
+            .map(|state| state.pool.control_client())
         else {
             return;
         };
@@ -583,8 +725,7 @@ impl LLMEngine for SglangSidecarEngine {
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
         let state = self
-            .state
-            .get()
+            .started_state()
             .ok_or_else(|| client::engine_shutdown("sglang sidecar is not started"))?;
         Ok(state
             .kv_event_sources
@@ -1252,7 +1393,7 @@ mod tests {
             assert_eq!(engine.transport.startup_deadline.as_secs(), 11);
             assert!(engine.bootstrap_host.is_none());
             assert!(engine.bootstrap_port.is_none());
-            assert!(!engine.state.initialized());
+            assert!(engine.state.lock().unwrap().is_none());
         }
     }
 
@@ -1951,3 +2092,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
