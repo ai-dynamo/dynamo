@@ -621,6 +621,7 @@ mod tests {
             nvext,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             thinking_token_budget: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,

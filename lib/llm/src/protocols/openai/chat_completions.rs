@@ -111,6 +111,12 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
 
+    /// Whether supporting chat templates retain earlier assistant reasoning in the prompt.
+    /// Normalized into `chat_template_args["preserve_thinking"]` before preprocessing.
+    /// An explicit top-level value takes precedence over the nested template argument.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_thinking: Option<bool>,
+
     /// OpenAI-style thinking token budget: bounds the number of thinking
     /// tokens generated per request. Forwarded to the backend's
     /// `thinking_token_budget` sampling parameter when supported.
@@ -144,6 +150,14 @@ impl NvCreateChatCompletionRequest {
     /// Runs once at the HTTP boundary, so every render path reads one answer.
     /// Model-specific overrides still apply later in the default preprocessor.
     pub fn normalize_reasoning_template_args(&mut self) -> anyhow::Result<()> {
+        if let Some(preserve) = self.preserve_thinking.take() {
+            self.chat_template_args
+                .get_or_insert_with(HashMap::new)
+                .insert(
+                    "preserve_thinking".to_string(),
+                    serde_json::Value::Bool(preserve),
+                );
+        }
         let thinking_mode = self
             .thinking
             .as_ref()
@@ -700,6 +714,68 @@ mod tests {
             .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"))
             .guided_decoding
             .unwrap_or_else(|| panic!("{extra} must produce guided decoding options"))
+    }
+
+    #[test]
+    fn test_preserve_thinking_normalizes_to_template_args() {
+        let request = |extra: serde_json::Value| {
+            let mut body = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(body).expect("Failed to deserialize request");
+            request
+                .normalize_reasoning_template_args()
+                .expect("preserve_thinking should normalize");
+            request
+        };
+
+        // A top-level field, not an unsupported one.
+        let normalized = request(json!({"preserve_thinking": true}));
+        assert!(normalized.unsupported_fields.is_empty());
+        assert_eq!(normalized.preserve_thinking, None);
+        let args = normalized.chat_template_args.expect("chat_template_args");
+        assert_eq!(args.get("preserve_thinking"), Some(&json!(true)));
+        // It decides nothing else.
+        assert_eq!(args.len(), 1);
+
+        // It wins over the nested value, which alone passes through untouched.
+        let normalized = request(json!({
+            "preserve_thinking": false,
+            "chat_template_kwargs": {"preserve_thinking": true},
+        }));
+        let args = normalized.chat_template_args.unwrap();
+        assert_eq!(args.get("preserve_thinking"), Some(&json!(false)));
+        let normalized = request(json!({"chat_template_kwargs": {"preserve_thinking": true}}));
+        let args = normalized.chat_template_args.unwrap();
+        assert_eq!(args.get("preserve_thinking"), Some(&json!(true)));
+
+        // `null` and omission leave the template's default or nested value intact.
+        assert!(request(json!({})).chat_template_args.is_none());
+        let normalized = request(json!({
+            "preserve_thinking": null,
+            "chat_template_kwargs": {"preserve_thinking": true},
+        }));
+        assert_eq!(
+            normalized.chat_template_args.unwrap()["preserve_thinking"],
+            json!(true)
+        );
+        assert!(
+            request(json!({"preserve_thinking": null}))
+                .chat_template_args
+                .is_none()
+        );
+        // Only a bool is accepted.
+        let body = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "preserve_thinking": "yes",
+        });
+        assert!(serde_json::from_value::<NvCreateChatCompletionRequest>(body).is_err());
     }
 
     #[test]

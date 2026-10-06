@@ -5952,6 +5952,40 @@ mod tests {
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
 
     #[test]
+    fn test_chat_completions_preserve_thinking_reaches_template() {
+        use dynamo_renderer::{ChatTemplate, PromptFormatter};
+
+        let template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": "{% for message in messages %}\
+                {% if message.role == 'assistant' and preserve_thinking | default(false) %}\
+                {{ message.reasoning_content }}{% endif %}{{ message.content }}{% endfor %}"
+        }))
+        .unwrap();
+        let PromptFormatter::OAI(formatter) =
+            PromptFormatter::from_parts(template, Default::default(), false).unwrap();
+
+        for (preserve, expected) in [
+            (true, "previous reasoning;answer;next"),
+            (false, "answer;next"),
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test-model",
+                    "messages": [
+                        {"role": "assistant", "content": "answer;",
+                         "reasoning_content": "previous reasoning;"},
+                        {"role": "user", "content": "next"}
+                    ],
+                    "preserve_thinking": preserve
+                }))
+                .unwrap();
+            normalize_chat_reasoning_template_args(&mut request).unwrap();
+            assert!(validate_chat_completion_fields_generic(&request).is_ok());
+            assert_eq!(formatter.render(&request).unwrap().as_str(), expected);
+        }
+    }
+
+    #[test]
     fn wire_normalized_invalid_request_is_found_through_error_context() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 
@@ -8252,6 +8286,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
@@ -8287,6 +8322,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
@@ -8543,6 +8579,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
@@ -8576,6 +8613,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
@@ -8608,6 +8646,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
@@ -8640,6 +8679,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
@@ -8674,6 +8714,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
@@ -8706,6 +8747,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             thinking: None,
+            preserve_thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
