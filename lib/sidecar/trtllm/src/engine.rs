@@ -271,6 +271,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             model = %model.source,
             context_length = ?limits.context_length,
             max_output_tokens = ?limits.max_output_tokens,
+            supports_multimodal = limits.supports_multimodal,
             "TensorRT-LLM gRPC is ready"
         );
         Ok(model.engine_config())

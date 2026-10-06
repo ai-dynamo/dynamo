@@ -28,8 +28,8 @@ registration, request conversion, transport, cancellation, and abort.
 - Streaming delta tokens with a terminal usage/finish summary
 - Cancellation via `Control.Abort` and by closing the gRPC stream
 
-The integration does **not** support multimodal input, LoRA, encode workers,
-beam search, or `n > 1`.
+The integration does **not** support LoRA, encode workers, beam search, or
+`n > 1`. For images, see [Images](#images).
 
 The sidecar advertises a single logical worker, rank `0`. Dynamo may attach that rank even with KV events disabled; it selects the advertised endpoint and is accepted without forwarding an engine rank override. TensorRT-LLM owns internal attention-DP placement through conversation affinity. Nonzero logical ranks are rejected because they are not registered.
 `KvSessionRef.dp_rank` still carries a disaggregated session's KV affinity,
@@ -46,6 +46,20 @@ inside the request body.
 > RPCs (`GetKvEventSources`, `SubscribeKvEvents`) return `UNIMPLEMENTED`: the
 > LLM API has no runtime adapter load/unload entry point, and KV events are
 > published out of band. The sidecar uses neither.
+
+## Images
+
+The sidecar forwards `image_url` content parts as OpenEngine `MediaItem`s, in
+request order. It sends a data URI as `data_uri` and an `http://` or `https://`
+URL as `url`. The engine decodes or fetches each image. The sidecar sends
+images only in aggregated mode, and only when `Control.GetModelInfo` reports
+`supports_multimodal`. TensorRT-LLM 1.3.0rc29, the pinned release, reports
+`false` and refuses media, so the sidecar refuses image requests with a 400.
+
+The sidecar also refuses video and audio input, media cache UUIDs, UUID-only
+media, media that the frontend decoded, and image options in
+`mm_processor_kwargs` or `media_io_kwargs`. OpenEngine has no field for image
+options, so TensorRT-LLM would silently use its defaults.
 
 ## Protocol
 

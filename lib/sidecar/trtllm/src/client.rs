@@ -27,8 +27,8 @@ use crate::proto::inference_client::InferenceClient;
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The engine's limits, resolved at startup from `--context-length` and
-/// `Control.GetModelInfo`.
+/// The engine's limits and capabilities, resolved at startup from
+/// `--context-length` and `Control.GetModelInfo`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ModelLimits {
     /// Maximum input + output tokens; backs both the registered context window
@@ -38,6 +38,9 @@ pub(crate) struct ModelLimits {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
+    /// Whether the engine accepts `GenerateRequest.media`. False when the engine
+    /// does not say, so image requests are refused before dispatch.
+    pub(crate) supports_multimodal: bool,
 }
 
 pub(crate) struct TrtllmClient {
@@ -105,6 +108,7 @@ impl TrtllmClient {
         Ok(ModelLimits {
             context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+            supports_multimodal: info.supports_multimodal.unwrap_or(false),
         })
     }
 
@@ -207,6 +211,15 @@ fn is_request_itself_wrong(status: &tonic::Status) -> bool {
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("TensorRT-LLM", message)
+}
+
+/// The frontend returns `message` to the client, so it takes only fixed request-validation text.
+pub(crate) fn invalid_request(message: &'static str) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+        .message(message)
+        .public_message(message)
+        .build()
 }
 
 /// A generation failure the engine reported in-band via an `EngineError` event
