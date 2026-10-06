@@ -819,8 +819,8 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
     assert_eq!(stats.freed_count, 1);
 }
 
-#[test]
-fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
+#[tokio::test(start_paused = true)]
+async fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
     let args = MockEngineArgs::builder()
         .block_size(4)
         .num_gpu_blocks(6)
@@ -841,14 +841,20 @@ fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
         })
         .collect();
 
-    let (report, stats) = simulate_concurrency_requests_with_stats(
-        args,
+    // Advance modeled time only after both request tasks can submit.
+    let runtime = LiveRuntime::new(
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
         requests,
-        2,
-        1,
-        ReplayRouterMode::RoundRobin,
+        LiveReplayMode::Concurrency { max_in_flight: 2 },
+        CancellationToken::new(),
     )
     .unwrap();
+    let (report, stats) = runtime.run().await.unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 2);
     assert!(
