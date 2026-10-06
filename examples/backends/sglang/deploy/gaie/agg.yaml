@@ -16,7 +16,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen
+  name: qwen-small
 spec:
   backendFramework: sglang
   components:
@@ -31,7 +31,7 @@ spec:
           - name: DYN_KV_CACHE_BLOCK_SIZE
             value: "16"
           - name: DYN_MODEL_NAME
-            value: Qwen/Qwen3-0.6B
+            value: Qwen/Qwen3.5-27B
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -54,9 +54,9 @@ spec:
           - -c
           env:
           - name: SERVED_MODEL_NAME
-            value: Qwen/Qwen3-0.6B
+            value: Qwen/Qwen3.5-27B
           - name: MODEL_PATH
-            value: Qwen/Qwen3-0.6B
+            value: Qwen/Qwen3.5-27B
           - name: DYN_STORE_KV
             value: mem
           envFrom:

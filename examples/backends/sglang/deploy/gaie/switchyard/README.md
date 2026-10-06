@@ -22,8 +22,9 @@ The namespace must already contain ready model workers, native Dynamo EPPs, and 
 `InferencePool` resources named `qwen-small-pool` and `qwen-large-pool`, serving `Qwen/Qwen3.5-27B`
 and `Qwen/Qwen3.5-397B-A17B`. Use the topology in the
 [SGLang aggregated GAIE deployment](../agg.yaml) when preparing those pools. That template
-uses a small Qwen3 model on one GPU; replace its model IDs and size tensor parallelism and
-GPU resources for each larger model. See the model cards for
+serves Qwen3.5-27B as `qwen-small` with one GPU. Size GPU memory and tensor parallelism for
+your context length and hardware. For `qwen-large`, replace the model IDs with
+`Qwen/Qwen3.5-397B-A17B` and adjust tensor parallelism and GPU resources accordingly. See the model cards for
 [27B](https://huggingface.co/Qwen/Qwen3.5-27B) and
 [397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B) serving guidance.
 Name the deployments `qwen-small` and `qwen-large`; the operator creates the corresponding
