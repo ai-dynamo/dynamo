@@ -73,8 +73,6 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
             self.publish_metrics or _forward_pass_metrics_enabled(self)
         )
 
-        # DynamoTrtllmArgGroup parses a list, but TensorRT-LLM accepts at most
-        # one connector from VALID_TRTLLM_CONNECTORS.
         if self.connector:
             if len(self.connector) > 1:
                 raise ValueError(
