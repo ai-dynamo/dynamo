@@ -89,6 +89,12 @@ impl DeltaGenerator {
         self.state.update_isl(isl);
     }
 
+    /// Excludes the renderer's trailing generation stub from reported
+    /// `usage.prompt_tokens`. See `PreprocessedRequest::pending_prompt_tokens`.
+    pub fn set_pending_prompt_tokens(&mut self, pending_prompt_tokens: u32) {
+        self.state.set_pending_prompt_tokens(pending_prompt_tokens);
+    }
+
     pub fn create_logprobs(
         &self,
         tokens: Vec<common::llm_backend::TokenType>,

@@ -307,6 +307,15 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
 
+    /// Tokens of the rendered assistant generation stub that the model's
+    /// reference API excludes from reported `usage.prompt_tokens` (Kimi K3's
+    /// trailing `<|open|>response<|sep|>`). They are still part of
+    /// `token_ids` and are prefilled by the worker; this only adjusts what the
+    /// frontend reports. Frontend-only, like `migration_state`.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) pending_prompt_tokens: u32,
+
     /// Set when remote prefill has staged KV blocks that only this request's
     /// decode worker can release, so the decode leg must reach that worker even
     /// after the client disconnects.
