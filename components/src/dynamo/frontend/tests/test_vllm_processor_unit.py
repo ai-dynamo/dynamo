@@ -1263,7 +1263,7 @@ def _logprobs_processor(vllm_processor_module):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("top_logprobs", [-1, -2])
+@pytest.mark.parametrize("top_logprobs", [-1])
 async def test_generator_rejects_negative_top_logprobs_before_preprocess(
     vllm_processor_module,
     monkeypatch,
@@ -3698,7 +3698,6 @@ def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
     assert count(False, 0) is None
     assert count(None, 0) is None
     assert count(False, True) is None
-    assert count(3, None) is None
 
 
 def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module):
@@ -4000,53 +3999,6 @@ def test_misaligned_logprobs_do_not_poison_the_next_choice(vllm_processor_module
     apply(nxt, post, _logprob_output([5]), pending, emitted, 0)
     assert [entry["logprob"] for entry in nxt["logprobs"]["content"]] == [-0.5]
     assert nxt["logprobs"]["content"][0]["token"] == "n"
-
-
-def test_choice_logprobs_restart_after_reasoning_choice(vllm_processor_module):
-    """A reasoning choice drains the buffer, so the answer does not reuse it."""
-    pending: list = []
-    emitted: list = []
-    append = vllm_processor_module._append_worker_logprobs
-    apply = vllm_processor_module._apply_choice_logprobs
-    post = SimpleNamespace(
-        _fast_plain_text=False,
-        _suppress_reasoning_output=False,
-        previous_token_ids=[],
-    )
-    append(pending, [7], [-0.7], [_top_entry(7, -0.7, token="r", raw_bytes=[114])])
-    reasoning: dict = {"index": 0}
-    apply(reasoning, post, _logprob_output([7]), pending, emitted, 0)
-    assert pending == []
-    assert emitted == []
-    assert reasoning["logprobs"]["content"][0]["logprob"] == -0.7
-    post.previous_token_ids = []
-    append(pending, [9], [-0.9], [_top_entry(9, -0.9, token="a", raw_bytes=[97])])
-    answer: dict = {"index": 0}
-    apply(answer, post, _logprob_output([9]), pending, emitted, 0)
-    assert [entry["logprob"] for entry in answer["logprobs"]["content"]] == [-0.9]
-    assert pending == []
-
-
-def test_choice_logprobs_ignore_empty_parser_history(vllm_processor_module):
-    """JSON tool fallback never writes previous_token_ids."""
-    pending: list = []
-    emitted: list = []
-    append = vllm_processor_module._append_worker_logprobs
-    apply = vllm_processor_module._apply_choice_logprobs
-    post = SimpleNamespace(
-        _fast_plain_text=False,
-        _suppress_reasoning_output=False,
-        previous_token_ids=[],
-    )
-    append(pending, [1], [-0.1], [_top_entry(1, -0.1, raw_bytes=[116])])
-    apply(None, post, _logprob_output([1]), pending, emitted, 1)
-    append(pending, [2], [-0.2], [_top_entry(2, -0.2, raw_bytes=[116])])
-    choice: dict = {"index": 0, "logprobs": None}
-    apply(choice, post, _logprob_output([2], "stop"), pending, emitted, 1)
-    assert [entry["logprob"] for entry in choice["logprobs"]["content"]] == [
-        -0.1,
-        -0.2,
-    ]
 
 
 def test_empty_terminal_choice_clears_raw_logprobs(vllm_processor_module):

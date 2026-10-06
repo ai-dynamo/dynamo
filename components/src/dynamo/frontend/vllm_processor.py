@@ -325,8 +325,6 @@ def _apply_choice_logprobs(
 
     taken = _take_emitted_logprobs(pending, emitted_ids)
     emitted_ids.clear()
-    # Drop the unmatched tail (trimmed stop token) and a mismatched prefix
-    # so the next chunk is not stuck comparing against a leftover record.
     pending.clear()
     if taken is None or not taken:
         choice["logprobs"] = None
