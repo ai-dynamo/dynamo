@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Run Switchyard's published Rust SDK in a separate, single-replica PreProc. It chooses between
 `Qwen/Qwen3-0.6B` and `Qwen/Qwen3-1.7B`; Dynamo's native EPP then selects a worker within that
-model's pool. The example adds application manifests to an existing Kubernetes deployment.
+model's pool. The example adds PreProc and gateway routing to an existing GAIE deployment.
 
 ```mermaid
 sequenceDiagram
@@ -37,14 +37,24 @@ for the supplied StageRouter policy. PreProc receives no Dynamo load or cache si
 
 ## Prerequisites
 
-- A Kubernetes cluster with the Dynamo platform/operator installed and two available NVIDIA GPUs.
-  Use the [Kubernetes installation guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/install-dynamo.md).
-- Gateway API v1.5.1, GAIE v1.2.1, and the **agentgateway 1.0.0 controller and CRDs**. Use
-  [Dynamo's gateway installer](../../../../../../deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh)
-  on a compatible cluster. Do not downgrade newer installed CRDs to run this example.
-- Frontend and vLLM images built from the same Dynamo revision as the installed operator.
-- Docker, `kubectl` with Kustomize support, and a registry that the cluster can pull from.
-  The public Qwen models must be downloadable by the EPP and worker pods.
+Use an existing Kubernetes deployment with the Dynamo operator, Gateway API, GAIE, and the
+**agentgateway 1.0.0 controller and CRDs** installed. Cluster, operator, GPU, and worker setup are
+outside this example.
+
+The namespace must already contain ready model workers, native Dynamo EPPs, and two
+`InferencePool` resources named `qwen-small-pool` and `qwen-large-pool`, serving `Qwen/Qwen3-0.6B`
+and `Qwen/Qwen3-1.7B`. Start from Dynamo's existing
+[aggregated GAIE deployment](../agg.yaml) or [disaggregated GAIE deployment](../disagg.yaml)
+when preparing those pools. The [standard HTTPRoute example](../http-route.yaml) shows the
+native pool attachment.
+
+The Kustomization assumes the existing namespace is `switchyard`. Change `namespace` in
+[kustomization.yaml](kustomization.yaml) to your workload namespace, and adjust the target model IDs
+in [routes.toml](preproc/config/routes.toml) and pool references in
+[http-routes.yaml](http-routes.yaml) if they differ. PreProc and the example's dedicated Gateway run
+in that same namespace. Do not downgrade newer controller CRDs to run this example.
+
+You also need Docker, `kubectl` with Kustomize support, and a registry the cluster can pull from.
 
 ## Build and deploy
 
@@ -59,22 +69,22 @@ docker build -f "$EXAMPLE/preproc/Dockerfile" -t "$PREPROC_IMAGE" .
 docker push "$PREPROC_IMAGE"
 ```
 
-Set the two Dynamo image tags and the PreProc registry image in
-[kustomization.yaml](kustomization.yaml). Then apply the example to the intended cluster:
+Set the PreProc registry image in [kustomization.yaml](kustomization.yaml). Then apply the add-on
+to the prepared namespace:
 
 ```bash
-kubectl create namespace switchyard --dry-run=client -o yaml | kubectl apply -f -
+export NAMESPACE=switchyard
+kubectl get -n "$NAMESPACE" inferencepool qwen-small-pool qwen-large-pool
 kubectl apply -k "$EXAMPLE"
-kubectl rollout status -n switchyard deployment/switchyard-preproc --timeout=180s
-kubectl wait -n switchyard dynamographdeployment/qwen-small dynamographdeployment/qwen-large   --for=condition=Ready --timeout=1800s
-kubectl wait -n switchyard gateway/switchyard-gateway --for=condition=Programmed --timeout=180s
-kubectl get -n switchyard httproute,inferencepool
-kubectl port-forward -n switchyard service/switchyard-gateway 8000:80
+kubectl rollout status -n "$NAMESPACE" deployment/switchyard-preproc --timeout=180s
+kubectl wait -n "$NAMESPACE" gateway/switchyard-gateway \
+  --for=condition=Programmed --timeout=180s
+kubectl get -n "$NAMESPACE" httproute
+kubectl port-forward -n "$NAMESPACE" service/switchyard-gateway 8000:80
 ```
 
-The HTTPRoutes must report `Accepted=True` and `ResolvedRefs=True`. The operator creates the
-`qwen-small-pool` and `qwen-large-pool` resources from the two DGDs. Each worker uses Dynamo's
-normal direct-mode Frontend sidecar. There is one separate Switchyard process for both models.
+The HTTPRoutes must report `Accepted=True` and `ResolvedRefs=True`. PreProc does not replace the
+existing Dynamo worker Frontends or EPPs. There is one separate Switchyard process for both models.
 
 ## Verify both model choices
 
@@ -82,13 +92,17 @@ In a second terminal, send a neutral request. The supplied `efficient_first` pol
 `Qwen/Qwen3-0.6B`:
 
 ```bash
-curl --fail-with-body -sS http://localhost:8000/v1/chat/completions   -H 'Content-Type: application/json'   -d '{"model":"auto","messages":[{"role":"user","content":"Say hello."}],"max_tokens":16}'
+curl --fail-with-body -sS http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Say hello."}],"max_tokens":16}'
 ```
 
 A critical tool failure selects `Qwen/Qwen3-1.7B`:
 
 ```bash
-curl --fail-with-body -sS http://localhost:8000/v1/chat/completions   -H 'Content-Type: application/json'   -d '{"model":"auto","messages":[{"role":"user","content":"Fix the failure."},{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"pytest\"}"}}]},{"role":"tool","tool_call_id":"call-1","content":"MemoryError: out of memory"}],"max_tokens":16}'
+curl --fail-with-body -sS http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Fix the failure."},{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"pytest\"}"}}]},{"role":"tool","tool_call_id":"call-1","content":"MemoryError: out of memory"}],"max_tokens":16}'
 ```
 
 Check the response's `model` field. Add `"stream":true` and use `curl --no-buffer` to verify SSE.
@@ -101,7 +115,7 @@ reapply the Kustomization. `Runner::from_toml` constructs the SDK directly; ther
 configuration schema. The request's `model` is a **route ID**, such as `auto`, rather than a served
 model alias. Named routes can select other configured policies.
 
-To add a model, add a target and policy in the TOML, a DGD in `models.yaml`, and a matching model
+To route to another existing model pool, add its target and policy in the TOML and a matching model
 header rule in `http-routes.yaml`. HTTPRoute owns the model-to-pool mapping. PreProc changes only
 the top-level `model` field and overwrites incoming gateway/worker routing controls; other raw JSON
 field values remain intact. Use decision-only policies: request-rewriting or generation-producing
@@ -112,9 +126,7 @@ to 2 MiB, concurrent routing to eight requests, total ExtProc streams to sixteen
 identities to 4096. SDK decisions time out after one second, request preprocessing after five
 seconds, and response passthrough after 120 seconds. Agentgateway 1.0.0 keeps PreProc on the
 response path. State lives in one process and resets on restart; `Recreate` updates briefly stop
-routing. Worker updates also use `Recreate`, so a replacement can start on the same GPU without
-requiring spare GPU capacity. This example does not provide high availability or production throughput
-guarantees.
+routing. This example does not provide high availability or production throughput guarantees.
 
 ## Validate and remove
 
@@ -127,7 +139,7 @@ cargo test --manifest-path "$EXAMPLE/preproc/Cargo.toml" --locked
 kubectl kustomize "$EXAMPLE"
 ```
 
-Remove only the example's namespaced resources:
+Remove the add-on's resources; the existing model deployments and pools remain:
 
 ```bash
 kubectl delete -k "$EXAMPLE"

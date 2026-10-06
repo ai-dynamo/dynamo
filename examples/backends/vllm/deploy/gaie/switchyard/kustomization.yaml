@@ -17,7 +17,6 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: switchyard
 resources:
-- models.yaml
 - preproc.yaml
 - gateway.yaml
 - http-routes.yaml
@@ -26,10 +25,6 @@ configMapGenerator:
   files:
   - routes.toml=preproc/config/routes.toml
 images:
-- name: nvcr.io/nvidia/ai-dynamo/dynamo-frontend
-  newTag: my-tag
-- name: nvcr.io/nvidia/ai-dynamo/vllm-runtime
-  newTag: my-tag
 - name: switchyard-preproc
   newName: registry.example.com/your-project/switchyard-preproc
   newTag: example
