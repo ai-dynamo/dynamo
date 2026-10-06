@@ -361,6 +361,20 @@ def test_uses_nixl_connector_direct_and_nested():
     assert _uses_nixl_connector(_make_engine_cfg()) is False
 
 
+@pytest.mark.parametrize(
+    "connector_names, expected",
+    [
+        (("NixlConnector", "OffloadingConnector"), True),
+        (("OffloadingConnector", "NixlConnector"), True),
+        (("OffloadingConnector",), False),
+        ((), False),
+    ],
+)
+def test_uses_nixl_connector_multi(connector_names, expected):
+    extra = {"connectors": [{"kv_connector": name} for name in connector_names]}
+    assert _uses_nixl_connector(_make_engine_cfg("MultiConnector", extra)) is expected
+
+
 def test_uses_dynamo_connector_direct_and_nested():
     """Test _uses_dynamo_connector for direct, nested-in-PdConnector, and absent cases."""
     assert _uses_dynamo_connector(_make_engine_cfg("DynamoConnector")) is True
