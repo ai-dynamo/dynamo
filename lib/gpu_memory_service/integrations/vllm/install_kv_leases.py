@@ -11,7 +11,10 @@ import logging
 import os
 from collections.abc import Callable
 
-from gms_kv_ring.common.content_directory import ContentDirectory
+from gms_kv_ring.common.content_directory import (
+    ContentDirectory,
+    async_directory_work_enabled,
+)
 from gpu_memory_service.integrations.common.kv_lease_client import (
     GMSKVLeaseClient,
     KVLease,
@@ -383,6 +386,7 @@ def _scheduler_init_with_gms_completion_fence(self, *args, **kwargs) -> None:
             try:
                 result = update(*args, **kwargs)
                 _flush_completed_frees(pool)
+                _collect_async_capacity(pool)
                 return result
             finally:
                 # On failure, do not publish unfinished work or return outputs.
@@ -993,13 +997,8 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
             directory.release_claim(token)
 
 
-def _evict_dormant_directory_blocks(
-    self, required_blocks: int, additional_blocks=()
-) -> int:
-    directory = getattr(self, "_gms_kv_directory", None)
-    client = getattr(self, "_gms_kv_lease_client", None)
-    if directory is None or not directory.enabled or client is None:
-        return 0
+def _select_capacity_candidates(self, required_blocks: int, additional_blocks=()):
+    """Return the oldest native-free cached slots that may be retired."""
     # The directory's access order only records publication/remote claims. It
     # cannot see native vLLM prefix hits, while BlockPool keeps exactly that
     # information in its free queue. Constrain retirement to the oldest
@@ -1030,13 +1029,17 @@ def _evict_dormant_directory_blocks(
         eligible_slot_ids.append(block_id)
         if len(eligible_slot_ids) >= candidate_limit:
             break
-    if not eligible_slot_ids:
-        return 0
-    victims = directory.ensure_hbm_capacity(
-        required_blocks,
-        eligible_slot_ids=eligible_slot_ids,
-        engine_id=_directory_pool_id(),
-    )
+    return eligible_slot_ids
+
+
+def _apply_capacity_victims(self, victims, *, verify_generation: bool = False) -> int:
+    """Evict and release blocks whose directory records were just retired.
+
+    With ``verify_generation`` (asynchronous retirement), a victim is applied
+    only if this pool still holds the exact lease the daemon retired; a block
+    released or reused in the meantime is left alone.
+    """
+    client = self._gms_kv_lease_client
     leases = []
     restored = []
     for victim in victims:
@@ -1044,6 +1047,10 @@ def _evict_dormant_directory_blocks(
             block_id = int(block_id)
             block = self.blocks[block_id]
             lease = self._gms_kv_leases_by_block.get(block_id)
+            if verify_generation and (
+                lease is None or int(lease.generation) != int(generation)
+            ):
+                continue
             victim_lease = lease or KVLease(block_id, int(generation))
             block_hash = getattr(block, "block_hash", None)
             content_hash = (
@@ -1064,6 +1071,29 @@ def _evict_dormant_directory_blocks(
     if restored:
         _publish_hbm_blocks(self, restored, active=True)
     client.release(leases)
+    return len(leases)
+
+
+def _evict_dormant_directory_blocks(
+    self, required_blocks: int, additional_blocks=()
+) -> int:
+    directory = getattr(self, "_gms_kv_directory", None)
+    client = getattr(self, "_gms_kv_lease_client", None)
+    if directory is None or not directory.enabled or client is None:
+        return 0
+    # Never select candidates alongside an in-flight asynchronous retirement.
+    _collect_async_capacity(self, wait=True)
+    eligible_slot_ids = _select_capacity_candidates(
+        self, required_blocks, additional_blocks
+    )
+    if not eligible_slot_ids:
+        return 0
+    victims = directory.ensure_hbm_capacity(
+        required_blocks,
+        eligible_slot_ids=eligible_slot_ids,
+        engine_id=_directory_pool_id(),
+    )
+    released = _apply_capacity_victims(self, victims)
     if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
         logger.warning(
             "[GMS-KVDirectory] vLLM capacity required=%d eligible=%d "
@@ -1071,9 +1101,66 @@ def _evict_dormant_directory_blocks(
             int(required_blocks),
             len(eligible_slot_ids),
             len(victims),
-            len(leases),
+            released,
         )
-    return len(leases)
+    return released
+
+
+def async_capacity_retirement_enabled() -> bool:
+    """Retire dormant HBM records off the scheduler thread (opt-in).
+
+    Enabled by DYN_GMS_ASYNC_DIRECTORY_WORK=1. The directory capacity call
+    runs on a background thread and its victims are applied on a later engine
+    step. Trade-off: freed headroom arrives a few steps later, so under a
+    sudden burst an allocation can still wait for the in-flight retirement;
+    retired records are briefly absent from the directory while their blocks
+    remain natively cached, and a native hit in that window republishes them
+    as active.
+    """
+    return async_directory_work_enabled()
+
+
+def _submit_async_capacity(self, required_blocks: int, additional_blocks=()) -> bool:
+    """Start one background capacity retirement; at most one is in flight."""
+    if getattr(self, "_gms_capacity_future", None) is not None:
+        return True
+    eligible_slot_ids = _select_capacity_candidates(
+        self, required_blocks, additional_blocks
+    )
+    if not eligible_slot_ids:
+        return False
+    executor = self.__dict__.get("_gms_capacity_executor")
+    if executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gms-capacity")
+        self._gms_capacity_executor = executor
+    self._gms_capacity_future = executor.submit(
+        self._gms_kv_directory.ensure_hbm_capacity,
+        int(required_blocks),
+        eligible_slot_ids=eligible_slot_ids,
+        engine_id=_directory_pool_id(),
+    )
+    return True
+
+
+def _collect_async_capacity(self, *, wait: bool = False) -> int:
+    """Apply a finished background retirement on the engine thread."""
+    future = getattr(self, "_gms_capacity_future", None)
+    if future is None or (not wait and not future.done()):
+        return 0
+    self._gms_capacity_future = None
+    try:
+        victims = future.result()
+    except Exception:  # noqa: BLE001
+        # Same outcome as a failed synchronous retirement: nothing is released
+        # here, and the next headroom check tries again.
+        logger.warning(
+            "[GMS-KVDirectory] background vLLM capacity retirement failed",
+            exc_info=True,
+        )
+        return 0
+    return _apply_capacity_victims(self, victims, verify_generation=True)
 
 
 def _reserve_dormant_headroom(self, recent_blocks: int, candidates=()) -> int:
@@ -1094,6 +1181,9 @@ def _reserve_dormant_headroom(self, recent_blocks: int, candidates=()) -> int:
         or client is None
     ):
         return 0
+    asynchronous = async_capacity_retirement_enabled()
+    if asynchronous:
+        _collect_async_capacity(self)
     configured = os.environ.get("GMS_VLLM_DORMANT_HEADROOM_BLOCKS")
     if configured is None:
         # A percentage alone admits only one prompt on small pools. Size the
@@ -1130,6 +1220,9 @@ def _reserve_dormant_headroom(self, recent_blocks: int, candidates=()) -> int:
             len(candidates),
             directory.authoritative,
         )
+    if asynchronous:
+        _submit_async_capacity(self, shortage, candidates)
+        return 0
     if candidates:
         return _evict_dormant_directory_blocks(self, shortage, candidates)
     return _evict_dormant_directory_blocks(self, shortage)

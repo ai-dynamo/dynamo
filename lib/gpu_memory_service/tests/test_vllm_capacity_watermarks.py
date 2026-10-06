@@ -164,3 +164,74 @@ def test_duplicate_content_keeps_one_durable_slot_and_releases_the_other():
     assert len(publications) == 1
     assert duplicate.block_hash is None
     assert pool._gms_kv_leases_by_block == {2: first_lease}
+
+
+def test_async_capacity_retirement_runs_off_the_engine_thread(monkeypatch):
+    """Opt-in retirement returns at once and applies only exact victims later."""
+    import threading
+
+    monkeypatch.setenv("DYN_GMS_ASYNC_DIRECTORY_WORK", "1")
+    monkeypatch.setenv("GMS_VLLM_DORMANT_HEADROOM_BLOCKS", "2")
+    blocks = {
+        slot: SimpleNamespace(
+            block_id=slot, block_hash=bytes([slot]), ref_cnt=0, is_null=False
+        )
+        for slot in range(5)
+    }
+    gate = threading.Event()
+    calls = []
+
+    class Directory:
+        enabled = True
+        authoritative = True
+
+        def ensure_hbm_capacity(
+            self, required, *, eligible_slot_ids=None, engine_id=None
+        ):
+            calls.append((threading.current_thread().name, required, eligible_slot_ids))
+            assert gate.wait(5)
+            # Slot 3 was re-leased meanwhile: its retired generation is stale.
+            return [
+                {"slot_ids": [2], "generations": [7]},
+                {"slot_ids": [3], "generations": [7]},
+            ]
+
+    released = []
+    pool = SimpleNamespace(
+        num_gpu_blocks=5,
+        blocks=blocks,
+        free_block_queue=SimpleNamespace(
+            get_all_free_blocks=lambda: [blocks[i] for i in (2, 3, 4)]
+        ),
+        _gms_kv_directory=Directory(),
+        _gms_kv_lease_client=SimpleNamespace(
+            free_count=lambda: 0, release=lambda leases: released.extend(leases)
+        ),
+        _gms_kv_leases_by_block={
+            2: KVLease(2, 7),
+            3: KVLease(3, 9),
+            4: KVLease(4, 7),
+        },
+        _gms_kv_directory_slot_by_hash={},
+        _maybe_evict_cached_block=lambda block: setattr(block, "block_hash", None),
+    )
+
+    assert hooks._reserve_dormant_headroom(pool, 1) == 0
+    assert hooks._reserve_dormant_headroom(pool, 1) == 0
+    assert released == []
+    assert hooks._collect_async_capacity(pool) == 0  # still in flight
+
+    gate.set()
+    assert hooks._collect_async_capacity(pool, wait=True) == 1
+    assert len(calls) == 1
+    assert calls[0][0].startswith("gms-capacity") and calls[0][1] == 2
+    assert released == [KVLease(2, 7)]
+    assert blocks[2].block_hash is None
+    assert blocks[3].block_hash == bytes([3])
+    assert 3 in pool._gms_kv_leases_by_block
+    pool._gms_capacity_executor.shutdown()
+
+
+def test_capacity_retirement_stays_synchronous_by_default(monkeypatch):
+    monkeypatch.delenv("DYN_GMS_ASYNC_DIRECTORY_WORK", raising=False)
+    assert hooks.async_capacity_retirement_enabled() is False

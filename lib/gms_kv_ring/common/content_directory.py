@@ -23,6 +23,23 @@ from gms_kv_ring.daemon.client import DaemonClient
 
 logger = logging.getLogger(__name__)
 
+
+def async_directory_work_enabled() -> bool:
+    """Opt in to keeping directory work off engine scheduler threads.
+
+    DYN_GMS_ASYNC_DIRECTORY_WORK=1 lets engine integrations retire dormant
+    HBM records from a background thread instead of the scheduler thread
+    (see the vLLM integration). Trade-off: retired capacity becomes reusable
+    a few engine steps later.
+    """
+    return os.environ.get("DYN_GMS_ASYNC_DIRECTORY_WORK", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 DIRECTORY_MODES = frozenset(("off", "shadow", "authoritative"))
 _T = TypeVar("_T")
 
