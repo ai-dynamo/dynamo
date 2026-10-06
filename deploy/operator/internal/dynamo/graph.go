@@ -54,6 +54,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -1522,111 +1523,6 @@ func IsWorkerComponent(componentType string) bool {
 		componentType == commonconsts.ComponentTypeDecode
 }
 
-// AddStandardEnvVars adds the standard environment variables that are common to
-// both SnapshotJob capture Pods and generated worker Pods.
-func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
-	standardEnvVars := []corev1.EnvVar{}
-	if operatorConfig.Infrastructure.NATSAddress != "" {
-		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
-			Name:  "NATS_SERVER",
-			Value: operatorConfig.Infrastructure.NATSAddress,
-		})
-	}
-
-	if operatorConfig.Infrastructure.ETCDAddress != "" {
-		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
-			Name:  "ETCD_ENDPOINTS",
-			Value: operatorConfig.Infrastructure.ETCDAddress,
-		})
-	}
-
-	if operatorConfig.Infrastructure.ModelExpressURL != "" {
-		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
-			Name:  "MODEL_EXPRESS_URL",
-			Value: operatorConfig.Infrastructure.ModelExpressURL,
-		})
-	}
-	if operatorConfig.Infrastructure.PrometheusEndpoint != "" {
-		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
-			Name:  "PROMETHEUS_ENDPOINT",
-			Value: operatorConfig.Infrastructure.PrometheusEndpoint,
-		})
-	}
-	// merge the env vars to allow users to override the standard env vars
-	container.Env = MergeEnvs(standardEnvVars, container.Env)
-}
-
-// AddTransportTLSEnvVars injects DYN_TCP_TLS_* and NATS_TLS_* certificate path
-// environment variables from InfrastructureConfiguration. Unlike
-// AddStandardEnvVars, this is scoped to DGD workload pods only — not the
-// DGDR profiler Job — because the profiler does not run the TCP/NATS
-// transport and does not inherit DGD podTemplate certificate mounts.
-func AddTransportTLSEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
-	tlsEnvVars := []corev1.EnvVar{}
-	// Inject TLS certificate paths for inter-component encryption (DYN_TCP_TLS_* / NATS_TLS_*).
-	if operatorConfig.Infrastructure.NATSTLSCAPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "NATS_TLS_CA_CERT_PATH",
-			Value: operatorConfig.Infrastructure.NATSTLSCAPath,
-		})
-	}
-	if operatorConfig.Infrastructure.NATSTLSClientCertPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "NATS_TLS_CLIENT_CERT_PATH",
-			Value: operatorConfig.Infrastructure.NATSTLSClientCertPath,
-		})
-	}
-	if operatorConfig.Infrastructure.NATSTLSClientKeyPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "NATS_TLS_CLIENT_KEY_PATH",
-			Value: operatorConfig.Infrastructure.NATSTLSClientKeyPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSCertPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CERT_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSCertPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSKeyPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_KEY_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSKeyPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSCAPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CA_CERT_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSCAPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSClientCertPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CLIENT_CERT_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSClientCertPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSClientKeyPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CLIENT_KEY_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSClientKeyPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSClientCAPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSClientCAPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSServerName != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_SERVER_NAME",
-			Value: operatorConfig.Infrastructure.TCPTLSServerName,
-		})
-	}
-	container.Env = MergeEnvs(tlsEnvVars, container.Env)
-}
-
 // usesMultinodeTopologyAliases keeps environment and command-line injection on
 // the same per-DGD compatibility boundary.
 func usesMultinodeTopologyAliases(annotations map[string]string) bool {
@@ -1801,15 +1697,26 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	roleLaunchOwnership roleLaunchOwnership,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
+	// Stored objects must satisfy the sidecar contract even when admission is not rerun.
+	if errs := ValidateDynamoSidecar(component, field.NewPath("spec")); len(errs) > 0 {
+		return nil, errs.ToAggregate()
+	}
+	nativeSidecar := GetDynamoSidecar(component) != nil
+
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
-	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations))
+	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure)
 	if err != nil {
 		return nil, err
 	}
-	container, err := componentDefaults.GetBaseContainer(componentContext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get base container: %w", err)
+
+	// Native-sidecar engines retain their image entrypoint and user configuration.
+	container := corev1.Container{Name: commonconsts.MainContainerName}
+	if !nativeSidecar {
+		container, err = componentDefaults.GetBaseContainer(componentContext)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get base container: %w", err)
+		}
 	}
 
 	if main := GetMainContainer(component); main != nil {
@@ -1845,8 +1752,8 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		return nil, err
 	}
 
-	AddStandardEnvVars(&container, operatorConfig)
-	AddTransportTLSEnvVars(&container, operatorConfig)
+	// Preserve legacy environment rendering before backend-specific additions.
+	container.Env = MergeEnvs(nil, container.Env)
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
 	// Apply backend-specific container modifications
@@ -1863,9 +1770,19 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-	if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
-		return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
+	// Native-sidecar mode does not yet support multi-node deployments.
+	// Single-node engines are launched entirely by the user.
+	if !nativeSidecar {
+		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
+			return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
+		}
 	}
+
+	// Cache env remains a backend addition in both worker modes, preserving legacy ordering.
+	if backendFramework == BackendFrameworkVLLM && component.CompilationCache != nil {
+		container.Env = append(container.Env, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: component.CompilationCache.MountPath})
+	}
+
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
 	if err != nil {
@@ -1910,13 +1827,21 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
+	// Merge runtime defaults only into the selected restartable init container.
+	if nativeSidecar {
+		if err := mergeDynamoSidecarDefaults(&podSpec, componentContext); err != nil {
+			return nil, err
+		}
+	} else {
+		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	}
+
 	if component.FrontendSidecar != nil {
-		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig, frontendSidecarMounts); err != nil {
+		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, frontendSidecarMounts); err != nil {
 			return nil, err
 		}
 	}
 
-	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
 
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
@@ -1995,6 +1920,29 @@ func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {
 	return nil
 }
 
+func mergeContainerByName(base *corev1.Container, override *corev1.Container) error {
+	if override == nil {
+		return nil
+	}
+	user := override.DeepCopy()
+	user.Name = base.Name
+	baseEnv := base.Env
+	if err := mergo.Merge(base, *user, mergo.WithOverride); err != nil {
+		return err
+	}
+	base.Env = MergeEnvs(baseEnv, user.Env)
+	if user.LivenessProbe != nil {
+		base.LivenessProbe = user.LivenessProbe.DeepCopy()
+	}
+	if user.ReadinessProbe != nil {
+		base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+	}
+	if user.StartupProbe != nil {
+		base.StartupProbe = user.StartupProbe
+	}
+	return nil
+}
+
 func applyCompilationCache(container *corev1.Container, component *v1beta1.DynamoComponentDeploymentSharedSpec, backendFramework BackendFramework) error {
 	if component.CompilationCache == nil {
 		return nil
@@ -2042,6 +1990,7 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 		})
 	}
 	container.VolumeMounts = normalizedMounts
+
 	return nil
 }
 
@@ -2122,19 +2071,24 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	return ordered
 }
 
-func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration, parentMounts []corev1.VolumeMount) error {
+func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, parentMounts []corev1.VolumeMount) error {
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
 		}
+
+		// Co-located frontend discovery uses its own identity in both worker layouts.
 		frontendContext := ComponentContext{
 			numberOfNodes:                  1,
+			RuntimeContainerName:           sidecarName,
 			ComponentType:                  commonconsts.ComponentTypeFrontend,
 			ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
+			Infrastructure:                 parentContext.Infrastructure,
 			DynamoNamespace:                parentContext.DynamoNamespace,
 		}
+
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)
 		if err != nil {
@@ -2147,8 +2101,6 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
-		AddStandardEnvVars(&base, operatorConfig)
-		AddTransportTLSEnvVars(&base, operatorConfig)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
 		return nil
@@ -2185,7 +2137,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1beta1.D
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext) (ComponentContext, error) {
+func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext, infrastructure configv1alpha1.InfrastructureConfiguration) (ComponentContext, error) {
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
@@ -2194,8 +2146,8 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	}
 
 	var image string
-	if main := GetMainContainer(component); main != nil {
-		image = main.Image
+	if runtime := GetDynamoContainer(component); runtime != nil {
+		image = runtime.Image
 	}
 	var resolvedRuntimeVersion *runtimeversion.Version
 	if version, err := runtimeversion.Resolve(image, component.RuntimeVersionOverride); err == nil {
@@ -2204,16 +2156,24 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		return ComponentContext{}, fmt.Errorf("resolve runtime version override: %w", err)
 	}
 
+	// Main hosts the runtime unless the component selects a native Dynamo sidecar.
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
+		RuntimeContainerName:           commonconsts.MainContainerName,
 		ComponentType:                  string(component.ComponentType),
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
 		Discovery:                      discovery,
+		Infrastructure:                 infrastructure,
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
 		RuntimeVersion:                 resolvedRuntimeVersion,
+	}
+
+	// A native sidecar owns the worker runtime identity.
+	if GetDynamoSidecar(component) != nil {
+		componentContext.RuntimeContainerName = commonconsts.RuntimeContainerName
 	}
 	return componentContext, nil
 }
@@ -2315,6 +2275,14 @@ func applyDGDTemplateDefaults(
 		for _, podTemplate := range EnsureComponentPodTemplates(component) {
 			main := ensureMainContainer(podTemplate)
 			main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
+
+			// When configured, apply global env to the Dynamo sidecar as well as main.
+			for i := range podTemplate.Spec.InitContainers {
+				runtime := &podTemplate.Spec.InitContainers[i]
+				if runtime.Name == commonconsts.RuntimeContainerName {
+					runtime.Env = MergeEnvs(dynamoDeployment.Spec.Env, runtime.Env)
+				}
+			}
 		}
 	}
 
@@ -2352,9 +2320,16 @@ func applyKvTransferPolicyToWorkerComponent(
 		return
 	}
 	for _, podTemplate := range EnsureComponentPodTemplates(component) {
-		main := ensureMainContainer(podTemplate)
-		main.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(main.Env), workerKvTransferPolicyEnvVars(kvt))
-		main.VolumeMounts = appendTopologyLabelVolumeMount(main.VolumeMounts, TopologyLabelVolumeMount())
+		// The runtime publishes routing topology; the engine does not consume this projection.
+		runtime := ensureMainContainer(podTemplate)
+		for i := range podTemplate.Spec.InitContainers {
+			if podTemplate.Spec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
+				runtime = &podTemplate.Spec.InitContainers[i]
+				break
+			}
+		}
+		runtime.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(runtime.Env), workerKvTransferPolicyEnvVars(kvt))
+		runtime.VolumeMounts = appendTopologyLabelVolumeMount(runtime.VolumeMounts, TopologyLabelVolumeMount())
 		podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt, groveClusterTopologyDomains))
 	}
 }

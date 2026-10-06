@@ -5,6 +5,7 @@ import logging
 from typing import AsyncGenerator
 
 import numpy as np
+import tritonclient.grpc.model_config_pb2 as mc
 from tritonserver import MemoryType as TritonMemoryType
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
@@ -23,15 +24,25 @@ logger = logging.getLogger(__name__)
 
 
 class RequestHandler:
-    def __init__(self, server: TritonServer, model: TritonModel):
+    def __init__(
+        self,
+        server: TritonServer,
+        model: TritonModel,
+        triton_model_config: mc.ModelConfig,
+    ):
         self._server = server
         self._model = model
+        self._config = triton_model_config
         # Output schema and batching are fixed at load time; cache to avoid a
         # per-response lookup.
         self._output_dtypes: dict[str, str] = {
             out["name"]: out["datatype"] for out in model.metadata()["outputs"]
         }
-        self._batched = model.config().get("max_batch_size", 0) > 0
+        # Read batching from the parsed proto (not model.config()) so the
+        # disk-fallback path in main.py._read_model_config still routes
+        # batchable models through their true batch layout when the runtime
+        # config is unavailable.
+        self._batched = self._config.max_batch_size > 0
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         logger.debug(f"Received request: {request}")

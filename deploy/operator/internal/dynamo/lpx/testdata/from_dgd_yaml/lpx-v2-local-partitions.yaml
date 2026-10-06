@@ -144,7 +144,6 @@ metadata:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:60a42610f587fade62de60a8606a76ab6c5ce9e59deb22abe01f5212a3f43aa7
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: lpx-v2-local-partitions
