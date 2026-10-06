@@ -6,7 +6,7 @@ use anyhow::Context;
 use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
 
 use crate::common::protocols::{MockEngineArgs, OutputSignal};
-use crate::engine_observations::dynamo_kv_event;
+use crate::engine_observations::{dynamo_kv_event, dynamo_storage_tier};
 use crate::loadgen::Trace;
 use crate::replay::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
@@ -64,8 +64,9 @@ impl ReplayEngineObservation for RouterEventObservation {
             events
                 .into_iter()
                 .map(|event| {
+                    let storage_tier = dynamo_storage_tier(event.tier);
                     let (event, _) = dynamo_kv_event(event);
-                    RouterEvent::with_storage_tier(worker_id, event, StorageTier::Device)
+                    RouterEvent::with_storage_tier(worker_id, event, storage_tier)
                 })
                 .collect(),
         )
@@ -241,7 +242,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
             .kv_events
             .into_iter()
             .map(|event| ReplayTimedKvEvent {
-                storage_tier: StorageTier::Device,
+                storage_tier: dynamo_storage_tier(event.event.tier),
                 event: dynamo_kv_event(event.event).0,
                 timestamp_us: timestamp_us_from_ms(event.observed_at_ms),
             })
