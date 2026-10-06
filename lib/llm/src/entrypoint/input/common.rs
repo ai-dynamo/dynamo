@@ -20,7 +20,7 @@ use crate::{
     },
     migration::Migration,
     model_card::ModelDeploymentCard,
-    namespace::{NamespaceFilter, NamespacePrefixMode},
+    namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -344,7 +344,6 @@ pub async fn prepare_engine(
             if !local_model.path().as_os_str().is_empty() {
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }
-            watcher.set_namespace_prefix_mode(NamespacePrefixMode::from_env());
             watcher.set_tokenizer_backend(local_model.runtime_config().tokenizer_backend);
             watcher.set_tokenizer_fallback_enabled(
                 local_model.runtime_config().tokenizer_fallback_enabled,

@@ -28,7 +28,7 @@ use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
 };
-use dynamo_runtime::namespace::{GLOBAL_NAMESPACE, NamespaceFilter, NamespacePrefixMode};
+use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
@@ -153,27 +153,11 @@ impl Router {
         .await
     }
 
-    pub async fn from_discovery_with_filter(
-        namespace_filter: NamespaceFilter,
-        component: &str,
-    ) -> Result<Self> {
-        Self::from_discovery_with_prefix_mode(
-            namespace_filter,
-            NamespacePrefixMode::Literal,
-            component,
-        )
-        .await
-    }
-
     pub(crate) async fn from_discovery_with_prefix_mode(
         namespace_filter: NamespaceFilter,
         namespace_prefix_mode: NamespacePrefixMode,
         component: &str,
     ) -> Result<Self> {
-        let namespace = match &namespace_filter {
-            NamespaceFilter::Global => GLOBAL_NAMESPACE,
-            NamespaceFilter::Exact(namespace) | NamespaceFilter::Prefix(namespace) => namespace,
-        };
         let container_discovery = validate_kube_discovery_mode()?;
 
         let runtime = Runtime::from_settings()?;
@@ -254,14 +238,14 @@ impl Router {
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
 
-        // Use the BASE namespace (without rolling-update suffix) for the pod
+        // Namespace-scoped pod selectors use the BASE namespace for the pod
         // selector. Workers register in discovery under the suffixed namespace
         // (e.g. "atchernych-qwen-9f792849"), but the K8s pod label
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
         // would silently match zero pods during/after a DGD rolling update.
         let (worker_index, pod_store_ready) =
-            spawn_pod_reflector(namespace, container_discovery).await?;
+            spawn_pod_reflector(&namespace_filter, container_discovery).await?;
 
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
@@ -1194,12 +1178,21 @@ async fn run_pod_reflector(
     }
 }
 
+fn worker_pod_selector(namespace_filter: &NamespaceFilter) -> String {
+    match namespace_filter {
+        NamespaceFilter::Global => "nvidia.com/dynamo-component-class=worker".to_string(),
+        NamespaceFilter::Exact(namespace) | NamespaceFilter::Prefix(namespace) => format!(
+            "nvidia.com/dynamo-namespace={namespace},nvidia.com/dynamo-component-class=worker"
+        ),
+    }
+}
+
 /// Start a background pod reflector that watches worker pods matching the
 /// InferencePool selector and incrementally maintains a [`WorkerEndpointIndex`]
 /// from its per-object events — O(1) request-path lookups, no K8s API calls
 /// and no pod rescans on the hot path.
 async fn spawn_pod_reflector(
-    dynamo_namespace: &str,
+    namespace_filter: &NamespaceFilter,
     container_discovery: bool,
 ) -> Result<(Arc<RwLock<WorkerEndpointIndex>>, Arc<AtomicBool>)> {
     use k8s_openapi::api::core::v1::Pod;
@@ -1217,10 +1210,7 @@ async fn spawn_pod_reflector(
 
     let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
 
-    let selector = format!(
-        "nvidia.com/dynamo-namespace={},nvidia.com/dynamo-component-class=worker",
-        dynamo_namespace
-    );
+    let selector = worker_pod_selector(namespace_filter);
 
     let writer = reflector::store::Writer::default();
     let store = writer.as_reader();
@@ -1697,6 +1687,21 @@ mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
 
+    #[test]
+    fn global_namespace_discovery_does_not_restrict_worker_pod_labels() {
+        let global = worker_pod_selector(&NamespaceFilter::Global);
+        assert_eq!(global, "nvidia.com/dynamo-component-class=worker");
+        for filter in [
+            NamespaceFilter::Exact("default-foo".into()),
+            NamespaceFilter::Prefix("default-foo".into()),
+        ] {
+            assert_eq!(
+                worker_pod_selector(&filter),
+                "nvidia.com/dynamo-namespace=default-foo,nvidia.com/dynamo-component-class=worker"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn bootstrap_namespace_scope_excludes_sibling_deployments() {
         use dynamo_runtime::distributed::DistributedConfig;
@@ -1732,6 +1737,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(manual.actual_namespace, "default-foo-bar");
+
+        let global = fetch_preprocessor_from_discovery(
+            &drt,
+            &NamespaceFilter::Global,
+            NamespacePrefixMode::WorkerGeneration,
+        )
+        .await
+        .unwrap();
+        assert_eq!(global.actual_namespace, "default-foo-bar");
 
         let filter = NamespaceFilter::Prefix("default-foo".into());
         let rejected =

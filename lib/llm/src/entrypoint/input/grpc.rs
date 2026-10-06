@@ -11,7 +11,7 @@ use crate::{
     grpc::service::kserve,
     http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
-    namespace::{NamespaceFilter, NamespacePrefixMode},
+    namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -161,7 +161,6 @@ async fn run_watcher(
         prefill_load_estimator,
         metrics,
     );
-    watch_obj.set_namespace_prefix_mode(NamespacePrefixMode::from_env());
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);

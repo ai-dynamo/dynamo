@@ -302,7 +302,7 @@ impl ModelWatcher {
     ) -> Self {
         Self {
             manager: model_manager,
-            namespace_prefix_mode: NamespacePrefixMode::Literal,
+            namespace_prefix_mode: NamespacePrefixMode::from_env(),
             drt: runtime,
             router_config,
             migration_limit,
@@ -1663,16 +1663,32 @@ mod tests {
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
-        let mut watcher = ModelWatcher::new(
-            drt,
-            Arc::new(ModelManager::new()),
-            RouterConfig::default(),
-            0,
-            None,
-            None,
-            None,
-            Arc::new(Metrics::new()),
-        );
+        let make_watcher = || {
+            ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig::default(),
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            )
+        };
+        temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", None::<&str>, || {
+            assert_eq!(
+                make_watcher().namespace_prefix_mode,
+                NamespacePrefixMode::Literal
+            );
+        });
+        let mut watcher = temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", Some("true"), || {
+            let watcher = make_watcher();
+            assert_eq!(
+                watcher.namespace_prefix_mode,
+                NamespacePrefixMode::WorkerGeneration
+            );
+            watcher
+        });
         let card = ModelDeploymentCard::with_name_only("isolated-model");
         let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
         for (namespace, admitted) in [

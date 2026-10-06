@@ -178,12 +178,10 @@ fn namespace_scope(filter: &NamespaceFilter) -> &str {
 
 /// Whether `namespace` is inside `filter` for the purposes of RL discovery.
 ///
-/// [`NamespaceFilter::Prefix`] matches on a bare `starts_with`, which also admits a
-/// sibling deployment whose name merely begins with the prefix: under
-/// `DYN_NAMESPACE_PREFIX=myns-dgd` it would take in `myns-dgd2`. The endpoints reached
-/// here are RL control endpoints, so the scope is the prefix itself plus the
-/// hyphen-delimited worker generations beneath it — the same shape
-/// `DYN_NAMESPACE_WORKER_SUFFIX` produces.
+/// In `WorkerGeneration` mode, prefixes use the strict runtime matcher. In
+/// `Literal` mode, RL retains its hyphen-boundary rule: `default-foo` admits
+/// `default-foo-bar` but excludes `default-foobar`. Exact and global scopes are
+/// unchanged in either mode.
 fn namespace_in_scope(
     filter: &NamespaceFilter,
     namespace: &str,

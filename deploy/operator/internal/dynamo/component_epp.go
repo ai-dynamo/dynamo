@@ -114,13 +114,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 
 	container.Command = []string{}
 
-	if runtimefeatures.StrictNamespacePrefix.Enabled(context.RuntimeVersion) {
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
-			Value: "true",
-		})
-	}
-
 	// Presence of eppConfig keeps the legacy Go EPP launch contract so existing
 	// DGDs survive operator upgrades unchanged until migration clears it.
 	if epp.IsLegacyGoEPP(context.EPPConfig) {
@@ -142,6 +135,13 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		_, volumeMount := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
 		container.VolumeMounts = append(container.VolumeMounts, volumeMount)
 	} else {
+		if runtimefeatures.StrictNamespacePrefix.Enabled(context.RuntimeVersion) {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+				Value: "true",
+			})
+		}
+
 		// Native Rust EPP: configured through DYN_* env vars, serves
 		// ext_proc/health on fixed ports, takes no CLI flags, and reads no
 		// config file. Leave Args empty and let the image ENTRYPOINT run.

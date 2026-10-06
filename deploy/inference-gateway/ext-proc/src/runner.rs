@@ -50,12 +50,10 @@ struct Config {
 
 impl Config {
     fn from_env() -> Self {
-        let namespace_filter = match env_or("DYN_NAMESPACE_PREFIX", "") {
-            Some(prefix) => NamespaceFilter::Prefix(prefix),
-            None => NamespaceFilter::Exact(
-                env_or("DYN_NAMESPACE", "").unwrap_or_else(|| "vllm-agg".to_string()),
-            ),
-        };
+        let namespace = env_or("DYN_NAMESPACE", "").unwrap_or_else(|| "vllm-agg".to_string());
+        let prefix = env_or("DYN_NAMESPACE_PREFIX", "");
+        let namespace_filter =
+            NamespaceFilter::from_namespace_and_prefix(Some(&namespace), prefix.as_deref());
 
         if parse_env("DYN_ENFORCE_DISAGG", false) {
             tracing::warn!(
@@ -525,6 +523,8 @@ mod tests {
                 false,
             ),
             (Some(" "), Some("default-foo"), Some("true"), false, false),
+            (Some(" dynamo "), Some("ignored"), Some("true"), true, true),
+            (None, Some("dynamo"), Some("true"), true, true),
         ] {
             temp_env::with_vars(
                 [

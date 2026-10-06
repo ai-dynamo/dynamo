@@ -52,13 +52,59 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ##### Operator Namespace Discovery Isolation
 
-**Change:** The operator enables strict namespace-prefix matching for frontend and EPP components using runtime 1.6.0 or later. For example, a frontend scoped to `default-foo` excludes `default-foo-bar` and its workers.
+**Change:** A frontend in a DynamoGraphDeployment (DGD) named `foo` can currently discover workers from a DGD named `foo-bar` in the same Kubernetes namespace and route requests to them. Strict namespace-prefix matching prevents this cross-deployment discovery for ordinary overlapping names such as `foo` and `foo-bar`.
 
-**Affected:** Operator-managed frontend and EPP components.
+**Affected:** Deployments in the same Kubernetes namespace whose DGD names share a prefix. Their frontends, including frontend sidecars, and native Rust EPP components can discover the other deployment's workers. Deployments without overlapping names are unaffected by this issue.
 
-**Action:** Use runtime images containing this fix. For custom images, set `runtimeVersionOverride` when the image tag does not identify the Dynamo runtime version. If retaining a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on frontend and EPP components.
+**Action:** Upgrade the operator and the affected frontend and native EPP images to Dynamo 1.6.0 or later. Runtime image 1.6.0 introduces `DYN_NAMESPACE_PREFIX_STRICT`; the updated operator enables it for supported images. For custom images, set `runtimeVersionOverride` when the image tag does not identify the Dynamo runtime version. Frontend sidecars use their own image version. With a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on those containers after upgrading their runtime images.
 
-**Existing deployments:** An operator-only upgrade does not fix isolation for older runtime images. With an updated operator, upgrading a component to a supported runtime enables strict matching and rolls that component. Manual namespace prefixes retain literal matching unless strict mode is enabled.
+**Existing deployments:** An operator-only upgrade leaves older runtime images affected. Upgrading an affected component's runtime image with the updated operator enables strict matching and rolls that component. Manual namespace prefixes retain literal matching unless strict mode is enabled. Strict matching still accepts names ending in an eight-character lowercase hexadecimal suffix or `-legacy`; it does not distinguish a separate DGD with such a name from a worker generation.
+
+#### CRD and admission breaking changes
+
+##### Reserved runtime init container name
+
+**Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
+sidecar mode for that component. The runtime container must specify an image and `restartPolicy: Always`.
+Dynamo defaults and runtime-version resolution target this container;
+`spec.components[*].podTemplate.spec.containers[name=main]` runs the engine.
+
+In v1alpha1, the corresponding paths are `spec.services.<service-name>.extraPodSpec.initContainers[name=runtime]`
+and `spec.services.<service-name>.extraPodSpec.mainContainer`.
+
+Only worker, prefill, and decode components support this mode. Multinode, enabled checkpoint, GPU memory
+service, and failover are currently unsupported and rejected. Support for these features is planned for a future release.
+
+**Affected:** Any deployment with `spec.components[*].podTemplate.spec.initContainers[name=runtime]`,
+including an unrelated setup container using that name.
+
+**Action:** Before upgrading, rename unrelated containers at
+`spec.components[*].podTemplate.spec.initContainers[name=runtime]`. For native Dynamo sidecars, declare
+`spec.components[*].podTemplate.spec.initContainers[name=runtime]` and specify `restartPolicy: Always`.
+
+**Existing deployments:** Components without `spec.components[*].podTemplate.spec.initContainers[name=runtime]`
+retain their current mode. Existing components with that entry adopt sidecar behavior when
+reconciled, which can change the rendered pod and trigger a rollout. Invalid combinations are
+rejected on updates.
+
+#### Operator behavior breaking changes
+
+##### Frontend sidecar identity in container discovery mode
+
+**Change:** The operator now sets `CONTAINER_NAME` to the container selected by
+`spec.components[*].frontendSidecar`, rather than `main`.
+In container discovery mode, the frontend registers as `{pod}-<name>`, where `<name>` is
+`spec.components[*].frontendSidecar`, instead of sharing the `{pod}` identity.
+
+**Affected:** Existing components with `spec.components[*].frontendSidecar` and
+`nvidia.com/dynamo-kube-discovery-mode: container`.
+
+**Action:** Plan for a one-time rollout of affected worker pods when upgrading the operator
+to v1.6.0. Update any tooling that depends on the frontend's previous registration identity.
+
+**Existing deployments:** Reconciliation updates the frontend container's `CONTAINER_NAME`,
+which changes the pod template and triggers the rollout even without a manifest change.
+Components without a frontend sidecar or using pod discovery are unaffected by this change.
 
 #### Dependency compatibility
 

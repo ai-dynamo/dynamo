@@ -56,6 +56,20 @@ func TestComponentNamespacePrefixRuntimeCompatibility(t *testing.T) {
 	}
 }
 
+func TestLegacyEPPDoesNotEnableStrictNamespacePrefix(t *testing.T) {
+	container, err := NewEPPDefaults().GetBaseContainer(ComponentContext{
+		DynamoNamespace: "default-foo",
+		ComponentType:   commonconsts.ComponentTypeEPP,
+		RuntimeVersion:  &runtimeversion.Version{Major: 1, Minor: 6, Patch: 0},
+		EPPConfig:       &v1beta1.EPPConfig{},
+	})
+	require.NoError(t, err)
+	env := envVarsToMap(container.Env)
+	assert.Equal(t, "default-foo", env[commonconsts.DynamoNamespacePrefixEnvVar])
+	assert.NotContains(t, env, commonconsts.DynamoNamespacePrefixStrictEnvVar)
+	assert.Contains(t, container.Args, "--pool-name")
+}
+
 func TestFrontendSidecarNamespacePrefixRuntimeCompatibility(t *testing.T) {
 	tests := []struct {
 		name            string
