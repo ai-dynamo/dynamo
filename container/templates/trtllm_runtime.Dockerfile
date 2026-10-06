@@ -42,6 +42,9 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 ARG NIXL_REF
 
+# Remove the upstream runtime's Git LFS package without pruning shared dependencies.
+RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
+
 # Create the LD_PRELOAD target before the ENV below names it. ENV applies to
 # every RUN after it, so a preload path that does not exist yet costs one
 # `ld.so: object ... cannot be preloaded ... ignored` line per process for the
@@ -738,6 +741,9 @@ CMD ["/bin/bash"]
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+# Remove the upstream runtime's Git LFS package without pruning shared dependencies.
+RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
+
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
 # without this, upstream's /workspace, /home/ubuntu, standalone
 # /usr/local/bin/etcd* tools, and preinstalled opencv (cv2/ + vendored
@@ -838,6 +844,14 @@ RUN rm -rf /workspace /home/ubuntu \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
+
+# Check the merged filesystem: both base stages must purge package-owned paths.
+RUN test ! -e /usr/bin/git-lfs && \
+    test ! -e /usr/local/bin/git-lfs && \
+    ! command -v git-lfs && \
+    status=$(dpkg-query -W -f='${db:Status-Status}' git-lfs 2>/dev/null || true) && \
+    test "$status" != installed && \
+    set -- /var/lib/dpkg/info/git-lfs.* && test ! -e "$1"
 
 # Post-overlay guard for the Open MPI settings edit in runtime_full. This stage
 # starts from the base image again, where the selected Open MPI's
