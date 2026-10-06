@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: East regional hook real tests
+
+on:
+  push:
+    branches:
+      - ci/regional-hook-east-canary
+    paths:
+      - .github/workflows/east-canary-smoke.yml
+      - .github/workflows/shared-test.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: regional-hook-east-canary
+  cancel-in-progress: false
+
+jobs:
+  vllm-test:
+    name: Existing vLLM CPU and single-GPU tests on east canary
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      framework: vllm
+      test_type: Regional hook canary
+      amd_runner: regional-hook-east-canary
+      runner_group: dynamo-ci-prod-east
+      target_tag_plain: vllm-runtime
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      # Reuse an image already published to both regions and test its source.
+      source_ref: f733943d6be698f3b70d3ca3408ef09fe9eb2b13
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and vllm and gpu_0 and not e2e
+      cpu_only_test_timeout_minutes: 15
+      run_gpu_tests: true
+      gpu_test_markers: pre_merge and vllm and gpu_1 and not sidecar
+      gpu_test_timeout_minutes: 45
+      run_gpu_parallel_tests: false
+      dd_env: regional-hook-canary
+      dd_flaky_retry_enabled: 'false'
+    secrets: inherit

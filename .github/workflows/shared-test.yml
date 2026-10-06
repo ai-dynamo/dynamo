@@ -22,6 +22,11 @@ on:
         description: 'Runner to execute tests on (amd64 only)'
         required: true
         type: string
+      runner_group:
+        description: 'Optional runner group for isolated regional canary routing'
+        required: false
+        type: string
+        default: ''
       target_tag_plain:
         description: 'Plain runtime image tag prefix from the build workflow'
         required: true
@@ -174,7 +179,7 @@ jobs:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
+    runs-on: ${{ inputs.runner_group != '' && fromJSON(format('{{"group":"{0}","labels":"{1}"}}', inputs.runner_group, matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2')) || (matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2') }}
     container:
       image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
@@ -286,7 +291,7 @@ jobs:
         id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-        uses: $/.github/actions/pytest-local
+        uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
@@ -304,7 +309,7 @@ jobs:
         # pool or retry until the parent step kills the runner container.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
         timeout-minutes: ${{ inputs.cpu_e2e_test_timeout_minutes }}
-        uses: $/.github/actions/pytest-local
+        uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.cpu_e2e_test_markers }}
@@ -321,7 +326,7 @@ jobs:
         id: gpu-parallel-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
-        uses: $/.github/actions/pytest-local
+        uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
@@ -345,7 +350,7 @@ jobs:
         # container/pod never coming online) skips this step cleanly instead of trying
         # to run the local pytest-local action against an un-checked-out workspace.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-        uses: $/.github/actions/pytest-local
+        uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
