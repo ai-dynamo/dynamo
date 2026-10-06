@@ -10,6 +10,7 @@ from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import reject_unconsumed_media
 
 
 class DiffusionWorkerHandler(DecodeWorkerHandler):
@@ -68,6 +69,9 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
             f"Starting diffusion generation for request {context.id()}, "
             f"input_tokens={len(request.get('token_ids', []))}"
         )
+
+        # The diffusion path never forwards media to the engine.
+        reject_unconsumed_media(request, consumes_media=False)
 
         # Get input parameters (tokens or text)
         input_param = self._get_input_param(request)
