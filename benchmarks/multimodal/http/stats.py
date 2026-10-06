@@ -3,9 +3,9 @@
 
 """Aggregate ``RunResult`` samples into a ``Summary`` (avg, p50, p90, p99).
 
-Latency stats are computed over success samples only — including timeout
-or status-error latencies would skew the comparison toward client-side
-wait time rather than server work.
+The latency statistics use successful samples only. The latency of a timeout
+or a status error measures how long the client waited, not the work of the
+server. The statistics leave those samples out.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from .runner import RunResult
 
 @dataclass
 class Summary:
-    backend: str
     n: int
     wall_s: float
     avg_ms: float
@@ -48,7 +47,6 @@ def summarize(result: RunResult) -> Summary:
     else:
         avg_ms = p50_ms = p90_ms = p99_ms = 0.0
     return Summary(
-        backend=result.backend,
         n=result.n,
         wall_s=result.wall_s,
         avg_ms=avg_ms,
