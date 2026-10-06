@@ -684,6 +684,10 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
 PY
 
 {% if device == "cuda" %}
+# Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
+RUN python3 -m pip uninstall --yes soxr && \
+    python3 -c "import importlib.util; assert importlib.util.find_spec('soxr') is None"
+
 RUN vllm-rs --help >/dev/null
 {% else %}
 # Use the packaged binary to match the installed vLLM version.
