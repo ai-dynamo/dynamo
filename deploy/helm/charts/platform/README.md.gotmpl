@@ -77,6 +77,14 @@ rejected on updates.
 
 #### Operator behavior breaking changes
 
+##### Coherent updates for disaggregated Grove deployments
+
+**Change:** Grove-backed graphs containing both `type: prefill` and `type: decode` components now default to the `Coherent` PCS update strategy. Explicit `nvidia.com/grove-update-strategy` annotations take precedence; accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. Other graphs keep Grove's default strategy.
+
+**Affected:** New and existing disaggregated Grove deployments. Existing deployments adopt the default on reconciliation after an operator upgrade. Changing only this strategy leaves pod templates and worker hashes unchanged, so it does not trigger a workload rollout by itself.
+
+**Action:** Install Grove v0.1.0-alpha.14 before upgrading the Dynamo operator. Coherent updates coordinate rollout progress across components, use no surge capacity, and block scaling during an active rollout. To retain the previous strategy, set `metadata.annotations["nvidia.com/grove-update-strategy"]: RollingRecreate` on the DGD before upgrading.
+
 ##### Frontend sidecar identity in container discovery mode
 
 **Change:** The operator now sets `CONTAINER_NAME` to the container selected by

@@ -257,12 +257,14 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 		))
 	}
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists &&
+		value != string(grovev1alpha1.CoherentStrategy) &&
 		value != string(grovev1alpha1.RollingRecreateStrategy) &&
 		value != string(grovev1alpha1.OnDeleteStrategy) {
 		allErrs = append(allErrs, field.NotSupported(
 			annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
 			value,
 			[]string{
+				string(grovev1alpha1.CoherentStrategy),
 				string(grovev1alpha1.RollingRecreateStrategy),
 				string(grovev1alpha1.OnDeleteStrategy),
 			},

@@ -2963,7 +2963,7 @@ func newGrovePodCliqueSet(
 	// KAI-Scheduler is injected later on each clique via schedulerName and queue label.
 	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations, runtimeConfig)
 	gangSet.Spec.Replicas = 1
-	updateStrategy, err := groveUpdateStrategyFromAnnotations(dynamoDeployment.Annotations)
+	updateStrategy, err := resolveGroveUpdateStrategy(dynamoDeployment)
 	if err != nil {
 		return nil, err
 	}
@@ -3022,23 +3022,37 @@ func shouldGateGroveScalingGroupReplicas(checkpointInfo *checkpoint.CheckpointIn
 		!checkpointInfo.Ready
 }
 
-func groveUpdateStrategyFromAnnotations(annotations map[string]string) (*grovev1alpha1.UpdateStrategyType, error) {
-	value, ok := annotations[commonconsts.KubeAnnotationGroveUpdateStrategy]
+// resolveGroveUpdateStrategy selects the PCS strategy from a non-nil DGD.
+func resolveGroveUpdateStrategy(dgd *v1beta1.DynamoGraphDeployment) (*grovev1alpha1.UpdateStrategyType, error) {
+	value, ok := dgd.Annotations[commonconsts.KubeAnnotationGroveUpdateStrategy]
+	// Coordinate typed prefill and decode components unless explicitly overridden.
 	if !ok {
+		var hasPrefill, hasDecode bool
+		for i := range dgd.Spec.Components {
+			component := &dgd.Spec.Components[i]
+			hasPrefill = hasPrefill || component.ComponentType == commonconsts.ComponentTypePrefill
+			hasDecode = hasDecode || component.ComponentType == commonconsts.ComponentTypeDecode
+		}
+		if hasPrefill && hasDecode {
+			return ptr.To(grovev1alpha1.CoherentStrategy), nil
+		}
 		return nil, nil
 	}
 
 	var strategy grovev1alpha1.UpdateStrategyType
 	switch value {
+	case string(grovev1alpha1.CoherentStrategy):
+		strategy = grovev1alpha1.CoherentStrategy
 	case string(grovev1alpha1.RollingRecreateStrategy):
 		strategy = grovev1alpha1.RollingRecreateStrategy
 	case string(grovev1alpha1.OnDeleteStrategy):
 		strategy = grovev1alpha1.OnDeleteStrategy
 	default:
 		return nil, fmt.Errorf(
-			"unsupported Grove update strategy annotation %q=%q: supported values are %q and %q",
+			"unsupported Grove update strategy annotation %q=%q: supported values are %q, %q and %q",
 			commonconsts.KubeAnnotationGroveUpdateStrategy,
 			value,
+			grovev1alpha1.CoherentStrategy,
 			grovev1alpha1.RollingRecreateStrategy,
 			grovev1alpha1.OnDeleteStrategy,
 		)

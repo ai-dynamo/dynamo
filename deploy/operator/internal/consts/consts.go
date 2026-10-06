@@ -53,7 +53,7 @@ const (
 
 	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
 	// PodCliqueSet update strategy while the long-term DGD API is settled.
-	// Supported values match Grove exactly: "RollingRecreate" and "OnDelete".
+	// Supported values match Grove exactly: "Coherent", "RollingRecreate" and "OnDelete".
 	KubeAnnotationGroveUpdateStrategy = "nvidia.com/grove-update-strategy"
 
 	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that

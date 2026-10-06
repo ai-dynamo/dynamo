@@ -48,6 +48,18 @@ spec:
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Grove update strategy
+
+Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.
+
+Starting with Dynamo 1.6.0, Grove-backed graphs containing both `type: prefill` and `type: decode` components default to `Coherent` when the annotation is absent. Other graphs retain Grove's default. Explicit annotations take precedence.
+
+Coherent updates coordinate rollout progress across components, use no surge capacity, and block scaling during an active rollout. They require Grove v0.1.0-alpha.14 or later.
+
+<Note>
+  Existing disaggregated Grove deployments adopt this default when reconciled after an operator upgrade. A strategy-only change leaves pod templates and worker hashes unchanged and does not itself trigger a workload rollout. Set the annotation to `RollingRecreate` before upgrading to retain the previous strategy. See the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#v160).
+</Note>
+
 ## Spec reference
 
 <ParamField path="components" type="[]DynamoComponentDeploymentSharedSpec">

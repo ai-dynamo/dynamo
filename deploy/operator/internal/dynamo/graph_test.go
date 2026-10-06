@@ -11047,14 +11047,48 @@ func TestGenerateGrovePodCliqueSet_PriorityClassName(t *testing.T) {
 
 func TestGenerateGrovePodCliqueSet_UpdateStrategy(t *testing.T) {
 	tests := []struct {
-		name          string
-		annotation    string
-		hasAnnotation bool
-		wantStrategy  *grovev1alpha1.UpdateStrategyType
-		wantErr       string
+		name           string
+		annotation     string
+		hasAnnotation  bool
+		componentTypes []string
+		wantStrategy   *grovev1alpha1.UpdateStrategyType
+		wantErr        string
 	}{
 		{
-			name: "default leaves Grove strategy unset",
+			name: "aggregated default leaves Grove strategy unset",
+		},
+		{
+			name:           "disaggregated default uses coherent updates",
+			componentTypes: []string{commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode},
+			wantStrategy:   ptr.To(grovev1alpha1.CoherentStrategy),
+		},
+		{
+			name:           "prefill alone leaves Grove strategy unset",
+			componentTypes: []string{commonconsts.ComponentTypePrefill},
+		},
+		{
+			name:           "decode alone leaves Grove strategy unset",
+			componentTypes: []string{commonconsts.ComponentTypeDecode},
+		},
+		{
+			name:          "Coherent annotation maps to Grove strategy",
+			annotation:    "Coherent",
+			hasAnnotation: true,
+			wantStrategy:  ptr.To(grovev1alpha1.CoherentStrategy),
+		},
+		{
+			name:           "disaggregated RollingRecreate override is preserved",
+			annotation:     "RollingRecreate",
+			hasAnnotation:  true,
+			componentTypes: []string{commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode},
+			wantStrategy:   ptr.To(grovev1alpha1.RollingRecreateStrategy),
+		},
+		{
+			name:           "disaggregated OnDelete override is preserved",
+			annotation:     "OnDelete",
+			hasAnnotation:  true,
+			componentTypes: []string{commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode},
+			wantStrategy:   ptr.To(grovev1alpha1.OnDeleteStrategy),
 		},
 		{
 			name:          "RollingRecreate annotation maps to Grove strategy",
@@ -11104,14 +11138,27 @@ func TestGenerateGrovePodCliqueSet_UpdateStrategy(t *testing.T) {
 					},
 				},
 			}
+			t.Log("Configure the graph topology and optional strategy override")
+			if len(tt.componentTypes) > 0 {
+				dgd.Spec.Services = make(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec)
+				for _, componentType := range tt.componentTypes {
+					dgd.Spec.Services[componentType] = &v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ComponentType: componentType,
+						Replicas:      ptr.To(int32(1)),
+					}
+				}
+			}
 			if tt.hasAnnotation {
 				dgd.Annotations = map[string]string{
 					commonconsts.KubeAnnotationGroveUpdateStrategy: tt.annotation,
 				}
 			}
 
+			t.Log("Render the PCS without changing the source DGD")
 			converted := betaDGD(t, dgd)
-			pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+			original := converted.DeepCopy()
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, false, nil)
+			assert.Equal(t, original, converted)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
@@ -11124,6 +11171,52 @@ func TestGenerateGrovePodCliqueSet_UpdateStrategy(t *testing.T) {
 			}
 			require.NotNil(t, pcs.Spec.UpdateStrategy)
 			assert.Equal(t, *tt.wantStrategy, pcs.Spec.UpdateStrategy.Type)
+		})
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_CoherentStrategyPreservesTemplates(t *testing.T) {
+	for _, multinode := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multinode=%t", multinode), func(t *testing.T) {
+			t.Log("Render an existing disaggregated graph with RollingRecreate")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "graph", Namespace: "default",
+					Annotations: map[string]string{commonconsts.KubeAnnotationGroveUpdateStrategy: "RollingRecreate"},
+				},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+						{ComponentName: "Prefill", ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+						{ComponentName: "Decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(2))},
+					},
+				},
+			}
+			if multinode {
+				for i := range dgd.Spec.Components {
+					dgd.Spec.Components[i].Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+				}
+			}
+			config := &configv1alpha1.OperatorConfiguration{}
+			runtimeConfig := &controller_common.RuntimeConfig{}
+			oldPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, &mockSecretsRetriever{}, nil, nil, false, nil)
+			require.NoError(t, err)
+			oldHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+
+			t.Log("Adopt the coherent default without changing the workload or worker generation")
+			delete(dgd.Annotations, commonconsts.KubeAnnotationGroveUpdateStrategy)
+			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, &mockSecretsRetriever{}, nil, nil, false, nil)
+			require.NoError(t, err)
+			require.NotNil(t, newPCS.Spec.UpdateStrategy)
+			require.Equal(t, grovev1alpha1.CoherentStrategy, newPCS.Spec.UpdateStrategy.Type)
+			assert.Equal(t, oldPCS.Spec.Template, newPCS.Spec.Template)
+			newHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			assert.Equal(t, oldHash, newHash)
+
+			t.Log("Validate the strategy-only update against the pinned Grove CRD")
+			newGrovePodCliqueSetRequestValidator(t).validate(t, newPCS, oldPCS)
 		})
 	}
 }
