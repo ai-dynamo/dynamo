@@ -45,9 +45,8 @@ See the deployment instructions in the [MiniMax M3 recipe README](../README.md).
 
 Both deployment profiles default to real EAGLE3 verification. This benchmark
 Job does not enable synthetic acceptance. To run a synthetic-acceptance
-experiment, follow the explicit opt-in instructions for
-[AGG](../vllm/agg-gb200-agentic/README.md#synthetic-acceptance-for-benchmarks) or
-[DISAGG](../vllm/disagg-gb200-agentic/README.md#synthetic-acceptance-for-benchmarks)
+experiment, follow the
+[synthetic-acceptance instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#synthetic-acceptance-for-benchmarks)
 and record that setting with the image and rendered deployment.
 The historical synthetic-acceptance figures on the Fern recipe page do not
 qualify the current image or real-verification defaults.
@@ -85,6 +84,60 @@ For the aggregated profile, set `INFERENCE_URL` to
 `http://minimax-m3-agg-gb200-agentic-frontend:8000/v1/chat/completions` and the
 affinity's `nvidia.com/dynamo-graph-deployment-name` value to
 `minimax-m3-agg-gb200-agentic`.
+
+Before launching the Job, verify that its runtime user can create files in
+`ARTIFACT_DIR`. A read-write PVC mount does not override filesystem ownership
+or permissions. The image's default user applies unless the Pod or container
+security context overrides it; do not assume it matches the BusyBox helper's
+user.
+
+Run this check from this directory after setting `ARTIFACT_DIR` in `perf.yaml`.
+It requires Python and PyYAML and creates a temporary Pod using the Job's
+image, environment, placement, security context, and PVC mount. It prints the
+runtime UID/GID and tests creating and deleting a file in the output directory:
+
+```bash
+python3 - <<'PY' | kubectl apply -n "${NAMESPACE}" -f -
+import yaml
+
+with open("perf.yaml") as source:
+    job = next(doc for doc in yaml.safe_load_all(source) if doc["kind"] == "Job")
+pod = job["spec"]["template"]
+pod.update(apiVersion="v1", kind="Pod")
+pod.setdefault("metadata", {})["name"] = "aiperf-artifact-check"
+container = pod["spec"]["containers"][0]
+container["command"] = ["/bin/bash", "-lc"]
+container["args"] = ['''set -euo pipefail
+id
+mkdir -p "$ARTIFACT_DIR"
+probe=$(mktemp "$ARTIFACT_DIR/.aiperf-write-check.XXXXXX")
+printf 'write check\n' > "$probe"
+rm "$probe"
+echo "ARTIFACT_DIR is writable: $ARTIFACT_DIR"
+''']
+# The permission check does not need the benchmark ConfigMap.
+container["volumeMounts"] = [v for v in container["volumeMounts"] if v["name"] != "aiperf-config"]
+pod["spec"]["volumes"] = [v for v in pod["spec"]["volumes"] if v["name"] != "aiperf-config"]
+print(yaml.safe_dump(pod))
+PY
+kubectl logs -f pod/aiperf-artifact-check -n "${NAMESPACE}" --pod-running-timeout=300s
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+  pod/aiperf-artifact-check -n "${NAMESPACE}" --timeout=300s
+kubectl delete pod aiperf-artifact-check -n "${NAMESPACE}"
+```
+
+Proceed only when the check succeeds. If it reports `Permission denied`, have
+the storage owner create the selected output directory and grant the printed
+UID or one of its groups write and directory-traversal permissions. Use
+ownership, group permissions, or an ACL on that directory; avoid recursive
+ownership changes to the shared model cache or making it world-writable.
+For storage that supports it, a Pod-level `fsGroup` can provide group access;
+use the same security context for the check and the benchmark. NFS root
+squashing may require changing permissions on the storage server. Delete the
+check Pod and repeat the check after correcting permissions or changing
+`ARTIFACT_DIR`, the image, or the security context.
+
+Launch the benchmark after the write check passes:
 
 ```bash
 kubectl apply -f perf.yaml -n "${NAMESPACE}"

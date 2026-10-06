@@ -81,13 +81,13 @@ Prepare a private cluster Kustomization for the selected deployment using the [b
 
 <div data-variant="agg">
 
-Follow the [aggregated cluster setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/agg-gb200-agentic/README.md#cluster-setup). Point the private composition's `resources` at `recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml` and validate it with the command in that guide.
+Follow the [aggregated cluster setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#deploy). Point the private composition's `resources` at `recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml` and validate it with the command in that guide.
 
 </div>
 
 <div data-variant="disagg">
 
-Follow the [disaggregated cluster setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/README.md#cluster-setup). Point the private composition's `resources` at `recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml` and validate it with the command in that guide.
+Follow the [disaggregated cluster setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#deploy). Point the private composition's `resources` at `recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml` and validate it with the command in that guide.
 
 </div>
 
@@ -150,7 +150,7 @@ A successful smoke test returns an HTTP 200 response containing a chat completio
 
 See the MiniMax M3 benchmark [README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/README.md) for the full workflow—staging the trace on the PVC, running a concurrency sweep, and fetching artifacts—and use the checked-in [AIPerf Job](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/perf/perf.yaml) to run the trace replay.
 
-Both serving manifests default to real EAGLE3 verification with three draft tokens. The benchmark Job does not change that setting. For synthetic-acceptance experiments, explicitly select the optional Component described in the [aggregated setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/agg-gb200-agentic/README.md#synthetic-acceptance-for-benchmarks) or [disaggregated setup](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/README.md#synthetic-acceptance-for-benchmarks). Both Components select an acceptance length of 2.89.
+Both serving manifests default to real EAGLE3 verification with three draft tokens. The benchmark Job does not change that setting. For synthetic-acceptance experiments, follow the [benchmark-only configuration instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#synthetic-acceptance-for-benchmarks). Both profiles provide a synthetic configuration with acceptance length 2.89.
 
 <Warning>
 Synthetic acceptance bypasses real EAGLE3 verification. Use it only for controlled performance experiments, never production responses or accuracy evaluation.
@@ -196,7 +196,7 @@ Both targets use vLLM, TP4 workers, FP8 KV cache, prefix caching, KV events, KV-
 
 - Both manifests pin the model checkpoint and the EAGLE3 checkpoint to specific Hugging Face revisions.
 - Both manifests select real EAGLE3 verification by default; synthetic acceptance length 2.89 is an explicit benchmark-only option.
-- The refreshed three-replica aggregated and 3P3D disaggregated compositions have local validation only. See the [aggregated validation scope](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/agg-gb200-agentic/README.md#validation-scope) and [disaggregated validation scope](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/README.md#validation-scope) before interpreting the historical results.
+- The refreshed three-replica aggregated and 3P3D disaggregated compositions have local validation only. Local validation does not establish readiness, response correctness, or performance for the current image.
 - The aggregated target uses vLLM's `OffloadingConnector` with `CPUOffloadingSpec` and sets `cpu_bytes_to_use` to `400000000000`.
 - The disaggregated target uses `NixlConnector` with `kv_role=kv_both` on prefill and decode workers.
 
