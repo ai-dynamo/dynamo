@@ -289,6 +289,13 @@ where
             };
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
+            // Notify before the publish: a non-error chunk shows the engine is
+            // making progress even if the client has left and the send fails.
+            // Error chunks do not prove the engine is healthy, so they do not
+            // reset the canary timer.
+            if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
+            }
             let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
@@ -318,12 +325,6 @@ where
                         .inc();
                 }
                 break;
-            } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                    notifier.notify_one();
-                }
             }
             if encoded.stop_stream {
                 // Dropping the engine stream after the terminal frame is sent
@@ -1058,7 +1059,7 @@ mod tests {
     use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
     use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
-    use futures::stream;
+    use futures::{FutureExt, Stream, stream};
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1551,6 +1552,71 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
             0
+        );
+    }
+
+    /// Run the pump with a health-check notifier set and a publisher whose
+    /// receiver is already gone, so every `send` fails. This models a client
+    /// that left before the engine produced its first chunk. The pump is
+    /// bounded by a short timeout so a stream that never yields still returns.
+    /// Returns whether the pump left a notification permit for the canary.
+    async fn pump_with_dead_publisher(
+        engine: impl Stream<Item = TestResponse> + Send + 'static,
+    ) -> bool {
+        let ingress = TestIngress::new();
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(engine), ctx.context());
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ingress.pump_response_stream(
+                response_stream,
+                &publisher,
+                RequestPlanePayloadCodec::Json,
+            ),
+        )
+        .await;
+
+        // `notify_one` stores a permit when no task is waiting, so a pending
+        // notification resolves immediately here.
+        notifier.notified().now_or_never().is_some()
+    }
+
+    /// Issue #15707: under overload the client often leaves before the engine
+    /// sends its first chunk, so every publish fails. The engine is still
+    /// making progress, so the canary timer must be reset.
+    #[tokio::test]
+    async fn publish_failure_with_engine_progress_still_resets_canary() {
+        let chunks: Vec<TestResponse> = (0..3)
+            .map(|i| Annotated::from_data(serde_json::json!({ "token": i })))
+            .collect();
+        assert!(
+            pump_with_dead_publisher(stream::iter(chunks)).await,
+            "a produced non-error chunk must reset the canary even when the publish fails"
+        );
+    }
+
+    /// A silent engine produces nothing, so the canary timer must expire and
+    /// the canary must fire. Error-only output must not reset the timer
+    /// either, since errors do not prove the engine is healthy.
+    #[tokio::test]
+    async fn silent_engine_does_not_reset_canary() {
+        assert!(
+            !pump_with_dead_publisher(stream::pending()).await,
+            "an engine that yields nothing must not reset the canary"
+        );
+        assert!(
+            !pump_with_dead_publisher(stream::iter(vec![TestResponse::from_error("boom")])).await,
+            "an error-only chunk must not reset the canary"
         );
     }
 }
