@@ -280,11 +280,6 @@ def test_templates_guard_on_the_same_version(path: str) -> None:
 
 @pytest.mark.parametrize("path", TEMPLATES)
 def test_templates_run_the_shared_guard(path: str) -> None:
-    """Each template runs container/compliance/check_pynvvideocodec.py at the pin.
-
-    The guard is one script; a template that stops running it, or runs it at another
-    version, goes unchecked.
-    """
     template = ROOT / path
     if not template.is_file():
         pytest.skip(f"{path} is not staged in this component image (.dockerignore)")

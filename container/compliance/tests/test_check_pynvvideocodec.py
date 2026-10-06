@@ -118,6 +118,8 @@ def test_a_record_without_a_source_tarball_fails(tmp_path):
         "libx265.so.209",
         "libfdk-aac.so.2",
         ".libs/libx264-1a2b3c4d.so.164",
+        "libavcodec_x.so.61",
+        "libswscale_x.so.8",
     ],
 )
 def test_a_denied_library_fails(tmp_path, lib):
@@ -125,8 +127,8 @@ def test_a_denied_library_fails(tmp_path, lib):
         _check(_install(tmp_path, libs=(*GOOD_LIBS, lib)))
 
 
-@pytest.mark.parametrize("libs", [("libavformat.so.61",), ("libavutil.so.59",)])
-def test_a_partial_package_fails(tmp_path, libs):
+@pytest.mark.parametrize("libs", [(), ("libavformat.so.61",), ("libavutil.so.59",)])
+def test_an_empty_or_partial_package_fails(tmp_path, libs):
     # Each required library must be bundled, or the negative checks pass vacuously.
     with pytest.raises(GuardError, match="bundles no"):
         _check(_install(tmp_path, libs=libs))

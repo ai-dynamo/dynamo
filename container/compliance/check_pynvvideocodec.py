@@ -72,7 +72,23 @@ def check(pinned: str, policy: CodecPolicy, path: list[str] | None = None) -> No
                 f"{PACKAGE} bundles no {required}, so the checks below would "
                 f"pass vacuously; found {bundled}"
             )
-    denied = [n for n in bundled if policy.violates(Path(pkg, n).as_posix())]
+    # Match each denied family by prefix, as the old heredocs did, so a
+    # build-suffixed name such as libavcodec_x.so.63 is caught too. The policy
+    # waivers still apply.
+    families = tuple(
+        m.group(1)
+        for g in policy.deny_globs
+        if (m := re.fullmatch(r"\*\*/(lib[\w-]+?)(?:-\*)?\.so\*", g))
+    )
+    denied = [
+        n
+        for n in bundled
+        if policy.violates(Path(pkg, n).as_posix())
+        or (
+            os.path.basename(n).startswith(families)
+            and policy.classify(Path(pkg, n).as_posix())[0] == "violation"
+        )
+    ]
     if denied:
         raise GuardError(f"{PACKAGE} bundles libraries the codec gate denies: {denied}")
 
