@@ -38,7 +38,7 @@ spec:
 The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.
 
 <ParamField path="backendFramework" type="string">
-  Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `main` container.
+  Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `spec.podTemplate.spec.containers[name=main]` container.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 
@@ -46,7 +46,7 @@ The DCD spec is `backendFramework` plus the [shared component spec](#shared-comp
 
 ### Shared component spec
 
-These fields are shared between a standalone DCD and each entry of a DGD `spec.components` list, except where a field is marked DGD-only. In a DGD, prefix them with `spec.components[*]`.
+These fields are shared between a standalone DCD and each entry of a DGD `spec.components` list, except where a field is marked DGD-only. In a DGD, prefix them with `spec.components[*]`. Container paths below use the standalone DCD layout; replace the leading `spec.podTemplate` with `spec.components[*].podTemplate` for DGD components.
 
 <ParamField path="providerOverride" type="ProviderOverride">
   Customizes the primary Grove unit for a component embedded in a DGD. Standalone DCD OpenAPI omits this field. Use `apiVersion: grove.io/v1alpha1`; the target is `PodCliqueTemplateSpec` for a component backed by a PodClique or `PodCliqueScalingGroupConfig` for one backed by a scaling group. The `value` may set only `topologyConstraint`. See [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
@@ -86,10 +86,24 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
       Expiry records `LPXSchedulingDeadlineExceeded` before cleanup. Cleanup removes complete engine replicas only from a trailing suffix: an expired interior replica blocks deadline cleanup to preserve healthy higher ordinals. Explicit `replicas` authorizes lowering the Grove replica count to the surviving prefix; externally managed capacity remains unchanged. Grove scaling and owner garbage collection handle pod cleanup; the LPX graph controller does not delete pods directly. A later LPX input revision authorizes republication after cleanup. An existing failure remains cleanup authority for cycles that started before it, so retiring those cycles does not consume the retry edit.
     </ParamField>
   </Indent>
+
+  <ParamField path="experimental" type="LPXExperimentalSpec">
+    Groups opt-in LPX options whose shape may change incompatibly between v1beta1 releases. These fields are not covered by the v1beta1 deprecation policy.
+  </ParamField>
+
+  <Indent>
+    <ParamField path="localPartitions" type="LPXLocalPartitions">
+      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. LPU-only, speculative, and HX builds reject this field.
+
+      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the conductor's `lpu_servers` and the Agents' partition configuration. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
+
+      `ids` lists compiler partition IDs of the build's runtime partitions. A selected prop-sync chain is one runtime partition: select its first partition, which keeps the whole chain on the GPU. Unknown IDs and non-first chain members are rejected during reconciliation. Changing the selection changes the workload digest and rolls the workload.
+    </ParamField>
+  </Indent>
 </Indent>
 
 <ParamField path="runtimeVersionOverride" type="string">
-  Declares the Dynamo runtime version in the component's `main` image, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
+  Declares the Dynamo runtime version in `spec.podTemplate.spec.containers[name=main].image` by default, or `spec.podTemplate.spec.initContainers[name=runtime].image` when the dynamo sidecar is present, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -105,7 +119,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-  Complete Pod template shared by all roles of the component. It is mutually exclusive with `roles[*].podTemplate`. New components must include a container named `main` with a non-empty `image`; the operator injects command, environment, port, probe, resource, and volume-mount defaults into that container, merging your overrides by name. Existing components created without a main image may retain that omission on unrelated updates. For DGD components whose image has no parseable semantic-version tag, set `runtimeVersionOverride`. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
+  Complete Pod template shared by all roles of the component. It is mutually exclusive with `roles[*].podTemplate`. Every component must include `spec.podTemplate.spec.containers[name=main]` with a non-empty `image`. By default the operator injects command, environment, port, probe, resource, and volume-mount defaults into `spec.podTemplate.spec.containers[name=main]`, merging your overrides by name. Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates [Dynamo Sidecar Mode](#dynamo-sidecar-mode). Existing standard-mode components created without `spec.podTemplate.spec.containers[name=main].image` may retain that omission on unrelated updates. For DGD components whose runtime image has no parseable semantic-version tag, set `runtimeVersionOverride`. Other containers are user-managed and must specify their required fields, including `image`; `frontendSidecar` can explicitly select a regular container for frontend defaults. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
 
   For `type: lpx`, omit this field and use `roles[].podTemplate`. Every LPX role requires its own template with an explicit `main` container image.
 
@@ -135,10 +149,12 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Semantic role name: `leader` or `worker` for ordinary multinode components, `conductor` or `agent` for LPX components. Names must be unique within the component.
   </ParamField>
   <ParamField path="replicas" type="integer">
-    Logical cardinality of this role in one complete component instance; minimum `1`. For ordinary multinode components, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape. For LPX, omitted conductor replicas use `1`, subject to runtime-specific limits. Agent replicas are derived from the model build; an explicit count must match the build.
+    Logical cardinality of this role in one complete component instance; minimum `1`. For ordinary multinode components, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape. For LPX, omitted conductor replicas use `1`, subject to runtime-specific limits. Agent replicas are derived from the model build and `lpx.experimental.localPartitions`; an explicit count must match that derived count.
   </ParamField>
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
+
+    An init container named `runtime` is rejected in role templates because Dynamo sidecar mode does not yet support multinode or LPX components.
 
     For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
 
@@ -228,9 +244,35 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   See: [ExperimentalSpec](#experimentalspec)
 </ParamField>
 
+## Dynamo Sidecar Mode
+
+Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates Dynamo sidecar mode. You must declare this init container yourself; the operator merges defaults into it and does not create it. It must specify a non-empty `image` and `restartPolicy: Always`. The name alone selects the mode; a missing restart policy is rejected. `spec.podTemplate.spec.containers[name=runtime]` or an init container with another name does not activate it.
+
+The operator injects Dynamo environment variables, identity, transport TLS, system port, and startup, liveness, and readiness probes into `spec.podTemplate.spec.initContainers[name=runtime]`. The `spec.podTemplate.spec.containers[name=main]` container runs the engine with user-provided launch configuration and probes. Graph-level environment variables apply to both containers; compilation cache and shared-memory configuration remain on `spec.podTemplate.spec.containers[name=main]`. A separate `frontendSidecar` is supported.
+
+Both containers use the existing environment merge behavior: merged entries are sorted by name and de-duplicated, with container-level values overriding graph-level values and runtime defaults. The operator origin version does not change this behavior. Backend-specific additions retain their existing placement; for example, `VLLM_CACHE_ROOT` is appended to the engine environment after merging.
+
+This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
+
+The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.
+
+```yaml
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        image: <engine-image>
+    initContainers:
+      - name: runtime
+        image: <dynamo-sidecar-image>
+        restartPolicy: Always
+```
+
+Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
+
 ## Runtime Version Compatibility
 
-DGD admission requires `runtimeVersionOverride` for non-LPX components when the `main` image has no parseable semantic-version tag. Also set it when a parseable tag does not represent the Dynamo runtime version in the image. The override must describe the Dynamo runtime actually contained in the image.
+DGD admission requires `runtimeVersionOverride` for non-LPX components when the runtime image has no parseable semantic-version tag. The runtime image is `spec.components[*].podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.components[*].podTemplate.spec.containers[name=main].image` otherwise. Also set it when a parseable tag does not represent the Dynamo runtime version in the image. The override must describe the Dynamo runtime actually contained in the image.
 
 When updating an image to a different Dynamo runtime version, update any configured `runtimeVersionOverride` in the same change, or remove it if the new image tag correctly identifies the runtime version. The operator uses the resolved runtime version to select feature gates that control how it renders the component's PodSpec, including flags, environment variables, and probes. For Dynamo 1.5.0 and later, changing the override alone may change the rendered PodSpec or worker revision and trigger a rollout, even when the image reference is unchanged. Keep the override aligned with the Dynamo runtime actually contained in the image.
 
@@ -267,7 +309,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </Warning>
 
 <ParamField path="gpuMemoryService" type="GPUMemoryServiceSpec">
-  Configures the GPU Memory Service (GMS). When set, GPU access for GMS clients is managed through Dynamic Resource Allocation (DRA), and the operator replaces the `main` container's GPU resources with a DRA `ResourceClaim`.
+  Configures the GPU Memory Service (GMS). When set, GPU access for GMS clients is managed through Dynamic Resource Allocation (DRA), and the operator replaces the `spec.podTemplate.spec.containers[name=main]` container's GPU resources with a DRA `ResourceClaim`.
 </ParamField>
 
 <Indent>
@@ -298,7 +340,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </Indent>
 
 <ParamField path="failover" type="FailoverSpec">
-  Configures active-passive GPU failover for a worker component. The `main` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+  Configures active-passive GPU failover for a worker component. The `spec.podTemplate.spec.containers[name=main]` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
 </ParamField>
 
 <Indent>
