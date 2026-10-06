@@ -138,3 +138,34 @@ def test_free_block_count_is_bounded_by_the_lease_ring():
     assert leases_mod._get_num_free_blocks(pool, lambda: 10) == 3
     pool._gms_kv_lease_client.free = 50
     assert leases_mod._get_num_free_blocks(pool, lambda: 10) == 10
+
+
+def test_current_writer_freezes_its_directory_view_once():
+    """A hydrated writer stops replicating its own publications, then misses
+    stay native-only."""
+    frozen = []
+
+    class Directory:
+        enabled = True
+        read_view_is_current_writer = True
+
+        def freeze_current_writer_view(self):
+            frozen.append(True)
+            return True
+
+        def lookup_and_claim(self, _keys):
+            raise AssertionError("a current writer must not consult the directory")
+
+    pool = SimpleNamespace(
+        _gms_kv_directory=Directory(),
+        _gms_kv_lease_client=_Client(),
+        _gms_hydrate_hbm=False,
+    )
+
+    for _ in range(3):
+        assert (
+            leases_mod._get_cached_block(pool, lambda *_a: None, b"\x02" * 32, [0])
+            is None
+        )
+    assert frozen == [True]
+    assert pool._gms_writer_view_frozen is True

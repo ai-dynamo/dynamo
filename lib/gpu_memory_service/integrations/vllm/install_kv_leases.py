@@ -817,6 +817,24 @@ def _borrow_hbm_blocks(self, native_keys, entries, token):
         return None
 
 
+def _freeze_writer_view_once(pool, directory) -> None:
+    """Stop replicating this writer's own publications into its process.
+
+    Once hydration is complete and this engine is the current writer, the
+    native block-hash map is authoritative and lookups never consult the
+    replicated view. Its background reader then only decodes this engine's own
+    publications, which contends with the scheduler for the GIL: after each
+    capacity retirement it applies thousands of changes. The frozen
+    current-writer bit stays valid for this writer epoch.
+    """
+    if getattr(pool, "_gms_writer_view_frozen", False):
+        return
+    freeze = getattr(directory, "freeze_current_writer_view", None)
+    if freeze is not None and freeze():
+        pool._gms_writer_view_frozen = True
+        logger.info("[GMS-KVDirectory] froze the vLLM writer's directory view")
+
+
 def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_ids):
     local = native_get_cached_block(block_hash, kv_cache_group_ids)
     if local is not None:
@@ -833,6 +851,7 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
     if hydration_was_complete and getattr(
         directory, "read_view_is_current_writer", False
     ):
+        _freeze_writer_view_once(self, directory)
         return None
 
     from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
