@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use dynamo_kv_router::{
     PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints,
+    config::RouterConfigOverride, protocols::RoutingConstraints, scheduling::QueueRejection,
 };
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
@@ -89,6 +89,14 @@ pub enum PrefillError {
 
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
+
+    /// The request's policy class refused admission outright instead of queuing
+    /// (its `request_queue_limit_per_worker` is `0`). Kept as its own variant so
+    /// a caller that wants per-class prefill shedding can tell a deliberate
+    /// refusal apart from "prefill unavailable, fall back to aggregated"; the
+    /// integrated frontend still sees it as an ordinary error.
+    #[error("prefill router policy-class queue rejection: {0}")]
+    QueueRejected(QueueRejection),
 }
 
 enum PrefillOutcome {
