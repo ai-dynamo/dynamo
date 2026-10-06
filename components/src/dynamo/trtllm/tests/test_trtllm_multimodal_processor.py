@@ -9,6 +9,7 @@ import base64
 import http.server
 import json
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -27,7 +28,7 @@ if not torch.cuda.is_available():
     )
 
 import dynamo.common.http as dynamo_http
-from dynamo.common.http import HttpConfigurationError, HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, HttpTimeoutError
 from dynamo.common.http.aiohttp_client import AiohttpClient
 from dynamo.common.http.base import HttpClient
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
@@ -839,10 +840,20 @@ async def shared_client(monkeypatch, clean_egress_env):
 
 @pytest.fixture
 def embedding_server():
-    """Serve one body on loopback and record each requested path."""
+    """Serve one body on loopback and record each requested path.
+
+    ``chunks`` and ``gap`` send the body in pieces, ``gap`` seconds apart.
+    ``stall`` sends one byte and then nothing more.
+    """
     state = SimpleNamespace(
-        body=safetensors_save({"mm_embeddings": _EMBEDDING}), hits=[], url=""
+        body=safetensors_save({"mm_embeddings": _EMBEDDING}),
+        hits=[],
+        url="",
+        chunks=1,
+        gap=0.0,
+        stall=False,
     )
+    done = threading.Event()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - http.server API
@@ -851,7 +862,14 @@ def embedding_server():
             self.send_header("Content-Length", str(len(state.body)))
             self.end_headers()
             try:
-                self.wfile.write(state.body)
+                if state.stall:
+                    self.wfile.write(state.body[:1])
+                    done.wait(10)
+                    return
+                size = -(-len(state.body) // state.chunks)
+                for start in range(0, len(state.body), size):
+                    time.sleep(state.gap)
+                    self.wfile.write(state.body[start : start + size])
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the client stopped reading at its size cap
 
@@ -866,8 +884,21 @@ def embedding_server():
     try:
         yield state
     finally:
+        done.set()
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture
+def short_embedding_timeouts(monkeypatch):
+    """A 4 s budget and a 1 s read timeout, so that a timing test runs fast.
+
+    Both stay under 5 s, the value from which aiohttp rounds a timeout up to a
+    whole second.
+    """
+    monkeypatch.setattr(mmp, "_EMBEDDING_FETCH_MIN_TIMEOUT_S", 4.0)
+    monkeypatch.setattr(mmp, "_EMBEDDING_FETCH_MIN_RATE", 1 << 40)
+    monkeypatch.setattr(mmp, "_EMBEDDING_FETCH_READ_TIMEOUT_S", 1.0)
 
 
 class _ScriptedClient(HttpClient):
@@ -879,13 +910,15 @@ class _ScriptedClient(HttpClient):
         self.responses = responses
         self.calls = []
 
-    async def _fetch_simple(self, url, timeout, *, max_bytes=None, policy=None):
+    async def _fetch_simple(
+        self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+    ):
         raise AssertionError("an embedding fetch must carry a policy")
 
     async def _fetch_body_or_redirect(
-        self, url, timeout, *, max_bytes=None, policy=None
+        self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
     ):
-        self.calls.append((url, timeout, max_bytes))
+        self.calls.append((url, timeout, max_bytes, read_timeout))
         return self.responses[url]
 
     async def close(self):
@@ -947,8 +980,8 @@ async def test_embedding_url_to_a_public_address_loads(
     loaded = await _embedding_processor().load_tensor_from_path_or_url(_PUBLIC_URL)
 
     assert torch.equal(loaded, _EMBEDDING)
-    # One whole-request budget, and the processor's size cap.
-    assert client.calls == [(_PUBLIC_URL, 300.0, 10 * 1024 * 1024)]
+    # The whole-request budget, the processor's size cap, and the read timeout.
+    assert client.calls == [(_PUBLIC_URL, 300.0, 10 * 1024 * 1024, 300.0)]
 
 
 @pytest.mark.asyncio
@@ -969,7 +1002,49 @@ async def test_embedding_fetch_budget_scales_with_the_size_cap(
     )
 
     cap = max_file_size_mb * 1024 * 1024
-    assert client.calls == [(_PUBLIC_URL, budget_s, cap)]
+    # The read timeout stays at 300 s whatever the cap.
+    assert client.calls == [(_PUBLIC_URL, budget_s, cap, 300.0)]
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_embedding_url_fails_at_the_read_timeout(
+    embedding_server, shared_client, short_embedding_timeouts
+) -> None:
+    """A server that stops sending fails at the read timeout, not at the
+    whole-request budget."""
+    embedding_server.stall = True
+    processor = _embedding_processor()
+    processor._url_policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="Failed to load tensor") as excinfo:
+        await processor.load_tensor_from_path_or_url(
+            f"{embedding_server.url}/emb.safetensors"
+        )
+    elapsed = time.monotonic() - start
+
+    assert isinstance(excinfo.value.__context__, HttpTimeoutError)
+    assert elapsed < 2.5, f"waited {elapsed:.2f} s, the whole 4 s budget"
+
+
+@pytest.mark.asyncio
+async def test_a_slow_steady_embedding_download_completes(
+    embedding_server, shared_client, short_embedding_timeouts
+) -> None:
+    """The read timeout bounds each wait for bytes, not the whole download."""
+    embedding_server.chunks, embedding_server.gap = 15, 0.1
+    processor = _embedding_processor()
+    processor._url_policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+    start = time.monotonic()
+    loaded = await processor.load_tensor_from_path_or_url(
+        f"{embedding_server.url}/emb.safetensors"
+    )
+    elapsed = time.monotonic() - start
+
+    assert torch.equal(loaded, _EMBEDDING)
+    # Longer than the 1 s read timeout, and within the 4 s budget.
+    assert elapsed > 1.0
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,8 @@ configure_dynamo_logging()
 _EMBEDDING_FETCH_MIN_TIMEOUT_S = 300.0
 # Above the floor, the budget is the size cap divided by this rate (bytes/s).
 _EMBEDDING_FETCH_MIN_RATE = 64 * 1024
+# A server that sends nothing for this long fails the download, in seconds.
+_EMBEDDING_FETCH_READ_TIMEOUT_S = 300.0
 
 
 def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
@@ -258,7 +260,8 @@ class MultimodalRequestProcessor:
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             # One budget for the whole download: at least 300 s, and 800 s at
-            # the default 50 MiB cap.
+            # the default 50 MiB cap. A server that sends nothing for 300 s
+            # fails sooner.
             timeout = max(
                 _EMBEDDING_FETCH_MIN_TIMEOUT_S,
                 self.max_file_size_bytes / _EMBEDDING_FETCH_MIN_RATE,
@@ -272,6 +275,7 @@ class MultimodalRequestProcessor:
                     timeout,
                     policy=self._url_policy,
                     max_bytes=self.max_file_size_bytes,
+                    read_timeout=_EMBEDDING_FETCH_READ_TIMEOUT_S,
                 )
                 data = safetensors_load(content)
                 return self._unwrap_safetensors(data)
