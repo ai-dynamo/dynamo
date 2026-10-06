@@ -77,6 +77,7 @@ A case contains the native inputs shared by every hardware run. Hardware values 
 
 ```yaml
 # cases/qwen3-32b-vllm-disagg/dgdr-v1beta1.yaml
+# Abridged to the fields that define the shared comparison intent.
 model: Qwen/Qwen3-32B
 backend: vllm
 image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.0
@@ -101,6 +102,9 @@ workload:
   request_rate: 10
 goal:
   target: goodput_per_gpu
+  sla:
+    ttft_ms: 2000
+    itl_ms: 25
 ```
 
 Issue #8469 does not define one comparable workload for all recipes. Cases without a historical
@@ -182,12 +186,15 @@ requires a concrete reason; evidence links are optional.
         reason: The historical recipe is no longer present in the repository.
 ```
 
-Supported scopes are:
+Supported exception scopes are:
 
 | Phase | Variant |
 | --- | --- |
 | `render` | `profiler-v1beta1`, `sweeper`, `sweeper-aic`, `sweeper-direct` |
 | `deploy` | `profiler-v1beta1`, `sweeper-aic`, `sweeper-direct`, `recipe` |
+
+The current runner implements only the `render` phase. The `deploy` scope is reserved for a
+follow-up live-deployment runner.
 
 For the exceptional case where none of its variants should run, a row may put `status`, `reason`,
 and optional `links` directly beside `case` and `hardware`. A row cannot combine that case-wide
@@ -209,10 +216,11 @@ Recipe requirements only control whether that recipe is eligible for live deploy
 recipe or requirement never prevents either generator from running. Normal execution tries recipes
 only on hardware already listed in `requirements`.
 
-With `--sweeper-discover-recipe-hardware`, the live test may try a recipe on the suite entry's
-otherwise unknown hardware. Only a successful recipe deployment and inference request prove the
-combination. The test leaves `recipe.yaml` unchanged and writes the proposed merged requirements to
-the ignored adjacent `recipe.new.yaml`; a failed generated DGD does not establish recipe support.
+A future live-deployment runner may try a recipe on otherwise unknown suite hardware. Only a
+successful recipe deployment and inference request would prove the combination. That follow-up must
+leave `recipe.yaml` unchanged and write proposed merged requirements to the ignored adjacent
+`recipe.new.yaml`; a failed generated DGD does not establish recipe support. No live deployment or
+hardware-discovery CLI flag is implemented by the current comparison runner.
 
 ## Composition
 

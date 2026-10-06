@@ -83,7 +83,7 @@ optimizer:
 dgd:
   name: qwen
   output_file: deployment.yaml
-  renderer: aic
+  generator: aic
   format: manifest
   runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
   num_gpus_per_node: 8
@@ -136,12 +136,15 @@ The command prints ranked candidates and produces:
 The `--stack` option selects the simulation implementation. The independent `--output dgd` option
 selects DGD generation.
 
-The `dgd.renderer` field defaults to `aic`. Set it to `direct` to compare the direct Dynamo renderer.
+The `dgd.generator` field defaults to `aic`. Set it to `direct` to compare the direct Dynamo generator.
 The output target depends on `dgd.format`:
 
 - `manifest` requires `output_file` and rejects `output_dir`.
 - `kustomize` requires `output_dir` and rejects `output_file`. The directory is relative to the CLI
   `--output-dir` and contains `deploy.yaml` and `kustomization.yaml`.
+
+`output_file` must be a bare `.yaml` or `.yml` filename, and `output_dir` must be one directory name,
+not a path. Neither accepts `.` or `..`; `{index}` is the only supported placeholder.
 
 For example, this writes the Kustomize bundle to `/tmp/dynosim-recommendations/qwen/`:
 
@@ -154,9 +157,12 @@ dgd:
   num_gpus_per_node: 8
 ```
 
-For a Pareto optimization, use explicit patterns in `name` and the active output field. For example,
+For a Pareto optimization, `{index}` is required in `name` and in the active output field
+(`output_file` or `output_dir`); scalar targets reject the placeholder. For example,
 `name: candidate-{index}` with `output_dir: candidate-{index}` creates one independently deployable
-Kustomize bundle per selected candidate. The adapter substitutes a zero-padded index.
+Kustomize bundle per selected candidate. The adapter substitutes a three-digit, zero-based index:
+`candidate-000`, `candidate-001`, and so on. AISimulate's recommendation files use a separate
+four-digit, one-based sequence, so `candidate-000` is the DGD for `recommendations/0001.yaml`.
 
 </Step>
 <Step title="Predict the best candidate" id="predict-the-best-candidate">
@@ -204,6 +210,8 @@ Use a shorter virtual-time cutoff or trial budget while iterating on large trace
 Set `optimization.target` to `throughput`, `throughput_per_gpu`, `throughput_per_user`, `goodput`,
 `goodput_per_gpu`, `ttft`, `e2e_latency`, or `pareto`. Goodput targets require `evaluation.sla`.
 Pareto output contains the complete nondominated front rather than a scalar ranking.
+Before changing the example to `optimization.target: pareto`, update `dgd.name` and the active output
+field with the required `{index}` placeholder as described in the recommendation step.
 
 Change one domain at a time. Use `choices` for categorical values, `range` for numeric domains, and
 complete preset mappings for correlated knobs such as parallelism.
