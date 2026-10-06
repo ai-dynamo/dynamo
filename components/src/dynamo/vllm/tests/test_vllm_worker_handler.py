@@ -1351,6 +1351,54 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
 
 
 @pytest.mark.asyncio
+async def test_prefill_caps_client_min_tokens_before_building_sampling_params(
+    monkeypatch,
+):
+    # The PrefillRouter sends max_tokens=1 with the client's min_tokens.
+    request = {
+        "token_ids": [1, 2],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 1, "min_tokens": 5, "ignore_eos": True},
+        "output_options": {},
+    }
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    handler._multimodal_request_processor = SimpleNamespace(
+        prepare_input=AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=request, multi_modal_data=None, mm_processor_kwargs=None
+            )
+        )
+    )
+    handler._build_prompt_from_request = MagicMock(return_value={})
+    handler.default_sampling_params = {}
+    handler.model_max_len = 128
+    handler.config = SimpleNamespace(enable_rl=False)
+    handler.engine_client = SimpleNamespace(vllm_config=None)
+    monkeypatch.setattr(
+        mod,
+        "make_kv_connector_protocol",
+        lambda _: SimpleNamespace(prefill_request_kv_transfer_params=dict),
+    )
+    handler._resolve_lora_request = MagicMock(side_effect=RuntimeError("stop"))
+    built = []
+    build = mod.build_sampling_params
+    monkeypatch.setattr(
+        mod,
+        "build_sampling_params",
+        lambda *args, **kwargs: built.append(build(*args, **kwargs)) or built[-1],
+    )
+
+    with pytest.raises(RuntimeError, match="stop"):
+        async for _ in handler._generate_token_mode(
+            request, MagicMock(), "request-prefill"
+        ):
+            pass
+
+    assert (built[0].max_tokens, built[0].min_tokens) == (1, 1)
+    assert request["stop_conditions"]["min_tokens"] == 5
+
+
+@pytest.mark.asyncio
 async def test_prefill_returns_structured_error_when_multimodal_is_disabled():
     handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
     processor = SimpleNamespace(
