@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from dynamo.profiler.utils.ais_system import resolve_ais_system
+
 from .scoring import _pick_best_record
 from .search import optimize_dense_agg_with_replay, optimize_dense_disagg_with_replay
 from .specs import ReplayOptimizeSpec
@@ -30,12 +32,13 @@ def compare_aic_and_replay_disagg(
     # (mirrors aic._load_aisimulate_modules). Only this function needs AIC.
     from aisimulate.sdk.task_v2 import Task
 
+    system = resolve_ais_system(spec.hardware.gpuSku)
     aic_task = Task(
         serving_mode="disagg",
         prefill_model_path=spec.engine.model,
         decode_model_path=spec.engine.model,
-        prefill_system_name=str(spec.hardware.gpuSku),
-        decode_system_name=str(spec.hardware.gpuSku),
+        prefill_system_name=system,
+        decode_system_name=system,
         prefill_backend_name=spec.engine.backend.value,
         decode_backend_name=spec.engine.backend.value,
         total_gpus=spec.hardware.totalGpus,

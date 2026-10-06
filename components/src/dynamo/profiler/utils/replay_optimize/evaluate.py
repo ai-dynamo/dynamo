@@ -18,6 +18,7 @@ from typing import Any
 
 from dynamo.llm import KvRouterConfig
 from dynamo.mocker import MockEngineArgs
+from dynamo.profiler.utils.ais_system import resolve_ais_system
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .engine_args import (
@@ -169,7 +170,7 @@ def _evaluate_state(
     log_state_start(state)
 
     backend = spec.engine.backend.value
-    system = str(spec.hardware.gpuSku)
+    system = resolve_ais_system(spec.hardware.gpuSku)
     prefill_args = _build_candidate_engine_args(
         base_args=spec.engine.basePrefillEngineArgs,
         tp_size=state.prefill_tp,
@@ -243,7 +244,7 @@ def _evaluate_agg_state(
     log_state_start(state)
 
     backend = spec.engine.backend.value
-    system = str(spec.hardware.gpuSku)
+    system = resolve_ais_system(spec.hardware.gpuSku)
     engine_args = _build_agg_candidate_engine_args(
         base_args=spec.engine.baseEngineArgs,
         tp_size=state.tp,

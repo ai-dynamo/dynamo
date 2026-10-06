@@ -202,6 +202,21 @@ class TestExtractProfilerParams:
         assert strategy == SearchStrategy.RAPID
         assert picking == "default"
 
+    @pytest.mark.parametrize("gpu_sku", ["gb200", "gb200_sxm"])
+    def test_gb200_skus_resolve_to_canonical_ais_system(self, gpu_sku: str):
+        """Canonical and deprecated API values select the GB200 AISimulate system."""
+        dgdr = _make_dgdr(
+            hardware=HardwareSpec(
+                gpuSku=gpu_sku,
+                totalGpus=4,
+                numGpusPerNode=4,
+            )
+        )
+
+        _, _, system, _, _, _, _, _, _, _, _ = _extract_profiler_params(dgdr)
+
+        assert system == "gb200"
+
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_e2e_latency_sets_both_targets(self):
