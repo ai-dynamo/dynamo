@@ -219,8 +219,6 @@ func NewGPUDiscoveryCache() *GPUDiscoveryCache {
 //
 // This method is safe for concurrent use.
 func (c *GPUDiscoveryCache) Get(sku nvidiacomv1beta1.GPUSKUType) (*GPUInfo, bool) {
-	sku = canonicalGPUSKU(sku)
-
 	c.mu.RLock()
 	e, ok := c.entries[sku]
 	c.mu.RUnlock()
@@ -237,8 +235,6 @@ func (c *GPUDiscoveryCache) Get(sku nvidiacomv1beta1.GPUSKUType) (*GPUInfo, bool
 //
 // This method is safe for concurrent use.
 func (c *GPUDiscoveryCache) Set(sku nvidiacomv1beta1.GPUSKUType, info *GPUInfo, ttl time.Duration) {
-	sku = canonicalGPUSKU(sku)
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[sku] = gpuCacheEntry{value: info, expiresAt: time.Now().Add(ttl)}
@@ -283,8 +279,6 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //   - *GPUInfo for the selected node
 //   - error if no GPU data can be retrieved
 func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
-	filterSKU = canonicalGPUSKU(filterSKU)
-
 	logger := log.FromContext(ctx)
 	if cache != nil {
 		if cached, ok := cache.Get(filterSKU); ok {
@@ -792,8 +786,6 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
 func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
-	filterSKU = canonicalGPUSKU(filterSKU)
-
 	logger := log.FromContext(ctx)
 	logger.Info("Starting GPU discovery from cluster nodes", "filterSKU", filterSKU)
 
@@ -992,15 +984,6 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	}
 
 	return ""
-}
-
-// canonicalGPUSKU maps deprecated API aliases to the canonical discovery identity.
-func canonicalGPUSKU(sku nvidiacomv1beta1.GPUSKUType) nvidiacomv1beta1.GPUSKUType {
-	//nolint:staticcheck // SA1019: Compatibility logic must recognize the deprecated enum value.
-	if sku == nvidiacomv1beta1.GPUSKUTypeGB200SXM {
-		return nvidiacomv1beta1.GPUSKUTypeGB200
-	}
-	return sku
 }
 
 // normalize standardizes a GPU product string to simplify matching.

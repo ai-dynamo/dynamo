@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 
 from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
-from dynamo.profiler.utils.ais_system import resolve_ais_system
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
@@ -157,7 +156,7 @@ def validate_dgdr_dynamo_features(
                 "AIC core fallback regression when native AIC estimates "
                 "are unavailable.",
                 dgdr.model,
-                resolve_ais_system(dgdr.hardware.gpuSku),
+                dgdr.hardware.gpuSku.lower(),
                 dgdr.backend,
             )
 

@@ -429,38 +429,26 @@ func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
 	}
 }
 
-func TestDGDRGB200SKUsRoundTripThroughSparseAnnotations(t *testing.T) {
-	tests := []struct {
-		name string
-		sku  v1beta1.GPUSKUType
-	}{
-		{name: "canonical", sku: v1beta1.GPUSKUTypeGB200},
-		//nolint:staticcheck // SA1019: The deprecated spelling must remain conversion-compatible.
-		{name: "deprecated alias", sku: v1beta1.GPUSKUTypeGB200SXM},
+func TestDGDRDeprecatedGB200SKURoundTripsThroughSparseAnnotations(t *testing.T) {
+	t.Log("Convert the deprecated v1beta1 GPU SKU through the v1alpha1 sparse payload")
+	original := newV1beta1DGDR()
+	//nolint:staticcheck // SA1019: The deprecated spelling must remain conversion-compatible.
+	original.Spec.Hardware = &v1beta1.HardwareSpec{GPUSKU: v1beta1.GPUSKUTypeGB200SXM}
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Convert the v1beta1 GPU SKU through the v1alpha1 sparse payload")
-			original := newV1beta1DGDR()
-			original.Spec.Hardware = &v1beta1.HardwareSpec{GPUSKU: tt.sku}
-			spoke := &DynamoGraphDeploymentRequest{}
-			if err := spoke.ConvertFrom(original); err != nil {
-				t.Fatalf("ConvertFrom() error = %v", err)
-			}
-			restored := &v1beta1.DynamoGraphDeploymentRequest{}
-			if err := spoke.ConvertTo(restored); err != nil {
-				t.Fatalf("ConvertTo() error = %v", err)
-			}
-
-			t.Log("Verify conversion preserves the exact API spelling without canonicalizing stored objects")
-			if restored.Spec.Hardware == nil {
-				t.Fatal("restored hardware is nil")
-			}
-			if restored.Spec.Hardware.GPUSKU != tt.sku {
-				t.Fatalf("restored gpuSku = %q, want %q", restored.Spec.Hardware.GPUSKU, tt.sku)
-			}
-		})
+	t.Log("Verify conversion preserves the deprecated spelling without canonicalizing stored objects")
+	if restored.Spec.Hardware == nil {
+		t.Fatal("restored hardware is nil")
+	}
+	if restored.Spec.Hardware.GPUSKU != original.Spec.Hardware.GPUSKU {
+		t.Fatalf("restored gpuSku = %q, want %q", restored.Spec.Hardware.GPUSKU, original.Spec.Hardware.GPUSKU)
 	}
 }
 

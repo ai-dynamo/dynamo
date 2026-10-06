@@ -194,7 +194,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 			gpuDiscovery: true,
 			wantWarnings: []string{
-				`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value is translated for AISimulate compatibility and will be removed in a future release`,
+				`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value will be removed in a future release`,
 			},
 		},
 		{

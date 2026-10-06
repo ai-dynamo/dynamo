@@ -30,8 +30,6 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from typing import Literal
 
-from dynamo.profiler.utils.ais_system import resolve_ais_system
-
 from . import aic, evaluate
 from .constants import DEFAULT_SEARCH_ROUNDS
 from .models import DenseAggReplayState, DenseReplayOptimizationResult, DenseReplayState
@@ -241,7 +239,7 @@ def _record_to_state(record: Mapping[str, float | int]) -> DenseReplayState:
 
 
 def _record_to_agg_state(
-    record: Mapping[str, float | int | str],
+    record: Mapping[str, float | int | str]
 ) -> DenseAggReplayState:
     return DenseAggReplayState(
         tp=int(record["tp"]),
@@ -285,7 +283,7 @@ def optimize_dense_disagg_with_replay(
         )
 
     backend = spec.engine.backend.value
-    system = resolve_ais_system(spec.hardware.gpuSku)
+    system = str(spec.hardware.gpuSku)
     overlap_credits = spec.router.effectiveOverlapCredits
     prefill_load_scales = spec.router.effectivePrefillLoadScales
     max_parallel_evals = max(1, int(spec.maxParallelEvals))
@@ -414,7 +412,7 @@ def optimize_dense_agg_with_replay(
         raise ValueError("hardware.totalGpus must be at least 1 for aggregated replay")
 
     backend = spec.engine.backend.value
-    system = resolve_ais_system(spec.hardware.gpuSku)
+    system = str(spec.hardware.gpuSku)
     overlap_credits = spec.router.effectiveOverlapCredits
     prefill_load_scales = spec.router.effectivePrefillLoadScales
     max_parallel_evals = max(1, int(spec.maxParallelEvals))

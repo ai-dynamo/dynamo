@@ -27,7 +27,6 @@ from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
-from dynamo.profiler.utils.ais_system import resolve_ais_system
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
@@ -92,7 +91,7 @@ def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
     """Pull all profiler parameters from dgdr and log them."""
     model = dgdr.model
     backend = BackendType(dgdr.backend).value.lower()
-    system = resolve_ais_system(dgdr.hardware.gpuSku)
+    system = dgdr.hardware.gpuSku.lower()
     total_gpus = dgdr.hardware.totalGpus
     isl = dgdr.workload.isl
     osl = dgdr.workload.osl

@@ -766,8 +766,8 @@ spec:
 
 <Warning>
   `gb200_sxm` is deprecated because GB200 systems use NVL rather than SXM. Existing manifests remain
-  admitted and the profiler translates the legacy value to `gb200`, but admission emits a warning.
-  Update manifests to use `gpuSku: gb200`; newly discovered GB200 hardware is stored as `gb200`.
+  admitted with their existing behavior, but admission emits a warning. Update manifests to use
+  `gpuSku: gb200`; newly discovered GB200 hardware is stored as `gb200`.
 </Warning>
 
 <Note>

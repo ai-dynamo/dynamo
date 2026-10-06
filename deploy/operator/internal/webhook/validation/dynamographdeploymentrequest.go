@@ -128,7 +128,7 @@ func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedGPUSKU(
 		return
 	}
 
-	v.warn(`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value is translated for AISimulate compatibility and will be removed in a future release`)
+	v.warn(`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value will be removed in a future release`)
 }
 
 func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedDGDOverrideTargets(
