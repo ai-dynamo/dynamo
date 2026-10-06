@@ -176,6 +176,7 @@ impl Router {
     /// card, initializes the preprocessor, and creates both routers.
     pub async fn from_discovery(namespace: &str, component: &str) -> Result<Self> {
         let container_discovery = validate_kube_discovery_mode()?;
+        let load_thresholds = load_thresholds_from_env()?;
 
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -193,7 +194,6 @@ impl Router {
         // generation-suffixed worker namespace changes during a rolling update.
         let mut kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-        let load_thresholds = load_thresholds_from_env()?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
