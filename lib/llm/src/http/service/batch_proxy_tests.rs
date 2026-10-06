@@ -124,6 +124,18 @@ async fn keeps_client_controlled_uris_and_headers_on_the_configured_origin() {
                 "/v1/files/%2e%2e/content".to_string(),
                 StatusCode::BAD_REQUEST,
             ),
+            (
+                format!("/v1/files/file-1?next={}&next=//{}&empty=&encoded=%23", canary.origin, canary_url.authority()),
+                StatusCode::MULTI_STATUS,
+            ),
+            (
+                "/v1/files/.%2E/content".to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/files/%2E./content".to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
         ] {
             // Exercise absolute-form and encoded paths without client-side rewriting.
             let mut connection = TcpStream::connect(Url::parse(&proxy.origin).unwrap().authority())
@@ -401,6 +413,47 @@ async fn streams_output_and_preserves_redirects_failures_and_cancellation() {
             "Unable to reach Batch gateway"
         );
         proxy.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn does_not_follow_gateway_redirects_to_another_origin() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (sender, mut captured) = mpsc::channel(1);
+        let canary = Server::start(Router::new().fallback(echo_request).with_state(sender)).await;
+        let destination = format!("{}/private", canary.origin);
+        let location = destination.clone();
+        let upstream = Server::start(Router::new().fallback(move || {
+            let location = location.clone();
+            async move {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, location)],
+                )
+            }
+        }))
+        .await;
+        let (_, proxy) =
+            router(&upstream.origin, None, None, 1024, CancellationToken::new()).unwrap();
+        let proxy = Server::start(proxy).await;
+        let response = client()
+            .get(format!("{}/v1/batches", proxy.origin))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.headers()[header::LOCATION], destination);
+        // A live listener distinguishes redirect blocking from a failed DNS lookup.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), captured.recv())
+                .await
+                .is_err()
+        );
+        proxy.stop().await;
+        upstream.stop().await;
+        canary.stop().await;
     })
     .await
     .unwrap();

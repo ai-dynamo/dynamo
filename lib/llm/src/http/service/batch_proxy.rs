@@ -187,7 +187,10 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
     let Some(upstream_path) = upstream_path else {
         return proxy_error(StatusCode::NOT_FOUND, "Unknown Batch API path");
     };
-    let mut url = state.gateway.clone();
+    // Only trusted configuration constructs the outbound destination. Client input
+    // can update path/query components, never the scheme, authority or port.
+    let mut request = reqwest::Request::new(parts.method, state.gateway.clone());
+    let url = request.url_mut();
     url.set_path(&upstream_path);
     // Reject encoded dot segments rather than letting URL normalization escape the Batch API.
     if url.path() != upstream_path {
@@ -222,16 +225,13 @@ async fn forward(State(state): State<ProxyState>, request: Request) -> Response 
             }
             item
         });
-    let request = state
-        .client
-        .request(parts.method, url)
-        .headers(parts.headers)
-        .body(reqwest::Body::wrap_stream(upload));
+    *request.headers_mut() = parts.headers;
+    *request.body_mut() = Some(reqwest::Body::wrap_stream(upload));
     let upstream = tokio::select! {
         biased;
         _ = state.cancel.cancelled() => return proxy_error(StatusCode::SERVICE_UNAVAILABLE, "Frontend is shutting down"),
         // Includes the streamed upload and response headers, not the output download.
-        response = tokio::time::timeout(Duration::from_secs(600), request.send()) => {
+        response = tokio::time::timeout(Duration::from_secs(600), state.client.execute(request)) => {
             match response {
                 Ok(response) => response,
                 Err(_) => return proxy_error(StatusCode::GATEWAY_TIMEOUT, "Batch gateway request timed out"),
