@@ -34,7 +34,7 @@ synthetic token stream. `--max-concurrent-requests` bounds admitted RPCs
 (default `256`) independently of the scheduler's `max_num_seqs`, so accepted
 requests can still exercise Mocker queueing.
 
-Synthetic output plans are limited to 32,768 tokens. LiveEngine uses a small,
+Synthetic output plans are limited to 1,000,000 tokens. LiveEngine uses a small,
 fixed response buffer for each request and cancels slow consumers rather than
 turning declared output length into a second admission-control policy.
 
