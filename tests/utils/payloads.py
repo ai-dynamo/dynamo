@@ -480,6 +480,7 @@ class CachedTokensChatPayload(ChatPayload):
         self._stored_events_before_r1: Optional[float] = None
 
     def body_for_iteration(self, iteration: int) -> Dict[str, Any]:
+        """Capture the stored-event count before the first routing request."""
         if iteration == 0 and self.min_avg_kv_hit_rate > 0:
             self._stored_events_before_r1 = self._scrape_stored_events_applied()
         return super().body_for_iteration(iteration)
@@ -616,6 +617,7 @@ class CachedTokensChatPayload(ChatPayload):
         )
 
     def _scrape_metrics(self) -> Optional[str]:
+        """Read frontend metrics, returning None on an HTTP or network error."""
         url = f"http://localhost:{self.port}/metrics"
         try:
             return requests.get(url, timeout=5).text
