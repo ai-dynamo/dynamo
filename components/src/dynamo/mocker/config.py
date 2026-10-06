@@ -103,6 +103,29 @@ def _resolve_raw_engine_args(raw: dict) -> dict:
     return raw
 
 
+def _build_native_host_offload(args: argparse.Namespace) -> dict | None:
+    num_host_blocks = getattr(args, "num_host_blocks", None)
+    controls = {
+        key: value
+        for key, value in (
+            (
+                "d2h_bandwidth_gbps",
+                getattr(args, "host_offload_d2h_bandwidth_gbps", None),
+            ),
+            (
+                "h2d_bandwidth_gbps",
+                getattr(args, "host_offload_h2d_bandwidth_gbps", None),
+            ),
+        )
+        if value is not None
+    }
+    if num_host_blocks is None:
+        if controls:
+            raise ValueError("--host-offload-* flags require --num-host-blocks")
+        return None
+    return {"num_host_blocks": num_host_blocks, **controls}
+
+
 def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
     worker_type = (
         "prefill"
@@ -193,6 +216,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
         enable_local_indexer=True,
         kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
+        native_host_offload=_build_native_host_offload(args),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
         kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
