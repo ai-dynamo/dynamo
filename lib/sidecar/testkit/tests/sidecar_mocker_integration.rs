@@ -466,6 +466,35 @@ async fn teardown_with_live_clients<F: WireFixture>() -> (Outputs, Vec<u32>) {
     (outputs, handle.tokens())
 }
 
+#[tokio::test]
+async fn sglang_shutdown_releases_pending_health_check() {
+    use dynamo_sglang_sidecar::proto::{
+        HealthCheckRequest, sglang_service_client::SglangServiceClient,
+    };
+
+    let mut fixture =
+        support::sglang::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    fixture.set_health(None);
+    let mut client = bounded(
+        "connect health client",
+        SglangServiceClient::connect(fixture.endpoint()),
+    )
+    .await
+    .unwrap();
+    let health = client.health_check(HealthCheckRequest {});
+    tokio::pin!(health);
+    tokio::select! {
+        result = &mut health => panic!("health check completed before shutdown: {result:?}"),
+        _ = fixture.health_check_received() => {},
+    }
+    fixture.shutdown().await;
+    assert!(
+        bounded("pending health check terminated", health)
+            .await
+            .is_err()
+    );
+}
+
 macro_rules! enroll_baseline {
     ($backend:ident, $fixture:ty) => {
         mod $backend {
@@ -490,30 +519,35 @@ macro_rules! enroll_baseline {
             async fn cleanup_before_start_during_read_and_after_shutdown() {
                 bounded("cleanup conformance", cleanup::<$fixture>()).await;
             }
+
+            #[tokio::test]
+            async fn explicit_cancel_releases_active_scheduler_work() {
+                bounded(
+                    "active cancellation and recovery",
+                    active_work::<$fixture>(Cancellation::Explicit),
+                )
+                .await;
+            }
+
+            #[tokio::test]
+            async fn consumer_drop_releases_active_scheduler_work() {
+                bounded(
+                    "consumer drop and recovery",
+                    active_work::<$fixture>(Cancellation::ConsumerDrop),
+                )
+                .await;
+            }
+
+            #[tokio::test]
+            async fn request_fields_logprobs_and_usage() {
+                bounded("request fields and responses", request_fields::<$fixture>()).await;
+            }
         }
     };
 }
 
 enroll_baseline!(vllm, support::vllm::Fixture);
 enroll_baseline!(sglang, support::sglang::Fixture);
-
-#[tokio::test]
-async fn vllm_explicit_cancel_releases_active_scheduler_work() {
-    bounded(
-        "active cancellation and recovery",
-        active_work::<vllm_fixture::Fixture>(Cancellation::Explicit),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn vllm_consumer_drop_releases_active_scheduler_work() {
-    bounded(
-        "consumer drop and recovery",
-        active_work::<vllm_fixture::Fixture>(Cancellation::ConsumerDrop),
-    )
-    .await;
-}
 
 #[tokio::test]
 async fn vllm_teardown_terminates_handlers_with_clients_alive() {
@@ -526,64 +560,96 @@ async fn vllm_teardown_terminates_handlers_with_clients_alive() {
     assert!(error.to_string().contains("GenerateStream"));
 }
 
-#[tokio::test]
-async fn vllm_request_fields_logprobs_and_usage() {
-    bounded("vLLM wire fields", async {
-        let control = Controller::<vllm_fixture::Adapter>::default();
-        let mut fixture =
-            vllm_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
-        let mut req = request("mocker-model", vec![10, 20, 30, 40, 50], 7);
-        vllm_fixture::Fixture::configure_request(&mut req);
-        let ctx = mock_context();
-        let handle = control.request(ctx.id(), RequestPlan::default());
-        let outputs = collect(&engine, req.clone(), GenerateContext::new(ctx, None)).await;
-        vllm_fixture::Fixture::assert_stream(&handle, &req, &outputs);
-        terminal(
-            outputs,
-            &handle.tokens(),
-            req.token_ids.len() as u32,
-            FinishReason::Length,
-        );
-        bounded("wire fields remote drop", handle.wait(Event::Dropped)).await;
-        fixture.scheduler_idle().await;
-        finish(&mut fixture, &engine).await;
-    })
-    .await;
+async fn request_fields<F: ProcessFixture>() {
+    let control = Controller::<F::Protocol>::default();
+    let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let mut req = request("mocker-model", vec![10, 20, 30, 40, 50], 7);
+    F::configure_request(&mut req);
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    let outputs = collect(&engine, req.clone(), GenerateContext::new(ctx, None)).await;
+    F::assert_stream(&handle, &req, &outputs);
+    terminal(
+        outputs,
+        &handle.tokens(),
+        req.token_ids.len() as u32,
+        FinishReason::Length,
+    );
+    bounded("wire fields remote drop", handle.wait(Event::Dropped)).await;
+    fixture.scheduler_idle().await;
+    finish(&mut fixture, &engine).await;
+}
+
+async fn native_rejection<F: WireFixture>() -> DynamoError {
+    let control = Controller::<F::Protocol>::default();
+    let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    let opening = engine
+        .generate(
+            request("mocker-model", vec![1, 2, 3], 32_769),
+            GenerateContext::new(ctx, None),
+        )
+        .await;
+    let outputs = match F::GENERATE_OPENING {
+        GenerateOpening::WaitsForHeaders => vec![Err(opening
+            .err()
+            .expect("native rejection must fail before a response stream opens"))],
+        GenerateOpening::OnStreamPoll => {
+            bounded("native rejection", opening.unwrap().collect::<Outputs>()).await
+        }
+    };
+    let error = failure(outputs, &[], BackendError::InvalidArgument);
+    bounded("rejected request drop", handle.wait(Event::Dropped)).await;
+    fixture.scheduler_idle().await;
+    healthy(&fixture, &engine, &control).await;
+    finish(&mut fixture, &engine).await;
+    error
 }
 
 #[tokio::test]
 async fn vllm_native_rejection_recovers_on_same_engine() {
-    bounded("native rejection and recovery", async {
-        let control = Controller::<vllm_fixture::Adapter>::default();
-        let mut fixture =
-            vllm_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
-        let ctx = mock_context();
-        let handle = control.request(ctx.id(), RequestPlan::default());
-        let error = engine
-            .generate(
-                request("mocker-model", vec![1, 2, 3], 32_769),
-                GenerateContext::new(ctx, None),
-            )
-            .await
-            .err()
-            .expect("native rejection must fail before a response stream opens");
-        let error = failure(vec![Err(error)], &[], BackendError::InvalidArgument);
-        assert!(
-            error
-                .to_string()
-                .contains("max_new_tokens must not exceed 32768")
-        );
-        assert!(error.to_string().contains("GenerateStream"));
-        bounded("rejected request drop", handle.wait(Event::Dropped)).await;
-        fixture.scheduler_idle().await;
-        healthy(&fixture, &engine, &control).await;
-        finish(&mut fixture, &engine).await;
-    })
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<vllm_fixture::Fixture>(),
+    )
     .await;
+    assert!(error.to_string().contains("GenerateStream"));
+    assert!(
+        error
+            .to_string()
+            .contains("max_new_tokens must not exceed 32768")
+    );
+}
+
+#[tokio::test]
+async fn sglang_native_rejection_recovers_on_same_engine() {
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<support::sglang::Fixture>(),
+    )
+    .await;
+    assert!(error.to_string().contains("Generate"));
+    assert!(
+        error
+            .to_string()
+            .contains("prompt tokens (3) plus max_new_tokens (32769) exceed context_length 32768")
+    );
+}
+
+#[tokio::test]
+async fn sglang_teardown_terminates_handlers_with_clients_alive() {
+    let (outputs, tokens) = bounded(
+        "server teardown with live clients",
+        teardown_with_live_clients::<support::sglang::Fixture>(),
+    )
+    .await;
+    let error = failure(outputs, &tokens, BackendError::Unknown);
+    assert!(error.to_string().contains("Generate"));
 }
 
 #[tokio::test]
@@ -636,6 +702,48 @@ async fn vllm_malformed_terminal_fails_then_recovers() {
         healthy(&fixture, &engine, &control).await;
         engine.cleanup().await.unwrap();
         fixture.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn sglang_malformed_terminal_fails_then_recovers() {
+    bounded("malformed terminal and recovery", async {
+        use dynamo_sglang_sidecar::proto as pb;
+        let control = Controller::<support::sglang::Adapter>::default();
+        let mut fixture =
+            support::sglang::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![
+                pb::GenerateResponse {
+                    output_ids: vec![101],
+                    ..Default::default()
+                },
+                pb::GenerateResponse {
+                    finished: true,
+                    ..Default::default()
+                },
+            ],
+        );
+        let error = failure(
+            collect(
+                &engine,
+                request("mocker-model", vec![1, 2, 3], 3),
+                GenerateContext::new(ctx, None),
+            )
+            .await,
+            &[101],
+            BackendError::Unknown,
+        );
+        assert!(error.to_string().contains("missing finish_reason"));
+        bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
     })
     .await;
 }

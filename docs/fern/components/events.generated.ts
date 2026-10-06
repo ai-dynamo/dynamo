@@ -22,9 +22,23 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-10-02";
+export const GENERATED_ON = "2026-10-06";
 
-export const UPCOMING_EVENTS: DynamoEvent[] = [];
+export const UPCOMING_EVENTS: DynamoEvent[] = [
+  {
+    "title": "UNTERGRUND, An evening for the people building the next generation of open source.",
+    "start": "2026-10-21T17:00:00.000Z",
+    "month": "Oct",
+    "day": "21",
+    "year": "2026",
+    "dateLabel": "Wed, Oct 21, 2026",
+    "timeLabel": "10:00 AM",
+    "isPast": false,
+    "location": "Hallesches Ufer 70",
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=UNTERGRUND%2C+An+evening+for+the+people+building+the+next+generation+of+open+source.&dates=20261021T170000Z%2F20261021T200000Z&location=The+Feuerle+Collection%2C+Hallesches+Ufer+70%2C+10963+Berlin-Bezirk+Friedrichshain-Kreuzberg%2C+Germany&details=Get+up-to-date+information+at%3A+https%3A%2F%2Fluma.com%2Funtergrund-berlin%3Fpk%3Dg-MPMdmMSC9xexAXN%0A%0AAddress%3A%0AThe+Feuerle+Collection%0ABerlin%2C+Germany%0A%0AAn+evening+for+the+people+building+the+next+generation+of+open+source.+Come+for+the+kind+of+conversations+with+AI+leaders+that+only+happen+off+the+record.%0A%0AFor+one+night%2C+a+WWII+bunker+in+Berlin+belongs+to+us.+Deep+inside+this+historical+bunker%2C+its+walls+hold+a+private+art+collection+you+won%E2%80%99t+see+anywhere+else.+Concrete+and+shadow%2C+museum+light%2C+a+DJ%2C+and+cocktails+worth+savoring.+One+of+Berlin%E2%80%99s+best-known+EDM+violinists+and+an+incredibly+talented+beat+boxer+will+emerge+into+the+night+at+moments+no+one+announces.%0A%0ALeave+your+phone+behind.+It%E2%80%99s+the+Berlin+way.%0A%0AYou%E2%80%99ll+take+home+a+piece+of%E2%80%A6%0A%0AHosted+by+Together+AI%0A%0AJoin+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhxr-ssrp-daf%0AOr+dial%3A+%28US%29+%2B1+470-839-8177+PIN%3A+247554242%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhxr-ssrp-daf%3Fpin%3D6735962442102%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  }
+];
 
 export const PAST_EVENTS: DynamoEvent[] = [
   {

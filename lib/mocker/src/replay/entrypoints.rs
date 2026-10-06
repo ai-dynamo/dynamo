@@ -2563,6 +2563,92 @@ mod tests {
     }
 
     #[test]
+    fn kv_event_lag_reaches_offline_kv_router_replay() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(128)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(8))
+            .build()
+            .unwrap();
+        let router_config = KvRouterConfig {
+            overlap_score_credit: 100.0,
+            overlap_score_credit_decay: 0.0,
+            router_temperature: 0.0,
+            ..KvRouterConfig::default()
+        };
+        let request = |session_id: &str, arrival_ms, last_hash, max_output_tokens| SessionTrace {
+            session_id: session_id.to_string(),
+            first_arrival_timestamp_ms: Some(arrival_ms),
+            turns: vec![TurnTrace {
+                input_length: 32,
+                max_output_tokens,
+                hash_ids: (1..8).chain([last_hash]).collect(),
+                ..Default::default()
+            }],
+        };
+        // Request 2 shares request 1's first seven blocks and arrives at 400 ms, well after request
+        // 1's prefill published them (~17 ms) and well before its decode ends (~800 ms).
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![request("first", 0.0, 8, 64), request("second", 400.0, 9, 2)],
+        };
+        let run = || {
+            simulate_loaded_trace_with_router_mode_and_options(
+                args.clone(),
+                Some(router_config.clone()),
+                None,
+                trace.clone(),
+                2,
+                1.0,
+                ReplayRouterMode::KvRouter,
+                true,
+                None,
+                SlaThresholds::default(),
+            )
+            .unwrap()
+        };
+        // The first request's worker is a random tie between two idle workers, so compare
+        // placement relative to it rather than raw worker ids.
+        let summary = |report: TraceSimulationReport| {
+            let mut records = report.per_request;
+            records.sort_by(|left, right| left.arrival_time_ms.total_cmp(&right.arrival_time_ms));
+            let first_worker = records[0].routing_history[0].logical_worker_id;
+            let requests = records
+                .iter()
+                .map(|record| {
+                    let route = &record.routing_history[0];
+                    (
+                        route.logical_worker_id == first_worker,
+                        route.reported_overlap_tokens,
+                        record.reused_input_tokens,
+                        record.ttft_ms,
+                        record.e2e_latency_ms,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (requests, report.prefix_cache_reused_ratio)
+        };
+
+        let synchronous = summary(run());
+        assert_eq!(
+            summary(crate::replay::with_kv_event_lag_ms(0.0, run).unwrap()),
+            synchronous
+        );
+        let (requests, reuse_ratio) = &synchronous;
+        assert!(requests[1].0, "fresh KV events should attract request 2");
+        assert_eq!(requests[1].1, Some(28));
+        assert!(*reuse_ratio > 0.0);
+
+        let (requests, reuse_ratio) =
+            summary(crate::replay::with_kv_event_lag_ms(10_000.0, run).unwrap());
+        assert!(!requests[1].0, "request 1's load should repel request 2");
+        assert_eq!(requests[1].1, Some(0));
+        assert_eq!(requests[1].2, 0);
+        assert_eq!(reuse_ratio, 0.0);
+    }
+
+    #[test]
     fn loaded_dynamo_online_trace_preserves_request_metadata_contract() {
         let report = simulate_loaded_trace_live_with_router_mode_and_options(
             replay_test_args(),

@@ -103,6 +103,20 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_DISCOVERY_BACKEND`
 </ParamField>
 
+<ParamField path="NATS_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
+  Maximum number of seconds that a process spends establishing its initial NATS connection. Applies
+  only to processes that connect to NATS. Dynamo retries DNS, I/O, and timeout failures with
+  exponential backoff from 1 second up to 5 seconds until this deadline; each attempt times out
+  after at most 5 seconds. Authentication, authorization, TLS, and invalid server address errors
+  fail immediately. Set a larger value when NATS can take longer to become available during
+  deployment startup or recovery; set a smaller value when the process should fail fast. On
+  Kubernetes, ensure the pod's startup probe allows at least this long. Values must be greater than
+  `0`. Zero or invalid values log a warning and fall back to `120`.
+
+  This setting does not affect reconnects after startup, which use a fixed 5-second
+  per-attempt timeout.
+</ParamField>
+
 <ParamField path="ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
   Maximum number of seconds that an etcd discovery client spends establishing its initial
   connection and primary lease. Dynamo retries with exponential backoff until this deadline. Set a

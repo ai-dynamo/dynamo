@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -44,7 +45,7 @@ const (
 	vllmDistributedExecutorBackendMP  = "mp"
 	vllmDistributedExecutorBackendRay = "ray"
 
-	runtimeVersionOverrideRequiredMessage = "is required when the specified main container image has no parseable semantic-version tag"
+	runtimeVersionOverrideRequiredMessage = "is required when the specified Dynamo runtime container image has no parseable semantic-version tag"
 )
 
 // runtimeVersionValidationSource identifies the API representation whose field
@@ -87,12 +88,19 @@ func (v *sharedValidation) hasRuntimeVersionSource(source runtimeVersionValidati
 	return v.runtimeVersionSource == source
 }
 
-// runtimeVersionImageAndPath returns the main image and its v1beta1 field path.
+// runtimeVersionImageAndPath returns the Dynamo runtime image and its v1beta1 field path.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPath(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {
+	// In sidecar mode the engine image says nothing about Dynamo compatibility.
+	if spec.PodTemplate != nil {
+		if index := slices.IndexFunc(spec.PodTemplate.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
+			return spec.PodTemplate.Spec.InitContainers[index].Image, fldPath.Child("podTemplate", "spec", "initContainers").Index(index).Child("image")
+		}
+	}
+
 	imagePath := fldPath.Child("podTemplate", "spec", "containers")
 
 	// Resolve the exact container path when the named main container exists.
@@ -105,12 +113,19 @@ func runtimeVersionImageAndPath(
 	return "", imagePath
 }
 
-// runtimeVersionImageAndPathV1Alpha1 returns the main image and its v1alpha1 field path.
+// runtimeVersionImageAndPathV1Alpha1 returns the runtime image and its alpha field path.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPathV1Alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {
+	// Alpha represents init containers directly, so live fields determine the mode.
+	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil {
+		if index := slices.IndexFunc(spec.ExtraPodSpec.PodSpec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
+			return spec.ExtraPodSpec.PodSpec.InitContainers[index].Image, fldPath.Child("extraPodSpec", "initContainers").Index(index).Child("image")
+		}
+	}
+
 	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")
 	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
 		return spec.ExtraPodSpec.MainContainer.Image, imagePath

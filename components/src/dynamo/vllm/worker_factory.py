@@ -950,7 +950,7 @@ class WorkerFactory:
                 "transcription": RealtimeTranscriptionHandler.from_engine(
                     engine_client=engine_client,
                     model_name=model_name,
-                    model_path=config.model,
+                    model_path=config.model_source_path,
                 )
             }
         )

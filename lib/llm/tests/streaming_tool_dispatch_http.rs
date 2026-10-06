@@ -95,6 +95,7 @@ fn chunk(choice: ChatChoiceStream) -> NvCreateChatCompletionStreamResponse {
             service_tier: None,
         },
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
     }
 }

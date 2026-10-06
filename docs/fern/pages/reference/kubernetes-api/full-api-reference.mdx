@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 169 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 172 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">71 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">74 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -385,7 +385,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime version in this component's main image. DGD admission requires it when the main image in extraPodSpec or the selected role PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime version in this component's runtime image. Paths below are relative to the component spec. Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present, otherwise extraPodSpec.mainContainer.image, or the main image in each selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -558,7 +558,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime version in this component's main image. DGD admission requires it when the main image in extraPodSpec or the selected role PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime version in this component's runtime image. Paths below are relative to the component spec. Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present, otherwise extraPodSpec.mainContainer.image, or the main image in each selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2638,10 +2638,12 @@ In v1beta1 the ten per-component pod-configuration fields that existed in
 v1alpha1 (resources, envs, envFromSecret, livenessProbe, readinessProbe,
 volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
 replaced with a single `podTemplate` field holding a native
-`corev1.PodTemplateSpec`. The operator injects its defaults into the
-container named `"main"` and merges user overrides using strategic-merge-by-name
-semantics. Users can add sidecars, init containers, and pod-level configuration
-directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
+`corev1.PodTemplateSpec`. By default, the operator injects its defaults into
+`podTemplate.spec.containers[name=main]` and merges user overrides using
+strategic-merge-by-name semantics. In Dynamo sidecar mode, Dynamo defaults target
+`podTemplate.spec.initContainers[name=runtime]` instead. Users can add sidecars,
+init containers, and pod-level configuration directly in `podTemplate` without
+any `extraPodSpec`-style escape hatch. Container paths are relative to the component spec.
 
 
 **Kind:** `type`
@@ -2665,7 +2667,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime version in this component's main image. DGD admission requires it when the main image in the selected component or role PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in podTemplate.spec.containers[name=main].image by default, or podTemplate.spec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present. With role PodTemplates, it applies to the main image in every selected template. DGD admission requires it when any selected runtime image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2675,7 +2677,7 @@ globalDynamoNamespace places the component in the global Dynamo namespace rather
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-podTemplate defines the complete Pod configuration shared by every role. It is mutually exclusive with roles[].podTemplate. New components must include a container named "main" with a non-empty image. Existing components created without a podTemplate may remain unchanged. The operator merges defaults into the main container. For DGD components whose main image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly. All other containers are user-managed sidecars and must specify their required fields, including image.
+podTemplate defines the complete Pod configuration shared by every role. It is mutually exclusive with roles[].podTemplate. New components using this template must include podTemplate.spec.containers[name=main] with a non-empty image. Existing components created without a podTemplate may remain unchanged. By default the operator merges Dynamo defaults into podTemplate.spec.containers[name=main]. Declaring podTemplate.spec.initContainers[name=runtime] activates Dynamo sidecar mode: podTemplate.spec.containers[name=main] runs the user-configured engine, and podTemplate.spec.initContainers[name=runtime] receives Dynamo env, identity, system port, and probe defaults. Users must declare podTemplate.spec.initContainers[name=runtime]; the operator merges defaults into it but does not create it. It must have a non-empty image and restartPolicy: Always. This mode supports worker, prefill, and decode components only. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Graph-level env applies to podTemplate.spec.containers[name=main] and podTemplate.spec.initContainers[name=runtime]; compilationCache and shared memory remain on podTemplate.spec.containers[name=main]. All other containers are user-managed and must specify their required fields, including image. For DGD components whose runtime image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2733,7 +2735,7 @@ See [LPXConfig](#lpxconfig).
 </ParamField>
 
 <ParamField path="frontendSidecar" type="string">
-frontendSidecar optionally designates a container in each selected PodTemplate as the frontend sidecar. The value must match the `name` of a container in the component-level podTemplate, or in every role podTemplate when those are used. The operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `"main"`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match the selected templates.
+frontendSidecar optionally designates a container in each selected PodTemplate as the frontend sidecar. The value must match the `name` of a container in the component-level podTemplate, or in every role podTemplate when those are used. The operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `podTemplate.spec.containers[name=main]`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match the selected templates.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2780,7 +2782,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime version in this component's main image. DGD admission requires it when the main image in the selected component or role PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in podTemplate.spec.containers[name=main].image by default, or podTemplate.spec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present. With role PodTemplates, it applies to the main image in every selected template. DGD admission requires it when any selected runtime image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2790,7 +2792,7 @@ globalDynamoNamespace places the component in the global Dynamo namespace rather
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-podTemplate defines the complete Pod configuration shared by every role. It is mutually exclusive with roles[].podTemplate. New components must include a container named "main" with a non-empty image. Existing components created without a podTemplate may remain unchanged. The operator merges defaults into the main container. For DGD components whose main image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly. All other containers are user-managed sidecars and must specify their required fields, including image.
+podTemplate defines the complete Pod configuration shared by every role. It is mutually exclusive with roles[].podTemplate. New components using this template must include podTemplate.spec.containers[name=main] with a non-empty image. Existing components created without a podTemplate may remain unchanged. By default the operator merges Dynamo defaults into podTemplate.spec.containers[name=main]. Declaring podTemplate.spec.initContainers[name=runtime] activates Dynamo sidecar mode: podTemplate.spec.containers[name=main] runs the user-configured engine, and podTemplate.spec.initContainers[name=runtime] receives Dynamo env, identity, system port, and probe defaults. Users must declare podTemplate.spec.initContainers[name=runtime]; the operator merges defaults into it but does not create it. It must have a non-empty image and restartPolicy: Always. This mode supports worker, prefill, and decode components only. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Graph-level env applies to podTemplate.spec.containers[name=main] and podTemplate.spec.initContainers[name=runtime]; compilationCache and shared memory remain on podTemplate.spec.containers[name=main]. All other containers are user-managed and must specify their required fields, including image. For DGD components whose runtime image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2841,7 +2843,7 @@ See [EPPConfig](#v1beta1-eppconfig).
 </ParamField>
 
 <ParamField path="frontendSidecar" type="string">
-frontendSidecar optionally designates a container in each selected PodTemplate as the frontend sidecar. The value must match the `name` of a container in the component-level podTemplate, or in every role podTemplate when those are used. The operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `"main"`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match the selected templates.
+frontendSidecar optionally designates a container in each selected PodTemplate as the frontend sidecar. The value must match the `name` of a container in the component-level podTemplate, or in every role podTemplate when those are used. The operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `podTemplate.spec.containers[name=main]`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match the selected templates.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3659,6 +3661,62 @@ scheduling configures this component's LPX scheduling attempts. Omission means n
 See [SchedulingSpec](#schedulingspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="experimental" type="LPXExperimentalSpec">
+experimental groups opt-in LPX options whose API shape may change in breaking ways between v1beta1 releases.
+See [LPXExperimentalSpec](#lpxexperimentalspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="lpxexperimentalspec" title="LPXExperimentalSpec">
+LPXExperimentalSpec groups experimental LPX options.
+
+
+**Kind:** `type`
+**Appears in:** [LPXConfig](#lpxconfig)
+
+<ParamField path="localPartitions" type="LPXLocalPartitions">
+localPartitions selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. The operator schedules LPU Agents only for the remaining partitions, and schedules none when every partition is local. Omission runs every partition on LPUs.
+See [LPXLocalPartitions](#lpxlocalpartitions).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="lpxlocalpartitions" title="LPXLocalPartitions">
+LPXLocalPartitions selects the runtime partitions that run on the Cyborg GPU.
+Partition IDs are the compiler partition IDs of the build's runtime
+partitions. A selected prop-sync chain is identified by its first partition.
+
+
+**Kind:** `type`
+**Appears in:** [LPXExperimentalSpec](#lpxexperimentalspec)
+
+<ParamField path="mode" type="LPXLocalPartitionsMode" required={true}>
+mode selects the partitions that run on the Cyborg GPU. `All` runs every partition; `IDs` runs the partitions listed in ids.
+See [LPXLocalPartitionsMode](#lpxlocalpartitionsmode).
+**Validation:** Enum: [All IDs]  Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="ids" type="integer array">
+ids lists the compiler partition IDs that run on the Cyborg GPU. Required when mode is `IDs` and forbidden otherwise.
+**Validation:** MinItems: 1  items:Maximum: 4.294967295e+09  items:Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="lpxlocalpartitionsmode" title="LPXLocalPartitionsMode">
+LPXLocalPartitionsMode selects how LPXLocalPartitions chooses partitions.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [All IDs]
+**Appears in:** [LPXLocalPartitions](#lpxlocalpartitions)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>All</Badge> LPXLocalPartitionsModeAll runs every partition on the Cyborg GPU.
+- <Badge intent="note" minimal>IDs</Badge> LPXLocalPartitionsModeIDs runs the partitions listed in ids on the Cyborg GPU.
 </Accordion>
 
 <Accordion id="mockerspec" title="MockerSpec">
