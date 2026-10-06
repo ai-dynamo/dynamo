@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Hosted API access: TYPESAFE_API_KEY; install the jev extra.
+# 100 calls maximum per Jev cell; no retries or hidden fallback.
+schema_version: 1
+name: jev-vs-planner-pilot
+description: Synthetic decision-quality pilot; Jev API wall time is recorded separately
+  from simulated serving time.
+backend:
+  type: sim
+  topology: disagg
+  gpu_budget: 32
+  model:
+    name: openai/gpt-oss-120b
+    ais_model_path: openai/gpt-oss-120b
+  engines:
+    common:
+      system: h200_sxm
+      backend: vllm
+      backend_version: 0.24.0
+      tp_size: 1
+      moe_tp_size: 1
+      moe_ep_size: 1
+      attention_dp_size: 1
+      runtime:
+        cold_start_delay_s: 30
+      extra_args: {}
+    prefill:
+      runtime:
+        kv_transfer_bandwidth_gbps: 100
+        kv_bytes_per_token: 131072
+    decode: {}
+  router:
+    mode: round_robin
+  planner_config: planner.sim.example.yaml
+  replay:
+    ais_bootstrap: true
+    concurrency: null
+    telemetry_sample_interval_s: 5
+  autoscalers:
+  - name: jev
+    type: jev
+    start:
+      prefill: 1
+      decode: 1
+    config:
+      model: jev-1.13.0
+      poll_interval_s: 15
+      step: 1
+      max_calls: 100
+      failure_mode: raise
+      min_confidence: 0
+  - name: planner
+    type: planner
+    start:
+      prefill: 1
+      decode: 1
+  - name: keda-default
+    type: keda
+    start:
+      prefill: 1
+      decode: 1
+    config:
+      poll_interval_s: 15
+      queue_threshold: 5
+      kv_threshold: 0.9
+      min_prefill: 1
+      max_prefill: 16
+      min_decode: 1
+      max_decode: 8
+      tolerance: 0.1
+      scale_up_stabilization_s: 0
+      scale_down_stabilization_s: 300
+  - name: reactive-default
+    type: reactive
+    start:
+      prefill: 1
+      decode: 1
+    config:
+      poll_interval_s: 15
+      step: 1
+      prefill_queue_up: 4
+      prefill_queue_down: 1
+      decode_kv_up: 0.8
+      decode_kv_down: 0.3
+      min_prefill: 1
+      max_prefill: 16
+      min_decode: 1
+      max_decode: 8
+  - name: static-4p4d
+    type: static
+    config:
+      num_prefill: 4
+      num_decode: 4
+      poll_interval_s: 5
+evaluations:
+  workloads:
+  - flat
+  - staircase
+  - flash_crowd
+  defaults:
+    seed: 0
+    max_requests: null
+    arrival_speedup: 1.0
+slo_profiles:
+- name: relaxed
+  ttft_ms: 2000
+  itl_ms: 50
+metrics:
+  rank_by: goodput_per_gpu
+  include:
+  - goodput_per_gpu
+  - goodput_rps
+  - good_rate
+  - gpu_hours
+  - mean_ttft_ms
+  - p99_ttft_ms
+  - mean_itl_ms
+  - oscillation_count
+  - scale_events
+execution:
+  repetitions: 1
+  fail_fast: true
+  max_runs: 15
+publish:
+  artifact_root: ../runs/jev-pilot/artifacts
+  destinations:
+  - type: console
+  - type: json
+    path: ../runs/jev-pilot/results.json
+  - type: html
+    path: ../runs/jev-pilot/report.html

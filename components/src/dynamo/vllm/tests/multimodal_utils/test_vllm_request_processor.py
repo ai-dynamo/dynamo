@@ -1142,14 +1142,24 @@ async def test_qwen_decode_merges_placeholder_image_with_reloaded_video(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_non_qwen_decode_uses_expanded_prompt_tokens():
+async def test_non_qwen_decode_keeps_original_tokens_when_image_loads():
+    """Loaded image media keeps the placeholder token ids.
+
+    Substituting expanded_prompt_token_ids as well makes vLLM expand the
+    image placeholder a second time. Decode's prompt then grows by N-1 and
+    NIXL asserts num_decode_blocks <= len(prefill_group).
+    """
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (2, 2), color=(1, 2, 3))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [{"Url": "https://image"}]
 
     prepared = await _prepare_prompt(
         processor,
         {
             "token_ids": [1, 2],
-            "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
             "prefill_result": {
                 "disaggregated_params": {
                     "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
@@ -1161,9 +1171,230 @@ async def test_non_qwen_decode_uses_expanded_prompt_tokens():
         DisaggregationMode.DECODE,
     )
 
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    assert prepared.prompt.get("type") != "multimodal"
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_uses_expanded_tokens_without_image():
+    """No image to expand: still use prefill's expanded token ids."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-expanded-only",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
     assert prepared.prompt["prompt_token_ids"] == [1, 99, 99, 2]
-    assert prepared.prompt["multi_modal_data"] is None
+    assert prepared.prompt.get("multi_modal_data") is None
     processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+def _engine_cache_identity(prompt) -> tuple:
+    """What vLLM folds into the KV block hash for this prompt's media.
+
+    vLLM reads multi_modal_uuids only when multi_modal_data is present
+    (renderers/base.py::_process_tokens).
+    """
+    if prompt.get("multi_modal_data"):
+        return ("multi_modal_uuids", repr(prompt.get("multi_modal_uuids")))
+    return ("tokens_only", None)
+
+
+async def _non_qwen_decode_prompt(
+    *,
+    mm_hash: str,
+    image=None,
+    image_item=None,
+    processor=None,
+):
+    """A non-Qwen decode request: same text, one image, forwarded hash."""
+    if processor is None:
+        processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    if image is None:
+        image = Image.new("RGB", (4, 4), color=(ord(mm_hash[0]) % 256, 0, 0))
+    if image_item is None:
+        image_item = {"Url": f"https://example.com/{mm_hash}.png"}
+    processor.image_loader.load_image_batch.return_value = [image]
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": [image_item]},
+            "extra_args": {
+                "mm_hashes": [mm_hash],
+                "expanded_token_ids": [1, 99, 99, 2],
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        f"request-{mm_hash}",
+        None,
+        DisaggregationMode.DECODE,
+    )
+    return prepared, processor
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_keeps_distinct_images_distinct():
+    """Distinct images yield distinct engine identity via multi_modal_data + hashes."""
+    image_a = Image.new("RGB", (8, 8), color=(10, 20, 30))
+    image_b = Image.new("RGB", (8, 8), color=(200, 100, 50))
+    a, proc_a = await _non_qwen_decode_prompt(
+        mm_hash="a1b2c3d4e5f60718",
+        image=image_a,
+    )
+    b, proc_b = await _non_qwen_decode_prompt(
+        mm_hash="f0e1d2c3b4a59687",
+        image=image_b,
+    )
+
+    assert a.prompt.get("type") != "multimodal"
+    assert b.prompt.get("type") != "multimodal"
+    assert "cache_salt" not in a.prompt
+    assert "cache_salt" not in b.prompt
+    assert a.prompt["multi_modal_data"] == {"image": image_a}
+    assert b.prompt["multi_modal_data"] == {"image": image_b}
+    assert a.prompt["multi_modal_uuids"] == {"image": ["a1b2c3d4e5f60718" + "0" * 48]}
+    assert b.prompt["multi_modal_uuids"] == {"image": ["f0e1d2c3b4a59687" + "0" * 48]}
+    assert _engine_cache_identity(a.prompt) != _engine_cache_identity(b.prompt), (
+        "two different images give the decode engine the same cache identity "
+        f"({_engine_cache_identity(a.prompt)}); with identical token ids their KV "
+        "block hashes collide and decode can serve one request's image KV to the other"
+    )
+    proc_a.image_loader.load_image_batch.assert_awaited()
+    proc_b.image_loader.load_image_batch.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_awaits_image_loader_for_url():
+    """Non-Qwen decode loads the original http(s) Url via ImageLoader, like prefill."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (3, 3), color=(7, 8, 9))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [{"Url": "https://example.com/a1b2c3d4e5f60718.png"}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {
+                "mm_hashes": ["a1b2c3d4e5f60718"],
+                "expanded_token_ids": [1, 99, 99, 2],
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-a1b2c3d4e5f60718",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == "https://example.com/a1b2c3d4e5f60718.png"
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_loads_data_url_via_image_loader():
+    """Client-supplied data: URLs are handed to ImageLoader unchanged."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (2, 2), color=(11, 22, 33))
+    processor.image_loader.load_image_batch.return_value = [image]
+    data_url = "data:image/png;base64,iVBORw0KGgo="
+    image_items = [{"Url": data_url}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-data-url",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == data_url
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_loads_decoded_nixl_when_frontend_decoding():
+    """Decoded/NIXL slots load via ImageLoader when enable_frontend_decoding is on."""
+    processor = _processor(
+        model="llava-hf/llava-1.5-7b-hf",
+        frontend_decoding=True,
+    )
+    image = Image.new("RGB", (2, 2), color=(40, 50, 60))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [
+        {"Decoded": {"shape": [2, 2, 3], "content_hash": "0123456789abcdef"}}
+    ]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-decoded-nixl",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
 
 
 @pytest.mark.asyncio

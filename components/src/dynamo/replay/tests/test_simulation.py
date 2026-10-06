@@ -745,7 +745,7 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     ).backend_deployment
     args = simulation.DynamoReplayRunner._engine_args(deployment.agg_engine_args)
     metadata = deployment.performance_model_metadata["aggregated"]["config"]
-    assert "model_path" in metadata
+    assert metadata["model"] == raw["engine"]["model"]
     config = _ais_session_kwargs(metadata, args)["config"]
     assert config == args.ais_perf_config
     assert config["database_mode"] == "SOL"

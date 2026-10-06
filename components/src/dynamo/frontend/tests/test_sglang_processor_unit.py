@@ -70,6 +70,7 @@ from dynamo.frontend.utils import (
     random_uuid,
 )
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -123,6 +124,87 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["frequency_penalty"] == 0.0
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
+
+    @pytest.mark.parametrize(
+        ("request_data", "expected"),
+        [
+            ({"thinking_token_budget": 32}, 32),
+            ({"thinking_token_budget": 0}, 0),
+            ({"nvext": {"max_thinking_tokens": 16}}, 16),
+        ],
+    )
+    def test_thinking_token_budget_uses_canonical_stop_condition(
+        self, request_data, expected
+    ):
+        result = _build_dynamo_preproc(
+            request_data, [1], "test", None, force_reasoning=True
+        )
+
+        assert result["stop_conditions"]["max_thinking_tokens"] == expected
+        assert result["require_reasoning"] is True
+
+    def test_root_thinking_token_budget_overrides_legacy_nvext(self):
+        result = _build_dynamo_preproc(
+            {
+                "thinking_token_budget": 32,
+                "nvext": {"max_thinking_tokens": 16},
+            },
+            [1],
+            "test",
+            None,
+            force_reasoning=True,
+        )
+
+        assert result["stop_conditions"]["max_thinking_tokens"] == 32
+
+    def test_omitted_thinking_token_budget_does_not_require_reasoning(self):
+        result = _build_dynamo_preproc({}, [1], "test", None)
+
+        assert result["stop_conditions"]["max_thinking_tokens"] is None
+        assert result["require_reasoning"] is False
+
+    @pytest.mark.parametrize(
+        ("overrides", "error"),
+        [
+            ({}, None),
+            ({"enable_strict_thinking": False}, "--enable-strict-thinking"),
+            ({"skip_tokenizer_init": True}, "--skip-tokenizer-init"),
+        ],
+    )
+    def test_disabled_thinking_preserves_budget_for_backend_validation(
+        self, overrides, error
+    ):
+        result = _build_dynamo_preproc(
+            {"thinking_token_budget": 32}, [1], "test", None, force_reasoning=False
+        )
+        assert result["stop_conditions"]["max_thinking_tokens"] == 32
+        assert result["require_reasoning"] is False
+        server_args = types.SimpleNamespace(
+            **{
+                "enable_strict_thinking": True,
+                "reasoning_parser": "qwen3",
+                "skip_tokenizer_init": False,
+                **overrides,
+            }
+        )
+        if error is None:
+            assert apply_thinking_budget(result, {}, server_args) == {}
+        else:
+            with pytest.raises(InvalidArgument, match=error):
+                apply_thinking_budget(result, {}, server_args)
+
+    @pytest.mark.asyncio
+    async def test_disabled_thinking_budget_still_rejected_by_diffusion_worker(self):
+        from dynamo.sglang.request_handlers.llm.diffusion_handler import (
+            DiffusionWorkerHandler,
+        )
+
+        result = _build_dynamo_preproc(
+            {"thinking_token_budget": 32}, [1], "test", None, force_reasoning=False
+        )
+        handler = object.__new__(DiffusionWorkerHandler)
+        with pytest.raises(InvalidArgument, match="diffusion language model"):
+            await anext(handler.generate(result, None))
 
     @pytest.mark.multimodal
     def test_rejects_multimodal_cache_uuid(self):
@@ -1365,6 +1447,60 @@ def test_structured_response_content_and_reasoning_gate(
         assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
             "json": response_format["json_schema"]["schema"]
         }
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    "use_pool,separate_reasoning,budget",
+    [(False, True, 16), (False, False, 0), (True, True, 0), (True, False, 16)],
+)
+def test_gpt_oss_budget_uses_harmony_reasoning_without_think_template(
+    tokenizer, monkeypatch, use_pool, separate_reasoning, budget
+):
+    tokenizer = copy.deepcopy(tokenizer)
+    tokenizer.chat_template = "{{ messages[0]['content'] }}"
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Return a short answer."}],
+        "thinking_token_budget": budget,
+        "separate_reasoning": separate_reasoning,
+    }
+    if use_pool:
+        for name, value in {
+            "_w_tokenizer": tokenizer,
+            "_w_reasoning_parser_name": "gpt-oss",
+            "_w_tool_call_parser_name": None,
+            "_w_template_force_reasoning": False,
+            "_w_default_thinking_mode": None,
+        }.items():
+            monkeypatch.setattr(sglang_processor_module, name, value)
+        result = _preprocess_worker(request, MODEL, None).dynamo_preproc
+    else:
+        pre = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name="gpt-oss",
+        )
+        result = _build_dynamo_preproc(
+            request,
+            pre.prompt_token_ids,
+            MODEL,
+            None,
+            reasoning_parser=pre.reasoning_parser,
+            force_reasoning=pre.force_reasoning,
+        )
+    assert result["require_reasoning"] is True
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "128")
+    server_args = types.SimpleNamespace(
+        enable_strict_thinking=True,
+        reasoning_parser="gpt-oss",
+        skip_tokenizer_init=False,
+    )
+    assert apply_thinking_budget(result, {}, server_args) == {
+        "custom_params": {"thinking_budget": budget}
+    }
 
 
 @pytest.mark.core
@@ -3589,6 +3725,33 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
+
+    def test_qwen3_thinking_budget_is_ignored_with_explicit_thinking_opt_out(
+        self, tokenizer
+    ):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {"enable_thinking": False},
+            "thinking_token_budget": 32,
+        }
+        pre = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+        )
+
+        assert pre.force_reasoning is False
+        result = _build_dynamo_preproc(
+            request,
+            pre.prompt_token_ids,
+            MODEL,
+            None,
+            force_reasoning=pre.force_reasoning,
+        )
+        assert result["stop_conditions"]["max_thinking_tokens"] == 32
+        assert result["require_reasoning"] is False
 
     # Only the explicit case is covered: with no `thinking` key we deliberately
     # do NOT materialize one, so the K3 chat template applies its own default

@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from contextlib import asynccontextmanager
+import json
+from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pydantic import ValidationError
 from sglang.srt.managers.io_struct import GenerateReqInput
 
 from dynamo.common.constants import DisaggregationMode
@@ -111,6 +113,8 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
     )
 
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
     handler._generate_bootstrap_room = lambda: "room"
@@ -130,6 +134,86 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
             pass
 
     assert not build_media_kwargs_called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options, allow_top, wrapped, expected",
+    [
+        pytest.param({}, False, False, {}, id="default"),
+        pytest.param(
+            {"logprobs": 0},
+            False,
+            False,
+            {"return_logprob": True, "top_logprobs_num": 0},
+            id="chosen-token",
+        ),
+        pytest.param(
+            {"prompt_logprobs": 0},
+            False,
+            False,
+            {},
+            id="prompt-only-excluded",
+        ),
+        pytest.param({"logprobs": 3}, False, False, None, id="top-rejected"),
+        pytest.param(
+            {"logprobs": 3},
+            True,
+            False,
+            {"return_logprob": True, "top_logprobs_num": 3},
+            id="top-allowed",
+        ),
+        pytest.param(
+            {"logprobs": 0, "prompt_logprobs": 5},
+            True,
+            True,
+            {"return_logprob": True, "top_logprobs_num": 0},
+            id="wrapped-mixed-excludes-prompt",
+        ),
+    ],
+)
+async def test_prefill_forwards_first_token_logprob_options(
+    monkeypatch, wrapped, allow_top, options, expected
+):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1" if allow_top else "0")
+    calls = []
+
+    async def async_generate(**kwargs):
+        calls.append(kwargs)
+
+        async def results():
+            yield {"meta_info": {"id": "prefill-request"}}
+
+        return results()
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace(async_generate=async_generate)
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
+    handler.bootstrap_host = "prefill.invalid"
+    handler.bootstrap_port = None
+    handler.enable_trace = False
+    handler._generate_bootstrap_room = lambda: 1
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    handler._priority_kwargs = lambda priority: {}
+    request = {"token_ids": [1, 2, 3], "output_options": options}
+    if wrapped:
+        request = {"request": request, "sampling_params": {"max_new_tokens": 4}}
+
+    context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
+    async with aclosing(handler.generate(request, context)) as stream:
+        if expected is None:
+            with pytest.raises(ValueError, match="DYN_SGL_ALLOW_TOP_LOGPROBS"):
+                await anext(stream)
+            assert not calls
+            return
+        await anext(stream)
+
+    assert len(calls) == 1
+    assert calls[0]["sampling_params"]["max_new_tokens"] == 1
+    assert {
+        key: value for key, value in calls[0].items() if "logprob" in key
+    } == expected
 
 
 def test_extract_media_urls_returns_none_for_missing_modality():
@@ -231,6 +315,9 @@ def _new_decode_handler(
     use_sglang_tokenizer: bool = False,
     skip_tokenizer_init: bool = False,
     enable_rl: bool = False,
+    enable_strict_thinking: bool = True,
+    reasoning_parser: str | None = "qwen3",
+    grammar_backend: str = "xgrammar",
     serving_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
 ):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
@@ -241,6 +328,9 @@ def _new_decode_handler(
         server_args=SimpleNamespace(
             served_model_name="test-model",
             skip_tokenizer_init=skip_tokenizer_init,
+            enable_strict_thinking=enable_strict_thinking,
+            reasoning_parser=reasoning_parser,
+            grammar_backend=grammar_backend,
         ),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
@@ -1167,6 +1257,93 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert "seed" not in sampling_params
 
 
+def test_build_sampling_params_maps_thinking_budget_for_token_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "require_reasoning": True,
+            "stop_conditions": {
+                "max_tokens": 128,
+                "max_thinking_tokens": 32,
+            },
+        }
+    )
+
+    assert sampling_params["custom_params"] == {"thinking_budget": 32}
+
+
+@pytest.mark.parametrize("budget", [0, 16])
+def test_build_sampling_params_rejects_gpt_oss_structured_budget(monkeypatch, budget):
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "128")
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    handler.config.server_args.reasoning_parser = "gpt-oss"
+    with pytest.raises(InvalidArgument, match="GPT-OSS.*json_schema"):
+        handler._build_sampling_params(
+            {
+                "sampling_options": {"guided_decoding": {"json": {"type": "object"}}},
+                "stop_conditions": {"max_tokens": 128, "max_thinking_tokens": budget},
+                "require_reasoning": True,
+            }
+        )
+
+
+@pytest.mark.parametrize("budget", [0, 32])
+def test_build_sampling_params_ignores_budget_when_wire_omits_false_reasoning(budget):
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    # Rust omits require_reasoning when preprocessing disables thinking.
+    request = json.loads(
+        '{"model":"test-model","token_ids":[1,2,3],'
+        '"sampling_options":{},"output_options":{},'
+        f'"stop_conditions":{{"max_tokens":128,"max_thinking_tokens":{budget}}}}}'
+    )
+
+    sampling_params = handler._build_sampling_params(request)
+
+    assert sampling_params["max_new_tokens"] == 128
+    assert "custom_params" not in sampling_params
+
+
+def test_build_sampling_params_rejects_budget_with_sglang_tokenizer():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    with pytest.raises(InvalidArgument, match="requires Dynamo frontend preprocessing"):
+        handler._build_sampling_params(
+            {
+                "max_tokens": 128,
+                "thinking_token_budget": 0,
+                "require_reasoning": True,
+            }
+        )
+
+
+def test_build_sampling_params_drops_raw_custom_params_without_public_budget():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "max_tokens": 128,
+            "custom_params": {"thinking_budget": -1},
+        }
+    )
+
+    assert "custom_params" not in sampling_params
+
+
+def test_build_sampling_params_omits_thinking_budget_when_unset():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {"max_tokens": 128},
+        }
+    )
+
+    assert "custom_params" not in sampling_params
+
+
 def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
@@ -1369,6 +1546,38 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     assert sampling_params["min_new_tokens"] == 64
     assert sampling_params["max_new_tokens"] == 64
     assert sampling_params["ignore_eos"] is True
+
+
+@pytest.mark.parametrize("value", [True, "32", 1.0, -1, 2**32])
+def test_multimodal_stop_conditions_reject_invalid_thinking_budget(value):
+    with pytest.raises(ValidationError):
+        StopConditions.model_validate({"max_thinking_tokens": value})
+
+
+def test_multimodal_build_sampling_params_maps_thinking_budget():
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            require_reasoning=True,
+            stop_conditions=StopConditions(
+                max_tokens=64,
+                max_thinking_tokens=16,
+            ),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    sampling_params = SglangUtils.build_sampling_params(
+        request,
+        server_args=SimpleNamespace(
+            enable_strict_thinking=True,
+            reasoning_parser="qwen3",
+            skip_tokenizer_init=False,
+            grammar_backend="xgrammar",
+        ),
+    )
+
+    assert sampling_params["custom_params"] == {"thinking_budget": 16}
 
 
 @pytest.mark.parametrize(

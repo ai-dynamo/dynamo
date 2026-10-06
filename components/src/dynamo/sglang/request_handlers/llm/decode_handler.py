@@ -29,6 +29,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
+    supports_external_mm_hashes,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
@@ -51,6 +52,10 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     raise_if_unextracted_multimodal,
 )
 from dynamo.sglang.request_utils import request_cache_salt
+from dynamo.sglang.thinking_budget import (
+    apply_thinking_budget,
+    thinking_budget_requested,
+)
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -450,17 +455,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
-        """Probe whether engine.async_generate accepts ``mm_hashes``.
+        """Prepare caller hashes when engine.async_generate accepts them.
 
-        SGLang accepted the kwarg starting with the upstream interop PR; older
-        builds (and forks lacking the patch) raise TypeError if we pass it.
-        Probing the signature once at init keeps the request hot path free of
-        repeated inspection. Returns ``False`` when the kwarg is absent — the
-        request still completes, MM-aware routing just falls back to the
-        text-prefix overlap signal.
+        Older builds (and forks lacking the interop patch) raise TypeError if
+        we pass it. Supported releases accept it but may apply the hash after
+        constructing padded multimodal IDs; the compatibility helper repairs
+        that derived data once per tokenized request.
         """
-        probe = filter_supported_async_generate_kwargs(engine, {"mm_hashes": None})
-        return "mm_hashes" in probe
+        return supports_external_mm_hashes(engine)
 
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
@@ -532,9 +534,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Keep max_new_tokens even when None — SGLang treats None as "generate
         # until EOS/context-length" whereas omitting it triggers a default of 128.
         keep_if_none = {"max_new_tokens"}
-        return {
+        sampling_params = {
             k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
         }
+        return apply_thinking_budget(
+            request,
+            sampling_params,
+            self.config.server_args,
+            engine=getattr(self, "engine", None),
+        )
 
     @staticmethod
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -676,6 +684,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         priority_kwargs = self._priority_kwargs(priority)
         sampling_params = self._build_sampling_params(request)
+        thinking_budget = sampling_params.get("custom_params", {}).get(
+            "thinking_budget"
+        )
+        if thinking_budget is not None:
+            logging.debug("SGLang thinking budget configured: %s", thinking_budget)
         submitted_request_id = _ordered_cancellation_request_id(
             sglang_request_id,
             sampling_params,
@@ -728,7 +741,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **cache_salt_kwargs(self.engine, request_cache_salt(request)),
                 sampling_params=sampling_params,
                 stream=True,
-                **require_reasoning_kwargs(self.engine, request),
+                **require_reasoning_kwargs(
+                    self.engine,
+                    request,
+                    thinking_budget_requested=thinking_budget_requested(request),
+                ),
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
@@ -824,7 +841,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
-                **require_reasoning_kwargs(self.engine, request),
+                **require_reasoning_kwargs(
+                    self.engine,
+                    request,
+                    thinking_budget_requested=thinking_budget_requested(request),
+                ),
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,

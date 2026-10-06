@@ -74,12 +74,12 @@ COPY examples/router/custom-policy-example/ examples/router/custom-policy-exampl
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
-# The `/src/target` cache below is keyed by a name that changes whenever a
-# build-script *input* is renamed or removed. The TensorRT-LLM sidecar's
-# vendored protos moved from `proto/trtllm_service.proto` to
-# `proto/openengine/v1/`, and a cached build-script binary compiled against the
-# old layout keeps asking protoc for a file this tree no longer has. Bumping the
-# id costs one cold build and makes that impossible.
+# The `/src/target` cache below uses an explicit generation suffix. BuildKit
+# cache mounts can contain generated protobuf outputs newer than a fresh source
+# checkout, so Cargo may otherwise consider stale bindings up to date after a
+# vendored protocol refresh. Bump the suffix whenever a sidecar build-script
+# input changes; one cold build is preferable to compiling against stale wire
+# types.
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
@@ -96,7 +96,7 @@ ARG TARGETARCH
 # build do not serialize against each other.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v2,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
     && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
@@ -108,7 +108,7 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v2,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar \
     && install -D target/release/dynamo-sglang-sidecar /out/dynamo-sglang-sidecar
@@ -120,7 +120,7 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-openengine,target=/src/target,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v2,target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-trtllm-sidecar \
     && strip target/release/dynamo-trtllm-sidecar \
     && install -D target/release/dynamo-trtllm-sidecar /out/dynamo-trtllm-sidecar
@@ -195,6 +195,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && { userdel -r ubuntu 2>/dev/null || true; } \
     && useradd --create-home --uid 1000 --gid 0 dynamo
+
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
 COPY --from=sglang-builder /out/dynamo-sglang-sidecar /usr/local/bin/
