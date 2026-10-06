@@ -352,18 +352,31 @@ impl
                         && !state.no_stop_trim
                     {
                         if data.log_probs.is_some() && data.tokens.is_none() {
-                            data.tokens = Some(
-                                data.token_ids
-                                    .iter()
-                                    .map(|token_id| {
-                                        state
-                                            .tokenizer
-                                            .decode(&[*token_id], state.skip_special_tokens)
-                                            .ok()
-                                            .map(Into::into)
-                                    })
-                                    .collect(),
-                            );
+                            let tokens = data
+                                .token_ids
+                                .iter()
+                                .map(|token_id| {
+                                    state
+                                        .tokenizer
+                                        .decode(&[*token_id], state.skip_special_tokens)
+                                        .map(|decoded| Some(decoded.into()))
+                                })
+                                .collect::<anyhow::Result<Vec<_>>>();
+                            match tokens {
+                                Ok(tokens) => data.tokens = Some(tokens),
+                                Err(e) => {
+                                    tracing::error!("Failed to decode logprob token: {e}");
+                                    let choice_idx = data.index.unwrap_or(0);
+                                    state.finished_choices.insert(choice_idx);
+                                    if state.finished_choices.len() >= state.decoders.len() {
+                                        state.stream.context().stop_generating();
+                                        state.finished = true;
+                                    }
+                                    data.finish_reason =
+                                        Some(FinishReason::Error(format!("decode error: {e}")));
+                                    return Some((output, state));
+                                }
+                            }
                         }
                         // Text already decoded; track finish for this choice
                         let choice_idx = data.index.unwrap_or(0);
@@ -1454,6 +1467,42 @@ mod tests {
     #[tokio::test]
     async fn test_sglang_top_logprobs_are_decoded_before_engine_text_fast_path() {
         assert_sglang_top_logprobs_are_decoded_in_openai_response(true).await;
+    }
+
+    #[tokio::test]
+    async fn engine_text_logprob_decode_error_finishes_the_choice() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(FailingDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(2),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangEngine {
+                engine_decodes_text: true,
+            });
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+        assert!(
+            matches!(output.finish_reason.as_ref(), Some(FinishReason::Error(error)) if error.contains("incomplete utf-8 byte sequence")),
+            "token decode failure must end the choice: {:?}",
+            output.finish_reason
+        );
     }
 
     #[tokio::test]

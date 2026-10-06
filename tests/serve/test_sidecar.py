@@ -414,6 +414,7 @@ def test_serve_deployment(
                 probe_path, probe_env = _trtllm_transfer_probe_env(tmp_path)
                 engine_env.update(probe_env)
                 engine_env["DYN_LOGGING_CONSOLE_FORMAT"] = "jsonl"
+                engine_env["DYN_DISCOVERY_BACKEND"] = discovery_backend
 
                 def validate_transfer():
                     payload = _trtllm_handoff_payload().with_model(config.model)
