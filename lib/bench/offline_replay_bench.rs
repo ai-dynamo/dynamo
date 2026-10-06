@@ -17,6 +17,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::{
     EngineType, KvTransferTimingMode, MockerConfig, WorkerType,
 };
@@ -305,15 +306,16 @@ fn canonical_capture_options(enabled: bool) -> ReplayCaptureOptions {
 
 fn canonical_engine_pool_metadata(args: &MockerConfig) -> Result<Value> {
     ensure!(
-        args.planner_profile_data.is_none(),
-        "canonical replay does not support planner_profile_data"
+        !matches!(args.perf_model.as_ref(), PerfModel::Interpolated { .. }),
+        "canonical replay does not support dynamo_profile timing"
     );
     ensure!(
-        args.response_replay_trace_path.is_none(),
+        args.runtime.response_replay_trace_path.is_none(),
         "canonical replay does not support response_replay_trace_path"
     );
+    let ais_config = args.ais_perf_config();
     ensure!(
-        args.ais_backend.is_none() || args.ais_backend_version.is_some(),
+        ais_config.is_none_or(|config| config["backend_version"].as_str().is_some()),
         "canonical AIS replay requires a resolved backend version"
     );
     let mut metadata = serde_json::to_value(args)?;
@@ -323,12 +325,12 @@ fn canonical_engine_pool_metadata(args: &MockerConfig) -> Result<Value> {
     metadata.insert(
         "performance_model".to_string(),
         json!({
-            "kind": if args.ais_backend.is_some() {
+            "kind": if ais_config.is_some() {
                 "ais_callback"
             } else {
                 "builtin_polynomial"
             },
-            "ais": args.ais_perf_config,
+            "ais": ais_config,
         }),
     );
     Ok(Value::Object(metadata.clone()))
