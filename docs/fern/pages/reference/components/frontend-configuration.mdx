@@ -721,9 +721,10 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 ## Host memory allocator
 
 The frontend performs per-request host-memory allocations. Under high CPU load, allocator
-contention can cap frontend throughput before the GPU workers saturate. By default, the frontend's
-Rust code allocates from mimalloc, which the Dynamo Python extension links in, and its Python and
-C/C++ code allocate from glibc. The frontend does not preload jemalloc by default.
+contention can cap frontend throughput before the GPU workers saturate. The frontend's Rust code
+allocates from a jemalloc that the Dynamo Python extension links in, in every process that imports
+the extension. The frontend's Python and C/C++ code allocate from glibc unless jemalloc is
+preloaded. The frontend does not preload jemalloc by default.
 
 <Note>
 Whether the container image ships jemalloc depends on how the image is built. Images built with
@@ -734,8 +735,8 @@ dev targets), as well as the standalone frontend entrypoint image do not. Verify
 `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`; if the library is missing, either build a custom
 frontend image that includes it, or install it from an initContainer into a shared volume mounted
 by both containers and point `LD_PRELOAD` at the copied library path. Pointing `LD_PRELOAD` at a
-`libjemalloc` path that does not exist only prints a loader warning, and the process then serves
-all allocations, including Rust's, from glibc.
+path that does not exist only prints a loader warning, and the process continues with the default
+glibc allocator for its Python and C/C++ code.
 </Note>
 
 <Note>
@@ -746,17 +747,17 @@ all allocations, including Rust's, from glibc.
 </Note>
 
 <ParamField path="DYN_FRONTEND_JEMALLOC" type="boolean" default="false">
-  Preload jemalloc so that it serves all of the frontend's host allocations, including the Rust
-  allocations that otherwise go to mimalloc. Accepts `1`, `true`, or `yes` (case-insensitive). The
-  frontend re-executes itself once with jemalloc added to `LD_PRELOAD`, so child processes inherit
-  the preload. If the frontend cannot find `libjemalloc`, it prints a warning and continues with its
-  default allocators.
+  Preload jemalloc so that it serves the frontend's Python and C/C++ allocations. Accepts `1`,
+  `true`, or `yes` (case-insensitive). The frontend re-executes itself once with jemalloc added to
+  `LD_PRELOAD`, so child processes inherit the preload. If the frontend cannot find `libjemalloc`, it
+  prints a warning and continues with glibc. The Rust allocations stay on the Dynamo Python
+  extension's jemalloc, so the process then runs two independent jemalloc instances, each with its
+  own memory and options.
 </ParamField>
 
 <ParamField path="LD_PRELOAD" type="string" default="unset">
-  Preload jemalloc for the frontend process. jemalloc then serves its Python, C/C++, and Rust
-  allocations: the Dynamo Python extension moves its Rust allocations off mimalloc in any process
-  whose `LD_PRELOAD` names a `libjemalloc` library. The library path depends on the container
+  Preload jemalloc for the frontend process's Python and C/C++ allocations. The Rust allocations
+  stay on the Dynamo Python extension's jemalloc. The library path depends on the container
   architecture:
 
   ```bash
@@ -783,29 +784,49 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 </Warning>
 
 <ParamField path="MALLOC_CONF" type="string" default="jemalloc defaults">
-  Configure jemalloc when it is preloaded. The best values depend on the request workload and CPU
-  allocation. This is an empirical starting point, not a production default:
+  Configure the preloaded jemalloc, which serves the Python and C/C++ allocations. It does not
+  configure the Dynamo Python extension's jemalloc; see `_RJEM_MALLOC_CONF`. The best values depend
+  on the request workload and CPU allocation. This starting point has not been measured for Python
+  and C/C++ allocations:
 
   ```bash
-  export MALLOC_CONF="narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+  export MALLOC_CONF="background_thread:true"
   ```
+
+  Background threads return unused memory to the operating system off the request path. To return
+  it sooner after load drops, lower `dirty_decay_ms` from its default of 10000 at some CPU cost.
+
+  Do not use `narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000`.
+  It was measured on the KV router indexer while a preloaded jemalloc also served the extension's
+  Rust allocations: compared with jemalloc's defaults, it lowered write throughput and raised CPU
+  time per update, while `background_thread:true` removed the update latency tail that both showed.
+  That result is why the extension's jemalloc enables background threads by default. `tcache:true`
+  and `lg_tcache_max:15` restate jemalloc 5.3 defaults, and on hosts with more than eight CPUs
+  `narenas:32` caps arenas below the default of four per CPU.
 
   Validate allocator changes with the same AIPerf workload before and after enabling them. See
   [Bound frontend host memory growth](../../kubernetes/operations/performance-tuning.md#bound-frontend-host-memory-growth)
   for the symptom this addresses and how to measure the effect.
 </ParamField>
 
-<ParamField path="MIMALLOC_ALLOW_THP" type="string" default="unset">
-  Controls transparent huge pages (THP) for mimalloc, which the Dynamo Python extension loads in
-  every process that imports it, including when jemalloc serves the Rust allocations.
+<ParamField path="_RJEM_MALLOC_CONF" type="string" default="background_thread:true">
+  Configure the jemalloc that the Dynamo Python extension links in, which serves the Rust
+  allocations of every process that imports the extension, including the frontend. It overrides the
+  built-in default and takes the same options as `MALLOC_CONF`, except the profiling options
+  (`prof*`): this jemalloc is built without profiling and does not collect statistics (`stats.*`).
+  jemalloc reads it once, when the extension loads.
 
-  - Unset: mimalloc does not advise its memory for huge pages (`MADV_HUGEPAGE`), because the advice
-    raises resident memory both under load and while idle. The rest of the process follows the
-    host's THP policy, and on hosts where THP is `always`, the kernel can still back mimalloc's
-    memory with huge pages.
-  - `1`: mimalloc advises its memory for huge pages.
-  - `0`: mimalloc disables THP for the whole process when it loads, which also covers glibc,
-    jemalloc, and Python memory.
+  On Linux with glibc, the default starts background threads, named `jemalloc_bg_thd`, that return
+  unused memory to the operating system: the first when the extension loads, and up to four in
+  total. Other platforms run without them. Because of that first thread, a process is multi-threaded
+  as soon as it imports `dynamo`, and Python 3.12 and later emit a `DeprecationWarning` when such a
+  process calls `os.fork()`. A child process forked without `exec` runs without background threads.
+
+  Background threads lower the memory that the extension's jemalloc keeps while idle. They purge on
+  their own schedule, though, so resident memory can stay higher for several seconds after an
+  allocation burst than with `background_thread:false`. Check both peak and idle memory against the
+  container's memory limit. `_RJEM_MALLOC_CONF=background_thread:false` turns the threads off, and
+  the allocating threads then purge unused memory themselves.
 </ParamField>
 
 ## HTTP endpoints

@@ -112,14 +112,15 @@ measured traffic.
 ## Bound frontend host memory growth
 
 The frontend allocates host memory per request for tokenization, routing bookkeeping, and response
-assembly. By default, its Python and C/C++ code allocate from glibc and its Rust code from mimalloc.
-glibc may retain freed memory in allocator arenas instead of returning it to the operating system,
-so frontend resident memory can climb to a high-water mark under load and may not drop when the
-load stops. This retention is allocator behavior rather than a leak.
+assembly. Its Rust code allocates from a jemalloc that the Dynamo Python extension links in, which
+returns unused memory to the operating system in the background. Its Python and C/C++ code allocate
+from glibc by default. glibc may retain freed memory in allocator arenas instead of returning it to
+the operating system, so frontend resident memory can climb to a high-water mark under load and may
+not drop when the load stops. This retention is allocator behavior rather than a leak.
 
-To bound the retained footprint, preload jemalloc with decay enabled on the frontend container,
-either with `DYN_FRONTEND_JEMALLOC=1` or through `LD_PRELOAD`. jemalloc then serves the frontend's
-Rust allocations as well. See
+To bound the retained footprint, preload jemalloc with background threads on the frontend container,
+either with `DYN_FRONTEND_JEMALLOC=1` or through `LD_PRELOAD`. The preload serves the frontend's
+Python and C/C++ allocations; its Rust allocations stay on the extension's jemalloc. See
 [Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator)
 for the `LD_PRELOAD` and `MALLOC_CONF` values and for which container images ship `libjemalloc2`.
 
@@ -127,7 +128,8 @@ To verify the change, run the same workload and track the frontend container's m
 (`memory.current` on cgroup v2, or `memory.usage_in_bytes` on cgroup v1) across repeated benchmark
 rounds and through an idle window after the load stops.
 
-With glibc the value typically stays at its peak, while with jemalloc and decay it may
-settle toward a floor. Those decay settings do not guarantee that purging occurs during an idle
-window; include an idle period in the benchmark to confirm whether memory actually settles for
-your workload.
+With glibc the value typically stays at its peak. With jemalloc background threads, it should
+settle toward a floor during the idle window once the decay time (10 seconds by default) passes.
+Include an idle period in the benchmark to confirm that memory settles for your workload, and
+record the peak too: the extension's jemalloc can hold freed memory for several seconds after a
+burst before its background threads return it.
