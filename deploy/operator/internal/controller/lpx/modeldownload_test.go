@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -26,10 +25,6 @@ const (
 	modelDownloadTestBuildID       = "gs://bucket/model/build"
 	modelDownloadTestSecondBuildID = "gs://bucket/model/second-build"
 	modelDownloadTestLocalBuildID  = "file:///models/local-build"
-
-	modelDownloadTestCheckpointModel    = "openai/gpt-oss-20b"
-	modelDownloadTestCheckpointRevision = "6cee5e81ee83917806bbde320786a8fb61efebee"
-	modelDownloadTestCheckpoint         = modelDownloadTestCheckpointModel + "@" + modelDownloadTestCheckpointRevision
 )
 
 func TestEnsureModelsDownloaded(t *testing.T) {
@@ -43,20 +38,22 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 		dgd        *v1beta1.DynamoGraphDeployment
 		registry   lpx.ModelRegistry
 		existing   []string
+		wantReady  bool
 		wantErr    string
 		wantCalls  []string
 		wantBuilds []string
-		wantWait   []string
 	}{
 		{
-			name:     "local build does not call Model Express",
-			dgd:      newModelDownloadDGD(modelDownloadTestLocalBuildID),
-			registry: newModelDownloadRegistry(t, nil, nil),
+			name:      "local build does not call Model Express",
+			dgd:       newModelDownloadDGD(modelDownloadTestLocalBuildID),
+			registry:  newModelDownloadRegistry(t, nil, nil),
+			wantReady: true,
 		},
 		{
 			name:       "deduplicates the same build across draft and target",
 			dgd:        newModelDownloadDGD(modelDownloadTestBuildID, modelDownloadTestBuildID),
 			registry:   newModelDownloadRegistry(t, map[string]bool{modelDownloadTestBuildID: true}, nil),
+			wantReady:  true,
 			wantCalls:  []string{modelDownloadTestBuildID},
 			wantBuilds: []string{modelDownloadTestBuildID},
 		},
@@ -68,6 +65,7 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 				modelDownloadTestBuildID:       true,
 				modelDownloadTestSecondBuildID: true,
 			}, nil),
+			wantReady:  true,
 			wantCalls:  []string{modelDownloadTestSecondBuildID},
 			wantBuilds: []string{modelDownloadTestBuildID, modelDownloadTestSecondBuildID},
 		},
@@ -77,9 +75,9 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 			registry: newModelDownloadRegistry(t, map[string]bool{
 				modelDownloadTestBuildID: true,
 			}, nil),
+			wantReady:  false,
 			wantCalls:  []string{modelDownloadTestBuildID, modelDownloadTestSecondBuildID},
 			wantBuilds: []string{modelDownloadTestBuildID},
-			wantWait:   []string{modelDownloadTestSecondBuildID},
 		},
 		{
 			name:     "returns build URL resolution error",
@@ -92,141 +90,20 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Check uncached selected builds without acquiring their compiler snapshots")
-			downloaded, pending, err := ensureModelsDownloaded(t.Context(), tt.dgd, tt.registry, v1alpha1.ModelDownloadStatus{Builds: tt.existing})
+			builds, ready, err := ensureModelsDownloaded(t.Context(), tt.dgd, tt.registry, tt.existing)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, tt.wantWait, pending)
-			require.True(t, slices.Equal(downloaded.Builds, tt.wantBuilds), "downloaded builds = %v, want %v", downloaded.Builds, tt.wantBuilds)
-			require.Empty(t, downloaded.Checkpoints)
+			require.Equal(t, tt.wantReady, ready)
+			require.True(t, slices.Equal(builds, tt.wantBuilds), "downloaded builds = %v, want %v", builds, tt.wantBuilds)
 			if registry, ok := tt.registry.(*fakeModelDownloadRegistry); ok {
 				require.Equal(t, tt.wantCalls, registry.calls)
 				require.Zero(t, registry.acquireBuildSnapshotCalls)
 			}
 		})
 	}
-}
-
-func TestEnsureModelsDownloadedCheckpoints(t *testing.T) {
-	tests := []struct {
-		name            string
-		ready           map[string]bool
-		err             map[string]error
-		existing        v1alpha1.ModelDownloadStatus
-		wantErr         string
-		wantCalls       []string
-		wantBuilds      []string
-		wantCheckpoints []string
-		wantWait        []string
-	}{
-		{
-			name:            "downloads the checkpoint after the build",
-			ready:           map[string]bool{modelDownloadTestBuildID: true, modelDownloadTestCheckpoint: true},
-			wantCalls:       []string{modelDownloadTestBuildID, modelDownloadTestCheckpoint},
-			wantBuilds:      []string{modelDownloadTestBuildID},
-			wantCheckpoints: []string{modelDownloadTestCheckpoint},
-		},
-		{
-			name:       "waits for a checkpoint download in progress",
-			ready:      map[string]bool{modelDownloadTestBuildID: true},
-			wantCalls:  []string{modelDownloadTestBuildID, modelDownloadTestCheckpoint},
-			wantBuilds: []string{modelDownloadTestBuildID},
-			wantWait:   []string{modelDownloadTestCheckpoint},
-		},
-		{
-			name:       "reports a checkpoint download error with its identity",
-			ready:      map[string]bool{modelDownloadTestBuildID: true},
-			err:        map[string]error{modelDownloadTestCheckpoint: fmt.Errorf("repository not found")},
-			wantErr:    `ensure checkpoint "` + modelDownloadTestCheckpoint + `" is downloaded: repository not found`,
-			wantCalls:  []string{modelDownloadTestBuildID, modelDownloadTestCheckpoint},
-			wantBuilds: []string{modelDownloadTestBuildID},
-		},
-		{
-			name:            "reuses a fresh checkpoint download",
-			existing:        v1alpha1.ModelDownloadStatus{Builds: []string{modelDownloadTestBuildID}, Checkpoints: []string{modelDownloadTestCheckpoint}},
-			wantBuilds:      []string{modelDownloadTestBuildID},
-			wantCheckpoints: []string{modelDownloadTestCheckpoint},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Select the same checkpoint from two components of one graph")
-			dgd := newModelDownloadDGD(modelDownloadTestBuildID, modelDownloadTestBuildID)
-			for index := range dgd.Spec.Components {
-				dgd.Spec.Components[index].LPX.Checkpoint = newModelDownloadCheckpoint()
-			}
-			registry := newModelDownloadRegistry(t, tt.ready, tt.err)
-
-			t.Log("Check the deduplicated build and checkpoint in one pass")
-			downloaded, pending, err := ensureModelsDownloaded(t.Context(), dgd, registry, tt.existing)
-			if tt.wantErr != "" {
-				require.EqualError(t, err, tt.wantErr)
-			} else {
-				require.NoError(t, err)
-			}
-			require.Equal(t, tt.wantCalls, registry.calls)
-			require.Equal(t, tt.wantBuilds, downloaded.Builds)
-			require.Equal(t, tt.wantCheckpoints, downloaded.Checkpoints)
-			require.Equal(t, tt.wantWait, pending)
-			require.Nil(t, downloaded.LastCheckedAt)
-		})
-	}
-}
-
-func TestEnsureModelsDownloadedSharesDeadlineWithCheckpoints(t *testing.T) {
-	t.Log("Select one remote build and one checkpoint")
-	dgd := newModelDownloadDGD(modelDownloadTestBuildID)
-	dgd.Spec.Components[0].LPX.Checkpoint = newModelDownloadCheckpoint()
-	registry := newModelDownloadRegistry(t, map[string]bool{modelDownloadTestBuildID: true, modelDownloadTestCheckpoint: true}, nil)
-	started := time.Now()
-
-	t.Log("Each download receives half of the total check budget")
-	_, _, err := ensureModelsDownloaded(t.Context(), dgd, registry, v1alpha1.ModelDownloadStatus{})
-	require.NoError(t, err)
-	require.Len(t, registry.deadlines, 2)
-	for _, deadline := range registry.deadlines {
-		require.WithinDuration(t, started.Add(modelDownloadCheckTimeout/2), deadline, time.Second)
-	}
-}
-
-func TestCheckpointDownloadGatesWorkload(t *testing.T) {
-	t.Log("Select a local build with a checkpoint that is still downloading")
-	dgd := newModelDownloadDGD(modelDownloadTestLocalBuildID)
-	dgd.Spec.Components[0].LPX.Checkpoint = newModelDownloadCheckpoint()
-	child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
-	registry := newModelDownloadRegistry(t, nil, nil)
-	r := &graphReconciler{modelRegistry: registry}
-
-	t.Log("Hold the workload and name the pending checkpoint in the Ready condition")
-	result, err := r.reconcileModelDownloads(t.Context(), child, dgd)
-	require.NoError(t, err)
-	require.Equal(t, modelDownloadRequeueAfter, result.RequeueAfter)
-	ready := meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition)
-	require.NotNil(t, ready)
-	require.Equal(t, metav1.ConditionFalse, ready.Status)
-	require.Equal(t, modelDownloadPendingMessage+": "+modelDownloadTestCheckpoint, ready.Message)
-	require.Empty(t, child.Status.ModelDownload.Checkpoints)
-	require.Nil(t, child.Status.ModelDownload.LastCheckedAt)
-
-	t.Log("Release the workload and record the checkpoint once Model Express completes it")
-	registry.ready = map[string]bool{modelDownloadTestCheckpoint: true}
-	result, err = r.reconcileModelDownloads(t.Context(), child, dgd)
-	require.NoError(t, err)
-	require.Zero(t, result)
-	require.Equal(t, []string{modelDownloadTestCheckpoint}, child.Status.ModelDownload.Checkpoints)
-	require.Empty(t, child.Status.ModelDownload.Builds)
-	require.NotNil(t, child.Status.ModelDownload.LastCheckedAt)
-
-	t.Log("Removing the checkpoint clears download status without another check")
-	dgd.Spec.Components[0].LPX.Checkpoint = nil
-	result, err = r.reconcileModelDownloads(t.Context(), child, dgd)
-	require.NoError(t, err)
-	require.Zero(t, result)
-	require.Nil(t, child.Status.ModelDownload)
-	require.Equal(t, []string{modelDownloadTestCheckpoint, modelDownloadTestCheckpoint}, registry.calls)
 }
 
 func TestEnsureModelsDownloadedSharesDeadlineAcrossBuilds(t *testing.T) {
@@ -241,12 +118,12 @@ func TestEnsureModelsDownloadedSharesDeadlineAcrossBuilds(t *testing.T) {
 	started := time.Now()
 
 	t.Log("Continue checking later builds and retain their completed progress")
-	downloaded, pending, err := ensureModelsDownloaded(ctx, dgd, registry, v1alpha1.ModelDownloadStatus{})
+	builds, result, err := ensureModelsDownloaded(ctx, dgd, registry, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorContains(t, err, "download failed")
-	require.Empty(t, pending)
+	require.Zero(t, result)
 	require.Equal(t, []string{modelDownloadTestBuildID, modelDownloadTestSecondBuildID}, registry.calls)
-	require.Equal(t, []string{modelDownloadTestSecondBuildID}, downloaded.Builds)
+	require.Equal(t, []string{modelDownloadTestSecondBuildID}, builds)
 	require.Zero(t, registry.acquireBuildSnapshotCalls)
 
 	t.Log("Each download receives a bounded share of the total check budget")
@@ -369,9 +246,9 @@ func TestEnsureModelsDownloadedCheckTimeout(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), parentTimeout)
 			defer cancel()
 
-			_, pending, err := ensureModelsDownloaded(ctx, dgd, registry, v1alpha1.ModelDownloadStatus{})
+			_, ready, err := ensureModelsDownloaded(ctx, dgd, registry, nil)
 			require.NoError(t, err)
-			require.Empty(t, pending)
+			require.True(t, ready)
 			require.Len(t, registry.deadlines, 1)
 			require.WithinDuration(t, started.Add(min(parentTimeout, modelDownloadCheckTimeout)), registry.deadlines[0], 100*time.Millisecond)
 		})
@@ -433,6 +310,7 @@ type fakeModelDownloadRegistry struct {
 	ready                     map[string]bool
 	err                       map[string]error
 	calls                     []string
+	checkpointCalls           []string
 	deadlines                 []time.Time
 	acquireBuildSnapshotCalls int
 }
@@ -440,14 +318,6 @@ type fakeModelDownloadRegistry struct {
 func (r *fakeModelDownloadRegistry) AcquireBuildSnapshot(ctx context.Context, id string) (*lpx.BuildSnapshot, error) {
 	r.acquireBuildSnapshotCalls++
 	return r.ModelRegistry.AcquireBuildSnapshot(ctx, id)
-}
-
-func (r *fakeModelDownloadRegistry) EnsureCheckpointDownloaded(ctx context.Context, checkpoint *v1beta1.LPXCheckpoint) (bool, error) {
-	key := lpx.CheckpointKey(checkpoint)
-	r.calls = append(r.calls, key)
-	deadline, _ := ctx.Deadline()
-	r.deadlines = append(r.deadlines, deadline)
-	return r.ready[key], r.err[key]
 }
 
 func (r *fakeModelDownloadRegistry) EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error) {
@@ -464,15 +334,6 @@ func newModelDownloadRegistry(t *testing.T, ready map[string]bool, errs map[stri
 	registry, err := lpx.NewModelRegistry("", nil)
 	require.NoError(t, err)
 	return &fakeModelDownloadRegistry{ModelRegistry: registry, ready: ready, err: errs}
-}
-
-// newModelDownloadCheckpoint returns a new admitted checkpoint selection.
-func newModelDownloadCheckpoint() *v1beta1.LPXCheckpoint {
-	return &v1beta1.LPXCheckpoint{
-		Provider: v1beta1.LPXCheckpointProviderHuggingFace,
-		Model:    modelDownloadTestCheckpointModel,
-		Revision: modelDownloadTestCheckpointRevision,
-	}
 }
 
 // newModelDownloadDGD supplies only the component-to-build mapping consumed by download checks.
