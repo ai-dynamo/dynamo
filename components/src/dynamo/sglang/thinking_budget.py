@@ -137,6 +137,15 @@ def apply_thinking_budget(
 
     _validate_server_config(server_args, engine)
 
+    if (
+        _resolved_reasoning_parser(server_args, engine) == "gpt-oss"
+        and result.get("json_schema") is not None
+    ):
+        raise InvalidArgument(
+            "thinking_token_budget is unsupported for SGLang GPT-OSS with "
+            "json_schema structured output because reasoning can produce malformed Harmony"
+        )
+
     # Rust omits require_reasoning when false on preprocessed requests.
     require_reasoning = request.get("require_reasoning", False)
     if require_reasoning is False:

@@ -106,6 +106,44 @@ def test_apply_thinking_budget_leaves_omitted_budget_unset():
     assert actual is not sampling_params
 
 
+@pytest.mark.parametrize("budget", [0, 16])
+@pytest.mark.parametrize(
+    "reasoning_fields", [{}, {"require_reasoning": False}, {"require_reasoning": True}]
+)
+@pytest.mark.parametrize("parser", ["gpt-oss", "auto"])
+def test_gpt_oss_structured_output_rejects_budget(
+    monkeypatch, budget, reasoning_fields, parser
+):
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "128")
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(config_value=lambda key: "gpt-oss")
+    )
+    with pytest.raises(InvalidArgument, match="GPT-OSS.*json_schema"):
+        apply_thinking_budget(
+            {"stop_conditions": {"max_thinking_tokens": budget}, **reasoning_fields},
+            {"json_schema": '{"type":"object"}'},
+            _server_args(reasoning_parser=parser),
+            engine=engine,
+        )
+
+
+def test_gpt_oss_structured_output_without_budget_preserves_sampling():
+    sampling = {"json_schema": '{"type":"object"}'}
+    assert (
+        apply_thinking_budget({}, sampling, _server_args(reasoning_parser="gpt-oss"))
+        == sampling
+    )
+
+
+def test_gpt_oss_plain_output_accepts_budget(monkeypatch):
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "128")
+    assert apply_thinking_budget(
+        {"stop_conditions": {"max_thinking_tokens": 16}, "require_reasoning": True},
+        {"json_schema": None},
+        _server_args(reasoning_parser="gpt-oss"),
+    ) == {"json_schema": None, "custom_params": {"thinking_budget": 16}}
+
+
 def test_apply_thinking_budget_rejects_forwarded_budget_without_canonical_value():
     with pytest.raises(InvalidArgument, match="requires a canonical"):
         apply_thinking_budget(

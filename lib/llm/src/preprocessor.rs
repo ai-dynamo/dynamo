@@ -60,7 +60,9 @@ use crate::local_model::runtime_config::{
     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
-use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
+use crate::local_model::runtime_config::{
+    SGLANG_GENERATE_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
+};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -3036,6 +3038,19 @@ impl OpenAIPreprocessor {
         }
 
         let has_thinking_budget = stop_conditions.max_thinking_tokens.is_some();
+        if has_thinking_budget
+            && self
+                .runtime_config
+                .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
+            && Self::has_structured_response_format(request)
+            && !Self::structured_response_supports_sglang_reasoning_gate(
+                self.runtime_config.reasoning_parser.as_deref(),
+            )
+        {
+            return Err(invalid_argument_error(
+                "thinking_token_budget is not supported with GPT-OSS structured output on SGLang",
+            ));
+        }
         builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
 
@@ -10554,6 +10569,94 @@ mod tests {
         .unwrap();
 
         assert!(OpenAIPreprocessor::backend_extra_args(&request, true, None).is_none());
+    }
+
+    #[test]
+    fn test_sglang_gpt_oss_structured_output_rejects_thinking_budget() {
+        use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.reasoning_parser = Some("gpt_oss".to_string());
+        mdc.runtime_config
+            .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for response_format in [
+            serde_json::json!({"type": "json_object"}),
+            serde_json::json!({"type": "json_schema", "json_schema": {
+                "name": "result", "schema": {"type": "object", "properties": {}}
+            }}),
+        ] {
+            for budget_fields in [
+                serde_json::json!({"thinking_token_budget": 32}),
+                serde_json::json!({"thinking_token_budget": 0}),
+                serde_json::json!({"nvext": {"max_thinking_tokens": 16}}),
+                serde_json::json!({"thinking_token_budget": 0, "nvext": {"max_thinking_tokens": 16}}),
+            ] {
+                let mut value = serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "response_format": response_format,
+                });
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(budget_fields.as_object().unwrap().clone());
+                let request: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+                let error = preprocessor
+                    .builder(&request)
+                    .err()
+                    .expect("SGLang cannot honor GPT-OSS structured output with a thinking budget");
+                assert_eq!(
+                    error.downcast_ref::<DynamoError>().unwrap().error_type(),
+                    ErrorType::InvalidArgument,
+                );
+                assert!(error.to_string().contains("thinking_token_budget"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_gpt_oss_thinking_budget_preserves_supported_output_paths() {
+        use crate::local_model::runtime_config::{
+            SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+
+        for (capability, budget, structured, expected_reasoning) in [
+            (SGLANG_GENERATE_CAPABILITY, Some(32), false, true),
+            (SGLANG_GENERATE_CAPABILITY, None, true, false),
+            (VLLM_INFERENCE_V1_GENERATE_CAPABILITY, Some(0), true, true),
+        ] {
+            let mut mdc = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            mdc.runtime_config.reasoning_parser = Some("gpt_oss".to_string());
+            mdc.runtime_config
+                .set_engine_specific(capability, true)
+                .unwrap();
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking_token_budget": budget,
+                "response_format": if structured { serde_json::json!({"type": "json_object"}) } else { serde_json::Value::Null },
+            })).unwrap();
+            let preprocessed = preprocessor
+                .builder(&request)
+                .unwrap()
+                .token_ids(vec![1])
+                .build()
+                .unwrap();
+            assert_eq!(preprocessed.require_reasoning, expected_reasoning);
+            assert_eq!(preprocessed.stop_conditions.max_thinking_tokens, budget);
+        }
     }
 
     #[test]

@@ -1194,6 +1194,21 @@ def test_build_sampling_params_maps_thinking_budget_for_token_requests():
     assert sampling_params["custom_params"] == {"thinking_budget": 32}
 
 
+@pytest.mark.parametrize("budget", [0, 16])
+def test_build_sampling_params_rejects_gpt_oss_structured_budget(monkeypatch, budget):
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "128")
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    handler.config.server_args.reasoning_parser = "gpt-oss"
+    with pytest.raises(InvalidArgument, match="GPT-OSS.*json_schema"):
+        handler._build_sampling_params(
+            {
+                "sampling_options": {"guided_decoding": {"json": {"type": "object"}}},
+                "stop_conditions": {"max_tokens": 128, "max_thinking_tokens": budget},
+                "require_reasoning": True,
+            }
+        )
+
+
 @pytest.mark.parametrize("budget", [0, 32])
 def test_build_sampling_params_ignores_budget_when_wire_omits_false_reasoning(budget):
     handler = _new_decode_handler(use_sglang_tokenizer=False)
