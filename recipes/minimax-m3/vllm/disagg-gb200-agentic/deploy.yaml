@@ -156,6 +156,7 @@ spec:
                 - --kv-cache-dtype
                 - fp8
                 - --enable-multimodal
+                - --frontend-decoding
                 - --mm-encoder-tp-mode
                 - data
                 - --skip-mm-profiling
@@ -300,6 +301,7 @@ spec:
                 - --kv-cache-dtype
                 - fp8
                 - --enable-multimodal
+                - --frontend-decoding
                 - --mm-encoder-tp-mode
                 - data
                 - --skip-mm-profiling

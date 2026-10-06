@@ -131,6 +131,7 @@ spec:
                 - $(SERVED_MODEL_NAME)
                 - --trust-remote-code
                 - --enable-multimodal
+                - --frontend-decoding
                 - --mm-encoder-tp-mode
                 - data
                 - --skip-mm-profiling

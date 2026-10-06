@@ -198,7 +198,7 @@ Both targets use vLLM, TP4 workers, FP8 KV cache, prefix caching, KV events, KV-
 - Both manifests select real EAGLE3 verification by default; synthetic acceptance length 2.89 is an explicit benchmark-only option.
 - The refreshed three-replica aggregated and 3P3D disaggregated compositions have local validation only. Local validation does not establish readiness, response correctness, or performance for the current image.
 - The aggregated target uses vLLM's `OffloadingConnector` with `CPUOffloadingSpec` and sets `cpu_bytes_to_use` to `400000000000`.
-- The disaggregated target uses `NixlConnector` with `kv_role=kv_both` on prefill and decode workers.
+- Both targets enable `--frontend-decoding`. With the pinned runtime image, this path supports VP8/VP9 video input but does not support H.264/H.265. Re-encode H.264/H.265 videos to VP9 before sending them to these deployments.
 
 ## Source
 
