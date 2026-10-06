@@ -2418,6 +2418,54 @@ class TestRLAdminRouteHardening:
                 assert "JSON object" in resp["message"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("reset_result", [True, None])
+    async def test_flush_cache_accepts_successful_reset_results(self, reset_result):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = SimpleNamespace(
+            reset_prefix_cache=AsyncMock(return_value=reset_result)
+        )
+
+        resp = await handler.flush_cache({})
+
+        assert resp == {"status": "ok", "message": "Cache flushed"}
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_flush_cache_reports_declined_reset(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = SimpleNamespace(
+            reset_prefix_cache=AsyncMock(return_value=False)
+        )
+
+        resp = await handler.flush_cache({})
+
+        assert resp["status"] == "error"
+        assert "KV blocks are still in use" in resp["message"]
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_legacy_pause_tracks_state_when_cache_reset_is_declined(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = SimpleNamespace(
+            pause_generation=AsyncMock(
+                side_effect=[TypeError("unsupported keyword"), None]
+            ),
+            reset_prefix_cache=AsyncMock(return_value=False),
+        )
+
+        resp = await handler.pause_generation({"clear_cache": True})
+
+        assert resp["status"] == "error"
+        assert "KV blocks are still in use" in resp["message"]
+        assert handler._paused is True
+        assert handler.engine_client.pause_generation.await_count == 2
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_keep_pause_rejects_active_lora_requests(self):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
