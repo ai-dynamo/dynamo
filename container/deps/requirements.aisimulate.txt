@@ -3,4 +3,4 @@
 
 # Exact version and public source used by both local installs and wheel builders.
 # Keep the source revision equal to Cargo.toml until a matching release exists.
-aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@3fa82b954b273faedf9eb8eef9872ce6f0b998bb#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'
+aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@8e69498db4e15b1b8bc3cef05d350ab9641d696d#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'
