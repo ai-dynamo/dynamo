@@ -77,7 +77,6 @@ pub fn decode(raw: &Value, headers: &http::HeaderMap) -> Result<Request> {
 }
 
 fn validate(raw: &Value) -> Result<()> {
-    ensure!(raw.is_object(), "request must be a JSON object");
     if let Some(nvext) = raw.get("nvext").filter(|v| !v.is_null()) {
         ensure!(nvext.is_object(), "nvext must be an object");
         for reserved in [
@@ -98,9 +97,6 @@ fn validate(raw: &Value) -> Result<()> {
             );
         }
     }
-    raw.get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("model must be a string"))?;
     let messages = raw
         .get("messages")
         .and_then(Value::as_array)

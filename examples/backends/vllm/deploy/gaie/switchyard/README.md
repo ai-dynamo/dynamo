@@ -33,7 +33,9 @@ sequenceDiagram
 
 These are two distinct ExtProc calls: PreProc chooses the model before route matching; the EPP
 selects the worker after pool selection. The SDK runs inside PreProc and makes no generation calls
-for the supplied StageRouter policy. PreProc receives no Dynamo load or cache signals.
+for the supplied StageRouter policy. PreProc receives no Dynamo load or cache signals. Both services use Dynamo's ExtProc streaming
+server. Switchyard implements its `RequestPreprocessor` hook; it does not implement another
+gateway protocol server.
 
 ## Prerequisites
 
@@ -58,8 +60,8 @@ You also need Docker, `kubectl` with Kustomize support, and a registry the clust
 
 ## Build and deploy
 
-From the Dynamo repository root, build the PreProc image. The build reuses Dynamo's committed
-ExtProc protos, so the repository root is the required build context:
+From the Dynamo repository root, build the PreProc image. It uses Dynamo's ExtProc library with
+EPP dependencies disabled, so the repository root is the required build context:
 
 ```bash
 export PREPROC_IMAGE=registry.example.com/your-project/switchyard-preproc:example
@@ -111,7 +113,7 @@ Set `X-Switchyard-Session-Id` to retain StageRouter state across requests in one
 ## Configure routing
 
 Edit [routes.toml](preproc/config/routes.toml) using the native Switchyard runner schema, then
-reapply the Kustomization. `Runner::from_toml` constructs the SDK directly; there is no adapter
+reapply the Kustomization. `Runner::load` reads the TOML and constructs the SDK; there is no adapter
 configuration schema. The request's `model` is a **route ID**, such as `auto`, rather than a served
 model alias. Named routes can select other configured policies.
 

@@ -22,24 +22,19 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+dynamo-ext-proc = { path = "../../../../../../../deploy/inference-gateway/ext-proc", default-features = false }
 switchyard-runner = "=0.3.0"
 protocol = { package = "switchyard-protocol", version = "=0.3.0" }
 switchyard-translation = "=0.3.0"
 anyhow = "1"
 axum = "0.8"
 http = "1"
-prost = "0.13.5"
-prost-types = "0.13.5"
 serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net"] }
-tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.13.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[build-dependencies]
-tonic-build = "0.13.1"
 
 # Keep optional SDK dependencies out of Dynamo's serving workspace.
 [workspace]

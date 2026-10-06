@@ -14,48 +14,76 @@ description = "Envoy ext_proc gRPC server for Dynamo inference routing"
 [[bin]]
 name = "dynamo-ext-proc"
 path = "src/bin/dynamo-ext-proc.rs"
+required-features = ["epp"]
+
+[features]
+default = ["epp"]
+epp = [
+    "dep:async-trait",
+    "dep:dynamo-custom-policy-builtin",
+    "dep:dynamo-kv-router",
+    "dep:dynamo-protocols",
+    "dep:dynamo-runtime",
+    "dep:axum",
+    "dep:dashmap",
+    "dep:futures",
+    "dep:hyper-util",
+    "dep:k8s-openapi",
+    "dep:kube",
+    "dep:prometheus",
+    "dep:rcgen",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:tokio-rustls",
+    "dep:tokio-util",
+    "dep:tonic-health",
+    "dep:tracing-subscriber",
+    "dep:validator",
+    "dep:dynamo-llm",
+]
 
 [dependencies]
-dynamo-custom-policy-builtin = { workspace = true }
-async-trait = { workspace = true }
-dynamo-kv-router = { workspace = true, features = [
+dynamo-custom-policy-builtin = { optional = true, workspace = true }
+async-trait = { optional = true, workspace = true }
+dynamo-kv-router = { optional = true, workspace = true, features = [
     "metrics",
     "runtime-protocols",
     "standalone-selection",
 ] }
-dynamo-protocols = { workspace = true }
-dynamo-runtime = { workspace = true }
+dynamo-protocols = { optional = true, workspace = true }
+dynamo-runtime = { optional = true, workspace = true }
 
 anyhow = { workspace = true }
-axum = { workspace = true }
+axum = { optional = true, workspace = true }
 bytes = { workspace = true }
-dashmap = { workspace = true }
-futures = { workspace = true }
-hyper-util = { workspace = true, features = ["tokio", "http2", "server-auto"] }
-k8s-openapi = { workspace = true }
-kube = { workspace = true }
-prometheus = { workspace = true }
+dashmap = { optional = true, workspace = true }
+futures = { optional = true, workspace = true }
+hyper-util = { optional = true, workspace = true, features = ["tokio", "http2", "server-auto"] }
+k8s-openapi = { optional = true, workspace = true }
+kube = { optional = true, workspace = true }
+prometheus = { optional = true, workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
-rcgen = { workspace = true }
-reqwest = { workspace = true }
-rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
+rcgen = { optional = true, workspace = true }
+reqwest = { optional = true, workspace = true }
+rustls = { optional = true, workspace = true }
+rustls-pemfile = { optional = true, workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-rustls = { workspace = true }
-tokio-util = { workspace = true }
+tokio-rustls = { optional = true, workspace = true }
+tokio-util = { optional = true, workspace = true }
 # `net` for TcpListenerStream (serve_with_incoming), `sync` for ReceiverStream.
 # Declared explicitly rather than relying on workspace feature unification.
 tokio-stream = { workspace = true, features = ["net", "sync"] }
 tonic = { workspace = true }
-tonic-health = { workspace = true }
+tonic-health = { optional = true, workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["fmt"] }
+tracing-subscriber = { optional = true, workspace = true, features = ["fmt"] }
 uuid = { workspace = true }
-validator = { workspace = true }
+validator = { optional = true, workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -68,7 +96,7 @@ ignored = ["prost"]
 tonic-build = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dynamo-llm = { path = "../../../lib/llm" }
+dynamo-llm = { optional = true, path = "../../../lib/llm" }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-dynamo-llm = { path = "../../../lib/llm", default-features = false }
+dynamo-llm = { optional = true, path = "../../../lib/llm", default-features = false }

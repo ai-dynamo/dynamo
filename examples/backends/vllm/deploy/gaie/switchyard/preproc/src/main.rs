@@ -13,12 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod error;
 mod json;
-mod proto;
+mod preprocessor;
 mod request;
 mod router;
-mod server;
 
 use std::{
     sync::{
@@ -29,14 +27,12 @@ use std::{
 };
 
 use axum::{Router as HttpRouter, extract::State, http::StatusCode, routing::get};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use tonic::transport::Server;
 
-use crate::{
-    proto::envoy::service::ext_proc::v3::external_processor_server::ExternalProcessorServer,
-    router::Router,
-    server::{MAX_BODY, MAX_CONCURRENT, MAX_IN_FLIGHT, Preproc},
-};
+use dynamo_ext_proc::{ExtProcServer, PreprocessLimits};
+
+use crate::{preprocessor::MAX_BODY, router::Router};
 
 async fn readiness(State(ready): State<Arc<AtomicBool>>) -> StatusCode {
     if ready.load(Ordering::Relaxed) {
@@ -56,7 +52,6 @@ async fn main() -> anyhow::Result<()> {
     let router = Arc::new(Router::load(
         std::env::var("ROUTES_CONFIG").unwrap_or_else(|_| "config/routes.toml".into()),
     )?);
-    let capacity = Arc::new(Semaphore::new(MAX_CONCURRENT));
     let ready = Arc::new(AtomicBool::new(true));
     let (shutdown, receiver) = watch::channel(false);
     let http = HttpRouter::new()
@@ -75,13 +70,10 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
     });
-    let processor = ExternalProcessorServer::new(Preproc {
-        router,
-        capacity,
-        streams: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
-    })
-    .max_decoding_message_size(MAX_BODY + 65536)
-    .max_encoding_message_size(MAX_BODY + 65536);
+    let processor = ExtProcServer::from_preprocessor(router, PreprocessLimits::default())
+        .into_service()
+        .max_decoding_message_size(MAX_BODY + 65536)
+        .max_encoding_message_size(MAX_BODY + 65536);
     let addr = std::env::var("GRPC_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:9002".into())
         .parse()?;

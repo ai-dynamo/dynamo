@@ -15,7 +15,6 @@
 
 use std::{
     collections::HashSet,
-    fs,
     path::Path,
     sync::Mutex,
     time::{Duration, Instant},
@@ -36,10 +35,8 @@ pub struct Router {
 
 impl Router {
     pub fn load(routes: impl AsRef<Path>) -> Result<Self> {
-        let source = fs::read_to_string(routes.as_ref())
-            .with_context(|| format!("read routing config {}", routes.as_ref().display()))?;
         // SDK parse/build access would allow validation of decision-only options before construction.
-        Ok(Self::new(Runner::from_toml(&source)?))
+        Ok(Self::new(Runner::load(routes)?))
     }
 
     pub fn new(runner: Runner) -> Self {
@@ -84,9 +81,11 @@ impl Router {
             let identity = (route_id.as_str().to_owned(), session.clone(), agent);
             let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
             if !sessions.contains(&identity) && sessions.len() >= 4096 {
-                return Err(
-                    crate::error::Reject::new(503, "session identity capacity exceeded").into(),
-                );
+                return Err(dynamo_ext_proc::PreprocessError::new(
+                    503,
+                    "session identity capacity exceeded",
+                )
+                .into());
             }
             sessions.insert(identity);
         }
@@ -94,15 +93,12 @@ impl Router {
         original_ir.model = None;
         let outcome = tokio::time::timeout(Duration::from_secs(1), route.decide(request))
             .await
-            .map_err(|_| crate::error::Reject::new(504, "SDK routing deadline exceeded"))?
-            .map_err(|_| crate::error::Reject::new(500, "SDK routing failed"))?;
+            .map_err(|_| {
+                dynamo_ext_proc::PreprocessError::new(504, "SDK routing deadline exceeded")
+            })?
+            .map_err(|_| dynamo_ext_proc::PreprocessError::new(500, "SDK routing failed"))?;
         ensure!(outcome.response.is_none(), "routing-only contract violated");
-        let decision = self
-            .runner
-            .describe_decision(&route_id, &outcome)
-            .context("SDK selected an unresolved target")?;
-        let target = decision.selected.target;
-        let model = decision.selected.model;
+        let model = outcome.selected_model_id()?.clone();
         let mut selected_ir = outcome.request.llm_request;
         selected_ir.model = None;
         ensure!(
@@ -112,7 +108,6 @@ impl Router {
         let output = crate::json::replace_model(body, model.as_str())?;
         let elapsed_us = started.elapsed().as_micros() as u64;
         tracing::info!(
-            %target,
             %model,
             elapsed_us,
             "routing decision"

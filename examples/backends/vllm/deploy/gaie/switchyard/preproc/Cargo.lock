@@ -317,6 +317,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "dynamo-ext-proc"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1977,18 +1996,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "dynamo-ext-proc",
  "http",
- "prost",
- "prost-types",
  "serde",
  "serde_json",
  "switchyard-protocol",
  "switchyard-runner",
  "switchyard-translation",
  "tokio",
- "tokio-stream",
  "tonic",
- "tonic-build",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2143,9 +2159,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.52.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "317fafbbe3f02fc663dad00ea6186197de963cd4190e86a26d8d0fae095539af"
 dependencies = [
  "bytes",
  "libc",
@@ -2188,6 +2204,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2463,6 +2480,7 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

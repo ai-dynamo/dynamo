@@ -75,7 +75,7 @@ pub fn is_prefiller_host_port_header(key: &str) -> bool {
 }
 
 /// Build a `HeaderValueOption` that **replaces** any existing value for the key.
-fn header_overwrite(key: &str, raw_value: &[u8]) -> HeaderValueOption {
+pub(crate) fn header_overwrite(key: &str, raw_value: &[u8]) -> HeaderValueOption {
     HeaderValueOption {
         header: Some(HeaderValue {
             key: key.to_string(),
