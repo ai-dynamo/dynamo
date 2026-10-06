@@ -986,7 +986,6 @@ func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) 
 	partitions, err := artifacts.NewPartitions(int32(lpuPartitions + len(fixture.nonLPUDeviceTypes)))
 	require.NoError(t, err)
 
-	// Describe each single-node LPU partition in compiler order.
 	for index := range lpuPartitions {
 		partitionID := firstPartitionID + uint32(index)
 		partition := partitions.At(index)
@@ -1003,7 +1002,6 @@ func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) 
 		setTestChipArchitecture(t, detail, "polarisB0")
 	}
 
-	// Append non-LPU artifacts after the LPU partitions.
 	for offset, deviceType := range fixture.nonLPUDeviceTypes {
 		partition := partitions.At(lpuPartitions + offset)
 		ref, err := partition.NewPartition()

@@ -147,8 +147,7 @@ func retainedPropSyncEdges(partitions, remote []BuildPartition, edgePositions []
 	return retained
 }
 
-// projectV3PropSync projects partitions and the selected edges between them. Each
-// edge position joins partitions[position] to partitions[position+1].
+// Each edgePositions entry is a source index whose destination is position+1.
 func projectV3PropSync(partitions []BuildPartition, edgePositions []int) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
 	// Project each physical partition into the V3 allocation metadata envelope.
 	partitionInfo := make(map[string]any, len(partitions)+1)
