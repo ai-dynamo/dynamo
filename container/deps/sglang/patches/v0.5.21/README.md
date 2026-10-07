@@ -27,6 +27,12 @@ verifies that Python resolves SGLang to `/sgl-workspace/sglang/python`. No start
 wrapper or writable source mount is needed when serving the resulting image.
 The patch step applies to CUDA runtime, dev, and local-dev images; XPU is excluded.
 
+The CUDA build also pins `transformers==5.19.0` and `tokenizers==0.23.2` without
+reinstalling their dependencies. The base image's Transformers 5.12.1 lacks
+`Glm5NextProcessor` and silently treats image/video requests as text-only (see
+[SGLang #39831](https://github.com/sgl-project/sglang/issues/39831)). A build-time
+check imports the image/video processors and verifies AutoProcessor registration.
+
 For a standalone applicability check against a clean release checkout:
 
 ```bash
