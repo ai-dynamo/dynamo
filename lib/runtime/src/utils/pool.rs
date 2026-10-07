@@ -581,7 +581,6 @@ mod tests {
             assert_eq!(*waiting_item, 0); // Should be reset value
         });
 
-        // Wait for the thread to start before checking that it cannot acquire the item.
         started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 1); // Should be waiting
 
