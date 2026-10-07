@@ -196,6 +196,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 <ParamField path="frontendSidecar" type="string">
   Designates a container in each selected complete Pod template as the frontend sidecar. The value must match a container `name` in the component template or every role template; the operator merges its frontend-sidecar defaults (Dynamo env vars, ports, health probes) into that container the same way it merges into `main`.
+
+  Strict namespace-prefix matching uses the sidecar's own image version, independently of the component's runtime container and `runtimeVersionOverride`. If the sidecar image tag does not identify the runtime version, set `DYN_NAMESPACE_PREFIX_STRICT=true` in that container's `env` when its image contains the strict-prefix implementation.
 </ParamField>
 
 <ParamField path="compilationCache" type="CompilationCacheConfig">
@@ -401,6 +403,8 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
   </ParamField>
   <ParamField path="targetContainerName" type="string" default="main">
     The workload container to snapshot and restore. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+
+    Automatic captures run this container under Snapshot's cuInterpose launcher, so it must set `command`. The `main` container always has one, because the operator defaults it to `/bin/sh -c`. To opt out, set the pod template annotation `nvidia.com/cuda-shared-memory-support: disabled`. Multi-GPU captures can then fail when NCCL uses cuMem or NVLS memory.
   </ParamField>
   <ParamField path="job" type="ComponentCheckpointJobConfig">
     Customizes the DGD-managed `SnapshotJob` capture Pod.
