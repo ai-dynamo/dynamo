@@ -19,11 +19,12 @@ The goal is to load one serving indexer (`python -m dynamo.router --serve-indexe
 
 | Piece | Where | Role |
 |---|---|---|
-| Static-source patch | commit `chore(kv-router): EXPERIMENT static direct-ZMQ KV sources`; `artifacts/tooling/static-kv-sources.patch` | Lets the serving indexer subscribe to and accept phantom publishers without discovery or serving membership. |
-| Stream exporter | `mooncake_bench --export-phantom-streams DIR` (phase-1 harness, `lib/bench`) | Captures AgentX on the mocker, or loads a corpus cache, and writes one base stream per captured worker. |
-| `phantom_plan` | this crate | Prints rates, speedup, and coverage. Splits the phantoms across publisher processes and writes the indexer's static-source file. |
-| `phantom_publisher` | this crate | Runs N phantom workers per process, each on its own ZMQ PUB socket. Sends the production wire format with open-loop pacing. |
+| Static-source patch | commits `chore(kv-router): EXPERIMENT static direct-ZMQ KV sources` and `chore(kv-router): EXPERIMENT static-source delivery accounting`; squashed in `artifacts/tooling/static-kv-sources.patch` | Lets the serving indexer subscribe to and accept phantom publishers without discovery or serving membership, and counts what it applied from them. |
+| Stream exporter | `mooncake_bench --export-phantom-streams DIR` (phase-1 harness, `lib/bench`) | Captures AgentX on the mocker, or loads a corpus cache, and writes one base stream per captured worker. Reports per-stream eviction. |
+| `phantom_plan` | this crate | Prints rates, speedup, coverage, eviction, the indexer's socket budget, and the delivery rule. Splits the phantoms across publisher processes and writes the indexer's static-source and environment files. |
+| `phantom_publisher` | this crate | Runs N phantom workers per process, each on its own ZMQ XPUB socket. Waits until the indexer subscribed to every socket, then sends a format-identical copy of the production wire with open-loop pacing. |
 | `query_driver` | this crate | Sends the real `kv_indexer_query` RPC with the phantoms' own lookups on the same clock, and reports RTT, issue lag, rate, and self-hit fraction. |
+| `delivery_check` | this crate | Applies the delivery rule to one arm: publisher summaries against the indexer's accounting. |
 | `scripts/local_smoke.sh` | this crate | Loopback plumbing smoke. Never report numbers from it. |
 
 ### Static-source patch
@@ -48,24 +49,62 @@ Behavior:
   routable.
 - A static ID that collides with a discovered worker or publisher is skipped and logged.
 - If the event plane is not direct ZMQ, startup fails.
+- Static sources require an explicit `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB`; startup fails without
+  it. Use the value `phantom_plan` prints, identical in both arms.
 - The env var applies to any process whose KvRouter subscribes to direct-ZMQ events. That
   includes a frontend's embedded router, through the same `start_subscriber` path. Set it only
   on the serving indexer.
 
+Delivery accounting (both arms, same code):
+
+- For each static source, the live path counts what it admits to the indexer queue: events,
+  stored and removed blocks, and the first and last event ID. It also counts gap resets
+  (`ResetDegraded`), rank resets after the source had indexed events (any cause, gap resets
+  included, shutdown excluded), and events dropped because the source was inactive. Counters sit
+  on one cache line per source and are published once per envelope.
+- A source whose first admitted event is not event 1 is logged once at WARN: its prefix was lost
+  before the indexer applied it. A live-only cursor accepts the first event it sees as initial,
+  so without this check such a loss would produce no reset and no log.
+- Admission is the last point that is identical in both arms. The indexer's own
+  `dynamo_kvrouter_kv_cache_events_applied{event_type,status}` counts events (not blocks) for
+  all sources, has no static-source split and no gap counts, and is recorded inside the
+  arm-specific indexer backends. Keep it only as a cross-check, for example for
+  `status="block_not_found"` removes.
+- Environment:
+
+  | Variable | Meaning |
+  |---|---|
+  | `DYN_EXPERIMENT_STATIC_KV_REPORT_S` | Report interval in seconds (default 10). |
+  | `DYN_EXPERIMENT_STATIC_KV_ACCOUNTING_OUT` | Rewrite each report as JSON to this path (atomic rename). |
+  | `DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS` | Snapshot the totals at this instant (set it to `--start-at-unix-ms`). Reports then split `warmup` from `timed`. It must lie in the future when the indexer starts. |
+
+- Each report is also logged at WARN as `EXPERIMENT static KV source accounting report=<json>`.
+  It carries `kind` (`interval`, `split`, or `final`), `t_unix_ms`, `static_sources`,
+  `endpoints_per_sub`, `warmup`, `timed`, and `accounting` (totals, `sources_with_events`,
+  `sources_first_event_late`, `gap_resets`, `rank_resets`, `dropped_events`, and up to 16
+  anomalous sources).
+- A `final` report is best effort. It is written only when the subscriber is cancelled, and a
+  router stopped by a signal can exit first; the local smoke's SIGTERM produced none. Read the
+  file at least two report intervals after the last publisher exited.
+
 CRTC neutrality:
 
-- Every file the patch touches has the same blob at MAIN `e61319d830`, STACK `2b20fc1d35`, the
-  D2 jemalloc tree (`82f4bbe95b`), and the campaign base `5233229717`:
+- Every file the patch touches has the same blob at MAIN `e61319d830`, STACK `41803f6f2d` (the
+  stack top merged onto the jemalloc L1), and the campaign base `5233229717`. So do the code the
+  patch relies on (`discovery/kv_source_{watch,membership}.rs`, `direct_zmq_sub_pool.rs`,
+  `recovery/{target,worker_query_state,worker_query_transport}.rs`) and
+  `lib/kv-router/src/protocols.rs`:
   - `lib/llm/src/kv_router/indexer/recovery/{direct_zmq,mod,subscriber,worker_query}.rs`, plus
-    the new `static_sources.rs`;
-  - the membership code the patch relies on.
-- `git apply --cached --check` passes against all three arm trees.
+    the new `static_sources.rs`.
+- The patch touches no CRTC or other `lib/kv-router` code. `git apply --cached --check` passes
+  against all three trees; STACK was fetched from
+  `artifacts/d2-jemalloc/stack-mu/stack-jemalloc.bundle` (`d2-jemalloc/L4`).
 
-To apply on an arm tree, use either:
+To apply on an arm tree, use one of:
 
 ```bash
-git -C <arm-tree> apply /path/to/static-kv-sources.patch
-git -C <arm-tree> cherry-pick <patch commit>
+git -C <arm-tree> apply /path/to/static-kv-sources.patch       # or: git -C <arm-tree> am ...
+git -C <arm-tree> cherry-pick <static-sources commit> <delivery-accounting commit>
 ```
 
 ### Wire fidelity
@@ -81,8 +120,24 @@ default batching (no timeout). The result:
 - envelopes of at most 128 events and 8192 blocks.
 
 Each envelope is encoded with the runtime's own `Codec` (msgpack `Vec<RouterEvent>` inside an
-`EventEnvelope`) and sent through `ZmqPubTransport`, giving the 4-frame multipart on topic
-`kv-events`. The indexer's `ValidatedZmqSource` therefore accepts the envelopes unchanged.
+`EventEnvelope`) and sent as the same 4-frame multipart `ZmqPubTransport` sends on topic
+`kv-events`: topic, big-endian publisher ID, big-endian sequence, and the encoded `Frame`. A
+unit test compares the frames with the runtime transport's. The wire is format-identical, not
+byte-identical, to a live worker's: hashes, worker IDs, and timestamps differ by construction.
+The indexer's `ValidatedZmqSource` and SUB sockets accept the envelopes unchanged.
+
+The sending socket is an XPUB, not a PUB. The subscriber side cannot tell the difference. The
+publisher gains two things:
+
+- **Subscription gate.** A PUB socket drops everything sent before the subscriber joins. Each
+  publisher therefore sends nothing until the indexer has subscribed to every phantom socket it
+  hosts. `--subscribe-timeout-s` (default 600) fails the run and names the first missing worker
+  IDs. Warm-up starts `--warmup-delay-s` (default 1) after the last subscription. The publisher
+  reports per-phantom subscribe latency, and counts phantoms whose subscriber later reconnected
+  or left.
+- **Counted drops.** With `ZMQ_XPUB_NODROP`, a send at the 100k-message high-water mark returns
+  `EAGAIN`. The message is dropped, as a PUB socket would drop it, but it is counted
+  (`hwm_dropped`).
 
 Phantom `i` is built from its base `b(i)`:
 
@@ -97,7 +152,7 @@ Phantom `i` is built from its base `b(i)`:
 ### 1. Build (campaign worktree)
 
 ```bash
-cargo build --release -p dynamo-e2e-indexer-tools                # phantom_publisher, query_driver, phantom_plan
+cargo build --release -p dynamo-e2e-indexer-tools   # phantom_publisher, query_driver, phantom_plan, delivery_check
 cargo bench --no-run -p dynamo-bench --no-default-features --features mooncake --bench mooncake_bench
 ```
 
@@ -111,7 +166,7 @@ Use the phase-1 capture arguments (`artifacts/offline-sizing/scripts/sizing_driv
 ```bash
 mooncake_bench <pool>.pool.msgpack --workload agentic --agentic-engine sglang \
   --agentic-pool-sha256 3753eceb7d88e1d9dda3f3fc5ad6d138d8ec68ecda8734d4cc19a5f5e586ccba \
-  --block-size <1|16> --num-gpu-blocks $((786432 / <page>)) \
+  --block-size <1|16> --num-gpu-blocks <capacity> \
   --num-unique-inference-workers <bases> --agentic-plays-per-worker <P> --agentic-lanes-per-worker 4 \
   --agentic-sim-ms <T> --agentic-warmup-sim-ms <W> --agentic-phase-spread 0.05 --seed 42 \
   [--agentic-corpus-cache <cache.bin>] --result-json-output export.json \
@@ -125,7 +180,7 @@ mooncake_bench <pool>.pool.msgpack --workload agentic --agentic-engine sglang \
   - timed lists, one per capture timestamp;
   - timed lookups.
 
-Sizing: there is no looping, so a phantom stops when its timed section ends.
+Coverage: there is no looping, so a phantom stops when its timed section ends.
 `timed_span_virtual_s / speedup` must cover the measurement duration plus the start spread;
 `phantom_plan --duration-s` enforces this. Per-worker load is constant across `<bases>`
 (weak scaling), so a longer `--agentic-sim-ms` with fewer bases buys coverage. For example,
@@ -133,42 +188,103 @@ Sizing: there is no looping, so a phantom stops when its timed section ends.
 `--agentic-plays-per-worker` so lanes do not run dry; the export report shows
 `lanes_exhausted_before_cap`.
 
+Eviction (removes): the timed window must run at steady-state eviction, where the cache is full
+and every stored block eventually evicts another. Otherwise the stream under-represents
+removes, about half the write mix at steady state.
+
+- The export report's `eviction` section lists, per stream:
+  - warm-up and timed stored and removed blocks;
+  - `warmup_resident_fraction`: blocks resident after the warm-up over the capture's
+    `--num-gpu-blocks`;
+  - `timed_remove_ratio`: removed over stored blocks.
+- The exporter flags streams below 0.8 (`bases_below_min`) and still writes them.
+  `phantom_plan` and `phantom_publisher` refuse them unless `--allow-low-eviction`.
+- The publisher checks the exact planned window too: `planned.timed_remove_ratio` in its plan
+  line.
+- To size the capture, make each worker's warm-up store clearly more blocks than
+  `--num-gpu-blocks`, so `warmup_resident_fraction` is about 1 when the timed section starts. The
+  levers are a longer `--agentic-warmup-sim-ms` or a smaller `--num-gpu-blocks`.
+  - The tiny local capture (4 workers, 120 s warm-up) stored 0.27–0.42 M warm-up blocks per
+    worker at page size 1 and 16–31 k at page size 16. That is far below the production
+    786,432-token capacity (786,432 blocks at page size 1, 49,152 at page size 16), so the
+    original tiny streams had no removes at all.
+  - At production capacity and page size 1, a linear extrapolation from that capture gives
+    about 225–350 s of warm-up sim time per worker. That is an estimate only; check the
+    report.
+  - A smaller capacity reaches steady state sooner, but it changes hit rates and so the
+    overlap and remove mix. Record it as a deviation.
+  - The capacity must hold the largest request. Below that, the capture fails with "offline
+    replay detected an effect-free zero-duration pass". At page size 16, 2,048 and 8,192
+    blocks failed this way and 12,288 worked.
+
 ### 3. Plan one load point
 
 ```bash
 phantom_plan --streams <dir> --total-phantoms 1800 --target-write-blocks-per-sec <R> \
-  --duration-s 1200 --start-spread-ms 5000 \
-  --publishers hostA:30000:900,hostB:30000:900 --sources-out sources.txt
+  --duration-s 1200 --start-spread-ms 5000 --live-sources <live mocker workers x DP ranks> \
+  --publishers hostA:30000:900,hostB:30000:900 --sources-out sources.txt --indexer-env-out indexer.env
 ```
 
 This prints:
 
 - natural and aggregate rates: writes, events, queries, lookup blocks, and queries per phantom;
-- the speedup;
+- the speedup and timed coverage;
+- `eviction`: the aggregate timed remove ratio and any streams below the minimum;
+- `indexer.sockets`: the serving indexer's ZMQ socket budget and the mandatory
+  `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` (below);
+- `acceptance`: the delivery rule (section 5);
 - one JSON line per publisher process with its exact `phantom_publisher` arguments.
 
-`sources.txt` holds the indexer's static-source list. Keep at most 1000 phantoms per publisher
-process (libzmq allows 1023 sockets per context).
+`sources.txt` holds the indexer's static-source list. `indexer.env` holds the `export` lines for
+`DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` and `DYN_EXPERIMENT_STATIC_KV_SOURCES`; source the same file in
+both arms.
+
+Keep at most 1000 phantoms per publisher process. libzmq allows 1023 sockets per context, and
+each phantom uses about 4 file descriptors: the socket mailbox, the listener, the connection, and
+spare.
+
+Socket budget (libzmq caps a process's shared context at 1023 sockets):
+
+- The serving indexer groups KV event endpoints `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` to a SUB
+  socket. That fan-in covers phantoms and live workers alike.
+- It also opens, per live worker, one ungrouped SUB socket each for `kv_metrics` and
+  `active_sequences_events`; each mocker worker has its own runtime and publishers. The local
+  smoke's indexer log shows both. `--sockets-per-live-source` defaults to 2 for these, and
+  `--socket-reserve` (default 64) covers the rest.
+- The plan picks the smallest fan-in that fits: `E = ceil((phantoms + live) / (1023 - 2 * live
+  - 64))`. That is 4 at 1x (1,800 phantoms, 200 live) and 33 at 10x with the same live workers.
+- The plan fails when the live workers' ungrouped sockets alone reach the cap, at about 480
+  live workers with the defaults. No fan-in fixes that.
+- It also prints a suggested `ulimit -n` (`min_nofile`).
+- `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` is mandatory: the patched indexer refuses static sources
+  without it. Every accounting report echoes it (`endpoints_per_sub`), so you can confirm both
+  arms used the same value.
 
 ### 4. Launch (same order as the smoke)
 
-1. Start the live mockers and the serving indexer:
+1. Pick `START_AT` (unix ms) far enough ahead to cover indexer startup, activation, the warm-up
+   (`planned.warmup.write_blocks / --warmup-blocks-per-sec`), and slack. The indexer needs it at
+   launch.
+2. Start the live mockers and the serving indexer, in both arms with the same `indexer.env`:
 
    ```bash
-   DYN_EXPERIMENT_STATIC_KV_SOURCES=@sources.txt \
-     python -m dynamo.router --endpoint <ns>.backend.generate --serve-indexer --router-block-size <page>
+   (set -a; source indexer.env
+    DYN_EXPERIMENT_STATIC_KV_ACCOUNTING_OUT=<run>/accounting.json \
+    DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS=$START_AT \
+    DYN_EXPERIMENT_STATIC_KV_REPORT_S=10 \
+      python -m dynamo.router --endpoint <ns>.backend.generate --serve-indexer --router-block-size <page>)
    ```
 
-   - Consider `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` to group phantom endpoints per SUB socket, and
-     a high `ulimit -n`.
-   - Use the same environment in both arms.
-2. Start the frontend: `python -m dynamo.frontend --router-mode kv --use-remote-indexer
+   Raise `ulimit -n` to at least the plan's `min_nofile`.
+3. Start the frontend: `python -m dynamo.frontend --router-mode kv --use-remote-indexer
    --kv-cache-block-size <page>`.
-3. Start every publisher with the shared values `--total-phantoms`, `--worker-id-base`,
-   `--salt-seed`, `--speedup` or `--target-write-blocks-per-sec`, `--start-at-unix-ms`,
-   `--start-spread-ms`, and `--duration-s`. Also pass `--warmup-blocks-per-sec`; warm-up is
-   untimed and must finish before `--start-at-unix-ms` (see `late_warmups`).
-4. Start the query drivers with the same shared values, plus:
+4. Start every publisher with the plan's arguments plus the shared values: `--speedup` or
+   `--target-write-blocks-per-sec`, `--start-at-unix-ms $START_AT`, `--start-spread-ms`,
+   `--duration-s`, and `--warmup-blocks-per-sec`.
+   - Publishers may start before the indexer; they hold at the subscription gate.
+   - The warm-up is untimed and must end before `--start-at-unix-ms`. `late_warmups` counts
+     phantoms that missed, which invalidates the run.
+5. Start the query drivers with the same shared values, plus:
    - `--component <ns>.backend`;
    - `--model-name <served model name>`;
    - optionally `--first-phantom/--count` to shard phantoms across driver processes.
@@ -177,30 +293,87 @@ Outputs:
 
 - Each binary prints one JSON line per `--report-interval-s` and a summary (also written to
   `--summary-out`).
-- Publisher: achieved write blocks/s and lag versus schedule. Driver: RTT p50/p99, issue lag,
-  achieved queries/s and lookup blocks/s, and the self-hit fraction.
+- Publisher plan line: `planned` warm-up and timed totals for this process. Summary: `sent`,
+  `hwm_dropped`, the following fields, and `finished_unix_ms`:
+  - `subscribe_latency`: from bind, including any wait for the indexer;
+  - `timed_lag`: measured after each send returns;
+  - `late_warmups`;
+  - `resubscribed_phantoms` and `unsubscribed_phantoms`.
+- Driver: RTT p50/p99, issue lag, achieved queries/s and lookup blocks/s, and the self-hit
+  fraction.
+- Indexer: the accounting reports (above).
 - Indexer CPU comes from the host (pidstat or perf), not from these tools.
 
-### 5. Local smoke (loopback; plumbing only)
+### 5. Delivery check (rejection rule)
+
+After every publisher of a run has exited, wait two accounting intervals. Then, per arm:
 
 ```bash
-WORK=<scratch> STREAMS=<tiny stream dir> SPEEDUP=4 DURATION_S=30 lib/e2e-indexer-tools/scripts/local_smoke.sh
+delivery_check --publisher-summary pubA.json --publisher-summary pubB.json \
+  --indexer-accounting <run>/accounting.json --label <arm>
+```
+
+The load point is invalid if either arm is invalid. An arm is invalid when any of these holds:
+
+- delivered write blocks are below 98% of planned (`--min-delivered-fraction`), checked over the
+  run, the warm-up, and the timed window. The timed check needs
+  `DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS`, so a large warm-up cannot hide a timed
+  shortfall;
+- any gap reset (`ResetDegraded`) occurred, or any other rank reset discarded indexed state;
+- any phantom's first applied event was not event 1 (a lost prefix), or a phantom with planned
+  events delivered none;
+- any warm-up ended after the timed start;
+- a publisher hit send errors or was interrupted;
+- the indexer accounted for a different number of static sources than the publishers host;
+- the accounting snapshot predates the last publisher's finish.
+
+High-water-mark drops and resubscriptions are reported as warnings. They normally also surface
+as gap resets or a shortfall. `--require-exact` additionally demands delivered = sent, which
+only a low-load smoke should meet.
+
+### 6. Local smoke (loopback; plumbing only)
+
+```bash
+WORK=<scratch> STREAMS=<tiny stream dir with eviction> SPEEDUP=4 DURATION_S=30 lib/e2e-indexer-tools/scripts/local_smoke.sh
 # page size 1: add BLOCK_SIZE=1 MOCKER_ARGS="--engine-type sglang"
+# streams without eviction: add PLAN_ARGS=--allow-low-eviction (skips the removes check)
 ```
 
 The smoke uses file discovery, the direct-ZMQ event plane, and the TCP request plane. It runs a
-live mocker, the patched serving indexer, a remote-indexer frontend (one real chat request),
-4 phantoms, and the driver.
+live mocker, 4 phantoms, the patched serving indexer, a remote-indexer frontend (one real chat
+request), and the driver. It checks the following:
+
+- (a) The publisher, started before the indexer, holds at the gate for `GATE_HOLD_S` and then
+  delivers the whole warm-up.
+- (b) Removes reach the indexer and are counted.
+- (c) Delivered equals sent: `delivery_check --require-exact`.
+
+Tiny streams with eviction: page size 16, `--num-gpu-blocks 12288`, 4 workers, 120 s warm-up,
+240 s sim (`artifacts/tooling/local-smoke/streams-ps16-evict`).
 
 ## Caveats (carry into any report)
+
+Headline caveats:
+
+- **No prefix sharing across phantoms.** As in phase 1, workers share no prefixes: the harness
+  salts each base, and the publisher remaps each copy. A real fleet shares system prompts and
+  tool definitions. The index therefore holds more distinct blocks, and lookups overlap less
+  across workers, than in production.
+- **Event cadence at page size 1.** The streams come from the SGLang-mode mocker. It emits about
+  one Stored event per decode token, about 112 per request. Real SGLang 0.5.21 at page size 1
+  emits about 2 Stored events per request (about 370 blocks each: the prefill tail, then the
+  outputs at finish) and about 0.5 Removed events (about 1.4k blocks)
+  (`artifacts/sglang-cadence/`). Block counts are comparable, but events and envelopes per
+  block are inflated about 50x. Per-event indexer costs are overstated at page size 1 until the
+  mocker cadence changes (ledger D7).
+
+Other caveats:
 
 - **Membership.** Membership filtering and recovery are skipped for phantom sources, identically
   in both arms.
 - **Hash remapping.** Non-root sequence hashes are remapped rather than re-chained from the
   remapped local hashes. Neither arm's event-driven indexer (CRTC and ThreadPoolIndexer)
   recomputes sequence hashes from local hashes; grep `compute_next_seq_hash` at both SHAs.
-- **No sharing across phantoms.** As in phase 1, workers share no prefixes: the harness salts
-  each base, and the publisher remaps each copy. A real fleet shares system prompts.
 - **Copies share timing.** Phantom copies of one base replay the same timing pattern, shifted
   only by `--start-spread-ms`.
 - **Envelope boundaries.**
@@ -209,20 +382,32 @@ live mocker, the patched serving indexer, a remote-indexer frontend (one real ch
     publishes a whole pass at once. At page size 1, the 41k events formed 24.8k lists.
   - Warm-up lists are runs of one worker in the merged warm-up order.
 - **No looping.** The tools do not loop. Size the capture; the plan refuses short coverage.
-- **Overload drops events.** A PUB socket drops sends once its high-water mark (100k messages)
-  is reached. A resulting event-ID gap resets that phantom's rank at the indexer
-  (live-only `ResetDegraded`); this is production behavior. Watch the indexer logs for gap
-  resets under overload, and compare the publisher's achieved rate with the plan.
+- **Overload drops events.** At the high-water mark (100k messages per socket) a send is
+  dropped, as in production. The publisher counts the drop (`hwm_dropped`). The resulting
+  event-ID gap resets that phantom's rank at the indexer (live-only `ResetDegraded`), which the
+  accounting counts. Either invalidates the load point.
+- **Buffering before activation.** The gate proves subscription, not activation. Until a source
+  activates, its envelopes wait in the indexer's SUB queue or group channel (100k each). At 10×,
+  activation is slow (next item); if the warm-up outruns it, the overflow shows up as drops,
+  gap resets, or late first events. Lengthen `--warmup-delay-s` or lower
+  `--warmup-blocks-per-sec` if it does.
 - **Per-query logging.** The serving indexer logs every `kv_indexer_query` at INFO
   (`push_handler` "request received/completed"). At thousands of queries per second that is
-  real CPU in both arms. Keep `DYN_LOG` identical across arms, and consider filtering it.
+  real CPU in both arms. Keep `DYN_LOG` identical across arms, and consider filtering it. The
+  accounting reports log at WARN, so they survive `DYN_LOG=warn`.
+- **Accounting overhead.** Counting adds a hash lookup per envelope and a few atomic adds on a
+  per-source cache line, identically in both arms.
 - **Slow activation at scale.** Activation is O(sources) per readiness signal
   (`WorkerQueryClient::reconcile_view` and `ready_sources`), so startup is about O(N²) for N
   sources. Expect slow activation, plus one warning line per live-only source, at 10× (about
   18k sources).
+- **Live-worker sockets.** Each live worker costs the serving indexer two ungrouped ZMQ sockets
+  (and the remote-indexer frontend similar), so about 480 live workers is the ceiling under the
+  1023-socket cap (section 3).
 - **Version skew.** The tools are built from the campaign base `5233229717`. Between it and the
-  arm SHAs, the event-plane codec and frames, ZMQ PUB, and the TCP request plane are unchanged;
-  the runtime diff touches only QUIC typed prologues and NATS. Keep the request and response
-  planes on TCP.
-- **Warm-up skip.** `--warmup-blocks-per-sec 0` skips the warm-up. Use it only for smoke tests:
-  the timed section then references blocks the indexer never saw.
+  arm SHAs, the event-plane codec and frames, the ZMQ transport (except one guidance string),
+  and the TCP request plane are unchanged; the runtime diff touches only QUIC typed prologues
+  and NATS. Keep the request and response planes on TCP.
+- **Warm-up skip.** `--warmup-blocks-per-sec 0` skips the warm-up. Use it only for smoke tests.
+  The timed section then references blocks the indexer never saw, and every phantom's first
+  event is not event 1, so the delivery rule fails.
