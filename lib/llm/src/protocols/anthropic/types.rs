@@ -206,7 +206,10 @@ fn convert_user_blocks(
         match block {
             AnthropicContentBlock::Text { text, .. } => {
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                    ChatCompletionRequestMessageContentPartText {
+                        prompt_cache_breakpoint: None,
+                        text: text.clone(),
+                    },
                 ));
             }
             AnthropicContentBlock::Image { source } => {
@@ -306,7 +309,10 @@ fn convert_tool_result_content(
         match block {
             ToolResultContentBlock::Text { text } => {
                 parts.push(ChatCompletionRequestToolMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                    ChatCompletionRequestMessageContentPartText {
+                        prompt_cache_breakpoint: None,
+                        text: text.clone(),
+                    },
                 ));
             }
             ToolResultContentBlock::Image { source } => {
@@ -1336,6 +1342,9 @@ mod tests {
                     completion_tokens: 5,
                     total_tokens: 17,
                     prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                        cache_write_tokens: None,
+                        image_tokens: None,
+                        text_tokens: None,
                         audio_tokens: None,
                         cached_tokens: Some(11),
                     }),
@@ -1366,6 +1375,9 @@ mod tests {
             completion_tokens: 5,
             total_tokens: 17,
             prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                cache_write_tokens: None,
+                image_tokens: None,
+                text_tokens: None,
                 audio_tokens: None,
                 cached_tokens: Some(20),
             }),

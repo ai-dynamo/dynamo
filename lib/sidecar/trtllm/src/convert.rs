@@ -811,6 +811,9 @@ fn prefill_usage(reported: Option<pb::Usage>, prompt_tokens: u32) -> CompletionU
 /// report more cached tokens than the prompt the client actually sent.
 fn cached_prompt_tokens(cached: Option<u32>, prompt_tokens: u32) -> Option<PromptTokensDetails> {
     cached.map(|cached_tokens| PromptTokensDetails {
+        cache_write_tokens: None,
+        image_tokens: None,
+        text_tokens: None,
         audio_tokens: None,
         cached_tokens: Some(cached_tokens.min(prompt_tokens)),
     })

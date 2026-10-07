@@ -97,7 +97,7 @@ use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
 use dynamo_protocols::types::responses::{
-    CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
+    CountInputTokensRequest, CountInputTokensResponse, ResponseError, ResponseErrorCode,
 };
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
@@ -4197,7 +4197,7 @@ async fn responses(
         instructions: request.inner.instructions.clone(),
         reasoning: request.inner.reasoning.clone(),
         text: request.inner.text.clone(),
-        service_tier: request.inner.service_tier,
+        service_tier: request.inner.service_tier.clone(),
         include: request.inner.include.clone(),
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
@@ -4392,8 +4392,9 @@ async fn responses(
                             producer_error_signal
                                 .set(extract_error_type_from_response(&error_response));
                         }
-                        backend_error = Some(ErrorObject {
-                            code: responses_error_code(error_response.0).to_string(),
+                        backend_error = Some(ResponseError {
+                            code: ResponseErrorCode::Other(responses_error_code(error_response.0).to_string()),
+                            misalignment: None,
                             message: error_response.1.message.clone(),
                         });
                     }
@@ -5126,6 +5127,24 @@ async fn images_with_request(
             dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
             dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
             dynamo_protocols::types::ImageModel::GptImage2 => "gpt-image-2".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage2_2026_04_21 => {
+                "gpt-image-2-2026-04-21".to_string()
+            }
+            dynamo_protocols::types::ImageModel::GptImage2_5Sunburst => {
+                "gpt-image-2.5-sunburst".to_string()
+            }
+            dynamo_protocols::types::ImageModel::GptImage2_5Sunburst2026_09_08 => {
+                "gpt-image-2.5-sunburst-2026-09-08".to_string()
+            }
+            dynamo_protocols::types::ImageModel::GptImage2_5Flare => {
+                "gpt-image-2.5-flare".to_string()
+            }
+            dynamo_protocols::types::ImageModel::GptImage2_5Flare2026_09_08 => {
+                "gpt-image-2.5-flare-2026-09-08".to_string()
+            }
+            dynamo_protocols::types::ImageModel::ChatGptImageLatest => {
+                "chatgpt-image-latest".to_string()
+            }
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
@@ -10987,10 +11006,16 @@ mod tests {
             completion_tokens: 2,
             total_tokens: 5,
             prompt_tokens_details: Some(PromptTokensDetails {
+                cache_write_tokens: None,
+                image_tokens: None,
+                text_tokens: None,
+
                 audio_tokens: Some(1),
                 cached_tokens: Some(2),
             }),
             completion_tokens_details: Some(CompletionTokensDetails {
+                text_tokens: None,
+
                 accepted_prediction_tokens: Some(1),
                 audio_tokens: None,
                 reasoning_tokens: Some(2),
@@ -11002,10 +11027,16 @@ mod tests {
             completion_tokens: 1,
             total_tokens: 5,
             prompt_tokens_details: Some(PromptTokensDetails {
+                cache_write_tokens: None,
+                image_tokens: None,
+                text_tokens: None,
+
                 audio_tokens: Some(2),
                 cached_tokens: Some(3),
             }),
             completion_tokens_details: Some(CompletionTokensDetails {
+                text_tokens: None,
+
                 accepted_prediction_tokens: Some(2),
                 audio_tokens: Some(1),
                 reasoning_tokens: None,

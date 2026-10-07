@@ -157,6 +157,9 @@ fn cached_prompt_tokens_reach_the_client_on_both_paths() {
     decode_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
         disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
         prompt_tokens_details: Some(dynamo_backend_common::PromptTokensDetails {
+            cache_write_tokens: None,
+            image_tokens: None,
+            text_tokens: None,
             audio_tokens: None,
             cached_tokens: Some(5),
         }),

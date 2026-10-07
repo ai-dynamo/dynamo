@@ -153,6 +153,9 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 prompt_tokens_details: Some(PromptTokensDetails {
                     audio_tokens: None,
                     cached_tokens: Some(ct),
+                    cache_write_tokens: None,
+                    image_tokens: None,
+                    text_tokens: None,
                 }),
                 completion_tokens_details: None,
             }),
