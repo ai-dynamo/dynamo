@@ -7,5 +7,5 @@
 # in sglang_runtime.Dockerfile.
 
 blake3>=1.0.0,<2.0.0  # Dynamo SGLang multimodal request handlers import blake3 at startup
-anyio==4.14.2  # GHSA-82r6-8w77-94w6: replace the base image's AnyIO 4.14.1
+anyio==4.14.2  # replace the base image's AnyIO 4.14.1
 zstandard==0.23.0
