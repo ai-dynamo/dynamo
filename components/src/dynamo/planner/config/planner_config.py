@@ -540,9 +540,13 @@ class PlannerConfig(BaseModel):
     )
 
     # Load predictor settings
-    load_predictor: str = SLAPlannerDefaults.load_predictor
+    load_predictor: Literal[
+        "constant", "arima", "prophet", "kalman"
+    ] = SLAPlannerDefaults.load_predictor
     load_predictor_log1p: bool = SLAPlannerDefaults.load_predictor_log1p
-    prophet_window_size: int = SLAPlannerDefaults.prophet_window_size
+    prophet_window_size: int = Field(
+        default=SLAPlannerDefaults.prophet_window_size, gt=0
+    )
     load_predictor_warmup_trace: Optional[str] = None
 
     # Kalman filter settings
@@ -672,13 +676,17 @@ class PlannerConfig(BaseModel):
             "scaling decisions. Even when only throughput-based scaling is enabled, "
             "live FPM observations are fed into the perf model at this interval to "
             "keep the performance model accurate. Must be shorter than "
-            "throughput_adjustment_interval_seconds."
+            "throughput_adjustment_interval_seconds when both scaling modes are enabled."
         ),
     )
-    max_num_fpm_samples: int = SLAPlannerDefaults.max_num_fpm_samples
-    fpm_sample_bucket_size: int = SLAPlannerDefaults.fpm_sample_bucket_size
-    load_scaling_down_sensitivity: int = (
-        SLAPlannerDefaults.load_scaling_down_sensitivity
+    max_num_fpm_samples: int = Field(
+        default=SLAPlannerDefaults.max_num_fpm_samples, gt=0
+    )
+    fpm_sample_bucket_size: int = Field(
+        default=SLAPlannerDefaults.fpm_sample_bucket_size, gt=0
+    )
+    load_scaling_down_sensitivity: int = Field(
+        default=SLAPlannerDefaults.load_scaling_down_sensitivity, ge=0, le=100
     )
     prefill_scale_up_queue_tokens: Optional[int] = Field(
         default=SLAPlannerDefaults.prefill_scale_up_queue_tokens,

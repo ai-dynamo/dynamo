@@ -31,7 +31,9 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
+    engine_consumes_media,
     raise_if_unextracted_multimodal,
+    reject_unconsumed_media,
 )
 from dynamo.sglang.request_utils import request_cache_salt
 from dynamo.sglang.thinking_budget import (
@@ -176,6 +178,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Prefill encodes the media so the KV it transfers carries the vision
         # context; decode extracts the same URLs to match the token layout.
         raise_if_unextracted_multimodal(inner_request)
+        reject_unconsumed_media(
+            inner_request, consumes_media=engine_consumes_media(self.engine)
+        )
         mm_kwargs = build_disagg_mm_kwargs(inner_request)
 
         routing = inner_request.get("routing") or {}
