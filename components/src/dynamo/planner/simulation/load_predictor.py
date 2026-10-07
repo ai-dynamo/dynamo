@@ -9,19 +9,17 @@ import logging
 import math
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.offline.trace_data import (
     extract_metrics_from_mooncake,
     extract_metrics_from_trace_paths,
 )
 
 from .presets import throughput_intervals
-
-if TYPE_CHECKING:
-    from dynamo.planner.config.planner_config import PlannerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +86,14 @@ LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 _DEFAULTS = {
-    "prophet_window_size": 50,
-    "q_level": 1.0,
-    "q_trend": 0.1,
-    "r": 10.0,
-    "min_points": 5,
+    name: PlannerConfig.model_fields[field].default
+    for name, field in {
+        "prophet_window_size": "prophet_window_size",
+        "q_level": "kalman_q_level",
+        "q_trend": "kalman_q_trend",
+        "r": "kalman_r",
+        "min_points": "kalman_min_points",
+    }.items()
 }
 _DEFAULT_PRESET = "constant_last"
 _VALID_FAMILIES = frozenset(
