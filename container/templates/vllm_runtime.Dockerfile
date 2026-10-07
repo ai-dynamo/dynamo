@@ -205,7 +205,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
     SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
     for p in /tmp/vllm_patches/*.patch; do \
-        patch --batch --forward --fuzz=5 -p1 -d "${SITE_PACKAGES}" < "$p"; \
+        patch --batch --forward --fuzz=5 -p1 -d "${SITE_PACKAGES}" < "$p" || exit 1; \
     done
 {% endif %}
 
