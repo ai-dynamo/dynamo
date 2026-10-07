@@ -704,17 +704,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/vllm-nemotron-omni-vision-wei
     patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/vllm-omni-vision.patch; \
     rm -rf /var/lib/apt/lists/*
 
-# Backport dler/vllm !1: normalise `<video>` placeholders so BPE cannot merge
-# them with preceding text. Without it a text-then-video request returns HTTP
-# 500 "found 0 prompt placeholders". See nvbug 6820634 / 6715494.
-RUN --mount=type=bind,source=./container/deps/vllm/vllm-nemotron-omni-video-placeholder-normalize.patch,target=/tmp/vllm-omni-video.patch \
-    set -eu; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends patch; \
-    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("vllm").origin).parent.parent)')"; \
-    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/vllm-omni-video.patch; \
-    rm -rf /var/lib/apt/lists/*
-
 # Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
 RUN python3 -m pip uninstall --yes soxr
 
