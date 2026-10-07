@@ -16,6 +16,7 @@ pytest.importorskip("vllm.lora.request")
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.lora.runtime import ResolvedLoRA
 from dynamo.llm import HttpError
+from dynamo.vllm import handlers as handlers_mod
 from dynamo.vllm import runtime_lora as runtime_lora_mod
 from dynamo.vllm.lora_state import LoRAState
 from dynamo.vllm.runtime_lora import RuntimeLoRACoordinator
@@ -740,6 +741,75 @@ async def test_victim_request_waits_for_failed_replacement_rollback(
     assert set(handler._lora_state.runtime_loras) == {first.lora_name}
     assert handler._lora_state.loaded_loras[first.lora_name].id == first.lora_int_id
     assert not handler._lora_state.runtime_eviction_events
+
+
+@pytest.mark.asyncio
+async def test_admin_mutations_reject_adapter_during_runtime_eviction(
+    monkeypatch, tmp_path
+):
+    snapshot = _snapshot(tmp_path)
+    manager = SimpleNamespace(
+        cache_root=tmp_path,
+        runtime_lora_schemes=frozenset({"wandb-artifact"}),
+        resolve_runtime_lora=AsyncMock(
+            return_value=ResolvedLoRA(snapshot, "digest:immutable")
+        ),
+    )
+    monkeypatch.setenv("DYN_LORA_ENABLED", "true")
+    monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+    monkeypatch.setenv("DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS", "1")
+    monkeypatch.setattr(runtime_lora_mod, "get_lora_manager", lambda **_kwargs: manager)
+    handler = _handler()
+    coordinator = RuntimeLoRACoordinator(handler)
+    first_source = "wandb-artifact:///entity/project/first:v1"
+    first = await coordinator.ensure_from_request(_request(first_source), "request-1")
+    await coordinator.release_pending_admission("request-1")
+    remove_started = asyncio.Event()
+    allow_remove = asyncio.Event()
+
+    async def remove_lora(_lora_id):
+        remove_started.set()
+        await allow_remove.wait()
+        return True
+
+    handler.engine_client.remove_lora.side_effect = remove_lora
+    replacement = asyncio.create_task(
+        coordinator.ensure_from_request(
+            _request("wandb-artifact:///entity/project/second:v1"), "request-2"
+        )
+    )
+    await remove_started.wait()
+    assert first.lora_name in handler._lora_state.runtime_eviction_events
+
+    handler._get_lora_lock = handler._lora_state.get_lock
+    handler._parse_lora_unload_request = lambda request: request["lora_name"]
+    load_results = [
+        result
+        async for result in handlers_mod.BaseWorkerHandler.load_lora(
+            handler,
+            {
+                "lora_name": first.lora_name,
+                "source": {"uri": "file:///replacement"},
+            },
+        )
+    ]
+    unload_results = [
+        result
+        async for result in handlers_mod.BaseWorkerHandler.unload_lora(
+            handler, {"lora_name": first.lora_name}
+        )
+    ]
+
+    assert load_results[-1]["status"] == "error"
+    assert "reserved for request-time adapters" in load_results[-1]["message"]
+    assert unload_results[-1]["status"] == "error"
+    assert "cannot be unloaded" in unload_results[-1]["message"]
+    assert handler.engine_client.add_lora.await_count == 1
+
+    allow_remove.set()
+    second = await replacement
+    assert second is not None
+    assert set(handler._lora_state.runtime_loras) == {second.lora_name}
 
 
 @pytest.mark.asyncio

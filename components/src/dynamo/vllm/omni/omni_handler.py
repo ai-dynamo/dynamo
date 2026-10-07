@@ -486,6 +486,9 @@ class OmniHandler(BaseOmniHandler):
         self,
         lora_request: LoRARequest | None,
         create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
+        *,
+        request_id: str | None = None,
+        runtime_lora: bool = False,
         sampling_params_list: list | None = None,
     ) -> AsyncIterator[Any]:
         """Yield engine outputs after atomically admitting a LoRA request.
@@ -531,6 +534,9 @@ class OmniHandler(BaseOmniHandler):
                 entire generation is kept inside the lock. If None or single-entry,
                 the lock is released after the first output (optimization for LLM).
         """
+        if runtime_lora:
+            raise RuntimeError("runtime LoRA admission is unsupported for Omni")
+
         if lora_request is None:
             # Base model: no lock needed
             async for result in create_generator(lora_request):

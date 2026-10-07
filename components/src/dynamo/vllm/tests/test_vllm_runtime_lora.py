@@ -22,6 +22,7 @@ from dynamo.common.lora.runtime import (
     RuntimeLoRAResolverUnavailableError,
 )
 from dynamo.llm import HttpError
+from dynamo.vllm import handlers as handlers_mod
 from dynamo.vllm import runtime_lora as runtime_lora_mod
 from dynamo.vllm.lora_state import LoRAState
 from dynamo.vllm.runtime_lora import RuntimeLoRACoordinator
@@ -554,6 +555,100 @@ async def test_pending_request_limit_is_separate_from_distinct_key_limit(
     assert first is not None and second is not None
     assert error.value.code == 429
     assert error.value.message == "lora_capacity_exceeded"
+
+
+@pytest.mark.parametrize(
+    "handler_type",
+    [handlers_mod.DecodeWorkerHandler, handlers_mod.PrefillWorkerHandler],
+)
+@pytest.mark.asyncio
+async def test_token_path_cancellation_after_resolution_releases_pending_admission(
+    monkeypatch, tmp_path, handler_type
+):
+    source_uri = "wandb-artifact:///entity/project/adapter:v1"
+    snapshot = _snapshot(tmp_path)
+    state_handler, coordinator = _coordinator(
+        monkeypatch,
+        tmp_path,
+        ResolvedLoRA(snapshot, "digest:immutable"),
+    )
+    ensure_from_request = coordinator.ensure_from_request
+
+    async def cancelling_ensure(request, request_id):
+        result = await ensure_from_request(request, request_id)
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        return result
+
+    coordinator.ensure_from_request = cancelling_ensure
+    request_handler = handler_type.__new__(handler_type)
+    request_handler._runtime_lora_coordinator = coordinator
+
+    async def request_flow():
+        (
+            admission_stack,
+            _lora_request,
+            _runtime_lora,
+        ) = await request_handler._prepare_lora_admission(
+            _request(source_uri), "request-1"
+        )
+        async with admission_stack:
+            await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.create_task(request_flow())
+
+    assert not state_handler._lora_state.runtime_pending_admissions
+    assert not state_handler._lora_state.runtime_pending_leases
+
+
+@pytest.mark.parametrize(
+    "handler_type",
+    [handlers_mod.DecodeWorkerHandler, handlers_mod.PrefillWorkerHandler],
+)
+@pytest.mark.asyncio
+async def test_token_path_cancellation_during_shared_resolution_creates_no_admission(
+    monkeypatch, tmp_path, handler_type
+):
+    source_uri = "wandb-artifact:///entity/project/adapter:v1"
+    snapshot = _snapshot(tmp_path)
+    resolution_started = asyncio.Event()
+    finish_resolution = asyncio.Event()
+
+    async def resolve(**_kwargs):
+        resolution_started.set()
+        await finish_resolution.wait()
+        return ResolvedLoRA(snapshot, "digest:immutable")
+
+    state_handler, coordinator = _coordinator(monkeypatch, tmp_path, resolve)
+    request_handler = handler_type.__new__(handler_type)
+    request_handler._runtime_lora_coordinator = coordinator
+
+    async def request_flow():
+        (
+            admission_stack,
+            _lora_request,
+            _runtime_lora,
+        ) = await request_handler._prepare_lora_admission(
+            _request(source_uri), "request-1"
+        )
+        async with admission_stack:
+            await asyncio.Event().wait()
+
+    request_task = asyncio.create_task(request_flow())
+    await resolution_started.wait()
+    load_task = next(iter(state_handler._lora_state.runtime_load_tasks.values()))
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    finish_resolution.set()
+    await load_task
+    await asyncio.sleep(0)
+
+    assert not state_handler._lora_state.runtime_pending_admissions
+    assert not state_handler._lora_state.runtime_pending_leases
 
 
 @pytest.mark.asyncio
