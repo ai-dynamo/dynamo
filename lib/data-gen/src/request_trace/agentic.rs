@@ -171,6 +171,51 @@ where
         }
     }
 
+    // Exporter-only edges are authoritative for each session pair they link.
+    let mut explicitly_linked_session_pairs = HashSet::new();
+    for (idx, request) in loaded.requests.iter().enumerate() {
+        for dependency in &request.replay.dependencies {
+            let Some(&dependency_idx) = id_to_index.get(&dependency.request_id) else {
+                bail!(
+                    "request {} depends on unknown request_id {}",
+                    request.request.request_id,
+                    dependency.request_id
+                );
+            };
+            let dependency_request = &loaded.requests[dependency_idx];
+            if dependency_request.start_ms > request.start_ms {
+                bail!(
+                    "request {} depends on later request {}",
+                    request.request.request_id,
+                    dependency.request_id
+                );
+            }
+            let anchor_ms = match dependency.trigger {
+                AgenticDependencyTrigger::Completion => dependency_request.end_ms,
+                AgenticDependencyTrigger::Dispatch => dependency_request.start_ms,
+            };
+            let session_id = session_id_for(request);
+            let dependency_session_id = session_id_for(dependency_request);
+            if session_id != dependency_session_id {
+                explicitly_linked_session_pairs
+                    .insert((session_id.clone(), dependency_session_id.clone()));
+                explicitly_linked_session_pairs.insert((dependency_session_id, session_id));
+            }
+            push_dependency(
+                &mut dependencies[idx],
+                AgenticDependency {
+                    request_id: dependency.request_id.clone(),
+                    trigger: dependency.trigger,
+                    // Coding agents run tools while a response streams, so a spawned or messaged
+                    // request can start shortly before the sending response completes. Waiting for
+                    // that completion keeps replay causal at the cost of the short overlap.
+                    delay_ms: request.start_ms.saturating_sub(anchor_ms).max(0) as f64,
+                    relation: dependency.relation,
+                },
+            );
+        }
+    }
+
     for (session_id, parent_id) in &parent_by_session {
         let Some(child_indices) = session_to_indices.get(session_id) else {
             continue;
@@ -265,6 +310,9 @@ where
                     },
                 );
             }
+            continue;
+        }
+        if explicitly_linked_session_pairs.contains(&(session_id.clone(), parent_id.clone())) {
             continue;
         }
 
@@ -503,8 +551,8 @@ fn validate_dependency_dag(
 mod tests {
     use super::*;
     use crate::request_trace::load::{
-        AgentContextFields, ClaudeToolReplayMetrics, RequestEntry, RequestTraceReplayMetrics,
-        RequestTraceRequestMetrics, ToolEntry,
+        AgentContextFields, ClaudeToolReplayMetrics, ReplayDependencyRecord, RequestEntry,
+        RequestTraceReplayMetrics, RequestTraceRequestMetrics, ToolEntry,
     };
 
     fn request(
@@ -529,6 +577,7 @@ mod tests {
                 trace_block_size: 2,
                 input_length: sequence_hashes.len() * 2,
                 input_sequence_hashes: sequence_hashes,
+                dependencies: Vec::new(),
             },
         }
     }
@@ -578,6 +627,175 @@ mod tests {
             Ok(())
         })?;
         Ok(rows)
+    }
+
+    fn depends_on(
+        mut entry: RequestEntry,
+        request_id: &str,
+        relation: AgenticDependencyRelation,
+    ) -> RequestEntry {
+        entry.replay.dependencies.push(ReplayDependencyRecord {
+            request_id: request_id.to_string(),
+            relation,
+            trigger: AgenticDependencyTrigger::Completion,
+        });
+        entry
+    }
+
+    #[test]
+    fn explicit_dependencies_replace_inferred_child_edges() {
+        let loaded = LoadedAgentTrace {
+            requests: vec![
+                contextual_request("p1", "root", None, 0, 10, vec![1]),
+                depends_on(
+                    contextual_request("p2", "root", None, 50, 60, vec![1]),
+                    "c1",
+                    AgenticDependencyRelation::Join,
+                ),
+                contextual_request("p3", "root", None, 100, 110, vec![1]),
+                depends_on(
+                    contextual_request("c1", "child", Some("root"), 20, 30, vec![2]),
+                    "p1",
+                    AgenticDependencyRelation::Spawn,
+                ),
+                depends_on(
+                    contextual_request("c2", "child", Some("root"), 70, 80, vec![2]),
+                    "p2",
+                    AgenticDependencyRelation::Spawn,
+                ),
+            ],
+            tools: Vec::new(),
+        };
+
+        let rows = lower_rows(loaded).unwrap();
+        let edges = |request_id: &str| {
+            rows.iter()
+                .find(|row| row.request_id == request_id)
+                .unwrap()
+                .dependencies
+                .iter()
+                .map(|edge| (edge.request_id.as_str(), edge.relation, edge.delay_ms))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            edges("c2"),
+            [
+                ("c1", AgenticDependencyRelation::Sequence, 40.0),
+                ("p2", AgenticDependencyRelation::Spawn, 10.0),
+            ]
+        );
+        assert_eq!(
+            edges("p2"),
+            [
+                ("c1", AgenticDependencyRelation::Join, 20.0),
+                ("p1", AgenticDependencyRelation::Sequence, 40.0),
+            ]
+        );
+        // Timestamp inference would also join the child's last request into p3.
+        assert_eq!(
+            edges("p3"),
+            [("p2", AgenticDependencyRelation::Sequence, 40.0)]
+        );
+    }
+
+    #[test]
+    fn explicit_dependencies_must_reference_earlier_known_requests() {
+        let unknown = LoadedAgentTrace {
+            requests: vec![depends_on(
+                contextual_request("r1", "root", None, 0, 10, vec![1]),
+                "missing",
+                AgenticDependencyRelation::Spawn,
+            )],
+            tools: Vec::new(),
+        };
+        assert!(lower_rows(unknown).is_err());
+
+        let later = LoadedAgentTrace {
+            requests: vec![
+                depends_on(
+                    contextual_request("r1", "root", None, 0, 10, vec![1]),
+                    "c1",
+                    AgenticDependencyRelation::Join,
+                ),
+                contextual_request("c1", "child", Some("root"), 20, 30, vec![2]),
+            ],
+            tools: Vec::new(),
+        };
+        assert!(lower_rows(later).is_err());
+    }
+
+    #[test]
+    fn completion_dependency_overlapping_its_dependent_waits_for_completion() {
+        // A tool can spawn a child before the spawning response finishes streaming.
+        let loaded = LoadedAgentTrace {
+            requests: vec![
+                contextual_request("p1", "root", None, 0, 25, vec![1]),
+                depends_on(
+                    contextual_request("c1", "child", Some("root"), 20, 30, vec![2]),
+                    "p1",
+                    AgenticDependencyRelation::Spawn,
+                ),
+            ],
+            tools: Vec::new(),
+        };
+
+        let rows = lower_rows(loaded).unwrap();
+        let child = rows.iter().find(|row| row.request_id == "c1").unwrap();
+        assert_eq!(child.dependencies.len(), 1);
+        assert_eq!(
+            child.dependencies[0].trigger,
+            AgenticDependencyTrigger::Completion
+        );
+        assert_eq!(child.dependencies[0].delay_ms, 0.0);
+    }
+
+    #[test]
+    fn explicit_link_to_a_sibling_keeps_inferred_parent_edges() {
+        let loaded = LoadedAgentTrace {
+            requests: vec![
+                contextual_request("p1", "root", None, 0, 10, vec![1]),
+                contextual_request("p2", "root", None, 100, 110, vec![1]),
+                depends_on(
+                    contextual_request("s1", "sibling", Some("root"), 12, 15, vec![2]),
+                    "p1",
+                    AgenticDependencyRelation::Spawn,
+                ),
+                depends_on(
+                    contextual_request("c1", "child", Some("root"), 20, 30, vec![3]),
+                    "s1",
+                    AgenticDependencyRelation::Join,
+                ),
+            ],
+            tools: Vec::new(),
+        };
+
+        let rows = lower_rows(loaded).unwrap();
+        let edges = |request_id: &str| {
+            rows.iter()
+                .find(|row| row.request_id == request_id)
+                .unwrap()
+                .dependencies
+                .iter()
+                .map(|edge| (edge.request_id.as_str(), edge.relation))
+                .collect::<Vec<_>>()
+        };
+        // Only the sibling pair is explicit, so the child still infers its parent spawn and join.
+        assert_eq!(
+            edges("c1"),
+            [
+                ("p1", AgenticDependencyRelation::Spawn),
+                ("s1", AgenticDependencyRelation::Join),
+            ]
+        );
+        // The sibling's explicit parent link replaces inference for that pair.
+        assert_eq!(
+            edges("p2"),
+            [
+                ("c1", AgenticDependencyRelation::Join),
+                ("p1", AgenticDependencyRelation::Sequence),
+            ]
+        );
     }
 
     #[test]

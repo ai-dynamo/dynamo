@@ -29,7 +29,7 @@ import (
 // was used as a workaround for disaggregated serving), `prefill` and `decode`
 // are first-class values: users can set them directly and downstream consumers
 // (e.g., the EPP) can filter on the pod label `nvidia.com/dynamo-component-type`.
-// +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp
+// +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp;lpx
 type ComponentType string
 
 const (
@@ -39,6 +39,7 @@ const (
 	ComponentTypeDecode   ComponentType = "decode"
 	ComponentTypePlanner  ComponentType = "planner"
 	ComponentTypeEPP      ComponentType = "epp"
+	ComponentTypeLPX      ComponentType = "lpx"
 )
 
 const (
@@ -107,6 +108,10 @@ const (
 	ComponentRoleLeader = "leader"
 	// ComponentRoleWorker identifies the worker Pod-producing role of a multinode component.
 	ComponentRoleWorker = "worker"
+	// ComponentRoleLPXConductor identifies the launcher role of an LPX component.
+	ComponentRoleLPXConductor = "conductor"
+	// ComponentRoleLPXAgent identifies the LPU-serving role of an LPX component.
+	ComponentRoleLPXAgent = "agent"
 )
 
 // ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -134,11 +139,24 @@ type ComponentRoleSpec struct {
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
-	// podTemplate defines the Pod configuration for this role. Admission permits
-	// it only when the enclosing component type explicitly supports role-specific
-	// Pod templates. No component type supports it in this release.
+	// podTemplate defines the complete Pod configuration for this role. Admission
+	// permits it only when the enclosing component type supports role-specific Pod
+	// templates. For multinode components, every required role must supply one and
+	// the role templates own backend-specific leader and worker launch commands.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
+
+// ComponentRole returns the authored role, or nil when the component does not declare it.
+// The shared spec must not be nil.
+func (s *DynamoComponentDeploymentSharedSpec) ComponentRole(name string) *ComponentRoleSpec {
+	// Resolve the role by its stable authored name.
+	for i := range s.Roles {
+		if s.Roles[i].Name == name {
+			return &s.Roles[i]
+		}
+	}
+	return nil
 }
 
 // MultinodeSpec configures a multinode component.
@@ -318,7 +336,7 @@ type GPUMemoryServiceSpec struct {
 	// extraClientContainers lists additional user-declared containers that should
 	// be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
 	// declared under checkpoint.job.gmsClientContainers. Every name must match a container
-	// in the enclosing component's podTemplate.spec.containers.
+	// in the enclosing component's podTemplate, or in every role podTemplate when those are used.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
@@ -806,6 +824,25 @@ type ComponentReplicaStatus struct {
 	// active revision namespace until cutover completes.
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
+
+	// servedModelName is the effective primary model identity exposed by this
+	// component's serving role. During rolling updates, worker status keeps the
+	// old active revision value until cutover completes.
+	// +optional
+	ServedModelName string `json:"servedModelName,omitempty"`
+
+	// runtimeComponentName is an explicit Dynamo runtime component identity
+	// resolved from the serving role's endpoint override. Omission means the
+	// backend default applies. During rolling updates, worker status keeps the
+	// old active revision value until cutover completes.
+	// +optional
+	RuntimeComponentName string `json:"runtimeComponentName,omitempty"`
+
+	// gpuPowerLimitWatts is the effective per-GPU power limit propagated to the
+	// component's Pods. Omission means no power limit is configured.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	GPUPowerLimitWatts *int64 `json:"gpuPowerLimitWatts,omitempty"`
 
 	// gpusPerEngine is the number of GPUs assigned to one inference engine in a
 	// component replica, across all of its nodes. Independent auxiliary GPU

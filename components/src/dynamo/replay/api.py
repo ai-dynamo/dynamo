@@ -21,6 +21,8 @@ from dynamo.replay.report import (
     ReplayTelemetryDetails,
 )
 
+_AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
+
 
 def _planner_replay_adapter():
     """Load Planner replay lazily to break the replay.api/mocker import cycle.
@@ -54,7 +56,7 @@ class _CommonReplayOptions(TypedDict, total=False):
     prefill_engine_args: Any
     decode_engine_args: Any
     router_config: Any
-    aic_perf_config: Any
+    ais_perf_config: Any
     num_workers: int
     num_prefill_workers: int
     num_decode_workers: int
@@ -71,10 +73,13 @@ class _CommonReplayOptions(TypedDict, total=False):
     capture_per_request: bool
     capture_planner_details: bool
     telemetry_options: TelemetryOptions | None
+    kv_event_lag_ms: float | None
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
     agentic_lanes: int | None
+    execution_model: str | None
+    weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
     trace_block_size: int | None
     trace_format: str
     trace_shared_prefix_ratio: float
@@ -111,7 +116,10 @@ def _materialize_offline_report(
     native,
     *,
     planner: PlannerReplayDetails | None,
+    execution_model: str | None = None,
 ) -> ReplayReport:
+    summary = dict(native.summary)
+    _add_agentic_model_projection(summary, execution_model)
     native_telemetry = native.telemetry
     telemetry = (
         None
@@ -122,12 +130,51 @@ def _materialize_offline_report(
         )
     )
     return ReplayReport(
-        summary=native.summary,
+        summary=summary,
         per_request=native.per_request,
         coverage=native.coverage,
         planner=planner,
         telemetry=telemetry,
     )
+
+
+def _normalize_execution_model(
+    trace_format: str, execution_model: str | None
+) -> str | None:
+    if execution_model is not None:
+        if not isinstance(execution_model, str):
+            raise TypeError("execution_model must be a string or None")
+        execution_model = execution_model.strip()
+        if not execution_model:
+            raise ValueError("execution_model must be non-empty")
+    if (
+        trace_format in {"weka", "agentic_mooncake", "agentic-mooncake"}
+        and execution_model is None
+    ):
+        raise ValueError("agentic execution requires a configured target model")
+    return execution_model
+
+
+def _add_agentic_model_projection(
+    summary: dict[str, Any], execution_model: str | None
+) -> None:
+    graph = summary.get("agentic_graph")
+    if not isinstance(graph, dict):
+        return
+    if execution_model is None:
+        raise ValueError(
+            "agentic execution did not declare its configured target model"
+        )
+    source_models = graph.get("source_models")
+    if not isinstance(source_models, list) or not all(
+        isinstance(model, str) and model for model in source_models
+    ):
+        raise ValueError("agentic graph did not report valid source_models")
+    summary["agentic_model_projection"] = {
+        "policy": _AGENTIC_MODEL_PROJECTION_POLICY,
+        "source_models": source_models,
+        "target_model": execution_model,
+    }
 
 
 def _telemetry_kwargs(options: TelemetryOptions | None) -> dict[str, Any]:
@@ -187,7 +234,7 @@ def run_trace_replay(
     prefill_engine_args=None,
     decode_engine_args=None,
     router_config=None,
-    aic_perf_config=None,
+    ais_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -211,12 +258,23 @@ def run_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
+    execution_model=None,
+    weka_nested_timestamp_basis=None,
     telemetry_options=None,
+    kv_event_lag_ms=None,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
+    ``weka_nested_timestamp_basis`` overrides Weka nested timestamp interpretation;
+    omitting it retains AISimulate's automatic selection.
+
+    ``kv_event_lag_ms`` delays the KV cache events (blocks stored and removed)
+    the router's indexer observes by that much simulated time. Prefill and
+    request completions stay immediate, as a live router observes them in-band
+    on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
+    KV-router replay only.
 
     Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
     leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
@@ -231,13 +289,23 @@ def run_trace_replay(
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
     ):
         raise TypeError("agentic_lanes must be an integer or None")
+    if weka_nested_timestamp_basis is not None:
+        if not isinstance(weka_nested_timestamp_basis, str):
+            raise TypeError("weka_nested_timestamp_basis must be a string or None")
+        if weka_nested_timestamp_basis not in {"auto", "absolute", "relative"}:
+            raise ValueError(
+                "weka_nested_timestamp_basis must be 'auto', 'absolute', or 'relative'"
+            )
+        if trace_format != "weka":
+            raise ValueError("weka_nested_timestamp_basis requires trace_format='weka'")
+    execution_model = _normalize_execution_model(trace_format, execution_model)
     trace_files = _normalize_trace_files(trace_files)
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
         "decode_engine_args": decode_engine_args,
         "router_config": router_config,
-        "aic_perf_config": aic_perf_config,
+        "ais_perf_config": ais_perf_config,
         "num_workers": num_workers,
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,
@@ -253,11 +321,14 @@ def run_trace_replay(
         "report_jsonl_path": report_jsonl_path,
         "max_sim_time_ms": max_sim_time_ms,
         "model_name": model_name,
+        "execution_model": execution_model,
+        "weka_nested_timestamp_basis": weka_nested_timestamp_basis,
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "kv_event_lag_ms": kv_event_lag_ms,
     }
     replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
@@ -272,15 +343,6 @@ def run_trace_replay(
         if replay_mode != "offline":
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
-            )
-        if trace_format not in (
-            "mooncake",
-            "applied_compute_agentic",
-            "dynamo",
-        ):
-            raise ValueError(
-                "planner_config replay only supports trace_format='mooncake', "
-                "'applied_compute_agentic', or 'dynamo'"
             )
         if trace_format != "dynamo" and len(trace_files) != 1:
             raise ValueError(
@@ -310,6 +372,7 @@ def run_trace_replay(
             return _materialize_offline_report(
                 native,
                 planner=adapter.finalize(native.lifecycle_operations),
+                execution_model=execution_model,
             )
     result = _run_mocker_trace_replay(
         trace_files,
@@ -317,8 +380,14 @@ def run_trace_replay(
         scaling_policy=None,
     )
     if replay_mode == "online":
+        if isinstance(result, dict):
+            _add_agentic_model_projection(result, execution_model)
         return result
-    return _materialize_offline_report(result, planner=None)
+    return _materialize_offline_report(
+        result,
+        planner=None,
+        execution_model=execution_model,
+    )
 
 
 @overload
@@ -366,7 +435,7 @@ def run_synthetic_trace_replay(
     prefill_engine_args=None,
     decode_engine_args=None,
     router_config=None,
-    aic_perf_config=None,
+    ais_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -391,14 +460,23 @@ def run_synthetic_trace_replay(
     capture_per_request=False,
     capture_planner_details=True,
     telemetry_options=None,
+    kv_event_lag_ms=None,
 ) -> ReplayReport | dict[str, Any]:
-    """Run synthetic replay with the same optional ``TelemetryOptions`` contract."""
+    """Run synthetic replay with the same optional ``TelemetryOptions`` and
+    ``kv_event_lag_ms`` contracts as :func:`run_trace_replay`.
+
+    ``arrival_seed`` seeds request-arrival generation only, not KV-router worker
+    selection. With ``router_mode="kv_router"``, equal-cost workers are selected
+    randomly even at router temperature zero. A fixed arrival seed therefore
+    does not guarantee identical routing, prefix reuse, or latency across runs,
+    including offline replay.
+    """
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
         "decode_engine_args": decode_engine_args,
         "router_config": router_config,
-        "aic_perf_config": aic_perf_config,
+        "ais_perf_config": ais_perf_config,
         "num_workers": num_workers,
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,
@@ -419,6 +497,7 @@ def run_synthetic_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "kv_event_lag_ms": kv_event_lag_ms,
     }
     replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":

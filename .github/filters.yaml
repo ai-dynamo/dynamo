@@ -9,6 +9,7 @@
 #   deploy   -> deploy tests
 #   dgdr     -> DGDR deploy tests
 #   planner  -> dynamo build-test
+#   planner_gym -> Planner Gym CPU tests and packaging
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
@@ -152,6 +153,7 @@ ignore:
   - 'lib/sidecar/**/*.rst'
 
 ci: &ci
+  - '.github/ci/**'
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
@@ -187,6 +189,7 @@ core:
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
   - 'components/src/dynamo/tokenspeed/**'
+  - 'examples/backends/tokenspeed/**'
   - 'components/src/dynamo/squeeze_evolve/**'
   - '*.toml'
   - '*.lock'
@@ -332,6 +335,12 @@ dgdr:
   - 'tests/deploy/dgd_utils.py'
 
 
+planner_gym:
+  - 'gyms/planner-gym/**'
+  - '.github/workflows/pre-merge.yml'
+  - '.github/actions/changed-files/**'
+  - '.github/filters.yaml'
+
 planner:
   - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
@@ -357,9 +366,11 @@ sidecar:
   - 'tests/router/helper.py'
   - 'tests/router/router_process.py'
   - 'tests/utils/gpu_args.py'
+  - 'tests/utils/payloads.py'
   - 'tests/utils/prometheus.py'
   - 'tests/utils/router_logs.py'
   - 'tests/utils/router_nvext.py'
+  - 'tests/utils/payloads.py'
   - 'Cargo.toml'
   - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.
@@ -425,7 +436,7 @@ frontend:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
-  - 'tests/frontend/router_aic_image_smoke.py'
+  - 'tests/frontend/router_ais_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
   # The frontend image is rendered from these two: render.py generates its
