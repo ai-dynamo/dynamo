@@ -118,10 +118,12 @@ Deploy Z.AI's GLM-5.3-Flash with NVIDIA Dynamo using SGLang or vLLM. The SGLang 
 - The NVIDIA DRA driver and `resource.nvidia.com/v1beta1` ComputeDomain CRD. Disaggregated workers must fit in one NVLink clique; the overlay uses Pod affinity on the `nvidia.com/gpu.clique` node label.
 - Standalone Kustomize v5.8.1 and a checkout of this repository.
 - Access to `RadixArk/GLM-5.3-Flash-NVFP4` at revision `f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35`.
-- The source image `lmsysorg/sglang:nightly-dev-cu13-20261001-b37e6f79`, with compatible `dynamo.frontend` and `dynamo.sglang` entry points. `runtimeVersionOverride: 1.6.0` declares compatibility to the operator; it does not install Dynamo.
+- Registry access to `dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime`, used by all frontend and worker containers. Configure `imagePullSecrets` for both in your private overlay when authentication is required.
 - A ReadWriteMany PVC named `shared-model-cache`, accessible from all worker nodes.
 
 The scheduling component selects arm64 nodes and `nvidia.com/gpu.product=NVIDIA-GB200` for workers. It tolerates `kubernetes.io/arch=arm64:NoSchedule` and, on workers, `nvidia.com/gpu=present:NoSchedule`. Keep site-specific namespace, storage class, pull Secrets, priority class, and scheduling overrides in a private cluster overlay.
+
+The Dynamo image builds on `lmsysorg/sglang:v0.5.21-cu130-runtime` with GLM-5.3-Flash backports, Transformers 5.19.0, and Tokenizers 0.23.2. It includes the Dynamo entry points and `Glm5NextProcessor` image/video processing support.
 
 </div>
 
@@ -310,7 +312,7 @@ curl --fail-with-body http://localhost:8000/v1/chat/completions \
   -d '{"model":"RadixArk/GLM-5.3-Flash-NVFP4","messages":[{"role":"user","content":"What is 2 + 2?"}],"max_tokens":128,"temperature":0}'
 ```
 
-The SGLang workers use the `glm45` reasoning parser and `glm47` tool-call parser.
+The SGLang workers use the `glm45` reasoning parser and `glm47` tool-call parser. Both recipes enable `--enable-multimodal` and `--frontend-decoding` on every SGLang worker. Send text, image, or video content to the chat completions endpoint; the Dynamo frontend decodes images and videos before passing them to the backend.
 
 </div>
 
@@ -356,6 +358,7 @@ Both GB200 targets use the pinned NVFP4 checkpoint and FP8 E4M3 KV cache. Worker
 | **Static memory fraction** | 0.70 | Prefill 0.70 / decode 0.78 |
 | **Routing** | Round-robin | Prediction-based KV-aware routing |
 | **KV transfer** | Not applicable | Mooncake over NVLink with MNNVL |
+| **Input modalities** | Text, images, video | Text, images, video |
 
 ## Related Feature Benchmarks
 
@@ -374,7 +377,7 @@ No controlled feature benchmark is linked to this recipe. Browse the [Feature Be
 
 ### SGLang
 
-- The aggregated recipe derives from E51 TP4 ReplaySSM with HiCache 100; the disaggregated recipe derives from D31 2P1D. Engine arguments, replica counts, GPU and memory requests, image, and model revision are retained.
+- The aggregated recipe derives from E51 TP4 ReplaySSM with HiCache 100; the disaggregated recipe derives from D31 2P1D. Engine tuning, replica counts, GPU and memory requests, and model revision are retained. The recipes replace the source image with the patched Dynamo SGLang runtime and enable multimodal processing and frontend media decoding.
 - Cluster identities and experiment labels are omitted. Kustomize components provide GB200 placement and ComputeDomain wiring. Operator defaults supply health probes.
 - Disaggregated routing disables KV events because the workers do not configure an event publisher. The router block size is 64, matching the SGLang page size.
 - The default overlay omits the source configurations' `SGLANG_SIMULATE_ACC_*` variables. Add the optional component only when reproducing synthetic acceptance measurements.
