@@ -3200,12 +3200,7 @@ async fn response_format_explicit_reasoning_without_prompt_prefill() {
                     (native.as_str(), "private", json),
                     (literal.as_str(), "", literal.as_str()),
                 ] {
-                    // TODO: Published 0.7.13 consumes quoted Muse channels even in Response.
-                    // https://github.com/ai-dynamo/frontend-crates/pull/326
-                    // Kept executable in response_format_muse_quoted_channel_stays_literal below.
-                    if family == "muse_glimmer" && raw == literal {
-                        continue;
-                    }
+                    // TODO: Extend this split matrix to literal native tool-call openers.
                     for split in 0..=raw.len() + 1 {
                         if split <= raw.len() && !raw.is_char_boundary(split) {
                             continue;
@@ -3245,10 +3240,8 @@ async fn response_format_explicit_reasoning_without_prompt_prefill() {
     }
 }
 
-// TODO: Re-enable after quoted Muse controls are fixed in a published parser.
-// https://github.com/ai-dynamo/frontend-crates/pull/326
+// TODO: Cover literal native tool-call opener text in Muse structured responses.
 #[tokio::test]
-#[ignore = "published 0.7.13 consumes quoted Muse channels; frontend-crates #326"]
 async fn response_format_muse_quoted_channel_stays_literal() {
     if test_utils::run_isolated(
         concat!(
@@ -3417,10 +3410,8 @@ async fn response_format_qwen3_prompt_injected_json_streams_before_terminal() {
     assert_eq!(first_content, first_json_chunk);
 }
 
-// TODO: Re-enable after the quoted-control fix is available in a published parser release.
-// https://github.com/ai-dynamo/frontend-crates/pull/326
+// TODO: Cover literal native tool-call opener text in streaming prose.
 #[tokio::test]
-#[ignore = "published 0.7.13 consumes quoted streaming controls; frontend-crates #326"]
 async fn postprocessor_parsing_stream_keeps_quoted_think_markers_as_content() {
     if test_utils::run_isolated(
         concat!(

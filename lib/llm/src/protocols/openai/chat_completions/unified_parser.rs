@@ -5333,10 +5333,8 @@ mod tests {
         }
     }
 
-    // TODO: Re-enable early-progress qualification after frontend-crates #326 is published.
-    // https://github.com/ai-dynamo/frontend-crates/pull/326
+    // TODO: Extend early-progress checks to literal native tool-call opener cases.
     #[test]
-    #[ignore = "published 0.7.13 buffers quoted-marker arguments; frontend-crates #326"]
     fn quoted_marker_in_tool_arguments_releases_following_content_before_close() {
         assert_quoted_marker_tool_arguments(true);
     }
@@ -5537,10 +5535,8 @@ mod tests {
         }
     }
 
-    // TODO: Re-enable streaming literal preservation after frontend-crates #326 is published.
-    // https://github.com/ai-dynamo/frontend-crates/pull/326
+    // TODO: Cover literal native tool-call opener text separately from reasoning controls.
     #[tokio::test]
-    #[ignore = "published 0.7.13 consumes quoted streaming controls; frontend-crates #326"]
     async fn quoted_control_markers_stay_visible_in_batch_and_streaming() {
         assert_quoted_control_markers(true, true).await;
     }
@@ -5550,10 +5546,8 @@ mod tests {
         assert_quoted_control_markers(false, false).await;
     }
 
-    // TODO: Qualify native-channel batch literal preservation after the upstream quoted-control fix.
-    // https://github.com/ai-dynamo/frontend-crates/pull/326
+    // TODO: Cover literal native tool-call opener text in native-channel batch responses.
     #[tokio::test]
-    #[ignore = "published 0.7.13 consumes Gemma, Kimi K3, and Muse quoted batch controls; frontend-crates #326"]
     async fn native_channel_quoted_control_markers_stay_visible_in_batch() {
         assert_quoted_control_markers(false, true).await;
     }
