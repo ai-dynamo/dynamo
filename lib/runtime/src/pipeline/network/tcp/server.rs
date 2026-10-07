@@ -1454,6 +1454,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_no_env_vars_is_plaintext"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         // Also clear the client-CA var: ambient it would turn this into an error
         // (client CA without a server cert/key) instead of plaintext.
         temp_env::with_vars_unset(
@@ -1470,6 +1480,13 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::build_tls_acceptor_partial_config_errors"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
@@ -1493,6 +1510,13 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::build_tls_acceptor_both_paths_is_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
@@ -1505,6 +1529,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_with_client_ca_is_mtls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_with_client_ca_is_mtls"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         // A client CA turns the response-stream server into an mTLS acceptor.
         let (cert, key) = self_signed_pair();
         temp_env::with_vars(
@@ -1522,6 +1556,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_client_ca_without_server_identity_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_client_ca_without_server_identity_errors"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, _key) = self_signed_pair();
         temp_env::with_vars(
             [

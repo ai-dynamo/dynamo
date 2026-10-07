@@ -74,11 +74,15 @@ COPY examples/router/custom-policy-example/ examples/router/custom-policy-exampl
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
-# The `/src/target` cache below uses an explicit generation suffix. BuildKit
-# cache mounts can contain artifacts newer than a fresh source checkout, so
-# Cargo may otherwise reuse stale crate APIs or generated protobuf bindings.
-# Bump the suffix when shared crate APIs or sidecar build-script inputs change;
-# one cold build is preferable to compiling against stale dependencies.
+# Exercise Cargo freshness with old checkout mtimes before using shared caches.
+RUN python3 -B -m unittest discover -s lib/sidecar -p test_build_cache.py
+
+# The shared target cache can contain artifacts newer than a fresh checkout.
+# The build helper hashes all copied inputs and restores their mtimes to a
+# shared source timestamp before Cargo checks freshness. This invalidates stale
+# local crates and protobuf outputs and preserves third-party dependency reuse.
+# Use a separate cache generation so older builders cannot replace artifacts
+# without updating the helper's source stamp.
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
@@ -95,8 +99,8 @@ ARG TARGETARCH
 # build do not serialize against each other.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-namespace-v3,target=/src/target,sharing=locked \
-    cargo build --release --locked -p dynamo-vllm-sidecar \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-inputs-v3,target=/src/target,sharing=locked \
+    lib/sidecar/build-with-cache.sh build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
     && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
 
@@ -107,8 +111,8 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-namespace-v3,target=/src/target,sharing=locked \
-    cargo build --release --locked -p dynamo-sglang-sidecar \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-inputs-v3,target=/src/target,sharing=locked \
+    lib/sidecar/build-with-cache.sh build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar \
     && install -D target/release/dynamo-sglang-sidecar /out/dynamo-sglang-sidecar
 
@@ -119,8 +123,8 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-namespace-v3,target=/src/target,sharing=locked \
-    cargo build --release --locked -p dynamo-trtllm-sidecar \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-inputs-v3,target=/src/target,sharing=locked \
+    lib/sidecar/build-with-cache.sh build --release --locked -p dynamo-trtllm-sidecar \
     && strip target/release/dynamo-trtllm-sidecar \
     && install -D target/release/dynamo-trtllm-sidecar /out/dynamo-trtllm-sidecar
 

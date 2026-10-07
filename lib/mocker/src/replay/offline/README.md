@@ -19,3 +19,14 @@ composition:
 
 See the [`aisimulate-core` crate](https://crates.io/crates/aisimulate-core) for the
 virtual-time runtime and its liveness contract.
+
+## Reproducibility
+
+`arrival_seed` in the Python replay API controls request arrival generation only.
+For Poisson traffic, AISimulate's YAML `traffic.load.seed` is forwarded as this
+arrival seed. It does not seed KV router worker selection.
+
+With KV routing enabled, the default router still breaks ties between equal-cost
+workers randomly at temperature zero. Identical inputs and arrival seeds can
+therefore produce different routing, prefix reuse, and simulated latencies,
+despite the deterministic event loop.
