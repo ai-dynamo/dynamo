@@ -2,26 +2,26 @@
   "description": "Maps (from_image:tag, baseline_image:tag) pairs to slim CycloneDX SBOMs of the baseline. Each entry records the engineer-specified compliance boundary: NGC (or other upstream) owns everything in the baseline; we own everything from_image adds on top. The captured SBOM is the BASELINE -- runtime licenses stages subtract its components from final-image NOTICES to filter out NGC-owned content. CI runs container/compliance/base_sboms/check_drift.py on every PR/post-merge; if either digest moved or the from_image's layer prefix no longer matches the recorded baseline, CI fails and a refresh PR is required.",
   "entries": [
     {
-      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
+      "baseline_digest": "sha256:3eb2d952d9cff2d7a4e42a1cedc19cfa610a7f72c3b8428811731dcea5a175fd",
       "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
-      "baseline_tag": "13.0.2-base-ubuntu24.04",
-      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
+      "baseline_sbom": "cuda@3eb2d952-amd64.cdx.json",
+      "baseline_tag": "13.4.1-base-ubuntu24.04",
+      "capture_note": "Syft 1.43.0 scanned the CUDA 13.4.1 baseline by immutable digest. Only the Ubuntu rootfs layer differs from the vLLM nightly; all six subsequent CUDA base layers match. Full runtime delta license validation remains a CI gate after dependency installation and codec removal.",
+      "from_digest": "sha256:e631ba412c9b40c9cfd2bc3b56a24f2b6cba16b49abb0e8c7645a2f5adc875ea",
       "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.27.1-ubuntu2404",
+      "from_tag": "cu134-nightly-bb87d227d4b964abb2a966cdf9194f3d376d9bbe",
       "layer_prefix_check_skipped": true,
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
+      "baseline_digest": "sha256:3eb2d952d9cff2d7a4e42a1cedc19cfa610a7f72c3b8428811731dcea5a175fd",
       "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
-      "baseline_tag": "13.0.2-base-ubuntu24.04",
-      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
+      "baseline_sbom": "cuda@3eb2d952-arm64.cdx.json",
+      "baseline_tag": "13.4.1-base-ubuntu24.04",
+      "capture_note": "Syft 1.43.0 scanned the CUDA 13.4.1 baseline by immutable digest. Only the Ubuntu rootfs layer differs from the vLLM nightly; all six subsequent CUDA base layers match. Full runtime delta license validation remains a CI gate after dependency installation and codec removal.",
+      "from_digest": "sha256:e631ba412c9b40c9cfd2bc3b56a24f2b6cba16b49abb0e8c7645a2f5adc875ea",
       "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.27.1-ubuntu2404",
+      "from_tag": "cu134-nightly-bb87d227d4b964abb2a966cdf9194f3d376d9bbe",
       "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
     },
@@ -162,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-10-06T01:41:52+00:00",
+  "generated_at": "2026-10-07T20:44:55+00:00",
   "schema_version": 2
 }

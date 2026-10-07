@@ -94,14 +94,10 @@ vllm:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: cu134-nightly-bb87d227d4b964abb2a966cdf9194f3d376d9bbe
     vllm_omni_ref: "v0.31.0rc1"
-    # Retain nvidia/cuda:13.0.2-base-ubuntu24.04 as the compliance floor.
-    # The cu134 runtime uses CUDA 13.4.1; additions remain subject to scanning.
-    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
-    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
-    # rather than hiding it. Per-arch stem; the licenses stage appends
-    # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
-    # the runtime image — see the codec-purge follow-up.)
-    baseline_sbom: cuda@2ab6381d
+    # CUDA 13.4.1 base SBOMs for the cu134 nightly, captured per architecture.
+    # All six CUDA base layers match; Ubuntu rootfs drift is recorded in the manifest.
+    # Subtract only the NVIDIA CUDA floor, so vLLM additions remain in scope.
+    baseline_sbom: cuda@3eb2d952
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
