@@ -17,14 +17,4 @@ engine:
       scheduler: {max_batched_tokens: 8192, max_sequences: 256}
       kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
       timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
-planner:
-  policy: enabled
-  target: load
-  enable_throughput_scaling: false
-  enable_load_scaling: true
-  throughput_adjustment_interval_seconds: 180
-  load_adjustment_interval_seconds: 5
-  load_scaling_down_sensitivity: 80
-  load_min_observations: 5
-  max_num_gpus: 2
-  min_workers: 1
+planner: {policy: enabled}

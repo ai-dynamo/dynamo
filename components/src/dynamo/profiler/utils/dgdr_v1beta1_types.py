@@ -58,6 +58,7 @@ class SearchStrategy(str, Enum):
 
 
 class GPUSKUType(str, Enum):
+    GB200 = "gb200"
     GB200SXM = "gb200_sxm"
     GB10 = "gb10"
     B300SXM = "b300_sxm"
@@ -227,7 +228,7 @@ class HardwareSpec(BaseModel):
 
     gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU. The legacy value gb200_sxm is deprecated; use gb200 instead.",
     )
     vramMb: Optional[float] = Field(
         default=None,
