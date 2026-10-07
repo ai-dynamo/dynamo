@@ -1,6 +1,7 @@
 Upstream: https://gitlab-master.nvidia.com/dler/vllm/-/merge_requests/1
 Author: Thinh Le (dler); backported here onto vLLM 0.29.1rc1.dev187.
-Runtime change only; upstream tests omitted (matching the PR-57505 patch).
+Runtime change only; upstream tests omitted.
+Target: vLLM v0.31.0 (db9527a46873454610df6dbedf79a36d6bf1a7f6).
 
 `<video>` is deliberately absent from this checkpoint's vocabulary, so it
 tokenizes as three ordinary tokens ['<', 'video', '>']. When the chat template

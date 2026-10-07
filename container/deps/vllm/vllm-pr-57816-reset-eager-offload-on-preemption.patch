@@ -1,6 +1,7 @@
 Upstream: https://github.com/vllm-project/vllm/pull/57816
 Commit: 52394b14faa162a7b20b6ca41edb070f801f5ea4
 Runtime change only; upstream tests omitted.
+Target: vLLM v0.31.0 (db9527a46873454610df6dbedf79a36d6bf1a7f6).
 
 diff --git a/vllm/v1/simple_kv_offload/manager.py b/vllm/v1/simple_kv_offload/manager.py
 --- a/vllm/v1/simple_kv_offload/manager.py

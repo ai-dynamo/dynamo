@@ -1,4 +1,5 @@
 Local workaround: load vision weights for NemotronH_Omni_Reasoning_V3 exports.
+Target: vLLM v0.31.0 (db9527a46873454610df6dbedf79a36d6bf1a7f6).
 
 vLLM's nano_nemotron_vl load_weights() routes tensors through four prefix
 predicates in an if/elif chain with no else branch. This checkpoint names the
