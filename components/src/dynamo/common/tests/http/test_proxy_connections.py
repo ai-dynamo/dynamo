@@ -12,7 +12,9 @@ not run here, so the connect-time check is the only one in play, and no real
 DNS lookup happens.
 
 A fetch without a URL policy follows redirects itself, one hop at a time. The
-tests at the end also pin its time budget and its limit of 10 redirects.
+tests at the end also pin its time budget, its limit of 10 redirects, and the
+redirect targets that it takes and refuses, which are the ones aiohttp took
+and refused.
 """
 
 from __future__ import annotations
@@ -77,11 +79,15 @@ class _LoopbackServer:
     """
 
     def __init__(
-        self, redirect: tuple[bytes, str] | None = None, delay: float = 0.0
+        self,
+        redirect: tuple[bytes, str] | None = None,
+        delay: float = 0.0,
+        redirect_header: bytes = b"Location",
     ) -> None:
         self.first_lines: list[bytes] = []
         self._redirect = redirect
         self._delay = delay
+        self._redirect_header = redirect_header
 
     async def _handle(self, reader, writer) -> None:
         try:
@@ -95,8 +101,8 @@ class _LoopbackServer:
             if self._redirect and line.startswith(self._redirect[0]):
                 location = self._redirect[1].format(port=self.port).encode()
                 writer.write(
-                    b"HTTP/1.1 302 Found\r\nLocation: %s\r\nContent-Length: 0\r\n"
-                    b"Connection: close\r\n\r\n" % location
+                    b"HTTP/1.1 302 Found\r\n%s: %s\r\nContent-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n" % (self._redirect_header, location)
                 )
             elif data.startswith(b"GET "):
                 writer.write(
@@ -290,3 +296,49 @@ async def test_redirects_without_a_policy_stop_at_ten() -> None:
     assert excinfo.value.status == 0
     assert isinstance(excinfo.value.__cause__, aiohttp.TooManyRedirects)
     assert len(server.first_lines) == 10
+
+
+@pytest.mark.parametrize(
+    ("location", "cause"),
+    [
+        ("http://[::1", aiohttp.InvalidUrlRedirectClientError),
+        ("ws://127.0.0.1:{port}/x", aiohttp.NonHttpUrlRedirectClientError),
+        ("https:x", aiohttp.InvalidUrlRedirectClientError),
+    ],
+    ids=["unparsable", "not-http", "no-host"],
+)
+async def test_a_redirect_target_that_aiohttp_refused_is_refused(
+    monkeypatch, location, cause
+) -> None:
+    """aiohttp refused these targets with a client error, which the fetch
+    reported as HttpConnectionError. The loop refuses them before the next
+    hop, so the proxy gate does not see a URL without a host either."""
+    # The fetch goes direct, and a proxy applies to a URL without a host.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY"):
+        monkeypatch.setenv(name, f"http://{_PROXY_HOST}:3128")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    async with _LoopbackServer((b"GET /start", location)) as server:
+        client = AiohttpClient()
+        try:
+            with pytest.raises(HttpConnectionError) as excinfo:
+                await client.fetch_bytes(f"http://127.0.0.1:{server.port}/start", 5.0)
+        finally:
+            await client.close()
+    assert isinstance(excinfo.value.__cause__, cause)
+    assert len(server.first_lines) == 1
+
+
+async def test_a_redirect_in_the_uri_header_is_followed() -> None:
+    """aiohttp took the obsolete URI header when Location was missing."""
+    async with _LoopbackServer(
+        (b"GET /start", "/next"), redirect_header=b"URI"
+    ) as server:
+        client = AiohttpClient()
+        try:
+            body = await client.fetch_bytes(
+                f"http://127.0.0.1:{server.port}/start", 5.0
+            )
+        finally:
+            await client.close()
+    assert body == _BODY
+    assert len(server.first_lines) == 2

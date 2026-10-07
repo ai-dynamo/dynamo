@@ -46,9 +46,38 @@ _READ_CHUNK = 64 * 1024
 # aiohttp's default ``max_redirects``, kept for a fetch without a URL policy.
 _MAX_SIMPLE_REDIRECTS = 10
 
+# The redirect targets that aiohttp follows: http(s), or a relative reference.
+_REDIRECT_SCHEMES = frozenset({"http", "https", ""})
+
 # Set to "1" to assert that the configured egress proxy enforces destination
 # policy itself. Spelled like DYN_MM_ALLOW_INTERNAL, which it sits beside.
 DYN_MM_TRUST_EGRESS_PROXY = "DYN_MM_TRUST_EGRESS_PROXY"
+
+
+def _redirect_target(base: URL, location: str) -> str:
+    """The next hop of a redirect without a URL policy, checked like aiohttp.
+
+    aiohttp followed these redirects before the client did. A target that it
+    refused raises the same client error here, so the fetch reports it as
+    HttpConnectionError, as before.
+    """
+    try:
+        target = URL(location)
+    except ValueError as e:
+        raise aiohttp.InvalidUrlRedirectClientError(
+            location,
+            "Server attempted redirecting to a location that does not look like a URL",
+        ) from e
+    if target.scheme not in _REDIRECT_SCHEMES:
+        raise aiohttp.NonHttpUrlRedirectClientError(location)
+    target = base.join(target)
+    try:
+        target.origin()
+    except ValueError as e:
+        raise aiohttp.InvalidUrlRedirectClientError(
+            target, "Invalid redirect URL origin"
+        ) from e
+    return str(target)
 
 
 class AiohttpClient(HttpClient):
@@ -231,7 +260,9 @@ class AiohttpClient(HttpClient):
                 async with session.get(
                     current, timeout=hop_timeout, allow_redirects=False
                 ) as response:
-                    location = response.headers.get("Location")
+                    # aiohttp also took the obsolete URI header.
+                    headers = response.headers
+                    location = headers.get("Location") or headers.get("URI")
                     if response.status in _REDIRECT_STATUSES and location:
                         redirects += 1
                         if redirects >= _MAX_SIMPLE_REDIRECTS:
@@ -239,7 +270,7 @@ class AiohttpClient(HttpClient):
                             raise aiohttp.TooManyRedirects(
                                 response.request_info, (response,)
                             )
-                        current = str(response.url.join(URL(location)))
+                        current = _redirect_target(response.url, location)
                         continue
                     response.raise_for_status()
                     return await collect_capped(
