@@ -311,7 +311,7 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-structural-tag-schema" type="string" default="auto">
-  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema only to tools with `strict=true`, leaving all other tools syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
+  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema unless the tool explicitly sets `strict=false`. Tools with `strict=false` remain syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>strict</Badge></span>
 

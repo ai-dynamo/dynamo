@@ -317,8 +317,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default="auto",
             choices=["auto", "strict"],
             help="Controls parameter schema strictness inside structural tags. "
-            "'auto': real schema only for tools with strict=true; "
-            "syntactically constrained but schema-unconstrained for all other tools. "
+            "'auto': real schema unless the tool explicitly sets strict=false; "
+            "strict=false tools are syntactically constrained but schema-unconstrained. "
             "'strict': real parameter schema for all tools.",
         )
         add_argument(
