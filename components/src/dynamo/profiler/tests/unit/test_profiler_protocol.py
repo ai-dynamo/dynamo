@@ -476,7 +476,7 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() ->
         decode_cli_args=[
             "--max-running-requests",
             "512",
-            "--cuda-graph-bs",
+            "--cuda-graph-bs-decode",
             "1",
         ],
         decode_replicas=2,
@@ -488,8 +488,8 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() ->
 
     assert prefill_args.count("--max-running-requests") == 1
     assert prefill_args[prefill_args.index("--max-running-requests") + 1] == "2"
-    assert prefill_args.count("--cuda-graph-bs") == 1
-    assert prefill_args[prefill_args.index("--cuda-graph-bs") + 1] == "2"
+    assert prefill_args.count("--cuda-graph-bs-decode") == 1
+    assert prefill_args[prefill_args.index("--cuda-graph-bs-decode") + 1] == "2"
 
 
 @pytest.mark.parametrize(
@@ -518,7 +518,7 @@ def test_sglang_prefill_dp_limits_normalize_shell_joined_args() -> None:
     assert "--max-running-requests 1" not in normalized
     assert normalized.count("--max-running-requests") == 1
     assert normalized[normalized.index("--max-running-requests") + 1] == "2"
-    assert normalized[normalized.index("--cuda-graph-bs") + 1] == "2"
+    assert normalized[normalized.index("--cuda-graph-bs-decode") + 1] == "2"
 
 
 @pytest.mark.parametrize(
@@ -559,7 +559,7 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
         prefill_cli_args=[
             "--max-running-requests",
             "1",
-            "--cuda-graph-bs=1",
+            "--cuda-graph-bs-decode=1",
         ],
         prefill_replicas=2,
         prefill_gpus=4,
@@ -574,9 +574,9 @@ def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
     cuda_graph_bs_args = [
         arg
         for arg in prefill_args
-        if arg == "--cuda-graph-bs" or arg.startswith("--cuda-graph-bs=")
+        if arg == "--cuda-graph-bs-decode" or arg.startswith("--cuda-graph-bs-decode=")
     ]
-    assert cuda_graph_bs_args == ["--cuda-graph-bs=1"]
+    assert cuda_graph_bs_args == ["--cuda-graph-bs-decode=1"]
 
 
 def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
@@ -602,8 +602,8 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
 
     assert args.count("--max-running-requests") == 1
     assert args[args.index("--max-running-requests") + 1] == "2"
-    assert args.count("--cuda-graph-bs") == 1
-    assert args[args.index("--cuda-graph-bs") + 1] == "2"
+    assert args.count("--cuda-graph-bs-decode") == 1
+    assert args[args.index("--cuda-graph-bs-decode") + 1] == "2"
 
 
 def test_vllm_mamba_align_raises_max_num_batched_tokens() -> None:

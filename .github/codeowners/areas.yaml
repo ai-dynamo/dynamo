@@ -223,6 +223,7 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+  - gyms/planner-gym/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -353,6 +354,8 @@ areas:
   - dynamo.code-workspace
   - hatch_build.py
   - lib/bindings/kvbm/pyproject.toml
+  - lib/sidecar/build-with-cache.sh
+  - lib/sidecar/test_build_cache.py
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
@@ -955,10 +958,6 @@ shared:
   owners:
   - operator
   - planner
-- glob: deploy/operator/internal/gpu/discovery.go
-  owners:
-  - operator
-  - observability
 - glob: deploy/operator/internal/controller/lpx/
   owners:
   - operator

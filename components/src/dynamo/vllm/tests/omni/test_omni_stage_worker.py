@@ -708,6 +708,35 @@ async def test_image_request_with_default_sampling_params():
 
 
 @pytest.mark.asyncio
+async def test_routed_video_request_passes_negative_prompt_to_engine():
+    engine = _MockEngine()
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(
+            stage_type="diffusion",
+            final_output=True,
+            default_sampling_params={"num_inference_steps": 4, "guidance_scale": 3.0},
+        ),
+        connectors={},
+        stage_id=0,
+        output_modalities=["video"],
+    )
+    request = {
+        "request_id": "video-negative-prompt-req",
+        "model": "test-model",
+        "prompt": "a small boat",
+        "size": "320x192",
+        "nvext": {"num_frames": 9, "negative_prompt": "blurry, distorted"},
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert not any("error" in c for c in chunks)
+    assert engine.received_prompt["prompt"] == "a small boat"
+    assert engine.received_prompt["negative_prompt"] == "blurry, distorted"
+
+
+@pytest.mark.asyncio
 async def test_sampling_params_propagate_in_stage_output():
     """Non-final stage must include sampling_params_list in its output for downstream stages."""
     engine = _MockEngine()

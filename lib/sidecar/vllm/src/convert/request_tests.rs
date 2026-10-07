@@ -148,22 +148,54 @@ fn unsafe_media_uuids_are_rejected() {
 }
 
 #[test]
-fn encode_requests_reject_non_image_media() {
-    let mut request = epd_image_request();
-    request.multi_modal_data.as_mut().unwrap().insert(
-        "audio_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "https://example.com/sample.wav".to_string(),
-        )],
-    );
+fn encode_requests_accept_image_and_video_media_only() {
+    for (shape, request) in [
+        ("video", epd_video_request()),
+        ("image+video", epd_image_video_request()),
+    ] {
+        let wire = build_generate_request(
+            request.clone(),
+            format!("encode-{shape}"),
+            DisaggregationMode::Encode,
+        )
+        .unwrap_or_else(|error| panic!("{shape}: {error}"));
+        assert_eq!(wire_media(&wire), expected_wire_media(&request), "{shape}");
+    }
 
-    let error = build_generate_request(
-        request,
-        "encode-audio".to_string(),
-        DisaggregationMode::Encode,
-    )
-    .expect_err("Encode must remain image-only");
-    assert!(error.to_string().contains("image media only"));
+    let audio = vec![MultimodalData::RawUrl(
+        "https://example.com/sample.wav".to_string(),
+    )];
+    let audio_only = epd_request(vec![("audio_url", audio.clone())]);
+    let mut image_audio = epd_image_request();
+    image_audio
+        .multi_modal_data
+        .as_mut()
+        .expect("image media")
+        .insert("audio_url".to_string(), audio);
+    let preprocessed_audio = request_with_preprocessed_features(json!({
+        "mm_hashes": {"audio": ["producer-audio-hash"]},
+        "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"audio": [VALID_MM_KWARGS_BASE64]}
+    }));
+    for (shape, request) in [
+        ("audio", audio_only),
+        ("image+audio", image_audio),
+        ("preprocessed audio", preprocessed_audio),
+    ] {
+        let Err(error) = build_generate_request(
+            request,
+            format!("encode-{shape}"),
+            DisaggregationMode::Encode,
+        ) else {
+            panic!("{shape}: Encode must reject audio");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("encode requests support image and video media only"),
+            "{shape}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -1253,6 +1285,29 @@ fn preprocessed_features_cannot_mix_with_raw_media() {
     )
     .expect_err("raw media and preprocessed features must not be mixed");
     assert!(error.to_string().contains("cannot be mixed"));
+}
+
+#[test]
+fn reasoning_parser_extra_args_do_not_reach_the_engine() {
+    // `request()` carries a JSON schema: the only case where vLLM reads these.
+    let baseline = build_generate_request(
+        request(),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    let mut request = request();
+    let extra = request.extra_args.as_mut().unwrap();
+    extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
+    extra["reasoning_ended"] = json!(false);
+    consume_reasoning_parser_args(&mut request.extra_args);
+    let converted = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    assert_eq!(converted, baseline);
 }
 
 #[test]

@@ -184,14 +184,16 @@ impl SequencePublishQueueError {
     }
 }
 
+/// Throttles repeated failure logs to one per interval, counting what it suppressed.
 #[derive(Default)]
-struct RateLimitedPublishFailure {
+pub(crate) struct RateLimitedFailureLog {
     last_logged_at: Option<Instant>,
     suppressed_since_last_log: u64,
 }
 
-impl RateLimitedPublishFailure {
-    fn record(&mut self, now: Instant) -> Option<u64> {
+impl RateLimitedFailureLog {
+    /// Record one failure; returns the failures since the last log when this one should log.
+    pub(crate) fn record(&mut self, now: Instant) -> Option<u64> {
         let should_log = self.last_logged_at.is_none_or(|last_logged_at| {
             now.saturating_duration_since(last_logged_at) >= SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL
         });
@@ -209,8 +211,8 @@ impl RateLimitedPublishFailure {
 
 #[derive(Default)]
 struct SequencePublishFailureLogState {
-    full: RateLimitedPublishFailure,
-    unexpected_closed: RateLimitedPublishFailure,
+    full: RateLimitedFailureLog,
+    unexpected_closed: RateLimitedFailureLog,
     shutdown_closed_logged: bool,
 }
 
@@ -833,6 +835,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     pub(crate) fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
+    }
+
+    /// Return the live booking for `request_id`, so callers can fence later
+    /// lifecycle steps to this attempt.
+    #[cfg(feature = "standalone-slot-tracker")]
+    pub(crate) fn request_booking(&self, request_id: &str) -> Option<SchedulerBookingDescriptor> {
+        let booking = self.request_index.booking_for(request_id)?;
+        Some(SchedulerBookingDescriptor {
+            request_id: request_id.to_string(),
+            worker: booking.worker,
+            attempt_id: booking.attempt_id,
+        })
     }
 
     pub(crate) fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {

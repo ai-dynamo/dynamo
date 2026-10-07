@@ -200,6 +200,15 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out
 }
 
+/// Exclusive bound for client token ids: the largest id plus one, added tokens
+/// included. Ids can have gaps, so the token count is not a bound.
+fn hf_token_id_bound(hf: &HfTokenizer) -> Option<usize> {
+    hf.get_vocab(true)
+        .into_values()
+        .max()
+        .map(|id| id as usize + 1)
+}
+
 /// serde `deserialize_with` that maps an explicitly-present value -- *including
 /// an explicit JSON `null`* -- to `Some`. Paired with `#[serde(default)]` (which
 /// supplies `None` only when the key is absent), this distinguishes "field
@@ -799,12 +808,14 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
+// Some(uri) selects a file location; None asks the caller to resolve the NGC
+// artifact. The file is still required, and its MDC checksum is unchanged.
 fn checked_file_uri(
     cf: &CheckedFile,
     source: &str,
     local_model_path: Option<&Path>,
     is_custom: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Option<String>> {
     use std::borrow::Cow;
 
     // Coerce path-only into a synthetic file:// URL up front so the
@@ -824,10 +835,10 @@ fn checked_file_uri(
     };
 
     match url.scheme() {
-        "http" | "https" | "hf" => Ok(url.to_string()),
+        "http" | "https" | "hf" => Ok(Some(url.to_string())),
         "file" => {
-            // worker location → --model-path → hf://. Basename + checksum preserved.
-            // is_custom slots aren't published on HF, so rung 4 errors instead.
+            // Prefer the worker location, then the frontend's --model-path.
+            // Only model-provided files can fall back to the original HF/NGC source.
             let path = url
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file uri: {url}"))?;
@@ -836,12 +847,12 @@ fn checked_file_uri(
                 .and_then(|f| f.to_str())
                 .with_context(|| format!("no filename in file uri: {url}"))?;
             if path.exists() {
-                return Ok(url.to_string());
+                return Ok(Some(url.to_string()));
             }
             if let Some(prefix) = local_model_path {
                 let local = prefix.join(filename);
                 if local.exists() {
-                    return file_uri_for(&local);
+                    return file_uri_for(&local).map(Some);
                 }
             }
             if is_custom {
@@ -854,9 +865,12 @@ fn checked_file_uri(
                     path.display()
                 );
             }
-            Ok(format!("hf://{source}/{filename}"))
+            if source.starts_with("ngc://") {
+                return Ok(None);
+            }
+            Ok(Some(format!("hf://{source}/{filename}")))
         }
-        _ => Ok(url.to_string()),
+        _ => Ok(Some(url.to_string())),
     }
 }
 
@@ -899,7 +913,7 @@ pub struct ModelDeploymentCard {
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
 
-    /// Original HuggingFace repository path for downloading model files.
+    /// Original Hugging Face repository, NGC URI, or local model path.
     /// When `display_name` is customized (e.g., via `--served-model-name`),
     /// this field preserves the original repository path needed for downloads.
     /// Falls back to `display_name` if not set.
@@ -1037,6 +1051,10 @@ pub struct ModelDeploymentCard {
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
+
+    /// Set when this card loads its tokenizer. See `hf_token_id_bound`.
+    #[serde(skip, default)]
+    tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
 /// LoRA adapter information for routing decisions
@@ -1335,6 +1353,12 @@ impl ModelDeploymentCard {
         self.tokenizer_with_options(Default::default(), false)
     }
 
+    /// `None` until this card loads its tokenizer, then `Some` of the
+    /// tokenizer's token id bound. That bound is `None` if unknown (tiktoken).
+    pub(crate) fn tokenizer_id_bound(&self) -> Option<Option<usize>> {
+        self.tokenizer_id_bound.get().copied()
+    }
+
     pub(crate) fn embedding_tokenizer_with_options(
         &self,
         options: crate::tokenizers::TokenizerOptions,
@@ -1392,6 +1416,8 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+                self.tokenizer_id_bound
+                    .get_or_init(|| hf_token_id_bound(&hf));
 
                 // Disable any truncation baked into `tokenizer.json`: the HF
                 // `tokenizers` crate honors it on `encode()`, silently clipping every
@@ -1547,6 +1573,8 @@ impl ModelDeploymentCard {
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
+                // tiktoken does not expose its ids.
+                self.tokenizer_id_bound.get_or_init(|| None);
 
                 let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
@@ -1690,16 +1718,27 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let local_dir = mdc_local_dir(&self.slug, &mdcsum)?;
 
-        let entries: Vec<(String, CheckedFile)> = self
-            .iter_metadata_files()
-            .into_iter()
-            .map(|(cf, is_custom)| {
-                Ok((
-                    checked_file_uri(cf, &source, local_model_path, is_custom)?,
-                    cf.clone(),
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
+        let mut entries = Vec::new();
+        let mut ngc_snapshot = None;
+        for (cf, is_custom) in self.iter_metadata_files() {
+            let uri = match checked_file_uri(cf, &source, local_model_path, is_custom)? {
+                Some(uri) => uri,
+                None => {
+                    let snapshot = match &ngc_snapshot {
+                        Some(snapshot) => snapshot,
+                        None => ngc_snapshot.insert(
+                            crate::hub::from_hf(&source, /* ignore_weights = */ true).await?,
+                        ),
+                    };
+                    // The MDC supplies the filename and expected checksum. Retry
+                    // in the resolved directory; a still-missing file is an error.
+                    checked_file_uri(cf, &source, Some(snapshot), is_custom)?.with_context(
+                        || format!("NGC metadata file missing after fetching {source}: {cf}"),
+                    )?
+                }
+            };
+            entries.push((uri, cf.clone()));
+        }
 
         // Pre-resolve hf:// repos once per unique repo; otherwise the
         // resolve loop would call hub::from_hf N times for one model.
@@ -1961,6 +2000,7 @@ impl ModelDeploymentCard {
             indexer_identity: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
+            tokenizer_id_bound: OnceLock::new(),
         })
     }
 }
@@ -2848,6 +2888,70 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ngc_identity_survives_cache_relocation() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let source = "ngc://example/team/model:1";
+        let worker_a = hf_cache_fixture(&workspace.path().join("worker-a"))?;
+        let worker_b = hf_cache_fixture(&workspace.path().join("worker-b"))?;
+        let cache_root = workspace.path().join("ngc-cache");
+        let snapshot = cache_root.join("ngc/example/team/models/model/1");
+        std::fs::create_dir_all(&snapshot)?;
+        for entry in std::fs::read_dir(&worker_a)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), snapshot.join(entry.file_name()))?;
+        }
+
+        let overlay = workspace.path().join("overlay");
+        std::fs::create_dir(&overlay)?;
+        std::fs::copy(worker_a.join("config.json"), overlay.join("config.json"))?;
+        // The explicit overlay must win even when another file needs the NGC cache.
+        std::fs::write(snapshot.join("config.json"), b"{}")?;
+
+        temp_env::async_with_vars(
+            [
+                ("HOME", Some(workspace.path())),
+                ("MODEL_EXPRESS_CACHE_DIRECTORY", Some(cache_root.as_path())),
+            ],
+            async {
+                let mut cards = Vec::new();
+                for path in [&worker_a, &worker_b] {
+                    let model = crate::local_model::LocalModelBuilder::default()
+                        .model_path(path.clone())
+                        .source_path(source.into())
+                        .model_name(Some("public-model".to_string()))
+                        .build()
+                        .await?;
+                    cards.push(model.into_card());
+                }
+                assert_eq!(cards[0].source_path(), source);
+                assert_eq!(cards[0].mdcsum(), cards[1].mdcsum());
+                let expected_sum = cards[1].mdcsum().to_string();
+                std::fs::remove_dir_all(workspace.path().join("worker-a"))?;
+
+                cards[0].download_config(Some(&overlay)).await?;
+                // Deserialization clears the cached mdcsum so the next check recomputes it.
+                let resolved: ModelDeploymentCard = serde_json::from_str(&cards[0].to_json()?)?;
+                assert_eq!(resolved.source_path(), source);
+                assert_eq!(resolved.mdcsum(), expected_sum);
+                assert_eq!(
+                    std::fs::read(resolved.local_dir().join("config.json"))?,
+                    std::fs::read(overlay.join("config.json"))?
+                );
+                assert!(resolved.local_dir().join("tokenizer.json").exists());
+                assert!(
+                    resolved
+                        .local_dir()
+                        .join("special_tokens_map.json")
+                        .exists()
+                );
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await
+    }
+
     /// Build a `CheckedFile` whose wire `path` field is `repr` — parses
     /// as a URL when `repr` has a scheme, otherwise as a `PathBuf`.
     fn cf_for(repr: &str) -> super::CheckedFile {
@@ -2899,7 +3003,7 @@ mod tests {
             let got =
                 super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
                     .unwrap();
-            assert_eq!(got, url);
+            assert_eq!(got.as_deref(), Some(url));
         }
     }
 
@@ -2913,7 +3017,7 @@ mod tests {
             super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
         assert_eq!(
             got,
-            url::Url::from_file_path(&local_cfg).unwrap().to_string()
+            Some(url::Url::from_file_path(&local_cfg).unwrap().to_string())
         );
     }
 
@@ -2938,7 +3042,7 @@ mod tests {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
 
         let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/template.jinja");
+        assert_eq!(got.as_deref(), Some("hf://Qwen/Qwen3-0.6B/template.jinja"));
 
         let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
             .expect_err("custom slot must error instead of falling back to HF");
@@ -2949,6 +3053,14 @@ mod tests {
             msg.contains("--model-path") || msg.contains("shared mount"),
             "wrong error: {msg}"
         );
+
+        let source = "ngc://example/team/model:1";
+        assert!(
+            super::checked_file_uri(&cf, source, None, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::checked_file_uri(&cf, source, None, true).is_err());
     }
 
     /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
