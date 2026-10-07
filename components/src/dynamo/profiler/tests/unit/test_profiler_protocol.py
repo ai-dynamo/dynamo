@@ -130,6 +130,8 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
     [
         ["--http-port", "9000"],
         ["--http-port=9000"],
+        ["--http-port", "8000", "--http-port=9000"],
+        ["--http-port=8000", "--http-port", "9000"],
         ["--http-port", "8000", "--http-port", "9000"],
     ],
 )
