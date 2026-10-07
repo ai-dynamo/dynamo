@@ -430,6 +430,19 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
+        if req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_resolution_version)
+            .is_some()
+        {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("runtime_lora_disaggregated_unsupported")
+                .build()
+                .into());
+        }
+
         let session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;

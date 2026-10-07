@@ -3248,7 +3248,7 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
         lora_name: Option<String>,
-        runtime_lora: Option<RuntimeLoraSelection>,
+        runtime_lora: Option<&RuntimeLoraSelection>,
     ) -> Result<(
         PreprocessedRequest,
         HashMap<String, String>,
@@ -3257,7 +3257,7 @@ impl OpenAIPreprocessor {
     )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
-        let mut builder = self.builder_with_lora(request, lora_name, runtime_lora.as_ref())?;
+        let mut builder = self.builder_with_lora(request, lora_name, runtime_lora)?;
 
         let template_start = Instant::now();
         let (formatted_prompt, prompt_injected_reasoning) = {
@@ -8143,7 +8143,7 @@ impl
                     .ok()
                     .flatten()
                     .map(|name| name.as_ref().clone()),
-                runtime_lora.map(|selection| selection.as_ref().clone()),
+                runtime_lora.as_deref(),
             )
             .instrument(preprocessing.clone())
             .await?;

@@ -431,7 +431,7 @@ where
             .is_some()
         {
             if retries_left > 0 {
-                tracing::warn!(
+                tracing::debug!(
                     "runtime LoRA request: migration disabled because resolver state is worker-local"
                 );
             }
