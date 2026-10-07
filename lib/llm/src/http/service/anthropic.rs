@@ -157,7 +157,8 @@ impl AnthropicRequestValidationError {
     fn status(&self) -> StatusCode {
         match self {
             Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
-            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            // Unsupported server tools cannot succeed on retry; 5xx makes clients retry.
+            Self::NotImplemented(_) => StatusCode::BAD_REQUEST,
             Self::UnsupportedContent(_) => StatusCode::BAD_REQUEST,
         }
     }
@@ -165,7 +166,7 @@ impl AnthropicRequestValidationError {
     fn anthropic_error_type(&self) -> &'static str {
         match self {
             Self::InvalidArgument(_) => "invalid_request_error",
-            Self::NotImplemented(_) => "api_error",
+            Self::NotImplemented(_) => "invalid_request_error",
             Self::UnsupportedContent(_) => "invalid_request_error",
         }
     }
@@ -226,7 +227,7 @@ impl AnthropicHandlerError {
                 (ErrorClass::InvalidRequest, ErrorType::NotImplemented)
             }
             AnthropicRequestValidationError::NotImplemented(_) => {
-                (ErrorClass::NotImplemented, ErrorType::NotImplemented)
+                (ErrorClass::InvalidRequest, ErrorType::NotImplemented)
             }
         };
         Self::new(

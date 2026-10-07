@@ -34,4 +34,14 @@ var (
 		Name:              "NativeRustEPP",
 		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
 	}
+
+	// PlannerDGDComponentStatus gates Planner discovery of model, runtime,
+	// accelerator, and power facts from operator-projected DGD component status.
+	// Runtime 1.6.0 is the first Planner version that no longer depends on the
+	// component-level PodTemplate, so it can consume components with role-specific
+	// PodTemplates.
+	PlannerDGDComponentStatus = Gate{
+		Name:              "PlannerDGDComponentStatus",
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 6, Patch: 0},
+	}
 )

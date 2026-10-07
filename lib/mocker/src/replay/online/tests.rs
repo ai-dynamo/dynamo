@@ -249,7 +249,7 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
     let args = MockEngineArgs::builder()
         .speedup_ratio(1000.0)
         .block_size(64)
-        .aic_tp_size(Some(2))
+        .ais_tp_size(Some(2))
         .build()
         .unwrap();
     let report = simulate_trace_workload(
@@ -398,7 +398,7 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
         &args,
         Some(KvRouterConfig {
             router_track_prefill_tokens: true,
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             ..KvRouterConfig::default()
         }),
         Some(Arc::new(FixedPrefillLoadEstimator {
@@ -819,8 +819,8 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
     assert_eq!(stats.freed_count, 1);
 }
 
-#[test]
-fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
+#[tokio::test(start_paused = true)]
+async fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
     let args = MockEngineArgs::builder()
         .block_size(4)
         .num_gpu_blocks(6)
@@ -841,14 +841,20 @@ fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
         })
         .collect();
 
-    let (report, stats) = simulate_concurrency_requests_with_stats(
-        args,
+    // Advance modeled time only after both request tasks can submit.
+    let runtime = LiveRuntime::new(
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
         requests,
-        2,
-        1,
-        ReplayRouterMode::RoundRobin,
+        LiveReplayMode::Concurrency { max_in_flight: 2 },
+        CancellationToken::new(),
     )
     .unwrap();
+    let (report, stats) = runtime.run().await.unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 2);
     assert!(

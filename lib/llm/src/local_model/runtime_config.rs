@@ -17,6 +17,7 @@ use dynamo_kv_router::{
         KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
     },
     protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
+    sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
@@ -32,9 +33,6 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
-
-/// Resource-safety bound for rank ranges advertised by one worker.
-pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
 
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
@@ -101,6 +99,13 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 /// older workers that predate this runtime contract.
 pub const VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
     "vllm_qwen_video_processor_contract";
+
+/// Worker-reported Qwen3 video prompt-expansion contract used by SGLang.
+///
+/// SGLang performs an additional frame-selection and spatial-resize stage
+/// before the Transformers processor, so this cannot share vLLM's contract.
+pub const SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
+    "sglang_qwen_video_processor_contract";
 
 /// Worker-reported Nemotron Nano Omni video prompt-expansion contract used by
 /// vLLM. Absence disables exact video routing for mixed-version safety.

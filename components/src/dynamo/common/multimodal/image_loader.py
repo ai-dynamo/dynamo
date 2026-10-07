@@ -11,7 +11,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from io import BytesIO
 from typing import Any, Coroutine, Dict, Final, List, Literal, overload
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from PIL import Image
 
@@ -80,6 +80,33 @@ def scope_image_cache_key(
         return None
     scope_digest = hashlib.sha256(cache_scope.strip().encode("utf-8")).hexdigest()
     return f"{scope_digest}:{cache_key}"
+
+
+def _normalize_http_url_key(normalized_url: str) -> str:
+    """Normalize only URL components that are case-insensitive at the origin."""
+
+    parsed_url = urlsplit(normalized_url)
+    userinfo, at, hostport = parsed_url.netloc.rpartition("@")
+    if hostport.startswith("["):
+        closing_bracket = hostport.find("]")
+        if closing_bracket != -1:
+            host = hostport[: closing_bracket + 1]
+            port = hostport[closing_bracket + 1 :]
+            zone_marker = host.find("%")
+            if zone_marker == -1:
+                host = host.lower()
+            else:
+                host = host[:zone_marker].lower() + host[zone_marker:]
+            hostport = host + port
+        else:
+            hostport = hostport.lower()
+    else:
+        hostport = hostport.lower()
+    return parsed_url._replace(
+        scheme=parsed_url.scheme.lower(),
+        netloc=f"{userinfo}{at}{hostport}",
+        fragment="",
+    ).geturl()
 
 
 def _create_nixl_connector() -> Any:
@@ -188,9 +215,7 @@ class ImageLoader:
         ``None`` means the caller must bypass all image caches: session
         scoping is enabled but no valid scope was provided for this load.
         """
-        # Preserve path and query case: unlike the scheme and host, both may be
-        # case-sensitive and therefore identify different origin objects.
-        url_key = normalized_url
+        url_key = _normalize_http_url_key(normalized_url)
 
         return scope_image_cache_key(
             url_key,
@@ -335,13 +360,15 @@ class ImageLoader:
     async def load_image(
         self, image_url: str, *, cache_scope: str | None = None
     ) -> Image.Image:
-        parsed_url = urlparse(image_url)
+        """Load and decode one media URL through the validated image cache."""
+
+        parsed_url = urlsplit(image_url)
         if parsed_url.scheme in ("", "file"):
             raise ValueError(
                 "Invalid image source scheme: local file access is not allowed"
             )
         normalized_url = await validate_media_url(image_url, self._url_policy)
-        parsed_url = urlparse(normalized_url)
+        parsed_url = urlsplit(normalized_url)
 
         if parsed_url.scheme in ("http", "https"):
             key = self._cache_key(normalized_url, cache_scope)

@@ -120,3 +120,25 @@ def test_hidden_stop_tokens_keep_engine_stopping_enabled() -> None:
     assert sampling_params.ignore_eos is False
     assert sampling_params.min_tokens == 2
     assert set(sampling_params.stop_token_ids) == {100, 300}
+
+
+def test_no_stop_trim_leaves_stopping_to_frontend() -> None:
+    sampling_params = SimpleNamespace(
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[200, 300],
+    )
+
+    apply_stop_conditions_to_sampling_params(
+        sampling_params,
+        {
+            "stop_token_ids_hidden": [100],
+            "stop_token_ids": [200],
+            "min_tokens": 2,
+        },
+        no_stop_trim=True,
+    )
+
+    # TRT-LLM maps ignore_eos to end_id=-1 and an empty executor stop-word list.
+    assert sampling_params.ignore_eos is True
+    assert sampling_params.min_tokens == 2
