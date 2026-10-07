@@ -431,6 +431,8 @@ DYN_CHAT_PROCESSOR=dynamo bash launch/agg_asr.sh --model Qwen/Qwen3-ASR-1.7B-hf
 
 **Transcription request:**
 
+The request names the default checkpoint. If you serve another checkpoint, such as `Qwen/Qwen3-ASR-0.6B` or `Qwen/Qwen3-ASR-1.7B-hf`, set `model` to that checkpoint's name.
+
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -471,7 +473,7 @@ Dynamo does not serve `/v1/audio/transcriptions`. Send audio through `/v1/chat/c
 
 #### Kubernetes Deployment
 
-[`agg_asr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr.yaml) deploys the same frontend and worker as a DynamoGraphDeployment. The frontend and worker run in separate pods, so the default shared-memory transfer of processed audio cannot reach the worker, and the worker transcribes the prompt without the audio (`language None<asr_text>`). The manifest sets `DYNAMO_DISABLE_NIXL_MM=1` on the frontend so the worker loads and processes the audio itself. `DYNAMO_MM_TRANSFER=nixl` also works across pods and spares the worker a second pass over the audio. With `Qwen/Qwen3-ASR-1.7B-hf` behind the default Rust frontend, the worker always loads the audio, so neither setting applies. To accept audio at other sample rates, run both components from an image with PyAV installed; see [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md#kubernetes).
+[`agg_asr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr.yaml) deploys the same frontend and worker as a DynamoGraphDeployment. The frontend and worker run in separate pods, so the default shared-memory transfer of processed audio cannot reach the worker, and the worker transcribes the prompt without the audio (`language None<asr_text>`). The manifest sets `DYNAMO_DISABLE_NIXL_MM=1` on the frontend so the worker loads and processes the audio itself. NIXL transfer also works across pods and spares the worker a second pass over the audio. To use it, remove `DYNAMO_DISABLE_NIXL_MM` from the frontend and set `DYNAMO_MM_TRANSFER=nixl` there. The frontend checks `DYNAMO_DISABLE_NIXL_MM` before it selects a transfer mode, so setting `DYNAMO_MM_TRANSFER=nixl` alone has no effect. With `Qwen/Qwen3-ASR-1.7B-hf` behind the default Rust frontend, the worker always loads the audio, so neither setting applies. To accept audio at other sample rates, run both components from an image with PyAV installed; see [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md#kubernetes).
 
 #### Streaming Transcription
 
