@@ -205,6 +205,7 @@ jobs:
         DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER: github
         PYTEST_ADDOPTS: >
           --ddtrace
+          ${{ inputs.framework == 'trtllm' && '--capture=no' || '' }}
           ${{ inputs.framework == 'triton' && '--ignore=tests/fault_tolerance/test_canary_rank_pause.py' || '' }}
           ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_vllm.py' || '' }}
           ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_sglang.py' || '' }}
