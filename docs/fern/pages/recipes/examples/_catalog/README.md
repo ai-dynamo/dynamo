@@ -30,19 +30,21 @@ the source cards. Subsection cards omit the topic label, and the page sets
 native MDX images and one stretched page link per card preserve Fern's asset, version, and locale
 rewriting. The widget reads the existing card metadata, the modality label, and chip labels, without
 a second catalog or browser-side metadata requests. Keep the title's `dynamo-diffusion-name` class
-so name sorting uses the visible title, and the `dynamo-diffusion-modality` label below it so the
-type filter uses its text. The title already names the model, so the Hugging Face ID stays in
-`data-model`, where search reads it, rather than in the visible card. The arrow beside the title is
-decorative; the stretched link retains its descriptive accessible name. Do not embed DGDs or add
-secondary links to these cards. Keep it first under **Examples → Diffusion** and linked from the
-main overview, without an `ExampleSelector` or a duplicate main-catalog card.
+so name sorting uses the visible title, and end the top row with the `dynamo-diffusion-modality`
+type chip so it sits top right and the type filter uses its text. The title already names the
+model, so the Hugging Face ID stays in `data-model`, where search reads it, rather than in the
+visible card. Cards carry no description line or arrow; the stretched link keeps its descriptive
+accessible name. Do not embed DGDs or add secondary links to these cards. Keep it first under
+**Examples → Diffusion** and linked from the main overview, without an `ExampleSelector` or a
+duplicate main-catalog card.
 
 Cards identify the source manifest in `data-source` for validation, and carry model, modality,
 backend, weight-size, and experimental metadata. Experimental and regular entries share one grid.
 Weight-size chips use the pinned Hugging Face file metadata in `diffusion-model-sizes.yaml`: decimal
 GB of checkpoint weights, including pipeline components, excluding duplicate root exports. These
-are not GPU memory estimates. Update the snapshot and visible chip values together. The snapshot
-also records the sources of the added provider logos.
+are not GPU memory estimates. The chip shows only the value, such as `33.7 GB`; its `title` and the
+note below the grid explain the basis. Update the snapshot and visible chip values together. The
+snapshot also records the sources of the added provider logos.
 
 The overview cards are the catalog source, matching the model-recipe landing-page pattern. They
 are not generated and do not use the model-recipe performance schema. Each card declares:
