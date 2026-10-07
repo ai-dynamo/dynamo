@@ -14,8 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Generic image builds share one run-scoped K8s builder pair instead of
-  # competing with other workflows on the remote general worker pool.
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
@@ -596,7 +594,6 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64' # @whoisj to enable ARM64 support in a future patch.
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      fresh_builder: true
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -702,7 +699,6 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      fresh_builder: true
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
@@ -775,7 +771,6 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      fresh_builder: true
       inline_compliance: true
       artifact_retention_days: '7'
       # Include cold multi-arch compilation and the later test-image/compliance stages.
@@ -1062,7 +1057,6 @@ jobs:
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      fresh_builder: true
       build_timeout_minutes: 60
       # `defaulted` is applied by the repository-root conftest.py to any test that
       # declared no lifecycle or hardware marker. It is routed here, not to the
