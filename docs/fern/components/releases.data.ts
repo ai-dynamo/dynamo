@@ -601,7 +601,7 @@ export const FEATURES: Feature[] = [
   {
     name: "Dynamo Snapshot",
     sglang: { status: "caveat", note: "Single-node single- and multi-GPU supported; multinode remains in progress" },
-    trtllm: { status: "wip", note: "Single-GPU aggregated text-worker path only" },
+    trtllm: { status: "wip", note: "Aggregated text-worker path only" },
     vllm: { status: "caveat", note: "Single-node single- and multi-GPU supported; multinode remains in progress" },
   },
 ];
