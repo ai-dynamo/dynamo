@@ -3,27 +3,26 @@
 
 //! Tool calls routed through the `dynamo-parsers-v2` streaming parser, bypassing the jail.
 //!
-//! Gated behind
-//! [`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`](dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2).
-//! When enabled, the families in `V2_FAMILIES` (Qwen3-Coder, DeepSeek-V4) stream
+//! The families in `V2_FAMILIES` (Qwen3-Coder, DeepSeek-V4) stream
 //! straight through their `dynamo_parsers_v2` parser instead of
 //! `JailedStream`: the v2 parser owns incremental
 //! tool-call emission and drops a parameter value truncated at EOF rather than
 //! guessing it. The jail is never built for these families in either path
-//! (`apply_stream` for streaming, `parse_complete` for batch). Other families, and
-//! non-`auto` tool_choice, keep the v1 jail / aggregate-finalize path. The parser is
-//! selected by family name via `dynamo_parsers_v2::create_tool_parser_for_family`, so
-//! adding a family is a one-line change here plus support in that crate.
+//! (`apply_stream` for streaming, `parse_complete` for batch). Within this legacy
+//! route, other families and non-`auto` tool_choice use the v1 jail / aggregate-
+//! finalize path. Requests selected for UnifiedParser use a separate route in
+//! `preprocessor.rs` and do not depend on this module's gate. The parser is selected
+//! by family name via `dynamo_parsers_v2::create_tool_parser_for_family`, so adding
+//! a family is a one-line change here plus support in that crate.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
 
 use async_stream::stream;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, FinishReason,
     FunctionCallStream, FunctionType,
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
@@ -31,87 +30,136 @@ use uuid::Uuid;
 use dynamo_parsers::tool_calling::{
     CalledFunction, ToolCallResponse, ToolCallType, ToolDefinition,
 };
+use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser, create_tool_parser_for_family};
+
+#[cfg(test)]
 use dynamo_parsers_v2::{
-    Tool as ToolV2, ToolCallDelta, ToolParser, UnifiedEvent, UnifiedParserEvent, UnifiedParserExt,
-    create_tool_parser_for_family, create_unified_parser_for_family,
+    UnifiedEvent, UnifiedParserEvent, UnifiedParserExt, create_unified_parser_for_family,
 };
 
 use crate::protocols::openai::GuidedToolConstraint;
 
 use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
-// TODO: when glm47 is added here AND DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set,
+// TODO: when glm47 is added here,
 // port the streaming <tool_call> truncation recovery from apply_tool_calling_jail
 // (preprocessor.rs) to tool_parser_v2::apply_stream. The v2 path skips the jail
 // entirely, so the ChoiceRecovery buffer and finish_reason=length synthetic-chunk
 // logic will not run. The aggregator.rs (non-streaming) half is parser-agnostic
 // and keeps working on both paths — only the streaming side needs porting.
-/// Tool-call families with a `dynamo-parsers-v2` parser wired into both the batch and
-/// the streaming path. Must stay a subset of the families
-/// `dynamo_parsers_v2::create_tool_parser_for_family` accepts; the strings match
-/// dynamo's `tool_call_parser` names so a parser name maps straight to a v2 family.
-pub(crate) const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4"];
+/// Map Dynamo tool-parser names onto the corresponding v2 registry family.
+#[cfg(test)]
+pub(crate) const V2_FAMILIES: &[&str] =
+    &["qwen3_coder", "deepseek_v4", "deepseek-v4", "deepseekv4"];
 
-/// Whether the experimental v2 tool-parser routing is enabled. Read once from
-/// [`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`](env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) —
-/// env vars are fixed for the process lifetime, so the result is cached.
+fn v2_family(parser: &str) -> Option<&'static str> {
+    match parser {
+        "qwen3_coder" => Some("qwen3_coder"),
+        "deepseek_v4" | "deepseek-v4" | "deepseekv4" => Some("deepseek_v4"),
+        _ => None,
+    }
+}
+
+pub(crate) use dynamo_runtime::config::ParserVersion;
+
+pub(crate) fn selected_version() -> anyhow::Result<ParserVersion> {
+    dynamo_runtime::config::selected_parser_version()
+}
+
+#[cfg(test)]
+fn parser_version_value(value: Option<&str>) -> anyhow::Result<ParserVersion> {
+    ParserVersion::try_from(value)
+}
+
 pub(crate) fn enabled() -> bool {
-    static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2));
-    *ENABLED
+    match selected_version() {
+        Ok(ParserVersion::V2) => true,
+        Ok(ParserVersion::Auto | ParserVersion::V1) => false,
+        Err(error) => panic!("invalid {}: {error:#}", env_llm::DYN_PARSER_VERSION),
+    }
+}
+
+/// Validate that an explicit parser generation exists for the configured family.
+pub(crate) fn validate_parser_version(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> anyhow::Result<()> {
+    validate_parser_version_for_mode(selected_version()?, tool_call_parser, reasoning_parser)
+}
+
+pub(crate) fn validate_tool_request_mode(
+    version: ParserVersion,
+    effective_tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    requires_v1_jail: bool,
+) -> anyhow::Result<()> {
+    // Raw batch consumers also need model compatibility checks before parsing can fall back.
+    validate_parser_version_for_mode(version, effective_tool_call_parser, reasoning_parser)?;
+    if version == ParserVersion::V2 && requires_v1_jail && effective_tool_call_parser.is_none() {
+        anyhow::bail!(
+            "{}=2 was requested, but this tool choice requires the v1 tool-call jail",
+            env_llm::DYN_PARSER_VERSION
+        );
+    }
+    Ok(())
+}
+
+fn validate_parser_version_for_mode(
+    version: ParserVersion,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> anyhow::Result<()> {
+    match version {
+        ParserVersion::Auto => Ok(()),
+        ParserVersion::V1 => {
+            let tools = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
+            let reasoning = dynamo_parsers::reasoning::get_available_reasoning_parsers();
+            if tool_call_parser.is_some_and(|name| !tools.contains(&name))
+                || reasoning_parser.is_some_and(|name| !reasoning.contains(&name))
+            {
+                anyhow::bail!(
+                    "{}=1 was requested, but the configured parser has no compatible v1 parser",
+                    env_llm::DYN_PARSER_VERSION,
+                );
+            }
+            Ok(())
+        }
+        ParserVersion::V2 => {
+            if (tool_call_parser.is_some() || reasoning_parser.is_some())
+                && !super::unified_parser::is_v2_configured_family(
+                    tool_call_parser,
+                    reasoning_parser,
+                )
+            {
+                anyhow::bail!(
+                    "{}=2 was requested, but the configured parser pair has no compatible unified v2 implementation",
+                    env_llm::DYN_PARSER_VERSION,
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Whether `family` has a v2 parser and should bypass the v1 jail when [`enabled`].
 pub(crate) fn supports_family(family: &str) -> bool {
-    V2_FAMILIES.contains(&family)
+    v2_family(family).is_some()
 }
-
-/// Parser names served by a v2 UNIFIED parser (reasoning + content + tool calls in
-/// ONE ordered pass), exposed to configuration and Python.
-///
-/// These parsers are default-on — no `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` gate.
-/// Muse has no usable v1 reasoning parser (the v1 crate dropped the variant, so
-/// `get_reasoning_parser_from_name` falls back to `Basic`, which cannot read the
-/// `to=self<|message|>` grammar), so the unified pass is the only correct path.
-/// The two Muse names match those the frameworks register, so a card written against either engine
-/// selects the same parser here: vLLM ships `--reasoning-parser muse_glimmer` and
-/// `--tool-call-parser muse_glimmer`, SGLang registers the family as `muse` in both
-/// its reasoning and function-call registries. A hyphenated spelling matches neither
-/// engine, so it is not accepted.
-/// DeepSeek V4.1 is selected separately by `unified_parser::configured_family`,
-/// which requires both parser fields to name `deepseek_v41`.
-pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse", "deepseek_v41"];
 
 pub fn unified_family_names() -> &'static [&'static str] {
-    UNIFIED_FAMILIES
+    &super::unified_parser::FAMILY_NAMES
 }
 
-/// The unified family for a request, or `None`. Keyed on EITHER the tool-call or
-/// the reasoning parser name being muse, so a card that sets only
-/// `--dyn-reasoning-parser muse_glimmer` still routes here. Canonicalizes the
-/// hyphen alias to the crate's family key `muse_glimmer`. Default-on: reads no
-/// environment variable.
+/// Resolve the configured family through the shared generation and pair policy.
+#[cfg(test)]
 pub(crate) fn unified_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<String> {
-    let is_muse = |p: Option<&str>| matches!(p, Some("muse_glimmer" | "muse"));
-    (is_muse(tool_call_parser) || is_muse(reasoning_parser)).then(|| "muse_glimmer".to_string())
+    super::unified_parser::selected_family(tool_call_parser, reasoning_parser).map(str::to_string)
 }
 
-/// Map dynamo's v1 `ToolDefinition`s onto the v2 parser's `Tool` shape.
-fn to_v2_tools(tools: Option<&[ToolDefinition]>) -> Vec<ToolV2> {
-    tools
-        .unwrap_or(&[])
-        .iter()
-        .map(|t| ToolV2 {
-            name: t.name.clone(),
-            description: None,
-            parameters: t.parameters.clone().unwrap_or(serde_json::Value::Null),
-            strict: t.strict,
-        })
-        .collect()
-}
+use super::unified_parser::to_v2_tools;
 
 /// Batch (non-streaming) path: run the whole response text through the `family` v2
 /// parser's complete lifecycle and map the coalesced calls back onto the v1
@@ -147,6 +195,7 @@ pub(crate) fn parse_complete(
 /// `(tool_calls, reasoning, content)`. Mirrors [`parse_complete`] but adds the
 /// reasoning channel the unified parser owns. Used by the (B)-topology aggregator
 /// path where raw model text reaches the frontend un-split.
+#[cfg(test)]
 pub(crate) fn parse_complete_unified(
     content: &str,
     tools: Option<&[ToolDefinition]>,
@@ -183,8 +232,8 @@ pub(crate) fn parse_complete_unified(
 ///
 /// Named guidance emits only the selected tool's argument object. Required guidance
 /// emits one call envelope or an array of envelopes. This conversion is family-neutral:
-/// Muse has no guided mode in its unified parser, while Qwen's unified parser consumes
-/// the same constraint directly so it can also recover a preceding reasoning span.
+/// This legacy conversion is used outside the shared unified route, whose parser
+/// consumes the same constraint directly and retains ordered reasoning spans.
 pub(crate) fn parse_complete_guided_json(
     content: &str,
     constraint: &GuidedToolConstraint,
@@ -295,6 +344,7 @@ impl ChoiceState {
     }
 }
 
+#[cfg(test)]
 type UnifiedChoiceState = super::unified_parser::ChoiceState;
 
 /// Finish every choice that has not received an upstream finish reason. This is
@@ -357,6 +407,7 @@ fn finish_unterminated_choices(
 /// Unified counterpart of [`finish_unterminated_choices`]: flush each unfinished
 /// UNIFIED parser and build the trailing chunk, which here can also carry
 /// `reasoning_content` (open reasoning is promoted at `finish`).
+#[cfg(test)]
 fn finish_unterminated_choices_unified(
     states: &mut HashMap<u32, UnifiedChoiceState>,
     finished: &mut HashSet<u32>,
@@ -396,6 +447,7 @@ fn finish_unterminated_choices_unified(
     responses
 }
 
+#[cfg(test)]
 fn response_with_choice(
     template: &NvCreateChatCompletionStreamResponse,
     choice: dynamo_protocols::types::ChatChoiceStream,
@@ -574,7 +626,7 @@ where
     }
 }
 
-/// Streaming path for the UNIFIED families (muse), default-on. One parser per
+/// Streaming path for the unified families. One parser per
 /// choice owns reasoning + content + tool calls in ONE ordered pass, so this
 /// replaces BOTH the v1 reasoning stage and the tool jail. Each upstream text
 /// delta is pushed; the parser's ordered [`UnifiedParserEvent`]s fold into
@@ -586,6 +638,7 @@ where
 /// stripping while dropping the parsed calls, which is what `tool_choice=none`
 /// needs: the family has no v1 reasoning parser, so it must route here to be read
 /// at all, but a caller that disabled tools must not receive `tool_calls`.
+#[cfg(test)]
 pub(crate) fn apply_unified_stream<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
@@ -1399,32 +1452,113 @@ mod tests {
     }
 
     #[test]
-    fn unified_family_default_on_and_alias() {
+    fn unified_family_defaults_and_aliases() {
         for parser in ["muse_glimmer", "muse"] {
             assert_eq!(
                 unified_family(Some(parser), None).as_deref(),
-                Some("muse_glimmer"),
-                "tool-call name {parser:?} must route to muse unified"
+                None,
+                "Muse's default streaming exception is selected by request mode"
             );
             assert_eq!(
                 unified_family(None, Some(parser)).as_deref(),
-                Some("muse_glimmer"),
-                "reasoning name {parser:?} must route to muse unified"
+                None,
+                "Muse's default streaming exception is selected by request mode"
             );
         }
-        assert_eq!(unified_family(Some("qwen3_coder"), None), None);
+        assert_eq!(unified_family(Some("qwen3_coder"), None).as_deref(), None);
+        assert_eq!(unified_family(Some("muse"), Some("qwen3")), None);
         assert_eq!(unified_family(None, None), None);
-        // Default-on: `unified_family` reads no environment variable. muse routes to
-        // the unified parser whether or not the experimental v2 gate is set — proven
-        // here by routing while `enabled()` (DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) is off.
+    }
+
+    #[test]
+    fn parser_versions_accept_numeric_values_and_reject_aliases() {
+        for (input, expected) in [
+            (None, ParserVersion::Auto),
+            (Some("auto"), ParserVersion::Auto),
+            (Some("1"), ParserVersion::V1),
+            (Some("2"), ParserVersion::V2),
+        ] {
+            assert_eq!(parser_version_value(input).unwrap(), expected);
+        }
+        for value in ["", "0", "3", "v1", "v2", "v3", "true", "V2"] {
+            assert!(parser_version_value(Some(value)).is_err());
+        }
+        for (tool, reasoning) in [
+            ("deepseek_v4", "deepseek_v4"),
+            ("gemma4", "gemma4"),
+            ("glm47", "glm45"),
+            ("kimi_k2", "kimi_k25"),
+            ("kimi_k3", "kimi_k3"),
+            ("qwen3_coder", "qwen3"),
+        ] {
+            assert!(
+                validate_parser_version_for_mode(ParserVersion::V1, Some(tool), Some(reasoning))
+                    .is_ok(),
+                "{tool}/{reasoning}"
+            );
+            assert!(
+                validate_parser_version_for_mode(ParserVersion::V2, Some(tool), Some(reasoning))
+                    .is_ok(),
+                "{tool}/{reasoning}"
+            );
+        }
         assert!(
-            !enabled(),
-            "test env should not set DYN_ENABLE_EXPERIMENTAL_PARSERS_V2"
+            validate_parser_version_for_mode(
+                ParserVersion::V1,
+                Some("deepseek_v41"),
+                Some("deepseek_v41")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parser_version_rejects_unavailable_generations() {
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::V1, Some("muse_glimmer"), None)
+                .is_err()
+        );
+        assert!(validate_parser_version_for_mode(ParserVersion::V1, None, Some("muse")).is_err());
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::V1, Some("qwen3_coder"), Some("qwen3"))
+                .is_ok()
         );
         assert!(
-            unified_family(Some("muse_glimmer"), None).is_some(),
-            "muse must route with the experimental v2 gate OFF (default-on)"
+            validate_parser_version_for_mode(ParserVersion::Auto, Some("muse_glimmer"), None)
+                .is_ok()
         );
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::V2, Some("muse_glimmer"), None).is_ok()
+        );
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::V2, Some("qwen3_coder"), Some("qwen3"))
+                .is_ok()
+        );
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::V2, None, Some("muse_glimmer")).is_ok()
+        );
+        assert!(
+            validate_parser_version_for_mode(
+                ParserVersion::V2,
+                Some("muse_glimmer"),
+                Some("muse_glimmer")
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_parser_version_for_mode(
+                ParserVersion::V2,
+                Some("qwen3_coder"),
+                Some("hermes")
+            )
+            .is_err()
+        );
+        assert!(validate_parser_version_for_mode(ParserVersion::V2, Some("hermes"), None).is_err());
+        assert!(validate_tool_request_mode(ParserVersion::V2, None, None, true).is_err());
+        for alias in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            assert!(validate_parser_version_for_mode(ParserVersion::V2, Some(alias), None).is_ok());
+            assert!(supports_family(alias));
+        }
     }
 
     #[test]
@@ -1437,6 +1571,24 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn parse_complete_unified_normalizes_tool_name_from_request_schema() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({"type": "object"})),
+            strict: None,
+        }];
+        let turn = concat!(
+            "<|start|>assistant to=get_weather.get_weather<|message|>",
+            "<atem:invoke name=\"get_weather.get_weather\">",
+            "<atem:parameter name=\"location\">Paris</atem:parameter>",
+            "</atem:invoke><|eom|>"
+        );
+        let (calls, _, _) = parse_complete_unified(turn, Some(&tools), "muse_glimmer").unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
     }
 
     #[tokio::test]
@@ -1495,18 +1647,10 @@ mod tests {
         );
     }
 
-    // Every other family (tool-call or reasoning name) must return None so the guard
-    // leaves its byte-for-byte original path untouched.
+    // Unregistered families stay on their existing route.
     #[test]
     fn unified_family_returns_none_for_other_families() {
-        for other in [
-            "deepseek_v4",
-            "deepseek_v41",
-            "qwen3",
-            "glm47",
-            "harmony",
-            "nemotron_deci",
-        ] {
+        for other in ["harmony", "nemotron_deci"] {
             assert_eq!(unified_family(Some(other), None), None, "{other} tool");
             assert_eq!(unified_family(None, Some(other)), None, "{other} reasoning");
         }
