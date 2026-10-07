@@ -349,9 +349,12 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 
 # MPI otherwise loads the upstream UCX 1.22 before NIXL initializes its UCX
 # 1.23 backend. Pin all four UCX core libraries to the wheel to prevent symbol
-# interposition between releases. nixl-sys also needs libnixl_capi.so on the
-# loader path. Keep in sync with the pre_runtime ENV below.
-ENV LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/ucx/libucm.so.0:/opt/dynamo/ucx/libucs.so.0:/opt/dynamo/ucx/libuct.so.0:/opt/dynamo/ucx/libucp.so.0:/opt/dynamo/nixl/libnixl.so \
+# interposition between releases. Use bare UCX names so glibc records the names
+# MPI requests. Absolute paths register only those paths and the wheel's hashed
+# SONAMEs, allowing MPI's RPATH to load a second UCX. LD_LIBRARY_PATH below
+# resolves these names to the wheel. nixl-sys also needs libnixl_capi.so on that
+# path. Keep in sync with the pre_runtime ENV below.
+ENV LD_PRELOAD=/opt/dynamo/libstdc++.so.6:libucm.so.0:libucs.so.0:libuct.so.0:libucp.so.0:/opt/dynamo/nixl/libnixl.so \
     LD_LIBRARY_PATH=/opt/dynamo/ucx:/opt/dynamo/nixl:${LD_LIBRARY_PATH} \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
 {% endif %}
@@ -1028,7 +1031,7 @@ ENV DYNAMO_HOME=/workspace \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/ucx/libucm.so.0:/opt/dynamo/ucx/libucs.so.0:/opt/dynamo/ucx/libuct.so.0:/opt/dynamo/ucx/libucp.so.0:/opt/dynamo/nixl/libnixl.so \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:libucm.so.0:libucs.so.0:libuct.so.0:libucp.so.0:/opt/dynamo/nixl/libnixl.so \
     LD_LIBRARY_PATH=/opt/dynamo/ucx:/opt/dynamo/nixl:/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
     OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins \
