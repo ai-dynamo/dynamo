@@ -157,9 +157,8 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
             "#subdirectory=python/aisimulate"
         )
     elif "aisimulate-core" not in root_cargo.get("patch", {}).get("crates-io", {}):
-        assert (
-            str(requirement.specifier).replace("==", "=").replace(".dev", "-dev.")
-            == canonical_core["version"]
+        assert requirement.specifier.contains(
+            canonical_core["version"].removeprefix("=").replace("-dev.", ".dev")
         )
 
 
