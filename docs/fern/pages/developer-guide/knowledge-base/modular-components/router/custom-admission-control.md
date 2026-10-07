@@ -202,7 +202,19 @@ The `type` selects the registered provider; `parameters` supplies its configurat
 
 ### Router Context
 
-The factory receives a `RequestClassifierContext`. Use `block_size()` for tokens per KV block and `workers()` for registered worker/rank identities and their optional `total_kv_blocks()`. These are advertised total capacities, not currently free blocks.
+The factory receives a `RequestClassifierContext` with router-wide information:
+
+| Accessor | Meaning |
+|---|---|
+| `block_size()` | Tokens per KV block |
+| `workers()` | Registered worker ranks from cached discovery information, updated as worker registrations change |
+
+Each entry returned by `workers()` is a `RequestClassifierWorker`:
+
+| Accessor | Meaning |
+|---|---|
+| `worker()` | Worker ID and data-parallel rank, returned as `WorkerWithDpRank` |
+| `total_kv_blocks()` | Advertised total KV-block capacity for this rank, or `None` when unavailable; this is not the number of free blocks |
 
 Classifiers do not currently receive the per-worker cache and load views exposed to worker-selection plugins through `WorkerInputs`.
 
