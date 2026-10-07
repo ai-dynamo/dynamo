@@ -151,9 +151,11 @@ Three variables decide that scope, and the first one that applies wins:
 
 | Variable | Effect when it applies |
 |---|---|
-| `DYN_NAMESPACE_PREFIX` | Match this namespace and the worker generations under it, so `ns` matches `ns` and `ns-abc123` but not the separate deployment `ns2`. An explicitly empty value or `dynamo` means every namespace |
+| `DYN_NAMESPACE_PREFIX` | Match this namespace and hyphen-delimited suffixes, so `ns` matches `ns`, `ns-abc123`, and `ns-other`, but not `ns2`. An explicitly empty value or `dynamo` means every namespace |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | Match the single namespace `{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}` |
 | `DYN_NAMESPACE` | Match this exact namespace. It falls back to `dynamo` only when unset, so setting it to an empty value searches the same empty namespace the workers register under |
+
+By default, a hyphenated sibling deployment such as `ns-other` can appear in the `ns` prefix's RL worker list, including its pause, resume, and weight-update endpoints. Set `DYN_NAMESPACE_PREFIX_STRICT=true` to match only the base namespace and the operator's worker-generation suffixes (eight lowercase hexadecimal characters or `legacy`). The operator enables strict mode for supported runtime images.
 
 An explicitly empty prefix or `dynamo` deliberately reaches past its own deployment: every other deployment's pause, resume, and weight-update endpoints then appear in this listener's `/v1/rl/workers`. On Kubernetes it is opt-in through `globalDynamoNamespace: true`, which makes the operator set `DYN_NAMESPACE_PREFIX=dynamo`. Use it only when one trainer is meant to control every deployment in the cluster.
 

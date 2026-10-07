@@ -14,9 +14,9 @@ pub enum NamespaceFilter {
     Global,
     /// Discover models only from an exact namespace match
     Exact(String),
-    /// Discover models from the prefix namespace and its hyphen-delimited
-    /// worker generations (e.g., prefix "ns" matches "ns", "ns-abc123",
-    /// "ns-def456", but not "ns2")
+    /// Discover models from the prefix namespace and hyphen-delimited suffixes
+    /// (e.g., "ns" matches "ns" and "ns-abc123", but not "ns2"). A suffix can
+    /// also be a separately named deployment, such as "ns-other".
     Prefix(String),
 }
 
@@ -68,9 +68,11 @@ impl NamespaceFilter {
     /// `ComputeDynamoNamespace` builds `<k8s namespace>-<deployment name>`, so
     /// under `DYN_NAMESPACE_PREFIX=myns-dgd` a bare match would take in
     /// `myns-dgd2`, a different deployment in the same Kubernetes namespace.
-    /// The scope is the prefix itself plus the hyphen-delimited worker
-    /// generations beneath it — the shape `DYN_NAMESPACE_WORKER_SUFFIX`
-    /// produces. A prefix ending in `-` already includes that boundary.
+    /// The scope is the prefix itself plus hyphen-delimited suffixes. This
+    /// boundary does not distinguish worker generations from separately named
+    /// deployments such as `myns-dgd-other`. Use `matches_with_prefix_mode` with
+    /// `WorkerGeneration` for the operator's generation format. A prefix ending
+    /// in `-` already includes the boundary.
     pub fn matches(&self, namespace: &str) -> bool {
         match self {
             NamespaceFilter::Global => true,
