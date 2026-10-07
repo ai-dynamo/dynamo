@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, conint
 
@@ -109,9 +109,9 @@ class NvCreateImageRequest(BaseModel):
     """
     Number of images to generate
     """
-    quality: str | None = None
-    response_format: str | None = None
-    output_format: str | None = None
+    quality: Literal['standard', 'hd', 'high', 'medium', 'low', 'auto'] | None = None
+    response_format: Literal['url', 'b64_json'] | None = None
+    output_format: Literal['png', 'jpeg', 'webp'] | None = None
     output_compression: conint(ge=0) | None = None
     """
     Compression level (0-100%) of jpeg and webp output
@@ -125,9 +125,9 @@ class NvCreateImageRequest(BaseModel):
     """
     Image size in WxH format, or "auto"
     """
-    moderation: str | None = None
-    background: str | None = None
-    style: str | None = None
+    moderation: Literal['auto', 'low'] | None = None
+    background: Literal['auto', 'transparent', 'opaque'] | None = None
+    style: Literal['vivid', 'natural'] | None = None
     user: str | None = None
     input_reference: str | None = None
     """
@@ -153,11 +153,11 @@ class NvImagesResponse(BaseModel):
     Unix timestamp of creation
     """
     data: list[ImageData]
-    background: str | None = None
-    output_format: str | None = None
+    background: Literal['transparent', 'opaque'] | None = None
+    output_format: Literal['png', 'jpeg', 'webp'] | None = None
     size: str | None = None
     """
     Image size in WxH format
     """
-    quality: str | None = None
+    quality: Literal['standard', 'hd', 'high', 'medium', 'low', 'auto'] | None = None
     usage: ImageUsage | None = None

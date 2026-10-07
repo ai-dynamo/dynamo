@@ -14,9 +14,10 @@ changes. To run it by hand:
 With --check, the script writes nothing and fails when a committed model is
 stale.
 
-The models are plain data shapes. The Rust frontend validates each request
-before a worker sees it, so an enum becomes its base type: a newer frontend
-can then send a new value to an older worker.
+The models carry the constraints of the Rust types: an enum becomes a
+``Literal`` of its values, and a numeric bound becomes a field constraint. A
+worker then rejects a value the frontend would reject, where the value is
+produced.
 """
 
 import argparse
@@ -43,8 +44,8 @@ OPTIONS = (
     "--input-file-type=openapi",
     "--output-model-type=pydantic_v2.BaseModel",
     "--target-python-version=3.10",
-    # An enum becomes `str`, not an Enum or RootModel class.
-    "--ignore-enum-constraints",
+    # An enum becomes a Literal of its values, not an Enum class.
+    "--enum-field-as-literal=all",
     "--collapse-root-models",
     # A field with a serde default is not Optional.
     "--strict-nullable",

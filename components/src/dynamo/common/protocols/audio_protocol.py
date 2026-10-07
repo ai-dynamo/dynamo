@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, confloat
 
@@ -122,7 +122,7 @@ class NvCreateAudioSpeechRequest(BaseModel):
     """
     Voice/speaker name (e.g., "vivian", "ryan", "aiden")
     """
-    data_source: str | None = None
+    data_source: Literal['url', 'b64_json'] | None = None
     response_format: str | None = None
     """
     Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")

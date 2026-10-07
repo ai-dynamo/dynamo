@@ -10,6 +10,7 @@ from dynamo.common.protocols.image_protocol import (
     ImageData,
     ImageTokenDetails,
     ImageUsage,
+    NvCreateImageRequest,
     NvImagesResponse,
 )
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
@@ -89,3 +90,9 @@ def test_images_response_rejects_usage_without_input_token_details():
             data=[],
             usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
         )
+
+
+def test_image_request_rejects_a_value_outside_the_enum():
+    # The frontend rejects the value too. The model matches the frontend.
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="a cat", quality="ultra")
