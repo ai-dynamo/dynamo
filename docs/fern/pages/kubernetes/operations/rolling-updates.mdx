@@ -24,14 +24,13 @@ Use these commands to check deployed versions, then compare them with your targe
 <Tabs>
 <Tab title="Runtime image tag">
 
-The operator reads the runtime version from a semantic-version image tag, unless `runtimeVersionOverride` is set. For sidecar workers, the `runtime` init container supplies the Dynamo version.
+The operator reads the runtime version from the `main` container's semantic-version image tag, unless `runtimeVersionOverride` is set.
 
 ```bash
 kubectl get dgd vllm-disagg -n dynamo -o json | jq -r '
   ["COMPONENT", "RUNTIME IMAGE"],
   (.spec.components[] | [.name,
-    ((.podTemplate.spec.initContainers // [] | map(select(.name == "runtime")) | .[0].image)
-      // (.podTemplate.spec.containers[] | select(.name == "main") | .image))])
+    (.podTemplate.spec.containers[] | select(.name == "main") | .image)])
   | @tsv'
 ```
 
