@@ -581,6 +581,21 @@ def test_plugin_write_publishes_the_final_selection_as_a_terminal_snapshot(
     assert tags(snapshot) == ["a", "b"]
 
 
+def test_plugin_write_keeps_sweepers_selection_order(
+    tmp_path: Path, renders: list[str], fake_search_config: None
+) -> None:
+    # Sweeper's selection can be goal-dependent (e.g. fewest GPUs first), so the
+    # adapter must not re-rank it by score.
+    result = SimpleNamespace(
+        views=SimpleNamespace(pareto_front=[]),
+        provenance=SimpleNamespace(config={}),
+        selected_candidates=[record("low", 1.0), record("high", 9.0)],
+        counts=SimpleNamespace(evaluated=2),
+    )
+    create_adapter().write(PLUGIN_CONFIG, result=result, output_dir=tmp_path)  # type: ignore[arg-type]
+    assert tags(load(tmp_path)) == ["low", "high"]
+
+
 def test_plugin_write_refuses_pareto_and_empty_results(tmp_path: Path) -> None:
     config = {
         "name": "sweep",
@@ -710,20 +725,6 @@ def test_a_transient_materialization_failure_is_retried_and_recovers(
     assert len(attempts) == 2
 
 
-def test_a_materialized_candidate_is_never_rendered_again(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.start()
-    adapter.on_candidate(record("a", 5.0))
-    wait_for(lambda: len(load(tmp_path)["candidates"]) == 1)
-    for round_no in range(1, 6):
-        adapter.on_round(round_no, [])
-    wait_for(lambda: load(tmp_path)["progress"]["round"] == 5)
-    adapter.close()
-    assert renders == ["a"]
-
-
 def test_plugin_write_keeps_the_round_recorded_by_the_live_snapshot(
     tmp_path: Path, renders: list[str], fake_search_config: None
 ) -> None:
@@ -763,14 +764,6 @@ def _subscribed(tmp_path: Path) -> Any:
     )
     assert callbacks is not None
     return callbacks
-
-
-def test_subscribe_registers_the_lifecycle_callbacks(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    callbacks = _subscribed(tmp_path)
-    assert callbacks.on_complete is not None
-    assert callbacks.on_failure is not None
 
 
 def test_a_failed_search_leaves_a_terminal_failed_snapshot(

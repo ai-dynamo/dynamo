@@ -128,10 +128,15 @@ class _Retained:
     def rank_key(self) -> tuple[float, int, str]:
         """Ascending sort key: best first.
 
-        Highest score, then fewer GPUs, then id so that equal points order
-        deterministically. Matches Sweeper's own scalar ranking.
+        Mirrors Sweeper's scalar ``rank()``: highest score, then fewer GPUs,
+        then the canonical config JSON. It is only used to bound the live
+        retained set; the final snapshot keeps Sweeper's own selection order.
         """
-        return (-self.score, self.used_gpus, self.id)
+        return (
+            -self.score,
+            self.used_gpus,
+            json.dumps(self.parameters, sort_keys=True, separators=(",", ":")),
+        )
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,7 @@ class DGDRRunOutputAdapter:
         *,
         snapshot_dir: Path | None = None,
         is_pareto: bool = False,
+        keep_arrival_order: bool = False,
     ) -> None:
         if is_pareto:
             raise NotImplementedError(
@@ -218,6 +224,9 @@ class DGDRRunOutputAdapter:
         # holding _publish_lock. A failure is retried on later writes up to
         # _MAX_RENDER_ATTEMPTS in total, because a first render can fail
         # transiently (cold start); after that it is final.
+        # The final result is already ranked by Sweeper (goal and SLA aware);
+        # publishing it must not re-rank it.
+        self._keep_arrival_order = keep_arrival_order
         self._publish_lock = threading.Lock()
         self._materialized: dict[str, SnapshotCandidate] = {}
         self._render_attempts: dict[str, int] = {}
@@ -401,7 +410,11 @@ class DGDRRunOutputAdapter:
                 # Cleared together with the copy so no update is ever lost: an
                 # update after this point sets the event again.
                 self._wake.clear()
-                ordered = sorted(self._retained.values(), key=lambda r: r.rank_key)
+                ordered = (
+                    list(self._retained.values())
+                    if self._keep_arrival_order
+                    else sorted(self._retained.values(), key=lambda r: r.rank_key)
+                )
                 round_no = self._round_no
                 evaluated = self._evaluated
                 terminal = self._terminal
@@ -447,7 +460,6 @@ class DGDRRunOutputAdapter:
                 manifest=manifest,
             )
         except CandidateMaterializationError as exc:
-            # Retried on later writes until _MAX_RENDER_ATTEMPTS, then final.
             entry = SnapshotCandidate(
                 id=item.id,
                 outcome=CandidateOutcome.MATERIALIZATION_FAILED,
@@ -534,7 +546,9 @@ class DGDRRunOutputPlugin:
             raise CandidateMaterializationError("no feasible candidate found")
         workload = SmartSearchConfig.model_validate(result.provenance.config).workload
         directory = Path(resolved.snapshot_dir or output_dir)
-        adapter = DGDRRunOutputAdapter(resolved, workload, snapshot_dir=directory)
+        adapter = DGDRRunOutputAdapter(
+            resolved, workload, snapshot_dir=directory, keep_arrival_order=True
+        )
         for candidate in selected:
             adapter.on_candidate(_as_feasible(candidate))
         counts = getattr(result, "counts", None)
