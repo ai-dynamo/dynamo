@@ -198,7 +198,10 @@ async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
         sent.response.as_ref().unwrap().return_output_logprobs,
         Some(true)
     );
-    assert!(sent.extra.is_none());
+    assert_eq!(
+        sent.extra.as_ref().unwrap().fields["detokenize"].kind,
+        Some(prost_types::value::Kind::BoolValue(false))
+    );
 
     assert_eq!(outputs.len(), 4);
     let (deltas, terminal) = outputs.split_at(3);
