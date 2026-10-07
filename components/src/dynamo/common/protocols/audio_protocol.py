@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, confloat
 
 
 class AudioData(BaseModel):
@@ -127,10 +127,11 @@ class NvCreateAudioSpeechRequest(BaseModel):
     """
     Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
     """
-    speed: float | None = None
+    speed: confloat(ge=0.25, le=4.0) = 1.0
     """
-    Speed factor. The frontend rejects a value outside 0.25 to 4.0.
-    Absent means 1.0.
+    Speed factor, 0.25 to 4.0. The frontend fills in 1.0 when the client
+    sends none and rejects a value outside the range, so a worker always
+    receives a valid speed.
     """
     task_type: str | None = None
     """

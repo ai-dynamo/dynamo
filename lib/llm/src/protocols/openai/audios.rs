@@ -42,11 +42,13 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<String>,
 
-    /// Speed factor. The frontend rejects a value outside 0.25 to 4.0.
-    /// Absent means 1.0.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Speed factor, 0.25 to 4.0. The frontend fills in 1.0 when the client
+    /// sends none and rejects a value outside the range, so a worker always
+    /// receives a valid speed.
+    #[serde(default = "default_speed")]
+    #[schema(default = default_speed, minimum = 0.25, maximum = 4.0)]
     #[validate(range(min = 0.25, max = 4.0, message = "speed must be between 0.25 and 4.0"))]
-    pub speed: Option<f64>,
+    pub speed: f64,
 
     // Qwen3-TTS specific parameters (top-level, matching vLLM-Omni)
     /// TTS task type: "CustomVoice", "VoiceDesign", or "Base"
@@ -162,6 +164,10 @@ pub struct NvAudioSpeechResponse {
     pub inference_time_s: Option<f64>,
 }
 
+fn default_speed() -> f64 {
+    1.0
+}
+
 fn default_object_type() -> String {
     "audio.speech".to_string()
 }
@@ -265,6 +271,17 @@ mod tests {
     }
 
     #[test]
+    fn audio_request_speed_defaults_to_one() {
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(r#"{"input":"hi"}"#).unwrap();
+        assert_eq!(req.speed, 1.0);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""speed":1.0"#),
+            "expected the worker to receive the default; got: {json}"
+        );
+    }
+
+    #[test]
     fn audio_request_speed_in_range_passes_validation() {
         // The bounds are inclusive, and an absent speed means 1.0.
         for json in [
@@ -316,7 +333,7 @@ mod tests {
             voice: None,
             data_source: None,
             response_format: None,
-            speed: None,
+            speed: 1.0,
             task_type: None,
             language: None,
             instructions: None,
@@ -380,12 +397,13 @@ mod tests {
 
     #[test]
     fn audio_request_empty_passthrough_adds_nothing() {
+        // `speed` is the one field with a protocol default.
         let json = r#"{"input":"hello"}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
         assert!(req.passthrough.is_empty());
         let out: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
-        assert_eq!(out, serde_json::json!({"input":"hello"}));
+        assert_eq!(out, serde_json::json!({"input":"hello","speed":1.0}));
     }
 
     #[test]
