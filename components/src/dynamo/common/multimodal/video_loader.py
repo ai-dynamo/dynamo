@@ -27,6 +27,7 @@ from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_by
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
@@ -43,6 +44,8 @@ from dynamo.common.multimodal.nvdec_decoder import (
     should_use_nvdec,
 )
 from dynamo.common.utils.runtime import run_async
+
+from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +174,10 @@ class VideoLoader:
         # data: and file:// never touch the network, so vLLM can handle them.
         if urlparse(normalized_url).scheme in ("http", "https"):
             content = await fetch_bytes(
-                normalized_url, self._http_timeout, policy=self._url_policy
+                normalized_url,
+                self._http_timeout,
+                policy=self._url_policy,
+                max_bytes=max_media_bytes(),
             )
             return await self._decode_video_bytes(content, media_io)
 
@@ -275,7 +281,9 @@ class VideoLoader:
             # Preserve deliberate client-error verdicts. UrlValidationError is
             # a ValueError, so the generic handler below would otherwise erase
             # its type and prevent the frontend from returning a 4xx.
-            logger.error("URL rejected loading video: '%s'", video_url)
+            logger.error(
+                "URL rejected loading video: '%s'", describe_media_source(video_url)
+            )
             raise
         except MissingMediaDecoderError:
             # Already actionable (names the codec and the install); a missing

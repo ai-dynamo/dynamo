@@ -12,6 +12,7 @@ from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_by
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_media_url,
 )
 from dynamo.common.multimodal.codec_errors import (
@@ -20,6 +21,8 @@ from dynamo.common.multimodal.codec_errors import (
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
+
+from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +131,10 @@ class AudioLoader:
         # data: and file:// never touch the network, so vLLM can handle them.
         if urlparse(normalized_url).scheme in ("http", "https"):
             content = await fetch_bytes(
-                normalized_url, self._http_timeout, policy=self._url_policy
+                normalized_url,
+                self._http_timeout,
+                policy=self._url_policy,
+                max_bytes=max_media_bytes(),
             )
             return await asyncio.to_thread(media_io.load_bytes, content)
 
@@ -157,7 +163,9 @@ class AudioLoader:
             # Preserve deliberate client-error verdicts. UrlValidationError is
             # a ValueError, so the generic handler below would otherwise erase
             # its type and prevent the frontend from returning a 4xx.
-            logger.error("URL rejected loading audio: '%s'", audio_url)
+            logger.error(
+                "URL rejected loading audio: '%s'", describe_media_source(audio_url)
+            )
             raise
         except ImportError as exc:
             # The image ships no audio decoder (PyAV is deliberately omitted).

@@ -81,10 +81,12 @@ class TestValidateTtsRequest:
         with pytest.raises(ValueError, match="Input text cannot be empty"):
             await handler.build_engine_inputs(req)
 
-    def test_invalid_task_type_rejected_by_pydantic(self):
-        """Pydantic Literal validation rejects invalid task_type at construction."""
-        with pytest.raises(Exception):
-            NvCreateAudioSpeechRequest(input="hello", task_type="Banana")
+    def test_invalid_task_type_rejected_by_handler(self):
+        """The handler owns the task vocabulary, not the shared protocol."""
+        handler = _make_audio_handler()
+        req = NvCreateAudioSpeechRequest(input="hello", task_type="Banana")
+        with pytest.raises(ValueError, match="Invalid task_type"):
+            handler._validate_tts_request(req)
 
     def test_valid_task_types_accepted(self):
         handler = _make_audio_handler()
@@ -157,6 +159,105 @@ class TestValidateTtsRequest:
         handler._tts_supported_languages = {"english"}
         req = NvCreateAudioSpeechRequest(input="hello", language="Auto")
         handler._validate_tts_request(req)  # Should not raise
+
+
+class TestCheckpointVariant:
+    @staticmethod
+    def _handler(tts_model_type=None, model=None):
+        handler = _make_audio_handler()
+        handler.engine_client.model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(tts_model_type=tts_model_type), model=model
+        )
+        return handler
+
+    @staticmethod
+    def _request(task):
+        req = NvCreateAudioSpeechRequest(input="hello", task_type=task)
+        if task == "VoiceDesign":
+            req.instructions = "cheerful"
+        elif task == "Base":
+            req.ref_audio = "data:audio/wav;base64,AAAA"
+        return req
+
+    @pytest.mark.parametrize(
+        "configured, variant",
+        [
+            ("custom_voice", "CustomVoice"),
+            ("VoiceDesign", "VoiceDesign"),
+            ("base", "Base"),
+        ],
+    )
+    def test_the_checkpoint_task_is_accepted(self, configured, variant):
+        handler = self._handler(tts_model_type=configured)
+        handler._validate_tts_request(self._request(variant))
+
+    def test_another_task_is_refused(self):
+        handler = self._handler(tts_model_type="custom_voice")
+        with pytest.raises(ValueError, match="does not support"):
+            handler._validate_tts_request(self._request("Base"))
+
+    def test_reference_inputs_imply_base_without_task_type(self):
+        handler = self._handler(tts_model_type="base")
+        req = NvCreateAudioSpeechRequest(
+            input="hello", ref_audio="data:audio/wav;base64,AAAA"
+        )
+        handler._validate_tts_request(req)
+        assert handler._tts_task_type(req) == "Base"
+
+    def test_reference_inputs_without_task_type_are_refused_by_other_checkpoints(
+        self,
+    ):
+        handler = self._handler(tts_model_type="custom_voice")
+        req = NvCreateAudioSpeechRequest(input="hello", ref_text="hi")
+        with pytest.raises(ValueError, match="does not support"):
+            handler._validate_tts_request(req)
+
+    @pytest.mark.parametrize(
+        "model, task",
+        [
+            ("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", "Base"),
+            (
+                "/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base/snapshots/abc123",
+                "CustomVoice",
+            ),
+            ("/models/qwen3_tts.voice-design", "CustomVoice"),
+        ],
+    )
+    def test_model_path_is_used_without_metadata(self, model, task):
+        handler = self._handler(model=model)
+        with pytest.raises(ValueError, match="does not support"):
+            handler._validate_tts_request(self._request(task))
+
+    @pytest.mark.parametrize(
+        "model, restricted",
+        [("/models/Qwen3-TTS-12Hz-0.6B-CustomVoice", True), (None, False)],
+    )
+    def test_missing_hf_config_falls_back_to_the_model_path(self, model, restricted):
+        handler = self._handler()
+        handler.engine_client.model_config = SimpleNamespace(model=model)
+        req = self._request("Base")
+        if restricted:
+            with pytest.raises(ValueError, match="does not support"):
+                handler._validate_tts_request(req)
+        else:
+            handler._validate_tts_request(req)
+
+    @pytest.mark.parametrize("model", ["/data/database", "/models/base/export"])
+    def test_unknown_variant_is_not_restricted(self, model):
+        handler = self._handler(tts_model_type="other", model=model)
+        handler._validate_tts_request(self._request("CustomVoice"))
+
+    def test_metadata_wins_over_the_model_path(self):
+        handler = self._handler(tts_model_type="base", model="/m/x-CustomVoice")
+        handler._validate_tts_request(self._request("Base"))
+
+    @pytest.mark.asyncio
+    async def test_mismatch_is_refused_before_ref_audio_is_fetched(self):
+        handler = self._handler(tts_model_type="custom_voice")
+        handler._resolve_ref_audio = fetch = MagicMock()
+        with pytest.raises(ValueError, match="does not support"):
+            await handler._engine_inputs_tts(self._request("Base"), stream_audio=False)
+        fetch.assert_not_called()
 
 
 class TestIsTtsModel:
@@ -365,12 +466,16 @@ class TestAudexModelDetection:
         handler = _make_audex_handler("qwen3_tts")
         assert handler.audex.model_type() is None
 
-    def test_stage_configs_shapes(self):
-        """model_stage is read from nested engine_args and from dict configs."""
+    @pytest.mark.parametrize("is_typed", [False, True])
+    def test_stage_configs_shapes(self, is_typed):
         handler = _make_audio_handler()
         handler.engine_client.stage_list = []
         handler.engine_client.stage_configs = [
-            SimpleNamespace(engine_args={"model_stage": "audex_thinker"}),
+            (
+                SimpleNamespace(model_stage="audex_thinker")
+                if is_typed
+                else SimpleNamespace(engine_args={"model_stage": "audex_thinker"})
+            ),
             {"engine_args": {"model_stage": "audex_code2wav"}},
         ]
         assert handler.audex.model_type() == "audex"
@@ -614,7 +719,7 @@ class TestResolveRefAudio:
     """ref_audio is client-supplied, so every failure must be a clean rejection."""
 
     @staticmethod
-    def _wav_bytes(samples=1600, rate=16000):
+    def _wav_bytes(samples=1600, rate=16000, channels=1):
         import io
 
         import numpy as np
@@ -623,9 +728,8 @@ class TestResolveRefAudio:
         buf = io.BytesIO()
         # Random content so the base64 payload really contains '+' and '/'.
         rng = np.random.default_rng(0)
-        sf.write(
-            buf, rng.standard_normal(samples).astype("float32"), rate, format="WAV"
-        )
+        shape = (samples,) if channels == 1 else (samples, channels)
+        sf.write(buf, rng.standard_normal(shape).astype("float32"), rate, format="WAV")
         return buf.getvalue()
 
     @staticmethod
@@ -639,6 +743,38 @@ class TestResolveRefAudio:
         wav = self._wav_bytes()
         data, rate = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
         assert len(data) == 1600 and rate == 16000
+
+    def test_downmixes_multichannel_audio_to_mono(self):
+        import io
+
+        import numpy as np
+        import soundfile as sf
+
+        handler = _make_audio_handler()
+        wav = self._wav_bytes(channels=2)
+        data, _ = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
+        stereo, _ = sf.read(io.BytesIO(wav), dtype="float32")
+        # A NumPy array nested in the prompt reaches the engine as a descriptor.
+        assert type(data) is list and type(data[0]) is float
+        np.testing.assert_allclose(data, stereo.mean(axis=1), rtol=1e-6)
+
+    def test_accepts_a_clip_exactly_at_the_duration_limit(self):
+        handler = _make_audio_handler()
+        wav = self._wav_bytes(samples=30 * 8000, rate=8000)
+        data, _ = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
+        assert len(data) == 30 * 8000
+
+    @pytest.mark.parametrize(
+        "samples, rate",
+        [(30 * 8000 + 1, 8000), (30 * 48000 + 1, 384000)],
+        ids=["duration", "sample_count"],
+    )
+    def test_rejects_a_clip_over_the_decoded_limits(self, samples, rate):
+        # The encoded size is fine; the decoded waveform is what costs memory.
+        handler = _make_audio_handler()
+        wav = self._wav_bytes(samples=samples, rate=rate)
+        with pytest.raises(ValueError, match="too long"):
+            asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
 
     def test_decodes_a_percent_encoded_payload(self):
         # A data URI that travelled through a URL has '+' and '/' escaped.

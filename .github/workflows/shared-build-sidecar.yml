@@ -20,13 +20,18 @@ on:
         required: false
         type: string
         default: ''
+      image_tag_suffix:
+        description: 'Suffix for the SHA-keyed image tag (e.g. -nightly)'
+        required: false
+        type: string
+        default: ''
       artifact_retention_days:
         description: 'Retention in days for compliance artifacts'
         required: false
         type: string
         default: '30'
       diff_event_context:
-        description: 'Compliance diff context (pr or push); empty disables baseline resolution'
+        description: 'Compliance diff context (pr, push, or nightly); empty disables baseline resolution'
         required: false
         type: string
         default: ''
@@ -80,11 +85,12 @@ jobs:
         env:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG_SUFFIX: ${{ inputs.image_tag_suffix }}
         run: |
           set -euo pipefail
           target_tag_plain="dynamo-sidecar"
           echo "target_tag_plain=${target_tag_plain}" >> "${GITHUB_OUTPUT}"
-          echo "image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${target_tag_plain}" >> "${GITHUB_OUTPUT}"
+          echo "image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${target_tag_plain}${IMAGE_TAG_SUFFIX}" >> "${GITHUB_OUTPUT}"
 
       - name: Initialize Dynamo Builder
         uses: $/.github/actions/init-dynamo-builder
