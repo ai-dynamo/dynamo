@@ -34,6 +34,14 @@ Benefits:
 Structural tags are enabled by default. Configure the tool-call parser on the
 **worker**; the Frontend needs no extra flags:
 
+> [!NOTE]
+> TensorRT-LLM guided decoding remains **opt-in** pending
+> [TensorRT-LLM #19913](https://github.com/NVIDIA/TensorRT-LLM/issues/19913).
+> Its `--guided-decoding-backend` default is unset, so default deployments ignore
+> structural tags and do not enforce their tool argument schemas. For affected
+> deployments using `--guided-decoding-backend xgrammar`, pass
+> `--no-dyn-enable-structural-tag` until a supported upgrade resolves the issue.
+
 ```yaml
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
