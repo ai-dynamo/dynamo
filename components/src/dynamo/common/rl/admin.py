@@ -11,6 +11,8 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
+from dynamo.common.utils.env import env_bool as common_env_bool
+
 logger = logging.getLogger(__name__)
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -66,7 +68,7 @@ def require_lora_load_request(request: Mapping[str, Any] | None) -> tuple[str, s
         raise RLAdminValidationError(
             "'dyn-lora-' names are reserved for request-time adapters"
         )
-    if env_bool("DYN_LORA_RUNTIME_LOAD_ENABLED") and "|" in lora_name:
+    if common_env_bool("DYN_LORA_RUNTIME_LOAD_ENABLED") and "|" in lora_name:
         raise RLAdminValidationError(
             "'|' in lora_name is reserved for request-time adapter identifiers"
         )
