@@ -54,6 +54,11 @@ reuse_key() {
     echo "${dockerfile} uses the dynamo context outside one-line COPY instructions" >&2
     return 1
   fi
+  # The parser below cannot read JSON-form arguments, so it would miss them.
+  if grep -q -E '^COPY --from=dynamo +\[' "${dockerfile}"; then
+    echo "${dockerfile} uses a JSON-form COPY from the dynamo context" >&2
+    return 1
+  fi
   # EPP_DIR is also the main build context, with the Dockerfile and Makefile.
   mapfile -t paths < <(
     {
