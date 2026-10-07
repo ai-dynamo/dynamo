@@ -10,9 +10,8 @@ description: 'Ensure a BuildKit builder is healthy; re-initialize it if the conn
 #      still reachable.  If it succeeds the action exits immediately — no extra
 #      work is done.
 #   2. If the inspect/bootstrap fails the builder is considered stale and
-#      init-dynamo-builder is called with the same flavor/arch/cuda_version that
-#      were used when the builder was first created, effectively re-routing
-#      workers and re-registering the builder from scratch.
+#      init-dynamo-builder is called with the same routing and isolation options
+#      that were used when the builder was first created.
 
 inputs:
   builder_name:
@@ -29,6 +28,10 @@ inputs:
     description: 'CUDA version used on re-init (e.g. 13.0, 13.1). Leave empty for general flavor.'
     required: false
     default: ''
+  fresh_builder:
+    description: 'Preserve an isolated Kubernetes builder when re-initializing'
+    required: false
+    default: 'false'
 
   # Kubernetes fallback passthrough inputs (forwarded to init-dynamo-builder)
   ephemeral_storage:
@@ -76,7 +79,9 @@ runs:
       shell: bash
       run: |
         echo "::warning::Builder '${{ inputs.builder_name }}' is unhealthy. Removing and re-initializing..."
-        docker buildx rm "${{ inputs.builder_name }}" || true
+        # Other image jobs may still use the same run-scoped Kubernetes pods.
+        # Only the workflow cleanup job should delete those shared daemons.
+        docker buildx rm --keep-daemon "${{ inputs.builder_name }}" || true
 
     - name: Re-initialize builder (if unhealthy)
       if: steps.check-health.outcome == 'failure'
@@ -86,6 +91,7 @@ runs:
         flavor: ${{ inputs.flavor }}
         arch: ${{ inputs.arch }}
         cuda_version: ${{ inputs.cuda_version }}
+        fresh_builder: ${{ inputs.fresh_builder }}
         ephemeral_storage: ${{ inputs.ephemeral_storage }}
         namespace: ${{ inputs.namespace }}
         replicas: ${{ inputs.replicas }}
