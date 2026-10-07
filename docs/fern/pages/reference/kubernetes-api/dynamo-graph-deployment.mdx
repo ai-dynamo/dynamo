@@ -94,6 +94,8 @@ For new DGDs, use the provider-native `minAvailable: 1` default unless the appli
 
 Grove rejects replica changes throughout an active coherent rollout. The Dynamo operator defers its requested scaling, continues observing workload readiness and component status, and reports `ScalingDeferred`. It retries scaling when Grove reports completion. External scalers writing directly to Grove's scale subresources still receive the admission rejection; do not rely on autoscaling to supply capacity during an active rollout.
 
+For LPX workloads with explicit replica counts, scheduling deadline cleanup also waits until capacity can be reduced before deleting expired pipeline requests. Workloads with omitted replica counts retain external capacity ownership, and their expired requests can still be cleaned up during a rollout.
+
 For RollingRecreate, `maxUnavailable` defaults to `1`; rolling update configuration is rejected with OnDelete. See [Grove's defaulting implementation](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.14/operator/internal/webhook/admission/pcs/defaulting/podcliqueset.go).
 
 DGD does not currently expose `maxUnavailable`. The Dynamo operator leaves it unset in generated PCS templates, so Grove supplies the defaults above. Upgrading Grove alone does not add this field to the DGD API.
