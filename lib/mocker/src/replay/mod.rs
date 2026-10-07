@@ -11,7 +11,7 @@ mod validate;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, MockerConfig};
 use dynamo_kv_router::PrefillLoadEstimator;
 
 /// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
@@ -45,8 +45,8 @@ pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
 
 #[derive(Clone, Debug)]
 pub struct OfflineDisaggReplayConfig {
-    pub prefill_args: MockEngineArgs,
-    pub decode_args: MockEngineArgs,
+    pub prefill_args: MockerConfig,
+    pub decode_args: MockerConfig,
     pub num_prefill_workers: usize,
     pub num_decode_workers: usize,
 }
