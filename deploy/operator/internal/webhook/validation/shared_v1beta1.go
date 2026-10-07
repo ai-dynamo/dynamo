@@ -201,15 +201,23 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		))
 	}
 
+	// Deprecation warnings are independent of the selected rollout strategy.
+	if spec.MinAvailable != nil && options.grovePathway {
+		minimumPath := fldPath.Child("minAvailable")
+		if spec.IsLPX() && spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+			v.warnf("%s (%q) is deprecated; remove this field and configure minimum availability on the shared target component; the draft's effective minimum remains 1", minimumPath.String(), spec.ComponentName)
+		} else {
+			replacement := groveNativeMinimumPath(spec, fldPath)
+			v.warnf("%s (%q) is deprecated; use %s and migrate all component minima together without changing their effective values", minimumPath.String(), spec.ComponentName, replacement.String())
+		}
+	}
+
 	// Native availability has the same replica envelope as the deprecated typed field.
 	if spec.ProviderOverride != nil {
 		minimum, exists := provideroverride.GroveMinAvailable(spec.ProviderOverride.Value.Raw)
 		replicas := k8sptr.Deref(spec.Replicas, 1)
 		if exists && minimum > 0 && replicas > 0 && !(spec.IsLPX() && spec.Replicas == nil) && minimum > replicas {
-			minimumPath := fldPath.Child("providerOverride", "value", "minAvailable")
-			if !spec.UsesPCSG() && !spec.IsLPX() {
-				minimumPath = fldPath.Child("providerOverride", "value", "spec", "minAvailable")
-			}
+			minimumPath := groveNativeMinimumPath(spec, fldPath)
 			allErrs = append(allErrs, field.Invalid(minimumPath, minimum, "minAvailable must be less than or equal to replicas unless replicas is 0"))
 		}
 	}
@@ -1058,11 +1066,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	newMinimum := provideroverride.EffectiveGroveMinAvailable(newComponent)
 	if (oldHasMinimum || ownerKind.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind) && newMinimum != provideroverride.EffectiveGroveMinAvailable(oldComponent) {
 		minimumPath := fldPath.Child("minAvailable")
-		if newComponent.MinAvailable == nil && newComponent.ProviderOverride != nil {
-			minimumPath = fldPath.Child("providerOverride", "value", "minAvailable")
-			if !newComponent.UsesPCSG() && !newComponent.IsLPX() {
-				minimumPath = fldPath.Child("providerOverride", "value", "spec", "minAvailable")
-			}
+		if newComponent.MinAvailable == nil && (newComponent.ProviderOverride != nil || oldComponent.ProviderOverride != nil) {
+			minimumPath = groveNativeMinimumPath(newComponent, fldPath)
 		}
 		allErrs = append(allErrs, field.Invalid(minimumPath, newMinimum, "minAvailable is immutable after creation"))
 	}

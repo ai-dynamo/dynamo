@@ -232,3 +232,47 @@ func mustJSON(t *testing.T, value any) string {
 	require.NoError(t, err)
 	return string(raw)
 }
+
+func TestGroveScalingBlocked(t *testing.T) {
+	for _, test := range []struct {
+		name                                   string
+		strategy                               grovev1alpha1.UpdateStrategyType
+		missingPCS, missingObservation, active bool
+		observed                               int64
+		blocked                                bool
+	}{
+		{name: "before creation", missingPCS: true, blocked: true},
+		{name: "Grove has not acknowledged any generation", missingObservation: true, blocked: true},
+		{name: "Grove has not acknowledged this generation", observed: 1, blocked: true},
+		{name: "acknowledged coherent update is still active", strategy: grovev1alpha1.CoherentStrategy, observed: 2, active: true, blocked: true},
+		{name: "completed coherent update", strategy: grovev1alpha1.CoherentStrategy, observed: 2},
+		{name: "acknowledged rolling recreate update", strategy: grovev1alpha1.RollingRecreateStrategy, observed: 2, active: true},
+		{name: "acknowledged on delete configuration", strategy: grovev1alpha1.OnDeleteStrategy, observed: 2},
+		{name: "implicit rolling recreate", observed: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Combine configuration synchronization with Grove acknowledgement and update progress")
+			pcs := &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Status:     grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(test.observed)},
+			}
+			if test.strategy != "" {
+				pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: test.strategy}
+			}
+			if test.active {
+				pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+			}
+			if test.missingObservation {
+				pcs.Status.ObservedGeneration = nil
+			}
+			if test.missingPCS {
+				pcs = nil
+			}
+			before := pcs.DeepCopy()
+
+			t.Log("Keep the decision pure and block every incomplete synchronization step")
+			require.Equal(t, test.blocked, GroveScalingBlocked(pcs))
+			require.Equal(t, before, pcs)
+		})
+	}
+}

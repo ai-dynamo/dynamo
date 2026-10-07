@@ -42,15 +42,15 @@ func newGroveScaler(kubeClient client.Client) *groveScaler {
 }
 
 // Reconcile applies component replica changes to the Grove resources created
-// asynchronously from the PodCliqueSet. pcs may be nil before creation.
-// It returns whether scaling is deferred and whether a scale-guard denial needs
-// a retry because the cached PCS has no active update to await.
+// asynchronously from the PodCliqueSet. scalingBlocked is resolved after PCS
+// synchronization. While blocked, observe capacity without writing replicas.
+// The result reports whether an explicit replica change is waiting.
 func (s *groveScaler) Reconcile(
 	ctx context.Context,
 	req groveReconcileRequest,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-	pcs *grovev1alpha1.PodCliqueSet,
-) (deferred, retrySoon bool, err error) {
+	scalingBlocked bool,
+) (deferred bool, err error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
 	managedComponents := req.ManagedComponents()
@@ -83,8 +83,8 @@ func (s *groveScaler) Reconcile(
 			resourceKind = "PodCliqueScalingGroup"
 			gvr = consts.PodCliqueScalingGroupGVR
 		}
-		// During a coherent update observe capacity without issuing forbidden scale writes.
-		if dynamo.GroveCoherentUpdateInProgress(pcs) {
+		// Observe capacity while the workload configuration or coherent rollout is pending.
+		if scalingBlocked {
 			var child client.Object
 			if usesPCSG {
 				child = &grovev1alpha1.PodCliqueScalingGroup{}
@@ -95,7 +95,7 @@ func (s *groveScaler) Reconcile(
 				if apierrors.IsNotFound(err) {
 					continue
 				}
-				return deferred, retrySoon, err
+				return deferred, err
 			}
 			switch resource := child.(type) {
 			case *grovev1alpha1.PodClique:
@@ -106,7 +106,7 @@ func (s *groveScaler) Reconcile(
 			continue
 		}
 
-		// Admission and controller observations can disagree at rollout start or completion.
+		// Unexpected admission or API failures retain the normal controller retry path.
 		if err := s.scaleResource(
 			ctx,
 			gvr,
@@ -114,11 +114,6 @@ func (s *groveScaler) Reconcile(
 			req.DGD.Namespace,
 			replicas,
 		); err != nil {
-			if dynamo.IsGroveCoherentScaleGuardRejection(err) {
-				deferred = true
-				retrySoon = true
-				continue
-			}
 			logger.Error(
 				err,
 				"Failed to scale Grove resource",
@@ -127,12 +122,12 @@ func (s *groveScaler) Reconcile(
 				"resourceName", resourceName,
 				"replicas", replicas,
 			)
-			return deferred, retrySoon, fmt.Errorf("failed to scale %s %s: %w", resourceKind, resourceName, err)
+			return deferred, fmt.Errorf("failed to scale %s %s: %w", resourceKind, resourceName, err)
 		}
 	}
 
 	logger.V(1).Info("Successfully reconciled Grove scaling operations", "deferred", deferred)
-	return deferred, retrySoon, nil
+	return deferred, nil
 }
 
 func (s *groveScaler) scaleResource(

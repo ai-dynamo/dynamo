@@ -63,8 +63,6 @@ SPDX-License-Identifier: Apache-2.0
 
 - Read workload dependencies through the cached client and validate them once
   per reconciliation; do not add uncached reads or pre-write revalidation.
-  Grove schema capability discovery is the exception: watch CRD metadata, fetch
-  the schema through APIReader, and cache only the result by CRD UID/resource version.
 - Observations are not an atomic snapshot. Publishing previously observed
   intent during a concurrent edit is accepted; watches drive convergence.
   UID/resource-version preconditions and write conflicts protect mutations.
@@ -76,6 +74,10 @@ SPDX-License-Identifier: Apache-2.0
   a deadline is active, and external download checks. The other deliberate use
   is the follow-up after recording `SchedulingFailed`, because status-only
   LPXGD updates are filtered. Ordinary errors use controller-runtime backoff.
+- Synchronize the desired PCS before any replica write, including scale-down and
+  deadline cleanup. Use the shared Grove scaling gate to wait for the cached intent,
+  Grove generation acknowledgement, and completion of an active Coherent rollout.
+  Continue observing readiness and component status while scaling is deferred.
 - After writing a PCS, wait for its watched observation before publishing LPRs.
   An LPR `AlreadyExists` response means wait for observation, not adopt an
   unverified object. Never adopt a foreign resource with the expected name.

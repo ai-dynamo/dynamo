@@ -79,7 +79,6 @@ type DynamoGraphDeploymentReconciler struct {
 	DockerSecretRetriever DockerSecretRetriever
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
-	GroveCoherentSupport  *dynamo.GroveCoherentSupport
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -368,7 +367,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	// Register Grove-owned workload watches only when the Grove feature is enabled.
 	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
-		ctrlBuilder = newGroveWatchSetup(r.Client, r.Config, r.RuntimeConfig).addTo(ctrlBuilder)
+		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
 	}
 
 	return ctrlBuilder.Complete(r)

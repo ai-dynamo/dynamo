@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -37,13 +36,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const groveScaleGuardRetryInterval = 5 * time.Second
-
-// groveWorkloadResult retains Grove's scaling wait and retry alongside the workload observation.
+// groveWorkloadResult retains Grove's scaling wait alongside the workload observation.
 type groveWorkloadResult struct {
 	ReconcileResult
 	ScalingDeferred bool
-	RequeueAfter    time.Duration
 }
 
 // groveWorkloadsReconciler owns the complete provider workload sequence while
@@ -55,12 +51,10 @@ type groveWorkloadsReconciler struct {
 	renderer        *groveWorkloadRenderer
 	scaler          *groveScaler
 	stableResources *groveStableResourcesReconciler
-	coherentSupport *dynamo.GroveCoherentSupport
 }
 
 func newGroveWorkloadsReconciler(
 	kubeClient client.Client,
-	coherentSupport *dynamo.GroveCoherentSupport,
 	recorder events.EventRecorder,
 	rollout *dgdWorkerRolloutReconciler,
 	config *configv1alpha1.OperatorConfiguration,
@@ -68,10 +62,9 @@ func newGroveWorkloadsReconciler(
 	dockerSecretRetriever DockerSecretRetriever,
 ) *groveWorkloadsReconciler {
 	return &groveWorkloadsReconciler{
-		syncer:          newDGDResourceSyncer(kubeClient, recorder),
-		rollout:         rollout,
-		reader:          kubeClient,
-		coherentSupport: coherentSupport,
+		syncer:  newDGDResourceSyncer(kubeClient, recorder),
+		rollout: rollout,
+		reader:  kubeClient,
 		renderer: newGroveWorkloadRenderer(
 			kubeClient,
 			config,
@@ -118,16 +111,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return groveWorkloadResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
 
-	// Validate Coherent capability before any provider workload mutation.
-	if dynamo.GroveCoherentUpdateSelected(renderedPodCliqueSet.desired) {
-		if err := r.coherentSupport.Check(ctx); err != nil {
-			if errors.Is(err, dynamo.ErrGroveCoherentUnsupported) {
-				return groveWorkloadResult{}, failWorkloadProgram("grove_update_strategy_unsupported", err)
-			}
-			return groveWorkloadResult{}, err
-		}
-	}
-
 	// Converge the ordinary PCS before rollout or readiness observation.
 	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, req.DGD, renderedPodCliqueSet)
 	if err != nil {
@@ -157,15 +140,17 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	scalingDeferred, retrySoon, err := r.scaler.Reconcile(ctx, req, checkpointInfos, syncedPodCliqueSet)
-	if err != nil {
-		logger.Error(err, "failed to reconcile Grove scaling")
-		return groveWorkloadResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
+	// Scaling waits for cached configuration convergence, Grove acknowledgement, and rollout completion.
+	scalingBlocked := pcsWasWritten || dynamo.GroveScalingBlocked(syncedPodCliqueSet)
+	scalingDeferred, scaleErr := r.scaler.Reconcile(ctx, req, checkpointInfos, scalingBlocked)
+	if scaleErr != nil {
+		scaleErr = fmt.Errorf("failed to reconcile Grove scaling: %w", scaleErr)
 	}
 
+	// Preserve readiness and component observations even when a scale write fails.
 	stableResources, err := r.stableResources.Reconcile(ctx, req, syncedPodCliqueSet)
 	if err != nil {
-		return groveWorkloadResult{}, err
+		return groveWorkloadResult{}, errors.Join(scaleErr, err)
 	}
 
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
@@ -174,7 +159,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		syncedPodCliqueSet,
 	)
 	if err != nil {
-		return groveWorkloadResult{}, err
+		return groveWorkloadResult{}, errors.Join(scaleErr, err)
 	}
 
 	resources := append(stableResources, podCliqueSetResource)
@@ -182,12 +167,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
 
-	// Retry a scale-guard denial even when the PCS completion event was already consumed.
-	workloadResult := groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}
-	if retrySoon {
-		workloadResult.RequeueAfter = groveScaleGuardRetryInterval
-	}
-	return workloadResult, nil
+	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, scaleErr
 }
 
 // reconcilePodCliqueSet returns the current PCS and whether it was created or updated.

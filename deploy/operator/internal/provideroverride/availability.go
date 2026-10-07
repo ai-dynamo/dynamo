@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 // HasLegacyGroveMinAvailable reports a compatibility marker anywhere in a non-nil DGD.
@@ -69,47 +68,4 @@ func EffectiveGroveMinAvailable(component *v1beta1.DynamoComponentDeploymentShar
 		}
 	}
 	return 1
-}
-
-// DefaultGroveMinAvailable materializes the new default while preserving explicit fragments.
-// component must be non-nil. Invalid identities and values remain unchanged for admission.
-func DefaultGroveMinAvailable(component *v1beta1.DynamoComponentDeploymentSharedSpec) {
-	// Only a conductor-bearing LPX component owns a workload scaling group.
-	if component.IsLPX() && component.ComponentRole(v1beta1.ComponentRoleLPXConductor) == nil {
-		return
-	}
-	target := TargetPodCliqueTemplateSpec
-	if component.UsesPCSG() || component.IsLPX() {
-		target = TargetPodCliqueScalingGroupConfig
-	}
-	if component.ProviderOverride == nil {
-		component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: GroveAPIVersion, Target: target, Value: apiextensionsv1.JSON{Raw: []byte(`{}`)}}
-	}
-	override := component.ProviderOverride
-	if override.APIVersion != GroveAPIVersion || override.Target != target {
-		return
-	}
-
-	// Decode raw messages so defaulting preserves opaque topology and explicit invalid values.
-	var value map[string]json.RawMessage
-	if err := json.Unmarshal(override.Value.Raw, &value); err != nil || value == nil {
-		return
-	}
-	owner := value
-	if target == TargetPodCliqueTemplateSpec {
-		owner = map[string]json.RawMessage{}
-		if raw, exists := value["spec"]; exists {
-			if err := json.Unmarshal(raw, &owner); err != nil || owner == nil {
-				return
-			}
-		}
-	}
-	if _, exists := owner["minAvailable"]; exists {
-		return
-	}
-	owner["minAvailable"] = json.RawMessage(`1`)
-	if target == TargetPodCliqueTemplateSpec {
-		value["spec"], _ = json.Marshal(owner)
-	}
-	override.Value.Raw, _ = json.Marshal(value)
 }

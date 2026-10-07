@@ -64,7 +64,7 @@ metadata:
 
 Starting with Dynamo 1.6.0, new Grove-backed DGDs that omit all deprecated component minima default provider-native `minAvailable` to `1`. Existing DGDs retain their persisted legacy fields. This availability defaulting is independent of the rollout strategy: both forms use RollingRecreate without an annotation. Mixing the old and native minimum forms anywhere in the DGD is rejected; migrate all components in one update. An explicit strategy annotation applies to both PodCliqueSets in a hybrid graph.
 
-Grove v0.1.0-alpha.14 or later and its matching CRDs are required for Coherent updates. The operator checks the installed PodCliqueSet CRD before writing Coherent intent. An unsupported schema produces an actionable failure condition; the operator does not substitute a different rollout strategy. Upgrade externally managed Grove controllers and CRDs together: a CRD capability check cannot verify the running controller's implementation.
+Grove v0.1.0-alpha.14 or later and its matching CRDs are required for Coherent updates. Upgrade externally managed Grove controllers and CRDs together. The operator writes the requested strategy and reports API validation or admission rejections through its normal failure condition and reconciliation retry path; it does not substitute a different strategy.
 
 Coherent recovery can stall when already-unavailable replicas exhaust the disruption budget, as tracked in [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873). Review this limitation before opting in. Changing or removing the strategy annotation cannot unblock a stalled active update. See [Recover from a stalled Coherent update](../../kubernetes/model-deployment/deploy-with-dgd.md#recover-from-a-stalled-coherent-update) for the DGD recreation procedure and the limitations of pod deletion workarounds.
 
@@ -97,7 +97,7 @@ Grove can roll replicas beyond the minimum unit through additional tail steps. P
 
 For new DGDs, use the provider-native `minAvailable: 1` default unless the application requires a larger viable unit. Keep the disruption budget at its default until the remaining capacity has been validated under representative traffic. Size spare serving capacity before a rollout; adding a larger budget does not add surge capacity. `minAvailable` is immutable after DGD creation, so review it before creating a deployment or opting an existing deployment into Coherent.
 
-Grove rejects replica changes throughout an active coherent rollout. The Dynamo operator defers its requested scaling, continues observing workload readiness and component status, and reports `ScalingDeferred`. It retries scaling when Grove reports completion. If Grove denies scaling while the operator observes no active update, the operator also schedules a retry after five seconds. External scalers writing directly to Grove's scale subresources still receive the admission rejection; do not rely on autoscaling to supply capacity during an active rollout.
+Grove rejects replica changes throughout an active coherent rollout. Before changing replicas, the Dynamo operator waits until its cache reflects the desired PodCliqueSet configuration, Grove acknowledges that generation, and any Coherent rollout completes. During this wait it continues observing workload readiness and component status and reports `ScalingDeferred` when a replica change is pending. PodCliqueSet watch events resume scaling. Unexpected API or admission failures use the normal reconciliation retry path. External scalers writing directly to Grove's scale subresources still receive the admission rejection; do not rely on autoscaling to supply capacity during an active rollout.
 
 For LPX workloads with explicit replica counts, scheduling deadline cleanup also waits until capacity can be reduced before deleting expired pipeline requests. Workloads with omitted replica counts retain external capacity ownership, and their expired requests can still be cleaned up during a rollout.
 
@@ -115,7 +115,7 @@ DGD does not currently expose `maxUnavailable`. The Dynamo operator leaves it un
 
 ### Configure native minimum availability
 
-Set the minimum at component scope. Dynamo resolves the target when omitted, so generated PCS names are not required.
+Set an explicit minimum at component scope. Dynamo resolves the target when omitted, so generated PCS names are not required. An omitted minimum resolves to `1` during rendering; admission leaves an absent `providerOverride` absent and does not add availability fields to a topology-only override.
 
 | Component shape | Provider target | Native minimum path inside `value` |
 |---|---|---|
@@ -137,7 +137,7 @@ For a scaling-group component, use `value.minAvailable: 1` instead. A shared LPX
 
 The effective minimum must be a positive integer and fit a positive replica count; ordinary Grove components may scale to zero without clearing their minimum. With omitted LPX replicas, the minimum seeds the initial scaling-group capacity.
 
-To migrate an existing DGD, remove every deprecated component `minAvailable` and put the same values in the corresponding component provider overrides in one update, including defaulted values on frontends and other components. Admission enforces effective-value immutability across both forms. Migration leaves the rollout strategy unchanged; select Coherent separately with the annotation. Moving the same values leaves worker hashes and rendered pod templates unchanged; subsequent workload updates use the selected strategy. Review the disruption implications before opting in.
+Admission returns a deprecation warning for the old component `minAvailable` field independently of the rollout strategy. To migrate an existing DGD, remove every deprecated component `minAvailable` and put the same values in the corresponding component provider overrides in one update, including defaulted values on frontends and other components. Admission enforces effective-value immutability across both forms. Migration leaves the rollout strategy unchanged; select Coherent separately with the annotation. Moving the same values leaves worker hashes and rendered pod templates unchanged; subsequent workload updates use the selected strategy. Review the disruption implications before opting in.
 
 A shared LPX draft has a legacy minimum of `1` but no independent scaling group. Remove that legacy field without adding a draft override; its effective default remains `1`, and the target component owns the native workload minimum.
 

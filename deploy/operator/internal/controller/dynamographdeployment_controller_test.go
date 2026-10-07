@@ -3799,7 +3799,7 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
-			reqs := newGroveWatchSetup(r.Client, r.Config, r.RuntimeConfig).
+			reqs := newGroveWatchSetup(r.Client).
 				mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
 
 			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))

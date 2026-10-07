@@ -362,6 +362,7 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 		name             string
 		version          string
 		wantNative       map[string]int32
+		wantOverrideRaw  map[string]string
 		op               admissionv1.Operation
 		groveEnabled     bool
 		annotations      map[string]string
@@ -541,10 +542,10 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "new Grove graph defaults native availability for P and D",
+			name:    "new Grove graph resolves minimum one without materializing P and D overrides",
 			version: "1.6.0", op: admissionv1.Create, groveEnabled: true,
 			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "P"}, {ComponentName: "D", Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}}},
-			wantMinAvailable: map[string]*int32{"P": nil, "D": nil}, wantNative: map[string]int32{"P": 1, "D": 1},
+			wantMinAvailable: map[string]*int32{"P": nil, "D": nil},
 		},
 		{
 			name:    "legacy value on P preserves legacy defaulting for D in a new graph",
@@ -564,19 +565,19 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			version: "1.6.0", op: admissionv1.Update, groveEnabled: true,
 			annotations:      map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0"},
 			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "P", Replicas: ptr.To(int32(4)), ProviderOverride: providerOverrideForDefaulting(`{"spec":{"minAvailable":2}}`)}, {ComponentName: "D"}},
-			wantMinAvailable: map[string]*int32{"P": nil, "D": nil}, wantNative: map[string]int32{"P": 2, "D": 1},
+			wantMinAvailable: map[string]*int32{"P": nil, "D": nil}, wantNative: map[string]int32{"P": 2},
 		},
 		{
-			name:    "new topology-only override retains opaque topology while gaining minimum",
+			name:    "new topology-only override retains opaque topology without gaining minimum",
 			version: "1.6.0", op: admissionv1.Create, groveEnabled: true,
 			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "Worker", ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","newField":{"keep":true}}}`)}},
-			wantMinAvailable: map[string]*int32{"Worker": nil}, wantNative: map[string]int32{"Worker": 1},
+			wantMinAvailable: map[string]*int32{"Worker": nil}, wantOverrideRaw: map[string]string{"Worker": `{"topologyConstraint":{"topologyName":"cluster","newField":{"keep":true}}}`},
 		},
 		{
-			name:    "new LPX target owns the default and shared draft receives no override",
+			name:    "new LPX target and shared draft resolve minimum one without overrides",
 			version: "1.6.0", op: admissionv1.Create, groveEnabled: true,
 			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "draft", ComponentType: nvidiacomv1beta1.ComponentTypeLPX}, {ComponentName: "target", ComponentType: nvidiacomv1beta1.ComponentTypeLPX, Roles: []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLPXConductor}}}},
-			wantMinAvailable: map[string]*int32{"draft": nil, "target": nil}, wantNative: map[string]int32{"target": 1},
+			wantMinAvailable: map[string]*int32{"draft": nil, "target": nil},
 		},
 	}
 
@@ -617,8 +618,15 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				component := &dgd.Spec.Components[i]
 				want, native := tt.wantNative[component.ComponentName]
 				if !native {
-					if component.ProviderOverride != nil {
+					if raw, expected := tt.wantOverrideRaw[component.ComponentName]; expected {
+						if component.ProviderOverride == nil || string(component.ProviderOverride.Value.Raw) != raw {
+							t.Fatalf("topology-only override changed for %s", component.ComponentName)
+						}
+					} else if component.ProviderOverride != nil {
 						t.Fatalf("unexpected native override for %s", component.ComponentName)
+					}
+					if component.MinAvailable == nil && provideroverride.EffectiveGroveMinAvailable(component) != 1 {
+						t.Fatalf("omitted native minimum must resolve to one for %s", component.ComponentName)
 					}
 					continue
 				}

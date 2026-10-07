@@ -5,12 +5,10 @@ package dynamo
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/utils/ptr"
 )
 
@@ -66,9 +64,13 @@ func GroveCoherentUpdateInProgress(pcs *grovev1alpha1.PodCliqueSet) bool {
 	return pcs != nil && GroveCoherentUpdateSelected(pcs) && pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
 }
 
-// IsGroveCoherentScaleGuardRejection distinguishes Grove admission from RBAC Forbidden errors.
-// Grove exposes this guard through denial text rather than a dedicated status reason.
-// Recheck the message and regression tests when upgrading Grove; prefer a typed reason if Grove adds one.
-func IsGroveCoherentScaleGuardRejection(err error) bool {
-	return apierrors.IsForbidden(err) && strings.Contains(err.Error(), "spec.replicas changes are not allowed while a coherent update is in progress on PodCliqueSet")
+// GroveScalingBlocked reports whether Grove has not acknowledged this PCS generation
+// or is still performing a Coherent update. pcs may be nil before creation.
+// Before authorizing replica writes, callers must also synchronize the intended
+// configuration and wait for the PCS watch if that synchronization writes it.
+// Matching generation fields on an older cached PCS alone cannot authorize scaling.
+func GroveScalingBlocked(pcs *grovev1alpha1.PodCliqueSet) bool {
+	return pcs == nil || pcs.Status.ObservedGeneration == nil ||
+		*pcs.Status.ObservedGeneration != pcs.Generation ||
+		GroveCoherentUpdateInProgress(pcs)
 }

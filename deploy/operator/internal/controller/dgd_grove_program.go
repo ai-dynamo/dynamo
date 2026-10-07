@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -99,7 +100,6 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		lpxRestartProgress: newLPXRestartProgressResolver(r.Client),
 		workloads: newGroveWorkloadsReconciler(
 			r.Client,
-			r.GroveCoherentSupport,
 			r.Recorder,
 			rollout,
 			r.Config,
@@ -192,21 +192,20 @@ func (p *groveProgram) Reconcile(
 
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
-		if result.ComponentStatus != nil {
+		if programResult.Status.Components == nil {
 			programResult.Status.Components = result.ComponentStatus
+		} else {
+			maps.Copy(programResult.Status.Components, result.ComponentStatus)
 		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
-
-	// Retain a scale-guard retry while the remaining operations converge workload status.
-	programResult.RequeueAfter = groveResult.RequeueAfter
 
 	// Publish scaling deferral without discarding observed component status or readiness.
 	condition := metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionFalse, ObservedGeneration: req.DGD.Generation, Reason: "ScalingAllowed", Message: "No Grove replica changes are deferred"}
 	if groveResult.ScalingDeferred {
 		condition.Status = metav1.ConditionTrue
-		condition.Reason = "CoherentUpdateInProgress"
-		condition.Message = "Replica changes are deferred until the Grove coherent update completes"
+		condition.Reason = "GroveUpdatePending"
+		condition.Message = "Replica changes are deferred until Grove observes the desired PodCliqueSet and any coherent update completes"
 		result.State = nvidiacomv1beta1.DGDStatePending
 		result.Reason = "scaling_deferred"
 		result.Message = Message(condition.Message)

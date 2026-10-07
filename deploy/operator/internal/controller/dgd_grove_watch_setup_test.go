@@ -6,10 +6,6 @@ package controller
 import (
 	"testing"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -145,21 +141,7 @@ func TestGroveWatchMapsOnlyDGDControllerOwnedPodCliques(t *testing.T) {
 			clique, group, pcs := newObjects()
 			objects := test.mutate(clique, group, pcs)
 			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-			require.Equal(t, test.want, newGroveWatchSetup(reader, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}).mapPodCliqueToRequests(t.Context(), clique))
+			require.Equal(t, test.want, newGroveWatchSetup(reader).mapPodCliqueToRequests(t.Context(), clique))
 		})
 	}
-}
-
-func TestGroveCRDChangeRequeuesOnlyGroveDeployments(t *testing.T) {
-	t.Log("Observe Grove and component-provider DGDs in the configured scope")
-	grove := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "grove", Namespace: "default", Annotations: map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}}}
-	component := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "component", Namespace: "default", Annotations: map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent}}}
-	reader := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(grove, component).Build()
-	setup := newGroveWatchSetup(reader, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{})
-	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}}
-
-	t.Log("A PCS schema upgrade resumes affected Grove reconciliation")
-	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(grove)}}, setup.mapGroveCRDToRequests(t.Context(), crd))
-	crd.Name = "unrelated.example.com"
-	require.Empty(t, setup.mapGroveCRDToRequests(t.Context(), crd))
 }

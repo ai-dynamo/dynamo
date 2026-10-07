@@ -559,7 +559,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantAdmissionErrs: []string{
 				"spec.components[1].replicas: Invalid value: -1: spec.components[1].replicas in body should be greater than or equal to 0",
-				"spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 			},
 		},
 		{
@@ -844,6 +843,25 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 
+		// Deprecated minima warn even when RollingRecreate or OnDelete is selected.
+		{
+			name: "deprecated standalone minimum warns with implicit RollingRecreate",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
+			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+		{
+			name: "deprecated scaling group minimum warns with OnDelete",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.MinAvailable = k8sptr.To(int32(1))
+			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+
 		// Native availability and migration use the same production schema/conversion/webhook chain.
 		{
 			name: "native standalone minimum is accepted",
@@ -903,6 +921,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
 			}),
 			wantWebhookErrs: []string{`spec.components[1].providerOverride.value: Forbidden: cannot mix provider-native minAvailable with deprecated component minAvailable; migrate all components together`},
+			wantWarnings:    []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name:          "all legacy minima migrate without changing their immutable values",
@@ -1040,6 +1059,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.Replicas = k8sptr.To(int32(2))
 				worker.MinAvailable = k8sptr.To(int32(1))
 			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "v1beta1 unchanged minAvailable update reaches the webhook",
@@ -1049,6 +1069,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "v1beta1 changed effective minAvailable is rejected by admission",
@@ -1081,7 +1102,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
-			deployment: betaDGDForAdmission(nil),
+			deployment:   betaDGDForAdmission(nil),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "v1beta1 power tuple is accepted on create",
@@ -2339,6 +2361,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.Replicas = k8sptr.To(int32(0))
 				worker.MinAvailable = k8sptr.To(int32(2))
 			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "rendered Grove resource name length accepts boundary",
@@ -2755,7 +2778,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
-			wantOriginVersion: "1.1.0",
+			wantOriginVersion: "1.6.0",
 		},
 		{
 			name:               "origin version cannot be materialized on update",
@@ -3493,7 +3516,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment:      betaTerminatingDGDForAdmission(nil),
 			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
-				dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.1.0"
+				dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.6.0"
 			}),
 			// Removal reports a null bad value, since there is no new value to name.
 			wantWebhookErrs: []string{

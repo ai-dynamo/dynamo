@@ -59,7 +59,7 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 // On every operation: defaults nil non-LPX component Replicas to 1 and persists the
 // replica counts implied by explicit multinode roles.
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
-// On Grove: new graphs default provider-native minAvailable to 1; legacy graphs keep the old field.
+// On Grove: new graphs resolve omitted native minAvailable to 1 during rendering; legacy graphs keep the old field.
 // Scaling to zero preserves the configured minimum viable unit.
 // On CREATE: overwrites nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
@@ -123,13 +123,9 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 			)
 		}
 
-		// Preserve legacy defaulting for old graphs and persist native availability for new ones.
-		if providerSelected && provider == consts.WorkloadProviderGrove {
-			if providerMinimum {
-				provideroverride.DefaultGroveMinAvailable(component)
-			} else if component.MinAvailable == nil {
-				component.MinAvailable = ptr.To(int32(1))
-			}
+		// Preserve legacy defaults; native availability is resolved during rendering without adding overrides.
+		if providerSelected && provider == consts.WorkloadProviderGrove && !providerMinimum && component.MinAvailable == nil {
+			component.MinAvailable = ptr.To(int32(1))
 		}
 
 		// Default each explicit role's provider context independently.
