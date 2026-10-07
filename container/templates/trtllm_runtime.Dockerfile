@@ -715,14 +715,14 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
 
-# Refresh the upstream developer stack in system site, where the image inventory
+# Pin the upstream developer stack in system site, where the image inventory
 # reads it. The rc29 baseline on both architectures satisfies all transitive
-# requirements of these four upgrades. Fail if a future solve changes another
-# distribution: its package paths must be added to the rebase whiteouts first.
+# requirements of these versions. Fail if the solve changes another distribution:
+# its package paths must be added to the rebase whiteouts first.
 RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
         --report /tmp/jupyter-upgrade.json \
-        "jupyter-server>=2.21.0,<3" "jupyterlab>=4.6.4,<5" \
-        "notebook>=7.6.3,<8" "urllib3>=2.8.0,<3" && \
+        "jupyter-server==2.21.1" "jupyterlab==4.6.4" \
+        "notebook==7.6.3" "urllib3==2.8.0" && \
     /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/jupyter-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"jupyter-server", "jupyterlab", "notebook", "urllib3"}, "Add whiteouts for upgraded transitive distributions"' && \
     rm /tmp/jupyter-upgrade.json && \
     /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
