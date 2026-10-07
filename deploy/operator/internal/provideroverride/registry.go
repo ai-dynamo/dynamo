@@ -330,7 +330,7 @@ func validateComponentValue(root map[string]json.RawMessage, target string) []Va
 		availabilityKey = "spec"
 		availabilityPath = "spec.minAvailable"
 	}
-	errs := rejectUnknown(root, "", "topologyConstraint", availabilityKey)
+	errs := rejectUnknown(root, "", "topologyConstraint", availabilityKey, "rollingUpdate")
 	if _, exists := root["topologyConstraint"]; exists {
 		_, valueErr := requiredObject(root, "topologyConstraint", "topologyConstraint")
 		if valueErr != nil {
@@ -340,9 +340,26 @@ func validateComponentValue(root map[string]json.RawMessage, target string) []Va
 
 	// Keep sparse topology-only fragments valid, but reject empty fragments.
 	_, hasAvailability := root[availabilityKey]
-	if _, topology := root["topologyConstraint"]; !topology && !hasAvailability {
-		errs = append(errs, ValueError{Path: "topologyConstraint", Detail: "topologyConstraint or minAvailable is required"})
+	if _, topology := root["topologyConstraint"]; !topology && !hasAvailability && root["rollingUpdate"] == nil {
+		errs = append(errs, ValueError{Path: "topologyConstraint", Detail: "topologyConstraint, minAvailable or rollingUpdate is required"})
 	}
+	// Validate maxUnavailable independently from the optional minimum and topology.
+	if _, exists := root["rollingUpdate"]; exists {
+		rolling, valueErr := requiredObject(root, "rollingUpdate", "rollingUpdate")
+		if valueErr != nil {
+			errs = append(errs, *valueErr)
+		} else {
+			errs = append(errs, rejectUnknown(rolling, "rollingUpdate", "maxUnavailable")...)
+			var budget int32
+			raw, exists := rolling["maxUnavailable"]
+			if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				errs = append(errs, ValueError{Path: "rollingUpdate.maxUnavailable", Detail: "is required"})
+			} else if err := json.Unmarshal(raw, &budget); err != nil || budget <= 0 {
+				errs = append(errs, ValueError{Path: "rollingUpdate.maxUnavailable", Detail: "must be a positive 32-bit integer"})
+			}
+		}
+	}
+
 	if !hasAvailability {
 		return errs
 	}
@@ -364,4 +381,19 @@ func validateComponentValue(root map[string]json.RawMessage, target string) []Va
 		errs = append(errs, ValueError{Path: availabilityPath, Detail: "must be a positive 32-bit integer"})
 	}
 	return errs
+}
+
+// GroveMaxUnavailable returns the configured budget, if present and well-formed.
+// Shape and value errors are reported by ValidateValue.
+func GroveMaxUnavailable(raw []byte) (int32, bool) {
+	// Decode only the supported knob without modifying the raw provider fragment.
+	var value struct {
+		RollingUpdate *struct {
+			MaxUnavailable *int32 `json:"maxUnavailable"`
+		} `json:"rollingUpdate"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil || value.RollingUpdate == nil || value.RollingUpdate.MaxUnavailable == nil {
+		return 0, false
+	}
+	return *value.RollingUpdate.MaxUnavailable, true
 }

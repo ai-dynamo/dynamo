@@ -23,6 +23,46 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
 		{
+			name: "explicit Coherent externally scaled LPX accepts native minimum and budget without a capacity warning",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+		{
+			name: "LPX budget cannot exceed the immutable PCS template seed",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = k8sptr.To(int32(4))
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":3}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[0].providerOverride.value.rollingUpdate.maxUnavailable: Invalid value: 3: must not be greater than the LPX scaling-group template seed (2)`},
+		},
+		{
+			name: "explicit Coherent LPX native budget must cover the native viable unit",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":3,"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantWebhookErrs: []string{`spec.components[0].providerOverride.value.rollingUpdate.maxUnavailable: Invalid value: 2: must not be less than minAvailable (3) under the Coherent update strategy`},
+		},
+
+		{
+			name: "unannotated LPX native budget keeps RollingRecreate without a Coherent minimum floor",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":3,"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+
+		{
 			name: "singleton LPX preserves omitted replicas with minimum availability above one",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]

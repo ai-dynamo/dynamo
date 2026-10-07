@@ -244,6 +244,7 @@ func workerTemplateProviderOverride(override *v1beta1.ProviderOverride) *v1beta1
 		return override
 	}
 	delete(value, "minAvailable")
+	delete(value, "rollingUpdate")
 	if raw, exists := value["spec"]; exists {
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &spec); err == nil && spec != nil {

@@ -173,6 +173,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				workloadProvider: options.workloadProvider,
 				scope:            provideroverride.ScopeComponent,
 				component:        spec,
+				updateStrategy:   options.groveUpdateStrategy,
 			},
 		)...)
 	}
@@ -205,7 +206,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	if spec.ProviderOverride != nil {
 		minimum, exists := provideroverride.GroveMinAvailable(spec.ProviderOverride.Value.Raw)
 		replicas := k8sptr.Deref(spec.Replicas, 1)
-		if exists && minimum > 0 && replicas > 0 && !(spec.IsLPX() && spec.Replicas == nil) && minimum > replicas {
+		if exists && minimum > 0 && replicas > 0 && !(spec.IsLPX() && (spec.Replicas == nil || spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil)) && minimum > replicas {
 			minimumPath := fldPath.Child("providerOverride", "value", "minAvailable")
 			if !spec.UsesPCSG() && !spec.IsLPX() {
 				minimumPath = fldPath.Child("providerOverride", "value", "spec", "minAvailable")
@@ -219,10 +220,20 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		replicas := k8sptr.Deref(spec.Replicas, 1)
 		minimum := provideroverride.EffectiveGroveMinAvailable(spec)
 		budget := minimum
+		if spec.ProviderOverride != nil {
+			if configured, exists := provideroverride.GroveMaxUnavailable(spec.ProviderOverride.Value.Raw); exists {
+				budget = configured
+			}
+		}
 		old := options.oldComponent
 		relevantChange := old == nil || options.groveStrategyChanged
 		if old != nil {
 			oldBudget := provideroverride.EffectiveGroveMinAvailable(old)
+			if old.ProviderOverride != nil {
+				if configured, exists := provideroverride.GroveMaxUnavailable(old.ProviderOverride.Value.Raw); exists {
+					oldBudget = configured
+				}
+			}
 			oldReplicas := k8sptr.Deref(old.Replicas, 1)
 			// Replica-only edits warn when they introduce full-component disruption risk.
 			replicaRiskIntroduced := oldReplicas != replicas && (oldReplicas <= 0 || oldBudget < oldReplicas)
@@ -445,6 +456,7 @@ type providerOverrideValidationOptions struct {
 	workloadProvider string
 	scope            provideroverride.Scope
 	component        *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	updateStrategy   grovev1alpha1.UpdateStrategyType
 }
 
 // validateProviderOverride validates override. override and fldPath must not be nil.
@@ -535,6 +547,31 @@ func (v *sharedValidation) validateProviderOverride(
 	// Availability belongs to a complete component, never one multinode member role.
 	if minimum, exists := provideroverride.GroveMinAvailable(override.Value.Raw); exists && options.scope != provideroverride.ScopeComponent {
 		allErrs = append(allErrs, field.Forbidden(valuePath.Child("spec", "minAvailable"), fmt.Sprintf("minAvailable (%d) belongs to the owning component", minimum)))
+	}
+
+	// Validate the budget in its authored component context before Grove admission.
+	if budget, exists := provideroverride.GroveMaxUnavailable(override.Value.Raw); exists && budget > 0 {
+		budgetPath := valuePath.Child("rollingUpdate", "maxUnavailable")
+		if options.scope != provideroverride.ScopeComponent {
+			allErrs = append(allErrs, field.Forbidden(valuePath.Child("rollingUpdate"), "member cliques use the owning component's rollingUpdate budget"))
+		} else {
+			replicas := k8sptr.Deref(options.component.Replicas, 1)
+			minAvailable := provideroverride.EffectiveGroveMinAvailable(options.component)
+			if options.updateStrategy == grovev1alpha1.OnDeleteStrategy {
+				allErrs = append(allErrs, field.Forbidden(valuePath.Child("rollingUpdate"), "must not be set when the update strategy is OnDelete"))
+			}
+			// LPX keeps its PCS template at the immutable minimum independently of live capacity.
+			if options.component.IsLPX() {
+				if budget > minAvailable {
+					allErrs = append(allErrs, field.Invalid(budgetPath, budget, fmt.Sprintf("must not be greater than the LPX scaling-group template seed (%d)", minAvailable)))
+				}
+			} else if budget > replicas {
+				allErrs = append(allErrs, field.Invalid(budgetPath, budget, fmt.Sprintf("must not be greater than replicas (%d); lower or remove the budget before scaling down", replicas)))
+			}
+			if options.updateStrategy == grovev1alpha1.CoherentStrategy && budget < minAvailable {
+				allErrs = append(allErrs, field.Invalid(budgetPath, budget, fmt.Sprintf("must not be less than minAvailable (%d) under the Coherent update strategy", minAvailable)))
+			}
+		}
 	}
 	return allErrs
 }

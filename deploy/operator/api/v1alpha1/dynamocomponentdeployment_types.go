@@ -65,7 +65,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// component. With apiVersion `grove.io/v1alpha1`, target is
 	// `PodCliqueTemplateSpec` for a single-node component or
 	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
-	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD
+	// OpenAPI omits this field.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
