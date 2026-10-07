@@ -75,17 +75,27 @@ Delivery accounting (both arms, same code):
   | Variable | Meaning |
   |---|---|
   | `DYN_EXPERIMENT_STATIC_KV_REPORT_S` | Report interval in seconds (default 10). |
-  | `DYN_EXPERIMENT_STATIC_KV_ACCOUNTING_OUT` | Rewrite each report as JSON to this path (atomic rename). |
-  | `DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS` | Snapshot the totals at this instant (set it to `--start-at-unix-ms`). Reports then split `warmup` from `timed`. It must lie in the future when the indexer starts. |
+  | `DYN_EXPERIMENT_STATIC_KV_ACCOUNTING_OUT` | Rewrite each report as compact JSON to this path (atomic rename), plus one row per static source. |
+  | `DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS` | Mark the timed start (set it to `--start-at-unix-ms`). Must lie in the future when the indexer starts. |
+  | `DYN_EXPERIMENT_STATIC_KV_TIMED_END_UNIX_MS` | Mark the timed end: the publishers' stop (`start + --duration-s`) plus 1–10 s. Needs the start. |
 
+- Window marks. At each mark the reporter reads the admitted totals (`taken_unix_ms` records
+  when, since the reporter runs on a loaded runtime), then times a FIFO barrier through every
+  event-thread queue of the indexer (`ThreadPoolIndexer::flush_and_wait`, same blob in both
+  arms). `drain_ms` is about zero when the indexer kept up and the backlog's drain time when it
+  did not. Admission feeds unbounded queues, so without it an arm that falls behind would
+  neither drop nor push back, and warm-up still queued at the start would load the window.
 - Each report is also logged at WARN as `EXPERIMENT static KV source accounting report=<json>`.
-  It carries `kind` (`interval`, `split`, or `final`), `t_unix_ms`, `static_sources`,
-  `endpoints_per_sub`, `warmup`, `timed`, and `accounting` (totals, `sources_with_events`,
+  It carries `kind` (`interval`, `split` at the start mark, `end` at the end mark, or `final`),
+  `t_unix_ms`, `report_interval_s`, `static_sources`, `endpoints_per_sub`, the `start` and `end`
+  marks, `warmup` (the start mark's totals), `timed` (start to end mark, or to now before the
+  end mark), `after_end`, and `accounting` (totals, `sources_with_events`,
   `sources_first_event_late`, `gap_resets`, `rank_resets`, `dropped_events`, and up to 16
-  anomalous sources).
+  anomalous sources). The file adds `source_columns` and `sources`: per static source its
+  events, write blocks, first and last admitted event ID, and gap resets.
 - A `final` report is best effort. It is written only when the subscriber is cancelled, and a
   router stopped by a signal can exit first; the local smoke's SIGTERM produced none. Read the
-  file at least two report intervals after the last publisher exited.
+  file at least three report intervals after the last publisher exited.
 
 CRTC neutrality:
 
@@ -256,6 +266,10 @@ Socket budget (libzmq caps a process's shared context at 1023 sockets):
 - The plan fails when the live workers' ungrouped sockets alone reach the cap, at about 480
   live workers with the defaults. No fan-in fixes that.
 - It also prints a suggested `ulimit -n` (`min_nofile`).
+- `--endpoints-per-sub N` pins the fan-in instead (it must fit, else the plan fails). Pin one
+  value of at least 2 for a whole sweep, in both arms: otherwise the smallest fitting value
+  changes with the load point (1, the dedicated per-source SUB path, at small points; 2+, the
+  grouped `direct_zmq_sub_pool` path, at larger ones), which confounds CPU against load.
 - `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` is mandatory: the patched indexer refuses static sources
   without it. Every accounting report echoes it (`endpoints_per_sub`), so you can confirm both
   arms used the same value.
@@ -271,6 +285,7 @@ Socket budget (libzmq caps a process's shared context at 1023 sockets):
    (set -a; source indexer.env
     DYN_EXPERIMENT_STATIC_KV_ACCOUNTING_OUT=<run>/accounting.json \
     DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS=$START_AT \
+    DYN_EXPERIMENT_STATIC_KV_TIMED_END_UNIX_MS=$((START_AT + DURATION_S * 1000 + 2000)) \
     DYN_EXPERIMENT_STATIC_KV_REPORT_S=10 \
       python -m dynamo.router --endpoint <ns>.backend.generate --serve-indexer --router-block-size <page>)
    ```
@@ -294,11 +309,15 @@ Outputs:
 - Each binary prints one JSON line per `--report-interval-s` and a summary (also written to
   `--summary-out`).
 - Publisher plan line: `planned` warm-up and timed totals for this process. Summary: `sent`,
-  `hwm_dropped`, the following fields, and `finished_unix_ms`:
+  `hwm_dropped`, the following fields, and `finished_unix_ms` (stamped after the ZMQ context
+  terminated, i.e. after the sockets' 10 s linger flush; `sends_done_unix_ms` is before it):
   - `subscribe_latency`: from bind, including any wait for the indexer;
   - `timed_lag`: measured after each send returns;
+  - `stop_at_unix_ms`, `first_timed_send_unix_ms`, `last_timed_send_unix_ms`;
   - `late_warmups`;
-  - `resubscribed_phantoms` and `unsubscribed_phantoms`.
+  - `resubscribed_phantoms` and `unsubscribed_phantoms`;
+  - `per_phantom` (file only; columns in `per_phantom_columns`): planned events, write blocks
+    and last event ID, and what was sent.
 - Driver: RTT p50/p99, issue lag, achieved queries/s and lookup blocks/s, and the self-hit
   fraction.
 - Indexer: the accounting reports (above).
@@ -306,30 +325,39 @@ Outputs:
 
 ### 5. Delivery check (rejection rule)
 
-After every publisher of a run has exited, wait two accounting intervals. Then, per arm:
+After every publisher of a run has exited, wait three accounting intervals. Then, per arm:
 
 ```bash
 delivery_check --publisher-summary pubA.json --publisher-summary pubB.json \
-  --indexer-accounting <run>/accounting.json --label <arm>
+  --indexer-accounting <run>/accounting.json --expect-endpoints-per-sub <plan's value> --label <arm>
 ```
 
 The load point is invalid if either arm is invalid. An arm is invalid when any of these holds:
 
-- delivered write blocks are below 98% of planned (`--min-delivered-fraction`), checked over the
-  run, the warm-up, and the timed window. The timed check needs
-  `DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS`, so a large warm-up cannot hide a timed
-  shortfall;
-- any gap reset (`ResetDegraded`) occurred, or any other rank reset discarded indexed state;
-- any phantom's first applied event was not event 1 (a lost prefix), or a phantom with planned
-  events delivered none;
-- any warm-up ended after the timed start;
-- a publisher hit send errors or was interrupted;
-- the indexer accounted for a different number of static sources than the publishers host;
-- the accounting snapshot predates the last publisher's finish.
+- **Not exact per phantom.** Any phantom's admitted events, write blocks, or first and last
+  event ID differ from what its publisher planned (IDs run from 1 through the warm-up and the
+  timed lists before the stop). In a valid run (no gap, no high-water-mark drop) delivered
+  equals planned once the indexer drains, at any load, so there is no tolerance: a 2% tail loss
+  that an aggregate 98% rule would pass is invalid.
+- **Window.** The indexer did not mark both window edges; at the start mark the admitted totals
+  differ from the planned warm-up (warm-up spilled into the window, or timed traffic preceded
+  it); admitted write blocks between the marks are below `--min-window-fraction` (0.99) of the
+  planned timed blocks, or above them; the start mark is not the publishers' start; or the end
+  mark is not within `--max-end-grace-ms` (10 s) after the publishers' stop.
+- **Not drained.** The barrier took longer than `--max-drain-ms` (1000) at either mark, or did
+  not run.
+- **Not paced.** Any publisher's timed lag p99 exceeds `--max-lag-p99-ms` (50) or its maximum
+  `--max-lag-ms` (1000), or its last timed send came more than `--max-send-overrun-ms` (1000)
+  after its stop.
+- Any gap reset (`ResetDegraded`), any other rank reset after a phantom indexed events, or any
+  phantom whose first admitted event was not event 1.
+- A warm-up ended after the timed start, a publisher hit send errors or was interrupted, the
+  indexer accounted for a different number of static sources than the publishers host, its
+  `endpoints_per_sub` differs from `--expect-endpoints-per-sub`, or its file was written less
+  than two report intervals after the last publisher's `finished_unix_ms`.
 
-High-water-mark drops and resubscriptions are reported as warnings. They normally also surface
-as gap resets or a shortfall. `--require-exact` additionally demands delivered = sent, which
-only a low-load smoke should meet.
+High-water-mark drops and resubscriptions are reported as warnings; they also break exactness.
+The defaults are printed in `phantom_plan`'s `acceptance` section.
 
 ### 6. Local smoke (loopback; plumbing only)
 
@@ -346,7 +374,8 @@ request), and the driver. It checks the following:
 - (a) The publisher, started before the indexer, holds at the gate for `GATE_HOLD_S` and then
   delivers the whole warm-up.
 - (b) Removes reach the indexer and are counted.
-- (c) Delivered equals sent: `delivery_check --require-exact`.
+- (c) The full delivery rule passes (`delivery_check`), including both window marks and drains.
+- (d) The indexer ran the grouped SUB path with the pinned `ENDPOINTS_PER_SUB` (default 2).
 
 Tiny streams with eviction: page size 16, `--num-gpu-blocks 12288`, 4 workers, 120 s warm-up,
 240 s sim (`artifacts/tooling/local-smoke/streams-ps16-evict`).
