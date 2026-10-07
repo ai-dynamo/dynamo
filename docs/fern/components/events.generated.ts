@@ -26,6 +26,19 @@ export const GENERATED_ON = "2026-10-06";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
   {
+    "title": "CoreWeave x NVIDIA Dynamo Meetup",
+    "start": "2026-10-16T01:00:00.000Z",
+    "month": "Oct",
+    "day": "15",
+    "year": "2026",
+    "dateLabel": "Thu, Oct 15, 2026",
+    "timeLabel": "6:00 PM",
+    "isPast": false,
+    "location": "San Francisco",
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=CoreWeave+x+NVIDIA+Dynamo+Meetup&dates=20261016T010000Z%2F20261016T040000Z&location=San+Francisco%2C+CA+%28venue+details+via+Luma+registration%29&details=Join+CoreWeave+and+NVIDIA+Dynamo+for+technical+talks+and+developer+networking+on+production+inference+and+RL+post-training.%0A%0ATopics%3A+CoreWeave+Forge%2C+Dynamo+inference+at+scale%2C+efficient+rollouts%2C+and+fast+weight+updates.%0A%0AAgenda+%28Pacific%29%3A%0A6%3A00+pm%3A+Doors+open%0A6%3A30+pm%3A+CoreWeave+talk%0A6%3A45+pm%3A+NVIDIA+Dynamo+talk%0A7%3A00%E2%80%939%3A00+pm%3A+Developer+networking%0A%0ARegister%3A+https%3A%2F%2Fluma.com%2FCWDynOctMeetup%0ARegistration+is+required.+Use+Luma+for+attendance+approval+and+venue+details.+Adding+this+calendar+event+does+not+register+you."
+  },
+  {
     "title": "UNTERGRUND, An evening for the people building the next generation of open source.",
     "start": "2026-10-21T17:00:00.000Z",
     "month": "Oct",
