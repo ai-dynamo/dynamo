@@ -837,8 +837,6 @@ pub struct HttpServiceConfig {
     streaming_backend_error_check: BackendErrorCheck,
 }
 
-/// Keep the builder's environment fallback scoped to one namespace unless a
-/// non-empty prefix is set. The frontend supplies its own resolved filter.
 fn namespace_filter_from_env() -> NamespaceFilter {
     dynamo_rl::resolve_namespace_filter(
         std::env::var("DYN_NAMESPACE").ok().as_deref(),
