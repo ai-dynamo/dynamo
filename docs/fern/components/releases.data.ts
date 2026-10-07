@@ -73,7 +73,7 @@ export const CURRENT_WHEEL = "1.5.0";
 export const MAIN_TOT: BackendPins = {
   sglang: "0.5.21",
   trtllm: "1.3.0rc29",
-  vllm: "0.30.0",
+  vllm: "0.31.0",
   nixlSglang: "1.4.0",
   nixlTrtllm: "1.3.1",
   nixlVllm: "1.3.2",
@@ -625,13 +625,6 @@ export interface Artifact {
   href: string;
   tags: { label: string; clipboard: string; variant?: "default" | "experimental" }[];
   badge?: "Preview" | "Experimental" | "Deprecated";
-}
-
-export interface NightlyBuild {
-  version: string;
-  date: string;
-  packages: string[];
-  note?: string;
 }
 
 const NGC_C = "https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers";
@@ -1381,23 +1374,5 @@ export const RELEASE_STATS: Record<string, ReleaseStats> = {
   "v0.6.0": { firstTimers: 4, breaking: 0, knownIssues: 3 },
 };
 
-export const NIGHTLY_BUILDS: NightlyBuild[] = [
-  {
-    version: "1.5.0.dev20260831",
-    date: "Aug 31, 2026",
-    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
-  },
-  {
-    version: "1.5.0.dev20260830",
-    date: "Aug 30, 2026",
-    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
-  },
-  {
-    version: "1.5.0.dev20260829",
-    date: "Aug 29, 2026",
-    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
-  },
-];
-
 export const NIGHTLIES_NOTE =
-  "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag.";
+  "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag. A night is listed once both its `ai-dynamo` and `ai-dynamo-runtime` wheels published; a night with an incomplete wheel train is omitted.";

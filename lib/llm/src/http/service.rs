@@ -51,9 +51,23 @@ use dynamo_runtime::error::DynamoError;
 
 /// Apply the request-level tool-call gates shared by the HTTP protocol handlers.
 fn apply_request_tool_call_parsing_options(
-    parsing_options: ParsingOptions,
+    mut parsing_options: ParsingOptions,
     request: &NvCreateChatCompletionRequest,
 ) -> Result<ParsingOptions, DynamoError> {
+    let unified_family =
+        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+    parsing_options.reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+        request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+        parsing_options.default_thinking_mode.as_deref(),
+        unified_family,
+    );
+    parsing_options.structured_response =
+        OpenAIPreprocessor::has_structured_response_format(request);
     let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(request);
     let tool_choice = request
         .inner
@@ -92,6 +106,134 @@ mod tests {
     use super::*;
     use crate::protocols::openai::GuidedToolConstraint;
     use serde_json::{Value, json};
+
+    #[test]
+    fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {
+        let mut options =
+            ParsingOptions::new(Some("gemma4".to_string()), Some("gemma4".to_string()));
+        options.default_thinking_mode = Some("enabled".to_string());
+        assert!(
+            !apply_request_tool_call_parsing_options(options.clone(), &request(json!("auto")))
+                .unwrap()
+                .reasoning_disabled
+        );
+        let mut disabled = request(json!("auto"));
+        disabled.thinking = Some(json!(false));
+        assert!(
+            apply_request_tool_call_parsing_options(options, &disabled)
+                .unwrap()
+                .reasoning_disabled
+        );
+    }
+
+    #[test]
+    fn muse_auto_batch_reasoning_policy_honors_disabled_request() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::muse_auto_batch_reasoning_policy_honors_disabled_request"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "auto",
+            )],
+        ) {
+            return;
+        }
+
+        let mut req = request(json!("auto"));
+        req.chat_template_args = Some(std::collections::HashMap::from([(
+            "thinking".to_string(),
+            json!(false),
+        )]));
+        let result = apply_request_tool_call_parsing_options(
+            ParsingOptions::new(Some("muse_glimmer".to_string()), None),
+            &req,
+        )
+        .unwrap();
+
+        assert!(result.reasoning_disabled);
+    }
+
+    #[test]
+    fn structured_response_schema_roots_reconstruct_response_policy() {
+        for kind in ["object", "array", "string", "number", "boolean", "null"] {
+            let req: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[{"role":"user", "content":"answer"}],
+                "response_format":{"type":"json_schema", "json_schema":{"name":"answer", "schema":{"type":kind}}}
+            })).unwrap();
+            let result = apply_request_tool_call_parsing_options(
+                ParsingOptions::new(Some("qwen3".into()), Some("qwen3".into())),
+                &req,
+            )
+            .unwrap();
+            assert!(result.structured_response, "{kind}");
+            assert_eq!(
+                result.guided_tool_constraint,
+                GuidedToolConstraint::None,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_request_controls_use_canonical_family_for_each_selector_shape() {
+        use crate::protocols::openai::chat_completions::unified_parser;
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_request_controls_use_canonical_family_for_each_selector_shape"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for selector in unified_parser::FAMILY_NAMES.iter() {
+            let family = unified_parser::canonical_family(selector).unwrap();
+            for (tool, reasoning) in [
+                (Some(*selector), None),
+                (None, Some(*selector)),
+                (Some(*selector), Some(*selector)),
+            ] {
+                for thinking in [None, Some(false), Some(true)] {
+                    let mut req = request(json!("auto"));
+                    req.thinking = thinking.map(|value| json!(value));
+                    req.normalize_reasoning_template_args().unwrap();
+                    let options =
+                        ParsingOptions::new(tool.map(str::to_owned), reasoning.map(str::to_owned));
+                    let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
+                    assert_eq!(
+                        result.reasoning_disabled,
+                        if family == "gemma4" {
+                            thinking != Some(true)
+                        } else {
+                            thinking == Some(false)
+                        },
+                        "{selector} {tool:?} {reasoning:?} {thinking:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unified_deepseek_retains_renderer_chat_and_thinking_modes() {
+        for family in ["deepseek_v4", "deepseek-v4", "deepseek_v41"] {
+            for mode in ["chat", "thinking"] {
+                let mut req = request(json!("auto"));
+                req.chat_template_args = Some(std::collections::HashMap::from([(
+                    "thinking_mode".to_owned(),
+                    json!(mode),
+                )]));
+                let options = ParsingOptions::new(Some(family.into()), Some(family.into()));
+                let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
+                assert_eq!(result.reasoning_disabled, mode == "chat", "{family} {mode}");
+            }
+        }
+    }
 
     fn request(tool_choice: Value) -> NvCreateChatCompletionRequest {
         let value = json!({
