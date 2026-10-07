@@ -197,7 +197,7 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
 # Copy NIXL SDK material for dev stage compilation.
 # cargo build needs NIXL headers plus linkable -lnixl, -lnixl_build, and -lnixl_common.
 # - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
-# - vLLM CUDA: Reuse the runtime's NIXL_REF Python-wheel libs and copy only headers beside them.
+# - vLLM CUDA: Reuse upstream vLLM's Python-wheel NIXL libs and copy only headers beside them.
 # - trtllm/none: NIXL/UCX are already present in runtime (no-op).
 ARG TARGETARCH
 {% if framework == "vllm" and device == "cuda" %}

@@ -56,7 +56,7 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/l
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% else %}
-# Expose libnixl.so from the NIXL_REF nixl-cu${CUDA_MAJOR} PyPI wheel through a
+# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
 # stable prefix so non-Python consumers use the same NIXL copy that Python imports.
 # This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
 # processes that do not import the nixl Python package first.
@@ -64,6 +64,12 @@ ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
+RUN install_nixl_from_wheel \
+    --cuda-major "${CUDA_MAJOR}" \
+    --site-packages "${SITE_PACKAGES}" \
+    --prefix "${NIXL_PREFIX}" \
+    --skip-headers
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
@@ -72,28 +78,6 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
-
-{% if device == "cuda" %}
-# Install NIXL_REF over upstream vLLM's NIXL (KVBM binds libnixl.so at import).
-# Upgrade cu12 and cu13 for the nixl meta pin; run before the vLLM-Omni nixl* freeze.
-COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
-RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
-    set -eu; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; }; \
-    NIXL_VERSION="${NIXL_REF#v}"; \
-    uv pip install --system --no-deps \
-        "nixl==${NIXL_VERSION}" \
-        "nixl-cu12==${NIXL_VERSION}" \
-        "nixl-cu13==${NIXL_VERSION}"; \
-    mkdir -p /opt/dynamo; \
-    uv pip show --system nixl "nixl-cu${CUDA_MAJOR}" | grep -E '^(Name|Version)' | tee /opt/dynamo/nixl-versions.txt; \
-    install_nixl_from_wheel \
-        --cuda-major "${CUDA_MAJOR}" \
-        --site-packages "${SITE_PACKAGES}" \
-        --prefix "${NIXL_PREFIX}" \
-        --skip-headers
-{% endif %}
 
 {% if device == "cuda" %}
 # Bring base-image OS packages up to the current patch releases published in
@@ -142,7 +126,7 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 
 {% if device != "cuda" %}
 # Copy UCX and NIXL from wheel_builder for CPU/XPU devices
-# (CUDA devices use the NIXL_REF PyPI wheels installed above)
+# (CUDA devices use NIXL from upstream vLLM wheels)
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
 {% if device == "xpu" %}
