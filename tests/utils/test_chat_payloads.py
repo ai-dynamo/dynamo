@@ -8,8 +8,12 @@ from unittest.mock import Mock, patch
 import pytest
 import requests
 
-from tests.utils.payload_builder import chat_payload_with_logprobs
-from tests.utils.payloads import GuidedDecodingChatPayload
+from tests.utils.engine_metrics import VllmMetricsChecker
+from tests.utils.payload_builder import (
+    chat_payload_with_logprobs,
+    streaming_chat_payload_with_logprobs,
+)
+from tests.utils.payloads import GuidedDecodingChatPayload, HttpCancellationPayload
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -19,8 +23,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
     [None, "human_readable", "shifted", "coalesced", "prompt", "done"],
 )
 def test_streaming_logprobs_require_complete_token_metadata(case):
-    payload = chat_payload_with_logprobs(
-        stream=True,
+    payload = streaming_chat_payload_with_logprobs(
         prompt_logprobs=1,
         top_logprobs=3,
         expected_response=[],
@@ -103,7 +106,7 @@ def test_streaming_logprobs_require_complete_token_metadata(case):
 
 
 def test_streaming_deadline_includes_keepalive_events():
-    payload = chat_payload_with_logprobs(stream=True)
+    payload = streaming_chat_payload_with_logprobs()
     response = Mock()
     response.iter_lines.return_value = iter([": keepalive"])
     with patch("tests.utils.payloads.time.monotonic", side_effect=[0, payload.timeout]):
@@ -152,3 +155,41 @@ def test_guided_json_checks_boolean_type_and_value():
     response.json.return_value["nvext"]["completion_token_ids"] = []
     with pytest.raises(AssertionError, match="completion_token_ids count"):
         payload.validate(response, '{"ok": true}')
+
+
+@pytest.mark.parametrize("generated_tokens", [3, 8])
+def test_http_cancellation_rejects_completed_generation(generated_tokens):
+    response = requests.Response()
+    response.status_code = 200
+    response.raw = io.BytesIO(
+        b'data: {"choices": [{"delta": {"role": "assistant"}}]}\n\n'
+        b'data: {"choices": [{"delta": {"content": "hello"}}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    response.close = Mock(wraps=response.close)
+    metrics = VllmMetricsChecker(url="unused", settle_timeout=0)
+
+    def scrape():
+        has_started = response.raw.closed or response.raw.tell() > 0
+        running = int(has_started and not response.raw.closed)
+        progress = 100 + (generated_tokens if has_started else 0)
+        return (
+            f"vllm:num_requests_running {running}\n"
+            "vllm:num_requests_waiting 0\n"
+            f"vllm:iteration_tokens_total_count {progress}\n"
+        )
+
+    payload = HttpCancellationPayload(
+        body={"stream": True, "ignore_eos": True, "max_tokens": 8},
+        expected_response=[],
+        expected_log=[],
+        metrics=metrics,
+    )
+    with patch.object(metrics, "scrape", side_effect=scrape):
+        payload.before_request()
+        if generated_tokens == 8:
+            with pytest.raises(AssertionError, match="completed generation"):
+                payload.process_response(response)
+        else:
+            assert payload.process_response(response) == "hello"
+    response.close.assert_called_once()

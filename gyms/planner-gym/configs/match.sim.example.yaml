@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+name: planner-vs-baselines-sim
+description: Compare Planner, KEDA, reactive, and fixed-capacity baselines in DynoSim.
+
+backend:
+  type: sim
+  topology: disagg
+  gpu_budget: 32
+
+  # First-class model identity. ais_model_path defaults to name when omitted.
+  model:
+    name: openai/gpt-oss-120b
+    ais_model_path: openai/gpt-oss-120b
+
+  # Common fields apply to every engine role. Optional prefill/decode mappings
+  # can override any field when the disaggregated roles use different engines.
+  engines:
+    common:
+      system: h200_sxm
+      backend: vllm
+      backend_version: "0.19.0"
+      tp_size: 1
+      moe_tp_size: 1
+      moe_ep_size: 1
+      attention_dp_size: 1
+      runtime:
+        # Delay before a newly created worker can serve requests.
+        cold_start_delay_s: 30
+      extra_args: {}
+    prefill:
+      runtime:
+        # KV handoff delay needs both values. Bandwidth is in GB/s; replace the
+        # bytes/token assumption for the model and KV-cache dtype being simulated.
+        kv_transfer_bandwidth_gbps: 100
+        kv_bytes_per_token: 131072
+    decode: {}
+
+  router:
+    mode: round_robin
+
+  # Resolved relative to this Match Config. An inline mapping is also accepted.
+  # The Planner's scaling target is distinct from the evaluation SLAs below.
+  planner_config: planner.sim.example.yaml
+
+  replay:
+    ais_bootstrap: true
+    concurrency: null
+    # Replay-owned telemetry cadence in simulated seconds. Set null to disable.
+    telemetry_sample_interval_s: 5
+
+  autoscalers:
+    - name: planner
+      type: planner
+      start:
+        prefill: 1
+        decode: 1
+
+    - name: keda-default
+      type: keda
+      start:
+        prefill: 1
+        decode: 1
+      config:
+        poll_interval_s: 15
+        queue_threshold: 5
+        kv_threshold: 0.9
+        min_prefill: 1
+        max_prefill: 16
+        min_decode: 1
+        max_decode: 8
+        tolerance: 0.1
+        scale_up_stabilization_s: 0
+        scale_down_stabilization_s: 300
+
+    - name: reactive-default
+      type: reactive
+      start:
+        prefill: 1
+        decode: 1
+      config:
+        poll_interval_s: 15
+        step: 1
+        prefill_queue_up: 4
+        prefill_queue_down: 1
+        decode_kv_up: 0.8
+        decode_kv_down: 0.3
+        min_prefill: 1
+        max_prefill: 16
+        min_decode: 1
+        max_decode: 8
+
+    # A static entry has no separate start fleet: its fixed fleet is the start.
+    - name: static-4p4d
+      type: static
+      config:
+        num_prefill: 4
+        num_decode: 4
+        poll_interval_s: 5
+
+evaluations:
+  # Combine the public Mooncake anchor with selected synthetic workloads.
+  workloads:
+    - mooncake
+  # User-supplied Mooncake JSONL traces are resolved relative to this file:
+  # traces:
+  #   - name: my-recorded-traffic
+  #     path: ../../../private/traces/my-traffic.jsonl
+  #     block_size: 512
+  #     presorted: true
+  suites:
+    - synthetic
+  exclude:
+    - square_wave
+    - flash_crowd
+    - diurnal
+    - decode_heavy
+    - shared_prefix
+  defaults:
+    seed: 0
+    max_requests: 250
+    arrival_speedup: 1.0
+
+slo_profiles:
+  # Lists form a Cartesian product: this profile expands to four SLA targets.
+  - name: interactive
+    ttft_ms: [300, 500]
+    itl_ms: [50, 100]
+
+metrics:
+  rank_by: goodput_per_gpu
+  include:
+    - goodput_per_gpu
+    - goodput_rps
+    - good_rate
+    - gpu_hours
+    - mean_ttft_ms
+    - p99_ttft_ms
+    - mean_itl_ms
+    - oscillation_count
+    - scale_events
+
+execution:
+  repetitions: 1
+  fail_fast: false
+  # 4 autoscalers x 3 workloads x 4 expanded SLA targets x 1 repetition.
+  max_runs: 48
+
+publish:
+  # Paths are resolved relative to this YAML file.
+  artifact_root: ../runs/match-sim/artifacts
+  destinations:
+    - type: console
+    - type: json
+      path: ../runs/match-sim/results.json
+    - type: html
+      path: ../runs/match-sim/report.html

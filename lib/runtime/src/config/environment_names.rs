@@ -196,6 +196,9 @@ pub mod nats {
     /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
     pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
 
+    /// Maximum time in seconds to establish the initial NATS connection.
+    pub const NATS_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "NATS_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
@@ -537,6 +540,13 @@ pub mod llm {
     /// 30-second default.
     pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
         "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
+
+    /// Progress-thread delay, in microseconds, of the frontend media loader's NIXL
+    /// agent (default 1000, range 0 to 1000000). NIXL rounds it up to whole
+    /// milliseconds; `0` makes the thread busy-poll one core. Over TCP, a read can
+    /// wait up to the full delay, so larger values add longer stalls. Values that do
+    /// not parse or are above 1000000 use the default.
+    pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
     /// Metrics configuration
     pub mod metrics {
@@ -1067,6 +1077,7 @@ mod tests {
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
+            nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,
@@ -1122,6 +1133,7 @@ mod tests {
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
+            llm::DYN_MM_NIXL_PROGRESS_DELAY_US,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,

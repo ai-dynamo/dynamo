@@ -532,6 +532,8 @@ func podCliqueSetLayoutMatches(observed, desired *grovev1alpha1.PodCliqueSet) bo
 			})
 		}
 		for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+			// Grove defaults this mutable rollout policy; it does not change the layout.
+			group.RollingUpdate = nil
 			if !onDelete {
 				group.Annotations = nil
 			}

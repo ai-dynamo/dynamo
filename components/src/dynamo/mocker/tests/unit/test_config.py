@@ -373,6 +373,30 @@ def test_mocker_cli_accepts_mtp_configuration():
     assert args.ais_mtp_seed == 99
 
 
+def test_mocker_cli_maps_native_host_offload_flags():
+    args = parse_args(
+        [
+            "--kv-bytes-per-token",
+            "1024",
+            "--num-host-blocks",
+            "128",
+            "--host-offload-d2h-bandwidth-gbps",
+            "12.5",
+            "--host-offload-h2d-bandwidth-gbps",
+            "0",
+        ]
+    )
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+
+    # Host blocks fall back to kv_bytes_per_token when the engine is built.
+    assert engine_args.kv_bytes_per_token == 1024
+    assert engine_args.kv_cache_bytes_per_token is None
+    assert engine_args.native_host_offload["num_host_blocks"] == 128
+    assert engine_args.native_host_offload["d2h_bandwidth_gbps"] == 12.5
+    assert engine_args.native_host_offload["h2d_bandwidth_gbps"] == 0.0
+
+
 def test_mocker_cli_accepts_max_model_len():
     args = parse_args(["--max-model-len", "32768"])
 

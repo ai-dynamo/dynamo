@@ -1288,6 +1288,29 @@ fn preprocessed_features_cannot_mix_with_raw_media() {
 }
 
 #[test]
+fn reasoning_parser_extra_args_do_not_reach_the_engine() {
+    // `request()` carries a JSON schema: the only case where vLLM reads these.
+    let baseline = build_generate_request(
+        request(),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    let mut request = request();
+    let extra = request.extra_args.as_mut().unwrap();
+    extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
+    extra["reasoning_ended"] = json!(false);
+    consume_reasoning_parser_args(&mut request.extra_args);
+    let converted = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    assert_eq!(converted, baseline);
+}
+
+#[test]
 fn frontend_router_metadata_does_not_require_engine_support() {
     let baseline = build_generate_request(
         request(),

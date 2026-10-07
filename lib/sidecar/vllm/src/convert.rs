@@ -534,6 +534,17 @@ fn consume_preprocessed_mm_routing_hashes(
     }
     Ok(Some(hashes))
 }
+
+/// The frontend adds these for vLLM's structured-output reasoning gate, which
+/// the gRPC proto cannot carry. Drop them only when vLLM runs no reasoning
+/// parser, so nothing reads them.
+pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
+        extra.remove("reasoning_parser_kwargs");
+        extra.remove("reasoning_ended");
+    }
+}
+
 fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
     cache_namespace: Option<&str>,
