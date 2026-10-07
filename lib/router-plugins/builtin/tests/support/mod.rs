@@ -32,7 +32,6 @@ pub fn fixture(
         isl_tokens: prompt_tokens,
         lora_name: None,
         expected_output_tokens: None,
-        backend_max_output_tokens: None,
         affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: None,

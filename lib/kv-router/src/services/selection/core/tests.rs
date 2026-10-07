@@ -248,7 +248,6 @@ fn lease_operation<'a>(
         prompt,
         router_config_override: None,
         expected_output_tokens: None,
-        backend_max_output_tokens: None,
         priority_jump: 0.0,
         strict_priority: 0,
         policy_class: None,
@@ -1318,6 +1317,48 @@ async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
     assert!(leased, "lease admission returns the booking's lease");
     // The lease was dropped with the selection, so the booking is gone.
     wait_until("booking release", || !entry.scheduler.has_request("queued")).await;
+}
+
+#[tokio::test]
+async fn backend_output_cap_uses_host_metadata_and_preserves_legacy_operation() {
+    use crate::plugins::request_classifier::{ClassifyFuture, ClassifyRequest, RequestClassifier};
+
+    struct InspectCap(Option<u32>, Arc<AtomicUsize>);
+    impl RequestClassifier for InspectCap {
+        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            assert_eq!(request.backend_max_output_tokens(), self.0);
+            self.1.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move { Ok(request) })
+        }
+    }
+
+    for cap in [None, Some(1)] {
+        let core = local_core(test_config(false));
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        let entry = core.entry(&default_key()).expect("entry");
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(entry.scheduler.install_request_classifier(
+            Box::new(InspectCap(cap, Arc::clone(&calls))),
+            core.cancel_token.clone(),
+        ));
+        let _lifecycle = entry
+            .scheduler
+            .begin_request_lifecycle("cap")
+            .unwrap()
+            .unwrap();
+        let req = reserve_request("cap");
+        let mut operation = lease_operation(req.prompt.view(), "cap", true);
+        operation.expected_output_tokens = Some(99);
+        let run = if cap.is_some() {
+            core.run_selection_with_backend_max_output_tokens(operation, cap)
+                .await
+        } else {
+            core.run_selection(operation).await
+        };
+        assert!(matches!(run.result, Ok(SelectionOutcome::Selected(_))));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        core.cancel_token.cancel();
+    }
 }
 
 /// A `Lease` admission hands the booking to the host: no index row, no

@@ -395,9 +395,18 @@ impl EmbeddedSelection {
     }
 
     /// Run one selection through the shared core.
-    pub(crate) async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+    pub(crate) async fn run_selection(
+        &self,
+        operation: SelectionOperation<'_>,
+        backend_max_output_tokens: Option<u32>,
+    ) -> SelectionRun {
         // Keep the selection state out of the frontend's nested request future.
-        let run = Box::pin(self.service.core().run_selection(operation)).await;
+        let run = Box::pin(
+            self.service
+                .core()
+                .run_selection_with_backend_max_output_tokens(operation, backend_max_output_tokens),
+        )
+        .await;
         self.observe_queue(match &run.result {
             Ok(SelectionOutcome::QueueRejected { rejection }) => Some(rejection),
             _ => None,

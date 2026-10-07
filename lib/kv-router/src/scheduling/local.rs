@@ -88,7 +88,6 @@ where
             isl_tokens,
             lora_name,
             expected_output_tokens,
-            backend_max_output_tokens,
             affinity_target,
             pinned_worker,
             allowed_worker_ids,
@@ -109,7 +108,6 @@ where
             isl_tokens,
             lora_name,
             expected_output_tokens,
-            backend_max_output_tokens,
             affinity_target,
             pinned_worker,
             allowed_worker_ids,
@@ -313,24 +311,12 @@ where
         ingress_at: Instant,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
         let (admitted, booking) = self
-            .schedule_request_with_booking_and_context(request, ingress_at)
+            .schedule_request_with_booking_and_context(request, ingress_at, None)
             .await?;
         if let Some(booking) = booking {
             let _ = booking.commit();
         }
         Ok(admitted)
-    }
-
-    /// Schedule a request and return an armed handle for its booking: dropping
-    /// the handle frees the booking, `commit` hands it to a longer-lived owner.
-    /// The handle is `None` unless the mode is `TrackedWithLifecycle`.
-    #[cfg(any(test, feature = "standalone-selection"))]
-    pub(crate) async fn schedule_request_with_booking(
-        &self,
-        request: ScheduleRequest,
-    ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
-        self.schedule_request_with_booking_and_context(request, Instant::now())
-            .await
     }
 
     /// Classify before acquiring a booking lease, preserving the caller's
@@ -340,12 +326,15 @@ where
         &self,
         request: ScheduleRequest,
         ingress_at: Instant,
+        backend_max_output_tokens: Option<u32>,
     ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
         let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
         let tracked = request.mode.is_tracked();
-        let classified_request = self.classify_request(&request, ingress_at).await?;
+        let classified_request = self
+            .classify_request(&request, ingress_at, backend_max_output_tokens)
+            .await?;
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
@@ -386,6 +375,7 @@ where
         &self,
         request: &SchedulingRequest,
         ingress_at: Instant,
+        backend_max_output_tokens: Option<u32>,
     ) -> Result<Option<ClassifyRequest>, KvSchedulerError> {
         let Some(classifier) = self.request_classifier.get() else {
             return Ok(None);
@@ -401,7 +391,11 @@ where
             return Ok(None);
         }
         classifier
-            .classify_with(self.queue.build_classify_request(request, ingress_at))
+            .classify_with(self.queue.build_classify_request(
+                request,
+                ingress_at,
+                backend_max_output_tokens,
+            ))
             .await
             .map(Some)
     }
@@ -584,7 +578,6 @@ where
             policy_class,
             session_context: None,
             expected_output_tokens,
-            backend_max_output_tokens: None,
             affinity_target: None,
             pinned_worker,
             allowed_worker_ids,
@@ -1088,7 +1081,6 @@ mod tests {
             isl_tokens: 64,
             lora_name: None,
             expected_output_tokens: None,
-            backend_max_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1220,9 +1212,13 @@ mod tests {
             .unwrap();
 
         let (_, booking) = scheduler
-            .schedule_request_with_booking(request(ScheduleMode::TrackedWithLifecycle {
-                request_id: "booked".to_string(),
-            }))
+            .schedule_request_with_booking_and_context(
+                request(ScheduleMode::TrackedWithLifecycle {
+                    request_id: "booked".to_string(),
+                }),
+                Instant::now(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -1250,6 +1246,7 @@ mod tests {
         impl RequestClassifier for DeadlineClassifier {
             fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
                 assert_eq!(request.ingress_at(), self.0);
+                assert_eq!(request.backend_max_output_tokens(), Some(1));
                 request.set_due_at(self.0 + Duration::from_secs(1));
                 Box::pin(async move { Ok(request) })
             }
@@ -1274,6 +1271,7 @@ mod tests {
                     request_id: "expired".to_string(),
                 }),
                 ingress_at,
+                Some(1),
             )
             .await;
         assert!(matches!(result, Err(KvSchedulerError::DeadlineExceeded)));

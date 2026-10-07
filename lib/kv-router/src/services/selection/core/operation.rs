@@ -30,7 +30,6 @@ pub struct SelectionOperation<'a> {
     pub prompt: PromptView<'a>,
     pub router_config_override: Option<RouterConfigOverride>,
     pub expected_output_tokens: Option<u32>,
-    pub backend_max_output_tokens: Option<u32>,
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,

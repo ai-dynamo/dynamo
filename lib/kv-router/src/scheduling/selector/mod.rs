@@ -522,7 +522,6 @@ mod test_support {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
-            backend_max_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,

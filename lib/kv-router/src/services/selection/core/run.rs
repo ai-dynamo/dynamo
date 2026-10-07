@@ -91,7 +91,6 @@ impl SelectionCore {
                 prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
                 expected_output_tokens: req.expected_output_tokens,
-                backend_max_output_tokens: None,
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
@@ -134,7 +133,6 @@ impl SelectionCore {
                 prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
                 expected_output_tokens: req.expected_output_tokens,
-                backend_max_output_tokens: None,
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
@@ -244,10 +242,22 @@ impl SelectionCore {
 
     /// Run one selection: resolve the session, look the prompt up, schedule,
     /// and (for `Book`) install the reservation. Every host's selection goes
-    /// through here.
+    /// through the same core path.
     pub async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+        self.run_selection_with_backend_max_output_tokens(operation, None)
+            .await
+    }
+
+    /// Run selection with the host's enforced backend stop limit, independent of routing hints.
+    pub async fn run_selection_with_backend_max_output_tokens(
+        &self,
+        operation: SelectionOperation<'_>,
+        backend_max_output_tokens: Option<u32>,
+    ) -> SelectionRun {
         let mut lookup = None;
-        let result = self.run_selection_inner(operation, &mut lookup).await;
+        let result = self
+            .run_selection_inner(operation, &mut lookup, backend_max_output_tokens)
+            .await;
         SelectionRun { result, lookup }
     }
 
@@ -255,13 +265,13 @@ impl SelectionCore {
         &self,
         operation: SelectionOperation<'_>,
         lookup: &mut Option<LookupTimings>,
+        backend_max_output_tokens: Option<u32>,
     ) -> Result<SelectionOutcome, SelectionError> {
         let SelectionOperation {
             key,
             prompt,
             router_config_override,
             expected_output_tokens,
-            backend_max_output_tokens,
             priority_jump,
             strict_priority,
             policy_class,
@@ -427,7 +437,6 @@ impl SelectionCore {
             policy_class,
             session_context,
             expected_output_tokens,
-            backend_max_output_tokens,
             affinity_target,
             pinned_worker,
             allowed_worker_ids,
@@ -454,7 +463,7 @@ impl SelectionCore {
                 } else {
                     entry
                         .scheduler
-                        .schedule_request_with_booking(schedule_request)
+                        .schedule_request_with_booking_and_context(schedule_request, tokio::time::Instant::now(), backend_max_output_tokens)
                         .instrument(tracing::info_span!("kv_router.schedule"))
                         .await
                         .map(|(admitted, booking)| (admitted.response, None, booking))

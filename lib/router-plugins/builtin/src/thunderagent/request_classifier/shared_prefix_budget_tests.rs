@@ -284,4 +284,32 @@ mod shared_prefix_budget_tests {
             );
         }
     }
+    #[test]
+    fn final_rechecks_live_target_progress_after_worker_loss() {
+        let w0 = WorkerWithDpRank::new(7, 0);
+        let w1 = WorkerWithDpRank::new(8, 0);
+        let now = Instant::now();
+        let both = capacities(&[w0, w1], 20_356);
+        let mut state = state(true);
+        state.register(main_request("owner", "owner", Some(w0), Some(hashes())), &both, now).unwrap();
+        complete(&mut state, &both, "owner", w0, now);
+        let (progress, updater) = RequestProgress::new(20_000);
+        state.register(RequestRegistration::new("background".into(), "background".into(),
+            20_000, progress, false).with_pinned_worker(Some(w1)), &both, now).unwrap();
+        state.on_event(ClassifyEvent::Sent { request_id: "background".into(), worker: w1 }, &both, now);
+        let lost = capacities(&[w1], 20_356);
+        state.register(RequestRegistration::new("final".into(), "owner".into(),
+            1, RequestProgress::new(1).0, true).with_pinned_worker(Some(w1)), &lost, now).unwrap();
+        assert_eq!(state.request_status("final"), WaitStatus::Waiting);
+        assert_eq!(state.programs["owner"].assigned_worker, None);
+        // Model progress arriving after the event's initial accounting snapshot.
+        updater.update_context_tokens(20_100);
+        let grown = capacities(&[w1], 20_756);
+        state.admit_request("final", &grown, now);
+        assert_eq!(state.request_status("final"), WaitStatus::Waiting);
+        assert_eq!(state.normal_usage[&w1], 20_456);
+        assert!(state.programs.contains_key("owner"));
+        assert!(state.final_reservations.is_empty());
+    }
+
 }

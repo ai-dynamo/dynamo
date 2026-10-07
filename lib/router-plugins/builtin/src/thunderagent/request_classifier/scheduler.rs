@@ -491,6 +491,36 @@ impl State {
         self.normal_usage = normal_usage;
     }
 
+    fn refresh_shared_worker(&mut self, worker: WorkerWithDpRank) {
+        let used = self
+            .final_reservations
+            .values()
+            .filter(|(target, _)| *target == worker)
+            .fold(self.shared_worker_tokens(worker), |used, (_, tokens)| {
+                used.saturating_add(*tokens)
+            });
+        if used == 0 {
+            self.normal_usage.remove(&worker);
+        } else {
+            self.normal_usage.insert(worker, used);
+        }
+    }
+
+    fn refresh_workers(
+        &mut self,
+        before: Option<WorkerWithDpRank>,
+        after: Option<WorkerWithDpRank>,
+    ) {
+        if let Some(worker) = before {
+            self.refresh_shared_worker(worker);
+        }
+        if after != before
+            && let Some(worker) = after
+        {
+            self.refresh_shared_worker(worker);
+        }
+    }
+
     fn update_program<R>(
         &mut self,
         session_id: &str,
@@ -499,7 +529,9 @@ impl State {
         let program = self.programs.get(session_id)?;
         let before = self.program_charge(program);
         self.marked_for_pause -= usize::from(program.marked_for_pause);
-        self.subtract_charge(before);
+        if !self.config.shared_prefix_budget {
+            self.subtract_charge(before);
+        }
         let result = update(self.programs.get_mut(session_id)?);
         let (after, paused, marked_for_pause) = self.programs.get(session_id).map(|program| {
             (
@@ -509,9 +541,13 @@ impl State {
             )
         })?;
         self.marked_for_pause += usize::from(marked_for_pause);
-        self.add_charge(after);
         if self.config.shared_prefix_budget {
-            self.refresh_normal_usage();
+            self.refresh_workers(
+                before.map(|(worker, _)| worker),
+                after.map(|(worker, _)| worker),
+            );
+        } else {
+            self.add_charge(after);
         }
         if paused {
             self.paused_programs.insert(session_id.to_owned());
@@ -527,9 +563,10 @@ impl State {
         debug_assert!(!self.programs.contains_key(&session_id));
         self.marked_for_pause += usize::from(program.marked_for_pause);
         self.programs.insert(session_id.clone(), program);
-        self.add_charge(charge);
         if self.config.shared_prefix_budget {
-            self.refresh_normal_usage();
+            self.refresh_workers(None, charge.map(|(worker, _)| worker));
+        } else {
+            self.add_charge(charge);
         }
         if paused {
             self.paused_programs.insert(session_id.clone());
@@ -540,9 +577,10 @@ impl State {
         let program = self.programs.remove(session_id)?;
         self.marked_for_pause -= usize::from(program.marked_for_pause);
         let charge = self.program_charge(&program);
-        self.subtract_charge(charge);
         if self.config.shared_prefix_budget {
-            self.refresh_normal_usage();
+            self.refresh_workers(charge.map(|(worker, _)| worker), None);
+        } else {
+            self.subtract_charge(charge);
         }
         self.paused_programs.remove(session_id);
         Some(program)
@@ -633,6 +671,11 @@ impl State {
         let input_tokens = request.input_tokens;
         let pinned_worker = request.pinned_worker;
         let was_new = request.prior_program.is_none();
+        if self.config.shared_prefix_budget
+            && let Some(pin) = pinned_worker
+        {
+            self.refresh_shared_worker(pin);
+        }
         let Some(program) = self.programs.get(&session_id) else {
             return false;
         };
@@ -726,6 +769,10 @@ impl State {
             let Some(prior) = self.remove_program(&session_id) else {
                 return false;
             };
+            // Removal refreshed the prior worker; the final may target another one.
+            if prior.lifecycle != ProgramLifecycle::Active || prior.assigned_worker != Some(pin) {
+                self.refresh_shared_worker(pin);
+            }
             let used = self.normal_usage.get(&pin).copied().unwrap_or(0);
             if used.saturating_add(cost) > capacity {
                 self.insert_program(session_id, prior);
@@ -733,7 +780,7 @@ impl State {
             }
             self.final_reservations
                 .insert(request_id.to_owned(), (pin, cost));
-            self.refresh_normal_usage();
+            self.refresh_shared_worker(pin);
             if let Some(request) = self.requests.get_mut(request_id) {
                 request.prior_program = None;
                 request.began_program = true;
@@ -742,7 +789,7 @@ impl State {
                 return true;
             }
             self.final_reservations.remove(request_id);
-            self.refresh_normal_usage();
+            self.refresh_shared_worker(pin);
             self.insert_program(session_id, prior);
             if let Some(request) = self.requests.get_mut(request_id) {
                 request.began_program = false;
@@ -1174,14 +1221,17 @@ impl State {
             }
             if usage.get(&worker).map_or(0, |usage| usage.used) > target {
                 for (_, session_id) in reasoning {
-                    if self
-                        .programs
-                        .get(&session_id)
-                        .is_some_and(|program| !program.marked_for_pause)
+                    if let Some(program) = self.programs.get_mut(&session_id)
+                        && !program.marked_for_pause
                     {
-                        self.update_program(&session_id, |program| {
+                        if self.config.shared_prefix_budget {
                             program.marked_for_pause = true;
-                        });
+                            self.marked_for_pause += 1;
+                        } else {
+                            self.update_program(&session_id, |program| {
+                                program.marked_for_pause = true;
+                            });
+                        }
                         changed = true;
                     }
                 }
@@ -1278,8 +1328,9 @@ impl State {
 
         if request.session_final && request.began_program {
             if self.config.shared_prefix_budget {
-                self.final_reservations.remove(request_id);
-                self.refresh_normal_usage();
+                if let Some((worker, _)) = self.final_reservations.remove(request_id) {
+                    self.refresh_shared_worker(worker);
+                }
             } else {
                 self.remove_program(&request.session_id);
             }
@@ -2283,13 +2334,16 @@ mod tests {
     fn benchmark_pause_by_rank() {
         use std::hint::black_box;
 
-        for (program_count, rank_count, hot_ranks) in [
-            (256, 2, 2),
-            (10_000, 128, 0),
-            (10_000, 128, 1),
-            (10_000, 128, 8),
-            (10_000, 128, 32),
-            (10_000, 128, 128),
+        for (program_count, rank_count, hot_ranks, shared) in [
+            (256, 2, 2, false),
+            (10_000, 128, 0, false),
+            (10_000, 128, 1, false),
+            (10_000, 128, 8, false),
+            (10_000, 128, 32, false),
+            (10_000, 128, 128, false),
+            (2, 2, 2, true),
+            (32, 2, 2, true),
+            (128, 2, 2, true),
         ] {
             let mut samples = Vec::new();
             let mut outcomes = None;
@@ -2297,10 +2351,16 @@ mod tests {
                 let now = Instant::now();
                 let mut state = state(ThunderAgentConfig {
                     buffer_per_program: 0,
+                    shared_prefix_budget: shared,
                     ..Default::default()
                 });
                 for i in 0..program_count {
-                    let mut program = Program::new(100 + i / rank_count);
+                    let mut program =
+                        Program::new(if shared { 16_393 } else { 100 + i / rank_count });
+                    if shared {
+                        program.sequence_hashes = Some((0..256).collect());
+                        program.sent_confirmed = true;
+                    }
                     program.assigned_worker =
                         Some(WorkerWithDpRank::new(1, (i % rank_count) as u32));
                     if (i / rank_count) % 2 == 0 {
@@ -2345,7 +2405,7 @@ mod tests {
             }
             samples.sort_unstable();
             println!(
-                "programs={program_count} ranks={rank_count} hot={hot_ranks} median_ns={} p95_ns={} outcomes={outcomes:?}",
+                "programs={program_count} ranks={rank_count} hot={hot_ranks} shared={shared} median_ns={} p95_ns={} outcomes={outcomes:?}",
                 samples[samples.len() / 2],
                 samples[samples.len() * 95 / 100],
             );
