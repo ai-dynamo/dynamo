@@ -1397,6 +1397,8 @@ async def test_generator_forwards_chat_logprobs_count(
                     max_tokens=1,
                     logprobs=True,
                     top_logprobs=1,
+                    top_k=None,
+                    min_p=None,
                     cache_salt=None,
                     mm_processor_kwargs=None,
                 ),
@@ -1660,6 +1662,7 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
     request_for_sampling = RequestForSampling(
         max_completion_tokens=None,
         max_tokens=1,
+        logprobs=False,
         cache_salt=None,
         mm_processor_kwargs=None,
         **{"temperature": None, "top_k": None, "min_p": None, **requested},
