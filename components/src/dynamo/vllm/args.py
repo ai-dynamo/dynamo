@@ -572,7 +572,6 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
         return False
     if kv_cfg.kv_connector == "NixlConnector":
         return True
-    # Wrapper connectors compose children in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
     if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
         extra = kv_cfg.kv_connector_extra_config or {}
