@@ -6,6 +6,11 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 MODEL="Qwen/Qwen3-0.6B"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+# Resolve once. The assignment on the prefill worker below only reaches that
+# process's environment, while the endpoint in --kv-events-config is expanded by
+# this shell first, so defaulting separately in each place lets an
+# operator-supplied port land in one and not the other.
+KV_EVENT_PORT="${DYN_VLLM_KV_EVENT_PORT:-20081}"
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
@@ -20,7 +25,7 @@ python -m dynamo.frontend &
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --model $MODEL --disaggregation-mode decode --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # Run prefill worker with FlexKV
-DYN_VLLM_KV_EVENT_PORT=20081 \
+DYN_VLLM_KV_EVENT_PORT=$KV_EVENT_PORT \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 DYNAMO_USE_FLEXKV=1 \
 FLEXKV_CPU_CACHE_GB=32 \
@@ -30,7 +35,7 @@ CUDA_VISIBLE_DEVICES=1 \
   --disaggregation-mode prefill \
   --disable-hybrid-kv-cache-manager \
   --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
