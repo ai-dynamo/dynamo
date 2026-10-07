@@ -144,16 +144,7 @@ impl Router {
     ///
     /// This waits for at least one decode worker to appear, fetches the model
     /// card, initializes the preprocessor, and creates both routers.
-    pub async fn from_discovery(namespace: &str, component: &str) -> Result<Self> {
-        Self::from_discovery_with_prefix_mode(
-            NamespaceFilter::Prefix(namespace.to_string()),
-            NamespacePrefixMode::from_env(),
-            component,
-        )
-        .await
-    }
-
-    pub(crate) async fn from_discovery_with_prefix_mode(
+    pub(crate) async fn from_discovery(
         namespace_filter: NamespaceFilter,
         namespace_prefix_mode: NamespacePrefixMode,
         component: &str,

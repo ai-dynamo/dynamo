@@ -317,7 +317,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
                     tracing::info!("Shutdown received during Dynamo discovery initialization");
                     return Ok(());
                 }
-                router = Router::from_discovery_with_prefix_mode(config.namespace_filter, config.namespace_prefix_mode, &config.component) => router?,
+                router = Router::from_discovery(config.namespace_filter, config.namespace_prefix_mode, &config.component) => router?,
             };
             if draining.is_cancelled() {
                 tracing::info!("Shutdown received before Dynamo discovery serving started");
