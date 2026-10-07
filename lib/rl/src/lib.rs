@@ -374,10 +374,9 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
             _ => None,
         })
         .filter(|endpoint| {
-            state.namespace_filter.matches_with_prefix_mode(
-                &endpoint.namespace,
-                state.namespace_prefix_mode,
-            )
+            state
+                .namespace_filter
+                .matches_with_prefix_mode(&endpoint.namespace, state.namespace_prefix_mode)
         })
         .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
         .filter(|endpoint| {
