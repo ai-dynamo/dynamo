@@ -26,8 +26,8 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
 /* Surfaces, fields, and chips mirror the shared site palette: the Reference
    panels and badges (ReferenceStyles), the CompatibilityHero select, and the
    main.css .dynamo-chip-* tints. Values stay literal because the published
-   theme drops main.css. The modality band carries each card's color, backend
-   chips carry per-backend tints, and green remains the interactive accent. */
+   theme drops main.css. The type chip carries each card's modality color,
+   backend chips carry per-backend tints, and green remains the interactive accent. */
 .dynamo-diffusion {
   --diffusion-text: #1a1a1a;
   --diffusion-muted: #666666;
@@ -190,44 +190,38 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
 .dynamo-diffusion-card[hidden] { display: none !important; }
 .dynamo-diffusion-card:hover { border-color: var(--diffusion-green); box-shadow: 0 12px 28px rgba(0, 0, 0, .09); }
 .dark .dynamo-diffusion-card:hover, [data-theme="dark"] .dynamo-diffusion-card:hover { box-shadow: 0 14px 32px rgba(0, 0, 0, .32); }
-.dynamo-diffusion-card-top { display: flex; align-items: center; gap: 14px; }
+/* The type chip shares the top line with the provider, at the card's top right, so the
+   title keeps the full width beside the logo. */
+.dynamo-diffusion-card-top {
+  display: grid; grid-template-columns: 48px minmax(0, 1fr) auto;
+  grid-template-areas: "logo provider type" "logo name name";
+  align-items: center; gap: 2px 14px;
+}
 .dynamo-diffusion .dynamo-diffusion-logo {
-  display: block; width: 48px; height: 48px; flex: 0 0 48px;
+  display: block; width: 48px; height: 48px;
   margin: 0 !important; border: 1px solid var(--diffusion-border); border-radius: 12px;
   object-fit: contain; background: #fff;
 }
-.dynamo-diffusion-card-heading { flex: 1; min-width: 0; }
-.dynamo-diffusion-card-arrow {
-  display: grid; place-items: center; flex: 0 0 auto; align-self: flex-start;
-  width: 30px; height: 30px; border: 1px solid var(--diffusion-accent-border); border-radius: 50%;
-  color: var(--diffusion-accent-fg); background: var(--diffusion-accent-bg);
-  font-size: 15px; line-height: 1;
-}
+/* Fern wraps the image in a span, so place the row's first child rather than the img. */
+.dynamo-diffusion-card-top > :first-child { grid-area: logo; }
 .dynamo-diffusion .dynamo-diffusion-provider {
-  margin: 0 0 3px !important; color: var(--diffusion-muted);
+  grid-area: provider; margin: 0 !important; color: var(--diffusion-muted);
   font-size: 11px; font-weight: 700; line-height: 1.4; letter-spacing: .08em; text-transform: uppercase;
 }
 .dynamo-diffusion .dynamo-diffusion-card h3 {
-  margin: 0 !important; font-size: 18px !important; line-height: 1.3 !important;
+  grid-area: name; margin: 0 !important; font-size: 18px !important; line-height: 1.3 !important;
   font-weight: 650; letter-spacing: -.02em; color: var(--diffusion-text); overflow-wrap: anywhere;
-}
-/* The inset accent bar follows the site convention for recommended rows and the active sidebar link. */
-.dynamo-diffusion .dynamo-diffusion-modality {
-  display: flex; align-items: center; min-height: 34px;
-  margin: 0 !important; padding: 6px 12px 6px 14px;
-  border: 1px solid var(--diffusion-accent-border); border-radius: 8px;
-  color: var(--diffusion-accent-fg); background: var(--diffusion-accent-bg);
-  box-shadow: inset 3px 0 0 var(--diffusion-accent-fg);
-  font-size: 12px; font-weight: 700; line-height: 1.3; letter-spacing: .08em; text-transform: uppercase;
-}
-.dynamo-diffusion .dynamo-diffusion-description {
-  margin: 0 !important; font-size: 13.5px; line-height: 1.6; color: var(--diffusion-muted);
 }
 .dynamo-diffusion-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 2px; }
 .dynamo-diffusion-chip {
   display: inline-flex; align-items: center; min-height: 22px; padding: 2px 9px;
   border: 1px solid transparent; border-radius: 999px;
   font-size: 11.5px; font-weight: 600; line-height: 1.2; white-space: nowrap;
+}
+.dynamo-diffusion-modality {
+  grid-area: type; align-self: start;
+  color: var(--diffusion-accent-fg); background: var(--diffusion-accent-bg); border-color: var(--diffusion-accent-border);
+  font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
 }
 .dynamo-diffusion-backend {
   color: var(--diffusion-gray-fg); background: var(--diffusion-gray-bg); border-color: var(--diffusion-gray-border);
@@ -268,6 +262,8 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
 }
 @media (max-width: 380px) {
   .dynamo-diffusion-filters { grid-template-columns: minmax(0, 1fr); }
+  /* Keep the type chip top right, on its own line, so the provider does not break mid-word. */
+  .dynamo-diffusion-card-top { grid-template-areas: "logo . type" "logo provider provider" "logo name name"; }
 }
 @media (prefers-reduced-motion: reduce) {
   .dynamo-diffusion-card, .dynamo-diffusion-reset,
