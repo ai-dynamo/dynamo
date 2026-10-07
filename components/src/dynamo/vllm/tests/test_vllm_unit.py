@@ -3339,12 +3339,27 @@ def test_failover_engines_get_isolated_vllm_compile_caches(monkeypatch):
     from dynamo.vllm.__main__ import _isolate_failover_compile_cache
 
     monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+    monkeypatch.delenv("DG_JIT_CACHE_DIR", raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", "/cache")
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
     monkeypatch.setenv("ENGINE_ID", "shadow/1")
 
     assert _isolate_failover_compile_cache() == "/cache/vllm-gms-failover/shadow_1"
     assert os.environ["VLLM_CACHE_ROOT"] == "/cache/vllm-gms-failover/shadow_1"
+    # DeepGEMM kernels stay shared across failover engines.
+    assert os.environ["DG_JIT_CACHE_DIR"] == "/cache/vllm/deep_gemm"
+
+
+def test_explicit_deep_gemm_cache_is_preserved(monkeypatch):
+    from dynamo.vllm.__main__ import _isolate_failover_compile_cache
+
+    monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+    monkeypatch.setenv("DG_JIT_CACHE_DIR", "/prebuilt/deep_gemm")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("ENGINE_ID", "1")
+
+    assert _isolate_failover_compile_cache() is not None
+    assert os.environ["DG_JIT_CACHE_DIR"] == "/prebuilt/deep_gemm"
 
 
 def test_explicit_vllm_compile_cache_is_preserved(monkeypatch):

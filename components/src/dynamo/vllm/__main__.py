@@ -21,6 +21,13 @@ def _isolate_failover_compile_cache(argv: list[str] | None = None) -> str | None
     cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
     cache_root = os.path.join(cache_home, "vllm-gms-failover", safe_engine_id)
     os.environ["VLLM_CACHE_ROOT"] = cache_root
+    # vLLM derives the DeepGEMM JIT cache from VLLM_CACHE_ROOT. Keep it shared:
+    # its kernels depend only on the GEMM shape, DeepGEMM publishes each one
+    # atomically, and a promoted standby that recompiles the primary's kernels
+    # stalls every rank for about 2 s per new batch shape right after takeover.
+    os.environ.setdefault(
+        "DG_JIT_CACHE_DIR", os.path.join(cache_home, "vllm", "deep_gemm")
+    )
     return cache_root
 
 
