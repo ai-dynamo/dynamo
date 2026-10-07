@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
-import aiohttp
 import soundfile as sf
 import torch
 from safetensors.torch import load as safetensors_load
@@ -32,6 +31,7 @@ from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.http import (
+    HttpConfigurationError,
     HttpConnectionError,
     HttpStatusError,
     HttpTimeoutError,
@@ -103,8 +103,7 @@ class TokenizerProtocol(Protocol):
         token_ids: List[int],
         skip_special_tokens: bool = True,
         clean_up_tokenization_spaces: bool = True,
-    ) -> str:
-        ...
+    ) -> str: ...
 
 
 def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
