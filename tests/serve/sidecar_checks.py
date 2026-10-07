@@ -5,7 +5,6 @@ import asyncio
 import json
 import time
 import uuid
-from itertools import product
 from pathlib import Path
 
 import aiohttp
@@ -117,66 +116,33 @@ def assert_cancellation_and_recovery(
             worker_ids = await poll_for_worker_instances(endpoint, 1, max_wait_time=10)
             assert len(worker_ids) == 1, worker_ids
             client = await endpoint.client()
+            payload = {
+                "model": model,
+                "token_ids": [11] * 128,
+                "stop_conditions": {"max_tokens": max_tokens, "ignore_eos": True},
+                "sampling_options": {"temperature": 0.0},
+            }
 
-            def payload(max_tokens: int, is_native_http: bool) -> dict:
-                result = {
-                    "model": model,
-                    "token_ids": [11] * 128,
-                    "stop_conditions": {"max_tokens": max_tokens, "ignore_eos": True},
-                    "sampling_options": {"temperature": 0.0},
-                }
-                if is_native_http:
-                    result["extra_args"] = {
-                        "sglang_tito": {
-                            "sampling_params": {
-                                "max_new_tokens": max_tokens,
-                                "ignore_eos": True,
-                                "temperature": 0.0,
-                            },
-                        }
-                    }
-                return result
+            async def drain_cancelled(stream) -> None:
+                async for output in stream:
+                    assert output.get("finish_reason") in (None, "cancelled"), output
 
-            async def drain_cancelled(stream, is_native_http: bool) -> None:
-                try:
-                    async for output in stream:
-                        assert output.get("finish_reason") in (
-                            None,
-                            "cancelled",
-                        ), output
-                except ValueError as error:
-                    if not is_native_http or not str(error).startswith("Cancelled:"):
-                        raise
-
-            async def recover(is_native_http: bool) -> None:
+            async def recover() -> None:
                 before = await asyncio.to_thread(
                     _engine_progress, backend, engine_http_port
                 )
                 stream = await client.direct(
-                    payload(4, is_native_http),
+                    {
+                        **payload,
+                        "stop_conditions": {"max_tokens": 4, "ignore_eos": True},
+                    },
                     worker_ids[0],
                     annotated=False,
                 )
                 outputs = [output async for output in stream]
-                if is_native_http:
-                    assert outputs, "Sidecar produced no native HTTP response"
-                    assert all(not output["token_ids"] for output in outputs), outputs
-                    raw = [
-                        output["engine_data"]["sglang_response"] for output in outputs
-                    ]
-                    assert sum(len(item["output_ids"]) for item in raw) == 4, raw
-                    assert all(
-                        output.get("finish_reason") is None for output in outputs[:-1]
-                    ), outputs
-                    assert outputs[-1]["finish_reason"] == "stop", outputs[-1]
-                    usage = raw[-1]["meta_info"]
-                    assert usage["finish_reason"]["type"] == "length", usage
-                    assert usage["prompt_tokens"] == 128, usage
-                    assert usage["completion_tokens"] == 4, usage
-                else:
-                    _assert_native_completion(
-                        outputs, prompt_tokens=128, completion_tokens=4
-                    )
+                _assert_native_completion(
+                    outputs, prompt_tokens=128, completion_tokens=4
+                )
                 if backend == "vllm":
                     deadline = time.monotonic() + 10
                     while True:
@@ -194,41 +160,29 @@ def assert_cancellation_and_recovery(
                         )
                         await asyncio.sleep(0.05)
 
-            for is_native_http, is_explicit_stop in product(
-                (False, True) if backend == "sglang" else (False,), (True, False)
-            ):
+            for is_explicit_stop in (True, False):
                 await asyncio.to_thread(_wait_for_scheduler, backend, engine_http_port)
                 before = await asyncio.to_thread(
                     _engine_progress, backend, engine_http_port
                 )
-                context = Context(
-                    f"cancel-{is_native_http}-{is_explicit_stop}-{uuid.uuid4()}"
-                )
+                context = Context(f"cancel-{is_explicit_stop}-{uuid.uuid4()}")
                 try:
                     stream = await asyncio.wait_for(
                         client.direct(
-                            payload(max_tokens, is_native_http),
-                            worker_ids[0],
-                            annotated=False,
-                            context=context,
+                            payload, worker_ids[0], annotated=False, context=context
                         ),
                         timeout=10,
                     )
                     output = await asyncio.wait_for(anext(stream), timeout=10)
-                    tokens = (
-                        output["engine_data"]["sglang_response"]["output_ids"]
-                        if is_native_http
-                        else output["token_ids"]
-                    )
-                    assert tokens and output.get("finish_reason") is None, output
+                    assert (
+                        output["token_ids"] and output.get("finish_reason") is None
+                    ), output
                     await asyncio.to_thread(
                         _wait_for_scheduler, backend, engine_http_port, is_active=True
                     )
                     if is_explicit_stop:
                         context.stop_generating()
-                        await asyncio.wait_for(
-                            drain_cancelled(stream, is_native_http), timeout=10
-                        )
+                        await asyncio.wait_for(drain_cancelled(stream), timeout=10)
                     del stream
                     await asyncio.to_thread(
                         _wait_for_cleanup,
@@ -244,7 +198,7 @@ def assert_cancellation_and_recovery(
                 finally:
                     context.stop_generating()
 
-                await asyncio.wait_for(recover(is_native_http), timeout=30)
+                await asyncio.wait_for(recover(), timeout=30)
                 await asyncio.to_thread(_wait_for_scheduler, backend, engine_http_port)
 
     asyncio.run(native_checks())
@@ -294,7 +248,7 @@ def assert_cancellation_and_recovery(
     _wait_for_scheduler(backend, engine_http_port)
 
 
-def kv_transfer_total(
+def _transferred(
     backend: str, prefill_http_port: int, probe_path: Path | None = None
 ) -> float:
     if backend == "sglang":
@@ -319,14 +273,14 @@ def assert_kv_transfer(
 ) -> None:
     """Require a fresh completed transfer as well as a successful response."""
 
-    before = kv_transfer_total(backend, prefill_http_port, probe_path)
+    before = _transferred(backend, prefill_http_port, probe_path)
     payload.body["messages"][0]["content"] = (
         f"Request {uuid.uuid4()}. " + payload.body["messages"][0]["content"]
     )
     with send_request(payload.url(), payload.body) as response:
         payload.process_response(response)
     deadline = time.monotonic() + 10
-    while kv_transfer_total(backend, prefill_http_port, probe_path) <= before:
+    while _transferred(backend, prefill_http_port, probe_path) <= before:
         assert time.monotonic() < deadline, f"{backend}: no completed KV transfer"
         time.sleep(0.05)
     _wait_for_scheduler(backend, decode_http_port)

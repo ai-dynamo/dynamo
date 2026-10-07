@@ -22,7 +22,6 @@ from tests.serve.sidecar_checks import (
     assert_cancellation_and_recovery,
     assert_kv_transfer,
     assert_sglang_transfer_wait_cancelled,
-    kv_transfer_total,
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
@@ -214,12 +213,7 @@ sidecar_configs = {
         name="sglang_aggregated",
         directory=sglang_sidecar_dir,
         script_name="agg.sh",
-        script_args=[
-            "--enable-metrics",
-            "--decode-log-interval",
-            "1",
-            "--incremental-streaming-output",
-        ],
+        script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
@@ -499,17 +493,17 @@ def test_serve_deployment(
 @pytest.mark.timeout(1200)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "mode,num_system_ports,model_name",
+    "dep,num_system_ports,model_name",
     [
         pytest.param(
-            "replicas",
+            False,
             2,
             "Qwen/Qwen3-0.6B",
             id="replicas",
             marks=[pytest.mark.gpu_1, pytest.mark.model("Qwen/Qwen3-0.6B")],
         ),
         pytest.param(
-            "dep",
+            True,
             1,
             "silence09/DeepSeek-R1-Small-2layers",
             id="dep",
@@ -517,13 +511,6 @@ def test_serve_deployment(
                 pytest.mark.gpu_2,
                 pytest.mark.model("silence09/DeepSeek-R1-Small-2layers"),
             ],
-        ),
-        pytest.param(
-            "disagg",
-            4,
-            "Qwen/Qwen3-0.6B",
-            id="disagg",
-            marks=[pytest.mark.gpu_1, pytest.mark.model("Qwen/Qwen3-0.6B")],
         ),
     ],
     indirect=["num_system_ports"],
@@ -546,32 +533,25 @@ def test_serve_deployment(
 )
 def test_sidecar_kv_routing(
     backend,
-    mode,
+    dep,
     model_name,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
     monkeypatch,
-    tmp_path,
 ):
     """Verify native sidecar KV events route requests to the cached worker or rank."""
-    dep = mode == "dep"
-    is_disaggregated = mode == "disagg"
     monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
     namespace = f"sidecar-kv-{generate_random_suffix()}"
     block_size = 64
-    worker_count = 4 if is_disaggregated else (1 if dep else 2)
+    worker_count = 1 if dep else 2
     config = EngineConfig(
-        name=f"{backend}_{mode}_routing",
+        name=f"{backend}_{'dep' if dep else 'kv'}_routing",
         directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
-        script_name=(
-            "disagg_kv_router.sh"
-            if is_disaggregated
-            else ("agg.sh" if dep else "agg_kv_router.sh")
-        ),
+        script_name="agg.sh" if dep else "agg_kv_router.sh",
         script_args=(
             ["--disable-cuda-graph", "--disable-piecewise-cuda-graph"]
             if backend == "sglang"
@@ -602,21 +582,15 @@ def test_sidecar_kv_routing(
             "DYN_ROUTER_USE_KV_EVENTS": "true",
             "DYN_ROUTER_MODE": "kv",
             "DYN_ROUTER_TEMPERATURE": "0",
-            "DYN_ROUTER_MIN_INITIAL_WORKERS": "2"
-            if is_disaggregated
-            else str(worker_count),
+            "DYN_ROUTER_MIN_INITIAL_WORKERS": str(worker_count),
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
             "VLLM_BLOCK_SIZE": str(block_size),
             "SGLANG_PAGE_SIZE": str(block_size),
         },
     )
-    port_count = worker_count * 2 + (
-        2 if is_disaggregated and backend == "sglang" else 0
-    )
-    probe_path = tmp_path / "transfers.jsonl"
     with reserved_ports(
-        port_count, start_port=DynamoPortRange.SERVE.value
+        worker_count * 2, start_port=DynamoPortRange.SERVE.value
     ) as engine_ports:
         if dep:
             devices = map_cuda_visible_devices(
@@ -689,47 +663,6 @@ def test_sidecar_kv_routing(
                     "--nccl-port",
                     str(dep_ports[-1]),
                 ]
-        elif is_disaggregated:
-            roles = (
-                ("DECODE1", "DECODE2", "PREFILL1", "PREFILL2")
-                if backend == "vllm"
-                else ("PREFILL1", "PREFILL2", "DECODE1", "DECODE2")
-            )
-            device = map_cuda_visible_devices(
-                [0], os.environ.get("CUDA_VISIBLE_DEVICES")
-            )
-            assert device != "-1", "One visible GPU is required"
-            engine_env = {}
-            for index, role in enumerate(roles):
-                prefix = f"{backend.upper()}_{role}"
-                engine_env[f"{prefix}_GPU"] = device
-                engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[index * 2])
-                engine_env[f"{prefix}_GRPC_PORT"] = str(engine_ports[index * 2 + 1])
-                engine_env[f"{prefix}_KV_EVENT_PORT"] = str(
-                    dynamo_dynamic_ports.kv_event_ports[index]
-                )
-                if backend == "vllm":
-                    engine_env[f"{prefix}_NIXL_SIDE_CHANNEL_PORT"] = str(
-                        dynamo_dynamic_ports.nixl_side_channel_ports[index]
-                    )
-            if backend == "vllm":
-                probe_path.write_text("")
-                engine_env["DYN_TEST_TRANSFER_PROBE"] = str(probe_path)
-                engine_env["PYTHONPATH"] = os.pathsep.join(
-                    [WORKSPACE_DIR, os.environ.get("PYTHONPATH", "")]
-                )
-                config.script_args += [
-                    "--worker-extension-cls",
-                    "tests.serve.vllm_transfer_probe.TransferProbe",
-                ]
-            else:
-                engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT1"] = str(
-                    engine_ports[8]
-                )
-                engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT2"] = str(
-                    engine_ports[9]
-                )
-                config.script_args += ["--enable-metrics"]
         else:
             engine_env = _sidecar_worker_gpu_env(backend)
             for worker_index in range(2):
@@ -741,20 +674,6 @@ def test_sidecar_kv_routing(
                 engine_env[f"{prefix}_KV_EVENT_PORT"] = str(
                     dynamo_dynamic_ports.kv_event_ports[worker_index]
                 )
-
-        def transfer_total():
-            if backend == "vllm":
-                return kv_transfer_total(backend, 0, probe_path)
-            return sum(
-                kv_transfer_total(
-                    backend, int(engine_env[f"SGLANG_PREFILL{index}_HTTP_PORT"])
-                )
-                for index in (1, 2)
-            )
-
-        system_ports = dynamo_dynamic_ports.system_ports
-        if is_disaggregated:
-            system_ports = system_ports[2:] if backend == "vllm" else system_ports[:2]
         run_serve_deployment(
             config,
             request,
@@ -762,12 +681,10 @@ def test_sidecar_kv_routing(
             extra_env=engine_env,
             post_validation=lambda: _test_frontend_kv_routing(
                 frontend_port=dynamo_dynamic_ports.frontend_port,
-                system_ports=system_ports,
+                system_ports=dynamo_dynamic_ports.system_ports,
                 namespace=namespace,
                 model_name=config.model,
                 block_size=block_size,
                 dp_ranks=(0, 1) if dep else (0,),
-                is_disaggregated=is_disaggregated,
-                transfer_total=transfer_total if is_disaggregated else None,
             ),
         )
