@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated speech recognition (ASR) serving with Qwen3-ASR
@@ -29,7 +29,6 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 MODEL_NAME="${DYN_MODEL_NAME:-Qwen/Qwen3-ASR-1.7B}"
 CHAT_PROCESSOR="${DYN_CHAT_PROCESSOR:-vllm}"
 
-# Extra arguments are passed through to the vLLM worker
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
