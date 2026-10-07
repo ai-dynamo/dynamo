@@ -75,7 +75,7 @@ COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
 # Exercise Cargo freshness with old checkout mtimes before using shared caches.
-RUN python3 -m unittest discover -s lib/sidecar -p test_build_cache.py
+RUN python3 -B -m unittest discover -s lib/sidecar -p test_build_cache.py
 
 # The shared target cache can contain artifacts newer than a fresh checkout.
 # The build helper hashes all copied inputs and restores their mtimes to a
