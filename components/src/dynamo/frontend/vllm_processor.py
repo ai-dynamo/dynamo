@@ -725,14 +725,20 @@ class VllmProcessor:
         self._sender: MmKwargsSender | None = None
         # Set DYNAMO_DISABLE_NIXL_MM=1 to disable mm_kwargs transfer entirely.
         # Set DYNAMO_MM_TRANSFER to choose transfer mode:
-        #   shm (default): shared memory. Same-node only (~2ms). If the
-        #     backend can't read the segment (cross-node), it falls back to
-        #     normal processing (backend runs HF processor).
+        #   shm (default): shared memory. The frontend and worker must share an
+        #     IPC namespace. A failed read uses raw-media fallback only when the
+        #     request already carries it; otherwise the worker fails closed.
         #   nixl: NIXL RDMA. Works cross-node via IB.
         self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
         transfer_mode = os.environ.get("DYNAMO_MM_TRANSFER", "shm").lower()
         self.use_shm_transfer = transfer_mode == "shm"
         logger.info("[mm-routing] Transfer mode: %s", transfer_mode)
+        if self.nixl_mm_enabled and self.use_shm_transfer:
+            logger.info(
+                "[mm-routing] SHM transfer requires the frontend and worker to "
+                "share /dev/shm; use DYNAMO_MM_TRANSFER=nixl for separate "
+                "pods or nodes"
+            )
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -848,8 +854,8 @@ class VllmProcessor:
             # Transfer pre-processed mm_kwargs to the backend so it can skip
             # the HF processor.  Strategy:
             #   - shm (default): shared memory, same-node only (~2ms).
-            #     Cross-node backends fail gracefully and fall back to
-            #     normal processing.
+            #     The worker fails closed if it cannot read the segment and
+            #     the request does not carry raw media.
             #   - nixl: NIXL RDMA (works cross-node via IB).
             if not self.nixl_mm_enabled:
                 logger.debug(

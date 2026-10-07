@@ -1262,6 +1262,20 @@ def _logprobs_processor(vllm_processor_module):
     )
 
 
+def test_disabled_mm_transfer_omits_shm_requirement_log(
+    vllm_processor_module,
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setenv("DYNAMO_DISABLE_NIXL_MM", "1")
+    monkeypatch.delenv("DYNAMO_MM_TRANSFER", raising=False)
+
+    with caplog.at_level("INFO"):
+        _logprobs_processor(vllm_processor_module)
+
+    assert "SHM transfer requires" not in caplog.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("top_logprobs", [-1])
 async def test_generator_rejects_negative_top_logprobs_before_preprocess(
