@@ -17,6 +17,7 @@ use dynamo_kv_router::plugins::request_classifier::{
     RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
     RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
 };
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -50,10 +51,15 @@ fn classifier_provider(
         .map_err(|error| RequestClassifierProviderError::new(error.to_string()))?;
 
     Ok(Arc::new(move |context| {
+        let block_size = usize::try_from(context.block_size()).unwrap_or(0);
         let capacity_provider = capacity_provider(context);
         Box::new(
-            ThunderAgentClassifier::new(config.clone(), capacity_provider)
-                .expect("ThunderAgent configuration was validated during catalog resolution"),
+            ThunderAgentClassifier::new_with_block_size(
+                config.clone(),
+                capacity_provider,
+                block_size,
+            )
+            .expect("ThunderAgent configuration was validated during catalog resolution"),
         )
     }))
 }
@@ -83,12 +89,61 @@ pub(crate) enum ThunderAgentError {
 
     #[error("ThunderAgent is already tracking its configured limit of {limit} programs")]
     ProgramLimitExceeded { limit: usize },
+
+    #[error("shared-prefix budget requires a hard Worker/DP pin for non-final session requests")]
+    NonFinalRequiresHardPin,
+
+    #[error("shared-prefix budget requires a hard Worker/DP pin for final session requests")]
+    FinalRequiresHardPin,
+
+    #[error("shared-prefix budget final request requires an existing session program")]
+    FinalRequiresKnownProgram,
+
+    #[error("shared-prefix budget already has a final request for this session")]
+    FinalAlreadyPending,
+
+    #[error("shared-prefix budget final request requires exactly one input token")]
+    FinalRequiresOneInputToken,
+
+    #[error("shared-prefix budget final request requires max output of exactly one token")]
+    FinalRequiresOneOutputToken,
+}
+
+fn classifier_error(error: ThunderAgentError) -> Box<ClassifierError> {
+    match error {
+        error @ (ThunderAgentError::NonFinalRequiresHardPin
+        | ThunderAgentError::FinalRequiresHardPin
+        | ThunderAgentError::FinalRequiresKnownProgram
+        | ThunderAgentError::FinalAlreadyPending
+        | ThunderAgentError::FinalRequiresOneInputToken
+        | ThunderAgentError::FinalRequiresOneOutputToken) => {
+            let message = error.to_string();
+            Box::new(
+                DynamoError::builder()
+                    .error_type(ErrorType::InvalidArgument)
+                    .message(message.clone())
+                    .public_message(message)
+                    .build(),
+            )
+        }
+        other => Box::new(other),
+    }
+}
+
+fn final_output_cap_error(
+    share_enabled: bool,
+    session_final: bool,
+    backend_max_output_tokens: Option<u32>,
+) -> Option<ThunderAgentError> {
+    (share_enabled && session_final && backend_max_output_tokens != Some(1))
+        .then_some(ThunderAgentError::FinalRequiresOneOutputToken)
 }
 
 struct Inner {
     state: Mutex<State>,
     capacity_provider: Arc<dyn WorkerCapacityProvider>,
     scheduler_started: AtomicBool,
+    share_enabled: bool,
 }
 
 impl Inner {
@@ -100,9 +155,12 @@ impl Inner {
         progress: RequestProgress,
         session_final: bool,
         pinned_worker: Option<dynamo_kv_router::protocols::WorkerWithDpRank>,
+        sequence_hashes: Option<Vec<u64>>,
     ) -> Result<Arc<Notify>, ThunderAgentError> {
         let capacities = self.capacity_provider.snapshot();
-        self.state.lock().register(
+        let mut state = self.state.lock();
+
+        let result = state.register(
             RequestRegistration::new(
                 request_id,
                 session_id,
@@ -110,10 +168,13 @@ impl Inner {
                 progress,
                 session_final,
             )
-            .with_pinned_worker(pinned_worker),
+            .with_pinned_worker(pinned_worker)
+            .with_sequence_hashes(sequence_hashes),
             &capacities,
             Instant::now(),
-        )
+        );
+
+        result
     }
 
     fn start_scheduler(self: &Arc<Self>) {
@@ -147,6 +208,7 @@ impl Inner {
         let (outcome, telemetry) = {
             let mut state = self.state.lock();
             let outcome = state.reconcile(&capacities, Instant::now());
+
             if !outcome.changed || !(debug_enabled || warn_enabled && outcome.forced_resumes > 0) {
                 return;
             }
@@ -259,9 +321,18 @@ pub struct ThunderAgentClassifier {
 }
 
 impl ThunderAgentClassifier {
+    #[cfg(test)]
     pub fn new(
         config: ThunderAgentConfig,
         capacity_provider: Arc<dyn WorkerCapacityProvider>,
+    ) -> Result<Self, ConfigError> {
+        Self::new_with_block_size(config, capacity_provider, 64)
+    }
+
+    fn new_with_block_size(
+        config: ThunderAgentConfig,
+        capacity_provider: Arc<dyn WorkerCapacityProvider>,
+        block_size: usize,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
         tracing::info!(
@@ -271,11 +342,13 @@ impl ThunderAgentClassifier {
             max_tracked_requests = config.max_tracked_requests,
             "ThunderAgent admission enabled"
         );
+        let share_enabled = config.shared_prefix_budget;
         Ok(Self {
             inner: Arc::new(Inner {
-                state: Mutex::new(State::new(config)),
+                state: Mutex::new(State::new_with_block_size(config, block_size)),
                 capacity_provider,
                 scheduler_started: AtomicBool::new(false),
+                share_enabled,
             }),
         })
     }
@@ -294,9 +367,22 @@ impl RequestClassifier for ThunderAgentClassifier {
         };
         let session_id = session.session_id().to_owned();
         let session_final = session.session_final() == Some(true);
+        if let Some(error) = final_output_cap_error(
+            self.inner.share_enabled,
+            session_final,
+            request.backend_max_output_tokens(),
+        ) {
+            return Box::pin(async move { Err(classifier_error(error)) });
+        }
         let input_tokens = request.input_tokens();
         let progress = request.progress().clone();
         let pinned_worker = request.pinned_worker();
+        let sequence_hashes = self
+            .inner
+            .share_enabled
+            .then(|| request.sequence_hashes())
+            .flatten()
+            .map(<[u64]>::to_vec);
         let notify = match self.inner.register(
             request_id.clone(),
             session_id,
@@ -304,17 +390,18 @@ impl RequestClassifier for ThunderAgentClassifier {
             progress,
             session_final,
             pinned_worker,
+            sequence_hashes,
         ) {
             Ok(notify) => notify,
             Err(error) => {
-                return Box::pin(async move { Err(Box::new(error) as Box<ClassifierError>) });
+                return Box::pin(async move { Err(classifier_error(error)) });
             }
         };
 
         let inner = Arc::clone(&self.inner);
         let pending = PendingClassification::new(inner, request_id, notify);
         Box::pin(async move {
-            await_release(pending, request)
+            let result = await_release(pending, request)
                 .await
                 .map(|(mut request, worker)| {
                     if let Some(worker) = worker {
@@ -322,7 +409,8 @@ impl RequestClassifier for ThunderAgentClassifier {
                     }
                     request
                 })
-                .map_err(|error| Box::new(error) as Box<ClassifierError>)
+                .map_err(|error| Box::new(error) as Box<ClassifierError>);
+            result
         })
     }
 
@@ -381,6 +469,20 @@ mod tests {
         let snapshot = capacities(values);
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
         ThunderAgentClassifier::new(config(), provider).unwrap()
+    }
+
+    #[test]
+    fn b_final_requires_backend_stop_one_and_keeps_default_off_behavior() {
+        for limit in [None, Some(0), Some(2)] {
+            let error = final_output_cap_error(true, true, limit)
+                .expect("B final without backend max one must be rejected");
+            let typed = classifier_error(error);
+            let typed = typed.as_ref().downcast_ref::<DynamoError>().unwrap();
+            assert_eq!(typed.error_type(), ErrorType::InvalidArgument);
+        }
+        assert!(final_output_cap_error(true, true, Some(1)).is_none());
+        assert!(final_output_cap_error(true, false, None).is_none());
+        assert!(final_output_cap_error(false, true, None).is_none());
     }
 
     #[test]
@@ -537,6 +639,7 @@ mod tests {
                 tokens,
                 progress,
                 session_final,
+                None,
                 None,
             )
             .unwrap();
@@ -1184,6 +1287,7 @@ mod tests {
             RequestProgress::new(100).0,
             false,
             None,
+            None,
         );
         assert!(matches!(
             result,
@@ -1363,3 +1467,6 @@ mod tests {
         release(&classifier, "request-1").await;
     }
 }
+
+#[cfg(test)]
+include!("shared_prefix_error_tests.rs");

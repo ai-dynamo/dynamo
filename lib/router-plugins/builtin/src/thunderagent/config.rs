@@ -25,6 +25,8 @@ pub struct ThunderAgentConfig {
     pub acting_decay_tau_seconds: f64,
     pub buffer_per_program: usize,
     pub max_tracked_requests: usize,
+    /// Account confirmed exact shared prefixes once per Worker/rank. Requires hard pins; disabled by default.
+    pub shared_prefix_budget: bool,
 }
 
 impl Default for ThunderAgentConfig {
@@ -40,6 +42,7 @@ impl Default for ThunderAgentConfig {
             acting_decay_tau_seconds: 1.0,
             buffer_per_program: 100,
             max_tracked_requests: 10_000,
+            shared_prefix_budget: false,
         }
     }
 }

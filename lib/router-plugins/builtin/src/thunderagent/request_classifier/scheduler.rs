@@ -10,9 +10,14 @@ use dynamo_kv_router::plugins::request_classifier::{ClassifyEvent, RequestProgre
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use tokio::sync::Notify;
 
+use rustc_hash::{FxHashMap, FxHashSet};
+
 use super::super::ThunderAgentConfig;
 use super::ThunderAgentError;
 use super::capacity::WorkerCapacitySnapshot;
+
+// Extra tokens reserved for each active shared-budget program.
+const SHARED_PREFIX_GROWTH_RESERVE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgramStatus {
@@ -37,6 +42,8 @@ pub(crate) struct Program {
     marked_for_pause: bool,
     acting_since: Option<Instant>,
     deferred_since: Option<Instant>,
+    sequence_hashes: Option<Vec<u64>>,
+    sent_confirmed: bool,
 }
 
 impl Program {
@@ -51,6 +58,8 @@ impl Program {
             marked_for_pause: false,
             acting_since: None,
             deferred_since: None,
+            sequence_hashes: None,
+            sent_confirmed: false,
         }
     }
 }
@@ -67,6 +76,7 @@ pub(crate) struct RequestState {
     progress: RequestProgress,
     session_final: bool,
     pinned_worker: Option<WorkerWithDpRank>,
+    sequence_hashes: Option<Vec<u64>>,
     phase: RequestPhase,
     prior_program: Option<Program>,
     began_program: bool,
@@ -81,6 +91,7 @@ pub(crate) struct RequestRegistration {
     progress: RequestProgress,
     session_final: bool,
     pinned_worker: Option<WorkerWithDpRank>,
+    sequence_hashes: Option<Vec<u64>>,
 }
 
 impl RequestRegistration {
@@ -98,11 +109,17 @@ impl RequestRegistration {
             progress,
             session_final,
             pinned_worker: None,
+            sequence_hashes: None,
         }
     }
 
     pub(crate) fn with_pinned_worker(mut self, worker: Option<WorkerWithDpRank>) -> Self {
         self.pinned_worker = worker;
+        self
+    }
+
+    pub(crate) fn with_sequence_hashes(mut self, hashes: Option<Vec<u64>>) -> Self {
+        self.sequence_hashes = hashes;
         self
     }
 }
@@ -180,28 +197,37 @@ pub(crate) struct State {
     paused_programs: HashSet<String>,
     marked_for_pause: usize,
     normal_usage: HashMap<WorkerWithDpRank, usize>,
+    final_reservations: HashMap<String, (WorkerWithDpRank, usize)>,
     pub(crate) requests: HashMap<String, RequestState>,
     sessions: HashMap<String, SessionRequests>,
     pub(crate) arrival_order: VecDeque<WaitingRequest>,
     waiting_arrivals: HashSet<String>,
     next_retention_expiry: Option<Instant>,
     capacity_snapshot_id: Option<u64>,
+    block_size: usize,
 }
 
 impl State {
+    #[cfg(test)]
     pub(crate) fn new(config: ThunderAgentConfig) -> Self {
+        Self::new_with_block_size(config, 64)
+    }
+
+    pub(crate) fn new_with_block_size(config: ThunderAgentConfig, block_size: usize) -> Self {
         Self {
             config,
             programs: HashMap::new(),
             paused_programs: HashSet::new(),
             marked_for_pause: 0,
             normal_usage: HashMap::new(),
+            final_reservations: HashMap::new(),
             requests: HashMap::new(),
             sessions: HashMap::new(),
             arrival_order: VecDeque::new(),
             waiting_arrivals: HashSet::new(),
             next_retention_expiry: None,
             capacity_snapshot_id: None,
+            block_size,
         }
     }
 
@@ -218,6 +244,7 @@ impl State {
             progress,
             session_final,
             pinned_worker,
+            sequence_hashes,
         } = request;
         if self.requests.contains_key(&request_id) {
             return Err(ThunderAgentError::DuplicateRequestId(request_id));
@@ -227,8 +254,34 @@ impl State {
                 limit: self.config.max_tracked_requests,
             });
         }
+        if self.config.shared_prefix_budget {
+            if pinned_worker.is_none() {
+                return Err(if session_final {
+                    ThunderAgentError::FinalRequiresHardPin
+                } else {
+                    ThunderAgentError::NonFinalRequiresHardPin
+                });
+            }
+            if session_final && input_tokens != 1 {
+                return Err(ThunderAgentError::FinalRequiresOneInputToken);
+            }
+            if session_final
+                && self
+                    .requests
+                    .values()
+                    .any(|existing| existing.session_final && existing.session_id == session_id)
+            {
+                return Err(ThunderAgentError::FinalAlreadyPending);
+            }
+        }
         self.refresh_normal_usage();
         self.expire_retained_programs(now);
+        if self.config.shared_prefix_budget
+            && session_final
+            && !self.programs.contains_key(&session_id)
+        {
+            return Err(ThunderAgentError::FinalRequiresKnownProgram);
+        }
         if !session_final {
             self.ensure_program_capacity(&session_id)?;
         }
@@ -255,6 +308,7 @@ impl State {
                 progress,
                 session_final,
                 pinned_worker,
+                sequence_hashes,
                 phase: RequestPhase::Waiting,
                 prior_program: None,
                 began_program: false,
@@ -273,6 +327,14 @@ impl State {
             Some(request) if !Arc::ptr_eq(&request.notify, notify) => WaitStatus::Missing,
             Some(request) if request.phase == RequestPhase::Waiting => WaitStatus::Waiting,
             Some(request) => WaitStatus::Released(request.placement_target),
+            None => WaitStatus::Missing,
+        }
+    }
+
+    #[cfg(test)]
+    fn request_status(&self, request_id: &str) -> WaitStatus {
+        match self.requests.get(request_id) {
+            Some(request) => self.wait_status(request_id, &request.notify),
             None => WaitStatus::Missing,
         }
     }
@@ -350,12 +412,80 @@ impl State {
         }
     }
 
+    fn valid_hashes<'a>(&self, program: &'a Program) -> Option<&'a [u64]> {
+        let hashes = program.sequence_hashes.as_deref()?;
+        (self.block_size > 0 && hashes.len() <= current_token_total(program) / self.block_size)
+            .then_some(hashes)
+    }
+
+    fn shared_worker_tokens(&self, worker: WorkerWithDpRank) -> usize {
+        // A prefix node keeps the largest member charge. Buffers, growth reserve,
+        // private suffixes and unconfirmed programs remain per-program charges.
+        let mut nodes = FxHashMap::<(usize, u64), (usize, usize)>::default();
+        let mut next_node = 1usize;
+        let mut used = 0usize;
+        for program in self.programs.values().filter(|p| {
+            p.lifecycle == ProgramLifecycle::Active && p.assigned_worker == Some(worker)
+        }) {
+            let weighted = |tokens| match program.status {
+                ProgramStatus::Reasoning => tokens,
+                ProgramStatus::Acting => scale_tokens(tokens, self.config.acting_token_weight),
+            };
+            let total = weighted(current_token_total(program));
+            used = used
+                .saturating_add(self.config.buffer_per_program)
+                .saturating_add(SHARED_PREFIX_GROWTH_RESERVE);
+            let hashes = program
+                .sent_confirmed
+                .then(|| self.valid_hashes(program))
+                .flatten();
+            let Some(hashes) = hashes else {
+                used = used.saturating_add(total);
+                continue;
+            };
+            used =
+                used.saturating_add(total.saturating_sub(weighted(hashes.len() * self.block_size)));
+            let mut parent = 0;
+            let mut previous = 0usize;
+            for (index, &hash) in hashes.iter().enumerate() {
+                let cumulative = weighted((index + 1) * self.block_size);
+                let cost = cumulative.saturating_sub(previous);
+                previous = cumulative;
+                let node = nodes.entry((parent, hash)).or_insert_with(|| {
+                    let id = next_node;
+                    next_node += 1;
+                    (id, 0)
+                });
+                used = used.saturating_add(cost.saturating_sub(node.1));
+                node.1 = node.1.max(cost);
+                parent = node.0;
+            }
+        }
+        used
+    }
+
     fn refresh_normal_usage(&mut self) {
         let mut normal_usage = HashMap::<WorkerWithDpRank, usize>::new();
-        for program in self.programs.values() {
-            if let Some((worker, tokens)) = self.program_charge(program) {
+        if self.config.shared_prefix_budget {
+            let workers: FxHashSet<_> = self
+                .programs
+                .values()
+                .filter(|program| program.lifecycle == ProgramLifecycle::Active)
+                .filter_map(|program| program.assigned_worker)
+                .collect();
+            for worker in workers {
+                normal_usage.insert(worker, self.shared_worker_tokens(worker));
+            }
+            for &(worker, tokens) in self.final_reservations.values() {
                 let used = normal_usage.entry(worker).or_default();
                 *used = used.saturating_add(tokens);
+            }
+        } else {
+            for program in self.programs.values() {
+                if let Some((worker, tokens)) = self.program_charge(program) {
+                    let used = normal_usage.entry(worker).or_default();
+                    *used = used.saturating_add(tokens);
+                }
             }
         }
         self.normal_usage = normal_usage;
@@ -380,6 +510,9 @@ impl State {
         })?;
         self.marked_for_pause += usize::from(marked_for_pause);
         self.add_charge(after);
+        if self.config.shared_prefix_budget {
+            self.refresh_normal_usage();
+        }
         if paused {
             self.paused_programs.insert(session_id.to_owned());
         } else {
@@ -395,6 +528,9 @@ impl State {
         self.marked_for_pause += usize::from(program.marked_for_pause);
         self.programs.insert(session_id.clone(), program);
         self.add_charge(charge);
+        if self.config.shared_prefix_budget {
+            self.refresh_normal_usage();
+        }
         if paused {
             self.paused_programs.insert(session_id.clone());
         }
@@ -405,6 +541,9 @@ impl State {
         self.marked_for_pause -= usize::from(program.marked_for_pause);
         let charge = self.program_charge(&program);
         self.subtract_charge(charge);
+        if self.config.shared_prefix_budget {
+            self.refresh_normal_usage();
+        }
         self.paused_programs.remove(session_id);
         Some(program)
     }
@@ -440,7 +579,7 @@ impl State {
     }
 
     pub(crate) fn needs_reconcile(&self) -> bool {
-        !self.programs.is_empty()
+        !self.programs.is_empty() || !self.final_reservations.is_empty()
     }
 
     fn admit_front_requests(&mut self, capacities: &WorkerCapacitySnapshot, now: Instant) -> bool {
@@ -477,7 +616,11 @@ impl State {
             return false;
         }
         if request.session_final {
-            return self.begin_session_final(request_id);
+            if self.config.shared_prefix_budget && !self.programs.contains_key(&request.session_id)
+            {
+                return self.finish_request(request_id, false, None, capacities, now);
+            }
+            return self.begin_session_final(request_id, capacities);
         }
         if !self.begin_request(request_id) {
             return false;
@@ -559,7 +702,11 @@ impl State {
         }
     }
 
-    fn begin_session_final(&mut self, request_id: &str) -> bool {
+    fn begin_session_final(
+        &mut self,
+        request_id: &str,
+        capacities: &WorkerCapacitySnapshot,
+    ) -> bool {
         let Some(request) = self.requests.get(request_id) else {
             return false;
         };
@@ -567,6 +714,41 @@ impl State {
             return false;
         }
         let session_id = request.session_id.clone();
+        if self.config.shared_prefix_budget {
+            let Some(pin) = request.pinned_worker else {
+                return false;
+            };
+            let Some(capacity) = capacities.capacity(pin).filter(|_| capacities.is_live(pin))
+            else {
+                return false;
+            };
+            let cost = self.request_cost(request.input_tokens);
+            let Some(prior) = self.remove_program(&session_id) else {
+                return false;
+            };
+            let used = self.normal_usage.get(&pin).copied().unwrap_or(0);
+            if used.saturating_add(cost) > capacity {
+                self.insert_program(session_id, prior);
+                return false;
+            }
+            self.final_reservations
+                .insert(request_id.to_owned(), (pin, cost));
+            self.refresh_normal_usage();
+            if let Some(request) = self.requests.get_mut(request_id) {
+                request.prior_program = None;
+                request.began_program = true;
+            }
+            if self.release_request(request_id, Some(pin)) {
+                return true;
+            }
+            self.final_reservations.remove(request_id);
+            self.refresh_normal_usage();
+            self.insert_program(session_id, prior);
+            if let Some(request) = self.requests.get_mut(request_id) {
+                request.began_program = false;
+            }
+            return false;
+        }
         let assigned_worker = self
             .programs
             .get(&session_id)
@@ -589,6 +771,10 @@ impl State {
         let session_id = request.session_id.clone();
         let input_tokens = request.input_tokens;
         let progress = request.progress.clone();
+        let hashes = request
+            .sequence_hashes
+            .clone()
+            .filter(|hashes| self.block_size > 0 && hashes.len() == input_tokens / self.block_size);
         let prior_program = self.programs.get(&session_id).cloned();
 
         if self.programs.contains_key(&session_id) {
@@ -598,12 +784,15 @@ impl State {
                     program.token_total = input_tokens;
                 }
                 program.request_progress = Some(progress);
+                program.sequence_hashes = hashes;
+                program.sent_confirmed = false;
                 program.step_count = program.step_count.saturating_add(1);
                 program.acting_since = None;
             });
         } else {
             let mut program = Program::new(input_tokens);
             program.request_progress = Some(progress);
+            program.sequence_hashes = hashes;
             self.insert_program(session_id, program);
         }
         if let Some(request) = self.requests.get_mut(request_id) {
@@ -624,6 +813,7 @@ impl State {
             program.lifecycle = ProgramLifecycle::Paused;
             program.deferred_since.get_or_insert(now);
             program.assigned_worker = None;
+            program.sent_confirmed = false;
         });
         lifecycle_changed || timer_changed || assignment_changed
     }
@@ -790,6 +980,9 @@ impl State {
                     .decayed
                     .saturating_add(self.program_tokens(program, true, now))
                     .saturating_add(self.config.buffer_per_program);
+                if self.config.shared_prefix_budget {
+                    *usage = self.worker_usage(now);
+                }
                 changed = true;
             }
         }
@@ -808,8 +1001,7 @@ impl State {
     }
 
     fn buffered_program_tokens(&self, session_id: &str) -> usize {
-        current_token_total(&self.programs[session_id])
-            .saturating_add(self.config.buffer_per_program)
+        self.request_cost(current_token_total(&self.programs[session_id]))
     }
 
     fn force_timed_out(
@@ -860,6 +1052,9 @@ impl State {
                         self.program_tokens(program, true, now),
                         self.config.buffer_per_program,
                     );
+                }
+                if self.config.shared_prefix_budget {
+                    *usage = self.worker_usage(now);
                 }
                 forced_resumes += 1;
             }
@@ -971,6 +1166,9 @@ impl State {
                         decayed,
                         self.config.buffer_per_program,
                     );
+                    if self.config.shared_prefix_budget {
+                        *usage = self.worker_usage(now);
+                    }
                     changed = true;
                 }
             }
@@ -1003,6 +1201,7 @@ impl State {
         self.update_program(session_id, |program| {
             program.lifecycle = ProgramLifecycle::Paused;
             program.assigned_worker = None;
+            program.sent_confirmed = false;
         });
         true
     }
@@ -1037,7 +1236,10 @@ impl State {
             return false;
         }
         let session_id = request.session_id.clone();
-        self.set_assignment(&session_id, Some(worker));
+        self.update_program(&session_id, |program| {
+            program.assigned_worker = Some(worker);
+            program.sent_confirmed = true;
+        });
         true
     }
 
@@ -1075,7 +1277,12 @@ impl State {
         self.compact_session_waiting(&request.session_id);
 
         if request.session_final && request.began_program {
-            self.remove_program(&request.session_id);
+            if self.config.shared_prefix_budget {
+                self.final_reservations.remove(request_id);
+                self.refresh_normal_usage();
+            } else {
+                self.remove_program(&request.session_id);
+            }
         } else if completed && request.phase == RequestPhase::Released {
             let pause = self
                 .update_program(&request.session_id, |program| {
@@ -1276,12 +1483,20 @@ impl State {
     }
 
     fn request_cost(&self, input_tokens: usize) -> usize {
-        input_tokens.saturating_add(self.config.buffer_per_program)
+        let cost = input_tokens.saturating_add(self.config.buffer_per_program);
+        if self.config.shared_prefix_budget {
+            cost.saturating_add(SHARED_PREFIX_GROWTH_RESERVE)
+        } else {
+            cost
+        }
     }
 
     fn set_assignment(&mut self, session_id: &str, worker: Option<WorkerWithDpRank>) {
         self.update_program(session_id, |program| {
             program.assigned_worker = worker;
+            if worker.is_none() {
+                program.sent_confirmed = false;
+            }
         });
     }
 
@@ -1378,6 +1593,8 @@ mod tests {
             marked_for_pause: false,
             acting_since: Some(now),
             deferred_since: Some(now),
+            sequence_hashes: None,
+            sent_confirmed: false,
         }
     }
 
@@ -2135,3 +2352,15 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+include!("shared_prefix_final_contract_tests.rs");
+
+#[cfg(test)]
+include!("shared_prefix_final_lifecycle_tests.rs");
+
+#[cfg(test)]
+include!("shared_prefix_final_overlap_tests.rs");
+
+#[cfg(test)]
+include!("shared_prefix_budget_tests.rs");

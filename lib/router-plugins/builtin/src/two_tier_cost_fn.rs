@@ -234,6 +234,7 @@ mod tests {
             isl_tokens: TEN_BLOCKS,
             lora_name: None,
             expected_output_tokens: None,
+            backend_max_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,

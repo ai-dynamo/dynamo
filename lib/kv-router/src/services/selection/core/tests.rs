@@ -248,6 +248,7 @@ fn lease_operation<'a>(
         prompt,
         router_config_override: None,
         expected_output_tokens: None,
+        backend_max_output_tokens: None,
         priority_jump: 0.0,
         strict_priority: 0,
         policy_class: None,

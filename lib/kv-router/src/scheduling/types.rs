@@ -400,6 +400,8 @@ pub struct ScheduleRequest {
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
     pub expected_output_tokens: Option<u32>,
+    /// Backend stop limit supplied by the request host, not a routing hint.
+    pub backend_max_output_tokens: Option<u32>,
     /// A session-affinity target resolved by the request host.
     ///
     /// The default selector treats an eligible target as exclusive. Custom policies receive the
@@ -431,6 +433,7 @@ pub struct SchedulingRequest {
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
     pub expected_output_tokens: Option<u32>,
+    pub backend_max_output_tokens: Option<u32>,
 
     // Routing constraints and request-level config.
     /// Affinity target with the same default-versus-custom policy semantics as
@@ -631,6 +634,7 @@ mod tests {
             isl_tokens,
             lora_name: None,
             expected_output_tokens: None,
+            backend_max_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
