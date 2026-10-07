@@ -680,6 +680,8 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # to match generators/rust.py. Best-effort: unreadable/absent files are skipped
 # and the generator falls back to canonical SPDX text. cargo's registry lives
 # under CARGO_HOME and/or the cache-mounted /root/.cargo — scan both.
+# tikv-jemalloc-sys compiles its vendored jemalloc (BSD-2-Clause) into the
+# _core extension; that license sits in jemalloc/COPYING, below the crate root.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
         [ -d "$src" ] || continue; \
@@ -689,6 +691,11 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
                 [ -e "$lf" ] || continue; \
                 mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
             done; \
+            case "$(basename "$crate")" in \
+                tikv-jemalloc-sys-*) \
+                    [ -f "$crate/jemalloc/COPYING" ] && mkdir -p "$dest" \
+                        && cp "$crate/jemalloc/COPYING" "$dest/jemalloc-COPYING" 2>/dev/null || true ;; \
+            esac; \
         done; \
     done; \
     echo "rust license harvest: $(find /opt/dynamo/rust-licenses -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) crates with license files"; \
