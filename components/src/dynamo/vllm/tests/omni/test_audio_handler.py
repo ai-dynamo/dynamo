@@ -4,12 +4,24 @@
 """Unit tests for AudioGenerationHandler."""
 
 import asyncio
+import http.server
+import socket
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import pytest_asyncio
 
 try:
+    import dynamo.common.http as dynamo_http
+    from dynamo.common.http import (
+        AiohttpClient,
+        HttpClient,
+        HttpConfigurationError,
+        HttpConnectionError,
+    )
+    from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
     from dynamo.common.protocols.audio_protocol import (
         AudioNvExt,
         NvCreateAudioSpeechRequest,
@@ -843,3 +855,299 @@ class TestResolveRefAudio:
         handler = _make_audio_handler()
         with pytest.raises(ValueError, match="must be a URL"):
             asyncio.run(handler._resolve_ref_audio("ftp://example.com/a.wav"))
+
+
+# ---------------------------------------------------------------------------
+# ref_audio URLs: the shared HTTP client and its URL policy
+# ---------------------------------------------------------------------------
+
+_EGRESS_ENV = (
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "DYN_MM_ALLOW_INTERNAL",
+    "DYN_MM_TRUST_EGRESS_PROXY",
+    "DYN_HTTP_TIMEOUT",
+)
+
+
+@pytest.fixture
+def clean_egress_env(monkeypatch):
+    """No ambient proxy, internal-access opt-in, or timeout override."""
+    for name in _EGRESS_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest_asyncio.fixture
+async def shared_client(monkeypatch, clean_egress_env):
+    """A fresh real client in place of the process-wide one."""
+    client = AiohttpClient()
+    monkeypatch.setattr(dynamo_http, "_default", client)
+    yield client
+    await client.close()
+
+
+@pytest.fixture
+def ref_audio_server():
+    """Serve a WAV file on loopback and record each requested path.
+
+    ``status`` sets the answer. ``stall`` holds the response until the test
+    ends.
+    """
+    state = SimpleNamespace(
+        status=200, body=TestResolveRefAudio._wav_bytes(), hits=[], url="", stall=False
+    )
+    done = threading.Event()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            state.hits.append(self.path)
+            if state.stall:
+                done.wait(10)
+                return
+            self.send_response(state.status)
+            self.send_header("Content-Length", str(len(state.body)))
+            self.end_headers()
+            try:
+                self.wfile.write(state.body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the client stopped reading at its size cap
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    ).start()
+    state.url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        yield state
+    finally:
+        done.set()
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def fake_dns(monkeypatch):
+    """Answer each host in ``script`` from its list, one address per lookup.
+
+    The last address repeats. ``lookups`` records ``(host, thread id)``. Other
+    names, IP literals included, go to the real ``getaddrinfo``.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+    state = SimpleNamespace(script={}, lookups=[])
+
+    def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        name = host.decode() if isinstance(host, bytes) else host
+        if name not in state.script:
+            return real_getaddrinfo(host, port, family, type, proto, flags)
+        answers = state.script[name]
+        seen = sum(1 for looked_up, _ in state.lookups if looked_up == name)
+        state.lookups.append((name, threading.get_ident()))
+        ip = answers[min(seen, len(answers) - 1)]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    return state
+
+
+class _ScriptedClient(HttpClient):
+    """The real policy checks and redirect loop of HttpClient, over a scripted
+    network: ``responses`` maps a URL to ``(body, redirect_to)``."""
+
+    def __init__(self, responses):
+        super().__init__()
+        self.responses = responses
+        self.calls = []
+
+    async def _fetch_simple(
+        self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+    ):
+        raise AssertionError("a ref_audio fetch must carry a policy")
+
+    async def _fetch_body_or_redirect(
+        self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+    ):
+        self.calls.append((url, timeout, max_bytes))
+        return self.responses[url]
+
+    async def close(self):
+        return None
+
+
+class TestResolveRefAudioUrl:
+    """A ref_audio URL is fetched by the shared HTTP client under the URL policy."""
+
+    @pytest.mark.asyncio
+    async def test_loads_from_an_internal_host_the_deployment_allows(
+        self, monkeypatch, ref_audio_server, shared_client
+    ):
+        """Control for the server and the client that the tests below use."""
+        monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+        handler = _make_audio_handler()
+
+        data, rate = await handler._resolve_ref_audio(f"{ref_audio_server.url}/ref.wav")
+
+        assert len(data) == 1600 and rate == 16000
+        assert ref_audio_server.hits == ["/ref.wav"]
+
+    @pytest.mark.asyncio
+    async def test_a_host_that_resolves_to_loopback_at_connect_is_refused(
+        self, ref_audio_server, shared_client, fake_dns
+    ):
+        """The check sees a public address, and the connection a loopback one."""
+        fake_dns.script["ref.test"] = ["8.8.8.8", "127.0.0.1"]
+        handler = _make_audio_handler()
+        handler._url_policy = UrlValidationPolicy(allow_http=True)
+        port = ref_audio_server.url.rsplit(":", 1)[1]
+
+        with pytest.raises(HttpConnectionError, match="resolves only to blocked IPs"):
+            await handler._resolve_ref_audio(f"http://ref.test:{port}/ref.wav")
+
+        assert [host for host, _ in fake_dns.lookups] == ["ref.test", "ref.test"]
+        assert ref_audio_server.hits == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://100.64.0.1/ref.wav",
+            "https://100.127.255.254/ref.wav",
+            "https://cgnat.test/ref.wav",
+        ],
+        ids=["first", "last", "hostname"],
+    )
+    async def test_a_shared_address_space_url_is_refused(
+        self, url, shared_client, fake_dns
+    ):
+        """100.64.0.0/10 is not global, but ipaddress calls it neither private
+        nor reserved."""
+        fake_dns.script["cgnat.test"] = ["100.64.0.1"]
+        handler = _make_audio_handler()
+
+        with pytest.raises(UrlValidationError, match="blocked"):
+            await handler._resolve_ref_audio(url)
+
+    @pytest.mark.asyncio
+    async def test_the_lookup_runs_off_the_event_loop(self, shared_client, fake_dns):
+        """A lookup on the event loop stalls every request of the worker."""
+        fake_dns.script["ref.test"] = ["127.0.0.1"]
+        handler = _make_audio_handler()
+
+        with pytest.raises(ValueError, match="blocked"):
+            await handler._resolve_ref_audio("https://ref.test/ref.wav")
+
+        loop_thread = threading.get_ident()
+        assert fake_dns.lookups
+        assert all(thread != loop_thread for _, thread in fake_dns.lookups)
+
+    @pytest.mark.asyncio
+    async def test_http_needs_the_internal_access_setting(
+        self, shared_client, fake_dns
+    ):
+        """http:// follows the shared policy, as image URLs do."""
+        handler = _make_audio_handler()
+
+        with pytest.raises(UrlValidationError, match="http:// URLs are not allowed"):
+            await handler._resolve_ref_audio("http://ref.test/ref.wav")
+        assert fake_dns.lookups == []
+
+    @pytest.mark.asyncio
+    async def test_an_error_status_is_a_client_error(
+        self, monkeypatch, ref_audio_server, shared_client
+    ):
+        """The client gets a ValueError as a 400 with this text. It would get an
+        HttpStatusError with the status of the host."""
+        monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+        ref_audio_server.status = 404
+        handler = _make_audio_handler()
+
+        with pytest.raises(ValueError, match="Failed to download ref_audio: HTTP 404"):
+            await handler._resolve_ref_audio(f"{ref_audio_server.url}/ref.wav")
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_stays_a_timeout_error(
+        self, monkeypatch, ref_audio_server, shared_client
+    ):
+        """The client gets a builtin TimeoutError as a 504. HttpTimeoutError is
+        not one, and it would get a 500."""
+        monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+        ref_audio_server.stall = True
+        handler = _make_audio_handler(tts_ref_audio_timeout=1)
+
+        with pytest.raises(TimeoutError, match="Timed out downloading ref_audio"):
+            await handler._resolve_ref_audio(f"{ref_audio_server.url}/ref.wav")
+
+    @pytest.mark.asyncio
+    async def test_a_file_at_the_size_cap_loads(
+        self, monkeypatch, ref_audio_server, shared_client
+    ):
+        monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+        handler = _make_audio_handler(
+            tts_ref_audio_max_bytes=len(ref_audio_server.body)
+        )
+
+        data, _ = await handler._resolve_ref_audio(f"{ref_audio_server.url}/ref.wav")
+
+        assert len(data) == 1600
+
+    @pytest.mark.asyncio
+    async def test_a_file_over_the_size_cap_is_refused(
+        self, monkeypatch, ref_audio_server, shared_client
+    ):
+        monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+        cap = len(ref_audio_server.body) - 1
+        handler = _make_audio_handler(tts_ref_audio_max_bytes=cap)
+
+        with pytest.raises(UrlValidationError, match=f"{cap} byte download limit"):
+            await handler._resolve_ref_audio(f"{ref_audio_server.url}/ref.wav")
+
+    @pytest.mark.asyncio
+    async def test_an_untrusted_egress_proxy_is_a_server_error(
+        self, monkeypatch, shared_client
+    ):
+        """The proxy, not the check, would resolve the host, so the fetch fails
+        closed. As a ValueError, the client would get this as a 400."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:3128")
+        handler = _make_audio_handler()
+
+        with pytest.raises(HttpConfigurationError, match="DYN_MM_TRUST_EGRESS_PROXY"):
+            await handler._resolve_ref_audio("https://8.8.8.8/ref.wav")
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_to_a_public_address_is_followed(
+        self, monkeypatch, clean_egress_env
+    ):
+        first, final = "https://8.8.8.8/ref.wav", "https://9.9.9.9/ref.wav"
+        wav = TestResolveRefAudio._wav_bytes()
+        client = _ScriptedClient({first: (None, final), final: (wav, None)})
+        monkeypatch.setattr(dynamo_http, "_default", client)
+        handler = _make_audio_handler()
+
+        data, _ = await handler._resolve_ref_audio(first)
+
+        assert len(data) == 1600
+        # Each hop gets the configured timeout and size cap.
+        cap = 50 * 1024 * 1024
+        assert client.calls == [(first, 15, cap), (final, 15, cap)]
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_to_a_blocked_address_is_refused(
+        self, monkeypatch, clean_egress_env
+    ):
+        first, blocked = "https://8.8.8.8/ref.wav", "https://169.254.169.254/ref.wav"
+        wav = TestResolveRefAudio._wav_bytes()
+        client = _ScriptedClient({first: (None, blocked), blocked: (wav, None)})
+        monkeypatch.setattr(dynamo_http, "_default", client)
+        handler = _make_audio_handler()
+
+        with pytest.raises(UrlValidationError, match="blocked range"):
+            await handler._resolve_ref_audio(first)
+        assert [call[0] for call in client.calls] == [first]
