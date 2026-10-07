@@ -22,30 +22,13 @@ Commands use `vllm-disagg` in namespace `dynamo`, with `Frontend`, `PrefillWorke
 Use these commands to check deployed versions, then compare them with your target and rollback versions.
 
 <Tabs>
-<Tab title="Runtime image tag">
-
-The operator reads the runtime version from the `main` container's semantic-version image tag, unless `runtimeVersionOverride` is set.
-
-```bash
-kubectl get dgd vllm-disagg -n dynamo -o json | jq -r '
-  ["COMPONENT", "RUNTIME IMAGE"],
-  (.spec.components[] | [.name,
-    (.podTemplate.spec.containers[] | select(.name == "main") | .image)])
-  | @tsv'
-```
-
-For example, `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0` identifies Dynamo runtime `1.4.0`.
-
-</Tab>
 <Tab title="Explicit runtime override">
 
-Check for overrides, which take precedence over image tags:
+Check for overrides, which take precedence over image tags. A `null` value means the operator uses the image tag.
 
 ```bash
-kubectl get dgd vllm-disagg -n dynamo -o json | jq -r '
-  ["COMPONENT", "RUNTIME OVERRIDE"],
-  (.spec.components[] | [.name, (.runtimeVersionOverride // "use image tag")])
-  | @tsv'
+kubectl get dgd vllm-disagg -n dynamo -o json \
+  | jq '.spec.components[] | {name, runtimeVersionOverride}'
 ```
 
 For custom tags, declare the contained Dynamo version on the component:
@@ -57,18 +40,26 @@ runtimeVersionOverride: "1.4.0"
 Update the override with the image, or remove it when the tag identifies the runtime correctly. The override declares a version; it does not change the image. See [Runtime Version Compatibility](../../reference/kubernetes-api/dynamo-component-deployment.mdx#runtime-version-compatibility).
 
 </Tab>
-<Tab title="Operator version">
+<Tab title="Runtime image tag">
 
-For a Helm-installed operator, inspect its image tag and configured version across namespaces:
+Without an override, the operator reads the runtime version from the `main` container's semantic-version image tag.
 
 ```bash
-kubectl get deployment -A -l app.kubernetes.io/part-of=dynamo-operator -o json | jq -r '
-  ["NAMESPACE", "OPERATOR IMAGE", "CONFIGURED VERSION"],
-  (.items[] | .metadata.namespace as $ns
-    | .spec.template.spec.containers[] | select(.name == "manager")
-    | [$ns, .image, ((.args // []
-      | map(select(startswith("--operator-version="))) | .[0]) // "check image tag")])
-  | @tsv'
+kubectl get dgd vllm-disagg -n dynamo -o json \
+  | jq '.spec.components[] | {name,
+      image: (.podTemplate.spec.containers[] | select(.name == "main") | .image)}'
+```
+
+For example, `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0` identifies Dynamo runtime `1.4.0`.
+
+</Tab>
+<Tab title="Operator version">
+
+For a Helm-installed operator, inspect its image tag and the `--operator-version` argument:
+
+```bash
+kubectl get deployment -A -l app.kubernetes.io/part-of=dynamo-operator -o json \
+  | jq '.items[].spec.template.spec.containers[] | select(.name == "manager") | {image, args}'
 ```
 
 </Tab>
