@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
-use pyo3::types::{PyCapsule, PyCapsuleMethods};
+use pyo3::exceptions::PyTypeError;
 use pyo3::{exceptions::PyException, prelude::*};
 use std::sync::OnceLock;
-use std::sync::Weak;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -101,30 +99,33 @@ struct Component {
     inner: rs::component::Component,
 }
 
+/// Keeps a `dynamo._core.DistributedRuntime` alive for as long as kvbm holds it.
+///
+/// `dynamo._core` is a separate cdylib with its own build of `dynamo-runtime`, and it may use
+/// a different global allocator, so kvbm never takes the Rust runtime out of it. Holding the
+/// Python object instead means the last release goes through Python, and `_core` drops and
+/// frees the runtime itself. The `Arc` lets kvbm types clone this without holding the GIL.
+#[derive(Clone)]
+pub struct DistributedRuntimeRef {
+    _object: Arc<PyObject>,
+}
+
 pub fn extract_distributed_runtime_from_obj(
     py: Python<'_>,
     drt_obj: PyObject,
-) -> PyResult<Option<Arc<rs::DistributedRuntime>>> {
+) -> PyResult<Option<DistributedRuntimeRef>> {
     if drt_obj.is_none(py) {
         return Ok(None);
     }
 
-    let obj = drt_obj.bind(py);
-
     let cls = py.import("dynamo._core")?.getattr("DistributedRuntime")?;
-    if !obj.is_instance(&cls)? {
+    if !drt_obj.bind(py).is_instance(&cls)? {
         return Err(PyTypeError::new_err(
             "expected dynamo._core.DistributedRuntime",
         ));
     }
 
-    let cap_any = obj.call_method0("to_capsule")?;
-    let cap: &Bound<'_, PyCapsule> = cap_any.downcast()?;
-    let weak: &Weak<rs::DistributedRuntime> = unsafe { cap.reference::<Weak<_>>() };
-
-    let strong = weak.upgrade().ok_or_else(|| {
-        PyRuntimeError::new_err("runtime is no longer alive (weak ref upgrade failed)")
-    })?;
-
-    Ok(Some(strong))
+    Ok(Some(DistributedRuntimeRef {
+        _object: Arc::new(drt_obj),
+    }))
 }

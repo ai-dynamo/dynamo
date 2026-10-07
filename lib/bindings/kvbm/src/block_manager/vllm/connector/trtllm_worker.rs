@@ -15,7 +15,6 @@ use crate::block_manager::distributed::PyNcclCommRef;
 use crate::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 use crate::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{block_manager::distributed::VllmTensor, to_pyerr};
-use dynamo_runtime::DistributedRuntime;
 
 use crate::{
     extract_distributed_runtime_from_obj, get_current_cancel_token, get_current_tokio_handle,
@@ -60,7 +59,7 @@ pub trait Worker: Send + Sync {
 }
 
 pub struct KvConnectorWorker {
-    _drt: Option<Arc<DistributedRuntime>>,
+    _drt: Option<crate::DistributedRuntimeRef>,
     kvbm_worker: OnceLock<KvbmWorker>,
     connector: WorkerSchedulerClient,
     transfer_client: TransferSchedulerClient,
@@ -94,7 +93,7 @@ pub struct KvConnectorWorker {
 
 impl KvConnectorWorker {
     fn new(
-        drt: Option<Arc<DistributedRuntime>>,
+        drt: Option<crate::DistributedRuntimeRef>,
         trtllm_rank: String,
         nccl_rank: Option<i32>,
         world_size: Option<i32>,
@@ -567,7 +566,7 @@ impl PyTrtllmKvConnectorWorker {
         world_size: Option<i32>,
         nccl_comm_ref: Option<PyObject>,
     ) -> PyResult<Self> {
-        let drt: Option<Arc<DistributedRuntime>> = Python::with_gil(|py| {
+        let drt: Option<crate::DistributedRuntimeRef> = Python::with_gil(|py| {
             if let Some(obj) = py_drt {
                 extract_distributed_runtime_from_obj(py, obj)
             } else {

@@ -184,7 +184,7 @@ impl BlockTransferHandler {
 #[derive(Clone)]
 pub struct KvbmWorker {
     inner: Arc<Mutex<KvbmWorkerImpl>>,
-    _drt: Option<Arc<rs::DistributedRuntime>>,
+    _drt: Option<crate::DistributedRuntimeRef>,
     /// Keeps the NCCL communicator alive for the worker lifetime; dropped with the worker.
     #[cfg(feature = "nccl")]
     _nccl_comm: Option<Arc<NcclCommOwned>>,
@@ -216,7 +216,7 @@ impl KvbmWorker {
         world_size: Option<i32>,
         nccl_comm_ref: Option<PyObject>,
     ) -> PyResult<Self> {
-        let drt: Option<Arc<rs::DistributedRuntime>> = Python::with_gil(|py| {
+        let drt: Option<crate::DistributedRuntimeRef> = Python::with_gil(|py| {
             if let Some(obj) = drt {
                 extract_distributed_runtime_from_obj(py, obj)
             } else {
