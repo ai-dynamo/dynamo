@@ -341,6 +341,65 @@ func TestPrepareCheckpointGMSPodTemplateRejectsMissingClient(t *testing.T) {
 	assert.Empty(t, podTemplate.Spec.Volumes)
 }
 
+func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) {
+	for _, backend := range []dynamo.BackendFramework{dynamo.BackendFrameworkVLLM, dynamo.BackendFrameworkSGLang} {
+		t.Run(string(backend), func(t *testing.T) {
+			t.Log("Build a two-GPU failover component with automatic capture")
+			deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client: fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(deviceClass).Build(),
+				Config: &configv1alpha1.OperatorConfiguration{}, Recorder: events.NewFakeRecorder(10),
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}},
+			}
+			tpFlag := "--tensor-parallel-size"
+			if backend == dynamo.BackendFrameworkSGLang {
+				tpFlag = "--tp"
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint},
+				},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: "main", Image: "runtime:1.6.0", Command: []string{"python3", "-m", "dynamo." + string(backend)},
+					Args:      []string{"--model", "Qwen/Qwen3-0.6B", tpFlag, "2"},
+					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("2")}},
+				}}}},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: "dgd-uid"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(backend)}}
+			original := component.DeepCopy()
+
+			t.Log("Create one canonical SnapshotJob before serving engines are cloned")
+			job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
+			expectedHash, err := newTestDGDCheckpointsReconciler(reconciler).snapshotCompatibilityHashForComponent(dgd, "worker", component)
+			require.NoError(t, err)
+			assert.Equal(t, expectedHash, job.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation], "capture and reusable checkpoint lookup must share the same contract")
+			require.Equal(t, original, component)
+			require.Len(t, job.Spec.PodTemplate.Spec.Containers, 1)
+			main := job.Spec.PodTemplate.Spec.Containers[0]
+			assert.Equal(t, "main", main.Name)
+			assert.Equal(t, original.PodTemplate.Spec.Containers[0].Args, main.Args)
+			assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
+			if backend == dynamo.BackendFrameworkVLLM {
+				for _, env := range main.Env {
+					assert.NotEqual(t, "DYN_FORWARDPASS_METRIC_PORT", env.Name)
+					assert.NotEqual(t, "DYN_VLLM_GMS_SHADOW_MODE", env.Name)
+				}
+			}
+
+			t.Log("Verify capture allocates two shared GPUs rather than doubling the request")
+			require.Len(t, job.Spec.PodTemplate.Spec.ResourceClaims, 1)
+			template := &resourcev1.ResourceClaimTemplate{}
+			require.NoError(t, reconciler.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: *job.Spec.PodTemplate.Spec.ResourceClaims[0].ResourceClaimTemplateName}, template))
+			require.Len(t, template.Spec.Spec.Devices.Requests, 1)
+			assert.Equal(t, int64(2), template.Spec.Spec.Devices.Requests[0].Exactly.Count)
+		})
+	}
+}
+
 func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOwner(t *testing.T) {
 	t.Log("Build a DGD and the GPU DeviceClass required by the checkpoint template")
 	ctx := context.Background()

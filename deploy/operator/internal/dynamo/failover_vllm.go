@@ -17,21 +17,20 @@ const (
 	vllmMasterPortStride = 100
 )
 
-// applyVLLMOverrides injects vLLM-specific env vars into all engine containers.
-// Port staggering (NIXL side channel, KV event, master port) prevents collisions
-// between engines sharing the same pod network namespace.
-// For multinode deployments, it also injects NNODES so engines know the group size.
-func applyVLLMOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
+// applyVLLMColdFailoverOverrides enables legacy vLLM shadow initialization.
+// Cold-start engines need port staggering and, for multinode, NNODES.
+// podSpec must not be nil.
+func applyVLLMColdFailoverOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
 	for i := range podSpec.Containers {
 		c := &podSpec.Containers[i]
 		if !strings.HasPrefix(c.Name, "engine-") {
 			continue
 		}
 
+		// The shared engine builder clears the inherited shadow flag before this override.
 		engineID, _ := strconv.Atoi(strings.TrimPrefix(c.Name, "engine-"))
-
+		c.Env = append(c.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
 		c.Env = append(c.Env,
-			corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
 			corev1.EnvVar{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
 			corev1.EnvVar{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
 		)
@@ -88,45 +87,32 @@ func staggerFlagValue(container *corev1.Container, flag string, offset int) {
 		}
 	}
 
-	for i, arg := range container.Args {
-		if strings.Contains(arg, flag+" ") {
-			parts := strings.Split(arg, flag+" ")
-			if len(parts) < 2 {
-				continue
-			}
-			var portStr string
-			for _, ch := range parts[1] {
-				if ch >= '0' && ch <= '9' {
-					portStr += string(ch)
-				} else {
-					break
-				}
-			}
-			if port, err := strconv.Atoi(portStr); err == nil {
-				container.Args[i] = strings.Replace(arg, flag+" "+portStr, flag+" "+strconv.Itoa(port+offset), 1)
-				return
-			}
-		}
+	// Preserve Args precedence when looking inside shell-wrapped launch strings.
+	if !staggerEmbeddedFlagValue(container.Args, flag, offset) {
+		staggerEmbeddedFlagValue(container.Command, flag, offset)
 	}
+}
 
-	for i, cmd := range container.Command {
-		if strings.Contains(cmd, flag+" ") {
-			parts := strings.Split(cmd, flag+" ")
-			if len(parts) < 2 {
-				continue
+// staggerEmbeddedFlagValue offsets the first embedded flag value it can parse.
+func staggerEmbeddedFlagValue(tokens []string, flag string, offset int) bool {
+	for i, token := range tokens {
+		parts := strings.Split(token, flag+" ")
+		if len(parts) < 2 {
+			continue
+		}
+
+		// Read only the integer prefix, leaving trailing launch arguments intact.
+		var portStr string
+		for _, ch := range parts[1] {
+			if ch < '0' || ch > '9' {
+				break
 			}
-			var portStr string
-			for _, ch := range parts[1] {
-				if ch >= '0' && ch <= '9' {
-					portStr += string(ch)
-				} else {
-					break
-				}
-			}
-			if port, err := strconv.Atoi(portStr); err == nil {
-				container.Command[i] = strings.Replace(cmd, flag+" "+portStr, flag+" "+strconv.Itoa(port+offset), 1)
-				return
-			}
+			portStr += string(ch)
+		}
+		if port, err := strconv.Atoi(portStr); err == nil {
+			tokens[i] = strings.Replace(token, flag+" "+portStr, flag+" "+strconv.Itoa(port+offset), 1)
+			return true
 		}
 	}
+	return false
 }

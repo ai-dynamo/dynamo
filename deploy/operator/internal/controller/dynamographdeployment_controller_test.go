@@ -145,8 +145,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	require.Equal(t,
 		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"component \"prefill\": Snapshot with active/passive failover is temporarily unsupported\n"+
-			"component \"decode\": Snapshot with active/passive failover is temporarily unsupported",
+			"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture",
 		ready.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)

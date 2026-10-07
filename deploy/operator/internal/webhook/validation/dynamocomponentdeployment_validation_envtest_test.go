@@ -69,6 +69,25 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantPodAnnotations map[string]string
 		wantRoleReplicas   map[string]int32
 	}{
+		{name: "DGD-owned vLLM multi-GPU automatic candidate is admitted without checkpointRef", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: k8sptr.To(true)}}
+			dcd.Spec.PodTemplate.Annotations = map[string]string{
+				consts.RestoreCandidateSourceKindAnnotation: consts.RestoreCandidateSourceSnapshotJob,
+				consts.CheckpointNameAnnotation:             "capture-job",
+				consts.SnapshotJobCandidateUIDAnnotation:    "capture-job-uid",
+			}
+		})},
+		{name: "DGD-owned SGLang multi-GPU checkpointRef restore is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionSGLangBackend)
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: k8sptr.To(true)}}
+			dcd.Spec.Experimental.Checkpoint.CheckpointRef = k8sptr.To("existing-snapshot")
+		})},
+		{name: "automatic failover default startup policy cannot bypass election", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
+			dcd.Spec.Experimental.Checkpoint.StartupPolicy = ""
+		}), wantWebhookErrs: []string{"spec.experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
 		// Sidecar mode is derived from live init-container names in both API versions.
 		{name: "beta unrelated init container retains standard mode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
@@ -800,7 +819,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 checkpoint with inter-pod GMS and failover reports both errors",
+			name: "v1beta1 checkpoint with inter-pod GMS and failover remains rejected",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
@@ -811,7 +830,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
-				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
 			},
 		},
 		{
