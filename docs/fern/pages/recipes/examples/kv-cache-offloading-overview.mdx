@@ -8,30 +8,52 @@ hide-toc: true
 ---
 
 import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
 
 Choose a KV cache offloading example, then filter its available deployment platforms and backends.
 
-<ExamplesCatalog>
+<ExamplesCatalog topicFilter={false}>
 
 <div className="dynamo-example-card" data-example="kvbm" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="kubernetes:vllm local:vllm" data-keywords="agg_kvbm.sh agg_kvbm.yaml agg_kvbm_router.sh disagg_kvbm.sh disagg_kvbm.yaml disagg_kvbm_2p2d.sh disagg_kvbm_2p2d.yaml disagg_kvbm_router.sh disagg_kvbm_tp2.yaml">
-<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
-### [KV Block Manager](kvbm.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="layer-group" /></span>
+
+### KV Block Manager
+
 Aggregated and disaggregated vLLM with KVBM offloading.
-<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span><span>Local / CLI: vLLM</span></div>
+
+<ExampleTargets targets="kubernetes:vllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="kvbm.mdx">Open KV Block Manager example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="lmcache" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="kubernetes:vllm local:vllm" data-keywords="agg_lmcache.sh agg_lmcache.yaml agg_lmcache_mp.sh agg_lmcache_multiproc.sh agg_lmcache_multiproc_xpu.sh agg_lmcache_xpu.sh disagg_lmcache.sh">
-<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
-### [LMCache](lmcache.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="database" /></span>
+
+### LMCache
+
 In-process and external LMCache examples for vLLM.
-<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span><span>Local / CLI: vLLM</span></div>
+
+<ExampleTargets targets="kubernetes:vllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="lmcache.mdx">Open LMCache example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="flexkv" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="local:vllm" data-keywords="agg_flexkv.sh agg_flexkv_router.sh disagg_flexkv.sh">
-<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
-### [FlexKV](flexkv.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="hard-drive" /></span>
+
+### FlexKV
+
 Local vLLM cache offloading with FlexKV.
-<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+
+<ExampleTargets targets="local:vllm" />
+
+<a className="dynamo-example-card-link" href="flexkv.mdx">Open FlexKV example</a>
+
 </div>
 
 </ExamplesCatalog>
