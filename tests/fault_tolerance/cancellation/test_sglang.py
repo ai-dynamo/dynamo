@@ -564,8 +564,7 @@ def test_request_cancellation_sglang_prefill_cancel(
                         frontend_port=frontend.frontend_port,
                         timeout_s=FOLLOWUP_TIMEOUT_S,
                     )
-                    followup.wait()
-                    response = followup.get_response()
+                    response = followup.get_response(timeout=60)
                     assert response.status_code == 200, (
                         f"Request {attempt} after prefill cancellation failed "
                         f"with HTTP {response.status_code}; the prefill/decode "

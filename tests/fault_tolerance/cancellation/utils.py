@@ -182,20 +182,6 @@ class CancellableRequest:
                 f"HTTP {status_code}: {response_body}"
             )
 
-    def wait(self, timeout_s: float = 60.0) -> None:
-        """Block until the request has finished.
-
-        Raises:
-            AssertionError: if the request has not finished within timeout_s,
-                which is what a wedged worker looks like from the client side.
-        """
-        thread = self._request_thread
-        if thread is None:
-            raise RuntimeError("wait() called before post()")
-        thread.join(timeout_s)
-        if thread.is_alive():
-            raise AssertionError(f"Request did not complete within {timeout_s}s")
-
     def get_response(self, timeout: float = 30.0):
         """Wait for the request to produce a response or raise an exception."""
         if not self._response_ready.wait(timeout):
