@@ -59,7 +59,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisimulate-core = { version = "=0.13.0-dev.202610060000000067", optional = true, features = ["python"] }
+aisimulate-core = { version = "=0.13.0", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "9.2.6" }
@@ -137,3 +137,7 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# Post-codefreeze AISimulate source pin for release/1.6.0.
+[patch.crates-io]
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "968e4f822a837811d6f02af0724dacb40a8c283c" }
