@@ -92,10 +92,10 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.31.0-ubuntu2404
+    runtime_image_tag: cu134-nightly-bb87d227d4b964abb2a966cdf9194f3d376d9bbe
     vllm_omni_ref: "v0.31.0rc1"
-    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
-    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
+    # Retain nvidia/cuda:13.0.2-base-ubuntu24.04 as the compliance floor.
+    # The cu134 runtime uses CUDA 13.4.1; additions remain subject to scanning.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
     # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
     # rather than hiding it. Per-arch stem; the licenses stage appends

@@ -684,16 +684,6 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
 PY
 
 {% if device == "cuda" %}
-# Backport vLLM PR #57816 after all package installs; runtime inherits this stage.
-RUN --mount=type=bind,source=./container/deps/vllm/vllm-pr-57816-reset-eager-offload-on-preemption.patch,target=/tmp/vllm-pr-57816.patch \
-    set -eu; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends patch; \
-    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("vllm").origin).parent.parent)')"; \
-    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/vllm-pr-57816.patch; \
-    rm -rf /var/lib/apt/lists/*
-
-
 # Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
 RUN python3 -m pip uninstall --yes soxr
 
