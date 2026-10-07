@@ -851,8 +851,10 @@ fn namespace_filter_from_env() -> NamespaceFilter {
     let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| "dynamo".to_string());
     let worker_suffix = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok();
     match worker_suffix.filter(|suffix| !suffix.is_empty()) {
-        Some(suffix) => NamespaceFilter::Exact(format!("{namespace}-{suffix}")),
-        None => NamespaceFilter::Exact(namespace),
+        Some(suffix) if !namespace.ends_with(&format!("-{suffix}")) => {
+            NamespaceFilter::Exact(format!("{namespace}-{suffix}"))
+        }
+        _ => NamespaceFilter::Exact(namespace),
     }
 }
 
@@ -1962,6 +1964,7 @@ mod tests {
         for (namespace, suffix, expected) in [
             (None, None, "dynamo"),
             (None, Some("worker"), "dynamo-worker"),
+            (Some("team-blue"), Some("blue"), "team-blue"),
             (Some(""), None, ""),
         ] {
             temp_env::with_vars(
