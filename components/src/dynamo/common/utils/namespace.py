@@ -10,13 +10,13 @@ def get_worker_namespace(namespace: Optional[str] = None) -> str:
 
     Uses the provided namespace, or falls back to the DYN_NAMESPACE environment
     variable (defaulting to "dynamo"). If DYN_NAMESPACE_WORKER_SUFFIX is set,
-    it is appended as "{namespace}-{suffix}" to support multiple sets of workers
-    for the same model.
+    it is appended as "{namespace}-{suffix}" unless already present, matching
+    the Rust workers and frontend discovery scope.
     """
     if not namespace:
         namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
     suffix = os.environ.get("DYN_NAMESPACE_WORKER_SUFFIX")
-    if suffix:
+    if suffix and not namespace.endswith(f"-{suffix}"):
         namespace = f"{namespace}-{suffix}"
     return namespace

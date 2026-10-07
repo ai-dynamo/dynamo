@@ -31,6 +31,23 @@ def _parse_runtime_args(argv: list[str]) -> tuple[DynamoRuntimeConfig, str]:
     return config, parser.format_help()
 
 
+@pytest.mark.parametrize("source", ["env", "cli"])
+@pytest.mark.parametrize(
+    "namespace, expected",
+    [("team-blue", "team-blue"), ("teamblue", "teamblue-blue")],
+)
+def test_worker_namespace_applies_suffix_once(source, namespace, expected, monkeypatch):
+    monkeypatch.setenv("DYN_NAMESPACE_WORKER_SUFFIX", "blue")
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "tcp")
+    monkeypatch.setenv("DYN_FPM_TRACE", "0")
+    monkeypatch.setenv("DYN_NAMESPACE", namespace if source == "env" else "other")
+    argv = [] if source == "env" else ["--namespace", namespace]
+
+    config, _ = _parse_runtime_args(argv)
+
+    assert config.namespace == expected
+
+
 def test_fpm_trace_defaults_disabled(monkeypatch):
     monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
 
