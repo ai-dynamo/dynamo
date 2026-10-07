@@ -64,20 +64,88 @@ pub struct VideoMetadata {
     pub(crate) sampled_timestamps: Vec<f64>,
 }
 
-fn get_source_duration_secs(
-    stream_duration: i64,
+/// Derives the selected video's duration from its packet timestamps.
+fn get_source_duration_from_video_packets(
+    input: &mut ffmpeg_next::format::context::Input,
+    stream_index: usize,
     stream_time_base: Rational,
-    container_duration: i64,
-) -> f64 {
-    if stream_duration > 0 {
-        Time::new(Some(stream_duration), stream_time_base).as_secs() as f64
-    } else if container_duration > 0 {
-        // AVFormatContext::duration is expressed in AV_TIME_BASE units, unlike
-        // the stream duration, which uses the stream's time base.
-        container_duration as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64
-    } else {
-        Time::new(Some(stream_duration), stream_time_base).as_secs() as f64
+    frame_rate: f64,
+    total_frames: u64,
+) -> Result<f64> {
+    let mut first_pts = None;
+    let mut max_pts = None;
+    let mut max_packet_end = None;
+
+    for (stream, packet) in input.packets() {
+        if stream.index() != stream_index {
+            continue;
+        }
+
+        let Some(pts) = packet.pts() else {
+            continue;
+        };
+        first_pts = Some(first_pts.map_or(pts, |first_pts: i64| first_pts.min(pts)));
+        max_pts = Some(max_pts.map_or(pts, |max_pts: i64| max_pts.max(pts)));
+
+        if packet.duration() > 0 {
+            let packet_end = pts.saturating_add(packet.duration());
+            max_packet_end = Some(max_packet_end.map_or(packet_end, |max_packet_end: i64| {
+                max_packet_end.max(packet_end)
+            }));
+        }
     }
+
+    input.seek(0, ..)?;
+
+    let frame_count_duration = if frame_rate > 0.0 {
+        total_frames as f64 / frame_rate
+    } else {
+        0.0
+    };
+    let (Some(first_pts), Some(max_pts)) = (first_pts, max_pts) else {
+        return Ok(frame_count_duration);
+    };
+
+    let pts_duration =
+        Time::new(Some(max_pts.saturating_sub(first_pts)), stream_time_base).as_secs() as f64;
+    let packet_duration = max_packet_end
+        .map(|end| {
+            Time::new(Some(end.saturating_sub(first_pts)), stream_time_base).as_secs() as f64
+        })
+        .filter(|duration| *duration > 0.0);
+
+    Ok(select_video_duration_secs(
+        pts_duration,
+        packet_duration,
+        frame_rate,
+        frame_count_duration,
+    ))
+}
+
+/// Selects packet or frame-count duration without overriding a valid PTS span.
+fn select_video_duration_secs(
+    pts_duration: f64,
+    packet_duration: Option<f64>,
+    frame_rate: f64,
+    frame_count_duration: f64,
+) -> f64 {
+    if pts_duration <= 0.0 {
+        // Collapsed/missing PTS do not describe the video's extent. Use the
+        // stronger available endpoint or frame-count estimate in that case.
+        return packet_duration
+            .unwrap_or_default()
+            .max(frame_count_duration);
+    }
+
+    packet_duration
+        .filter(|duration| *duration > pts_duration)
+        .unwrap_or_else(|| {
+            if frame_rate > 0.0 {
+                pts_duration + 1.0 / frame_rate
+            } else {
+                pts_duration
+            }
+        })
 }
 
 fn get_num_requested_frames(
@@ -243,9 +311,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
     let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
     let mut input = ffmpeg_next::format::input(&fd_path).map_err(video_open_error)?;
-    let container_duration = input.duration();
-
-    let (stream_index, stream_time_base, source_duration, source_fps, total_frames, parameters) = {
+    let (stream_index, stream_time_base, stream_duration, source_fps, total_frames, parameters) = {
         let input_stream = input
             .streams()
             .best(ffmpeg_next::media::Type::Video)
@@ -259,15 +325,22 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         (
             input_stream.index(),
             stream_time_base,
-            get_source_duration_secs(
-                input_stream.duration(),
-                stream_time_base,
-                container_duration,
-            ),
+            input_stream.duration(),
             (frame_rate.numerator() as f32 / frame_rate.denominator() as f32) as f64,
             input_stream.frames().max(0) as u64,
             input_stream.parameters(),
         )
+    };
+    let source_duration = if stream_duration > 0 {
+        Time::new(Some(stream_duration), stream_time_base).as_secs() as f64
+    } else {
+        get_source_duration_from_video_packets(
+            &mut input,
+            stream_index,
+            stream_time_base,
+            source_fps,
+            total_frames,
+        )?
     };
 
     // Duration and frame count come from file metadata and might be inaccurate.
@@ -531,6 +604,19 @@ mod tests {
     }
 
     #[test]
+    fn test_select_video_duration_uses_frame_count_when_pts_collapse() {
+        assert_eq!(select_video_duration_secs(0.0, None, 2.0, 3.0), 3.0);
+        assert_eq!(select_video_duration_secs(0.0, Some(0.5), 2.0, 3.0), 3.0);
+    }
+
+    #[test]
+    fn test_select_video_duration_does_not_override_pts_extent_with_frame_rate_estimate() {
+        // A known variable-rate extent is more reliable than a contradictory
+        // stream frame-rate estimate.
+        assert_eq!(select_video_duration_secs(2.0, Some(2.25), 2.0, 10.0), 2.25);
+    }
+
+    #[test]
     fn test_unsupported_codec_error_is_actionable() {
         // H.264 fixture: the in-tree FFmpeg decodes only VP8/VP9, so opening
         // must fail -- and with the re-encode guidance, not ffmpeg's bare
@@ -582,10 +668,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_decode_video_uses_container_duration_when_stream_duration_is_missing() {
+    fn test_decode_video_uses_packet_duration_when_stream_duration_is_missing() {
         // decode_video opens its sealed memfd through /proc/self/fd.
-        // This VP9/WebM fixture has a 3-second container duration, while FFmpeg
-        // reports no stream duration or frame count and a 2 FPS frame rate.
+        // This VP9/WebM fixture has no stream duration or frame count, but its
+        // video packets span 3 seconds at 2 FPS.
         let path = format!(
             "{}/tests/data/media/webm_container_duration_6.webm",
             env!("CARGO_MANIFEST_DIR")
@@ -608,22 +694,42 @@ mod tests {
         assert!((metadata.source_duration - 3.0).abs() < 0.01);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn test_get_source_duration_secs_uses_container_when_stream_duration_is_missing() {
-        let duration = get_source_duration_secs(
-            ffmpeg_next::ffi::AV_NOPTS_VALUE,
-            Rational::new(1, 1_000),
-            i64::from(ffmpeg_next::ffi::AV_TIME_BASE) * 3,
+    fn test_decode_video_uses_video_duration_when_audio_outlasts_video() {
+        let path = format!(
+            "{}/tests/data/media/webm_audio_outlasts_video_6.webm",
+            env!("CARGO_MANIFEST_DIR")
         );
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|_| panic!("Failed to read test video: {}", path));
+        let decoder = VideoDecoder {
+            num_frames: Some(6),
+            ..Default::default()
+        };
 
-        assert!((duration - 3.0).abs() < 0.000_001);
+        let decoded = decoder
+            .decode(EncodedMediaData {
+                bytes,
+                b64_encoded: false,
+            })
+            .unwrap();
 
-        let stream_duration = get_source_duration_secs(
-            2_000,
-            Rational::new(1, 1_000),
-            i64::from(ffmpeg_next::ffi::AV_TIME_BASE) * 3,
+        assert_eq!(decoded.tensor_info.shape, vec![6, 224, 224, 3]);
+        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
+            panic!("missing video metadata");
+        };
+        assert!((metadata.source_duration - 3.0).abs() < 0.01);
+        assert!(
+            (metadata
+                .sampled_timestamps
+                .last()
+                .copied()
+                .unwrap_or_default()
+                - 2.5)
+                .abs()
+                < 0.01
         );
-        assert!((stream_duration - 2.0).abs() < 0.000_001);
     }
 
     #[test]
