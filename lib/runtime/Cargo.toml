@@ -39,6 +39,8 @@ async-nats = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 tmq = { workspace = true }
+# Same version tmq uses; event-plane SUB sockets drive libzmq directly.
+zmq = { version = "0.10" }
 lru = { version = "0.16" }
 axum = { workspace = true }
 blake3 = { workspace = true }

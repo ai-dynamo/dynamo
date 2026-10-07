@@ -671,6 +671,7 @@ async fn stop_group(mut group: SocketGroup) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::transports::event_plane::{EventTransportTx, ZmqPubTransport};
 
     fn config_lookup(value: Option<&str>) -> impl FnMut(&str) -> Option<OsString> {
         let value = value.map(OsString::from);
@@ -831,6 +832,74 @@ mod tests {
         );
 
         drop(registrations);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn socket_group_keeps_each_publisher_ordered_across_interleaved_bursts() {
+        const ANCHOR_SEQUENCE: u64 = u64::MAX;
+        let topic = "kv-events";
+        let pool = pool(topic, 64, 4096);
+        let process = std::process::id();
+        let mut sources = Vec::new();
+        for publisher_id in 1..=2 {
+            let endpoint = format!("inproc://dynamo-sub-pool-bursts-{process}-{publisher_id}");
+            let (publisher, endpoint) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+            let registration = pool
+                .register_grouped(publisher_id, &endpoint, 1)
+                .await
+                .unwrap();
+            sources.push((publisher_id, publisher, registration));
+        }
+        assert_eq!(sources[0].2.group_id, sources[1].2.group_id);
+
+        // Publish anchors until each subscription is live.
+        for (publisher_id, publisher, registration) in &mut sources {
+            let anchor = wire_message(topic, *publisher_id, ANCHOR_SEQUENCE).payload;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    publisher.publish(topic, anchor.clone()).await.unwrap();
+                    let received = tokio::time::timeout(
+                        Duration::from_millis(25),
+                        registration.receiver.recv(),
+                    )
+                    .await;
+                    if matches!(received, Ok(Some(_))) {
+                        return;
+                    }
+                }
+            })
+            .await
+            .expect("grouped subscription should become live");
+        }
+
+        // Interleave chunks so the shared socket alternates between publisher
+        // pipes, and send more per publisher than one receive burst drains.
+        let per_publisher = 300;
+        for chunk in (0..per_publisher).step_by(50) {
+            for (publisher_id, publisher, _) in &sources {
+                for sequence in chunk..chunk + 50 {
+                    let payload = wire_message(topic, *publisher_id, sequence).payload;
+                    publisher.publish(topic, payload).await.unwrap();
+                }
+            }
+        }
+        for (publisher_id, _, registration) in &mut sources {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let mut expected = 0;
+                while expected < per_publisher {
+                    let received = sequence(registration.receiver.recv().await.unwrap());
+                    if received == ANCHOR_SEQUENCE {
+                        continue;
+                    }
+                    assert_eq!(received, expected, "publisher {publisher_id}");
+                    expected += 1;
+                }
+            })
+            .await
+            .expect("every grouped message should arrive in order");
+        }
+        drop(sources);
         pool.shutdown().await;
     }
 

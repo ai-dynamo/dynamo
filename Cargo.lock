@@ -3053,6 +3053,7 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
