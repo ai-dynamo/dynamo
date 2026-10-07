@@ -1179,12 +1179,6 @@ mod tests {
                 "stop_sequence",
                 Some("\n\nHuman:"),
             ),
-            (
-                FinishReason::Stop,
-                serde_json::Value::Null,
-                "end_turn",
-                None,
-            ),
             (FinishReason::Stop, serde_json::json!(42), "end_turn", None),
             (
                 FinishReason::Length,

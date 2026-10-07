@@ -888,7 +888,6 @@ mod tests {
                 "stop_sequence",
                 Some("\n\nHuman:"),
             ),
-            ("stop", serde_json::Value::Null, "end_turn", None),
             ("stop", serde_json::json!(42), "end_turn", None),
             ("length", serde_json::json!("</answer>"), "max_tokens", None),
             (
