@@ -239,10 +239,17 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
             frame_rate.denominator() > 0,
             "Cannot determine the video frame rate"
         );
+        let source_duration = if input_stream.duration() > 0 {
+            Time::new(Some(input_stream.duration()), stream_time_base).as_secs() as f64
+        } else {
+            // WebM may expose duration only at container level, in AV_TIME_BASE units.
+            // Clamp unknown (AV_NOPTS_VALUE) or nonpositive durations to zero.
+            input.duration().max(0) as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE)
+        };
         (
             input_stream.index(),
             stream_time_base,
-            Time::new(Some(input_stream.duration()), stream_time_base).as_secs() as f64,
+            source_duration,
             (frame_rate.numerator() as f32 / frame_rate.denominator() as f32) as f64,
             input_stream.frames().max(0) as u64,
             input_stream.parameters(),
@@ -535,6 +542,59 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("VP8/VP9"), "no codec guidance in: {msg}");
         assert!(msg.contains("libvpx-vp9"), "no re-encode hint in: {msg}");
+    }
+
+    #[rstest]
+    #[case(None, None, 6)]
+    #[case(Some(1.0), None, 3)]
+    #[case(None, Some(2), 2)]
+    fn test_decode_webm_with_container_duration(
+        #[case] fps: Option<f64>,
+        #[case] num_frames: Option<u64>,
+        #[case] expected_frames: usize,
+    ) {
+        // Finalized six-frame VP9 WebM from the reported data-URL request.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/media/224p_6_vp9.webm"
+        );
+        let input = ffmpeg_next::format::input(&path).unwrap();
+        let stream = input
+            .streams()
+            .best(ffmpeg_next::media::Type::Video)
+            .unwrap();
+        assert_eq!(stream.duration(), ffmpeg_next::ffi::AV_NOPTS_VALUE);
+        assert_eq!(stream.frames(), 0);
+        assert_eq!(
+            input.duration(),
+            3 * i64::from(ffmpeg_next::ffi::AV_TIME_BASE)
+        );
+
+        let decoder = VideoDecoder {
+            fps,
+            num_frames,
+            strict: true,
+            ..Default::default()
+        };
+        let decoded = decoder
+            .decode(EncodedMediaData::from_bytes(std::fs::read(path).unwrap()))
+            .unwrap();
+        assert_eq!(
+            decoded.tensor_info.shape,
+            vec![expected_frames, 224, 224, 3]
+        );
+        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
+            panic!("missing video metadata");
+        };
+        assert_eq!(metadata.source_duration, 3.0);
+        assert_eq!(metadata.source_fps, 2.0);
+        assert_eq!(metadata.sampled_timestamps.len(), expected_frames);
+        assert!(
+            metadata
+                .sampled_timestamps
+                .iter()
+                .all(|t| (0.0..3.0).contains(t))
+        );
     }
 
     #[test]
