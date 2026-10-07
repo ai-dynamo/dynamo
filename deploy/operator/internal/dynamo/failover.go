@@ -487,47 +487,39 @@ func IntraPodFailoverEngineContainerNames() []string {
 	return names
 }
 
-// buildFailoverPod clones the main container into two engine containers (active + standby).
-// This runs AFTER applyGPUMemoryService, so the main container already has DRA claims,
-// shared volume mount, and TMPDIR set. This function only handles engine duplication
-// and failover-specific env vars.
-//
-// Non-main containers (e.g. frontend sidecar) are preserved in the final pod spec.
-func buildFailoverPod(
-	podSpec *corev1.PodSpec,
-	numberOfNodes int32,
-	backendFramework BackendFramework,
-	snapshotEnabled bool,
-) error {
+// buildSnapshotFailoverPod prepares the restored active/standby pair for vLLM
+// and SGLang with GMS V1. TRT-LLM is gated until its restore/election path exists.
+// Collective ports are captured state, so cold shadow overrides do not apply.
+// Mutates podSpec, which must not be nil and must already have GMS resources.
+func buildSnapshotFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework) error {
+	// Defend direct rendering as well as objects that bypassed admission.
+	if !snapshotFailoverBackendSupported(backendFramework) {
+		return fmt.Errorf("Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: %s)", backendFramework)
+	}
+	if numberOfNodes != 1 {
+		return fmt.Errorf("Snapshot-backed intra-pod failover requires a single node setup")
+	}
+
+	return buildFailoverEnginePair(podSpec)
+}
+
+// buildFailoverEnginePair replaces main with two engine containers, preserving
+// sidecars and the already configured DRA claim and GMS shared mount. Both the
+// snapshot path and cold-start failover path use these identity/probe settings.
+// Mutates podSpec, which must not be nil and must have main as its first container.
+func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for failover transformation")
 	}
 
-	// SGLang uses the restored-paused election path, not vLLM's V0 cold shadow.
-	if backendFramework != BackendFrameworkVLLM && !(snapshotEnabled && backendFramework == BackendFrameworkSGLang) {
-		return fmt.Errorf("cold-start failover is currently supported only for vLLM; snapshot-backed failover supports vLLM and SGLang (detected: %s)", backendFramework)
-	}
-
-	// Snapshot-backed failover requires a single node setup.
-	if snapshotEnabled && numberOfNodes != 1 {
-		return fmt.Errorf("Snapshot-backed intra-pod failover requires a single node setup")
-	}
-
+	// Clone main before applying any path-specific overrides.
 	mainContainer := podSpec.Containers[0]
 	sidecars := podSpec.Containers[1:]
-
 	engines := make([]corev1.Container, failoverEngineCount)
 	for i := range failoverEngineCount {
 		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
 	}
-
 	podSpec.Containers = append(engines, sidecars...)
-
-	// Only cold-start vLLM failover needs legacy shadow initialization and port overrides.
-	if backendFramework == BackendFrameworkVLLM && !snapshotEnabled {
-		applyVLLMColdFailoverOverrides(podSpec, numberOfNodes)
-	}
-
 	return nil
 }
 
@@ -558,7 +550,7 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		"DYN_HEALTH_CHECK_ENABLED":              true,
 		"CONTAINER_NAME":                        true,
 		"DYN_FORWARDPASS_METRIC_PORT":           true,
-		// Only the legacy vLLM cold path re-enables shadow mode after cloning.
+		// Only the cold-start failover path re-enables shadow mode after cloning.
 		"DYN_VLLM_GMS_SHADOW_MODE": true,
 	}
 

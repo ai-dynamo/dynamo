@@ -6,6 +6,7 @@
 package dynamo
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -17,18 +18,22 @@ const (
 	vllmMasterPortStride = 100
 )
 
-// applyVLLMColdFailoverOverrides enables legacy vLLM shadow initialization.
-// Cold-start engines need port staggering and, for multinode, NNODES.
-// podSpec must not be nil.
-func applyVLLMColdFailoverOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
-	for i := range podSpec.Containers {
-		c := &podSpec.Containers[i]
-		if !strings.HasPrefix(c.Name, "engine-") {
-			continue
-		}
+// buildColdStartFailoverPod prepares snapshot-less failover, supported only for
+// vLLM with GMS V0. Engines initialize concurrently in shadow mode and need
+// separate collective/KV ports, unlike the restored snapshot engine pair.
+// Mutates podSpec, which must not be nil and must already have GMS resources.
+func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework) error {
+	// Reject other backends before changing the pod.
+	if backendFramework != BackendFrameworkVLLM {
+		return fmt.Errorf("cold-start failover is currently supported only for vLLM (detected: %s)", backendFramework)
+	}
+	if err := buildFailoverEnginePair(podSpec); err != nil {
+		return err
+	}
 
-		// The shared engine builder clears the inherited shadow flag before this override.
-		engineID, _ := strconv.Atoi(strings.TrimPrefix(c.Name, "engine-"))
+	// Only the two cloned engines receive legacy shadow initialization settings.
+	for engineID := range failoverEngineCount {
+		c := &podSpec.Containers[engineID]
 		c.Env = append(c.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
 		c.Env = append(c.Env,
 			corev1.EnvVar{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
@@ -52,6 +57,7 @@ func applyVLLMColdFailoverOverrides(podSpec *corev1.PodSpec, numberOfNodes int32
 			)
 		}
 	}
+	return nil
 }
 
 // hasMasterPortFlag checks if --master-port appears in the container args or command.
