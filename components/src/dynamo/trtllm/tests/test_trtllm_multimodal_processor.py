@@ -161,7 +161,9 @@ async def test_unsupported_audio_returns_client_error_before_loading(
     )
     processor._load_audio = AsyncMock()
 
-    with pytest.raises(HttpStatusError, match="does not support audio input") as excinfo:
+    with pytest.raises(
+        HttpStatusError, match="does not support audio input"
+    ) as excinfo:
         await processor.process_openai_request(
             {
                 "extra_args": {"formatted_prompt": "Transcribe this"},
