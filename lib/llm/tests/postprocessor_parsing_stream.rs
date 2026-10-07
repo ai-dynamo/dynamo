@@ -5822,9 +5822,13 @@ async fn route_matrix_minimax_m2_named_native_xml_with_inner_brace_stays_native(
 
 #[tokio::test]
 async fn research_per_chunk_interleaving() {
+    if test_utils::run_isolated(
+        concat!(module_path!(), "::research_per_chunk_interleaving"),
+        &[(env_llm::DYN_PARSER_VERSION, "1")],
+    ) {
+        return;
+    }
     use futures::FutureExt;
-    let v2_enabled = dynamo_runtime::config::selected_parser_version().unwrap()
-        == dynamo_runtime::config::ParserVersion::V2;
     for family in ["qwen3_coder", "deepseek_v4", "kimi_k2"] {
         // Hold reasoning grammar fixed to isolate the selected tool parser and its routing.
         let preprocessor = build_preprocessor(Some("qwen3"), Some(family));
@@ -5906,13 +5910,7 @@ async fn research_per_chunk_interleaving() {
             });
             let expected_tool_call = [4, 14].into_iter().any(|header_index| {
                 let outer_end_index = header_index + 5;
-                if v2_enabled && family == "qwen3_coder" {
-                    (header_index + 1..outer_end_index).contains(&i)
-                } else if v2_enabled && family == "deepseek_v4" {
-                    i == header_index + 4
-                } else {
-                    i == outer_end_index
-                }
+                i == outer_end_index
             });
             assert_eq!(
                 tool_call_emitted,
@@ -6195,17 +6193,38 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
 
 #[tokio::test]
 async fn legacy_backend_arguments_survive_postprocessing_and_aggregation() {
-    for (parser, reasoning) in [
-        (None, None),
-        (Some("hermes"), None),
-        (Some("deepseek_v41"), Some("deepseek_v41")),
-    ] {
-        if parser == Some("deepseek_v41")
-            && (dynamo_runtime::config::selected_parser_version().unwrap()
-                == dynamo_runtime::config::ParserVersion::V2)
-        {
-            continue;
-        }
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::legacy_backend_arguments_survive_postprocessing_and_aggregation"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "1")],
+    ) {
+        return;
+    }
+    backend_arguments_survive_postprocessing_and_aggregation(false).await;
+}
+
+#[tokio::test]
+async fn auto_backend_arguments_survive_postprocessing_and_aggregation() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::auto_backend_arguments_survive_postprocessing_and_aggregation"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "auto")],
+    ) {
+        return;
+    }
+    backend_arguments_survive_postprocessing_and_aggregation(true).await;
+}
+
+async fn backend_arguments_survive_postprocessing_and_aggregation(include_default_on: bool) {
+    let mut parser_pairs = vec![(None, None), (Some("hermes"), None)];
+    if include_default_on {
+        parser_pairs.push((Some("deepseek_v41"), Some("deepseek_v41")));
+    }
+    for (parser, reasoning) in parser_pairs {
         let preprocessor = build_preprocessor(reasoning, parser);
         let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
         for finish in [
@@ -6338,5 +6357,42 @@ async fn legacy_backend_arguments_survive_postprocessing_and_aggregation() {
                 }
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn explicit_v2_rejects_legacy_and_mixed_stream_parser_pairs() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::explicit_v2_rejects_legacy_and_mixed_stream_parser_pairs"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    for (reasoning, parser) in [
+        (None, Some("hermes")),
+        (Some("qwen3"), Some("deepseek_v4")),
+        (Some("qwen3"), Some("kimi_k2")),
+    ] {
+        let preprocessor = build_preprocessor(reasoning, parser);
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let result = preprocessor.postprocessor_parsing_stream(
+            stream::iter([Annotated::from_data(mock_final_chunk())]),
+            &request,
+            false,
+            false,
+        );
+        let error = match result {
+            Ok(_) => panic!("explicit V2 accepted unsupported pair {reasoning:?}/{parser:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("no compatible unified v2 implementation"),
+            "{reasoning:?}/{parser:?}: {error}"
+        );
     }
 }
