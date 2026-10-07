@@ -76,7 +76,6 @@ fn get_source_duration_secs(
         // the stream duration, which uses the stream's time base.
         container_duration as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64
     } else {
-        // Keep the existing failure behavior when neither duration is known.
         Time::new(Some(stream_duration), stream_time_base).as_secs() as f64
     }
 }
