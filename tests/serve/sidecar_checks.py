@@ -2,71 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
-import time
 import uuid
-from pathlib import Path
+from dataclasses import dataclass, field
 
 import aiohttp
-import requests
 
 from dynamo.runtime import Context
-from tests.fault_tolerance.cancellation.utils import (
-    CancellableRequest,
-    read_streaming_responses,
-)
 from tests.router.helper import managed_runtime, poll_for_worker_instances
-from tests.utils.client import send_request
-from tests.utils.payloads import ChatPayload, StreamingChatPayload
-from tests.utils.prometheus import find_metric_samples
-
-
-def _metrics(port: int) -> str:
-    response = requests.get(f"http://127.0.0.1:{port}/metrics", timeout=2)
-    response.raise_for_status()
-    return response.text
-
-
-def _wait_for_scheduler(backend: str, port: int, *, is_active: bool = False) -> None:
-    names = {
-        "vllm": ("vllm:num_requests_running", "vllm:num_requests_waiting"),
-        "sglang": ("sglang:num_running_reqs", "sglang:num_queue_reqs"),
-    }[backend]
-    deadline = time.monotonic() + 10
-    while True:
-        body = _metrics(port)
-        samples = [find_metric_samples(body, name) for name in names]
-        assert all(samples), f"Missing scheduler metrics {names}: {body}"
-        running, waiting = map(sum, samples)
-        if running > 0 if is_active else running == waiting == 0:
-            return
-        assert (
-            time.monotonic() < deadline
-        ), f"{backend} scheduler is_active={is_active}: {body}"
-        time.sleep(0.05)
-
-
-def _engine_progress(backend: str, port: int) -> float:
-    name, labels = {
-        "vllm": ("vllm:iteration_tokens_total_count", {}),
-        "sglang": ("sglang:realtime_tokens_total", {"mode": "decode"}),
-    }[backend]
-    body = _metrics(port)
-    samples = find_metric_samples(body, name, labels)
-    assert samples, f"Missing engine progress counter {name}: {body}"
-    return sum(samples)
-
-
-def _wait_for_cleanup(
-    backend: str, port: int, *, before: float, max_tokens: int
-) -> None:
-    _wait_for_scheduler(backend, port)
-    # Read progress after idle; a single metrics response is not an atomic snapshot.
-    delta = _engine_progress(backend, port) - before
-    assert delta >= 0, f"{backend} engine progress counter reset: {delta}"
-    # Non-speculative vLLM emits one batch per token; SGLang prefill supplies one.
-    completed = max_tokens if backend == "vllm" else max_tokens - 1
-    assert delta < completed, f"{backend} completed generation: {delta=}"
+from tests.utils.engine_metrics import EngineMetrics
+from tests.utils.payloads import KvTransferPayload
 
 
 def _assert_native_completion(
@@ -87,28 +31,16 @@ def _assert_native_completion(
     assert usage["total_tokens"] == prompt_tokens + completion_tokens, usage
 
 
-def assert_cancellation_and_recovery(
+def assert_native_cancellation_and_recovery(
     *,
-    backend: str,
+    metrics: EngineMetrics,
     model: str,
     namespace: str,
-    frontend_port: int,
-    engine_http_port: int,
     discovery_backend: str = "etcd",
 ) -> None:
-    """Check explicit stop, consumer drop, and HTTP disconnect cleanup and recovery."""
+    """Check explicit native stop and consumer drop on the existing deployment."""
     max_tokens = 2048
-    if backend == "sglang":
-        body = _metrics(engine_http_port)
-        for name, minimum in (
-            ("sglang:context_len", 4096),
-            ("sglang:max_total_num_tokens", 8192),
-        ):
-            samples = find_metric_samples(body, name)
-            assert samples and min(samples) >= minimum, (
-                f"Cancellation request may be shortened: {name} must be >= {minimum}: "
-                f"{body}"
-            )
+    completion_progress = metrics.completion_progress(max_tokens)
 
     async def native_checks() -> None:
         with managed_runtime(discovery_backend, "tcp") as runtime:
@@ -128,9 +60,7 @@ def assert_cancellation_and_recovery(
                     assert output.get("finish_reason") in (None, "cancelled"), output
 
             async def recover() -> None:
-                before = await asyncio.to_thread(
-                    _engine_progress, backend, engine_http_port
-                )
+                before = await asyncio.to_thread(metrics.progress)
                 stream = await client.direct(
                     {
                         **payload,
@@ -143,28 +73,13 @@ def assert_cancellation_and_recovery(
                 _assert_native_completion(
                     outputs, prompt_tokens=128, completion_tokens=4
                 )
-                if backend == "vllm":
-                    deadline = time.monotonic() + 10
-                    while True:
-                        delta = (
-                            await asyncio.to_thread(
-                                _engine_progress, backend, engine_http_port
-                            )
-                            - before
-                        )
-                        if delta == 4:
-                            break
-                        assert 0 <= delta < 4 and time.monotonic() < deadline, (
-                            "Expected one vLLM engine batch per recovery token: "
-                            f"{delta=}"
-                        )
-                        await asyncio.sleep(0.05)
+                await asyncio.to_thread(
+                    metrics.assert_recovered, before=before, max_tokens=4
+                )
 
             for is_explicit_stop in (True, False):
-                await asyncio.to_thread(_wait_for_scheduler, backend, engine_http_port)
-                before = await asyncio.to_thread(
-                    _engine_progress, backend, engine_http_port
-                )
+                await asyncio.to_thread(metrics.wait_for_scheduler)
+                before = await asyncio.to_thread(metrics.progress)
                 context = Context(f"cancel-{is_explicit_stop}-{uuid.uuid4()}")
                 try:
                     stream = await asyncio.wait_for(
@@ -177,19 +92,15 @@ def assert_cancellation_and_recovery(
                     assert (
                         output["token_ids"] and output.get("finish_reason") is None
                     ), output
-                    await asyncio.to_thread(
-                        _wait_for_scheduler, backend, engine_http_port, is_active=True
-                    )
+                    await asyncio.to_thread(metrics.wait_for_scheduler, is_active=True)
                     if is_explicit_stop:
                         context.stop_generating()
                         await asyncio.wait_for(drain_cancelled(stream), timeout=10)
                     del stream
                     await asyncio.to_thread(
-                        _wait_for_cleanup,
-                        backend,
-                        engine_http_port,
+                        metrics.assert_cancelled,
                         before=before,
-                        max_tokens=max_tokens,
+                        completion_progress=completion_progress,
                     )
                     if not is_explicit_stop:
                         assert (
@@ -198,93 +109,10 @@ def assert_cancellation_and_recovery(
                 finally:
                     context.stop_generating()
 
-                await asyncio.wait_for(recover(), timeout=30)
-                await asyncio.to_thread(_wait_for_scheduler, backend, engine_http_port)
+                await asyncio.wait_for(recover(), timeout=30 + metrics.settle_timeout)
+                await asyncio.to_thread(metrics.wait_for_scheduler)
 
     asyncio.run(native_checks())
-    _wait_for_scheduler(backend, engine_http_port)
-    before = _engine_progress(backend, engine_http_port)
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": "Count from one to a thousand."}],
-        "max_tokens": max_tokens,
-        "ignore_eos": True,
-        "temperature": 0.0,
-        "chat_template_kwargs": {"enable_thinking": False},
-        "stream": True,
-    }
-    request = CancellableRequest()
-    try:
-        request.post(
-            f"http://127.0.0.1:{frontend_port}/v1/chat/completions",
-            json=body,
-            stream=True,
-            timeout=30,
-        )
-        deadline = time.monotonic() + 10
-        while request.get_response() is None:
-            request.raise_for_early_failure()
-            assert (
-                time.monotonic() < deadline
-            ), "No streaming response before cancellation"
-            time.sleep(0.05)
-        read_streaming_responses(
-            request, expected_count=1, deadline_s=10, require_content=True
-        )
-        _wait_for_scheduler(backend, engine_http_port, is_active=True)
-    finally:
-        request.cancel()
-    _wait_for_cleanup(backend, engine_http_port, before=before, max_tokens=max_tokens)
-    payload = StreamingChatPayload(
-        body={**body, "max_tokens": 4, "stream_options": {"include_usage": True}},
-        expected_response=[],
-        expected_log=[],
-        expected_finish_reason="length",
-        expected_completion_tokens=4,
-        port=frontend_port,
-    )
-    with send_request(payload.url(), payload.body, stream=True) as response:
-        payload.process_response(response)
-    _wait_for_scheduler(backend, engine_http_port)
-
-
-def _transferred(
-    backend: str, prefill_http_port: int, probe_path: Path | None = None
-) -> float:
-    if backend == "sglang":
-        return sum(
-            find_metric_samples(
-                _metrics(prefill_http_port), "sglang:kv_transfer_total_mb_sum"
-            )
-        )
-    assert probe_path is not None
-    return sum(
-        json.loads(line)["bytes"] for line in probe_path.read_text().splitlines()
-    )
-
-
-def assert_kv_transfer(
-    *,
-    backend: str,
-    payload: ChatPayload,
-    prefill_http_port: int,
-    decode_http_port: int,
-    probe_path: Path | None = None,
-) -> None:
-    """Require a fresh completed transfer as well as a successful response."""
-
-    before = _transferred(backend, prefill_http_port, probe_path)
-    payload.body["messages"][0]["content"] = (
-        f"Request {uuid.uuid4()}. " + payload.body["messages"][0]["content"]
-    )
-    with send_request(payload.url(), payload.body) as response:
-        payload.process_response(response)
-    deadline = time.monotonic() + 10
-    while _transferred(backend, prefill_http_port, probe_path) <= before:
-        assert time.monotonic() < deadline, f"{backend}: no completed KV transfer"
-        time.sleep(0.05)
-    _wait_for_scheduler(backend, decode_http_port)
-    _wait_for_scheduler(backend, prefill_http_port)
 
 
 def assert_sglang_transfer_wait_cancelled(
@@ -373,3 +201,23 @@ def assert_sglang_transfer_wait_cancelled(
                 await wait_for_transfer_queue(False)
 
     asyncio.run(run())
+
+
+@dataclass
+class SGLangTransferRecoveryPayload(KvTransferPayload):
+    """Cancel an unmatched native transfer, then verify normal frontend recovery."""
+
+    namespace: str = field(kw_only=True)
+    decode_http_port: int = field(kw_only=True)
+    bootstrap_port: int = field(kw_only=True)
+    discovery_backend: str = field(default="etcd", kw_only=True)
+
+    def before_request(self) -> None:
+        assert_sglang_transfer_wait_cancelled(
+            namespace=self.namespace,
+            model=self.body["model"],
+            decode_http_port=self.decode_http_port,
+            bootstrap_port=self.bootstrap_port,
+            discovery_backend=self.discovery_backend,
+        )
+        super().before_request()

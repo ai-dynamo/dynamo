@@ -33,6 +33,18 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
 }
 
 #[test]
+fn sidecar_requires_a_local_grpc_endpoint() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"))
+        .env_remove("DYN_SIDECAR_GRPC_ENDPOINT")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("the following required arguments were not provided"));
+    assert!(stderr.contains("--grpc-endpoint <GRPC_ENDPOINT>"));
+}
+
+#[test]
 fn invalid_arguments_fail_before_runtime_configuration() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"));
     for (key, _) in std::env::vars().filter(|(key, _)| {
