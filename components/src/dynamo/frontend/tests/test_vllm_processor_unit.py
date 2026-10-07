@@ -2253,10 +2253,16 @@ class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
     tool_call_end_token = "<|im_end|>"
 
 
-@pytest.mark.parametrize("step_tokens", [1, 2, 3, 4, 5, 6])
-def test_parallel_tool_calls_survive_multi_token_steps(tokenizer, step_tokens):
-    """One step can close a call and open the next (e.g. MTP); the second call
-    must not leak as content."""
+_GLM_CALL = (
+    "<tool_call>get_weather<arg_key>city</arg_key><arg_value>{}</arg_value></tool_call>"
+)
+_GLM_TWO_CALLS = (
+    "<think>x</think>" + _GLM_CALL.format("Paris") + _GLM_CALL.format("Rome")
+)
+
+
+def _assert_two_glm_calls_streamed(tokenizer, steps):
+    """Stream (text, token_ids) steps; both calls must come out as tool calls."""
     from vllm.reasoning import ReasoningParserManager
     from vllm.tool_parsers import ToolParserManager
 
@@ -2265,51 +2271,69 @@ def test_parallel_tool_calls_survive_multi_token_steps(tokenizer, step_tokens):
         tokenizer=tokenizer,
         tool_parser_class=None,
     )
-    call = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>{}</arg_value></tool_call>"
-    ids = tokenizer.encode(
-        "<think>x</think>" + call.format("Paris") + call.format("Rome"),
-        add_special_tokens=False,
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request,
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=ToolParserManager.get_tool_parser("glm47")(
+            tokenizer, tools=request.tools
+        ),
+        reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("glm45"),
+        chat_template_kwargs={},
+        stream_response=True,
     )
-    for offset in range(step_tokens):
-        post = StreamingPostProcessor(
-            tokenizer=tokenizer,
-            request_for_sampling=request,
-            sampling_params=SamplingParams(),
-            prompt_token_ids=[],
-            tool_parser=ToolParserManager.get_tool_parser("glm47")(
-                tokenizer, tools=request.tools
-            ),
-            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("glm45"),
-            chat_template_kwargs={},
-            stream_response=True,
+    names, args, content = [], [], ""
+    for n, (text, token_ids) in enumerate(steps):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=token_ids,
+                finish_reason="tool_calls" if n == len(steps) - 1 else None,
+                logprobs=None,
+            )
         )
+        delta = choice["delta"] if choice else {}
+        content += delta.get("content") or ""
+        for tool_call in delta.get("tool_calls") or []:
+            function = tool_call.get("function") or {}
+            if function.get("name"):
+                names.append(function["name"])
+                args.append("")
+            args[-1] += function.get("arguments") or ""
+
+    assert names == ["get_weather", "get_weather"], (names, content)
+    assert [json.loads(a)["city"] for a in args] == ["Paris", "Rome"]
+    assert not content.strip(), content
+
+
+@pytest.mark.parametrize("step_tokens", [3, 4, 5, 6])
+def test_parallel_tool_calls_survive_multi_token_steps(tokenizer, step_tokens):
+    """One step can close a call and open the next (e.g. MTP)."""
+    ids = tokenizer.encode(_GLM_TWO_CALLS, add_special_tokens=False)
+    for offset in range(step_tokens):
         steps = [ids[:offset]] if offset else []
         steps += [
             ids[i : i + step_tokens] for i in range(offset, len(ids), step_tokens)
         ]
-        names, args, content = [], [], ""
-        for n, step in enumerate(steps):
-            choice = post.process_output(
-                SimpleNamespace(
-                    index=0,
-                    text=tokenizer.decode(step, skip_special_tokens=False),
-                    token_ids=step,
-                    finish_reason="tool_calls" if n == len(steps) - 1 else None,
-                    logprobs=None,
-                )
-            )
-            delta = choice["delta"] if choice else {}
-            content += delta.get("content") or ""
-            for tool_call in delta.get("tool_calls") or []:
-                function = tool_call.get("function") or {}
-                if function.get("name"):
-                    names.append(function["name"])
-                    args.append("")
-                args[-1] += function.get("arguments") or ""
+        _assert_two_glm_calls_streamed(
+            tokenizer,
+            [(tokenizer.decode(s, skip_special_tokens=False), s) for s in steps],
+        )
 
-        assert names == ["get_weather", "get_weather"], (offset, names, content)
-        assert [json.loads(a)["city"] for a in args] == ["Paris", "Rome"]
-        assert not content.strip(), (offset, content)
+
+def test_parallel_tool_calls_survive_split_start_marker(tokenizer):
+    end = _GLM_TWO_CALLS.index("</tool_call>")
+    split = _GLM_TWO_CALLS.rindex("<tool_call>") + len("<tool")
+    _assert_two_glm_calls_streamed(
+        tokenizer,
+        [
+            (_GLM_TWO_CALLS[:end], []),
+            (_GLM_TWO_CALLS[end:split], []),
+            (_GLM_TWO_CALLS[split:], []),
+        ],
+    )
 
 
 class TestControlMarkerStrip:

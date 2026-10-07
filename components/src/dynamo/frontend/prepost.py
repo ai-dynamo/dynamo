@@ -1125,7 +1125,10 @@ class StreamingPostProcessor:
         if pos < 0:
             return False
         tail = text[pos + len(marker) :]
-        return not any(m in tail for m in self._tool_start_markers())
+        return not any(
+            m in tail or any(tail.endswith(m[:i]) for i in range(1, len(m)))
+            for m in self._tool_start_markers()
+        )
 
     # A text-grammar reasoning parser can only split the stream if the model's
     # content-kind control markers survive detokenisation, which is why
