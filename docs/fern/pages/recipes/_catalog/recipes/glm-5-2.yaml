@@ -128,6 +128,5 @@ targets:
 related_benchmarks: []
 maintainer: milesial
 gaps:
-- Source recipe tree (recipes/glm-5.3/) lands in PR #11448; source links and asset-path validation resolve once that PR merges to main
 - Full 1M context not supported out of the box (B200 capped at 500K, H200 at 250K)
 - n>1 requests unsupported on the disaggregated targets
