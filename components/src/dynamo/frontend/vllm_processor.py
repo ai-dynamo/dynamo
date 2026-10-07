@@ -403,6 +403,21 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
                 image_url["detail"] = "auto"
 
 
+def _disabled_as_unset(value: Any, requested: Any) -> Any:
+    """Send a disabled top_k or min_p as unset unless the client disabled it.
+
+    vLLM disables top_k at 0 or -1 and min_p at 0. vllm-proto 0.3 also uses 0
+    for "unset", so the vLLM gRPC sidecar rejects these values. If the client
+    did not disable the control, it is disabled here only because
+    generation_config does not enable it or because greedy sampling reset it.
+    A backend that reads the same generation_config then samples the same way.
+    A backend override of generation_config now applies instead of this 0.
+    """
+    if value <= 0 and (requested is None or requested > 0):
+        return None
+    return value
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -779,8 +794,8 @@ class VllmProcessor:
                 "repetition_penalty": sp.repetition_penalty,
                 "temperature": sp.temperature,
                 "top_p": sp.top_p,
-                "top_k": sp.top_k,
-                "min_p": sp.min_p,
+                "top_k": _disabled_as_unset(sp.top_k, request_for_sampling.top_k),
+                "min_p": _disabled_as_unset(sp.min_p, request_for_sampling.min_p),
                 "seed": sp.seed,
             },
             "output_options": {

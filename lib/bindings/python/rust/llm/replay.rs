@@ -9,8 +9,9 @@ use std::sync::Arc;
 use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType as RsMockerEngineType, MockEngineArgs as RsMockEngineArgs,
-    PreemptionMode as RsPreemptionMode, ReasoningConfig as RsReasoningConfig,
-    SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs, WorkerType as RsWorkerType,
+    NativeHostOffloadConfig, PreemptionMode as RsPreemptionMode,
+    ReasoningConfig as RsReasoningConfig, SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs,
+    WorkerType as RsWorkerType,
 };
 use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
@@ -176,6 +177,18 @@ fn parse_preemption_mode(preemption_mode: &str) -> PyResult<RsPreemptionMode> {
     }
 }
 
+fn parse_native_host_offload(
+    config: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<NativeHostOffloadConfig>> {
+    config
+        .map(|config| {
+            pythonize::depythonize(config).map_err(|error| {
+                PyValueError::new_err(format!("invalid native_host_offload: {error}"))
+            })
+        })
+        .transpose()
+}
+
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct ReasoningConfig {
@@ -285,7 +298,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None, kv_cache_bytes_per_token=None, native_host_offload=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -324,6 +337,8 @@ impl MockEngineArgs {
         trtllm: Option<TrtllmArgs>,
         max_model_len: Option<usize>,
         ais_perf_config: Option<&Bound<'_, PyAny>>,
+        kv_cache_bytes_per_token: Option<usize>,
+        native_host_offload: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
@@ -368,6 +383,8 @@ impl MockEngineArgs {
             .bootstrap_port(bootstrap_port)
             .handoff_session_timeout_ms(handoff_session_timeout_ms)
             .kv_bytes_per_token(kv_bytes_per_token)
+            .kv_cache_bytes_per_token(kv_cache_bytes_per_token)
+            .native_host_offload(parse_native_host_offload(native_host_offload)?)
             .kv_transfer_bandwidth(kv_transfer_bandwidth)
             .kv_transfer_timing_mode(kv_transfer_timing_mode)
             .reasoning(reasoning.map(|config| config.inner()))
@@ -518,6 +535,16 @@ impl MockEngineArgs {
     #[getter]
     fn kv_bytes_per_token(&self) -> Option<usize> {
         self.inner.kv_bytes_per_token
+    }
+
+    #[getter]
+    fn kv_cache_bytes_per_token(&self) -> Option<usize> {
+        self.inner.kv_cache_bytes_per_token
+    }
+
+    #[getter]
+    fn native_host_offload<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        pythonize(py, &self.inner.native_host_offload).map_err(to_pyerr)
     }
 
     #[getter]
@@ -765,6 +792,31 @@ impl MockEngineArgs {
     }
 }
 
+/// KV event lag is an offline KV-router replay knob; `None` means synchronous updates.
+fn validate_kv_event_lag_ms(
+    lag_ms: Option<f64>,
+    replay_mode: &str,
+    router_mode: &str,
+) -> PyResult<f64> {
+    let lag_ms = lag_ms.unwrap_or(0.0);
+    if !lag_ms.is_finite() || lag_ms < 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "kv_event_lag_ms must be finite and non-negative, got {lag_ms}"
+        )));
+    }
+    if lag_ms > 0.0 && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "kv_event_lag_ms only supports replay_mode='offline'",
+        ));
+    }
+    if lag_ms > 0.0 && router_mode != "kv_router" {
+        return Err(PyValueError::new_err(
+            "kv_event_lag_ms only supports router_mode='kv_router'",
+        ));
+    }
+    Ok(lag_ms)
+}
+
 fn replay_canonical_path(path: &Path) -> Option<PathBuf> {
     path.canonicalize().ok().or_else(|| {
         let file_name = path.file_name()?;
@@ -810,7 +862,7 @@ fn replay_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -847,7 +899,9 @@ pub fn run_mocker_trace_replay(
     telemetry_sample_interval_ms: f64,
     telemetry_callback: Option<Py<PyAny>>,
     telemetry_jsonl_path: Option<PathBuf>,
+    kv_event_lag_ms: Option<f64>,
 ) -> PyResult<PyObject> {
+    let kv_event_lag_ms = validate_kv_event_lag_ms(kv_event_lag_ms, replay_mode, router_mode)?;
     if telemetry_jsonl_path.as_deref().is_some_and(|path| {
         report_jsonl_path
             .as_deref()
@@ -1147,18 +1201,24 @@ pub fn run_mocker_trace_replay(
         .map(|report| (report, None))
     };
     let report_result = if let Some(callback) = scaling_policy {
-        run(
-            Some(Box::new(PyReplayScalingPolicy {
-                callback,
-                capture_lifecycle_evidence: capture_planner_details,
-                callback_error: scaling_callback_error
-                    .clone()
-                    .expect("scaling error slot exists with callback"),
-            })),
-            telemetry,
-        )
+        dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, || {
+            run(
+                Some(Box::new(PyReplayScalingPolicy {
+                    callback,
+                    capture_lifecycle_evidence: capture_planner_details,
+                    callback_error: scaling_callback_error
+                        .clone()
+                        .expect("scaling error slot exists with callback"),
+                })),
+                telemetry,
+            )
+        })
+        .and_then(|result| result)
     } else {
-        py.allow_threads(move || run(None, telemetry))
+        py.allow_threads(move || {
+            dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, || run(None, telemetry))
+                .and_then(|result| result)
+        })
     };
     // Always finish the sink so buffered I/O errors are observed even when the
     // replay failed. Preserve the replay/callback error as the primary error.
@@ -1396,7 +1456,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1433,7 +1493,9 @@ pub fn run_mocker_synthetic_trace_replay(
     telemetry_sample_interval_ms: f64,
     telemetry_callback: Option<Py<PyAny>>,
     telemetry_jsonl_path: Option<PathBuf>,
+    kv_event_lag_ms: Option<f64>,
 ) -> PyResult<PyObject> {
+    let kv_event_lag_ms = validate_kv_event_lag_ms(kv_event_lag_ms, replay_mode, router_mode)?;
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
@@ -1738,18 +1800,24 @@ pub fn run_mocker_synthetic_trace_replay(
         }
     };
     let report_result = if let Some(callback) = scaling_policy {
-        run(
-            Some(Box::new(PyReplayScalingPolicy {
-                callback,
-                capture_lifecycle_evidence: capture_planner_details,
-                callback_error: scaling_callback_error
-                    .clone()
-                    .expect("scaling error slot exists with callback"),
-            })),
-            telemetry,
-        )
+        dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, || {
+            run(
+                Some(Box::new(PyReplayScalingPolicy {
+                    callback,
+                    capture_lifecycle_evidence: capture_planner_details,
+                    callback_error: scaling_callback_error
+                        .clone()
+                        .expect("scaling error slot exists with callback"),
+                })),
+                telemetry,
+            )
+        })
+        .and_then(|result| result)
     } else {
-        py.allow_threads(move || run(None, telemetry))
+        py.allow_threads(move || {
+            dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, || run(None, telemetry))
+                .and_then(|result| result)
+        })
     };
     // Always finish the sink so buffered I/O errors are observed even when the
     // replay failed. Preserve the replay/callback error as the primary error.
