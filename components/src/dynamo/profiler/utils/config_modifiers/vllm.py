@@ -52,8 +52,8 @@ DEFAULT_VLLM_KV_TRANSFER_CONFIG = {
 def _get_valued_arg(args: list[str], key: str) -> str | None:
     value = None
     for i, arg in enumerate(args):
-        if arg == key and i + 1 < len(args):
-            value = args[i + 1]
+        if arg == key:
+            value = args[i + 1] if i + 1 < len(args) else None
         if isinstance(arg, str) and arg.startswith(f"{key}="):
             value = arg.split("=", 1)[1]
     return value

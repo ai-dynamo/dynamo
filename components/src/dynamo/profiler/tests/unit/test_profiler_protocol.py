@@ -130,8 +130,6 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
     [
         ["--http-port", "9000"],
         ["--http-port=9000"],
-        ["--http-port", "8000", "--http-port=9000"],
-        ["--http-port=8000", "--http-port", "9000"],
         ["--http-port", "8000", "--http-port", "9000"],
     ],
 )
@@ -146,7 +144,14 @@ def test_get_port_preserves_frontend_cli_port(backend: str, args: list[str]) -> 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 @pytest.mark.parametrize(
-    "args", [[], ["--http-port"], ["--http-port=invalid"], ["--http-port", "invalid"]]
+    "args",
+    [
+        [],
+        ["--http-port"],
+        ["--http-port", "9000", "--http-port"],
+        ["--http-port=invalid"],
+        ["--http-port", "invalid"],
+    ],
 )
 def test_get_port_defaults_when_port_is_unavailable(
     backend: str, args: list[str]
