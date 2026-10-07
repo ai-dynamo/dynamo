@@ -62,15 +62,16 @@ class LoRAManager:
         # Single unified Rust interface handles both downloading and caching
         cache_str = str(cache_path) if cache_path else None
         self._downloader = LoRADownloader(cache_str)
-        self._cache_root = (
-            cache_path
-            or Path(
-                os.environ.get(
-                    "DYN_LORA_PATH",
-                    Path.home() / ".cache" / "dynamo_loras",
-                )
+        if cache_path is not None:
+            self._cache_root = cache_path
+        elif "DYN_LORA_PATH" in os.environ:
+            self._cache_root = Path(os.environ["DYN_LORA_PATH"])
+        else:
+            self._cache_root = (
+                Path(os.environ.get("HOME", os.environ.get("USERPROFILE", "/tmp")))
+                / ".cache"
+                / "dynamo_loras"
             )
-        ).expanduser()
 
         # Extension point: custom sources
         self._custom_sources: dict[str, LoRASourceProtocol] = {}
@@ -90,7 +91,6 @@ class LoRAManager:
         self,
         resolver_chain: RuntimeLoRAResolverChain,
     ) -> None:
-        """Install the validated request-time resolver chain."""
         self._runtime_resolvers = resolver_chain
 
     @property
@@ -221,7 +221,6 @@ def _lora_enabled() -> bool:
 
 
 def runtime_lora_enabled() -> bool:
-    """Return whether request-time LoRA resolution is enabled."""
     return env_bool("DYN_LORA_RUNTIME_LOAD_ENABLED")
 
 
