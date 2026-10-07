@@ -8,7 +8,6 @@ package lpx
 import (
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -95,16 +94,14 @@ func RenderNodeLocal(
 	if err != nil {
 		return nil, err
 	}
-	v2HybridRuntime := projections[0].configuredBuild.Family == BuildFamilyXT &&
-		projections[0].pipeline == PipelineLPX
-
-	// Render the optional Cyborg config and construct final resource order once.
+	// Every hybrid Cyborg reads its remote Agent addresses, independently of the
+	// LPU family. Render the optional Cyborg config and construct final resource order once.
 	var (
 		cyborgConfigMap  *corev1.ConfigMap
 		cyborgConfigHash string
 		extraResources   []client.Object
 	)
-	if v2HybridRuntime {
+	if hybrid {
 		cyborgConfigMap, cyborgConfigHash, err = workload.renderCyborgConfigMap(plan)
 		if err != nil {
 			return nil, err
@@ -220,14 +217,6 @@ func RenderNodeLocal(
 			return nil, err
 		}
 
-		// Bind the authored HX Cyborg configuration mount to the generated ConfigMap.
-		container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
-		if cyborgConfigMap == nil && slices.ContainsFunc(container.VolumeMounts,
-			func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName }) {
-			if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, configMap.Name, true); err != nil {
-				return nil, err
-			}
-		}
 		if err := configureHybridCyborg(
 			cyborg,
 			projections[0],

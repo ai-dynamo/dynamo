@@ -93,11 +93,11 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
   <Indent>
     <ParamField path="localPartitions" type="LPXLocalPartitions">
-      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. LPU-only, speculative, and HX builds reject this field.
+      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. Hybrid XT (LP20) and HX (LP30) builds support this field. LPU-only and speculative builds reject it.
 
-      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the conductor's `lpu_servers` and the Agents' partition configuration. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
+      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the Agents' partition configuration and, for XT builds, the conductor's `lpu_servers`. For HX builds, the request's allocation metadata also lists only the remaining partitions. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
 
-      `ids` lists compiler partition IDs of the build's runtime partitions. A selected prop-sync chain is one runtime partition: select its first partition, which keeps the whole chain on the GPU. Unknown IDs and non-first chain members are rejected during reconciliation. Changing the selection changes the workload digest and rolls the workload.
+      `ids` lists compiler partition IDs of the build's runtime partitions. A selected prop-sync chain is one runtime partition: select its first partition, which keeps the whole chain on the GPU. Unknown IDs and non-first chain members are rejected during reconciliation. Because a chain moves as a unit, a local selection never splits a chain. The operator keeps a prop-sync connector only when both of its partitions remain on LPUs, and renumbers it to their positions among the remaining partitions. Changing the selection changes the workload digest and rolls the workload.
     </ParamField>
   </Indent>
 </Indent>
@@ -196,6 +196,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 <ParamField path="frontendSidecar" type="string">
   Designates a container in each selected complete Pod template as the frontend sidecar. The value must match a container `name` in the component template or every role template; the operator merges its frontend-sidecar defaults (Dynamo env vars, ports, health probes) into that container the same way it merges into `main`.
+
+  Strict namespace-prefix matching uses the sidecar's own image version, independently of the component's runtime container and `runtimeVersionOverride`. If the sidecar image tag does not identify the runtime version, set `DYN_NAMESPACE_PREFIX_STRICT=true` in that container's `env` when its image contains the strict-prefix implementation.
 </ParamField>
 
 <ParamField path="compilationCache" type="CompilationCacheConfig">
@@ -210,6 +212,14 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Overrides the backend-specific default mount path. When empty, the operator selects a default appropriate for the backend framework.
   </ParamField>
 </Indent>
+
+<Warning>
+  Cached artifacts (for example vLLM's `torch.compile`/CUDA graph cache) are specific to the
+  backend, torch, and CUDA versions that produced them. After upgrading to a new Dynamo release —
+  or any change to the underlying backend image — clear the PVC's contents before redeploying.
+  Stale entries from an older build have caused worker crashes at startup (for example an NVML
+  assertion failure during CUDA graph capture) that disappear once the cache is emptied.
+</Warning>
 
 <ParamField path="eppConfig" type="EPPConfig" deprecated={true}>
   Deprecated: omit `eppConfig` and use the native Rust EPP, which is configured through environment variables and takes no config file. Presence of this field selects the legacy Go EPP pod contract, so existing deployments keep running across an operator upgrade until you clear it.
@@ -393,6 +403,8 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
   </ParamField>
   <ParamField path="targetContainerName" type="string" default="main">
     The workload container to snapshot and restore. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+
+    Automatic captures run this container under Snapshot's cuInterpose launcher, so it must set `command`. The `main` container always has one, because the operator defaults it to `/bin/sh -c`. To opt out, set the pod template annotation `nvidia.com/cuda-shared-memory-support: disabled`. Multi-GPU captures can then fail when NCCL uses cuMem or NVLS memory.
   </ParamField>
   <ParamField path="job" type="ComponentCheckpointJobConfig">
     Customizes the DGD-managed `SnapshotJob` capture Pod.

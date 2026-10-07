@@ -4,6 +4,8 @@
 //! Publication of neutral generalized-engine effects through Dynamo sinks.
 
 use super::*;
+use aisimulate_core::engine::PassStartEffects;
+use dynamo_kv_router::protocols::StorageTier;
 
 #[derive(Clone)]
 pub(super) struct RankDispatch {
@@ -83,6 +85,9 @@ pub(super) async fn run_effect_dispatcher(
                     dispatch.publish_admissions(rank.effects.admissions).await?;
                     dispatch.publish_kv(rank.effects.kv_events);
                 }
+            }
+            GroupedLiveEvent::InternalWorkCompleted(effects) => {
+                publish_internal_work(effects, &ranks).await?;
             }
             GroupedLiveEvent::PassCompleted {
                 completed,
@@ -169,7 +174,7 @@ async fn dispatch_pass_completion(
         }
 
         for (dp_rank, request_id) in delivery_failures {
-            let command_result = boundary
+            let outcome = boundary
                 .apply_command(EngineSchedulerCommand::new(
                     dp_rank,
                     Command::CancelRequest {
@@ -181,7 +186,11 @@ async fn dispatch_pass_completion(
             // The output transport no longer owns this request regardless of
             // whether the engine had already retired it.
             compatibility.apply_cleanup(Cleanup::Request(request_id));
-            let effects = command_result?;
+            let outcome = outcome?;
+            for effects in outcome.internal {
+                publish_internal_work(effects, ranks).await?;
+            }
+            let effects = outcome.command?;
             merge_boundary_command_effects(effects, ranks, compatibility, &mut publications)?;
         }
 
@@ -209,6 +218,18 @@ async fn dispatch_pass_completion(
         Ok(CompletionDispatch::Cancelled) => Ok(()),
         Ok(CompletionDispatch::Completed) => finish_result,
     }
+}
+
+async fn publish_internal_work(
+    effects: EngineEffects<PassStartEffects>,
+    ranks: &[RankDispatch],
+) -> Result<()> {
+    for rank in effects.by_rank {
+        let dispatch = rank_dispatch(ranks, rank.dp_rank)?;
+        dispatch.publish_admissions(rank.effects.admissions).await?;
+        dispatch.publish_kv(rank.effects.kv_events);
+    }
+    Ok(())
 }
 
 async fn finish_boundary_or_cancel<F>(finish: F, cancel: &CancellationToken) -> Result<()>
@@ -452,17 +473,23 @@ impl RankDispatch {
                 );
                 continue;
             }
+            let storage_tier = dynamo_storage_tier(event.tier);
             let (event, block_token_ids) = dynamo_kv_event(event);
             raw_events.push(RawKvEvent {
                 event,
                 block_token_ids,
-                storage_tier: StorageTier::Device,
+                storage_tier,
             });
         }
         let normal_events = raw_events
             .iter()
             .map(|event| (event.event.clone(), event.storage_tier))
             .collect();
+        // The vLLM wire format needs each block's token IDs, which AISimulate
+        // does not carry for G2 residency; those events use only the event sink.
+        raw_events.retain(|event| {
+            event.storage_tier == StorageTier::Device || event.block_token_ids.is_some()
+        });
         if let Err(error) = self
             .kv_event_publishers
             .publish_event_sink_batch_only(normal_events)
