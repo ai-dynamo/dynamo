@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this form to request a fix on a release branch after code freeze. Get the fix merged to `main` first. The maintainer who merged your PR opens the release PR.
+        Use this form to request a fix on a release branch after code freeze. Get the fix merged to `main` first. Release-only fixes skip this step. The maintainer who merged your PR opens the release PR.
 
         In the title, replace `X.Y.Z` with the target release, for example `[release/1.6.0]`.
 
@@ -23,7 +23,7 @@ body:
     id: target-release
     attributes:
       label: Target Release
-      description: Defaults to the release in code freeze.
+      description: The release this fix ships in, for example 1.6.0.
       placeholder: "1.6.0"
     validations:
       required: true
