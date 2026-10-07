@@ -18,8 +18,8 @@ import numpy as np
 
 from dynamo._core import Context
 
-from .connection import RealtimeConnection, RealtimeTurn
-from .events import (
+from ..connection import RealtimeConnection, RealtimeTurn
+from ..events import (
     input_audio_buffer_cleared_event,
     input_audio_buffer_committed_event,
     input_audio_transcription_completed_event,
@@ -28,7 +28,7 @@ from .events import (
     invalid_request_error_event,
     session_updated_event,
 )
-from .factories import StreamingInputFactory, build_realtime_serving
+from ..factories import StreamingInputFactory, build_realtime_serving
 
 logger = logging.getLogger(__name__)
 

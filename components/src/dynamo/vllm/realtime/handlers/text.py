@@ -14,8 +14,8 @@ from typing import Any
 
 from dynamo._core import Context
 
-from .connection import RealtimeConnection, RealtimeTurn
-from .events import (
+from ..connection import RealtimeConnection, RealtimeTurn
+from ..events import (
     conversation_item_added_event,
     conversation_item_done_event,
     invalid_request_error_event,
@@ -27,7 +27,7 @@ from .events import (
     response_output_text_event,
     session_updated_event,
 )
-from .factories import (
+from ..factories import (
     ChatCompletionFactory,
     TextPrefillFactory,
     build_realtime_text_factories,

@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from dynamo._core import Context
 
-from .events import invalid_request_error_event
+from ..events import invalid_request_error_event
 
 
 class RealtimeSessionHandler(Protocol):

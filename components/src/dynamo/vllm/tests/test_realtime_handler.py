@@ -15,8 +15,8 @@ from dynamo.vllm.realtime import (
     RealtimeTextHandler,
     RealtimeTranscriptionHandler,
 )
-from dynamo.vllm.realtime.text_handler import _TextPrefill, _TextTurn
-from dynamo.vllm.realtime.text_utils import _text_prompt
+from dynamo.vllm.realtime.handlers.text import _TextPrefill, _TextTurn
+from dynamo.vllm.realtime.handlers.text_utils import _text_prompt
 
 pytestmark = [
     pytest.mark.unit,
@@ -321,7 +321,7 @@ def test_text_session_streams_canonical_response_and_preserves_usage():
 @pytest.mark.parametrize("overflow", [False, True])
 def test_text_commit_cancels_warming_before_final_generation(monkeypatch, overflow):
     monkeypatch.setattr(
-        "dynamo.vllm.realtime.text_handler.MAX_TEXT_BUFFER_BYTES", len("Hello world")
+        "dynamo.vllm.realtime.handlers.text.MAX_TEXT_BUFFER_BYTES", len("Hello world")
     )
     updates_seen = []
     prefill_messages = []
@@ -531,7 +531,7 @@ def test_text_prefill_failure_does_not_fail_final_generation():
 
 @pytest.mark.parametrize("prefill_fails", [False, True])
 def test_text_buffer_coalesces_updates_and_limits_bytes(monkeypatch, prefill_fails):
-    monkeypatch.setattr("dynamo.vllm.realtime.text_handler.MAX_TEXT_BUFFER_BYTES", 8)
+    monkeypatch.setattr("dynamo.vllm.realtime.handlers.text.MAX_TEXT_BUFFER_BYTES", 8)
 
     async def scenario():
         seen = asyncio.Event()
@@ -600,7 +600,7 @@ def test_text_buffer_must_be_committed_before_response():
     ],
 )
 def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message):
-    monkeypatch.setattr("dynamo.vllm.realtime.text_handler.MAX_TEXT_BUFFER_BYTES", 8)
+    monkeypatch.setattr("dynamo.vllm.realtime.handlers.text.MAX_TEXT_BUFFER_BYTES", 8)
 
     async def chat_completion(messages, max_output_tokens):
         assert messages == [
@@ -1409,7 +1409,7 @@ def test_from_engine_rejects_unsupported_model_at_startup(monkeypatch):
     pytest.importorskip("vllm.model_executor.models.interfaces")
     serving = SimpleNamespace(model_cls=SimpleNamespace(supports_realtime=False))
     monkeypatch.setattr(
-        "dynamo.vllm.realtime.transcription_handler.build_realtime_serving",
+        "dynamo.vllm.realtime.handlers.transcription.build_realtime_serving",
         lambda **_: serving,
     )
 
