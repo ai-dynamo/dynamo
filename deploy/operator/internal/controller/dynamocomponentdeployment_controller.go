@@ -146,6 +146,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	compatibilityErrors := checkpoint.ValidateCheckpointCompatibility(dynamoComponentDeployment.Spec.Experimental)
 	if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(
 		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec, field.NewPath("spec"),
+		dynamoComponentDeployment.Spec.BackendFramework,
 	).ToAggregate(); snapshotFailoverErr != nil {
 		compatibilityErrors = append(compatibilityErrors, snapshotFailoverErr)
 	}

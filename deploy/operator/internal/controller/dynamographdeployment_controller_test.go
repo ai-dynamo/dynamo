@@ -95,9 +95,11 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 			Generation: 7,
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "prefill",
+					ComponentType: v1beta1.ComponentTypeWorker,
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
@@ -106,6 +108,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 				},
 				{
 					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeWorker,
 					Experimental: &v1beta1.ExperimentalSpec{
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
 						Failover:   &v1beta1.FailoverSpec{},

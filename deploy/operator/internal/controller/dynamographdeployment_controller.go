@@ -164,7 +164,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	var compatibilityErrs []error
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
-		if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(component, field.NewPath("spec", "components").Index(i)).ToAggregate(); snapshotFailoverErr != nil {
+		if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(component, field.NewPath("spec", "components").Index(i), dynamoDeployment.Spec.BackendFramework).ToAggregate(); snapshotFailoverErr != nil {
 			compatibilityErrs = append(compatibilityErrs, snapshotFailoverErr)
 		}
 		for _, compatibilityErr := range checkpoint.ValidateCheckpointCompatibility(component.Experimental) {

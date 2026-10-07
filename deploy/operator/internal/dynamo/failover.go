@@ -425,7 +425,7 @@ const (
 
 // ValidateSnapshotFailover checks the requirements for snapshot-backed intra-pod
 // failover. component and fldPath must not be nil.
-func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) field.ErrorList {
+func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string) field.ErrorList {
 	config := GetCheckpoint(component)
 
 	// Apply these checks only to snapshot-backed intra-pod failover.
@@ -434,6 +434,15 @@ func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentShared
 	}
 
 	var allErrs field.ErrorList
+
+	// Resolve the backend exactly as rendering does, including command inference.
+	// TRT-LLM snapshot failover is not supported yet; reject it at admission.
+	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework)
+	if err != nil {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend"))
+	} else if !snapshotFailoverBackendSupported(backendFramework) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), fmt.Sprintf("Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: %s)", backendFramework)))
+	}
 
 	// Require a single node setup.
 	if component.GetNumberOfNodes() != 1 {
@@ -451,6 +460,10 @@ func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentShared
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "startupPolicy"), "Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"))
 	}
 	return allErrs
+}
+
+func snapshotFailoverBackendSupported(backendFramework BackendFramework) bool {
+	return backendFramework == BackendFrameworkVLLM || backendFramework == BackendFrameworkSGLang
 }
 
 // IsIntraPodFailoverEnabled is true only when failover clones engine
