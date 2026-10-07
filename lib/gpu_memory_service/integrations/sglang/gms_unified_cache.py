@@ -34,6 +34,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Live prefixes are confirmed (daemon ack plus TP vote) in batches: after this
+# many output calls since the oldest unconfirmed publication, or once this many
+# publications are pending. Both count lockstep output calls, so every rank
+# votes at the same point.
+_LIVE_CONFIRM_CALLS = 64
+_LIVE_CONFIRM_BATCH = 32
+# A newly sealed live prefix is published after this many output calls, so
+# requests that finish sooner are published only by their finalization.
+_LIVE_PUBLISH_DELAY_CALLS = 16
+
 _publication_gate_installed = False
 _original_process_batch_result = None
 _original_stream_output = None
@@ -242,6 +252,10 @@ def make_gms_unified_cache_class():
             self._gms_fresh_insert = None
             self._gms_publication_batch_depth = 0
             self._gms_pending_publications = []
+            # Live publications awaiting TP confirmation, and the output-call
+            # counter that schedules it identically on every rank.
+            self._gms_live_unconfirmed = []
+            self._gms_live_calls = 0
             self._gms_local_pages_by_hash: dict[bytes, int] = {}
             self._gms_local_hashes_by_page: dict[int, set[bytes]] = {}
             self._gms_retained_order: dict[int, None] = {}
@@ -983,6 +997,8 @@ def make_gms_unified_cache_class():
             self._gms_recovery_candidates.clear()
             self._gms_pending_publications.clear()
             self._gms_publication_batch_depth = 0
+            self._gms_live_unconfirmed = []
+            self._gms_live_calls = 0
             self._gms_local_pages_by_hash.clear()
             self._gms_local_hashes_by_page.clear()
             self._gms_retained_order.clear()
@@ -1107,9 +1123,30 @@ def make_gms_unified_cache_class():
             return super()._evict_device_leaf(node_id, tracker)
 
         def _gms_publish_live_prefixes(self, reqs) -> None:
-            """Commit a TP-wide full-page prefix before clients see its tokens."""
+            """Publish full-page live prefixes and confirm them one output later.
+
+            Every TP rank calls this from the output streamer with the same
+            requests. A prefix counts as published only after the daemon has
+            acknowledged it and every rank has voted on the same identity.
+            Waiting for both before releasing tokens put a daemon round trip
+            and a cross-rank barrier (1.5-2 ms) on the output path whenever a
+            request crossed a page. Confirming pending publications together a
+            few output calls later keeps the rule, overlaps the acknowledgement
+            with decode steps, and pays one barrier per batch. A new page is
+            also published only after it has been live for a few outputs; a
+            request that finishes first is published by its finalization. A
+            crash before confirmation only means the replay recomputes those
+            pages.
+            """
             if not self._gms_steady_state or not self._gms_directory.authoritative:
                 return
+            self._gms_live_calls += 1
+            unconfirmed = self._gms_live_unconfirmed
+            if unconfirmed and (
+                self._gms_live_calls - unconfirmed[0][3] >= _LIVE_CONFIRM_CALLS
+                or len(unconfirmed) >= _LIVE_CONFIRM_BATCH
+            ):
+                self._gms_confirm_live_prefixes()
             page_size = int(self.page_size)
             pending_ack = []
             for req in reqs:
@@ -1118,8 +1155,22 @@ def make_gms_unified_cache_class():
                     continue
                 committed = int(getattr(req.kv, "kv_committed_len", 0))
                 sealed_len = committed // page_size * page_size
-                if sealed_len <= int(getattr(req, "_gms_published_kv_len", 0)):
+                if sealed_len <= max(
+                    int(getattr(req, "_gms_published_kv_len", 0)),
+                    int(getattr(req, "_gms_live_pending_len", 0)),
+                ):
                     continue
+                # Publish a newly sealed prefix only once it has been live for
+                # a few outputs: a request that finishes first is published by
+                # its finalization instead, so short requests skip this work.
+                due = getattr(req, "_gms_live_due_call", None)
+                if due is None:
+                    req._gms_live_due_call = self._gms_live_calls
+                    if _LIVE_PUBLISH_DELAY_CALLS > 0:
+                        continue
+                elif self._gms_live_calls - due < _LIVE_PUBLISH_DELAY_CALLS:
+                    continue
+                req._gms_live_due_call = None
                 pending_ack.append((req, sealed_len))
             if not pending_ack:
                 return
@@ -1130,7 +1181,8 @@ def make_gms_unified_cache_class():
                 identity.update(b"\0")
                 identity.update(sealed_len.to_bytes(8, "little"))
 
-            def commit_local_pages() -> None:
+            error = None
+            try:
                 for req, sealed_len in pending_ack:
                     pages = getattr(req, "_gms_kv_page_ids", None)
                     expected_pages = sealed_len // page_size
@@ -1152,21 +1204,48 @@ def make_gms_unified_cache_class():
                         cache_salt=req.cache_salt,
                     ).page_aligned(page_size)
                     self._publish_finished_prefix(key, request_pages=pages)
+                self._gms_flush_publications()
+            except Exception as exc:  # noqa: BLE001
+                # Report through the confirmation vote so every rank stops
+                # together instead of one rank leaving its peers in a vote.
+                error = exc
+            for req, sealed_len in pending_ack:
+                req._gms_live_pending_len = sealed_len
+            self._gms_live_unconfirmed.append(
+                (identity.digest(), pending_ack, error, self._gms_live_calls)
+            )
+
+        def _gms_confirm_live_prefixes(self) -> None:
+            """Agree all pending live publications after their daemon acks."""
+            unconfirmed = self._gms_live_unconfirmed
+            if not unconfirmed:
+                return
+            self._gms_live_unconfirmed = []
+            combined = sha256()
+            pending_ack = []
+            error = None
+            for digest, publication, publication_error, _call in unconfirmed:
+                combined.update(digest)
+                pending_ack.extend(publication)
+                error = error or publication_error
+            digest = combined.digest()
+
+            def acknowledge() -> None:
+                if error is not None:
+                    raise error
                 # The stream hook runs on every TP rank, but rank 0 may reach
                 # client output before a peer reaches this point. Only a
                 # daemon ACK *and* the following TP vote make the prefix
                 # common; neither a userspace enqueue nor a local ACK does.
-                self._gms_flush_publications()
                 if not self._gms_directory.flush_deferred(timeout=2.0):
                     raise RuntimeError(
                         "timed out acknowledging live SGLang HBM publication"
                     )
 
-            self._gms_tp.transact_digest(
-                "live:ack", identity.digest(), commit_local_pages
-            )
+            self._gms_tp.transact_digest("live:ack", digest, acknowledge)
             for req, sealed_len in pending_ack:
-                req._gms_published_kv_len = sealed_len
+                if sealed_len > int(getattr(req, "_gms_published_kv_len", 0)):
+                    req._gms_published_kv_len = sealed_len
 
         def _gms_checkpoint_finished(self, req, *, up_to: int, **kwargs) -> None:
             self._gms_finished_insert = None
