@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, closing, nullcontext
+from contextlib import AsyncExitStack, asynccontextmanager, closing, nullcontext
 from typing import (
     Any,
     AsyncIterator,
@@ -132,6 +132,7 @@ from .multimodal_utils.request_processor import (
     MultimodalTransferError,
     VllmMultimodalRequestProcessor,
 )
+from .runtime_lora import RuntimeLoRACoordinator
 from .state_agent import state_agent_settings
 
 configure_dynamo_logging()
@@ -1323,7 +1324,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             config.artifact_router_profile
         )
         self._lora_state = LoRAState()
-        self._lora_capacity: int | None = None
+        self._runtime_lora_coordinator = RuntimeLoRACoordinator(self)
+        runtime_lora_settings = self._runtime_lora_coordinator.settings
+        self._lora_capacity = (
+            runtime_lora_settings.max_registered_loras
+            if runtime_lora_settings is not None
+            else None
+        )
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
         # inference request supplies its LoRARequest.
@@ -2605,6 +2612,53 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_enabled=self._lora_enabled,
         )
 
+    async def _resolve_or_ensure_lora_request(
+        self,
+        request: Mapping[str, Any],
+        request_id: str,
+    ) -> tuple[LoRARequest | None, bool]:
+        """Resolve explicit adapters or load a request-time adapter fail-closed."""
+        coordinator = getattr(self, "_runtime_lora_coordinator", None)
+        if coordinator is not None:
+            runtime_request = await coordinator.ensure_from_request(request, request_id)
+            if runtime_request is not None:
+                return runtime_request, True
+
+        routing = request.get("routing")
+        routed_lora_name = (
+            routing.get("lora_name") if isinstance(routing, Mapping) else None
+        )
+        return (
+            self._resolve_lora_request(routed_lora_name or request.get("model")),
+            False,
+        )
+
+    async def _prepare_lora_admission(
+        self,
+        request: Mapping[str, Any],
+        request_id: str,
+    ) -> tuple[AsyncExitStack, LoRARequest | None, bool]:
+        """Resolve a LoRA while already owning pending-admission cleanup."""
+        admission_stack = AsyncExitStack()
+        coordinator = getattr(self, "_runtime_lora_coordinator", None)
+        if coordinator is None or not coordinator.enabled:
+            lora_request, runtime_lora = await self._resolve_or_ensure_lora_request(
+                request, request_id
+            )
+            return admission_stack, lora_request, runtime_lora
+
+        await admission_stack.enter_async_context(
+            coordinator.pending_admission_guard(request_id)
+        )
+        try:
+            lora_request, runtime_lora = await self._resolve_or_ensure_lora_request(
+                request, request_id
+            )
+        except BaseException:
+            await admission_stack.aclose()
+            raise
+        return admission_stack, lora_request, runtime_lora
+
     def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
         """Record adapters handed to vLLM for request-time lazy activation."""
         if lora_request is not None:
@@ -2864,13 +2918,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self,
         lora_request: LoRARequest | None,
         create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
+        *,
+        request_id: str | None = None,
+        runtime_lora: bool = False,
     ) -> AsyncIterator[Any]:
         """Yield results after atomically admitting a LoRA request.
 
-        vLLM admits an ``AsyncLLM.generate`` request on its first iteration.
-        Holding the adapter lifecycle lock through that iteration prevents an
-        unload from removing lazy or preloaded adapter state before admission.
+        Admission is synchronized with pause and adapter mutations. Request
+        tracking and runtime leases protect the adapter until its engine
+        generator has closed.
         """
+        if runtime_lora and lora_request is None:
+            raise RuntimeError("runtime LoRA admission requires a LoRA request")
         if lora_request is None:
             async for result in create_generator(lora_request):
                 yield result
@@ -2883,9 +2942,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"Cannot admit LoRA request '{lora_request.lora_name}' while "
                     "generation is paused"
                 )
-            # The adapter may have been unloaded or reloaded at a different path
-            # while this request waited. Look it up again while holding the lock.
-            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
+            if runtime_lora:
+                if request_id is None:
+                    raise RuntimeError("runtime LoRA admission requires a request ID")
+                admitted_lora_request = (
+                    await self._runtime_lora_coordinator.activate_pending_admission(
+                        request_id, lora_request
+                    )
+                )
+            else:
+                # Reload the adapter metadata after waiting for lifecycle changes.
+                admitted_lora_request = self._resolve_lora_request(
+                    lora_request.lora_name
+                )
             if admitted_lora_request is None:
                 logger.warning(
                     "LoRA adapter %s was unloaded before vLLM admission; "
@@ -2916,6 +2985,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         await close()
                 finally:
                     self._lora_state.end_request(admitted_lora_request.lora_name)
+                    if runtime_lora:
+                        await self._runtime_lora_coordinator.release_active_admission(
+                            admitted_lora_request.lora_name
+                        )
 
             release_cancelled, _released, release_error = await run_lora_mutation(
                 finish_admission()
@@ -3208,6 +3281,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.error(f"Failed to list LoRA adapters: {e}")
             yield {"status": "error", "message": str(e)}
 
+    async def aclose(self) -> None:
+        """Drain asynchronous resources owned by this handler."""
+        coordinator = getattr(self, "_runtime_lora_coordinator", None)
+        if coordinator is not None:
+            await coordinator.close()
+
     def cleanup(self):
         """Clean up resources including temporary directories."""
         if self._ep_capacity_executor is not None:
@@ -3472,6 +3551,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         request_id,
         data_parallel_rank=None,
         lora_request=None,
+        runtime_lora=False,
         trace_headers=None,
         priority=0,
         reasoning_ended=None,
@@ -3508,6 +3588,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         reasoning_parser_kwargs,
                     ),
                 ),
+                request_id=request_id,
+                runtime_lora=runtime_lora,
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
@@ -4090,17 +4172,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
 
-        # Extract LoRA request if present
-        model_name = request.get("model")
-        lora_request = self._resolve_lora_request(model_name)
-        if lora_request:
-            logger.info(
-                f"Decode request {request_id} will use LoRA adapter: {model_name} (ID: {lora_request.lora_int_id})"
-            )
-        else:
-            logger.debug(
-                f"Decode request {request_id} has no LoRA specified (model: {model_name})"
-            )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = (
@@ -4223,13 +4294,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         with (
             closing(artifact_session) if artifact_session is not None else nullcontext()
         ):
-            async with _deferred_abort_guard(
-                self.engine_client,
-                request_id,
-                is_decode_only,
-                self._deferred_aborts,
-                self._shutdown_on_engine_dead,
-            ) as abort_guard:
+            (
+                admission_stack,
+                lora_request,
+                runtime_lora,
+            ) = await self._prepare_lora_admission(request, request_id)
+            async with (
+                admission_stack,
+                _deferred_abort_guard(
+                    self.engine_client,
+                    request_id,
+                    is_decode_only,
+                    self._deferred_aborts,
+                    self._shutdown_on_engine_dead,
+                ) as abort_guard,
+            ):
                 async with self._abort_monitor(
                     context, request_id, abort_guard=abort_guard
                 ):
@@ -4259,6 +4338,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             request_id,
                             data_parallel_rank=dp_rank,
                             lora_request=lora_request,
+                            runtime_lora=runtime_lora,
                             trace_headers=trace_headers,
                             priority=priority,
                             reasoning_ended=reasoning_ended,
@@ -4587,19 +4667,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         kv_protocol = self._prefill_kv_protocol(is_local_probe, sampling_params)
 
-        # Extract LoRA request if present
-        model_name = request.get("model")
-        lora_request = self._resolve_lora_request(model_name)
-        if lora_request:
-            logger.info(
-                f"Prefill request {request_id} will use LoRA adapter: {model_name} "
-                f"(ID: {lora_request.lora_int_id}), path: {lora_request.lora_path}"
-            )
-        else:
-            logger.debug(
-                f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
-            )
-
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
@@ -4609,7 +4676,29 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         session_id = session_id_from_request(request)
         kv_hints = _build_vllm_kv_hints(request)
 
-        async with self._abort_monitor(context, request_id, is_prefill=True):
+        # Establish cleanup ownership before resolution can record a pending lease.
+        model_name = request.get("model")
+        (
+            admission_stack,
+            lora_request,
+            runtime_lora,
+        ) = await self._prepare_lora_admission(request, request_id)
+
+        async with (
+            admission_stack,
+            self._abort_monitor(context, request_id, is_prefill=True),
+        ):
+            if lora_request:
+                logger.info(
+                    "Prefill request %s will use LoRA adapter %s (ID: %s)",
+                    request_id,
+                    lora_request.lora_name,
+                    lora_request.lora_int_id,
+                )
+            else:
+                logger.debug(
+                    f"Prefill request {request_id} has no LoRA specified (model: {model_name})"
+                )
             try:
                 gen = self._generate_with_lora_admission_lock(
                     lora_request,
@@ -4629,6 +4718,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             reasoning_parser_kwargs,
                         ),
                     ),
+                    request_id=request_id,
+                    runtime_lora=runtime_lora,
                 )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
