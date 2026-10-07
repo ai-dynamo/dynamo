@@ -153,10 +153,17 @@ class AiohttpClient(HttpClient):
         give only that fetch the connector that resolves the proxy unfiltered.
         """
         try:
+            target = URL(url)
+        except ValueError:
+            # No proxy carries a URL that does not parse. aiohttp refuses it
+            # before it picks a proxy, and the fetch reports that refusal as
+            # HttpConnectionError.
+            return False
+        try:
             # aiohttp runs this same helper through asyncio.to_thread because
             # it does proxy-bypass discovery and .netrc file reads. Match that
             # rather than repeating the blocking work on the event loop.
-            await asyncio.to_thread(get_env_proxy_for_url, URL(url))
+            await asyncio.to_thread(get_env_proxy_for_url, target)
         except LookupError:
             # No proxy for this URL, so aiohttp dials the origin and the
             # connect-time check governs it.

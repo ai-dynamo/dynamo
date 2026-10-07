@@ -342,3 +342,24 @@ async def test_a_redirect_in_the_uri_header_is_followed() -> None:
             await client.close()
     assert body == _BODY
     assert len(server.first_lines) == 2
+
+
+@pytest.mark.parametrize(
+    "trusted_proxy", [True, False], ids=["trusted-proxy", "no-proxy"]
+)
+async def test_a_url_that_does_not_parse_is_a_connection_error(
+    monkeypatch, trusted_proxy
+) -> None:
+    """aiohttp refuses a URL that it cannot parse, and the fetch reports
+    HttpConnectionError. The proxy lookup that runs first must not raise the
+    parse error itself, with or without the trusted-proxy opt-in."""
+    if trusted_proxy:
+        monkeypatch.setenv("DYN_MM_TRUST_EGRESS_PROXY", "1")
+        _configure_proxy(monkeypatch, 3128)
+    client = AiohttpClient()
+    try:
+        with pytest.raises(HttpConnectionError) as excinfo:
+            await client.fetch_bytes("http://[::1", 5.0)
+    finally:
+        await client.close()
+    assert isinstance(excinfo.value.__cause__, aiohttp.InvalidUrlClientError)
