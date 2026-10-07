@@ -400,8 +400,7 @@ async def test_the_opt_in_allows_a_proxied_fetch(monkeypatch) -> None:
         monkeypatch.setenv(name, "http://proxy.internal:3128")
 
     client = AiohttpClient()
-    # An http URL, so the configured HTTP_PROXY applies: the gate returns, and
-    # reports that a proxy carries the fetch.
+    # An http URL, so that HTTP_PROXY applies.
     assert (
         await client._require_trusted_egress_proxy("http://example.com/x.png") is True
     )

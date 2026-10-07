@@ -142,9 +142,8 @@ async def _run_sweep(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    # The media server runs on localhost. The client refuses private addresses
-    # unless the deployment allows them, and a per-request policy cannot loosen
-    # that. Only here, not in _run_sweep: tests call that in a shared process.
+    # Here and not in _run_sweep, so that tests that call it do not change
+    # the environment of the shared test process.
     os.environ.setdefault("DYN_MM_ALLOW_INTERNAL", "1")
     return asyncio.run(_run_sweep(args))
 
