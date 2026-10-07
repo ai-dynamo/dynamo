@@ -332,6 +332,8 @@ navigation:
               - page: KV-Aware Routing
                 slug: system-architecture/kv-aware-routing
                 path: pages/developer-guide/knowledge-base/concepts/system-architecture/kv-aware-routing.md
+              - page: Rolling Update Architecture
+                path: pages/developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md
               - page: Observability Architecture
                 path: pages/developer-guide/knowledge-base/concepts/observability-architecture.md
               - section: Simulation
