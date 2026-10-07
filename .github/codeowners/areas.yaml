@@ -45,7 +45,6 @@ areas:
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
-  - components/src/dynamo/kv_dc_relay/
   - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/kv_state_agent/
   - components/src/dynamo/global_router/
@@ -69,6 +68,18 @@ areas:
   - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
   - examples/router/custom-policy-example/
+- label: global-router
+  github_team: '@ai-dynamo/dynamo-global-router-codeowners'
+  path_globs:
+  - components/src/dynamo/kv_dc_relay/
+  - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
+  - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
+  - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
+  - lib/bindings/python/rust/llm/kv_dc_relay.rs
+  - lib/llm/src/kv_dc_relay.rs
+  - lib/llm/src/kv_dc_relay/
+  - lib/llm/tests/fixtures/relay-sources-canonical.json
+  - tests/router/test_kv_dc_relay_e2e.py
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
@@ -1010,6 +1021,11 @@ shared:
   owners:
   - performance
   - router
+- glob: lib/bench/kv_router/dc_ckf_relay_bench.rs
+  owners:
+  - performance
+  - router
+  - global-router
 - glob: lib/kv-router/src/services/shared_cache/
   owners:
   - router
