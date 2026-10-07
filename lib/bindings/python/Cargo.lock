@@ -285,9 +285,9 @@ checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
 
 [[package]]
 name = "async-openai"
-version = "0.41.1"
+version = "0.42.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3007014661d5b98168b7b6f1014147bce8b1362a194783543eeb9f6117a20be9"
+checksum = "63077bf55857e6963effefb5f28134c40cc2ee68bc176cc601bbdeb070017fba"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -2347,9 +2347,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "9.0.0"
+version = "9.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e316d4d0f5082257f1629ca61973eafc17cee3e6ee0c24f7a55a61beeff40d97"
+checksum = "0ce378321729ac01507bbebbb66d38a3bf887a694d70d128c72176bcf3515ad6"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2358,6 +2358,7 @@ dependencies = [
  "futures",
  "num-traits",
  "openai-harmony",
+ "percent-encoding",
  "regex",
  "rustpython-ruff_python_ast",
  "rustpython-ruff_python_parser",
@@ -2387,9 +2388,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "6.1.0"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ef02e31ca224ca8db24b88a990b7db3eb2b99c77697b0d8ae44feaa32709e38"
+checksum = "45ca7eba9c7e08c01b523fa8dc3d2287a7dabe53b1f9249827d329a91ad8f925"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2450,9 +2451,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "6.0.0"
+version = "7.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc939c7664a55184c789a2878d0d1ac270f4df9844491c10cfe7958d90c81916"
+checksum = "dbca1e2025c60cbecc4c3e919d689d99e552787a7b63821b7a811d257349e820"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2607,9 +2608,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "2.0.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cac05c279739c1c192898450ff2445e2e65e0ab99d4682ab664072efb68e45cb"
+checksum = "6d4180e59a9b92dcf282428be874743895f3d93e7a70e75d6ceb98fb5c493a53"
 dependencies = [
  "aho-corasick",
  "anyhow",

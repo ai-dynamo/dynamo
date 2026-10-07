@@ -14,17 +14,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, ErrorObject, FunctionToolCall, IncompleteDetails, InputTokenDetails,
-    Instructions, OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    AssistantRole, FunctionToolCall, IncompleteDetails, InputTokenDetails, Instructions,
+    OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
     OutputTextContent, OutputTokenDetails, ReasoningItem, ReasoningItemContent,
     ReasoningTextContent, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseFailedEvent,
-    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
-    ResponseInProgressEvent, ResponseIncompleteEvent, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
-    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
-    ResponseUsage, ServiceTier, Status, TextResponseFormatConfiguration, ToolChoiceOptions,
-    ToolChoiceParam, Truncation,
+    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseError, ResponseErrorCode,
+    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
+    ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTierResponses as ServiceTier,
+    Status, TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use serde::{
     Serialize,
@@ -286,6 +286,7 @@ impl ResponseStreamConverter {
         events.push(self.make_sse_event(&item_done));
     }
 
+    #[allow(deprecated, reason = "Preserve prompt_cache_retention on the wire")]
     fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
         let completed_at = if status == Status::Completed {
             Some(
@@ -298,6 +299,9 @@ impl ResponseStreamConverter {
             None
         };
         Response {
+            prompt_cache_options: None,
+            prompt_cache_diagnostics: None,
+            moderation: None,
             id: self.response_id.clone(),
             object: "response".to_string(),
             created_at: self.created_at,
@@ -318,7 +322,7 @@ impl ResponseStreamConverter {
                 .params
                 .tool_choice
                 .clone()
-                .or(Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto))),
+                .or(Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto))),
             tools: Some(
                 self.params
                     .tools
@@ -346,7 +350,7 @@ impl ResponseStreamConverter {
             prompt_cache_retention: self.params.prompt_cache_retention,
             reasoning: self.params.reasoning.clone(),
             safety_identifier: self.params.safety_identifier.clone(),
-            service_tier: Some(self.params.service_tier.unwrap_or(ServiceTier::Auto)),
+            service_tier: Some(self.params.service_tier.clone().unwrap_or(ServiceTier::Auto)),
             top_logprobs: Some(0),
             usage: self.usage.clone(),
         }
@@ -400,6 +404,7 @@ impl ResponseStreamConverter {
             self.usage = Some(ResponseUsage {
                 input_tokens: u.prompt_tokens,
                 input_tokens_details: InputTokenDetails {
+                    cache_write_tokens: None,
                     cached_tokens: u
                         .prompt_tokens_details
                         .as_ref()
@@ -576,8 +581,9 @@ impl ResponseStreamConverter {
                         )
                     };
                     if let Some(name) = disallowed_name {
-                        let error = ErrorObject {
-                            code: "server_error".to_string(),
+                        let error = ResponseError {
+                            misalignment: None,
+                            code: ResponseErrorCode::ServerError,
                             message: format!(
                                 "Backend returned function '{name}' outside allowed_tools"
                             ),
@@ -632,6 +638,8 @@ impl ResponseStreamConverter {
                                 sequence_number: self.next_seq(),
                                 output_index,
                                 item: OutputItem::FunctionCall(FunctionToolCall {
+                                    caller: None,
+                                    r#async: None,
                                     id: Some(item_id),
                                     call_id,
                                     namespace,
@@ -756,6 +764,8 @@ impl ResponseStreamConverter {
                     sequence_number: self.next_seq(),
                     output_index,
                     item: OutputItem::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         id: Some(item_id),
                         call_id,
                         namespace,
@@ -849,6 +859,8 @@ impl ResponseStreamConverter {
                 output.push((
                     output_index,
                     OutputItem::FunctionCall(FunctionToolCall {
+                        caller: None,
+                        r#async: None,
                         id: Some(function_call.item_id.clone()),
                         call_id: function_call.call_id.clone(),
                         namespace: function_call.namespace.clone(),
@@ -947,7 +959,7 @@ impl ResponseStreamConverter {
     }
 
     /// Emit error events when the stream ends due to a backend error.
-    pub fn emit_error_events(&mut self, error: ErrorObject) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_error_events(&mut self, error: ResponseError) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
         let terminal_event = self.append_error_events(error, &mut events);
         events.push(terminal_event);
@@ -958,7 +970,7 @@ impl ResponseStreamConverter {
     /// `response.failed` event.
     pub fn append_error_events(
         &mut self,
-        error: ErrorObject,
+        error: ResponseError,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) -> Result<Event, anyhow::Error> {
         let output_status = OutputStatus::Incomplete;
@@ -1106,6 +1118,7 @@ struct ResponseForSpec<'a> {
 // Mirrors async-openai's `Response` serialization while writing Dynamo's
 // OpenResponses spec fields directly, avoiding a per-stream-event Value tree.
 impl Serialize for ResponseForSpec<'_> {
+    #[allow(deprecated, reason = "Preserve prompt_cache_retention on the wire")]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let response = self.response;
         let mut map = serializer.serialize_map(None)?;
@@ -1171,6 +1184,23 @@ where
 
 fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
     match event {
+        ResponseStreamEvent::ResponseAudioDelta(_) => "response.audio.delta",
+        ResponseStreamEvent::ResponseAudioDone(_) => "response.audio.done",
+        ResponseStreamEvent::ResponseAudioTranscriptDelta(_) => "response.audio.transcript.delta",
+        ResponseStreamEvent::ResponseAudioTranscriptDone(_) => "response.audio.transcript.done",
+        ResponseStreamEvent::ResponseShellCallCommandAdded(_) => {
+            "response.shell_call_command.added"
+        }
+        ResponseStreamEvent::ResponseShellCallCommandDelta(_) => {
+            "response.shell_call_command.delta"
+        }
+        ResponseStreamEvent::ResponseShellCallCommandDone(_) => "response.shell_call_command.done",
+        ResponseStreamEvent::ResponseShellCallOutputContentDelta(_) => {
+            "response.shell_call_output_content.delta"
+        }
+        ResponseStreamEvent::ResponseShellCallOutputContentDone(_) => {
+            "response.shell_call_output_content.done"
+        }
         ResponseStreamEvent::ResponseCreated(_) => "response.created",
         ResponseStreamEvent::ResponseInProgress(_) => "response.in_progress",
         ResponseStreamEvent::ResponseCompleted(_) => "response.completed",
@@ -1297,6 +1327,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         }
@@ -1586,8 +1617,9 @@ mod tests {
         ));
         let _ = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
 
-        let events = conv.emit_error_events(ErrorObject {
-            code: "server_error".to_string(),
+        let events = conv.emit_error_events(ResponseError {
+            misalignment: None,
+            code: ResponseErrorCode::ServerError,
             message: "backend error".to_string(),
         });
         assert_eq!(event_types(&events), vec!["response.failed".to_string()]);
@@ -1605,8 +1637,9 @@ mod tests {
         let _ = conv.process_chunk(&text_chunk("complete answer"));
         let _ = conv.process_chunk(&finish_chunk(FinishReason::Stop));
 
-        let events = conv.emit_error_events(ErrorObject {
-            code: "server_error".to_string(),
+        let events = conv.emit_error_events(ResponseError {
+            misalignment: None,
+            code: ResponseErrorCode::ServerError,
             message: "backend error".to_string(),
         });
         assert_eq!(
@@ -1850,6 +1883,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         };
@@ -1873,6 +1907,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         };
@@ -1967,6 +2002,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         };
@@ -2015,6 +2051,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         };
@@ -2056,6 +2093,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         };
@@ -2112,6 +2150,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         };
@@ -2136,6 +2175,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         };
@@ -2163,6 +2203,7 @@ mod tests {
             reasoning: Some(Reasoning {
                 effort: None,
                 summary: Some(ReasoningSummary::Auto),
+                ..Default::default()
             }),
             ..default_params()
         };

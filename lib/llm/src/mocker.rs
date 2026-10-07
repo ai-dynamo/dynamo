@@ -212,6 +212,7 @@ fn usage_with_cached_tokens(
         prompt_tokens_details: Some(PromptTokensDetails {
             audio_tokens: None,
             cached_tokens: Some(to_u32(cached_tokens)),
+            ..Default::default()
         }),
         completion_tokens_details: None,
     }
@@ -1487,6 +1488,7 @@ mod tests {
                 prompt_tokens_details: Some(PromptTokensDetails {
                     audio_tokens: None,
                     cached_tokens: Some(0),
+                    ..Default::default()
                 }),
                 completion_tokens_details: None,
             })

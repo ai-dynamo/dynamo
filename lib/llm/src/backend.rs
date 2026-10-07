@@ -370,7 +370,7 @@ impl
                             // which would reorder output (e.g. "there" + withheld "o" must
                             // come out as "othere", not "thereo").
                             if has_finish
-                                && let Some(flushed) = decoder.flush_jailed()
+                                && let Some(flushed) = decoder.finish()
                                 && let Some(data) = &mut output.data
                             {
                                 let newer = data.text.take().unwrap_or_default();
@@ -439,7 +439,7 @@ impl
                     // discarded.
                     if result.stop_trigger.is_none()
                         && data.finish_reason.is_some()
-                        && let Some(flushed) = decoder.flush_jailed()
+                        && let Some(flushed) = decoder.finish()
                     {
                         result.text.get_or_insert_with(String::new).push_str(&flushed);
                     }
@@ -584,7 +584,7 @@ impl
                         if state.finished_choices.contains(idx) {
                             continue;
                         }
-                        if let Some(flushed) = decoder.flush_jailed() {
+                        if let Some(flushed) = decoder.finish() {
                             state.pending_flush.push((*idx, flushed));
                         }
                     }
@@ -867,6 +867,17 @@ impl Decoder {
         // increment the generated tokens
         self.generated_tokens += 1;
 
+        // dynamo-tokenizers 3 buffers a trailing byte-fallback run until `finish()`.
+        // A stop token ends the output, so settle that text before decoding it.
+        let settled = if !below_min_tokens
+            && (self.visible_stop_ids.contains(&token_id)
+                || self.hidden_stop_ids.contains(&token_id))
+        {
+            self.decode_stream.finish()?
+        } else {
+            None
+        };
+
         // decode the token
         let detokenize_start = self.tracker.as_ref().map(|_| Instant::now());
         let token = {
@@ -888,14 +899,10 @@ impl Decoder {
             // complete now, so it goes out ahead of this (included) token's own text --
             // otherwise it would be silently dropped and, if it were released later, would
             // come out of order.
-            let released = match (self.flush_jailed(), &token) {
-                (Some(mut flushed), Some(t)) => {
-                    flushed.push_str(t);
-                    Some(flushed)
-                }
-                (Some(flushed), None) => Some(flushed),
-                (None, t) => t.clone(),
-            };
+            let mut released = self.flush_jailed();
+            for text in [settled.as_deref(), token.as_deref()].into_iter().flatten() {
+                released.get_or_insert_default().push_str(text);
+            }
             return Ok(StepResult::with_stop_trigger(
                 token,
                 released,
@@ -914,6 +921,9 @@ impl Decoder {
             // Release any earlier withheld prefix before this stop token's own text.
             let token = if self.no_stop_trim { token } else { None };
             let mut released = self.flush_jailed();
+            if let Some(text) = &settled {
+                released.get_or_insert_default().push_str(text);
+            }
             if let Some(text) = &token {
                 released.get_or_insert_default().push_str(text);
             }
@@ -1004,6 +1014,18 @@ impl Decoder {
         let flushed = self.jailed_string();
         self.jailed_bytes = 0;
         flushed
+    }
+
+    /// End-of-input flush: withheld stop-sequence text, then any text the decode
+    /// stream still buffers (dynamo-tokenizers 3 requires `DecodeStream::finish`).
+    pub fn finish(&mut self) -> Option<String> {
+        let mut released = self.flush_jailed();
+        match self.decode_stream.finish() {
+            Ok(Some(text)) => released.get_or_insert_default().push_str(&text),
+            Ok(None) => {}
+            Err(err) => tracing::warn!(%err, "failed to flush buffered detokenizer output"),
+        }
+        released
     }
 
     /// Non-consuming look at whatever is currently withheld as a possible hidden-stop-

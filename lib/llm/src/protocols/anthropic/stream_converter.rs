@@ -1559,6 +1559,7 @@ mod tests {
                         dynamo_protocols::types::PromptTokensDetails {
                             audio_tokens: None,
                             cached_tokens: Some(c),
+                            ..Default::default()
                         }
                     }),
                     completion_tokens_details: None,
