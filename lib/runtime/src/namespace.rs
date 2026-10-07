@@ -182,6 +182,10 @@ mod tests {
         assert!(!filter.matches("ns2"));
         assert!(!filter.matches("nsother-abc123"));
 
+        let filter = NamespaceFilter::Prefix("ns-".to_string());
+        assert!(filter.matches("ns-abc"));
+        assert!(!filter.matches("ns2-abc"));
+
         let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
         assert!(filter.matches("myns-dgd"));
         assert!(filter.matches("myns-dgd-abc123"));

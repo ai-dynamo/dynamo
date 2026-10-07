@@ -472,14 +472,18 @@ impl Model {
     pub fn namespace_readiness(&self) -> ModelReadiness {
         let mut namespaces = std::collections::BTreeMap::new();
 
-        for ns in self.distinct_namespaces_sorted() {
-            let wsets: Vec<Arc<WorkerSet>> = self
-                .worker_sets
-                .iter()
-                .filter(|entry| entry.value().namespace() == ns)
-                .map(|entry| entry.value().clone())
-                .collect();
+        // Group once so globally scoped diagnostics do not rescan every set per namespace.
+        let mut grouped: std::collections::BTreeMap<String, Vec<Arc<WorkerSet>>> =
+            std::collections::BTreeMap::new();
+        for entry in &self.worker_sets {
+            let ws = entry.value();
+            grouped
+                .entry(ws.namespace().to_string())
+                .or_default()
+                .push(Arc::clone(ws));
+        }
 
+        for (ns, wsets) in grouped {
             // Authoritative readiness facts (shared with the serving gate).
             let eval = self.evaluate_namespace(&wsets);
 
@@ -1899,6 +1903,15 @@ mod tests {
         assert!(topo.ready);
         assert!(topo.namespaces["ns-old"].ready);
         assert!(!topo.namespaces["ns-new"].ready);
+        assert_eq!(topo.namespaces.len(), 2);
+        assert_eq!(topo.namespaces["ns-old"].worker_types["prefill"].workers, 1);
+        assert_eq!(topo.namespaces["ns-old"].worker_types["decode"].workers, 1);
+        assert_eq!(topo.namespaces["ns-new"].worker_types["decode"].workers, 1);
+        assert!(
+            !topo.namespaces["ns-new"]
+                .worker_types
+                .contains_key("prefill")
+        );
         assert_eq!(
             topo.namespaces["ns-new"].missing_worker_types,
             vec!["prefill".to_string()]

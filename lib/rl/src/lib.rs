@@ -26,7 +26,7 @@ use dynamo_runtime::{
     DistributedRuntime,
     component::{Client, Instance, TransportType},
     discovery::{DiscoveryInstance, DiscoveryQuery},
-    namespace::{GLOBAL_NAMESPACE, NamespaceFilter, NamespacePrefixMode, is_global_namespace},
+    namespace::{GLOBAL_NAMESPACE, NamespaceFilter, NamespacePrefixMode},
     pipeline::{
         SingleIn,
         network::egress::push_router::{PushRouter, RouterMode},
@@ -122,10 +122,7 @@ pub struct RlDiscoveryConfig {
 /// back only for an unset variable, and its `if suffix:` skips an empty suffix; the
 /// composition is a single ASCII hyphen, no trimming, no case folding.
 ///
-/// The prefix has no counterpart in that helper. An empty one would match every
-/// namespace, so it counts as absent rather than as a scope over everything.
-///
-/// A prefix of [`GLOBAL_NAMESPACE`] is the one exception: it means every namespace, the
+/// An explicitly empty prefix or [`GLOBAL_NAMESPACE`] means every namespace, the
 /// same reading `NamespaceFilter::from_namespace_and_prefix` gives it for model
 /// discovery. The operator produces exactly that input — `ComputeDynamoNamespace`
 /// returns the literal `dynamo` for a component with `globalDynamoNamespace: true`, and
@@ -148,11 +145,8 @@ pub fn resolve_namespace_filter(
         value.filter(|value| !value.is_empty())
     }
 
-    if let Some(prefix) = present(namespace_prefix) {
-        if is_global_namespace(prefix) {
-            return NamespaceFilter::Global;
-        }
-        return NamespaceFilter::Prefix(prefix.to_string());
+    if namespace_prefix.is_some() {
+        return NamespaceFilter::from_namespace_and_prefix(namespace, namespace_prefix);
     }
 
     let base = namespace.unwrap_or(DEFAULT_NAMESPACE);
@@ -1037,6 +1031,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_prefix_discovers_workers_outside_the_base_namespace() {
+        let distributed = test_runtime().await;
+        let started = start_rl_endpoint(&distributed, "other-ns").await;
+        let filter = resolve_namespace_filter(Some("ns"), Some(""), Some("abc123"));
+        assert_eq!(
+            filter,
+            NamespaceFilter::from_namespace_and_prefix(Some("ns"), Some(""))
+        );
+        let state = discovery_state(&distributed, filter);
+
+        let workers = list_workers(&state).await.expect("list");
+        let namespaces: Vec<&str> = workers.iter().map(|w| w.namespace.as_str()).collect();
+        assert_eq!(namespaces, ["other-ns"]);
+
+        started.shutdown().await.expect("endpoint shutdown");
+    }
+
+    #[tokio::test]
     async fn list_workers_exact_scope_excludes_suffixed_namespace() {
         let distributed = test_runtime().await;
         let started = start_rl_endpoint(&distributed, "ns-abc123").await;
@@ -1162,11 +1174,18 @@ mod tests {
                 NamespaceFilter::Exact("-abc123".to_string()),
             ),
             (
-                "an empty prefix counts as absent rather than matching everything",
+                "an empty prefix means every namespace, as it does for model discovery",
                 Some("ns"),
                 Some(""),
                 None,
-                NamespaceFilter::Exact("ns".to_string()),
+                NamespaceFilter::Global,
+            ),
+            (
+                "an empty prefix wins over a suffix that is also set",
+                Some("ns"),
+                Some(""),
+                Some("abc123"),
+                NamespaceFilter::Global,
             ),
             (
                 "a global prefix means every namespace, as it does for model discovery",
