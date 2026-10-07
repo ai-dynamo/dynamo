@@ -207,10 +207,10 @@ pub(crate) fn build_generate_request(
     if mode.is_encode()
         && media
             .iter()
-            .any(|item| item.modality() != pb::Modality::Image)
+            .any(|item| !matches!(item.modality(), pb::Modality::Image | pb::Modality::Video))
     {
         return Err(client::invalid_argument(
-            "encode requests support image media only",
+            "encode requests support image and video media only",
         ));
     }
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
@@ -534,6 +534,17 @@ fn consume_preprocessed_mm_routing_hashes(
     }
     Ok(Some(hashes))
 }
+
+/// The frontend adds these for vLLM's structured-output reasoning gate, which
+/// the gRPC proto cannot carry. Drop them only when vLLM runs no reasoning
+/// parser, so nothing reads them.
+pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
+        extra.remove("reasoning_parser_kwargs");
+        extra.remove("reasoning_ended");
+    }
+}
+
 fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
     cache_namespace: Option<&str>,
@@ -1194,17 +1205,6 @@ fn validate_request(
             "encode requests require multimodal media",
         ));
     }
-    if mode.is_encode()
-        && request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .iter()
-                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
-        })
-    {
-        return Err(client::invalid_argument(
-            "encode requests support image media only",
-        ));
-    }
     if mode.is_encode() && request.encoder_result.is_some() {
         return Err(client::invalid_argument(
             "encode requests must not include encoder_result",
@@ -1271,6 +1271,8 @@ pub(crate) struct ResponseState {
     output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
     prompt_info: Option<pb::PromptInfo>,
+    user_stop_token_ids: Vec<u32>,
+    hidden_stop_token_ids: Vec<u32>,
 }
 
 impl ResponseState {
@@ -1287,6 +1289,16 @@ impl ResponseState {
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
+            user_stop_token_ids: request
+                .stop_conditions
+                .stop_token_ids
+                .clone()
+                .unwrap_or_default(),
+            hidden_stop_token_ids: request
+                .stop_conditions
+                .stop_token_ids_hidden
+                .clone()
+                .unwrap_or_default(),
         }
     }
 
@@ -1401,10 +1413,17 @@ impl ResponseState {
                 ));
             }
         });
-        mapped.stop_reason = finish.stop_reason.map(|reason| match reason {
-            pb::finish_info::StopReason::StopTokenId(id)
-            | pb::finish_info::StopReason::EosTokenId(id) => StopReason::Int(i64::from(id)),
-            pb::finish_info::StopReason::StopString(value) => StopReason::String(value),
+        mapped.stop_reason = finish.stop_reason.and_then(|reason| match reason {
+            pb::finish_info::StopReason::StopTokenId(id) => {
+                (!self.hidden_stop_token_ids.contains(&id)
+                    || self.user_stop_token_ids.contains(&id))
+                .then_some(StopReason::Int(i64::from(id)))
+            }
+            pb::finish_info::StopReason::EosTokenId(id) => self
+                .user_stop_token_ids
+                .contains(&id)
+                .then_some(StopReason::Int(i64::from(id))),
+            pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
         if self.mode.is_encode() {
@@ -1432,6 +1451,10 @@ impl ResponseState {
                     client::protocol_error("encode terminal is missing valid ec_transfer_params")
                 })?;
             return Ok(Some(LLMEngineOutput::encode_terminal(params)));
+        }
+        if self.mode.is_prefill() && reason == pb::finish_info::FinishReason::Aborted {
+            self.attach_prompt_data(&mut mapped);
+            return Ok(Some(mapped));
         }
         mapped.disaggregated_params = finish
             .kv_transfer_params
@@ -1635,15 +1658,7 @@ fn normalize_logprob(logprob: f32) -> f64 {
 }
 
 #[cfg(test)]
-mod candidate_tests {
-    use super::{pb, top_n_candidates};
+mod request_tests;
 
-    #[test]
-    fn full_vocabulary_logprobs_select_all_candidates() {
-        let candidates = top_n_candidates(u32::MAX).expect("map full vocabulary");
-        assert_eq!(
-            candidates.select,
-            Some(pb::candidate_tokens::Select::All(true))
-        );
-    }
-}
+#[cfg(test)]
+mod response_tests;

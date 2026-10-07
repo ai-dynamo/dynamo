@@ -24,9 +24,9 @@ use crate::client;
 use crate::proto as pb;
 
 /// `extra` key the OpenEngine servicer reads to select the disaggregation phase.
-pub(crate) const REQUEST_TYPE_KEY: &str = "request_type";
+pub const REQUEST_TYPE_KEY: &str = "request_type";
 /// `extra.request_type` value marking a prefill-only request.
-pub(crate) const CONTEXT_ONLY: &str = "context_only";
+pub const CONTEXT_ONLY: &str = "context_only";
 /// TensorRT-LLM extension carrying Dynamo's stable agent session identity.
 const CONVERSATION_ID_KEY: &str = "conversation_id";
 
@@ -148,7 +148,11 @@ pub(crate) fn request_extra(
     context_only: bool,
     conversation_id: Option<&str>,
 ) -> prost_types::Struct {
-    let mut fields = std::collections::BTreeMap::new();
+    let mut fields = if context_only {
+        context_only_extra().fields
+    } else {
+        std::collections::BTreeMap::new()
+    };
     // Dynamo detokenizes the returned IDs; server-side text is discarded.
     fields.insert(
         "detokenize".to_string(),
@@ -156,16 +160,6 @@ pub(crate) fn request_extra(
             kind: Some(prost_types::value::Kind::BoolValue(false)),
         },
     );
-    if context_only {
-        fields.insert(
-            REQUEST_TYPE_KEY.to_string(),
-            prost_types::Value {
-                kind: Some(prost_types::value::Kind::StringValue(
-                    CONTEXT_ONLY.to_string(),
-                )),
-            },
-        );
-    }
     if let Some(conversation_id) = conversation_id {
         fields.insert(
             CONVERSATION_ID_KEY.to_string(),
@@ -177,4 +171,20 @@ pub(crate) fn request_extra(
         );
     }
     prost_types::Struct { fields }
+}
+
+/// `extra` payload marking a request as prefill-only.
+pub fn context_only_extra() -> prost_types::Struct {
+    prost_types::Struct {
+        fields: [(
+            REQUEST_TYPE_KEY.to_string(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue(
+                    CONTEXT_ONLY.to_string(),
+                )),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    }
 }

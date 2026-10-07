@@ -78,6 +78,60 @@ mode.
   KV cache bytes per token. Overrides the auto-computation.
 </ParamField>
 
+## Native G2 host offload
+
+The vLLM mocker can simulate framework-native G1-to-host (G2) KV offload. Offloaded blocks are
+restored from host memory on a later prefix hit. As with the native vLLM offloading connector, G2
+residency is published as `HostPinned` (CPU-medium) KV events alongside device events, so the KV
+router can credit a host-resident prefix with `host_cache_hit_weight` and route to the worker that
+holds it. Host offload requires `--engine-type vllm` and prefix caching. Host blocks are sized by
+`--kv-bytes-per-token`.
+
+G2 events are not published on the vLLM ZMQ wire (`--zmq-kv-events-ports`), which needs per-block
+token IDs that the simulated G2 does not carry; a router consuming that stream sees only G1.
+
+<ParamField path="--num-host-blocks" type="integer" default="null">
+  Enable native G2 host offload with this host cache capacity per data-parallel rank, in blocks.
+</ParamField>
+
+<ParamField path="--host-offload-d2h-bandwidth-gbps" type="float" default="AISimulate default">
+  Per-rank device-to-host bandwidth in decimal GB/s. `0` is unlimited. Requires `--num-host-blocks`.
+</ParamField>
+
+<ParamField path="--host-offload-h2d-bandwidth-gbps" type="float" default="AISimulate default">
+  Per-rank host-to-device bandwidth in decimal GB/s. `0` is unlimited. Requires `--num-host-blocks`.
+</ParamField>
+
+Offline replay can also simulate one G2 pool shared by every worker of the simulated deployment.
+Live mocker workers reject this scope, so pass it through the offline replay Python API:
+
+```python
+from dynamo.mocker import MockEngineArgs
+from dynamo.replay import run_trace_replay
+
+engine_args = MockEngineArgs(
+    engine_type="vllm",
+    kv_bytes_per_token=131072,
+    native_host_offload={
+        "scope": "cluster_shared",
+        "num_host_blocks": 65536,
+        "kv_layout_id": "llama-3-8b-tp1",
+    },
+)
+report = run_trace_replay(
+    "trace.jsonl",
+    extra_engine_args=engine_args,
+    num_workers=4,
+    replay_mode="offline",
+    router_mode="kv_router",
+)
+```
+
+Offline replay does not compute bytes per token from a model, so set `kv_bytes_per_token` (or
+`kv_cache_bytes_per_token`) explicitly. `native_host_offload` also accepts
+`latency_to_first_byte_ms` and the shared-pool bandwidth caps. G2 host offload does not support
+MTP (`--ais-nextn`).
+
 ## Scheduling
 
 <ParamField path="--max-num-seqs" type="integer" default="256">

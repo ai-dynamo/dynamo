@@ -268,6 +268,7 @@ impl MockerBackend {
             disaggregation_mode,
         );
         let config = WorkerConfig {
+            runtime: args.common.runtime,
             namespace: args.common.namespace,
             component: args.common.component,
             endpoint: args.common.endpoint,

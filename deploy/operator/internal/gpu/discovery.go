@@ -129,7 +129,7 @@ type gpuRule struct {
 
 var gpuRules = []gpuRule{
 	// Blackwell
-	{token: tokenGB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM},
+	{token: tokenGB200, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB200},
 	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
 	{token: tokenB300, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM},
 	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
@@ -373,7 +373,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
 	for _, n := range allNodes {
-		if filterSKU != "" && n.sku != filterSKU {
+		if !matchesDiscoveredSKU(filterSKU, n.sku) {
 			continue
 		}
 		if bestNode == nil ||
@@ -829,7 +829,7 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
 	for _, n := range allNodes {
-		if filterSKU != "" && n.sku != filterSKU {
+		if !matchesDiscoveredSKU(filterSKU, n.sku) {
 			continue
 		}
 		if bestNode == nil ||
@@ -976,7 +976,7 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 			}
 			// Token matched but no form factor indicator was present in the string
 			// (e.g. "NVIDIA H200" from DCGM has no SXM/HGX/DGX suffix). If the GPU
-			// has no PCIe variant it must be SXM-only (H200, B200, GB200).
+			// has no PCIe variant it must be SXM-only (H200, B200).
 			if rule.sxmSKU != "" {
 				return rule.sxmSKU
 			}
@@ -984,6 +984,16 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	}
 
 	return ""
+}
+
+// matchesDiscoveredSKU keeps the deprecated GB200 selector compatible without rewriting it.
+func matchesDiscoveredSKU(filterSKU, discoveredSKU nvidiacomv1beta1.GPUSKUType) bool {
+	if filterSKU == "" || filterSKU == discoveredSKU {
+		return true
+	}
+
+	//nolint:staticcheck // SA1019: Existing selectors must continue to match GB200 nodes.
+	return filterSKU == nvidiacomv1beta1.GPUSKUTypeGB200SXM && discoveredSKU == nvidiacomv1beta1.GPUSKUTypeGB200
 }
 
 // normalize standardizes a GPU product string to simplify matching.
