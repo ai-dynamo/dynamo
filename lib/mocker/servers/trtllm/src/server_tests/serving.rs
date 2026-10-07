@@ -70,20 +70,50 @@ async fn oversized_generation_is_rejected_before_token_planning() {
 }
 
 #[tokio::test]
-async fn prompt_plus_output_must_fit_the_context_window() {
-    let service = TrtllmMockerService::new(
-        MockerServerConfig {
-            context_length: 8,
-            ..config()
-        },
-        admitting_args(),
-    )
-    .unwrap();
-    let error = generate_error(&service, request("req-ctx", 8)).await;
-    assert_eq!(error.code(), Code::InvalidArgument);
-    assert!(error.message().contains("context length"), "{error}");
+async fn output_budget_is_clamped_to_the_remaining_context_window() {
+    for mode in [ServerMode::Aggregated, ServerMode::Decode] {
+        let service = TrtllmMockerService::new(
+            MockerServerConfig {
+                mode,
+                context_length: 8,
+                ..config()
+            },
+            admitting_args(),
+        )
+        .unwrap();
+        let mut clamped = request("req-ctx", 8);
+        if mode == ServerMode::Decode {
+            clamped.kv = Some(pb::KvOptions {
+                session: Some(prefill_session("pf-ctx").await),
+                ..Default::default()
+            });
+        }
+        let responses = drain(&service, clamped.clone()).await.unwrap();
+        let token_count: usize = events(&responses)
+            .iter()
+            .filter_map(|event| match event {
+                pb::generate_response::Event::Token(token) => Some(token.tokens.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(token_count, 4);
+        let terminal = responses.last().unwrap();
+        assert!(matches!(
+            terminal.event.as_ref(),
+            Some(pb::generate_response::Event::Finished(finished))
+                if finished.reason == pb::FinishReason::Length as i32
+        ));
+        assert_eq!(terminal.usage.as_ref().unwrap().completion_tokens, 4);
 
-    assert!(drain(&service, request("req-ctx-ok", 2)).await.is_ok());
+        for prompt_len in [8, 9] {
+            clamped.input = Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+                ids: vec![1; prompt_len],
+            }));
+            let error = generate_error(&service, clamped.clone()).await;
+            assert_eq!(error.code(), Code::InvalidArgument);
+            assert!(error.message().contains("context length"), "{error}");
+        }
+    }
 }
 
 /// The sidecar fails the whole request if a single `TokenInfo` is missing its
@@ -229,45 +259,50 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
 
 #[tokio::test]
 async fn capacity_rejection_is_an_in_band_internal_error() {
-    // One 4-token block cannot hold a 5-token prompt, so the scheduler rejects
-    // the request after it was admitted.
-    let service = TrtllmMockerService::new(
-        config(),
-        MockEngineArgsBuilder::default()
-            .engine_type(EngineType::Trtllm)
-            .num_gpu_blocks(1usize)
-            .block_size(4usize)
-            .max_num_seqs(Some(8))
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(0.0)
-            .build()
-            .unwrap(),
-    )
-    .unwrap();
-    let mut oversized = request("req-cap", 4);
-    oversized.input = Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-        ids: vec![1, 2, 3, 4, 5],
-    }));
+    for mode in [ServerMode::Aggregated, ServerMode::Decode] {
+        let service = TrtllmMockerService::new(
+            MockerServerConfig { mode, ..config() },
+            MockEngineArgsBuilder::default()
+                .engine_type(EngineType::Trtllm)
+                .num_gpu_blocks(1usize)
+                .block_size(4usize)
+                .max_num_seqs(Some(8))
+                .max_num_batched_tokens(Some(64))
+                .speedup_ratio(0.0)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut oversized = request("req-cap", 4);
+        oversized.input = Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+            ids: vec![1, 2, 3, 4, 5],
+        }));
+        if mode == ServerMode::Decode {
+            let mut context = request("pf-cap", 1);
+            context.input = oversized.input.clone();
+            context.extra = Some(context_only_extra());
+            let responses = drain(&prefill_service(), context).await.unwrap();
+            oversized.kv = Some(pb::KvOptions {
+                session: Some(session_of(&responses)),
+                ..Default::default()
+            });
+        }
 
-    // The RPC itself must succeed: an accepted request reports failure in-band
-    // and the stream still closes OK, per the OpenEngine error contract.
-    let responses = drain(&service, oversized).await.unwrap();
-    let error = events(&responses)
-        .into_iter()
-        .find_map(|event| match event {
-            pb::generate_response::Event::Error(error) => Some(error),
-            _ => None,
-        })
-        .expect("expected an in-band EngineError");
-    // Matches the servicer's post-acceptance default (ERROR_CODE_INTERNAL,
-    // retryable=false). ERROR_CODE_OVERLOADED is reserved upstream for the
-    // consumer-stall watchdog, not for capacity.
-    assert_eq!(error.code, pb::ErrorCode::Internal as i32);
-    assert!(!error.retryable);
-    assert!(!responses.iter().any(|response| matches!(
-        response.event,
-        Some(pb::generate_response::Event::Finished(_))
-    )));
+        let responses = drain(&service, oversized).await.unwrap();
+        let error = events(&responses)
+            .into_iter()
+            .find_map(|event| match event {
+                pb::generate_response::Event::Error(error) => Some(error),
+                _ => None,
+            })
+            .expect("expected an in-band EngineError");
+        assert_eq!(error.code, pb::ErrorCode::Internal as i32);
+        assert!(!error.retryable);
+        assert!(!responses.iter().any(|response| matches!(
+            response.event,
+            Some(pb::generate_response::Event::Finished(_))
+        )));
+    }
 }
 
 /// Prompt logprobs are their own switch; gating them on the output flag would
@@ -360,10 +395,24 @@ async fn context_only_and_a_session_together_are_rejected() {
     assert!(error.message().contains("cannot be both"), "{error}");
 }
 
-/// Only requests the server accepted are recorded, and the window is bounded.
+#[tokio::test]
+async fn request_recording_is_disabled_by_default() {
+    let service = service();
+    drain(&service, request("req-unrecorded", 2)).await.unwrap();
+    assert!(service.received.is_none());
+    assert!(service.received_requests().is_empty());
+}
+
 #[tokio::test]
 async fn only_accepted_requests_are_recorded() {
-    let service = service();
+    let service = TrtllmMockerService::new(
+        MockerServerConfig {
+            is_request_recording_enabled: true,
+            ..config()
+        },
+        admitting_args(),
+    )
+    .unwrap();
     drain(&service, request("req-ok", 2)).await.unwrap();
     let mut rejected = request("req-rejected", 2);
     rejected.model = String::new();
@@ -372,6 +421,28 @@ async fn only_accepted_requests_are_recorded() {
     let received = service.received_requests();
     assert_eq!(received.len(), 1, "a rejected request must not be recorded");
     assert_eq!(received[0].request_id, "req-ok");
+
+    for index in 1..MAX_RECORDED_REQUESTS {
+        drain(&service, request(&format!("req-{index}"), 1))
+            .await
+            .unwrap();
+    }
+    let recorder = service.received.as_ref().unwrap();
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _guard = recorder.lock().unwrap();
+            panic!("poison the optional recorder");
+        })
+        .is_err()
+    );
+    drain(&service, request("req-after-poison", 1))
+        .await
+        .unwrap();
+
+    let received = service.received_requests();
+    assert_eq!(received.len(), MAX_RECORDED_REQUESTS);
+    assert_eq!(received.first().unwrap().request_id, "req-1");
+    assert_eq!(received.last().unwrap().request_id, "req-after-poison");
 }
 
 /// `GetServerInfo` and `GetLoad` are part of the surface a real server answers,

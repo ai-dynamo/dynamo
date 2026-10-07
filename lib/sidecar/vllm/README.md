@@ -141,7 +141,8 @@ all plugins. An exported `VLLM_PLUGINS` overrides this default. The `dev` and
 Start vLLM with its gRPC listener:
 
 ```bash
-vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
+vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051 \
+  --reasoning-parser none
 ```
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
@@ -186,11 +187,20 @@ the response twice.
 When these flags and environment variables are absent, the sidecar advertises no
 parsers. It does not infer Dynamo parser settings from vLLM's native parser names.
 
-Requests that require visible stop-token preservation, `max_thinking_tokens`, or
-reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`) still fail
-explicitly in the gRPC request converter. These limitations affect some tool
-terminators and reasoning/structured-output combinations; enabling a parser does
-not add support for those request controls.
+Dynamo parsers need vLLM to run without its own reasoning parser, so start
+`vllm-rs` with `--reasoning-parser none`, as the launch scripts and deploy
+examples do. vLLM's reasoning parser decides where structured output starts from
+per-request reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`)
+that the gRPC protocol cannot carry. If a Dynamo parser flag is set and vLLM
+reports its own reasoning parser, the sidecar exits at startup. With no engine
+reasoning parser, vLLM never reads that metadata, so the sidecar removes it, and
+vLLM applies structured output, such as a JSON schema or a required or named
+`tool_choice`, from the first output token. If vLLM runs its own reasoning
+parser, a request that carries this metadata still fails.
+
+Requests that require visible stop-token preservation or `max_thinking_tokens`
+still fail explicitly in the gRPC request converter. These limitations affect
+some tool terminators, such as `harmony` tool calls.
 
 ### RL workflows
 
