@@ -336,11 +336,24 @@ pub fn indexer_sockets(
     })
 }
 
+/// Unix time in microseconds, shifted by `E2E_CLOCK_OFFSET_US` (signed, default 0).
+///
+/// The offset maps this host's clock onto the serving indexer host's clock, measured just before
+/// a run (the indexer's clock minus this host's), so the publishers' schedule and the indexer's
+/// window marks share one clock when the hosts' clocks drift apart.
 pub fn unix_now_us() -> u64 {
-    std::time::SystemTime::now()
+    static OFFSET_US: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    let offset = *OFFSET_US.get_or_init(|| {
+        std::env::var("E2E_CLOCK_OFFSET_US")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_micros() as u64)
-        .unwrap_or(0)
+        .map(|elapsed| elapsed.as_micros() as i64)
+        .unwrap_or(0);
+    now.saturating_add(offset).max(0) as u64
 }
 
 #[cfg(test)]
