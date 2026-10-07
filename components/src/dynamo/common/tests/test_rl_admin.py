@@ -7,6 +7,7 @@ import asyncio
 
 import pytest
 
+from dynamo.common.lora.manager import runtime_lora_enabled
 from dynamo.common.rl import (
     RLAdminValidationError,
     RLRouteRegistry,
@@ -196,3 +197,14 @@ def test_lora_load_request_rejects_runtime_delimiter_when_enabled(monkeypatch) -
     monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
     with pytest.raises(RLAdminValidationError, match="reserved"):
         require_lora_load_request(request)
+
+
+@pytest.mark.parametrize("value", ["true", "on", " true ", "false"])
+def test_lora_name_restriction_uses_runtime_enablement_parser(monkeypatch, value):
+    monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", value)
+    request = {"lora_name": "base|adapter", "source": {"uri": "file:///adapter"}}
+    if runtime_lora_enabled():
+        with pytest.raises(RLAdminValidationError, match="reserved"):
+            require_lora_load_request(request)
+    else:
+        assert require_lora_load_request(request) == ("base|adapter", "file:///adapter")

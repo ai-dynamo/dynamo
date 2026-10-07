@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,33 @@ pytestmark = [
 def fresh_singleton(monkeypatch):
     """Reset the module-level OnceLock so each test starts with no cached manager."""
     monkeypatch.setattr(manager_module, "_lora_manager", OnceLock())
+
+
+@pytest.mark.parametrize(
+    "source", ["explicit", "DYN_LORA_PATH", "HOME", "USERPROFILE", "fallback"]
+)
+def test_cache_root_matches_downloader_without_home_lookup(
+    monkeypatch, tmp_path, source
+):
+    for name in ("DYN_LORA_PATH", "HOME", "USERPROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    if source in ("DYN_LORA_PATH", "HOME", "USERPROFILE"):
+        monkeypatch.setenv(source, str(tmp_path))
+
+    def unavailable_home():
+        raise RuntimeError("home directory unavailable")
+
+    monkeypatch.setattr(Path, "home", unavailable_home)
+    monkeypatch.setattr(manager_module, "LoRADownloader", lambda path: object())
+    manager = manager_module.LoRAManager(tmp_path if source == "explicit" else None)
+    expected = (
+        tmp_path
+        if source in ("explicit", "DYN_LORA_PATH")
+        else (Path("/tmp") if source == "fallback" else tmp_path)
+        / ".cache"
+        / "dynamo_loras"
+    )
+    assert manager.cache_root == expected
 
 
 class TestGetLoraManagerSingleton:
