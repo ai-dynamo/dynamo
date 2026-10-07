@@ -715,6 +715,24 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
 
+# Pin the upstream developer stack in system site, where the image inventory
+# reads it. The rc29 baseline on both architectures satisfies all transitive
+# requirements of these versions. Fail if the solve changes another distribution:
+# its package paths must be added to the rebase whiteouts first.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/jupyter-upgrade.json \
+        "jupyter-server==2.21.1" "jupyterlab==4.6.4" \
+        "notebook==7.6.3" "urllib3==2.8.0" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/jupyter-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"jupyter-server", "jupyterlab", "notebook", "urllib3"}, "Add whiteouts for upgraded transitive distributions"' && \
+    rm /tmp/jupyter-upgrade.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
+
+{% if target not in ("dev", "local-dev") %}
+# The runtime venv takes precedence over system site. Check its resolved imports
+# so an older venv distribution cannot shadow the refreshed system packages.
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
+{% endif %}
+
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
@@ -824,6 +842,16 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
     /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
     /usr/local/external/ffmpeg \
+    /usr/local/share/jupyter/lab \
+    /usr/local/share/jupyter/labextensions/@jupyter-notebook/lab-extension \
+    /usr/local/lib/python3.12/dist-packages/jupyter_server \
+    /usr/local/lib/python3.12/dist-packages/jupyter_server-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/jupyterlab \
+    /usr/local/lib/python3.12/dist-packages/jupyterlab-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/notebook \
+    /usr/local/lib/python3.12/dist-packages/notebook-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/urllib3 \
+    /usr/local/lib/python3.12/dist-packages/urllib3-*.dist-info \
     /usr/local/lib/python3.12/dist-packages/aiohttp \
     /usr/local/lib/python3.12/dist-packages/aiohttp-* \
     /usr/local/lib/python3.12/dist-packages/multidict \
@@ -844,6 +872,14 @@ RUN rm -rf /workspace /home/ubuntu \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
+
+# Package trees and shared JupyterLab assets are whiteouted before the overlay.
+# Validate after the overlay so stale base metadata cannot survive the refresh.
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
+
+{% if target not in ("dev", "local-dev") %}
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
+{% endif %}
 
 # Check the merged filesystem: both base stages must purge package-owned paths.
 RUN test ! -e /usr/bin/git-lfs && \

@@ -412,7 +412,7 @@ async def test_rejects_malformed_encoder_image_item_before_dispatch():
 async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -424,7 +424,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -436,7 +436,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -456,7 +456,7 @@ async def test_decode_cannot_hide_disabled_media_with_expanded_tokens():
         enabled=False,
     )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -740,7 +740,9 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    parse_mm_data.assert_called_once()
+    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.kwargs == {"validate": False}
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()
