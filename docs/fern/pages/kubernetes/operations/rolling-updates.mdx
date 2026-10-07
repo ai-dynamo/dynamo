@@ -9,32 +9,163 @@ This guide shows how to plan and perform zero-downtime updates to a `DynamoGraph
 
 ## Before You Start
 
-- Start with a healthy DGD and its manifest in version control. If you need a deployment first, follow [Model Deployment](../model-deployment/introduction.mdx).
-- Record the current operator version and the current, target, and rollback runtime versions of each component.
-- Identify the backing resources for your workers and frontend. Workers use Deployment, Grove, or LeaderWorkerSet (LWS); frontends use Deployment or Grove. Check `status.components` below; Grove components appear as `PodClique` or `PodCliqueScalingGroup`. See [Multinode Orchestration](../installation/multinode-orchestration.md) for provider selection.
-- For Grove, this walkthrough assumes `RollingRecreate`. If you selected `OnDelete`, updates require manual pod replacement; see the [strategy reference](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#rolling-update-controls).
-
-The example uses a running disaggregated vLLM DGD named `vllm-disagg` in namespace `dynamo`, with components named `Frontend`, `PrefillWorker`, and `DecodeWorker`. Its source manifest is `vllm-disagg.yaml`. Substitute your deployment, namespace, and component names in the commands.
-
-```bash
-kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.components}{"\n"}'
-```
+Start with a healthy DGD deployed in your cluster. If it is receiving traffic, follow this guide to plan and perform a zero-downtime upgrade. If you need a deployment first, follow [Model Deployment](../model-deployment/introduction.mdx).
 
 <Note>
-Changing any worker pod template rolls all worker components, including workers whose configuration did not change. A frontend-only change does not create a new worker generation.
+Commands use `vllm-disagg` in namespace `dynamo`, with `Frontend`, `PrefillWorker`, and `DecodeWorker` components and a source manifest named `vllm-disagg.yaml`. Substitute your own names.
 </Note>
 
 ## Plan the Rollout
 
 ### Check Version Compatibility
 
-Check every combination that will exist during the update and rollback, including old and new runtime versions running at the same time.
+Use these commands to check deployed versions, then compare them with your target and rollback versions.
 
-- **Operator and runtime:** the operator supports Dynamo runtimes within an N−2 window: its release line and the two preceding release lines. Both the current and target frontend and worker runtimes, as well as the rollback versions, must fall within that window. If necessary, upgrade the operator first, checking that it still supports the runtimes already serving traffic; use intermediate releases when a single upgrade would exceed the window.
-- **Frontend and workers:** mixed versions are supported across the current release line and the two preceding release lines, in either age direction. Check [Mixed-Version Compatibility](../../reference/general/compatibility.mdx#mixed-version-compatibility) for the supported scope and feature-specific exceptions.
-- **Prefill and decode:** when changing their protocol or backend/runtime combination, update prefill and decode together in the same DGD manifest. They form one new worker generation, isolated from the old generation. The existing generation can continue serving while the replacement becomes ready, subject to the capacity plan below. See [Generation Isolation](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md#generation-isolation) for the design.
+<Tabs>
+<Tab title="Runtime image tag">
 
-When changing a runtime image, update its `runtimeVersionOverride` in the same change, or remove the override if the image tag correctly identifies the contained Dynamo runtime. For sidecar workers, use the version of the `runtime` init container, not the engine image. See [Runtime Version Compatibility](../../reference/kubernetes-api/dynamo-component-deployment.mdx#runtime-version-compatibility).
+The operator reads the runtime version from a semantic-version image tag, unless `runtimeVersionOverride` is set. For sidecar workers, the `runtime` init container supplies the Dynamo version.
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o json | jq -r '
+  ["COMPONENT", "RUNTIME IMAGE"],
+  (.spec.components[] | [.name,
+    ((.podTemplate.spec.initContainers // [] | map(select(.name == "runtime")) | .[0].image)
+      // (.podTemplate.spec.containers[] | select(.name == "main") | .image))])
+  | @tsv'
+```
+
+For example, `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0` identifies Dynamo runtime `1.4.0`.
+
+</Tab>
+<Tab title="Explicit runtime override">
+
+Check for overrides, which take precedence over image tags:
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o json | jq -r '
+  ["COMPONENT", "RUNTIME OVERRIDE"],
+  (.spec.components[] | [.name, (.runtimeVersionOverride // "use image tag")])
+  | @tsv'
+```
+
+For custom tags, declare the contained Dynamo version on the component:
+
+```yaml
+runtimeVersionOverride: "1.4.0"
+```
+
+Update the override with the image, or remove it when the tag identifies the runtime correctly. The override declares a version; it does not change the image. See [Runtime Version Compatibility](../../reference/kubernetes-api/dynamo-component-deployment.mdx#runtime-version-compatibility).
+
+</Tab>
+<Tab title="Operator version">
+
+For a Helm-installed operator, inspect its image tag and configured version across namespaces:
+
+```bash
+kubectl get deployment -A -l app.kubernetes.io/part-of=dynamo-operator -o json | jq -r '
+  ["NAMESPACE", "OPERATOR IMAGE", "CONFIGURED VERSION"],
+  (.items[] | .metadata.namespace as $ns
+    | .spec.template.spec.containers[] | select(.name == "manager")
+    | [$ns, .image, ((.args // []
+      | map(select(startswith("--operator-version="))) | .[0]) // "check image tag")])
+  | @tsv'
+```
+
+</Tab>
+</Tabs>
+
+| Components | Compatibility requirement |
+|---|---|
+| Operator → runtime | **N−2:** the operator supports its release line and the two preceding runtime release lines. Current, target, and rollback runtimes must fit this window. Upgrade the operator first if needed; use intermediate releases to stay within the window. |
+| Frontend ↔ workers | **N−2 in either age direction.** Check [Mixed-Version Compatibility](../../reference/general/compatibility.mdx#mixed-version-compatibility) for feature exceptions. |
+| Prefill ↔ decode | The frontend/worker guarantee does not cover these protocols. Update prefill and decode together in one manifest, using a validated backend/runtime combination within each generation. Old and new generations are isolated; see [Generation Isolation](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md#generation-isolation). |
+
+### Identify the Backing Resources
+
+List the controller kind for each component:
+
+```bash
+kubectl get dgd vllm-disagg -n dynamo -o json | jq -r '
+  ["COMPONENT", "KIND"],
+  (.status.components | to_entries[] | [.key, .value.componentKind])
+  | @tsv'
+```
+
+Example outputs by provider:
+
+<Tabs>
+<Tab title="Deployment">
+
+```text
+COMPONENT       KIND
+Frontend        Deployment
+PrefillWorker   Deployment
+DecodeWorker    Deployment
+```
+
+</Tab>
+<Tab title="Grove">
+
+```text
+COMPONENT       KIND
+Frontend        PodClique
+PrefillWorker   PodClique
+DecodeWorker    PodCliqueScalingGroup
+```
+
+Grove reports `PodClique` or `PodCliqueScalingGroup`, depending on the component's topology.
+
+</Tab>
+<Tab title="LeaderWorkerSet">
+
+```text
+COMPONENT       KIND
+Frontend        Deployment
+PrefillWorker   LeaderWorkerSet
+DecodeWorker    LeaderWorkerSet
+```
+
+</Tab>
+</Tabs>
+
+See [Multinode Orchestration](../installation/multinode-orchestration.md) for provider selection.
+
+### Choose an Update Strategy
+
+<Tabs>
+<Tab title="Deployment">
+
+| Strategy | Use during live traffic |
+|---|---|
+| **`RollingUpdate` (default, recommended)** | Use `maxSurge: "1"` and `maxUnavailable: "0"`; reserve resources for an extra replica per component. |
+| `Recreate` | Stops old pods before starting replacements; permits a component outage. |
+
+Set strategy and budgets on each component's `podTemplate.metadata.annotations`. See [Deployment Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#deployment-backed-components).
+
+</Tab>
+<Tab title="Grove">
+
+| Strategy | Use during live traffic |
+|---|---|
+| **`RollingRecreate` (default, recommended)** | Replaces pods without surge. Use at least two replicas per component and enough remaining capacity to serve traffic. |
+| `OnDelete` | Replaces pods only after manual deletion; requires a separately coordinated replacement procedure. |
+
+This walkthrough uses `RollingRecreate`. Set `nvidia.com/grove-update-strategy` in the DGD's `metadata.annotations`; it applies to both workers and frontend. See [Grove Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-backed-components).
+
+</Tab>
+<Tab title="LeaderWorkerSet">
+
+DGD uses the default rolling update: **one worker replica at a time, without surge**. Use at least two replicas per worker component and enough remaining capacity to serve traffic. DGD does not expose LWS update budgets.
+
+For the frontend, follow the Deployment tab. See [LWS Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#lws-backed-workers).
+
+</Tab>
+</Tabs>
+
+<Note>
+Changing any worker pod template rolls all worker components. A frontend-only change does not create a new worker generation. Check the capacity and draining requirements below before applying either change.
+</Note>
 
 ### Choose the Update Order
 
