@@ -586,6 +586,87 @@ pub fn read_base(path: &Path, sections: Sections) -> Result<BaseStream> {
     Ok(stream)
 }
 
+/// A base's timed write blocks and lookups over virtual time, read without the hash payloads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BaseTimeline {
+    pub list_ts_us: Vec<u64>,
+    /// Engine events and write blocks (stored + removed) of lists `[0, i]`.
+    pub cum_events: Vec<u64>,
+    pub cum_write_blocks: Vec<u64>,
+    pub query_ts_us: Vec<u64>,
+    /// Lookup blocks of queries `[0, i]`.
+    pub cum_query_blocks: Vec<u64>,
+}
+
+/// Read a base's [`BaseTimeline`], seeking past the warm-up and every hash array.
+pub fn read_timeline(path: &Path) -> Result<BaseTimeline> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut input = BufReader::with_capacity(1 << 20, file);
+    let mut magic = [0u8; 8];
+    input.read_exact(&mut magic)?;
+    ensure!(
+        &magic == MAGIC,
+        "{} is not a phantom stream",
+        path.display()
+    );
+    let warmup_len = read_u64(&mut input)?;
+    input.seek_relative(i64::try_from(warmup_len)?)?;
+
+    let _timed_len = read_u64(&mut input)?;
+    let list_ts_us = read_u64s(&mut input)?;
+    let list_end = read_u64s(&mut input)?;
+    let kind = read_u8s(&mut input)?;
+    skip_u64s(&mut input)?; // parents
+    let hash_end = read_u64s(&mut input)?;
+    skip_u64s(&mut input)?; // hashes
+    ensure!(
+        list_ts_us.len() == list_end.len() && kind.len() == hash_end.len(),
+        "{}: timed arrays disagree",
+        path.display()
+    );
+    let mut cum_events = Vec::with_capacity(list_end.len());
+    let mut cum_write_blocks = Vec::with_capacity(list_end.len());
+    let (mut event, mut hashes_before, mut blocks) = (0usize, 0u64, 0u64);
+    for &end in &list_end {
+        while event < end as usize {
+            let hashes = hash_end[event] - hashes_before;
+            blocks += match kind[event] {
+                KIND_STORE_ROOT | KIND_STORE_CHILD => hashes / 2,
+                KIND_REMOVE => hashes,
+                _ => 0,
+            };
+            hashes_before = hash_end[event];
+            event += 1;
+        }
+        cum_events.push(end);
+        cum_write_blocks.push(blocks);
+    }
+
+    let _queries_len = read_u64(&mut input)?;
+    let query_ts_us = read_u64s(&mut input)?;
+    let cum_query_blocks = read_u64s(&mut input)?;
+    ensure!(
+        query_ts_us.len() == cum_query_blocks.len(),
+        "{}: query arrays disagree",
+        path.display()
+    );
+    Ok(BaseTimeline {
+        list_ts_us,
+        cum_events,
+        cum_write_blocks,
+        query_ts_us,
+        cum_query_blocks,
+    })
+}
+
+fn skip_u64s(input: &mut BufReader<File>) -> Result<()> {
+    let len = read_u64(input)?;
+    input.seek_relative(i64::try_from(
+        len.checked_mul(8).context("array too long")?,
+    )?)?;
+    Ok(())
+}
+
 fn array_bytes(len: usize, element: u64) -> u64 {
     8 + len as u64 * element
 }
@@ -697,6 +778,13 @@ mod tests {
         assert_eq!(info.timed.removed_blocks, 1);
         assert_eq!(info.timed.cleared, 1);
         assert_eq!((info.first_ts_us, info.last_ts_us), (Some(9), Some(20)));
+
+        let timeline = read_timeline(&path).unwrap();
+        assert_eq!(timeline.list_ts_us, vec![10, 20]);
+        assert_eq!(timeline.cum_events, vec![2, 3]);
+        assert_eq!(timeline.cum_write_blocks, vec![2, 2]);
+        assert_eq!(timeline.query_ts_us, vec![9, 19]);
+        assert_eq!(timeline.cum_query_blocks, vec![3, 3]);
     }
 
     #[test]

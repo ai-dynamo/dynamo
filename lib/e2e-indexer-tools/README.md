@@ -196,7 +196,16 @@ Coverage: there is no looping, so a phantom stops when its timed section ends.
 (weak scaling), so a longer `--agentic-sim-ms` with fewer bases buys coverage. For example,
 32 bases × 24,500 s costs about as many worker-seconds as phase 1's 512 × 1,600 s. Size
 `--agentic-plays-per-worker` so lanes do not run dry; the export report shows
-`lanes_exhausted_before_cap`.
+`lanes_exhausted_before_cap`. Keep `--agentic-phase-spread × --agentic-sim-ms` near phase 1's
+80 s: the phase offset delays a worker's start, so a long capture with the default 0.05 would
+start some workers after their warm-up.
+
+Stationarity: the streams are not stationary. The request rate stays flat (about 0.13 per
+worker-second), but writes per request rise as agentic sessions turn over: the page-size-16
+production capture wrote about 140–240 blocks per worker-second in the first ~14,000 virtual
+seconds after the warm-up and about 430–475 later (phase 1's 400 s window saw about 142). A
+window that plays only part of the span therefore does not run at the span average, so
+`phantom_plan` solves the speedup on the planned window (section 3).
 
 Eviction (removes): the timed window must run at steady-state eviction, where the cache is full
 and every stored block eventually evicts another. Otherwise the stream under-represents
@@ -237,8 +246,16 @@ phantom_plan --streams <dir> --total-phantoms 1800 --target-write-blocks-per-sec
 
 This prints:
 
-- natural and aggregate rates: writes, events, queries, lookup blocks, and queries per phantom;
-- the speedup and timed coverage;
+- natural and aggregate rates: writes, events, queries, lookup blocks, and queries per phantom.
+  With `--duration-s` the aggregate rates are the planned window's (`window`, `basis`), counted
+  with the publisher's and driver's own stop rule from every base's timeline;
+- the speedup and timed coverage. With `--duration-s` and `--target-write-blocks-per-sec`, the
+  speedup is solved so that the planned window itself carries the target
+  (`speedup_span_average` shows the naive whole-span value). Pass the printed `speedup` to every
+  publisher (it is in each process's arguments) and driver; their own
+  `--target-write-blocks-per-sec` uses the whole-span average and is exact only for stationary
+  streams. Window events are engine events before the publisher pipeline coalesces them; the
+  publisher's plan line has the wire counts;
 - `eviction`: the aggregate timed remove ratio and any streams below the minimum;
 - `indexer.sockets`: the serving indexer's ZMQ socket budget and the mandatory
   `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` (below);

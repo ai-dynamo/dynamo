@@ -3,6 +3,12 @@
 
 //! EXPERIMENT ONLY: plan a phantom load point.
 //!
+//! With `--duration-s`, the speedup is solved on the planned window itself: the streams are not
+//! stationary (fresh agentic sessions write more per request), so a whole-span average would
+//! mislabel a window that plays only part of the span. The plan reads every base's timeline
+//! (list and query timestamps with block counts, no hashes) and applies the publisher's and
+//! driver's own stop rule. Pass the printed `speedup` to every publisher and driver.
+//!
 //! Prints the stream's natural rates, the resolved speedup, the resulting aggregate rates,
 //! whether the timed section covers the requested duration, whether the capture reached
 //! steady-state eviction, the serving indexer's ZMQ socket budget (and so the mandatory
@@ -17,9 +23,12 @@ use clap::Parser;
 use dynamo_e2e_indexer_tools::delivery::Rule;
 use dynamo_e2e_indexer_tools::plan::{
     DEFAULT_SOCKET_RESERVE, DEFAULT_SOCKETS_PER_LIVE_SOURCE, DEFAULT_WORKER_ID_BASE, PhantomLayout,
-    TimeMap, ZMQ_MAX_SOCKETS, indexer_sockets, natural_rates, resolve_speedup,
+    TimeMap, WindowTotals, ZMQ_MAX_SOCKETS, indexer_sockets, natural_rates, resolve_speedup,
+    solve_window_speedup, window_totals,
 };
-use dynamo_e2e_indexer_tools::stream::{DEFAULT_MIN_TIMED_REMOVE_RATIO, Manifest, eviction_report};
+use dynamo_e2e_indexer_tools::stream::{
+    BaseTimeline, DEFAULT_MIN_TIMED_REMOVE_RATIO, Manifest, eviction_report, read_timeline,
+};
 use serde_json::json;
 
 #[derive(Parser, Debug)]
@@ -84,9 +93,12 @@ fn publisher_args(
     count: u64,
     host: &str,
     port: u16,
+    speedup: f64,
     args: &Args,
 ) -> Vec<String> {
     let mut out = vec![
+        "--speedup".to_string(),
+        speedup.to_string(),
         "--total-phantoms".to_string(),
         layout.total.to_string(),
         "--first-phantom".to_string(),
@@ -118,6 +130,35 @@ fn parse_u64(value: &str) -> Result<u64, String> {
     .map_err(|error| error.to_string())
 }
 
+/// Every base's timeline, read in parallel.
+fn read_timelines(dir: &std::path::Path, manifest: &Manifest) -> Result<Vec<BaseTimeline>> {
+    let paths: Vec<PathBuf> = manifest
+        .bases
+        .iter()
+        .map(|base| dir.join(&base.file))
+        .collect();
+    let threads = std::thread::available_parallelism().map_or(8, |n| n.get().min(32));
+    let chunk = paths.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk)
+            .map(|paths| {
+                scope.spawn(move || {
+                    paths
+                        .iter()
+                        .map(|path| read_timeline(path))
+                        .collect::<Result<Vec<_>>>()
+                })
+            })
+            .collect();
+        let mut timelines = Vec::with_capacity(paths.len());
+        for handle in handles {
+            timelines.extend(handle.join().expect("timeline reader panicked")?);
+        }
+        Ok(timelines)
+    })
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let manifest = Manifest::read(&args.streams)?;
@@ -127,12 +168,40 @@ fn main() -> Result<()> {
         salt_seed: args.salt_seed,
     };
     layout.validate(&manifest)?;
-    let speedup = resolve_speedup(
+    let span_average_speedup = resolve_speedup(
         &manifest,
         &layout,
         args.speedup,
         args.target_write_blocks_per_sec,
     )?;
+    // With a duration, solve (or evaluate) the speedup on the planned window itself.
+    let window: Option<WindowTotals> = match args.duration_s {
+        None => None,
+        Some(duration_s) => {
+            let timelines = read_timelines(&args.streams, &manifest)?;
+            let duration_us = (duration_s * 1e6) as u64;
+            let spread_us = args.start_spread_ms * 1000;
+            Some(match args.target_write_blocks_per_sec {
+                Some(target) => solve_window_speedup(
+                    &timelines,
+                    &layout,
+                    manifest.t0_us,
+                    target,
+                    duration_us,
+                    spread_us,
+                )?,
+                None => window_totals(
+                    &timelines,
+                    &layout,
+                    manifest.t0_us,
+                    span_average_speedup,
+                    duration_us,
+                    spread_us,
+                ),
+            })
+        }
+    };
+    let speedup = window.map_or(span_average_speedup, |window| window.speedup);
     let map = TimeMap {
         start_at_unix_us: 0,
         t0_us: manifest.t0_us,
@@ -144,6 +213,25 @@ fn main() -> Result<()> {
         .duration_s
         .map(|duration| duration + args.start_spread_ms as f64 / 1e3);
     let wall = |rate: f64| rate * speedup;
+    let aggregate = match &window {
+        Some(window) => {
+            let mut per_s = window.per_s();
+            per_s["queries_per_phantom"] =
+                json!(window.queries as f64 / window.duration_s / layout.total as f64);
+            per_s["basis"] = json!("planned window");
+            per_s
+        }
+        None => json!({
+            "write_blocks": wall(natural.write_blocks),
+            "stored_blocks": wall(natural.stored_blocks),
+            "removed_blocks": wall(natural.removed_blocks),
+            "events": wall(natural.events),
+            "queries": wall(natural.queries),
+            "query_blocks": wall(natural.query_blocks),
+            "queries_per_phantom": wall(natural.queries) / layout.total as f64,
+            "basis": "whole-span average",
+        }),
+    };
     let sockets = indexer_sockets(
         layout.total,
         args.live_sources,
@@ -165,18 +253,12 @@ fn main() -> Result<()> {
         "total_phantoms": layout.total,
         "phantoms_per_base": layout.total as f64 / manifest.bases.len() as f64,
         "speedup": speedup,
+        "speedup_span_average": span_average_speedup,
         "coverage_s": coverage_s,
         "required_s": required_s,
         "natural_per_virtual_s": natural,
-        "aggregate_per_wall_s": {
-            "write_blocks": wall(natural.write_blocks),
-            "stored_blocks": wall(natural.stored_blocks),
-            "removed_blocks": wall(natural.removed_blocks),
-            "events": wall(natural.events),
-            "queries": wall(natural.queries),
-            "query_blocks": wall(natural.query_blocks),
-            "queries_per_phantom": wall(natural.queries) / layout.total as f64,
-        },
+        "window": window,
+        "aggregate_per_wall_s": aggregate,
         "warmup_write_blocks": natural.warmup_write_blocks,
         "eviction": {
             "min_timed_remove_ratio": eviction.min_timed_remove_ratio,
@@ -263,7 +345,7 @@ fn main() -> Result<()> {
             "{}",
             json!({
                 "publisher": spec,
-                "args": publisher_args(&layout, first, count, host, port, &args),
+                "args": publisher_args(&layout, first, count, host, port, speedup, &args),
                 "sources_entry": entry,
             })
         );

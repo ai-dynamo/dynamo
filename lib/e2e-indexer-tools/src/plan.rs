@@ -10,7 +10,7 @@
 use anyhow::{Result, bail, ensure};
 use serde::Serialize;
 
-use crate::stream::Manifest;
+use crate::stream::{BaseTimeline, Manifest};
 
 /// Default first phantom worker ID: above the 2^53 discovery-safe publisher-ID space, so a
 /// phantom never shares a publisher ID with a real direct-ZMQ publisher.
@@ -146,6 +146,109 @@ pub fn resolve_speedup(
         "speedup {speedup} must be finite and positive"
     );
     Ok(speedup)
+}
+
+/// What every phantom's timed section sends, and the queries the driver issues, before the stop:
+/// lists and queries whose wall instant (`TimeMap::wall_us`, the publisher's and driver's own
+/// rule) falls before `duration_us` after the start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct WindowTotals {
+    pub speedup: f64,
+    pub duration_s: f64,
+    /// Engine events before the publisher pipeline coalesces them (the wire has slightly fewer).
+    pub events: u64,
+    pub write_blocks: u64,
+    pub queries: u64,
+    pub query_blocks: u64,
+}
+
+impl WindowTotals {
+    pub fn write_blocks_per_s(&self) -> f64 {
+        self.write_blocks as f64 / self.duration_s
+    }
+
+    pub fn per_s(&self) -> serde_json::Value {
+        let rate = |value: u64| value as f64 / self.duration_s;
+        serde_json::json!({
+            "write_blocks": rate(self.write_blocks),
+            "events": rate(self.events),
+            "queries": rate(self.queries),
+            "query_blocks": rate(self.query_blocks),
+        })
+    }
+}
+
+/// Totals of the planned window at `speedup`; `timelines` are indexed by base.
+pub fn window_totals(
+    timelines: &[BaseTimeline],
+    layout: &PhantomLayout,
+    t0_us: u64,
+    speedup: f64,
+    duration_us: u64,
+    spread_us: u64,
+) -> WindowTotals {
+    let map = TimeMap {
+        start_at_unix_us: 0,
+        t0_us,
+        speedup,
+    };
+    let mut totals = WindowTotals {
+        speedup,
+        duration_s: duration_us as f64 / 1e6,
+        ..WindowTotals::default()
+    };
+    let before =
+        |ts: &[u64], delay: u64| ts.partition_point(|&ts| map.wall_us(ts, delay) < duration_us);
+    for phantom in 0..layout.total {
+        let timeline = &timelines[layout.base_of(phantom, timelines.len())];
+        let delay = layout.start_delay_us(phantom, spread_us);
+        let lists = before(&timeline.list_ts_us, delay);
+        if lists > 0 {
+            totals.events += timeline.cum_events[lists - 1];
+            totals.write_blocks += timeline.cum_write_blocks[lists - 1];
+        }
+        let queries = before(&timeline.query_ts_us, delay);
+        if queries > 0 {
+            totals.queries += queries as u64;
+            totals.query_blocks += timeline.cum_query_blocks[queries - 1];
+        }
+    }
+    totals
+}
+
+/// The speedup at which the planned window carries `target_write_blocks_per_sec`: streams are not
+/// stationary (fresh agentic sessions write more per request), so a whole-span average mislabels
+/// a window that plays only part of the span. Bisects the window's monotone write total.
+pub fn solve_window_speedup(
+    timelines: &[BaseTimeline],
+    layout: &PhantomLayout,
+    t0_us: u64,
+    target_write_blocks_per_sec: f64,
+    duration_us: u64,
+    spread_us: u64,
+) -> Result<WindowTotals> {
+    let at = |speedup| window_totals(timelines, layout, t0_us, speedup, duration_us, spread_us);
+    let (mut low, mut high) = (1e-6, 1.0);
+    while at(high).write_blocks_per_s() < target_write_blocks_per_sec {
+        ensure!(
+            high < 1e7,
+            "the streams cannot reach {target_write_blocks_per_sec} write blocks/s in the window"
+        );
+        low = high;
+        high *= 2.0;
+    }
+    for _ in 0..100 {
+        if high / low - 1.0 < 1e-9 {
+            break;
+        }
+        let mid = (low * high).sqrt();
+        if at(mid).write_blocks_per_s() < target_write_blocks_per_sec {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    Ok(at(high))
 }
 
 /// Wall-clock mapping of the timed section.
@@ -310,6 +413,39 @@ mod tests {
         assert_eq!(small.kv_sub_sockets, 95);
         // ...and a pin too small for the point is refused.
         assert!(pin(1800, 3).is_err());
+    }
+
+    #[test]
+    fn window_speedup_follows_a_non_stationary_stream() {
+        // One base: 10 blocks per list at t = 0..100 s, then 30 per list at 100..200 s (1 list/s).
+        let mut timeline = BaseTimeline::default();
+        let (mut events, mut blocks) = (0, 0);
+        for second in 0..200u64 {
+            events += 1;
+            blocks += if second < 100 { 10 } else { 30 };
+            timeline.list_ts_us.push(second * 1_000_000);
+            timeline.cum_events.push(events);
+            timeline.cum_write_blocks.push(blocks);
+        }
+        let layout = PhantomLayout {
+            total: 2,
+            worker_id_base: DEFAULT_WORKER_ID_BASE,
+            salt_seed: 0,
+        };
+        let timelines = [timeline];
+        // At speedup 1 a 50 s window sees only the early regime: 2 phantoms x 50 lists x 10.
+        let early = window_totals(&timelines, &layout, 0, 1.0, 50_000_000, 0);
+        assert_eq!(early.write_blocks, 1000);
+        // The span average is (100x10 + 100x30) / 200 = 20 blocks/s per phantom, so a target of 40
+        // over a 50 s window would use speedup 1 and deliver half. The window solve needs the
+        // first 100 lists (t = 0..99 s) before the 50 s stop: speedup just above 1.98.
+        let solved = solve_window_speedup(&timelines, &layout, 0, 40.0, 50_000_000, 0).unwrap();
+        assert!((solved.speedup - 1.98).abs() < 1e-6, "{solved:?}");
+        assert_eq!(solved.write_blocks, 2000);
+        // Reaching into the late regime: 3000 blocks per phantom need 67 lists past t = 100 s.
+        let late = solve_window_speedup(&timelines, &layout, 0, 120.0, 50_000_000, 0).unwrap();
+        assert_eq!(late.write_blocks, 2 * (1000 + 67 * 30));
+        assert!((late.speedup - 166.0 / 50.0).abs() < 1e-6, "{late:?}");
     }
 
     #[test]
