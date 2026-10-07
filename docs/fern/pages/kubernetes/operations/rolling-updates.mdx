@@ -67,7 +67,7 @@ kubectl get deployment -A -l app.kubernetes.io/part-of=dynamo-operator -o json \
 
 | Components | Compatibility requirement |
 |---|---|
-| Operator → runtime | **N−2 through N+1:** operator release N supports runtime release lines N−2, N−1, N, and N+1. Current, target, and rollback runtimes must fit this window. Upgrade the operator first if needed; use intermediate releases to stay within the window. |
+| Operator → runtime | <Tooltip tip="N refers to the operator’s minor release version (MINOR in MAJOR.MINOR.PATCH)."><strong>N−2 through N+1</strong></Tooltip>: operator release N supports runtime release lines N−2, N−1, N, and N+1. Current, target, and rollback runtimes must fit this window. Upgrade the operator first if needed; use intermediate releases to stay within the window. |
 | Frontend ↔ workers | **N−2 in either age direction.** Check [Mixed-Version Compatibility](../../reference/general/compatibility.mdx#mixed-version-compatibility) for feature exceptions. |
 | Prefill ↔ decode | The frontend/worker guarantee does not cover these protocols. Update prefill and decode together in one manifest, using a validated backend/runtime combination within each generation. Old and new generations are isolated; see [Generation Isolation](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md#generation-isolation). |
 
