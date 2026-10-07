@@ -9,8 +9,9 @@ use std::sync::Arc;
 use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType as RsMockerEngineType, MockEngineArgs as RsMockEngineArgs,
-    PreemptionMode as RsPreemptionMode, ReasoningConfig as RsReasoningConfig,
-    SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs, WorkerType as RsWorkerType,
+    NativeHostOffloadConfig, PreemptionMode as RsPreemptionMode,
+    ReasoningConfig as RsReasoningConfig, SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs,
+    WorkerType as RsWorkerType,
 };
 use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
@@ -176,6 +177,18 @@ fn parse_preemption_mode(preemption_mode: &str) -> PyResult<RsPreemptionMode> {
     }
 }
 
+fn parse_native_host_offload(
+    config: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<NativeHostOffloadConfig>> {
+    config
+        .map(|config| {
+            pythonize::depythonize(config).map_err(|error| {
+                PyValueError::new_err(format!("invalid native_host_offload: {error}"))
+            })
+        })
+        .transpose()
+}
+
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct ReasoningConfig {
@@ -285,7 +298,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None, kv_cache_bytes_per_token=None, native_host_offload=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -324,6 +337,8 @@ impl MockEngineArgs {
         trtllm: Option<TrtllmArgs>,
         max_model_len: Option<usize>,
         ais_perf_config: Option<&Bound<'_, PyAny>>,
+        kv_cache_bytes_per_token: Option<usize>,
+        native_host_offload: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
@@ -368,6 +383,8 @@ impl MockEngineArgs {
             .bootstrap_port(bootstrap_port)
             .handoff_session_timeout_ms(handoff_session_timeout_ms)
             .kv_bytes_per_token(kv_bytes_per_token)
+            .kv_cache_bytes_per_token(kv_cache_bytes_per_token)
+            .native_host_offload(parse_native_host_offload(native_host_offload)?)
             .kv_transfer_bandwidth(kv_transfer_bandwidth)
             .kv_transfer_timing_mode(kv_transfer_timing_mode)
             .reasoning(reasoning.map(|config| config.inner()))
@@ -518,6 +535,16 @@ impl MockEngineArgs {
     #[getter]
     fn kv_bytes_per_token(&self) -> Option<usize> {
         self.inner.kv_bytes_per_token
+    }
+
+    #[getter]
+    fn kv_cache_bytes_per_token(&self) -> Option<usize> {
+        self.inner.kv_cache_bytes_per_token
+    }
+
+    #[getter]
+    fn native_host_offload<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        pythonize(py, &self.inner.native_host_offload).map_err(to_pyerr)
     }
 
     #[getter]
