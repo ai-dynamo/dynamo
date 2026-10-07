@@ -626,13 +626,9 @@ impl DeltaAggregator {
             }
             let finalized: Vec<_> = std::mem::take(&mut choice.tool_call_chunks)
                 .into_iter()
-                .filter(|(index, _)| {
-                    choice.parser_call_completion.get(index).copied().unwrap_or(
-                        !require_explicit_tool_terminal
-                            || choice.finish_reason
-                                == Some(dynamo_protocols::types::FinishReason::ToolCalls),
-                    )
-                })
+                // Explicit parser evidence owns provisional calls. Backend chunks have
+                // no completion bit; the shared argument validation below handles them.
+                .filter(|(index, _)| choice.parser_call_completion.get(index) != Some(&false))
                 .filter_map(|(_, chunk)| finalize_merged_tool_chunk(chunk))
                 .collect();
             // choice.tool_calls is always None at this point: or_insert
@@ -2344,7 +2340,7 @@ mod tests {
                     let choice = &result.inner.choices[0];
                     let valid = serde_json::from_str::<serde_json::Value>(args).is_ok();
                     let retained = if unified {
-                        finish == Some(FinishReason::ToolCalls) && (valid || args.is_empty())
+                        valid || (finish == Some(FinishReason::ToolCalls) && args.is_empty())
                     } else {
                         finish != Some(FinishReason::Length) || valid
                     };
@@ -2410,16 +2406,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_terminal_policy_requires_an_explicit_terminal_for_each_choice() {
+    async fn explicit_terminal_policy_rejects_provisional_evidence_for_each_choice() {
         let delta = |index, finish_reason| {
-            create_test_delta(
+            let mut input = create_test_delta(
                 index,
                 "",
                 Some(dynamo_protocols::types::Role::Assistant),
                 finish_reason,
                 None,
                 Some(r#"{"name":"search","arguments":{"query":"Paris"}}"#),
-            )
+            );
+            input.data.as_mut().unwrap().tool_call_completion.push(
+                super::super::ToolCallCompletion {
+                    choice_index: index,
+                    tool_index: 0,
+                    complete: false,
+                },
+            );
+            input
         };
         let incomplete_stop = delta(0, Some(dynamo_protocols::types::FinishReason::Stop));
         let complete = create_test_delta(
@@ -2536,7 +2540,7 @@ mod tests {
 
         assert_eq!(
             response.inner.choices[0].finish_reason,
-            Some(dynamo_protocols::types::FinishReason::Stop)
+            Some(dynamo_protocols::types::FinishReason::Length)
         );
         assert!(response.inner.choices[0].message.tool_calls.is_none());
     }
@@ -3722,5 +3726,89 @@ mod tests {
             ErrorType::Backend(BackendError::InvalidArgument)
         );
         assert_eq!(error.message(), "invalid sampling parameter");
+    }
+    #[tokio::test]
+    async fn review_structured_complete_calls_survive_every_finish_without_evidence() {
+        for finish in [
+            None,
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            Some(dynamo_protocols::types::FinishReason::Length),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
+        ] {
+            let input = create_test_delta(
+                0,
+                "",
+                None,
+                finish,
+                None,
+                Some(r#"{"name":"write_file","arguments":{"count":1,"content":"data"}}"#),
+            );
+            let result = DeltaAggregator::apply_with_tool_terminal_policy(
+                stream::iter([input]),
+                ParsingOptions::default(),
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.inner.choices[0]
+                    .message
+                    .tool_calls
+                    .as_ref()
+                    .map(Vec::len),
+                Some(1),
+                "{finish:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn review_backend_completion_evidence_remains_authoritative() {
+        for complete in [None, Some(false), Some(true)] {
+            for finish in [
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                Some(dynamo_protocols::types::FinishReason::Length),
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+            ] {
+                let mut input = create_test_delta(
+                    0,
+                    "",
+                    None,
+                    finish,
+                    None,
+                    Some(r#"{"name":"write_file","arguments":{"count":1,"content":"data"}}"#),
+                );
+                if let Some(complete) = complete {
+                    input.data.as_mut().unwrap().tool_call_completion.push(
+                        super::super::ToolCallCompletion {
+                            choice_index: 0,
+                            tool_index: 0,
+                            complete,
+                        },
+                    );
+                }
+                let response = DeltaAggregator::apply_with_tool_terminal_policy(
+                    stream::iter([input]),
+                    ParsingOptions::default(),
+                    true,
+                )
+                .await
+                .unwrap();
+                let calls = &response.inner.choices[0].message.tool_calls;
+                if complete == Some(false) {
+                    assert!(calls.is_none(), "{finish:?}");
+                } else {
+                    let calls = calls.as_ref().unwrap();
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(calls[0].function.name, "write_file");
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments)
+                            .unwrap(),
+                        serde_json::json!({"count":1,"content":"data"})
+                    );
+                }
+            }
+        }
     }
 }

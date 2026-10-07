@@ -840,6 +840,14 @@ pub(crate) fn contains_unquoted_marker(content: &str, marker: &str) -> bool {
 /// if it never appears outside a quoted span. Prefill detection compares positions
 /// so a later opener cannot hide an earlier prompt-prefilled closer.
 pub(crate) fn first_unquoted_marker_position(content: &str, marker: &str) -> Option<usize> {
+    first_unquoted_marker_position_after(content, marker, 0)
+}
+
+fn first_unquoted_marker_position_after(
+    content: &str,
+    marker: &str,
+    minimum: usize,
+) -> Option<usize> {
     let chars: Vec<(usize, char)> = content.char_indices().collect();
     // Whether an unescaped `"`, `'`, or `` ` `` appears anywhere at or after each
     // position, precomputed once in O(n) so the scan below doesn't rescan the
@@ -880,7 +888,7 @@ pub(crate) fn first_unquoted_marker_position(content: &str, marker: &str) -> Opt
             quote = Some(character);
             continue;
         }
-        if content[offset..].starts_with(marker) {
+        if offset >= minimum && content[offset..].starts_with(marker) {
             return Some(offset);
         }
     }
@@ -1105,21 +1113,35 @@ fn batch_tool_output_mode(
 
 /// Ask the grammar owner which source bytes remain uncommitted. A literal tool
 /// closer inside an argument must not hide an unfinished sibling from recovery.
-fn glm_pending_input(input: &str) -> anyhow::Result<String> {
-    let mut parser = create_unified_parser_for_family(GLM47_UNIFIED_FAMILY, &[])?;
-    parser.parse_into(input, &mut UnifiedParserOutput::default())?;
-    Ok(parser.reset())
-}
-
 fn glm_unfinished_call(input: &str) -> anyhow::Result<Option<usize>> {
-    let pending = glm_pending_input(input)?;
+    let mut parser = create_unified_parser_for_family(GLM47_UNIFIED_FAMILY, &[])?;
+    let mut output = UnifiedParserOutput::default();
+    parser.parse_into(input, &mut output)?;
+    let pending = parser.reset();
     let prefix = input
         .strip_suffix(&pending)
         .ok_or_else(|| anyhow::anyhow!("GLM pending input is not a source suffix"))?;
-    Ok(
-        first_unquoted_native_tool_call_marker(&pending, GLM47_UNIFIED_FAMILY)
-            .map(|start| prefix.len() + start),
-    )
+    // Only prose after the last completed call can quote a pending marker.
+    // Argument quotes belong to the native grammar and cannot span sibling calls.
+    let mut prose = String::new();
+    for event in output.events {
+        match event {
+            UnifiedParserEvent::ToolCall(call) if call.complete => prose.clear(),
+            UnifiedParserEvent::Text(text) | UnifiedParserEvent::Reasoning(text) => {
+                prose.push_str(&text)
+            }
+            _ => {}
+        }
+    }
+    let pending_offset = prose.len();
+    prose.push_str(&pending);
+    let markers = native_tool_call_start_tokens(GLM47_UNIFIED_FAMILY)
+        .expect("registered GLM native grammar has start tokens");
+    Ok(markers
+        .iter()
+        .filter_map(|marker| first_unquoted_marker_position_after(&prose, marker, pending_offset))
+        .min()
+        .map(|start| prefix.len() + start - pending_offset))
 }
 
 /// Merge adjacent same-kind text/reasoning deltas so one `push` does not become three
@@ -1770,6 +1792,7 @@ impl ChoiceState {
 
     fn parse_segment(&mut self, text: &str) -> Vec<UnifiedParserEvent> {
         if let Some(input) = &mut self.glm_native_input {
+            // EOF recovery needs source context; scan once there, not on every push.
             input.push_str(text);
         }
         if self.family == QWEN3_UNIFIED_FAMILY
@@ -1779,27 +1802,7 @@ impl ChoiceState {
         }
         let mut output = UnifiedParserOutput::default();
         match self.parser.parse_into(text, &mut output) {
-            Ok(()) => {
-                if let Some(input) = &mut self.glm_native_input {
-                    if output.events.iter().any(|event| matches!(event, UnifiedParserEvent::ToolCall(call) if call.complete)) {
-                        match glm_pending_input(input) {
-                            Ok(pending) => *input = pending,
-                            Err(error) => tracing::warn!(%error, why = "glm_pending_input_failed", "retaining native input for terminal recovery"),
-                        }
-                    }
-                    // Retain quotes and marker prefixes: later bytes can still make them syntax.
-                    if !input.contains(['"', '\'', '`'])
-                        && unquoted_native_tool_call_marker_or_prefix_start(
-                            input,
-                            GLM47_UNIFIED_FAMILY,
-                        )
-                        .is_none()
-                    {
-                        input.clear();
-                    }
-                }
-                output.events
-            }
+            Ok(()) => output.events,
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -1959,9 +1962,12 @@ impl ChoiceState {
                     &mut self.next_tool_index,
                 );
                 self.tool_emitted = true;
-                self.parser_call_completion
-                    .insert(tool_index, call.complete);
-                if call.complete {
+                let complete = self
+                    .parser_call_completion
+                    .entry(tool_index)
+                    .and_modify(|complete| *complete |= call.complete)
+                    .or_insert(call.complete);
+                if *complete {
                     self.pending_tool_calls.remove(&tool_index);
                     self.pending_parsed_tool_calls.remove(&tool_index);
                 } else {
@@ -2135,23 +2141,13 @@ impl ChoiceState {
     }
 
     pub(crate) fn unterminated_finish_reason(&self) -> Option<FinishReason> {
-        if self.incomplete_native_call {
-            return Some(FinishReason::Length);
-        }
-        self.has_terminal_tool_calls()
-            .then_some(FinishReason::ToolCalls)
+        self.normalize_finish_reason(Some(FinishReason::Stop))
+            .filter(|reason| *reason == FinishReason::Length || *reason == FinishReason::ToolCalls)
     }
 
     /// Whether this choice has emitted a tool-call delta so far.
     pub(crate) fn tool_emitted(&self) -> bool {
         self.tool_emitted
-    }
-
-    fn has_terminal_tool_calls(&self) -> bool {
-        self.tool_emitted
-            && self.pending_tool_calls.is_empty()
-            && self.pending_parsed_tool_calls.is_empty()
-            && !has_incomplete_call_evidence(&self.parser_call_completion)
     }
 
     fn resolve_complete_parsed_tool_calls_at_eof(&mut self) {
@@ -2175,22 +2171,14 @@ impl ChoiceState {
     /// OpenAI streaming contract: `Stop` becomes `ToolCalls` only when every emitted
     /// call index is complete. `Length` / `ContentFilter` stay unchanged.
     fn normalize_finish_reason(&self, finish_reason: Option<FinishReason>) -> Option<FinishReason> {
-        match finish_reason {
-            Some(FinishReason::Stop | FinishReason::ToolCalls) if self.incomplete_native_call => {
-                Some(FinishReason::Length)
-            }
-            Some(FinishReason::ToolCalls)
-                if !self.pending_tool_calls.is_empty()
-                    || !self.pending_parsed_tool_calls.is_empty()
-                    || has_incomplete_call_evidence(&self.parser_call_completion) =>
-            {
-                Some(FinishReason::Stop)
-            }
-            Some(FinishReason::Stop) if self.has_terminal_tool_calls() => {
-                Some(FinishReason::ToolCalls)
-            }
-            other => other,
-        }
+        normalize_tool_finish_reason(
+            finish_reason,
+            self.tool_emitted,
+            self.incomplete_native_call
+                || !self.pending_tool_calls.is_empty()
+                || !self.pending_parsed_tool_calls.is_empty()
+                || has_incomplete_call_evidence(&self.parser_call_completion),
+        )
     }
 }
 
@@ -2218,9 +2206,10 @@ fn resolve_complete_parsed_tool_calls_at_terminal(
     family: &str,
     allow_empty_parameterless: bool,
 ) {
-    // Default-on V4.1 preserves backend arguments at terminal/EOF with the experiment off.
+    // Default-on families preserve backend arguments at terminal/EOF with the experiment off.
     // Native pending calls and explicit parser completion evidence remain separate guards.
-    if family == DEEPSEEK_V41_UNIFIED_FAMILY && !parsers_v2_selected() {
+    if matches!(family, DEEPSEEK_V41_UNIFIED_FAMILY | MUSE_UNIFIED_FAMILY) && !parsers_v2_selected()
+    {
         pending.clear();
         return;
     }
@@ -2568,27 +2557,14 @@ fn qwen_chunks_for_choices(
 
 impl ChoiceRecord {
     fn normalize_finish_reason(&self, finish_reason: Option<FinishReason>) -> Option<FinishReason> {
-        match finish_reason {
-            Some(FinishReason::Stop | FinishReason::ToolCalls) if self.incomplete_native_call => {
-                Some(FinishReason::Length)
-            }
-            Some(FinishReason::ToolCalls)
-                if !self.pending_tool_calls.is_empty()
-                    || !self.pending_parsed_tool_calls.is_empty()
-                    || has_incomplete_call_evidence(&self.parser_call_completion) =>
-            {
-                Some(FinishReason::Stop)
-            }
-            Some(FinishReason::Stop)
-                if self.tool_emitted
-                    && self.pending_tool_calls.is_empty()
-                    && self.pending_parsed_tool_calls.is_empty()
-                    && !has_incomplete_call_evidence(&self.parser_call_completion) =>
-            {
-                Some(FinishReason::ToolCalls)
-            }
-            other => other,
-        }
+        normalize_tool_finish_reason(
+            finish_reason,
+            self.tool_emitted,
+            self.incomplete_native_call
+                || !self.pending_tool_calls.is_empty()
+                || !self.pending_parsed_tool_calls.is_empty()
+                || has_incomplete_call_evidence(&self.parser_call_completion),
+        )
     }
 
     fn remember_state(&mut self, state: &ChoiceState) {
@@ -2605,12 +2581,12 @@ impl ChoiceRecord {
         self.next_tool_index = self.next_tool_index.max(state.next_tool_index);
         self.pending_tool_calls
             .clone_from(&state.pending_tool_calls);
-        self.parser_call_completion.extend(
-            state
-                .parser_call_completion
-                .iter()
-                .map(|(index, complete)| (*index, *complete)),
-        );
+        for (&index, &complete) in &state.parser_call_completion {
+            self.parser_call_completion
+                .entry(index)
+                .and_modify(|remembered| *remembered |= complete)
+                .or_insert(complete);
+        }
         self.pending_parsed_tool_calls
             .clone_from(&state.pending_parsed_tool_calls);
         self.tool_emitted |= state.tool_emitted();
@@ -2652,7 +2628,7 @@ fn finish_unterminated_choices(
             Some(state) => {
                 let deltas = state.finish();
                 // Native completion evidence remains authoritative; backend-only calls
-                // use the family policy so flag-off V4.1 retains its EOF contract.
+                // use the family policy so default-on parsers retain their EOF contract.
                 let mut flushed = state.choices_for(&base, deltas, true, None);
                 state.resolve_complete_parsed_tool_calls_at_eof();
                 if let Some(reason) = state.unterminated_finish_reason() {
@@ -2690,23 +2666,32 @@ fn finish_unterminated_choices(
                     &mut record.pending_parsed_tool_calls,
                     family,
                 );
-                if record.incomplete_native_call {
-                    let mut choice = base;
-                    choice.finish_reason = Some(FinishReason::Length);
-                    chunks.push(FinishedStreamChunk::Choice(choice));
-                } else if record.tool_emitted
-                    && record.pending_tool_calls.is_empty()
-                    && record.pending_parsed_tool_calls.is_empty()
-                    && !has_incomplete_call_evidence(&record.parser_call_completion)
+                if let Some(reason @ (FinishReason::Length | FinishReason::ToolCalls)) =
+                    record.normalize_finish_reason(Some(FinishReason::Stop))
                 {
                     let mut choice = base;
-                    choice.finish_reason = Some(FinishReason::ToolCalls);
+                    choice.finish_reason = Some(reason);
                     chunks.push(FinishedStreamChunk::Choice(choice));
                 }
             }
         }
     }
     chunks
+}
+
+// Live and history-only choices must expose the same unfinished-call outcome.
+fn normalize_tool_finish_reason(
+    finish_reason: Option<FinishReason>,
+    tool_emitted: bool,
+    incomplete: bool,
+) -> Option<FinishReason> {
+    match finish_reason {
+        Some(FinishReason::Stop | FinishReason::ToolCalls) if incomplete => {
+            Some(FinishReason::Length)
+        }
+        Some(FinishReason::Stop) if tool_emitted => Some(FinishReason::ToolCalls),
+        other => other,
+    }
 }
 
 fn has_incomplete_call_evidence(completion: &HashMap<usize, bool>) -> bool {
@@ -3717,6 +3702,7 @@ pub(crate) mod tests {
             },
             nvext: None,
             llm_metrics: None,
+            prompt_logprobs: None,
             tool_call_completion: Vec::new(),
         };
         Annotated::from_data(response)
@@ -4534,11 +4520,14 @@ pub(crate) mod tests {
         assert!(partial[0].delta.tool_calls.is_some());
         assert_eq!(
             partial[0].finish_reason,
-            Some(FinishReason::Stop),
-            "an unfinished parser fragment must not rewrite Stop to ToolCalls"
+            Some(FinishReason::Length),
+            "an unfinished parser fragment must expose truncation"
         );
         assert!(state.tool_emitted());
-        assert_eq!(state.unterminated_finish_reason(), None);
+        assert_eq!(
+            state.unterminated_finish_reason(),
+            Some(FinishReason::Length)
+        );
 
         let completed = state.choices_for(
             &empty_choice(0),
@@ -4571,8 +4560,11 @@ pub(crate) mod tests {
             true,
             Some(FinishReason::Stop),
         );
-        assert_eq!(completed[0].finish_reason, Some(FinishReason::Stop));
-        assert_eq!(state.unterminated_finish_reason(), None);
+        assert_eq!(completed[0].finish_reason, Some(FinishReason::Length));
+        assert_eq!(
+            state.unterminated_finish_reason(),
+            Some(FinishReason::Length)
+        );
 
         let final_fragment = state.choices_for(
             &empty_choice(0),
@@ -4616,7 +4608,10 @@ pub(crate) mod tests {
         ]);
         let partials = state.choices_for(&parsed_fragments, Vec::new(), true, None);
         assert_eq!(partials.len(), 1);
-        assert_eq!(state.unterminated_finish_reason(), None);
+        assert_eq!(
+            state.unterminated_finish_reason(),
+            Some(FinishReason::Length)
+        );
 
         let terminal =
             state.choices_for(&empty_choice(0), Vec::new(), true, Some(FinishReason::Stop));
@@ -5332,7 +5327,7 @@ pub(crate) mod tests {
                 .iter()
                 .filter_map(|choice| choice.finish_reason)
                 .collect::<Vec<_>>(),
-            vec![FinishReason::Stop],
+            vec![FinishReason::Length],
             "an incomplete argument object must not be reported as a completed tool call"
         );
     }
@@ -5364,7 +5359,7 @@ pub(crate) mod tests {
                 .iter()
                 .filter_map(|choice| choice.finish_reason)
                 .collect::<Vec<_>>(),
-            vec![FinishReason::Stop]
+            vec![FinishReason::Length]
         );
     }
 
@@ -6567,6 +6562,7 @@ pub(crate) mod tests {
                 },
                 nvext: None,
                 llm_metrics: None,
+                prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
             };
             Annotated::from_data(response)
@@ -6856,7 +6852,11 @@ pub(crate) mod tests {
         let choices = collect_choices(&responses);
 
         assert!(
-            choices.iter().all(|choice| choice.finish_reason.is_none()),
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>()
+                == vec![FinishReason::Length],
             "a valid JSON prefix followed by malformed bytes must remain provisional"
         );
     }
@@ -7157,7 +7157,11 @@ pub(crate) mod tests {
             "the partial upstream tool-call delta must remain visible"
         );
         assert!(
-            choices.iter().all(|choice| choice.finish_reason.is_none()),
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>()
+                == vec![FinishReason::Length],
             "EOF must not claim tool-call completion when upstream arguments remain partial"
         );
     }
@@ -7381,7 +7385,7 @@ pub(crate) mod tests {
                 .iter()
                 .filter_map(|choice| choice.finish_reason)
                 .collect::<Vec<_>>(),
-            vec![FinishReason::Stop]
+            vec![FinishReason::Length]
         );
     }
 
@@ -7607,7 +7611,11 @@ pub(crate) mod tests {
             "both the raw and already-parsed partial fragments should be emitted"
         );
         assert!(
-            choices.iter().all(|choice| choice.finish_reason.is_none()),
+            choices
+                .iter()
+                .filter_map(|choice| choice.finish_reason)
+                .collect::<Vec<_>>()
+                == vec![FinishReason::Length],
             "nonterminal parsed argument fragments must not synthesize a completed-call terminal"
         );
     }
@@ -7924,7 +7932,7 @@ pub(crate) mod tests {
                     .iter()
                     .filter_map(|choice| choice.finish_reason)
                     .collect::<Vec<_>>(),
-                vec![FinishReason::Stop],
+                vec![FinishReason::Length],
                 "a terminal reason must not complete malformed parsed fragments (tool_calls_finish={tool_calls_finish})"
             );
             let emitted_arguments: Vec<_> = choices
@@ -8032,7 +8040,7 @@ pub(crate) mod tests {
             .filter_map(|choice| choice.finish_reason.map(|reason| (choice.index, reason)))
             .collect();
 
-        assert_eq!(finishes.get(&0), Some(&FinishReason::Stop));
+        assert_eq!(finishes.get(&0), Some(&FinishReason::Length));
         assert_eq!(finishes.get(&1), Some(&FinishReason::ToolCalls));
         let calls: HashMap<_, _> = choices
             .iter()
@@ -8128,6 +8136,7 @@ pub(crate) mod tests {
                 },
                 nvext: None,
                 llm_metrics: None,
+                prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
             };
             Annotated::from_data(response)
@@ -11376,341 +11385,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn unmatched_quote_does_not_hide_real_reasoning_close_at_any_stream_split() {
-        let raw = r#"<think>I considered "Paris.</think>The answer is Paris."#;
-        let batch =
-            parse_complete(QWEN3_UNIFIED_FAMILY, raw, &GuidedToolConstraint::None, &[]).unwrap();
-        assert_eq!(batch.reasoning, r#"I considered "Paris."#);
-        assert_eq!(batch.text, "The answer is Paris.");
-
-        for split in 0..=raw.len() {
-            let responses = apply_stream(
-                stream::iter([chunk(&raw[..split], false), chunk(&raw[split..], true)]),
-                None,
-                None,
-                false,
-                UnifiedParserStartingState::None,
-                QWEN3_UNIFIED_FAMILY,
-            )
-            .collect::<Vec<_>>()
-            .await;
-            let choices = collect_choices(&responses);
-            let reasoning = choices
-                .iter()
-                .filter_map(|choice| choice.delta.reasoning_content.as_deref())
-                .collect::<String>();
-            let text = choices
-                .iter()
-                .filter_map(|choice| choice.delta.content.as_ref())
-                .filter_map(|content| match content {
-                    ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-            assert_eq!(reasoning, batch.reasoning, "split {split}");
-            assert_eq!(text, batch.text, "split {split}");
-        }
-    }
-
-    #[tokio::test]
-    async fn structured_json_then_reasoning_close_matches_batch_and_streaming() {
-        let policy = UnifiedRequestPolicy {
-            structured_response: true,
-            ..Default::default()
-        };
-        let raw = r#"{"plan":"check"}</think>{"answer":42}"#;
-        let batch = parse_complete_with_policy(
-            QWEN3_UNIFIED_FAMILY,
-            raw,
-            &GuidedToolConstraint::None,
-            &[],
-            policy,
-        )
-        .unwrap();
-        assert_eq!(batch.reasoning, r#"{"plan":"check"}"#);
-        assert_eq!(batch.text, r#"{"answer":42}"#);
-
-        for split in 0..=raw.len() {
-            let responses = apply_stream_with_policy(
-                stream::iter([chunk(&raw[..split], false), chunk(&raw[split..], true)]),
-                None,
-                GuidedToolConstraint::None,
-                UnifiedParserStartingState::Reasoning,
-                QWEN3_UNIFIED_FAMILY,
-                false,
-                policy,
-            )
-            .collect::<Vec<_>>()
-            .await;
-            let choices = collect_choices(&responses);
-            let reasoning = choices
-                .iter()
-                .filter_map(|choice| choice.delta.reasoning_content.as_deref())
-                .collect::<String>();
-            let text = choices
-                .iter()
-                .filter_map(|choice| choice.delta.content.as_ref())
-                .filter_map(|content| match content {
-                    ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-            assert_eq!(reasoning, batch.reasoning, "split {split}");
-            assert_eq!(text, batch.text, "split {split}");
-        }
-    }
-
-    #[test]
-    fn quoted_marker_in_tool_arguments_releases_following_content_before_close() {
-        assert_quoted_marker_tool_arguments(true);
-    }
-
-    #[test]
-    fn quoted_marker_tool_arguments_preserve_completed_output_at_every_split() {
-        assert_quoted_marker_tool_arguments(false);
-    }
-
-    fn assert_quoted_marker_tool_arguments(require_early_progress: bool) {
-        let tools = vec![Tool {
-            name: "write_file".to_string(),
-            description: None,
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
-                },
-                "required": ["path", "content"]
-            }),
-            strict: None,
-        }];
-        let body = "a".repeat(8192);
-        for (mode, prefix, suffix) in [
-            (
-                UnifiedToolOutputMode::GuidedJson {
-                    named_tool: Some("write_file".to_string()),
-                },
-                r#"{"path":"x","content":"prefix <think>"#,
-                r#" suffix"}"#,
-            ),
-            (
-                UnifiedToolOutputMode::GuidedJson { named_tool: None },
-                r#"[{"name":"write_file","arguments":{"path":"x","content":"prefix <think>"#,
-                r#" suffix"}}]"#,
-            ),
-            (
-                UnifiedToolOutputMode::Native,
-                r#"<tool_call><function=write_file><parameter=path>x</parameter><parameter=content>"prefix <think>"#,
-                r#" suffix"</parameter></function></tool_call>"#,
-            ),
-        ] {
-            let mut state = ChoiceState::new(
-                QWEN3_UNIFIED_FAMILY,
-                &tools,
-                UnifiedParserStartingState::Response,
-                mode.clone(),
-                true,
-            )
-            .unwrap();
-            let mut events = state.push(prefix);
-            let progress = state.push(&body);
-            let arguments: String = progress
-                .iter()
-                .filter_map(|event| match event {
-                    UnifiedParserEvent::ToolCall(call) => Some(call.arguments.as_str()),
-                    _ => None,
-                })
-                .collect();
-            if require_early_progress {
-                assert!(
-                    arguments.contains(&body),
-                    "{mode:?}: argument body must stream before its quote closes"
-                );
-            }
-            events.extend(progress);
-            events.extend(state.push(suffix));
-            events.extend(state.finish());
-
-            let mut batch = create_unified_parser_for_family(QWEN3_UNIFIED_FAMILY, &tools).unwrap();
-            let init = UnifiedParserInit {
-                starting_state: UnifiedParserStartingState::Response,
-                tool_output_mode: mode.clone(),
-                invalid_guided_payload: InvalidGuidedPayloadPolicy::StreamBestEffort,
-                ..Default::default()
-            };
-            batch.initialize_request(init.clone()).unwrap();
-            let raw = format!("{prefix}{body}{suffix}");
-            let completed = dynamo_parsers_v2::assemble(&events);
-            assert_eq!(
-                completed,
-                vec![UnifiedEvent::ToolCall {
-                    name: "write_file".to_string(),
-                    arguments: serde_json::json!({
-                        "path": "x",
-                        "content": if matches!(mode, UnifiedToolOutputMode::Native) {
-                            // XML parameter quotes are payload; JSON string quotes are syntax.
-                            format!("\"prefix <think>{body} suffix\"")
-                        } else {
-                            format!("prefix <think>{body} suffix")
-                        },
-                    }),
-                }],
-                "{mode:?}: completed arguments must preserve every body byte"
-            );
-            assert_eq!(completed, batch.parse_complete(&raw).unwrap());
-
-            let short_raw = format!(r#"{prefix}é \"quoted\" <think>{suffix}"#);
-            batch.reset();
-            batch.initialize_request(init).unwrap();
-            let expected = batch.parse_complete(&short_raw).unwrap();
-            for split in (0..=short_raw.len()).filter(|split| short_raw.is_char_boundary(*split)) {
-                let mut split_state = ChoiceState::new(
-                    QWEN3_UNIFIED_FAMILY,
-                    &tools,
-                    UnifiedParserStartingState::Response,
-                    mode.clone(),
-                    true,
-                )
-                .unwrap();
-                let mut split_events = split_state.push(&short_raw[..split]);
-                split_events.extend(split_state.push(&short_raw[split..]));
-                split_events.extend(split_state.finish());
-                assert_eq!(
-                    dynamo_parsers_v2::assemble(&split_events),
-                    expected,
-                    "{mode:?} split {split}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn repeated_quoted_markers_are_excluded_from_prefill_classification() {
-        let literal = "The literal \"<think>private</think>\" stays visible. ".repeat(1024);
-        let mut shield = QuotedControlMarkerProbe::new(QWEN3_UNIFIED_FAMILY);
-        let mut masked = shield.push(&literal);
-        masked.push_str(&shield.finish());
-        assert!(!masked.contains("</think>"));
-        assert_eq!(masked.len(), literal.len());
-    }
-
-    async fn assert_quoted_literal_streams_as_text(family: &'static str, literal: &str) {
-        for split in literal
-            .char_indices()
-            .map(|(offset, _)| offset)
-            .chain(std::iter::once(literal.len()))
-        {
-            let responses = apply_stream(
-                stream::iter([
-                    chunk(&literal[..split], false),
-                    chunk(&literal[split..], false),
-                ]),
-                None,
-                None,
-                false,
-                UnifiedParserStartingState::None,
-                family,
-            )
-            .collect::<Vec<_>>()
-            .await;
-            let choices = collect_choices(&responses);
-            let streamed = choices
-                .iter()
-                .filter_map(|choice| choice.delta.content.as_ref())
-                .filter_map(|content| match content {
-                    ChatCompletionMessageContent::Text(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-            let reasoning = choices
-                .iter()
-                .filter_map(|choice| choice.delta.reasoning_content.as_deref())
-                .collect::<String>();
-            assert_eq!(streamed, literal, "{family} split {split}");
-            assert!(
-                reasoning.is_empty(),
-                "{family} split {split}: {reasoning:?}"
-            );
-            assert!(
-                choices
-                    .iter()
-                    .all(|choice| choice.delta.tool_calls.is_none()),
-                "{family} split {split}: {choices:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn quoted_control_markers_stay_visible_in_batch_and_streaming() {
-        assert_quoted_control_markers(true, true).await;
-    }
-
-    #[tokio::test]
-    async fn quoted_control_markers_stay_visible_in_batch() {
-        assert_quoted_control_markers(false, false).await;
-    }
-
-    #[tokio::test]
-    async fn native_channel_quoted_control_markers_stay_visible_in_batch() {
-        assert_quoted_control_markers(false, true).await;
-    }
-
-    async fn assert_quoted_control_markers(check_streaming: bool, include_deferred: bool) {
-        for family in [
-            "deepseek_v4",
-            "deepseek_v41",
-            "qwen3",
-            "glm47",
-            "kimi_k2",
-            "gemma4",
-            "kimi_k3",
-            "muse_glimmer",
-        ] {
-            if matches!(family, "gemma4" | "kimi_k3" | "muse_glimmer") && !include_deferred {
-                continue;
-            }
-            let (opener, closer) = match family {
-                "kimi_k3" => ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
-                "muse_glimmer" => ("<|start|>assistant to=self<|message|>", "<|eom|>"),
-                _ => reasoning_marker_pair(family).unwrap(),
-            };
-            for quote in ['"', '\'', '`'] {
-                let literal =
-                    format!("{quote}The literal {opener}private{closer}{quote} stays visible.");
-                let parsed =
-                    parse_complete(family, &literal, &GuidedToolConstraint::None, &[]).unwrap();
-                assert_eq!(parsed.text, literal, "{family} quote {quote}");
-                assert!(
-                    parsed.reasoning.is_empty(),
-                    "{family} quote {quote}: {:?}",
-                    parsed.reasoning
-                );
-
-                if check_streaming {
-                    assert_quoted_literal_streams_as_text(family, &literal).await;
-                }
-            }
-        }
-
-        for quote in ['\'', '`'] {
-            let literal =
-                format!("The literal {quote}<think>private</think>{quote} stays visible.");
-            let parsed = parse_complete(
-                QWEN3_UNIFIED_FAMILY,
-                &literal,
-                &GuidedToolConstraint::None,
-                &[],
-            )
-            .unwrap();
-            assert_eq!(parsed.text, literal, "quote {quote}");
-            assert!(parsed.reasoning.is_empty(), "quote {quote}");
-            if check_streaming {
-                assert_quoted_literal_streams_as_text(QWEN3_UNIFIED_FAMILY, &literal).await;
-            }
-        }
-    }
-
     #[test]
     fn quoted_control_marker_probe_masks_closed_quotes_and_flushes_unclosed_quotes() {
         for family in [
@@ -12336,6 +12010,226 @@ pub(crate) mod tests {
                 })
                 .collect();
             assert_eq!(before_call, prefix, "split {split}: call ordering");
+        }
+    }
+    #[test]
+    fn review_completion_is_monotonic_after_whitespace_delta() {
+        let mut state = test_state();
+        state.delta_to_choice(0, call_delta(0, Some("get_weather"), "{}"));
+        state.delta_to_choice(0, partial_call_delta(0, None, " "));
+        assert_eq!(state.parser_call_completion.get(&0), Some(&true));
+        assert!(state.pending_tool_calls.is_empty());
+        let mut record = ChoiceRecord::default();
+        record.remember_state(&state);
+        assert_eq!(record.parser_call_completion.get(&0), Some(&true));
+        assert_eq!(
+            record.normalize_finish_reason(Some(FinishReason::Stop)),
+            Some(FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            state.normalize_finish_reason(Some(FinishReason::Stop)),
+            Some(FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn review_named_guided_whitespace_preserves_completion_at_every_split() {
+        let raw = r#"{"city":"Tokyo"}"#;
+        for (family, _) in all_family_native_calls() {
+            for split in 0..=raw.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([
+                        chunk(&raw[..split], false),
+                        chunk(&raw[split..], false),
+                        chunk(" ", false),
+                        chunk("\n", true),
+                    ]),
+                    Some(weather_tools()),
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "get_weather".into(),
+                    },
+                    UnifiedParserStartingState::None,
+                    family,
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                let choices = collect_choices(&output);
+                assert_eq!(
+                    choices.last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls),
+                    "{family} split {split}"
+                );
+                let arguments = choices
+                    .iter()
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                    .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                    .collect::<String>();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    serde_json::json!({"city":"Tokyo"}),
+                    "{family} split {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_provisional_sibling_exposes_truncation_in_live_and_history_states() {
+        for completed_sibling in [false, true] {
+            let mut state = test_state();
+            if completed_sibling {
+                state.delta_to_choice(0, call_delta(0, Some("first"), "{}"));
+            }
+            state.delta_to_choice(0, partial_call_delta(1, Some("unfinished"), "{"));
+            let mut record = ChoiceRecord::default();
+            record.remember_state(&state);
+            for finish in [
+                None,
+                Some(FinishReason::Stop),
+                Some(FinishReason::ToolCalls),
+                Some(FinishReason::Length),
+                Some(FinishReason::ContentFilter),
+            ] {
+                let expected = match finish {
+                    Some(FinishReason::Stop | FinishReason::ToolCalls) => {
+                        Some(FinishReason::Length)
+                    }
+                    other => other,
+                };
+                assert_eq!(state.normalize_finish_reason(finish), expected);
+                assert_eq!(record.normalize_finish_reason(finish), expected);
+            }
+            assert_eq!(
+                state.unterminated_finish_reason(),
+                Some(FinishReason::Length)
+            );
+            let mut records = HashMap::from([(0, record)]);
+            let chunks = finish_unterminated_choices(
+                &mut HashMap::new(),
+                &mut records,
+                QWEN3_UNIFIED_FAMILY,
+            );
+            assert!(
+                matches!(&chunks[..], [FinishedStreamChunk::Choice(choice)] if choice.finish_reason == Some(FinishReason::Length))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn review_default_on_backend_malformed_arguments_keep_flag_off_finish() {
+        for family in [DEEPSEEK_V41_UNIFIED_FAMILY, MUSE_UNIFIED_FAMILY] {
+            for arguments in ["", "{"] {
+                for terminal in [false, true] {
+                    let mut input = chunk("", terminal);
+                    let delta = &mut input.data.as_mut().unwrap().inner.choices[0].delta;
+                    delta.content = None;
+                    delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                        index: 0,
+                        id: Some("backend-call".into()),
+                        r#type: Some(FunctionType::Function),
+                        function: Some(FunctionCallStream {
+                            name: Some("get_weather".into()),
+                            arguments: Some(arguments.into()),
+                        }),
+                    }]);
+                    let output = apply_stream(
+                        stream::iter([input]),
+                        Some(weather_tools()),
+                        None,
+                        false,
+                        UnifiedParserStartingState::None,
+                        family,
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    let choices = collect_choices(&output);
+                    let expected = if parsers_v2_selected() {
+                        FinishReason::Length
+                    } else {
+                        FinishReason::ToolCalls
+                    };
+                    assert_eq!(
+                        choices.last().unwrap().finish_reason,
+                        Some(expected),
+                        "{family} args={arguments:?} terminal={terminal}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn review_glm_long_unfinished_argument_retains_truncation() {
+        let (family, input) = eight_family_calls(&"x".repeat(8000))
+            .into_iter()
+            .find(|(family, _)| *family == GLM47_UNIFIED_FAMILY)
+            .unwrap();
+        let end = input.rfind('x').unwrap() + 1;
+        let mut state = ChoiceState::new(
+            family,
+            &to_v2_tools(Some(&write_file_tools())),
+            UnifiedParserStartingState::None,
+            UnifiedToolOutputMode::Native,
+            true,
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        for character in input[..end].chars() {
+            state.push(&character.to_string());
+        }
+        eprintln!(
+            "GLM 8000-byte unfinished call, character cadence: {:?}",
+            started.elapsed()
+        );
+        let events = state.finish();
+        state.choices_for(&empty_choice(0), events, true, None);
+        assert_eq!(
+            state.unterminated_finish_reason(),
+            Some(FinishReason::Length)
+        );
+    }
+
+    #[test]
+    fn review_glm_pending_markers_keep_prose_quotes_and_native_payload_ownership() {
+        let complete = r#"<tool_call>write_file<arg_key>content</arg_key><arg_value>say "hi</arg_value></tool_call>"#;
+        let incomplete = r#"<tool_call>write_file<arg_key>content</arg_key><arg_value>"unfinished"#;
+        for input in [
+            format!("{complete}{incomplete}"),
+            format!("{complete} The literal \"<tool_call>\" stays visible. {incomplete}"),
+            "<tool_call>write_file<arg_key>content</arg_key><arg_value>literal </tool_call> text"
+                .to_string(),
+        ] {
+            let expected_start = if input.starts_with(complete) {
+                input.rfind(incomplete).unwrap()
+            } else {
+                0
+            };
+            assert_eq!(glm_unfinished_call(&input).unwrap(), Some(expected_start));
+            for split in input
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain(std::iter::once(input.len()))
+            {
+                let mut state = ChoiceState::new(
+                    GLM47_UNIFIED_FAMILY,
+                    &to_v2_tools(Some(&write_file_tools())),
+                    UnifiedParserStartingState::None,
+                    UnifiedToolOutputMode::Native,
+                    true,
+                )
+                .unwrap();
+                state.push(&input[..split]);
+                state.push(&input[split..]);
+                state.finish();
+                assert!(state.incomplete_native_call, "split {split}: {input}");
+            }
+        }
+        for input in [
+            r#"The literal "<tool_call>" stays visible."#.to_string(),
+            format!("{complete} The literal \"<tool_call>\" stays visible."),
+        ] {
+            assert_eq!(glm_unfinished_call(&input).unwrap(), None);
         }
     }
 }

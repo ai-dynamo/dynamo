@@ -544,14 +544,11 @@ mod tests {
     }
 
     fn unified_parser_options() -> ParsingOptions {
-        ParsingOptions::new(
-            Some("deepseek_v41".to_string()),
-            Some("deepseek_v41".to_string()),
-        )
+        ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
     }
 
     #[tokio::test]
-    async fn payload_capture_applies_request_terminal_policy_at_eof() {
+    async fn payload_capture_keeps_complete_backend_calls_at_eof() {
         let chunks = call_without_explicit_tool_terminal(FinishReason::Stop);
         let (passthrough, future) =
             scan_aggregate_with_future(stream::iter(chunks.clone()), unified_parser_options());
@@ -559,7 +556,7 @@ mod tests {
         let outcome = future.await;
         assert_eq!(delivered.len(), chunks.len());
         assert!(outcome.drop_reason.is_none());
-        assert_eq!(
+        assert!(
             outcome
                 .response
                 .expect("complete output should be captured")
@@ -567,8 +564,7 @@ mod tests {
                 .choices[0]
                 .message
                 .tool_calls
-                .is_none(),
-            crate::protocols::openai::chat_completions::unified_parser::parsers_v2_selected()
+                .is_some()
         );
 
         // Without a unified parser selected, the same structurally valid call is kept.
@@ -589,7 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_capture_applies_request_terminal_policy_to_error_prefix() {
+    async fn payload_capture_keeps_complete_backend_calls_in_error_prefix() {
         let mut chunks = call_without_explicit_tool_terminal(FinishReason::Stop);
         chunks
             .push(Annotated::<NvCreateChatCompletionStreamResponse>::from_error("backend failed"));
@@ -606,7 +602,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.starts_with("aggregation_failed:"))
         );
-        assert_eq!(
+        assert!(
             outcome
                 .response
                 .expect("the prefix should still be captured")
@@ -614,8 +610,7 @@ mod tests {
                 .choices[0]
                 .message
                 .tool_calls
-                .is_none(),
-            crate::protocols::openai::chat_completions::unified_parser::parsers_v2_selected()
+                .is_some()
         );
     }
 
@@ -848,5 +843,35 @@ mod tests {
             reason.contains("backend unavailable"),
             "reason should name the underlying error, got {reason}"
         );
+    }
+
+    // Model-text fixtures cannot carry the internal parser completion evidence.
+    #[tokio::test]
+    async fn payload_capture_rejects_provisional_evidence_at_eof_and_error_prefix() {
+        for error in [false, true] {
+            let mut chunks = call_without_explicit_tool_terminal(FinishReason::Stop);
+            chunks[0].data.as_mut().unwrap().tool_call_completion.push(
+                crate::protocols::openai::chat_completions::ToolCallCompletion {
+                    choice_index: 0,
+                    tool_index: 0,
+                    complete: false,
+                },
+            );
+            if error {
+                chunks.push(Annotated::from_error("backend failed"));
+            }
+            let (passthrough, future) =
+                scan_aggregate_with_future(stream::iter(chunks), unified_parser_options());
+            let delivered = passthrough.collect::<Vec<_>>().await;
+            let outcome = future.await;
+            assert_eq!(delivered.len(), if error { 3 } else { 2 });
+            assert_eq!(outcome.drop_reason.is_some(), error);
+            assert!(
+                outcome.response.unwrap().inner.choices[0]
+                    .message
+                    .tool_calls
+                    .is_none()
+            );
+        }
     }
 }
