@@ -60,9 +60,19 @@ def _context():
     )
 
 
+def _config():
+    return SimpleNamespace(
+        server_args=SimpleNamespace(
+            served_model_name="test-model", skip_tokenizer_init=False
+        ),
+        dynamo_args=SimpleNamespace(enable_rl=False),
+    )
+
+
 def _with_token_input(
     handler, *, max_token_id=MAX_TOKEN_ID, engine=None, tokenizer=None
 ):
+    handler.config = _config()
     handler.use_sglang_tokenizer = tokenizer is not None
     handler.input_param_manager = InputParamManager(tokenizer)
     handler._max_input_token_id = max_token_id
@@ -81,12 +91,6 @@ def _decode_handler_for_generate(engine):
     """A decode handler whose generate() runs up to the engine call."""
     handler = _decode_handler(engine=engine)
     handler.shutdown_event = None
-    handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(
-            served_model_name="test-model", skip_tokenizer_init=False
-        ),
-        dynamo_args=SimpleNamespace(enable_rl=False),
-    )
     handler._enable_frontend_decoding = False
     handler._mm_hashes_supported = False
     handler._engine_supports_priority = False
@@ -238,6 +242,7 @@ async def test_request_forwarded_by_encode_worker_passes_with_placeholder_ids():
     ).model_dump_json()
 
     handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+    handler.config = _config()
     handler.serving_mode = DisaggregationMode.AGGREGATED
     handler.enable_trace = False
     # The placeholder is above the bound, as for a model whose placeholder
