@@ -6,9 +6,8 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-#[cfg(test)]
 use dynamo_mocker::common::protocols::EngineType;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::MockerConfig;
 use dynamo_trtllm_mocker::{MockerServerConfig, ServerMode, TrtllmMockerService};
 use dynamo_trtllm_sidecar::proto::control_server::ControlServer;
 use dynamo_trtllm_sidecar::proto::inference_server::InferenceServer;
@@ -68,7 +67,7 @@ struct Args {
 /// Rewrites the caller's object rather than deserializing it directly: the
 /// serde default for `engine_type` is vllm, so a missing key would silently
 /// select the wrong scheduler.
-fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
+fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockerConfig> {
     let mut object = match value {
         None => Map::new(),
         Some(value) if value.trim_start().starts_with('{') => serde_json::from_str::<Value>(value)
@@ -86,23 +85,19 @@ fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
         .context("--extra-engine-args must be a JSON object")?,
     };
 
-    match object.get("engine_type") {
-        None => {
-            object.insert(
-                "engine_type".to_string(),
-                Value::String("trtllm".to_string()),
-            );
-        }
-        Some(Value::String(engine_type)) if engine_type.eq_ignore_ascii_case("trtllm") => {}
-        Some(engine_type) => {
-            bail!("--extra-engine-args engine_type must be trtllm, got {engine_type}")
-        }
+    let rank = object
+        .entry("engine")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("engine must be a JSON object")?;
+    rank.entry("backend")
+        .or_insert_with(|| Value::String("trtllm".to_owned()));
+    let args = MockerConfig::from_value(Value::Object(object))
+        .context("invalid Mocker engine arguments")?;
+    if args.backend != EngineType::Trtllm {
+        bail!("--extra-engine-args backend must be trtllm");
     }
-
-    MockEngineArgs::from_json_str(&Value::Object(object).to_string())
-        .map_err(anyhow::Error::msg)?
-        .normalized()
-        .context("invalid Mocker engine arguments")
+    Ok(args)
 }
 
 #[tokio::main]
@@ -163,21 +158,21 @@ mod tests {
 
     #[test]
     fn engine_loader_defaults_to_trtllm() {
-        let args = load_engine_args(Some(r#"{"block_size":4}"#)).unwrap();
-        assert_eq!(args.engine_type, EngineType::Trtllm);
+        let args = load_engine_args(Some(r#"{"engine":{"block_size":4}}"#)).unwrap();
+        assert_eq!(args.backend, EngineType::Trtllm);
         assert_eq!(args.block_size, 4);
     }
 
     #[test]
     fn engine_loader_materializes_the_trtllm_block_size() {
         let args = load_engine_args(None).unwrap();
-        assert_eq!(args.engine_type, EngineType::Trtllm);
+        assert_eq!(args.backend, EngineType::Trtllm);
         assert_eq!(args.block_size, 32);
     }
 
     #[test]
     fn engine_loader_rejects_another_engine_type() {
-        let error = load_engine_args(Some(r#"{"engine_type":"vllm"}"#)).unwrap_err();
+        let error = load_engine_args(Some(r#"{"engine":{"backend":"vllm"}}"#)).unwrap_err();
         assert!(error.to_string().contains("must be trtllm"), "{error}");
     }
 }

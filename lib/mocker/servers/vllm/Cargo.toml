@@ -33,6 +33,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 dynamo-llm = { path = "../../../llm", default-features = false }
 dynamo-kv-router = { workspace = true }
 dynamo-runtime = { workspace = true }
