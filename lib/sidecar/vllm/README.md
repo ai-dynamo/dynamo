@@ -130,18 +130,20 @@ Prefill and encode use their canonical one-token request and do not apply decode
 
 The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's `vllm-proto` dependency is pinned in the workspace `Cargo.toml`.
 
-vLLM-Omni changes the engine response format, causing `vllm-rs` to reject
-responses. The Dynamo vLLM runtime image provides a `vllm-rs` wrapper that
-disables Omni by default. Use `vllm-rs` from `PATH` when starting the engine.
+The CUDA image uses the upstream `vllm-rs` command, which accepts
+the extra engine response fields added by vLLM-Omni. Use `vllm-rs` from `PATH`
+when starting the engine.
 
-The wrapper enables only ModelExpress when installed; otherwise it disables
-all plugins. An exported `VLLM_PLUGINS` overrides this default. The `dev` and
-`local-dev` images do not install Omni and retain normal plugin discovery.
+Runtime images on older vLLM versions retain a wrapper that disables Omni by
+default, enabling only ModelExpress when installed. An exported `VLLM_PLUGINS`
+overrides this default. CUDA images and the `dev` and `local-dev` images use
+normal plugin discovery; the latter two do not install Omni.
 
 Start vLLM with its gRPC listener:
 
 ```bash
-vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
+vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051 \
+  --reasoning-parser none
 ```
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
@@ -186,11 +188,20 @@ the response twice.
 When these flags and environment variables are absent, the sidecar advertises no
 parsers. It does not infer Dynamo parser settings from vLLM's native parser names.
 
-Requests that require visible stop-token preservation, `max_thinking_tokens`, or
-reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`) still fail
-explicitly in the gRPC request converter. These limitations affect some tool
-terminators and reasoning/structured-output combinations; enabling a parser does
-not add support for those request controls.
+Dynamo parsers need vLLM to run without its own reasoning parser, so start
+`vllm-rs` with `--reasoning-parser none`, as the launch scripts and deploy
+examples do. vLLM's reasoning parser decides where structured output starts from
+per-request reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`)
+that the gRPC protocol cannot carry. If a Dynamo parser flag is set and vLLM
+reports its own reasoning parser, the sidecar exits at startup. With no engine
+reasoning parser, vLLM never reads that metadata, so the sidecar removes it, and
+vLLM applies structured output, such as a JSON schema or a required or named
+`tool_choice`, from the first output token. If vLLM runs its own reasoning
+parser, a request that carries this metadata still fails.
+
+Requests that require visible stop-token preservation or `max_thinking_tokens`
+still fail explicitly in the gRPC request converter. These limitations affect
+some tool terminators, such as `harmony` tool calls.
 
 ### RL workflows
 
@@ -328,8 +339,8 @@ unhealthy engine containers, with a 30-minute startup budget; increase this for
 larger models. The engine listens on `0.0.0.0` for kubelet probes, while the
 sidecar connects over loopback.
 
-The Dynamo vLLM runtime image exposes `vllm-rs` through the
-[wrapper described above](#runtime-compatibility). On CPU and XPU, check that
+The Dynamo vLLM runtime image exposes `vllm-rs` on `PATH`; see
+[runtime compatibility](#runtime-compatibility). On CPU and XPU, check that
 the binary is available with `command -v vllm-rs`. The example manifests use
 upstream vLLM images and locate the binary inside the Python package.
 

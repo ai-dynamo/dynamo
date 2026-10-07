@@ -105,9 +105,8 @@ def _trace(tmp_path, trace_format):
 def _spec(tmp_path, trace_format="weka", scope="dp_rank_local", *, disagg=False):
     # Fixed timing and explicit bytes avoid models, GPUs and external services.
     args = {
-        "engine_type": "vllm",
+        "backend": "vllm",
         "worker_type": "aggregated",
-        "dp_size": 1,
         "block_size": 4,
         "num_gpu_blocks": 3,
         "max_num_seqs": 1,
@@ -125,7 +124,12 @@ def _spec(tmp_path, trace_format="weka", scope="dp_rank_local", *, disagg=False)
             "kv_layout_id": "dynamo-agentx-g2-fixture-v1",
         }
     roles = ("prefill", "decode") if disagg else ("aggregated",)
-    workers = {role: {**copy.deepcopy(args), "worker_type": role} for role in roles}
+    # ReplaySpec accepts rank descriptors; the runner materializes these into
+    # native MockerConfig launch inputs with engine nesting and top-level DP.
+    workers = {
+        role: {"rank": {**copy.deepcopy(args), "worker_type": role}, "dp_size": 1}
+        for role in roles
+    }
     deployment = BackendDeploymentSpec(
         deployment_mode="disagg" if disagg else "agg",
         backend="vllm",
@@ -207,12 +211,12 @@ def test_existing_api_restores_g2_and_measures_h2d(
     spec = _spec(tmp_path, trace_format, scope)
     fast = run_replay(spec)
     slow_spec = copy.deepcopy(spec)
-    slow_spec.backend_deployment.agg_engine_args["native_host_offload"][
+    slow_spec.backend_deployment.agg_engine_args["rank"]["native_host_offload"][
         "h2d_bandwidth_gbps"
     ] = 0.1
     slow = run_replay(slow_spec)
     hbm_spec = copy.deepcopy(spec)
-    hbm_spec.backend_deployment.agg_engine_args.pop("native_host_offload")
+    hbm_spec.backend_deployment.agg_engine_args["rank"].pop("native_host_offload")
     hbm = run_replay(hbm_spec)
 
     for report, wait_ms in ((fast, 2), (slow, 20)):
@@ -262,7 +266,7 @@ def test_1p1d_shared_pool_counts_capacity_and_first_reuse_once(tmp_path, run_rep
         small.backend_deployment.prefill_engine_args,
         small.backend_deployment.decode_engine_args,
     ):
-        args["native_host_offload"]["num_host_blocks"] = 1
+        args["rank"]["native_host_offload"]["num_host_blocks"] = 1
     evicted = run_replay(small)
     assert not _host_hits(evicted)
     assert evicted["committed_prefill_tokens"] > report["committed_prefill_tokens"]
@@ -317,7 +321,9 @@ def test_1p1d_shared_pool_rejects_incompatible_participants(
     tmp_path, run_replay, field, value
 ):
     spec = _spec(tmp_path, scope="cluster_shared", disagg=True)
-    spec.backend_deployment.decode_engine_args["native_host_offload"][field] = value
+    spec.backend_deployment.decode_engine_args["rank"]["native_host_offload"][
+        field
+    ] = value
     # The existing binding maps native configuration errors to PyException;
     # pin its diagnostic rather than accepting an arbitrary execution failure.
     with pytest.raises(Exception, match="cluster_shared.*incompatible"):
@@ -345,7 +351,7 @@ def test_snapshot_warmup_waits_for_g2_and_retains_cache(tmp_path, run_replay, sc
     spec = _spec(tmp_path, scope=scope)
     if scope:
         # Primer D2H lasts 200 ms, longer than the eleven fixed 2 ms passes.
-        spec.backend_deployment.agg_engine_args["native_host_offload"][
+        spec.backend_deployment.agg_engine_args["rank"]["native_host_offload"][
             "d2h_bandwidth_gbps"
         ] = 0.01
     spec = replace(spec, workload={**spec.workload, "agentic_snapshot": {"seed": 5}})
@@ -423,7 +429,7 @@ def test_profile_cancels_incomplete_host_restore_without_draining_it(
     tmp_path, run_replay, scope
 ):
     spec = _spec(tmp_path, scope=scope)
-    spec.backend_deployment.agg_engine_args["native_host_offload"][
+    spec.backend_deployment.agg_engine_args["rank"]["native_host_offload"][
         "h2d_bandwidth_gbps"
     ] = 0.001
     spec = replace(

@@ -4246,16 +4246,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug("Prefill Request ID: %s", request_id)
-        try:
-            self._multimodal_request_processor.validate_multimodal_request(request)
-        except ValueError as exc:
-            logger.error("Request %s: %s", request_id, exc)
-            yield {
-                "status": "error",
-                "message": str(exc),
-                "disaggregated_params": None,
-            }
-            return
+        self._multimodal_request_processor.validate_multimodal_request(request)
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):

@@ -21,7 +21,7 @@ use super::extensions::kv_router::{
 };
 use super::normalize_trace_requests;
 use crate::common::handoff::NormalizedHandoffConformance;
-use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
+use crate::common::protocols::{DirectRequest, EngineType, MockerConfig, WorkerType};
 use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
@@ -30,13 +30,13 @@ use crate::replay::{
 };
 use crate::scheduler::RouterEventVisibility;
 
-fn startup_delay_ms(args: &MockEngineArgs) -> f64 {
+fn startup_delay_ms(args: &MockerConfig) -> f64 {
     args.startup_time
         .filter(|seconds| *seconds > 0.0)
         .map_or(0.0, |seconds| seconds * 1_000.0)
 }
 
-fn worker_pool(initial_workers: usize, args: &MockEngineArgs) -> WorkerPoolSpec {
+fn worker_pool(initial_workers: usize, args: &MockerConfig) -> WorkerPoolSpec {
     WorkerPoolSpec {
         initial_workers,
         startup_delay_ms: startup_delay_ms(args),
@@ -45,16 +45,22 @@ fn worker_pool(initial_workers: usize, args: &MockEngineArgs) -> WorkerPoolSpec 
 
 fn validate_agentic_host_offload(
     input: &ReplayRuntimeInput,
-    roles: &[(usize, &MockEngineArgs)],
+    roles: &[(usize, &MockerConfig)],
     scaling_enabled: bool,
 ) -> Result<()> {
     let ReplayRuntimeInput::Workload(driver) = input else {
         return Ok(());
     };
-    if !driver.is_agentic()
-        || !roles
-            .iter()
-            .any(|(_, args)| args.native_host_offload.is_some())
+    if !driver.is_agentic() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        roles.iter().all(|(_, args)| args.g3_offload.is_none()),
+        "agentic replay does not support G3"
+    );
+    if !roles
+        .iter()
+        .any(|(_, args)| args.native_host_offload.is_some())
     {
         return Ok(());
     }
@@ -71,21 +77,22 @@ fn validate_agentic_host_offload(
     );
     for (_, args) in roles {
         anyhow::ensure!(
-            args.engine_type == EngineType::Vllm
-                && args
-                    .ais_backend
-                    .as_deref()
-                    .is_none_or(|backend| backend == "vllm"),
+            args.backend == EngineType::Vllm
+                && args.ais_perf_config().is_none_or(|config| {
+                    config
+                        .get("backend")
+                        .is_none_or(|backend| backend == "vllm")
+                }),
             "agentic host offload requires backend=vllm on every role"
         );
         anyhow::ensure!(
-            args.dp_size == 1 && args.ais_attention_dp_size.is_none_or(|dp| dp == 1),
+            args.dp_size == 1,
             "agentic host offload requires attention DP=1 on every role"
         );
         anyhow::ensure!(
             args.decode_speedup_ratio == 1.0
-                && args.ais_nextn.is_none()
-                && args.ais_perf_config.as_ref().is_none_or(|config| {
+                && args.aic_nextn.is_none()
+                && args.ais_perf_config().is_none_or(|config| {
                     config
                         .get("speculation")
                         .is_none_or(serde_json::Value::is_null)
@@ -147,7 +154,7 @@ fn replay_spec(
 
 #[allow(clippy::too_many_arguments)]
 fn run_aggregated(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     input: ReplayRuntimeInput,
@@ -185,7 +192,7 @@ fn run_aggregated(
 
 #[allow(clippy::too_many_arguments)]
 fn run_aggregated_with_capture_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     input: ReplayRuntimeInput,
@@ -403,25 +410,21 @@ pub fn run_offline_handoff_conformance(
     transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
 ) -> Result<NormalizedHandoffConformance> {
     let build_args = |worker_type| {
-        let mut builder = MockEngineArgs::builder()
-            .engine_type(engine_type)
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .max_num_seqs(Some(2))
-            .worker_type(worker_type)
-            .speedup_ratio(1000.0)
-            .decode_speedup_ratio(1000.0)
-            .kv_transfer_bandwidth(Some(1.0))
-            .kv_bytes_per_token(Some(1_000_000))
-            .kv_transfer_timing_mode(transfer_timing_mode);
-        if engine_type == EngineType::Sglang {
-            builder = builder.sglang(Some(SglangArgs {
-                page_size: Some(4),
-                ..Default::default()
-            }));
-        }
-        builder.build()
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": engine_type,
+                "worker_type": worker_type,
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "max_num_seqs": 2,
+                "speedup_ratio": 1000.0,
+                "decode_speedup_ratio": 1000.0,
+                "kv_transfer_bandwidth": 1.0,
+                "kv_transfer_bytes_per_token": 1_000_000,
+                "kv_transfer_timing_mode": transfer_timing_mode
+            }
+        }))
     };
     let prefill_args = build_args(WorkerType::Prefill)?;
     let decode_args = build_args(WorkerType::Decode)?;
@@ -438,14 +441,14 @@ pub fn run_offline_handoff_conformance(
 }
 
 pub(crate) fn generate_trace_worker_artifacts(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
 ) -> Result<ReplayWorkerArtifacts> {
     generate_trace_worker_artifacts_with_visibility(args, trace, None)
 }
 
 pub(crate) fn generate_trace_worker_artifacts_with_visibility(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     visibility: Option<RouterEventVisibility>,
 ) -> Result<ReplayWorkerArtifacts> {
@@ -454,7 +457,7 @@ pub(crate) fn generate_trace_worker_artifacts_with_visibility(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -486,7 +489,7 @@ pub(crate) fn simulate_trace_with_scaling_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -517,7 +520,7 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -559,7 +562,7 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_with_capture_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -593,7 +596,7 @@ pub(crate) fn simulate_trace_workload_with_capture_options(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -633,7 +636,7 @@ pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_agentic_trace_workload(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,
@@ -914,17 +917,18 @@ mod agentic_host_offload_tests {
         ReplayRuntimeInput::Workload(trace.into_trace_driver_with_options(4, true, None).unwrap())
     }
 
-    fn args(scope: Option<&str>) -> MockEngineArgs {
-        let mut args = MockEngineArgs::builder().build().unwrap();
-        args.native_host_offload = scope.map(|scope| {
-            serde_json::from_value(serde_json::json!({
-                "scope": scope,
-                "num_host_blocks": 16,
-                "kv_layout_id": "agentic-g2-test",
-            }))
-            .unwrap()
-        });
-        args.normalized().unwrap()
+    fn args(scope: Option<&str>) -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "kv_cache_bytes_per_token": 1024,
+                "native_host_offload": scope.map(|scope| serde_json::json!({
+                    "scope": scope,
+                    "num_host_blocks": 16,
+                    "kv_layout_id": "agentic-g2-test",
+                })),
+            },
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -933,7 +937,7 @@ mod agentic_host_offload_tests {
         let scopes = [None, Some("dp_rank_local"), Some("cluster_shared")];
         for prefill_scope in scopes {
             let mut prefill = args(prefill_scope);
-            prefill.ais_tp_size = Some(4);
+            prefill.tensor_parallel_size = 4;
             validate_agentic_host_offload(&input, &[(1, &prefill)], false).unwrap();
             for decode_scope in scopes {
                 let decode = args(decode_scope);
@@ -955,22 +959,25 @@ mod agentic_host_offload_tests {
             invalid,
             "agentic host offload requires attention DP=1 on every role",
         ));
-        let mut invalid = args(None);
-        invalid.ais_attention_dp_size = Some(2);
-        invalid_roles.push((
-            invalid,
-            "agentic host offload requires attention DP=1 on every role",
-        ));
         for backend in [EngineType::Sglang, EngineType::Trtllm] {
             let mut invalid = args(None);
-            invalid.engine_type = backend;
+            invalid.backend = backend;
             invalid_roles.push((
                 invalid,
                 "agentic host offload requires backend=vllm on every role",
             ));
         }
         let mut invalid = args(None);
-        invalid.ais_nextn = Some(1);
+        invalid.timing_model = aisimulate_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({"backend": "sglang"}),
+        };
+        invalid_roles.push((
+            invalid,
+            "agentic host offload requires backend=vllm on every role",
+        ));
+        let mut invalid = args(None);
+        invalid.aic_nextn = Some(1);
         invalid_roles.push((
             invalid,
             "agentic host offload requires speculative decoding disabled",
@@ -982,7 +989,10 @@ mod agentic_host_offload_tests {
             "agentic host offload requires speculative decoding disabled",
         ));
         let mut invalid = args(None);
-        invalid.ais_perf_config = Some(serde_json::json!({"speculation": {"nextn": 2}}));
+        invalid.timing_model = aisimulate_core::engine::TimingModelConfig::External {
+            provider: "ais".to_string(),
+            config: serde_json::json!({"speculation": {"nextn": 2}}),
+        };
         invalid_roles.push((
             invalid,
             "agentic host offload requires speculative decoding disabled",
@@ -1064,14 +1074,53 @@ mod agentic_host_offload_tests {
     }
 
     #[test]
+    fn native_execution_rejects_canonical_g3_for_agentic_replay() {
+        for scope in ["worker_local", "cluster_shared"] {
+            let mut offloaded = args(Some("cluster_shared"));
+            offloaded.g3_offload = Some(
+                serde_json::from_value(serde_json::json!({
+                    "scope": scope,
+                    "num_g3_blocks": 8,
+                }))
+                .unwrap(),
+            );
+            // G3 is valid in the canonical engine schema, but remains outside
+            // the qualified AgentX support boundary.
+            let offloaded = offloaded.normalized().unwrap();
+            validate_agentic_host_offload(
+                &ReplayRuntimeInput::Requests(VecDeque::new()),
+                &[(1, &offloaded)],
+                false,
+            )
+            .unwrap();
+            let error = run_aggregated(
+                offloaded,
+                None,
+                None,
+                agentic_input(),
+                1,
+                None,
+                ReplayRouterMode::RoundRobin,
+                false,
+                None,
+                SlaThresholds::default(),
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "agentic replay does not support G3");
+        }
+    }
+
+    #[test]
     fn leaves_hbm_and_non_agentic_g2_deployments_unchanged() {
         let mut hbm = args(None);
-        hbm.engine_type = EngineType::Sglang;
+        hbm.backend = EngineType::Sglang;
         hbm.dp_size = 2;
         hbm.decode_speedup_ratio = 2.0;
         validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
         hbm.decode_speedup_ratio = 1.0;
-        hbm.ais_nextn = Some(2);
+        hbm.aic_nextn = Some(2);
         validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
 
         let mut offloaded = args(Some("cluster_shared"));

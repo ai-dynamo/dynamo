@@ -73,6 +73,19 @@ optimizer:
 Each parallelism preset is a complete mapping and becomes one categorical choice. Router and
 scheduler domains add independent search dimensions.
 
+To search Planner settings too, add `planner: {}`. The default search keeps the scaling presets
+compatible with the optimization target: throughput and latency objectives retain disabled and
+load-only policies; goodput objectives can also use throughput and hybrid policies when both
+TTFT and ITL thresholds are supplied. An explicit `scaling_policy.preset` list must contain only
+compatible choices. Other explicit preset lists, including load-predictor candidates, stay within
+the selected subset.
+
+FPM sampling is searched only if a retained policy uses throughput scaling; load sensitivity is
+searched only if one uses load scaling. With `preset: false`, independent domains follow the
+same filtering, and invalid combinations are skipped as infeasible candidates. Concrete
+recommendations resolve through the same `PlannerConfig` as the production Planner and preserve
+its effective defaults, scaling flags, and GPU limits when passed to `predict`.
+
 </Step>
 <Step title="Run the recommendation" id="run-the-recommendation">
 

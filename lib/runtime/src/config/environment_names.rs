@@ -447,19 +447,21 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// \[EXPERIMENTAL\] Use `dynamo-parsers-v2` instead of the v1 tool-call jail, for
-    /// BOTH the batch and the streaming path. Off by default.
+    /// Select the parser generation. Unset or `auto` keeps the original family defaults.
     ///
-    /// Which v2 shape a request gets is decided by the configured parsers, not by a
-    /// second flag:
-    /// * tool-call parser only (Qwen3-Coder, DeepSeek-V4) -> the v2 TOOL parser owns
-    ///   incremental tool-call emission and drops values truncated at EOF.
-    /// * tool-call AND reasoning parser naming the same family (`qwen3_coder` +
-    ///   `qwen3`) -> the v2 UNIFIED parser owns reasoning, visible text and tool calls
-    ///   in one ordered stream, so reasoning that followed a tool call stays after it
-    ///   instead of being hoisted to the front and fused with the first thought.
+    /// Explicit `1` keeps the V1 parsers; explicit `2` selects a compatible unified
+    /// parser for the configured family. When both parser slots are set, their names
+    /// must resolve to the same family. Unsupported explicit selections fail during
+    /// preprocessor construction.
     ///
-    /// One switch, because both are the same decision: stop using v1.
+    /// Accepted values are `auto`, `1`, and `2`. Explicit
+    /// generations fail during preprocessor construction when the configured family has
+    /// no compatible parser.
+    pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
+
+    /// Compatibility alias for `DYN_PARSER_VERSION=2` when enabled. Uses the shared
+    /// boolean parser: `1`/`true`/`on`/`yes` enable it; `0`/`false`/`off`/`no`/empty
+    /// disable it. This conflicts with `DYN_PARSER_VERSION=1`; `false` conflicts with `2`.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Rollback lever for incremental guided-tool-call streaming.
@@ -1130,6 +1132,7 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_REASONING_FIELD_NAME,
+            llm::DYN_PARSER_VERSION,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,

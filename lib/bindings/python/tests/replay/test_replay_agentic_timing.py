@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from dynamo._core import run_mocker_trace_replay
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_trace_replay
 
 from .replay_utils import _report_summary, _vllm_args
@@ -130,3 +132,44 @@ def test_agentic_mooncake_finite_binding_preserves_normalized_scaled_timing(
         )
         assert timing[-1] == pytest.approx((0.0, 12.0, 8.0))
     assert timing[0] == pytest.approx(timing[1])
+
+
+@pytest.mark.parametrize("g3_scope", ["worker_local", "cluster_shared"])
+@pytest.mark.parametrize("agentic_lanes", [None, 1])
+def test_native_agentic_replay_rejects_g3_after_canonical_config_validation(
+    tmp_path, g3_scope, agentic_lanes
+):
+    trace = _write_timing_trace(
+        tmp_path / "g3.jsonl",
+        start_ms=0.0,
+        root_gap_ms=48.0,
+        dependency_delay_ms=32.0,
+    )
+    # G3 is valid in the canonical engine schema, including its required G2
+    # staging tier. AgentX must still reject it at the native replay boundary.
+    args = normalize_mocker_config(
+        {
+            "engine": {
+                "backend": "vllm",
+                "block_size": 64,
+                "kv_cache_bytes_per_token": 1024,
+                "native_host_offload": {
+                    "scope": "dp_rank_local",
+                    "num_host_blocks": 8,
+                },
+                "g3_offload": {"scope": g3_scope, "num_g3_blocks": 16},
+            },
+            "dp_size": 1,
+        }
+    )
+    # The binding exposes native replay errors as PyException. The exact error
+    # proves both explicit and trace-inferred AgentX reach the deployment guard.
+    with pytest.raises(Exception, match="^agentic replay does not support G3$"):
+        run_mocker_trace_replay(
+            [trace],
+            extra_engine_args=args,
+            replay_mode="offline",
+            trace_format="agentic_mooncake",
+            execution_model="fixture-model",
+            agentic_lanes=agentic_lanes,
+        )
