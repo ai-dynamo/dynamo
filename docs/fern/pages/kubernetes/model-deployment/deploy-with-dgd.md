@@ -719,6 +719,19 @@ spec:
 
 This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations above — disaggregated, multinode, MoE expert-parallel, cached, KV-routed, or offloaded — apply the change from that step or the matching page below.
 
+## Before updating a Grove deployment
+
+New Grove DGDs created by operator 1.6.0 or later default to Coherent with provider-native `minAvailable: 1`, unless the manifest uses the deprecated component `minAvailable` or an explicit strategy annotation. Existing DGDs retain their persisted legacy minima and RollingRecreate default. Moving all legacy minima to provider overrides explicitly opts in; preserve their effective values.
+
+Before changing worker images or pod templates:
+
+1. Review each component's effective `minAvailable` and whether it uses the deprecated field or a provider override. It defines the minimum viable replacement unit under Coherent. For new deployments, start at `1` unless the application requires a larger unit; the field is immutable after creation.
+2. Check how much serving capacity remains while that unit is unavailable. With eight replicas and `minAvailable: 4`, the default disruption budget allows four unavailable replicas. A changed component with only one replica can become completely unavailable.
+3. Plan with existing capacity: Grove has no surge support in alpha.14, and replica changes are deferred throughout an active coherent rollout. Do not depend on an HPA or the Planner adding replicas mid-rollout.
+4. Update compatible worker components together. Dynamo's shared worker hash can roll all workers when one worker template changes; a frontend participates when its own rendered template changes. Validate latency and throughput under representative traffic before increasing the disruption budget.
+
+See [Coherent capacity and disruption](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#coherent-capacity-and-disruption) for budget semantics and examples. Coherent coordination applies within one PCS and does not guarantee zero downtime.
+
 ## Optional next steps
 
 These are independent capabilities you opt into per workload. None are required for a working deployment.

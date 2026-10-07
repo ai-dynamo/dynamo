@@ -12,6 +12,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,7 +47,8 @@ func ResolveGroveUpdateStrategy(dgd *v1beta1.DynamoGraphDeployment, existingPCS 
 			return nil, err
 		}
 		desired = ptr.To(strategy)
-	} else if compatibility.GroveCoherentUpdates.Enabled(dgd.Annotations) {
+	} else if !provideroverride.HasLegacyGroveMinAvailable(dgd) &&
+		(provideroverride.HasGroveMinAvailableOverrides(dgd) || compatibility.GroveCoherentUpdates.Enabled(dgd.Annotations)) {
 		desired = ptr.To(grovev1alpha1.CoherentStrategy)
 	}
 

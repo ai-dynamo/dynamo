@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -2576,8 +2578,8 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 	// in termination of the PodGang that it belongs to.
 	minAvailable := int32(1)
 	// A component without a scaling group owns the availability threshold on its PCLQ.
-	if !p.usesPCSG && p.component.MinAvailable != nil {
-		minAvailable = *p.component.MinAvailable
+	if !p.usesPCSG {
+		minAvailable = provideroverride.EffectiveGroveMinAvailable(p.component)
 	}
 	// pclqs that are part of a multi-node component set minAvailable to their
 	// replica count. Plain multi-node needs every leader/worker rank ready for
@@ -2997,10 +2999,7 @@ func buildGroveScalingGroupConfig(
 	isInterPodGMS bool,
 ) grovev1alpha1.PodCliqueScalingGroupConfig {
 	replicas := component.Replicas
-	minAvailable := ptr.To(int32(1))
-	if component.MinAvailable != nil {
-		minAvailable = ptr.To(*component.MinAvailable)
-	}
+	minAvailable := ptr.To(provideroverride.EffectiveGroveMinAvailable(component))
 	if shouldGateGroveScalingGroupReplicas(checkpointInfo) {
 		replicas = ptr.To(int32(0))
 	}

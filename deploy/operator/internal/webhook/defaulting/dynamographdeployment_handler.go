@@ -25,6 +25,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -58,8 +59,8 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 // On every operation: defaults nil non-LPX component Replicas to 1 and persists the
 // replica counts implied by explicit multinode roles.
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
-// On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
-// does not rewrite MinAvailable; it remains the component's configured minimum viable unit.
+// On Grove: new graphs default provider-native minAvailable to 1; legacy graphs keep the old field.
+// Scaling to zero preserves the configured minimum viable unit.
 // On CREATE: overwrites nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
@@ -83,10 +84,24 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// Resolve the authoritative or creation-time provider before applying component defaults.
 	provider, providerSelected := defaultWorkloadProvider(ctx, dgd, req.Operation)
 
+	// Stamp creation provenance independently from level-based provider defaulting.
+	if req.Operation == admissionv1.Create {
+		// Replace any user-supplied value with the authoritative creating operator version.
+		dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
+		logger.Info("stamped operator origin version on DGD",
+			"name", dgd.Name,
+			"namespace", dgd.Namespace,
+			"version", d.OperatorVersion)
+	}
+
 	// Persist the root target only when this provider context resolves unambiguously.
 	if dgd.Spec.ProviderOverride != nil {
 		provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil)
 	}
+
+	// Legacy fields are durable compatibility markers; new-form intent opts an older DGD in.
+	legacyMinimum := provideroverride.HasLegacyGroveMinAvailable(dgd)
+	providerMinimum := !legacyMinimum && (provideroverride.HasGroveMinAvailableOverrides(dgd) || compatibility.GroveCoherentUpdates.Enabled(dgd.Annotations))
 
 	// Apply component defaults on every operation, including newly added components.
 	for i := range dgd.Spec.Components {
@@ -98,11 +113,6 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		}
 		defaultMultinodeRoleReplicas(component)
 
-		// Default Grove's minimum available replicas only for Grove-selected DGDs.
-		if providerSelected && provider == consts.WorkloadProviderGrove && component.MinAvailable == nil {
-			component.MinAvailable = ptr.To(int32(1))
-		}
-
 		// Persist the component target only when this provider context resolves unambiguously.
 		if component.ProviderOverride != nil {
 			provideroverride.DefaultTarget(
@@ -111,6 +121,15 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 				provideroverride.ScopeComponent,
 				component,
 			)
+		}
+
+		// Preserve legacy defaulting for old graphs and persist native availability for new ones.
+		if providerSelected && provider == consts.WorkloadProviderGrove {
+			if providerMinimum {
+				provideroverride.DefaultGroveMinAvailable(component)
+			} else if component.MinAvailable == nil {
+				component.MinAvailable = ptr.To(int32(1))
+			}
 		}
 
 		// Default each explicit role's provider context independently.
@@ -125,16 +144,6 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 			}
 			provideroverride.DefaultTarget(role.ProviderOverride, provider, scope, component)
 		}
-	}
-
-	// Stamp creation provenance independently from level-based provider defaulting.
-	if req.Operation == admissionv1.Create {
-		// Replace any user-supplied value with the authoritative creating operator version.
-		dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
-		logger.Info("stamped operator origin version on DGD",
-			"name", dgd.Name,
-			"namespace", dgd.Namespace,
-			"version", d.OperatorVersion)
 	}
 
 	return nil

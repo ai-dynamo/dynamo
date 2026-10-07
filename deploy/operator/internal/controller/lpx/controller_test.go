@@ -2402,17 +2402,29 @@ func TestLPXScaleDownUpdatesGroveBeforeDeletingStaleRequest(t *testing.T) {
 func TestLPXStartupScalesMinimumSeedBeforePublishingRequests(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
+		native  bool
 		minimum *int32
 	}{
 		{name: "default minimum"},
 		{name: "explicit minimum", minimum: ptr.To(int32(2))},
+		{name: "provider-native minimum", minimum: ptr.To(int32(2)), native: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Start without Grove resources and create the owned PCS at its immutable minimum")
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 			component := dgd.GetComponentByName("lpx")
 			component.Replicas, component.MinAvailable = ptr.To(int32(3)), tc.minimum
+			if tc.native {
+				component.MinAvailable = nil
+				component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: "grove.io/v1alpha1", Target: "PodCliqueScalingGroupConfig", Value: apiextensionsv1.JSON{Raw: []byte(`{"minAvailable":2}`)}}
+			}
 			r := newLPXTestReconciler(t, registry, child, dgd)
+			if tc.native {
+				t.Log("Expose the pinned Grove schema required by native Coherent opt-in")
+				crd := &apiextensionsv1.CustomResourceDefinition{}
+				require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
+				require.NoError(t, r.Create(t.Context(), crd))
+			}
 			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
 			result, err := r.Reconcile(t.Context(), key)
 			require.NoError(t, err)

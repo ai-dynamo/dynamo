@@ -5,6 +5,7 @@ package dynamo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -75,46 +77,55 @@ func TestGenerateGrovePodCliqueSet_CoherentStrategyPreservesTemplates(t *testing
 }
 
 func TestGroveUpdateStrategyPolicy(t *testing.T) {
+	const nativeMinimumForm = "provider minimum"
 	for _, origin := range []string{"", "1.1.0", "1.6.0"} {
 		for _, annotation := range []string{"", string(grovev1alpha1.CoherentStrategy), "RollingRecreate", "OnDelete"} {
 			for _, disagg := range []bool{false, true} {
-				t.Run(fmt.Sprintf("origin=%s/annotation=%s/disagg=%t", origin, annotation, disagg), func(t *testing.T) {
-					t.Log("Author an old or new graph with optional explicit strategy")
-					dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", Annotations: map[string]string{}}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-						{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(2))},
-					}}}
-					if origin != "" {
-						dgd.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
-					}
-					if annotation != "" {
-						dgd.Annotations[commonconsts.KubeAnnotationGroveUpdateStrategy] = annotation
-					}
-					if disagg {
-						dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{
-							{ComponentName: "Prefill", ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(2))},
-							{ComponentName: "Decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(3))},
+				for _, form := range []string{"omitted", "legacy", nativeMinimumForm} {
+					t.Run(fmt.Sprintf("origin=%s/annotation=%s/disagg=%t/form=%s", origin, annotation, disagg, form), func(t *testing.T) {
+						t.Log("Author an old or new graph with optional explicit strategy")
+						dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", Annotations: map[string]string{}}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+							{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(2))},
+						}}}
+						if origin != "" {
+							dgd.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
 						}
-					}
-					original := dgd.DeepCopy()
+						if annotation != "" {
+							dgd.Annotations[commonconsts.KubeAnnotationGroveUpdateStrategy] = annotation
+						}
+						if disagg {
+							dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{
+								{ComponentName: "Prefill", ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(2))},
+								{ComponentName: "Decode", ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(3))},
+							}
+						}
+						if form == "legacy" {
+							dgd.Spec.Components[0].MinAvailable = ptr.To(int32(1))
+						}
+						if form == nativeMinimumForm {
+							dgd.Spec.Components[0].ProviderOverride = &v1beta1.ProviderOverride{APIVersion: provideroverride.GroveAPIVersion, Target: provideroverride.TargetPodCliqueTemplateSpec, Value: apiextensionsv1.JSON{Raw: []byte(`{"spec":{"minAvailable":1}}`)}}
+						}
+						original := dgd.DeepCopy()
 
-					t.Log("Both ordinary and LPX envelopes follow origin version rather than topology")
-					ordinary, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
-					require.NoError(t, err)
-					lpx, err := RenderLPXPodCliqueSet(t.Context(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, "lpx-graph", nil)
-					require.NoError(t, err)
-					want := annotation
-					if want == "" && origin == "1.6.0" {
-						want = string(grovev1alpha1.CoherentStrategy)
-					}
-					if want == "" {
-						require.Nil(t, ordinary.Spec.UpdateStrategy)
-					} else {
-						require.NotNil(t, ordinary.Spec.UpdateStrategy)
-						require.Equal(t, grovev1alpha1.UpdateStrategyType(want), ordinary.Spec.UpdateStrategy.Type)
-					}
-					require.Equal(t, ordinary.Spec.UpdateStrategy, lpx.Spec.UpdateStrategy)
-					require.Equal(t, original, dgd)
-				})
+						t.Log("Both ordinary and LPX envelopes follow origin version rather than topology")
+						ordinary, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
+						require.NoError(t, err)
+						lpx, err := RenderLPXPodCliqueSet(t.Context(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, "lpx-graph", nil)
+						require.NoError(t, err)
+						want := annotation
+						if want == "" && form != "legacy" && (form == nativeMinimumForm || origin == "1.6.0") {
+							want = string(grovev1alpha1.CoherentStrategy)
+						}
+						if want == "" {
+							require.Nil(t, ordinary.Spec.UpdateStrategy)
+						} else {
+							require.NotNil(t, ordinary.Spec.UpdateStrategy)
+							require.Equal(t, grovev1alpha1.UpdateStrategyType(want), ordinary.Spec.UpdateStrategy.Type)
+						}
+						require.Equal(t, ordinary.Spec.UpdateStrategy, lpx.Spec.UpdateStrategy)
+						require.Equal(t, original, dgd)
+					})
+				}
 			}
 		}
 	}
@@ -230,4 +241,52 @@ func TestCheckGroveUpdateStrategySupport(t *testing.T) {
 			require.NoError(t, CheckGroveUpdateStrategySupport(t.Context(), reader, pcs))
 		})
 	}
+}
+
+func TestGroveMinAvailableMigrationPreservesWorkload(t *testing.T) {
+	for _, multinode := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multinode=%t", multinode), func(t *testing.T) {
+			t.Log("Render a legacy graph and record its complete workload identity")
+			dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "Worker", ComponentType: commonconsts.ComponentTypeWorker, Replicas: ptr.To(int32(4)), MinAvailable: ptr.To(int32(2))}}}}
+			component := &dgd.Spec.Components[0]
+			if multinode {
+				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+			}
+			oldHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			oldPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
+			require.NoError(t, err)
+
+			t.Log("Move the same minimum to its native owner without rolling worker templates")
+			component.MinAvailable = nil
+			fragment, target := `{"spec":{"minAvailable":2}}`, provideroverride.TargetPodCliqueTemplateSpec
+			if multinode {
+				fragment, target = `{"minAvailable":2}`, provideroverride.TargetPodCliqueScalingGroupConfig
+			}
+			component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: provideroverride.GroveAPIVersion, Target: target, Value: apiextensionsv1.JSON{Raw: []byte(fragment)}}
+			newHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			require.Equal(t, oldHash, newHash)
+			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
+			require.NoError(t, err)
+			require.Equal(t, oldPCS.Spec.Template, newPCS.Spec.Template)
+			require.Equal(t, grovev1alpha1.CoherentStrategy, newPCS.Spec.UpdateStrategy.Type)
+
+			t.Log("Compose the native fragment without erasing generated container templates")
+			composed, err := provideroverride.ComposeGroveOverrides(dgd, newPCS)
+			require.NoError(t, err)
+			var typed grovev1alpha1.PodCliqueSet
+			require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(composed.Object, &typed))
+			require.Equal(t, mustJSON(t, oldPCS.Spec.Template), mustJSON(t, typed.Spec.Template))
+			newGrovePodCliqueSetRequestValidator(t).validate(t, &typed, oldPCS)
+		})
+	}
+}
+
+// mustJSON compares wire templates, where empty annotations and omission are equivalent.
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	require.NoError(t, err)
+	return string(raw)
 }

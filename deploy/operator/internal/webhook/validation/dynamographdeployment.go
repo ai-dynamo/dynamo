@@ -335,6 +335,23 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if len(spec.Components) == 0 {
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
+	// A PCS-wide strategy cannot safely mix legacy compatibility markers with native opt-in.
+	hasLegacyMinimum := false
+	for i := range spec.Components {
+		hasLegacyMinimum = hasLegacyMinimum || spec.Components[i].MinAvailable != nil
+	}
+	if hasLegacyMinimum {
+		for i := range spec.Components {
+			component := &spec.Components[i]
+			if component.ProviderOverride == nil {
+				continue
+			}
+			if _, native := provideroverride.GroveMinAvailable(component.ProviderOverride.Value.Raw); native {
+				allErrs = append(allErrs, field.Forbidden(componentsPath.Index(i).Child("providerOverride", "value"), "cannot mix provider-native minAvailable with deprecated component minAvailable; migrate all components together"))
+			}
+		}
+	}
+
 	components := componentsByName(spec.Components)
 	hasLPXComponent := lpxComponentCount > 0
 	for i := range spec.Components {

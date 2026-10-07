@@ -77,7 +77,8 @@ type CompilationCacheConfig struct {
 //   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
 //     `PodCliqueScalingGroupConfig`, according to the field location and
 //     component shape.
-//   - value may set only the target's topologyConstraint subtree.
+//   - value may set topologyConstraint, and component contexts may set the
+//     native minAvailable field. Availability is not supported at root or role scope.
 //
 // All other providers, versions, targets, and fields are rejected.
 type ProviderOverride struct {
@@ -95,8 +96,10 @@ type ProviderOverride struct {
 
 	// value is a sparse fragment of the selected provider schema. For Grove,
 	// PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded
-	// PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only
-	// `topologyConstraint`.
+	// targets accept `topologyConstraint`. Component contexts also accept
+	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
+	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
+	// deprecated component field preserves its value and opts the PCS into Coherent.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object

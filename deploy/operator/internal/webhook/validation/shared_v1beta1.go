@@ -159,7 +159,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	allErrs := field.ErrorList{}
 
 	// Validate the provider-native fragment in this component context.
-	if spec.ProviderOverride != nil && spec.IsLPX() {
+	if spec.ProviderOverride != nil && spec.IsLPX() && provideroverride.WritesGroveTopology(spec.ProviderOverride.Target, spec.ProviderOverride.Value.Raw) {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "LPX component does not support Grove topology overrides"))
 	} else if spec.ProviderOverride != nil {
 		allErrs = append(allErrs, v.validateProviderOverride(
@@ -172,6 +172,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				component:        spec,
 			},
 		)...)
+	}
+
+	// A shared draft has no independently configurable scaling group.
+	if spec.IsLPX() && spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil && spec.ProviderOverride != nil {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "shared LPX draft availability belongs to the target component"))
 	}
 
 	// Preserve the LPX role-template boundary after conversion from the alpha schema.
@@ -191,6 +196,19 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			fldPath.Child("minAvailable"),
 			"is currently supported only for Grove-backed DynamoGraphDeployment components",
 		))
+	}
+
+	// Native availability has the same replica envelope as the deprecated typed field.
+	if spec.ProviderOverride != nil {
+		minimum, exists := provideroverride.GroveMinAvailable(spec.ProviderOverride.Value.Raw)
+		replicas := k8sptr.Deref(spec.Replicas, 1)
+		if exists && minimum > 0 && replicas > 0 && !(spec.IsLPX() && spec.Replicas == nil) && minimum > replicas {
+			minimumPath := fldPath.Child("providerOverride", "value", "minAvailable")
+			if !spec.UsesPCSG() && !spec.IsLPX() {
+				minimumPath = fldPath.Child("providerOverride", "value", "spec", "minAvailable")
+			}
+			allErrs = append(allErrs, field.Invalid(minimumPath, minimum, "minAvailable must be less than or equal to replicas unless replicas is 0"))
+		}
 	}
 
 	// Validate the complete role schema against the enclosing component shape.
@@ -490,6 +508,10 @@ func (v *sharedValidation) validateProviderOverride(
 			continue
 		}
 		allErrs = append(allErrs, field.Invalid(errPath, nil, valueErr.Detail))
+	}
+	// Availability belongs to a complete component, never one multinode member role.
+	if minimum, exists := provideroverride.GroveMinAvailable(override.Value.Raw); exists && options.scope != provideroverride.ScopeComponent {
+		allErrs = append(allErrs, field.Forbidden(valuePath.Child("spec", "minAvailable"), fmt.Sprintf("minAvailable (%d) belongs to the owning component", minimum)))
 	}
 	return allErrs
 }
@@ -1002,6 +1024,24 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			oldComponent.ProviderOverride,
 			fldPath.Child("providerOverride"),
 		)...)
+	}
+
+	// Preserve the immutable effective minimum while allowing an explicit API-form migration.
+	oldHasMinimum := oldComponent.MinAvailable != nil
+	if oldComponent.ProviderOverride != nil {
+		_, nativeMinimum := provideroverride.GroveMinAvailable(oldComponent.ProviderOverride.Value.Raw)
+		oldHasMinimum = oldHasMinimum || nativeMinimum
+	}
+	newMinimum := provideroverride.EffectiveGroveMinAvailable(newComponent)
+	if (oldHasMinimum || ownerKind.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind) && newMinimum != provideroverride.EffectiveGroveMinAvailable(oldComponent) {
+		minimumPath := fldPath.Child("minAvailable")
+		if newComponent.MinAvailable == nil && newComponent.ProviderOverride != nil {
+			minimumPath = fldPath.Child("providerOverride", "value", "minAvailable")
+			if !newComponent.UsesPCSG() && !newComponent.IsLPX() {
+				minimumPath = fldPath.Child("providerOverride", "value", "spec", "minAvailable")
+			}
+		}
+		allErrs = append(allErrs, field.Invalid(minimumPath, newMinimum, "minAvailable is immutable after creation"))
 	}
 
 	// Keep the component's multinode shape stable across updates. Permit

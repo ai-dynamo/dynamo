@@ -23,8 +23,8 @@ import semver "github.com/Masterminds/semver/v3"
 // first reconciled / created the DGD resource).
 
 var (
-	// GroveCoherentUpdates defaults newly created Grove workloads to coordinated rollouts.
-	// Older and unstamped DGDs keep Grove's existing default unless explicitly opted in.
+	// GroveCoherentUpdates enables native availability defaults for newly created Grove workloads.
+	// Legacy minima preserve RollingRecreate; older graphs can explicitly opt in through overrides.
 	GroveCoherentUpdates = Gate{
 		Name:             "GroveCoherentUpdates",
 		MinOriginVersion: *semver.MustParse("1.6.0"),
