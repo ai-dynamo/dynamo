@@ -554,6 +554,54 @@ async def test_admin_unload_retries_indeterminate_discovery_restoration(
 
 
 @pytest.mark.asyncio
+async def test_runtime_lease_cleanup_error_preserves_cancellation(caplog):
+    handler = _make_prefill_handler()
+    handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(
+        id=123, path="/cache/adapter"
+    )
+    lora_request = handler._resolve_lora_request("adapterA")
+    generation_started = asyncio.Event()
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    async def activate(_request_id, request):
+        return request
+
+    async def release(_adapter_key):
+        release_started.set()
+        await finish_release.wait()
+        raise RuntimeError("lease release failed")
+
+    handler._runtime_lora_coordinator = SimpleNamespace(
+        activate_pending_admission=activate,
+        release_active_admission=release,
+    )
+
+    async def generate(_request):
+        generation_started.set()
+        await asyncio.Event().wait()
+        yield SimpleNamespace()
+
+    admission = handler._generate_with_lora_admission_lock(
+        lora_request,
+        generate,
+        request_id="request-1",
+        runtime_lora=True,
+    )
+    task = asyncio.create_task(anext(admission))
+    await generation_started.wait()
+    task.cancel()
+    await release_started.wait()
+    task.cancel()
+    finish_release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert "Failed to release active LoRA lease during cancellation" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_legacy_prefill_unload_treats_missing_request_adapter_as_idempotent(
     monkeypatch,
 ):

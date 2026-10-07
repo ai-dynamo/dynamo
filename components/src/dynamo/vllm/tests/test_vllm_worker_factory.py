@@ -17,6 +17,7 @@ from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.args import Config
 from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import BaseWorkerHandler
 from dynamo.vllm.instrumented_scheduler import (
     ENV_FPM_BENCHMARK_OUTPUT_PATH,
     ENV_FPM_WORKER_ID,
@@ -148,6 +149,11 @@ def test_worker_lifecycle_cleanup_in_reverse_construction_order():
     engine_client.shutdown.assert_called_once_with(timeout=7.0)
 
 
+@pytest.mark.asyncio
+async def test_base_handler_aclose_is_safe_without_runtime_lora_coordinator():
+    await BaseWorkerHandler.aclose(SimpleNamespace())
+
+
 def test_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     handler = Mock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
@@ -190,6 +196,7 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
     factory = _make_factory()
     engine_client = Mock()
     handler = Mock()
+    handler.aclose = AsyncMock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
     startup_error = ValueError("decode worker startup failed")
 
@@ -209,6 +216,35 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
     assert exc_info.value is startup_error
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
     assert "Failed to clean up worker after an earlier failure" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["decode", "prefill"])
+async def test_worker_preserves_primary_error_when_async_drain_fails(caplog, role):
+    factory = _make_factory()
+    engine_client = Mock()
+    handler = Mock()
+    handler.aclose = AsyncMock(side_effect=RuntimeError("async drain failed"))
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_resource_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise startup_error
+
+    setattr(factory, f"_run_{role}_worker", fail_after_resource_creation)
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await getattr(factory, f"_create_{role}_worker")(
+            Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
+        )
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert f"Failed to drain {role} worker after an earlier failure" in caplog.text
+    factory.state_agent_lifecycle.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -233,7 +269,8 @@ async def test_decode_worker_without_custom_encoder_uses_lifecycle():
 
 
 @pytest.mark.asyncio
-async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
+@pytest.mark.parametrize("role", ["decode", "prefill"])
+async def test_worker_failure_withdraws_state_agent_before_engine_cleanup(role):
     calls = []
     state_agent_lifecycle = SimpleNamespace(
         close=AsyncMock(side_effect=lambda: calls.append("state-agent"))
@@ -242,6 +279,7 @@ async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
     engine_client = Mock()
     engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
     handler = Mock()
+    handler.aclose = AsyncMock(side_effect=lambda: calls.append("async-handler"))
     handler.cleanup.side_effect = lambda: calls.append("handler")
 
     async def fail_after_setup(*_args, lifecycle, **_kwargs):
@@ -250,13 +288,13 @@ async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
         lifecycle.handler = handler
         raise RuntimeError("startup failed")
 
-    factory._run_decode_worker = fail_after_setup  # type: ignore[method-assign]
+    setattr(factory, f"_run_{role}_worker", fail_after_setup)
     with pytest.raises(RuntimeError, match="startup failed"):
-        await factory._create_decode_worker(
+        await getattr(factory, f"_create_{role}_worker")(
             Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
         )
 
-    assert calls == ["state-agent", "handler", "engine"]
+    assert calls == ["state-agent", "async-handler", "handler", "engine"]
 
 
 @pytest.mark.asyncio
