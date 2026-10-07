@@ -2283,7 +2283,8 @@ def _assert_two_glm_calls_streamed(tokenizer, steps):
         chat_template_kwargs={},
         stream_response=True,
     )
-    names, args, content = [], [], ""
+    calls: dict[int, tuple[str, str]] = {}
+    content = ""
     for n, (text, token_ids) in enumerate(steps):
         choice = post.process_output(
             SimpleNamespace(
@@ -2296,15 +2297,19 @@ def _assert_two_glm_calls_streamed(tokenizer, steps):
         )
         delta = choice["delta"] if choice else {}
         content += delta.get("content") or ""
+        # Rebuild calls by index, as an OpenAI client does.
         for tool_call in delta.get("tool_calls") or []:
             function = tool_call.get("function") or {}
-            if function.get("name"):
-                names.append(function["name"])
-                args.append("")
-            args[-1] += function.get("arguments") or ""
+            name, arguments = calls.get(tool_call["index"], ("", ""))
+            calls[tool_call["index"]] = (
+                name + (function.get("name") or ""),
+                arguments + (function.get("arguments") or ""),
+            )
 
-    assert names == ["get_weather", "get_weather"], (names, content)
-    assert [json.loads(a)["city"] for a in args] == ["Paris", "Rome"]
+    assert [
+        (name, json.loads(arguments)["city"])
+        for name, arguments in (calls[i] for i in sorted(calls))
+    ] == [("get_weather", "Paris"), ("get_weather", "Rome")], (calls, content)
     assert not content.strip(), content
 
 
