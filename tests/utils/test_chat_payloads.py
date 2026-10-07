@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import io
 import json
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from tests.utils.payload_builder import chat_payload_with_logprobs
 from tests.utils.payloads import GuidedDecodingChatPayload
@@ -12,14 +14,27 @@ from tests.utils.payloads import GuidedDecodingChatPayload
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
-@pytest.mark.parametrize("case", [None, "shifted", "coalesced", "prompt", "done"])
+@pytest.mark.parametrize(
+    "case",
+    [None, "human_readable", "shifted", "coalesced", "prompt", "done"],
+)
 def test_streaming_logprobs_require_complete_token_metadata(case):
     payload = chat_payload_with_logprobs(
-        stream=True, prompt_logprobs=1, top_logprobs=1, expected_response=[]
+        stream=True,
+        prompt_logprobs=1,
+        top_logprobs=3,
+        expected_response=[],
+        extra_body=(
+            {"return_tokens_as_token_ids": False} if case == "human_readable" else None
+        ),
     )
     payload.min_token_chunks = 2
-    token = {"token": "token_id:17", "logprob": -0.1, "bytes": [49, 55]}
-    logprob = {**token, "token_id": 17, "top_logprobs": [token]}
+    token = {
+        "token": "欧元" if case == "human_readable" else "token_id:17",
+        "logprob": -9999,
+        "bytes": None,
+    }
+    logprob = {**token, "token_id": 17, "top_logprobs": [token, token]}
     chunks = [
         {
             "choices": [
@@ -35,7 +50,7 @@ def test_streaming_logprobs_require_complete_token_metadata(case):
             "choices": [
                 {
                     "index": 0,
-                    "delta": {"content": "hello"},
+                    "delta": {"content": "欧元" if case == "human_readable" else "hello"},
                     "logprobs": {"content": [logprob]},
                     "finish_reason": "stop",
                 }
@@ -51,7 +66,9 @@ def test_streaming_logprobs_require_complete_token_metadata(case):
             "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
         },
     ]
-    if case in ("shifted", "coalesced"):
+    if case == "human_readable":
+        assert payload.body["return_tokens_as_token_ids"] is False
+    elif case in ("shifted", "coalesced"):
         chunks[1]["choices"][0]["logprobs"]["content"].extend(
             chunks[0]["choices"][0].pop("logprobs")["content"]
         )
@@ -61,13 +78,18 @@ def test_streaming_logprobs_require_complete_token_metadata(case):
             )
     elif case == "prompt":
         chunks[1]["nvext"]["prompt_logprobs"][1] = {"6": {"logprob": -0.2}}
-    lines = [f"data: {json.dumps(chunk)}" for chunk in chunks]
+    lines = [f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks]
     if case != "done":
         lines.append("data: [DONE]")
-    response = Mock()
-    response.iter_lines.return_value = iter(lines)
-    if case is None:
-        assert payload.process_response(response) == "hello"
+    response = requests.Response()
+    response.status_code = 200
+    response.encoding = "ISO-8859-1"
+    response.raw = io.BytesIO(("\n\n".join(lines) + "\n\n").encode("utf-8"))
+    response.close = Mock(wraps=response.close)
+    if case in (None, "human_readable"):
+        assert payload.process_response(response) == (
+            "欧元" if case == "human_readable" else "hello"
+        )
     else:
         expected = {
             "shifted": "Output logprobs do not match this chunk",
@@ -90,12 +112,21 @@ def test_streaming_deadline_includes_keepalive_events():
     response.close.assert_called_once()
 
 
-def test_requested_logprobs_cannot_be_empty():
+def test_requested_logprobs_allow_unknown_bytes_but_require_finite_values():
     payload = chat_payload_with_logprobs(expected_response=[])
     response = Mock()
+    logprob = {"token": "€", "bytes": None, "logprob": -9999, "top_logprobs": []}
     response.json.return_value = {
-        "choices": [{"message": {"content": "hello"}, "logprobs": None}]
+        "choices": [
+            {"message": {"content": "hello"}, "logprobs": {"content": [logprob]}}
+        ]
     }
+    assert payload.process_response(response) == "hello"
+    for invalid in (float("nan"), 0.1):
+        logprob["logprob"] = invalid
+        with pytest.raises(AssertionError, match="Invalid logprob"):
+            payload.process_response(response)
+    response.json.return_value["choices"][0]["logprobs"] = None
     with pytest.raises(AssertionError, match="requested output logprobs"):
         payload.process_response(response)
 

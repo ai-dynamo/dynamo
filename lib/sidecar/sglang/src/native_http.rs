@@ -195,14 +195,7 @@ impl Drop for AbortGuard<'_> {
                     }
                 }
             }
-            let result = native_http
-                .client
-                .post(native_http.endpoint.with_path("/abort_request"))
-                .timeout(native_http.abort_timeout)
-                .json(&serde_json::json!({"rid": request_id, "abort_all": false}))
-                .send()
-                .await
-                .and_then(Response::error_for_status);
+            let result = native_http.abort(&request_id, native_http.abort_timeout).await;
             // Disconnecting first removes the request state needed by SGLang's abort handler.
             drop(opening);
             drop(stream);
@@ -296,6 +289,17 @@ impl NativeHttp {
             }
             tokio::time::sleep_until((Instant::now() + retry_interval).min(deadline)).await;
         }
+    }
+
+    pub(crate) async fn abort(&self, rid: &str, timeout: Duration) -> Result<(), reqwest::Error> {
+        self.client
+            .post(self.endpoint.with_path("/abort_request"))
+            .json(&serde_json::json!({"rid": rid, "abort_all": false}))
+            .timeout(timeout)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     async fn open(self, body: Value) -> Result<Response, DynamoError> {
