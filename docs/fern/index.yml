@@ -946,6 +946,14 @@ navigation:
           - page: vLLM
             path: pages/recipes/cli-templates/vllm.mdx
 
+      # ==================== Examples ====================
+      # Curated index of the user-facing tree under examples/. Kept as a single
+      # landing page rather than one entry per directory.
+      - page: Examples
+        icon: file-code
+        path: pages/recipes/examples/overview.mdx
+        slug: examples
+
       # ==================== Feature Benchmarks ====================
       # Evidence pages behind the recipes: controlled A/B benchmarks whose
       # winning configs promote into recipes. Kept adjacent to Recipes so the
