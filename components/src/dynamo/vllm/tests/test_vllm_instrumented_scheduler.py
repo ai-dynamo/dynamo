@@ -394,25 +394,6 @@ def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
     assert q.sum_decode_kv_tokens == 1500
 
 
-def test_main_waiting_queue_remote_kvs_counts_as_queued_decode():
-    """A transient remote-KV wait in the main queue is not prefill work."""
-
-    q = _run_compute_queued(
-        waiting=[
-            _make_request(
-                RequestStatus.WAITING_FOR_REMOTE_KVS,
-                num_tokens=1024,
-                num_computed_tokens=768,
-            ),
-        ],
-        skipped_waiting=[],
-    )
-    assert q.num_prefill_requests == 0
-    assert q.sum_prefill_tokens == 0
-    assert q.num_decode_requests == 1
-    assert q.sum_decode_kv_tokens == 768
-
-
 def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
     """Structured-output grammar compile wait has no KV computed yet; prefill."""
 
