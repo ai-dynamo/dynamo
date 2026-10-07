@@ -122,8 +122,6 @@ use super::error::{
     http_action_for_error, overload_status_code,
 };
 
-/// Build the RL worker discovery router, scoped to the frontend's resolved
-/// `namespace_filter` so `/v1/rl/workers` lists the namespaces the frontend routes to.
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
     namespace_filter: crate::namespace::NamespaceFilter,

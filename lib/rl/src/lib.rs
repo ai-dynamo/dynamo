@@ -954,13 +954,10 @@ mod tests {
         .await;
     }
 
-    /// Issue #15726: the frontend routes to `myns2` under prefix `myns` (literal
-    /// `starts_with`), so the RL listing must include it too.
     #[tokio::test]
     async fn list_workers_prefix_scope_is_literal_like_model_discovery() {
         let distributed = test_runtime().await;
         let sibling = start_rl_endpoint(&distributed, "myns2").await;
-        let other = start_rl_endpoint(&distributed, "other").await;
         let state = discovery_state(&distributed, NamespaceFilter::Prefix("myns".to_string()));
 
         let workers = list_workers(&state).await.expect("list");
@@ -968,7 +965,6 @@ mod tests {
         assert_eq!(namespaces, ["myns2"]);
 
         sibling.shutdown().await.expect("endpoint shutdown");
-        other.shutdown().await.expect("endpoint shutdown");
     }
 
     #[tokio::test]

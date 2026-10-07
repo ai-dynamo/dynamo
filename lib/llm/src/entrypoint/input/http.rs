@@ -224,15 +224,6 @@ async fn run_with_router_plugins(
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
     http_service_builder =
         http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
-    // Resolve the scope once so model discovery and the RL worker listing see the same
-    // namespaces. The suffix applies to a non-global namespace, as on workers.
-    let worker_suffix = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok();
-    let namespace_filter = NamespaceFilter::from_namespace_prefix_and_suffix(
-        local_model.namespace(),
-        local_model.namespace_prefix(),
-        worker_suffix.as_deref(),
-    );
-    http_service_builder = http_service_builder.namespace_filter(Some(namespace_filter.clone()));
     for extension in frontend_route_extensions {
         http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
     }
@@ -243,6 +234,16 @@ async fn run_with_router_plugins(
             ref chat_engine_factory,
             ref prefill_load_estimator,
         } => {
+            // Resolve the scope once so model discovery and the RL worker listing see the same
+            // namespaces. The suffix applies to a non-global namespace, as on workers.
+            let worker_suffix = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok();
+            let namespace_filter = NamespaceFilter::from_namespace_prefix_and_suffix(
+                model.namespace(),
+                model.namespace_prefix(),
+                worker_suffix.as_deref(),
+            );
+            http_service_builder =
+                http_service_builder.namespace_filter(Some(namespace_filter.clone()));
             // Pass the discovery client so the /health endpoint can query active instances
             http_service_builder =
                 http_service_builder.discovery(Some(distributed_runtime.discovery()));
