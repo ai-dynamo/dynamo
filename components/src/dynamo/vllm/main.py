@@ -26,7 +26,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
-from dynamo.common.snapshot.lifecycle import elect_and_wake
+from dynamo.common.snapshot.lifecycle import elect_and_wake, is_snapshot_enabled
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -51,7 +51,10 @@ from dynamo.llm import (
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
-from dynamo.vllm.worker_factory import WorkerFactory
+from dynamo.vllm.worker_factory import (
+    WorkerFactory,
+    _snapshot_uses_instrumented_scheduler,
+)
 
 from . import envs
 from .args import (
@@ -682,6 +685,21 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    # Snapshot failover restores two EngineCores into one pod network namespace.
+    # Reject the resolved FPM scheduler before it binds a socket during capture,
+    # including activation by tracing, benchmarking, or a custom subclass.
+    if (
+        is_snapshot_enabled()
+        and env_bool("DYN_SNAPSHOT_FAILOVER_CAPTURE")
+        and _snapshot_uses_instrumented_scheduler(vllm_config)
+    ):
+        raise ValueError(
+            "FPM is not supported with vLLM snapshot failover. "
+            "Disable --fpm-trace/DYN_FPM_TRACE and --benchmark-mode, and remove "
+            "any --scheduler-cls override that subclasses InstrumentedScheduler."
+        )
+
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 

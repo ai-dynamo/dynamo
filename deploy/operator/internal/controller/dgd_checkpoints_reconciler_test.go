@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -370,6 +371,17 @@ func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) 
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: "dgd-uid"},
 				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(backend)}}
+
+			t.Log("Job overrides cannot remove failover intent or re-enable the default FPM port")
+			component.Experimental.Checkpoint.Job = &v1beta1.ComponentCheckpointJobConfig{
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: commonconsts.MainContainerName,
+					Env: []corev1.EnvVar{
+						{Name: commonconsts.DynamoSnapshotFailoverCaptureEnvVar, Value: ""},
+						{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)},
+					},
+				}}}},
+			}
 			original := component.DeepCopy()
 
 			t.Log("Create one canonical SnapshotJob before serving engines are cloned")
@@ -384,10 +396,29 @@ func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) 
 			assert.Equal(t, original.PodTemplate.Spec.Containers[0].Args, main.Args)
 			assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
 			if backend == dynamo.BackendFrameworkVLLM {
+				assert.Contains(t, main.Env, corev1.EnvVar{Name: commonconsts.DynamoSnapshotFailoverCaptureEnvVar, Value: "true"})
+				assert.NotContains(t, main.Env, corev1.EnvVar{Name: commonconsts.DynamoSnapshotFailoverCaptureEnvVar, Value: ""})
 				for _, env := range main.Env {
 					assert.NotEqual(t, "DYN_FORWARDPASS_METRIC_PORT", env.Name)
 					assert.NotEqual(t, "DYN_VLLM_GMS_SHADOW_MODE", env.Name)
 				}
+			}
+
+			if backend == dynamo.BackendFrameworkVLLM {
+				t.Log("A capture without the FPM safety marker cannot match the reuse contract")
+				olderCapture := job.Spec.PodTemplate.DeepCopy()
+				filtered := olderCapture.Spec.Containers[0].Env[:0]
+				for _, env := range olderCapture.Spec.Containers[0].Env {
+					if env.Name != commonconsts.DynamoSnapshotFailoverCaptureEnvVar {
+						filtered = append(filtered, env)
+					}
+				}
+				olderCapture.Spec.Containers[0].Env = filtered
+				gmsMode, deviceClass, err := snapshotGMSCompatibility(gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)))
+				require.NoError(t, err)
+				olderHash, err := checkpoint.ComputeSnapshotCompatibilityHash(olderCapture, commonconsts.MainContainerName, string(backend), gmsMode, deviceClass)
+				require.NoError(t, err)
+				assert.NotEqual(t, expectedHash, olderHash)
 			}
 
 			t.Log("Verify capture allocates two shared GPUs rather than doubling the request")
@@ -396,6 +427,14 @@ func TestDGDCheckpointsReconciler_MultiGPUSnapshotFailoverCapture(t *testing.T) 
 			require.NoError(t, reconciler.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: *job.Spec.PodTemplate.Spec.ResourceClaims[0].ResourceClaimTemplateName}, template))
 			require.Len(t, template.Spec.Spec.Devices.Requests, 1)
 			assert.Equal(t, int64(2), template.Spec.Spec.Devices.Requests[0].Exactly.Count)
+
+			t.Log("Ordinary snapshots retain their authored settings and do not acquire failover intent")
+			nonFailover := component.DeepCopy()
+			nonFailover.Experimental.Failover = nil
+			capture, err := newTestDGDCheckpointsReconciler(reconciler).buildCheckpointJobPodTemplate(dgd, nonFailover, "worker", backend)
+			require.NoError(t, err)
+			assert.Contains(t, capture.Spec.Containers[0].Env, corev1.EnvVar{Name: commonconsts.DynamoSnapshotFailoverCaptureEnvVar, Value: ""})
+			assert.Contains(t, capture.Spec.Containers[0].Env, corev1.EnvVar{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort)})
 		})
 	}
 }

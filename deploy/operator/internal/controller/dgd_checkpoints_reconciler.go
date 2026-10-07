@@ -1146,9 +1146,11 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		}
 	}
 
-	// FPM binds a publisher port before capture, which would collide when
-	// restored into both engines. Strip the operator default here so capture
-	// and reuse hash the same template; SGLang disables FPM in its snapshot hook.
+	// vLLM snapshotfailover must not capture an FPM publisher socket that both
+	// restored engines would bind. Remove the default port after job overrides
+	// and mark capture so the runtime rejects any instrumented scheduler.
+	// This marker remains in the compatibility hash, preventing reuse of older
+	// captures that did not enforce the guard. SGLang disables FPM in its hook.
 	if backendFramework == dynamo.BackendFrameworkVLLM && dynamo.IsIntraPodFailoverEnabled(component) {
 		targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
 		if err != nil {
@@ -1160,7 +1162,9 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				filtered = append(filtered, env)
 			}
 		}
-		targetContainer.Env = filtered
+		targetContainer.Env = dynamo.MergeEnvs(filtered, []corev1.EnvVar{
+			{Name: consts.DynamoSnapshotFailoverCaptureEnvVar, Value: "true"},
+		})
 	}
 	return podTemplate, nil
 }
