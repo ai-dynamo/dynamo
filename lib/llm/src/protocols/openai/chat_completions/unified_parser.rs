@@ -1477,6 +1477,7 @@ impl ChoiceState {
         self.failed = true;
         let recovered = self.parser.reset();
         if recovered.is_empty() {
+            // TODO: Preserve the parser's consumed offset so a partial-commit error cannot replay input.
             text_delta(fallback.to_string())
         } else {
             text_delta(recovered)

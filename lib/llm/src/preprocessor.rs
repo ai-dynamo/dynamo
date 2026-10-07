@@ -5131,7 +5131,8 @@ impl OpenAIPreprocessor {
             effective_tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
             should_jail,
-        )?;
+        )
+        .map_err(|error| invalid_argument_error(format!("{error:#}")))?;
 
         if let Some(parser_name) = effective_tool_call_parser.as_deref()
             && tool_parser_v2::enabled()
@@ -5150,10 +5151,10 @@ impl OpenAIPreprocessor {
             return Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()));
         }
         if selected_version == tool_parser_v2::ParserVersion::V2 {
-            anyhow::bail!(
+            return Err(invalid_argument_error(format!(
                 "{}=2 was requested, but this tool choice requires the v1 tool-call jail",
                 env_llm::DYN_PARSER_VERSION
-            );
+            )));
         }
         Ok(ToolProcessingRoute::LegacyJail(effective_tool_call_parser))
     }
@@ -9259,13 +9260,26 @@ mod tests {
         let constraint =
             crate::preprocessor::tool_choice::guided_tool_constraint(&request, None, None, false)
                 .unwrap();
+        let error = preprocessor
+            .tool_processing_route(&request, &constraint)
+            .expect_err("explicit v2 must not construct an unconfigured immediate jail");
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("request-route errors must retain their InvalidArgument classification");
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
         assert!(
-            preprocessor
-                .tool_processing_route(&request, &constraint)
-                .expect_err("explicit v2 must not construct an unconfigured immediate jail")
-                .to_string()
+            dynamo_error
+                .message()
                 .contains("requires the v1 tool-call jail")
         );
+        match crate::http::service::error::http_action_for_error(dynamo_error) {
+            crate::http::service::error::ClientErrorAction::Respond { status, .. } => {
+                assert_eq!(status.as_u16(), 400);
+            }
+            crate::http::service::error::ClientErrorAction::NoDelivery => {
+                panic!("invalid parser-route requests must return an HTTP response");
+            }
+        }
     }
 
     #[test]
