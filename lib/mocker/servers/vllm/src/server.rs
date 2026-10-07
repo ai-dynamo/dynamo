@@ -105,7 +105,7 @@ impl VllmMockerService {
             supports_text_input: false,
             supports_token_ids_input: true,
             supports_lora: false,
-            supports_multimodal: false,
+            supports_multimodal: true,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
         };

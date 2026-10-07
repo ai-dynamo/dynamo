@@ -77,6 +77,7 @@ impl PreparedRequest {
         block_size: usize,
         max_model_len: Option<u32>,
     ) -> BoxedStatusResult<Self> {
+        validate_media(&request.media)?;
         if !request.lora_name.is_empty() {
             return Err(Status::unimplemented("LoRA is not supported by the mock server").into());
         }
@@ -399,6 +400,35 @@ impl PreparedRequest {
             ]),
         }
     }
+}
+
+/// Check the media envelope without fetching, decoding, or retaining its payload.
+/// Image features do not change the mock's token accounting or synthetic output.
+fn validate_media(media: &[pb::MediaItem]) -> BoxedStatusResult<()> {
+    use pb::media_item::Source;
+
+    for item in media {
+        if item.modality != pb::Modality::Image as i32 {
+            return Err(Status::unimplemented("the mock server supports image media only").into());
+        }
+        let has_payload = match item.source.as_ref() {
+            Some(Source::Url(value) | Source::DataUri(value)) => !value.trim().is_empty(),
+            Some(Source::RawBytes(value)) => !value.is_empty(),
+            Some(Source::Features(value)) => {
+                !value.identifier.trim().is_empty()
+                    && value.length > 0
+                    && value.kwargs.as_ref().is_some_and(|data| !data.is_empty())
+            }
+            None => false,
+        };
+        if !has_payload {
+            return Err(Status::invalid_argument(
+                "image media requires a non-empty source; features require kwargs, identifier, and length",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 impl KvTransferRole {

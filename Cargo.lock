@@ -3265,6 +3265,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-runtime",
+ "dynamo-sidecar-common",
  "dynamo-vllm-sidecar",
  "futures",
  "prost-types 0.14.3",

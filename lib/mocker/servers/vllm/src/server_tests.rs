@@ -96,6 +96,111 @@ fn generation_output_limit_is_one_million_tokens() {
 }
 
 #[test]
+fn image_sources_are_opaque_but_require_payloads() {
+    use pb::media_item::Source;
+
+    let features = pb::PreprocessedMediaFeatures {
+        kwargs: Some(vec![0xc1]), // Deliberately opaque, not valid MessagePack.
+        identifier: "image-1".to_string(),
+        length: 1,
+        ..Default::default()
+    };
+    let cases = [
+        (
+            "url",
+            Some(Source::Url("https://example.invalid/image.png".into())),
+            true,
+        ),
+        (
+            "data URI",
+            Some(Source::DataUri("data:image/png;base64,b3BhcXVl".into())),
+            true,
+        ),
+        ("bytes", Some(Source::RawBytes(vec![1, 2, 3])), true),
+        ("features", Some(Source::Features(features.clone())), true),
+        ("missing source", None, false),
+        ("empty URL", Some(Source::Url(String::new())), false),
+        (
+            "empty data URI",
+            Some(Source::DataUri(String::new())),
+            false,
+        ),
+        ("empty bytes", Some(Source::RawBytes(Vec::new())), false),
+        (
+            "missing kwargs",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                kwargs: None,
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "empty kwargs",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                kwargs: Some(Vec::new()),
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "missing identifier",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                identifier: String::new(),
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "missing length",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                length: 0,
+                ..features
+            })),
+            false,
+        ),
+    ];
+    let config = MockerServerConfig::default();
+    let text = PreparedRequest::new(request("image"), &config, 4, None).unwrap();
+    for (name, source, valid) in cases {
+        for modality in [
+            pb::Modality::Image,
+            pb::Modality::Video,
+            pb::Modality::Audio,
+            pb::Modality::Unspecified,
+        ] {
+            let mut req = request("image");
+            req.media.push(pb::MediaItem {
+                modality: modality as i32,
+                source: source.clone(),
+                ..Default::default()
+            });
+            let result = PreparedRequest::new(req, &config, 4, None);
+            if modality != pb::Modality::Image {
+                assert_eq!(
+                    result.unwrap_err().code(),
+                    tonic::Code::Unimplemented,
+                    "{name}"
+                );
+            } else if valid {
+                let prepared = result.unwrap();
+                assert_eq!(
+                    prepared.direct_request().tokens,
+                    text.direct_request().tokens,
+                    "{name}"
+                );
+                assert_eq!(prepared.output_token(0), text.output_token(0), "{name}");
+            } else {
+                assert_eq!(
+                    result.unwrap_err().code(),
+                    tonic::Code::InvalidArgument,
+                    "{name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn minimum_tokens_must_not_exceed_the_effective_maximum() {
     let config = MockerServerConfig::default();
     let mut contradictory = request("contradictory-stopping");

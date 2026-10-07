@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 `dynamo-vllm-mocker-server` implements vLLM's native Inference and Control services plus standard gRPC health on CPU. It uses the Dynamo Mocker scheduler for batching, KV capacity, prefix cache, and timing behavior.
 
-The mock server imports the generated types exposed by `dynamo-vllm-sidecar`. The proto files are vendored unchanged from vLLM.
+The mock server imports the official `vllm-proto` types exposed by `dynamo-vllm-sidecar`.
 
 ## Aggregated serving
 
@@ -37,6 +37,57 @@ requests can still exercise Mocker queueing.
 Synthetic output plans are limited to 1,000,000 tokens. LiveEngine uses a small,
 fixed response buffer for each request and cancels slow consumers rather than
 turning declared output length into a second admission-control policy.
+
+## Image mock deployments
+
+The mock advertises multimodal support and accepts image URLs, data URIs, raw
+bytes, and preprocessed feature payloads in aggregated, prefill, and decode
+roles. Sources must be non-empty; features must contain non-empty `kwargs`, an
+`identifier`, and a positive `length`. Audio and video are rejected. Image
+contents remain opaque: the mock does not fetch URLs, decode images, or parse
+feature tensors. Its gRPC message limit is 64 MiB, matching the sidecar.
+
+Prompt usage, scheduling, and synthetic output use the supplied token IDs.
+The mock does not expand image placeholders or simulate image-aware KV or
+encoder caching. Disable prefix caching for these deployments. Prefill returns
+the supplied prompt IDs and synthetic handoff metadata, which lets the real
+sidecars complete the image P/D request flow without NIXL or KV data transfer.
+
+The launch example runs the real Dynamo HTTP frontend, discovery, routing, and
+sidecars. It requires the `ai-dynamo` and `ai-dynamo-runtime` Python packages and
+the Rust binaries, but no vLLM installation, model weights, or GPUs:
+
+```bash
+cargo build -p dynamo-vllm-mocker -p dynamo-vllm-sidecar
+export PATH="$PWD/target/debug:$PATH"
+
+# One aggregated mock worker.
+bash lib/mocker/servers/vllm/launch/multimodal.sh aggregated
+
+# Or separate prefill and decode mock workers.
+bash lib/mocker/servers/vllm/launch/multimodal.sh disagg
+```
+
+The default model is `Qwen/Qwen2.5-VL-3B-Instruct`. The frontend and sidecars
+load its configuration, tokenizer, and chat template. Set `MODEL` to a local
+metadata directory for offline use. The example uses URL passthrough,
+round-robin routing, disabled prefix caching, and file discovery under
+`$PWD/.dynamo-mm-mock`; no etcd or NATS service is required. All processes must
+share the discovery directory. Ports and namespace can be set through the
+environment; run the script with `--help` for details.
+
+After the model appears in `/v1/models`, send a streaming image request:
+
+```bash
+curl -N http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen2.5-VL-3B-Instruct","messages":[{"role":"user","content":[{"type":"text","text":"Describe this image."},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="}}]}],"max_tokens":8,"stream":true,"stream_options":{"include_usage":true}}'
+```
+
+The response contains synthetic text, terminal usage, and `[DONE]`. It does
+not describe the image. Dynamo may inspect image metadata in its own frontend;
+the mock does no image processing. The HTTP API uses `image_url` content parts;
+raw bytes and preprocessed features are also accepted at the gRPC boundary.
 
 ## KV events
 

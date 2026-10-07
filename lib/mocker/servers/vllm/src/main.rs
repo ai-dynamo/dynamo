@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use clap::Parser;
 use dynamo_mocker::common::protocols::MockerConfig;
+use dynamo_sidecar_common::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
 use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
@@ -92,7 +93,11 @@ async fn main() -> anyhow::Result<()> {
         .set_serving::<InferenceServer<VllmMockerService>>()
         .await;
     tonic::transport::Server::builder()
-        .add_service(InferenceServer::new(service.clone()))
+        .add_service(
+            InferenceServer::new(service.clone())
+                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+                .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
+        )
         .add_service(ControlServer::new(service))
         .add_service(health_service)
         .serve_with_shutdown(args.listen, async {
