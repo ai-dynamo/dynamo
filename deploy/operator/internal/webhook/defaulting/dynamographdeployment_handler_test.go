@@ -87,7 +87,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 			wantAnnotation: testVersion,
 		},
 		{
-			name:            "CREATE does not overwrite pre-existing origin version",
+			name:            "CREATE overwrites user-supplied origin version",
 			operatorVersion: testVersion,
 			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -99,7 +99,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 					},
 				},
 			},
-			wantAnnotation: "0.7.0",
+			wantAnnotation: testVersion,
 		},
 		{
 			name:            "UPDATE does not stamp annotation",

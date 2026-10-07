@@ -839,7 +839,7 @@ impl WorkerRegistry {
 
     /// The state a `deregister_dp_rank` cancelled after removing the listener
     /// leaves behind: no listener, index entries untouched.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "standalone-selection"))]
     pub(crate) fn forget_listener(&self, instance_id: WorkerId, dp_rank: u32) {
         if let Some(mut entry) = self.workers.get_mut(&instance_id) {
             entry.listeners.remove(&dp_rank);

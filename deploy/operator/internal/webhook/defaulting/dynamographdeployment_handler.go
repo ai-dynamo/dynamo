@@ -55,13 +55,12 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
-// On every operation: defaults nil component Replicas to 1 and persists the
+// On every operation: defaults nil non-LPX component Replicas to 1 and persists the
 // replica counts implied by explicit multinode roles.
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
-// Existing unannotated DGDs remain unselected for controller-side workload adoption.
 // On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
 // does not rewrite MinAvailable; it remains the component's configured minimum viable unit.
-// On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
+// On CREATE: overwrites nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
@@ -89,12 +88,12 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil)
 	}
 
-	// Default nil replicas on every operation so newly added components remain safe to expand.
+	// Apply component defaults on every operation, including newly added components.
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 
-		// Default omitted replica counts before the controller expands component roles.
-		if component.Replicas == nil {
+		// Preserve omitted LPX replicas so Grove can retain its native scale.
+		if !component.IsLPX() && component.Replicas == nil {
 			component.Replicas = ptr.To(int32(1))
 		}
 		defaultMultinodeRoleReplicas(component)
@@ -130,14 +129,12 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	// Stamp creation provenance independently from level-based provider defaulting.
 	if req.Operation == admissionv1.Create {
-		// Stamp operator version on creation (don't overwrite if already set)
-		if _, exists := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; !exists {
-			dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
-			logger.Info("stamped operator origin version on DGD",
-				"name", dgd.Name,
-				"namespace", dgd.Namespace,
-				"version", d.OperatorVersion)
-		}
+		// Replace any user-supplied value with the authoritative creating operator version.
+		dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
+		logger.Info("stamped operator origin version on DGD",
+			"name", dgd.Name,
+			"namespace", dgd.Namespace,
+			"version", d.OperatorVersion)
 	}
 
 	return nil

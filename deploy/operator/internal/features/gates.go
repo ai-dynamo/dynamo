@@ -142,6 +142,7 @@ const (
 var allNames = [...]Name{
 	Checkpoint,
 	Grove,
+	LPX,
 	LWS,
 	DisaggregatedSet,
 	KaiScheduler,
@@ -160,6 +161,7 @@ type Gate interface {
 type Gates struct {
 	Checkpoint       bool `json:"checkpoint"`
 	Grove            bool `json:"grove"`
+	LPX              bool `json:"lpx"`
 	LWS              bool `json:"lws"`
 	DisaggregatedSet bool `json:"disaggregatedSet"`
 	KaiScheduler     bool `json:"kaiScheduler"`
@@ -213,6 +215,14 @@ func New(
 		"Grove is explicitly enabled in config but the Grove API group was not detected in the cluster"); err != nil {
 		return Gates{}, err
 	}
+
+	// Enable LPX only when explicitly configured and its external API dependency is available.
+	if config.LPX.Enabled {
+		if gates.LPX, err = resolveLPX(ctx, mgr.GetConfig()); err != nil {
+			return Gates{}, err
+		}
+	}
+
 	lwsAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "leaderworkerset.x-k8s.io", "", "")
 	if err != nil {
 		return Gates{}, err

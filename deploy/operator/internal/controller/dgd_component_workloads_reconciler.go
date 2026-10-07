@@ -27,7 +27,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -175,11 +174,11 @@ func getExistingRestartAnnotationsDCD(
 		if existingDCD.Name == "" {
 			continue
 		}
-		restartAt := dynamo.GetPodTemplateAnnotations(
-			&existingDCD.Spec.DynamoComponentDeploymentSharedSpec,
-		)[consts.RestartAnnotation]
-		if restartAt != "" {
-			restartAnnotations[componentName] = restartAt
+		for _, podTemplate := range dynamo.ComponentPodTemplates(&existingDCD.Spec.DynamoComponentDeploymentSharedSpec) {
+			if restartAt := podTemplate.Annotations[consts.RestartAnnotation]; restartAt != "" {
+				restartAnnotations[componentName] = restartAt
+				break
+			}
 		}
 	}
 	return restartAnnotations, nil
@@ -248,17 +247,12 @@ func applyRestoreCandidateMetadataToComponent(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) error {
-	annotations := dynamo.GetPodTemplateAnnotations(component)
-	if annotations == nil {
-		if component.PodTemplate == nil {
-			component.PodTemplate = &corev1.PodTemplateSpec{}
+	for _, podTemplate := range dynamo.EnsureComponentPodTemplates(component) {
+		if err := checkpoint.ApplyRestoreCandidateMetadata(podTemplate.Annotations, checkpointInfo); err != nil {
+			return err
 		}
-		if component.PodTemplate.Annotations == nil {
-			component.PodTemplate.Annotations = map[string]string{}
-		}
-		annotations = component.PodTemplate.Annotations
 	}
-	return checkpoint.ApplyRestoreCandidateMetadata(annotations, checkpointInfo)
+	return nil
 }
 
 // preserveExistingDCDState carries forward immutable server state that must not

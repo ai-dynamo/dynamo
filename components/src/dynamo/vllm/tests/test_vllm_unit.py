@@ -971,9 +971,11 @@ class TestBenchmarkConfig:
         assert config._benchmark_additional_config == {
             "mode": "prefill",
             "randomize_kda_state": False,
+            "hybrid_live_state": False,
             "warmup_iterations": 2,
             "output_path": str(output),
             "timeout": 900,
+            "max_batch_size": None,
             "prefill_max_new_token_samples": 64,
             "prefill_max_kv_read_token_samples": 16,
             "decode_max_kv_read_token_samples": 128,
@@ -1517,6 +1519,51 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
+def _token_request(**sampling_options):
+    return {
+        "token_ids": [1, 2, 3],
+        "sampling_options": sampling_options,
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+
+@pytest.mark.parametrize("text_mode", [False, True], ids=["token-mode", "text-mode"])
+@pytest.mark.parametrize(
+    ("temperature", "expected"),
+    [
+        (0.0, (0.0, 1.0, 0, 0.0)),
+        # vLLM raises 0 < temperature < 0.01 to 0.01, so this is not greedy.
+        (1e-6, (0.01, 0.8, 20, 0.05)),
+    ],
+    ids=["greedy", "tiny-temperature"],
+)
+def test_build_sampling_params_applies_vllm_post_init_after_overlays(
+    text_mode, temperature, expected
+):
+    from dynamo.vllm.handlers import build_sampling_params, build_sampling_params_openai
+
+    defaults = {"top_p": 0.8, "top_k": 20, "min_p": 0.05}
+    if text_mode:
+        sp = build_sampling_params_openai({"temperature": temperature}, defaults)
+    else:
+        sp = build_sampling_params(
+            _token_request(temperature=temperature), default_sampling_params=defaults
+        )
+    assert (sp.temperature, sp.top_p, sp.top_k, sp.min_p) == expected
+
+
+def test_build_sampling_params_rejects_out_of_range_greedy_values():
+    from vllm.exceptions import VLLMValidationError
+
+    from dynamo.vllm.handlers import build_sampling_params
+
+    with pytest.raises(VLLMValidationError, match="top_p"):
+        build_sampling_params(
+            _token_request(temperature=0.0, top_p=0.0), default_sampling_params={}
+        )
+
+
 @pytest.mark.parametrize(
     ("constraint_name", "constraint_value"),
     [
@@ -1696,6 +1743,8 @@ def _make_dynamo_config(**overrides):
         "fpm_trace": False,
         "benchmark_mode": None,
         "benchmark_randomize_kda_state": False,
+        "benchmark_hybrid_live_state": False,
+        "benchmark_max_batch_size": None,
         "benchmark_warmup_iterations": 5,
         "benchmark_output_path": "/tmp/benchmark_results.json",
         "benchmark_timeout": 900,

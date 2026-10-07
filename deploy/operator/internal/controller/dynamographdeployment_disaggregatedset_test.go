@@ -23,6 +23,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -601,6 +602,69 @@ func TestDCDAndDirectDisaggregatedSetRenderingParity(t *testing.T) {
 		require.Equal(t, "value", template.Annotations["example.com/graph-annotation"])
 		require.Equal(t, "render-parity-checkpoint", template.Annotations[consts.CheckpointNameAnnotation])
 	}
+}
+
+func TestDCDAndDirectDisaggregatedSetRoleTemplateRenderingParity(t *testing.T) {
+	t.Log("Create distinct complete leader and worker templates with different GPU quantities")
+	dgd := newEnvtestDSHappyPathDGD("role-render-parity")
+	component := &dgd.Spec.Components[0]
+	leaderTemplate := component.PodTemplate.DeepCopy()
+	workerTemplate := component.PodTemplate.DeepCopy()
+	leaderTemplate.Labels = map[string]string{"template-source": "leader"}
+	workerTemplate.Labels = map[string]string{"template-source": "worker"}
+	leaderTemplate.Spec.Containers[0].Image = "leader:1.0.0"
+	workerTemplate.Spec.Containers[0].Image = "worker:1.0.0"
+	leaderTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("4")}
+	workerTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("2")}
+	component.PodTemplate = nil
+	component.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+		{Name: nvidiacomv1beta1.ComponentRoleLeader, PodTemplate: leaderTemplate},
+		{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: workerTemplate},
+	}
+
+	t.Log("Normalize restart and worker hash metadata on both complete role sources")
+	rollingUpdateCtx := dynamo.RollingUpdateContext{NewWorkerHash: "worker123"}
+	restart := &dynamo.RestartState{Timestamp: "restart123", ComponentsToAnnotate: map[string]bool{"prefill": true}}
+	normalized, err := dynamo.NormalizeDynamoGraphDeploymentComponents(dgd, restart, nil, rollingUpdateCtx)
+	require.NoError(t, err)
+	component = normalized["prefill"]
+	require.Nil(t, component.PodTemplate, "normalization must retain role-template mode")
+	for _, role := range component.Roles {
+		require.Equal(t, "worker123", role.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+		require.Equal(t, "restart123", role.PodTemplate.Annotations[consts.RestartAnnotation])
+	}
+
+	t.Log("Render the DCD and direct DS adapters from the same normalized component")
+	dcds, err := dynamo.GenerateDynamoComponentsDeploymentsFromNormalized(
+		dgd, map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{"prefill": component}, rollingUpdateCtx,
+	)
+	require.NoError(t, err)
+	dcd := dcds["prefill"]
+	dcd.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
+	renderer := newDCDWorkloadRenderer(
+		fake.NewClientBuilder().WithScheme(scheme).Build(),
+		&configv1alpha1.OperatorConfiguration{},
+		&commoncontroller.RuntimeConfig{Gate: features.Gates{}},
+		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+	)
+	dcdLeader, dcdWorker, err := renderer.renderMultinodePodTemplateSpecs(t.Context(), dcd)
+	require.NoError(t, err)
+	backend, err := dynamo.BackendFrameworkForComponent(component, dgd)
+	require.NoError(t, err)
+	dsLeader, dsWorker, err := renderer.renderMultinodePodTemplateSpecsForDGDComponent(
+		t.Context(), dgd, component, "prefill", dcd.Name, dynamo.GetDynamoNamespace(dgd, component), backend, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, dcdLeader, dsLeader)
+	require.Equal(t, dcdWorker, dsWorker)
+	require.Equal(t, "leader", dsLeader.Labels["template-source"])
+	require.Equal(t, "worker", dsWorker.Labels["template-source"])
+	require.Equal(t, "leader:1.0.0", dsLeader.Spec.Containers[0].Image)
+	require.Equal(t, "worker:1.0.0", dsWorker.Spec.Containers[0].Image)
 }
 
 func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {

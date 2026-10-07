@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -10,10 +11,12 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveSequenceEvent, WorkerWithDpRank};
+use crate::sequences::multi_worker::RateLimitedFailureLog;
 use crate::sequences::{
     SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher, SequenceSubscriber,
 };
@@ -117,7 +120,6 @@ pub(crate) struct ReplicaSyncConfig {
 #[derive(Debug)]
 pub(crate) struct ReplicaSyncRuntime {
     config: ReplicaSyncConfig,
-    cancel_token: CancellationToken,
     publisher_task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -127,14 +129,14 @@ impl ReplicaSyncRuntime {
     }
 
     pub(crate) async fn shutdown(&self) {
-        self.cancel_token.cancel();
+        self.config.cancel_token.cancel();
         if let Some(task) = self.publisher_task.lock().await.take() {
             let _ = task.await;
         }
     }
 
     fn abort(&self) {
-        self.cancel_token.cancel();
+        self.config.cancel_token.cancel();
         if let Ok(mut task) = self.publisher_task.try_lock()
             && let Some(task) = task.take()
         {
@@ -282,6 +284,7 @@ impl ScopedSequencePublisher {
         }
     }
 
+    #[cfg(feature = "standalone-selection")]
     pub(crate) fn with_load_sink(mut self, sink: Option<Arc<dyn SchedulerLoadSink>>) -> Self {
         self.load_sink = sink;
         self
@@ -448,9 +451,8 @@ pub(crate) fn setup_replica_sync(
     let (outbound_tx, affinity_tx, publisher_task) =
         start_replica_publisher(&bind_endpoint, cancel_token.clone())?;
     Ok(Some(ReplicaSyncRuntime {
-        config: ReplicaSyncConfig::new(process_id, outbound_tx, cancel_token.clone())
+        config: ReplicaSyncConfig::new(process_id, outbound_tx, cancel_token)
             .with_affinity_publisher(affinity_tx),
-        cancel_token,
         publisher_task: Mutex::new(Some(publisher_task)),
     }))
 }
@@ -519,51 +521,37 @@ pub(crate) fn start_replica_publisher(
         mpsc::channel::<AffinityBindingEvent>(AFFINITY_EVENT_CHANNEL_CAPACITY);
 
     let task = tokio::spawn(async move {
-        loop {
-            let (frames, label) = tokio::select! {
+        // The two sources close independently; keep publishing until both are
+        // closed or the mesh shuts down.
+        let mut sequence_open = true;
+        let mut affinity_open = true;
+        while sequence_open || affinity_open {
+            let message = tokio::select! {
                 _ = cancel_token.cancelled() => break,
-                event = rx.recv() => {
-                    let Some(event) = event else {
-                        break;
-                    };
-                    let partition = event.partition_ref();
-                    match rmp_serde::to_vec_named(&event) {
-                        Ok(payload) => (
-                            vec![REPLICA_TOPIC.to_vec(), payload],
-                            format!("{partition} request_id={}", event.event.request_id),
-                        ),
-                        Err(error) => {
-                            tracing::error!(
-                                model_name = %partition.model_name,
-                                routing_group = %partition.routing_group,
-                                request_id = %event.event.request_id,
-                                "Failed to encode active-sequence replica event: {error}"
-                            );
-                            continue;
-                        }
+                event = rx.recv(), if sequence_open => match event {
+                    Some(event) => OutboundReplicaMessage::Sequence(event),
+                    None => {
+                        sequence_open = false;
+                        continue;
                     }
-                }
-                binding = affinity_rx.recv() => {
-                    let Some(binding) = binding else {
-                        break;
-                    };
-                    match rmp_serde::to_vec_named(&binding) {
-                        Ok(payload) => (
-                            vec![AFFINITY_TOPIC.to_vec(), payload],
-                            format!("session_id={}", binding.session_id),
-                        ),
-                        Err(error) => {
-                            tracing::error!(
-                                session_id = %binding.session_id,
-                                "Failed to encode session affinity replica event: {error}"
-                            );
-                            continue;
-                        }
+                },
+                binding = affinity_rx.recv(), if affinity_open => match binding {
+                    Some(binding) => OutboundReplicaMessage::Affinity(binding),
+                    None => {
+                        affinity_open = false;
+                        continue;
                     }
+                },
+            };
+            let frames = match message.encode() {
+                Ok(frames) => frames,
+                Err(error) => {
+                    tracing::error!(event = %message, error = %error, "Failed to encode replica message");
+                    continue;
                 }
             };
             if let Err(error) = socket.send_multipart(frames).await {
-                tracing::error!(event = %label, "Failed to publish replica event: {error}");
+                tracing::error!(event = %message, error = %error, "Failed to publish replica message");
             }
         }
     });
@@ -571,13 +559,100 @@ pub(crate) fn start_replica_publisher(
     Ok((tx, affinity_tx, task))
 }
 
+enum OutboundReplicaMessage {
+    Sequence(ScopedReplicaEvent),
+    Affinity(AffinityBindingEvent),
+}
+
+impl OutboundReplicaMessage {
+    fn encode(&self) -> Result<Vec<Vec<u8>>, rmp_serde::encode::Error> {
+        let (topic, payload) = match self {
+            Self::Sequence(event) => (REPLICA_TOPIC, rmp_serde::to_vec_named(event)?),
+            Self::Affinity(binding) => (AFFINITY_TOPIC, rmp_serde::to_vec_named(binding)?),
+        };
+        Ok(vec![topic.to_vec(), payload])
+    }
+}
+
+/// Error-path log label; formatted only when encoding or sending fails.
+impl fmt::Display for OutboundReplicaMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sequence(event) => write!(
+                f,
+                "active-sequence event {} request_id={}",
+                event.partition_ref(),
+                event.event.request_id
+            ),
+            Self::Affinity(binding) => write!(
+                f,
+                "session affinity binding session_id={}",
+                binding.session_id
+            ),
+        }
+    }
+}
+
+/// Inbound side of one partition's replica channel: forwards mesh events to
+/// the partition's tracker. Best effort; a full channel drops the event.
+pub(crate) struct ReplicaInbox {
+    tx: mpsc::Sender<ActiveSequenceEvent>,
+    full_drops: parking_lot::Mutex<RateLimitedFailureLog>,
+}
+
+impl ReplicaInbox {
+    pub(crate) fn new(tx: mpsc::Sender<ActiveSequenceEvent>) -> Self {
+        Self {
+            tx,
+            full_drops: parking_lot::Mutex::default(),
+        }
+    }
+
+    pub(crate) fn deliver(
+        &self,
+        partition: &RoutingPartitionId,
+        expected_block_size: u32,
+        block_size: u32,
+        event: ActiveSequenceEvent,
+    ) {
+        if block_size != expected_block_size {
+            tracing::debug!(
+                %partition,
+                expected_block_size,
+                received_block_size = block_size,
+                "Dropping replica event with mismatched block size"
+            );
+            return;
+        }
+        match self.tx.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                let Some(dropped_events) = self.full_drops.lock().record(Instant::now()) else {
+                    return;
+                };
+                tracing::warn!(
+                    %partition,
+                    request_id = %event.request_id,
+                    capacity = self.tx.max_capacity(),
+                    dropped_events_since_last_log = dropped_events,
+                    "Replica subscriber channel full; dropping event"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(
+                    %partition,
+                    "Replica subscriber channel closed; dropping event"
+                );
+            }
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 pub enum ReplicaPeerError {
     #[error(transparent)]
     InvalidEndpoint(#[from] anyhow::Error),
 
-    #[allow(dead_code)]
     #[error("replica sync is disabled")]
     Disabled,
 
@@ -585,7 +660,6 @@ pub enum ReplicaPeerError {
     Unavailable,
 }
 
-#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 pub(crate) struct PeerManager {
     command_tx: mpsc::Sender<PeerCommand>,
     peers: Arc<RwLock<HashSet<String>>>,
@@ -593,7 +667,6 @@ pub(crate) struct PeerManager {
     subscriber_task: Mutex<Option<JoinHandle<()>>>,
 }
 
-#[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 enum PeerCommand {
     Register {
         endpoint: String,
@@ -684,7 +757,6 @@ impl PeerManager {
         })
     }
 
-    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
         validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
@@ -698,7 +770,6 @@ impl PeerManager {
             .map_err(ReplicaPeerError::InvalidEndpoint)
     }
 
-    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
         validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
@@ -712,7 +783,6 @@ impl PeerManager {
             .map_err(ReplicaPeerError::InvalidEndpoint)
     }
 
-    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) fn list_peers(&self) -> Vec<String> {
         let mut peers: Vec<_> = self.peers.read().iter().cloned().collect();
         peers.sort();
@@ -953,6 +1023,27 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn publisher_runs_until_every_source_closes() {
+        let (outbound, affinity, mut publisher_task) =
+            start_replica_publisher(&reserve_tcp_endpoint(), CancellationToken::new()).unwrap();
+
+        drop(affinity);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !publisher_task.is_finished(),
+            "closing the affinity source must not stop active-sequence publishing"
+        );
+
+        drop(outbound);
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut publisher_task)
+            .await
+            .expect("publisher exits once every source closes")
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -85,22 +85,25 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecs(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (*corev1.PodTemplateSpec, *corev1.PodTemplateSpec, error) {
-	podLabels, err := r.getDCDWorkloadPodLabels(ctx, dcd)
+	leaderContainerGPUs := r.containerGPUCountForRole(ctx, dcd, dynamo.RoleLeader)
+	workerContainerGPUs := leaderContainerGPUs
+	if dynamo.HasRolePodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		workerContainerGPUs = r.containerGPUCountForRole(ctx, dcd, dynamo.RoleWorker)
+	}
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(
+		ctx,
+		dcd,
+		leaderContainerGPUs,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
-	containerGPUs := r.containerGPUCount(ctx, dcd)
 
-	leaderLabels := make(map[string]string, len(podLabels))
-	maps.Copy(leaderLabels, podLabels)
-	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, dcd, leaderLabels, containerGPUs)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	workerLabels := make(map[string]string, len(podLabels))
-	maps.Copy(workerLabels, podLabels)
-	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, dcd, workerLabels, containerGPUs)
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(
+		ctx,
+		dcd,
+		workerContainerGPUs,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -120,76 +123,65 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 	backendFramework dynamo.BackendFramework,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) (*corev1.PodTemplateSpec, *corev1.PodTemplateSpec, error) {
-	podLabels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
-	podAnnotations := dynamo.ApplyDGDComponentTopologyAnnotations(
-		dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component),
-		dgd,
-		component,
-	)
-	podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
-	podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
-	podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
-	dynamo.AddBaseModelLabel(podLabels, component.ModelRef)
-	dynamo.AddBaseModelAnnotation(podAnnotations, component.ModelRef)
-	componentType, err := r.getWorkloadComponentType(
-		ctx,
-		dgd.Namespace,
-		workloadName,
-		string(component.ComponentType),
-		podLabels,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	containerGPUs := sync.OnceValues(func() (int64, error) {
+	templates := make(map[dynamo.Role]*corev1.PodTemplateSpec, 2)
+	sharedContainerGPUs := sync.OnceValues(func() (int64, error) {
 		return dynamo.ResolveContainerGPUs(ctx, r.reader, dgd.Namespace, component)
 	})
 
-	leaderLabels := maps.Clone(podLabels)
-	leaderPodTemplateSpec, err := r.generateComponentRolePodTemplateSpec(
-		ctx,
-		component,
-		maps.Clone(podLabels),
-		maps.Clone(podAnnotations),
-		componentType,
-		workloadName,
-		dgd.Name,
-		dgd.Namespace,
-		componentName,
-		dynamoNamespace,
-		backendFramework,
-		dynamo.RoleLeader,
-		leaderLabels,
-		checkpointInfo,
-		containerGPUs,
-	)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to generate leader pod template")
-	}
+	// Resolve each complete role source before applying graph metadata and rendering.
+	for _, role := range []dynamo.Role{dynamo.RoleLeader, dynamo.RoleWorker} {
+		effective, err := dynamo.EffectiveComponentForRole(component, role)
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "failed to resolve role pod template")
+		}
+		podLabels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, effective)
+		podAnnotations := dynamo.ApplyDGDComponentTopologyAnnotations(
+			dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, effective),
+			dgd,
+			effective,
+		)
+		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
+		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
+		podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+		dynamo.AddBaseModelLabel(podLabels, effective.ModelRef)
+		dynamo.AddBaseModelAnnotation(podAnnotations, effective.ModelRef)
+		componentType, err := r.getWorkloadComponentType(
+			ctx, dgd.Namespace, workloadName, string(effective.ComponentType), podLabels,
+		)
+		if err != nil {
+			return nil, nil, err
+		}
 
-	workerLabels := maps.Clone(podLabels)
-	workerPodTemplateSpec, err := r.generateComponentRolePodTemplateSpec(
-		ctx,
-		component,
-		maps.Clone(podLabels),
-		maps.Clone(podAnnotations),
-		componentType,
-		workloadName,
-		dgd.Name,
-		dgd.Namespace,
-		componentName,
-		dynamoNamespace,
-		backendFramework,
-		dynamo.RoleWorker,
-		workerLabels,
-		checkpointInfo,
-		containerGPUs,
-	)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to generate worker pod template")
+		// Complete role templates may request different GPU quantities.
+		containerGPUs := sharedContainerGPUs
+		if dynamo.HasRolePodTemplates(component) {
+			containerGPUs = sync.OnceValues(func() (int64, error) {
+				return dynamo.ResolveContainerGPUs(ctx, r.reader, dgd.Namespace, effective)
+			})
+		}
+		template, err := r.generateComponentRolePodTemplateSpec(
+			ctx,
+			component,
+			maps.Clone(podLabels),
+			podAnnotations,
+			componentType,
+			workloadName,
+			dgd.Name,
+			dgd.Namespace,
+			componentName,
+			dynamoNamespace,
+			backendFramework,
+			role,
+			podLabels,
+			checkpointInfo,
+			containerGPUs,
+		)
+		if err != nil {
+			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
+		}
+		templates[role] = template
 	}
-
-	return leaderPodTemplateSpec, workerPodTemplateSpec, nil
+	return templates[dynamo.RoleLeader], templates[dynamo.RoleWorker], nil
 }
 
 func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
@@ -241,15 +233,26 @@ func (r *dcdWorkloadRenderer) containerGPUCount(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) dynamo.ContainerGPUCount {
+	return r.containerGPUCountForRole(ctx, dcd, dynamo.RoleMain)
+}
+
+func (r *dcdWorkloadRenderer) containerGPUCountForRole(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	role dynamo.Role,
+) dynamo.ContainerGPUCount {
 	return sync.OnceValues(func() (int64, error) {
-		return dynamo.ResolveContainerGPUs(ctx, r.reader, dcd.Namespace, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+		component, err := dynamo.EffectiveComponentForRole(&dcd.Spec.DynamoComponentDeploymentSharedSpec, role)
+		if err != nil {
+			return 0, err
+		}
+		return dynamo.ResolveContainerGPUs(ctx, r.reader, dcd.Namespace, component)
 	})
 }
 
 func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-	labels map[string]string,
 	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
 	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleLeader, containerGPUs)
@@ -257,7 +260,6 @@ func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
 
-	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
 	leaderPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
@@ -271,7 +273,6 @@ func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-	labels map[string]string,
 	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
 	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleWorker, containerGPUs)
@@ -279,7 +280,6 @@ func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
 
-	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
 	workerPodTemplateSpec.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(dynamo.RoleWorker)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
@@ -296,13 +296,16 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	role dynamo.Role,
 	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	component := dynamo.ConvertDynamoComponentDeploymentToSpec(dcd)
+	component, err := dynamo.EffectiveComponentForRole(&dcd.Spec.DynamoComponentDeploymentSharedSpec, role)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to resolve role pod template")
+	}
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
 	if err != nil {
 		return nil, err
 	}
-	podLabels := dynamo.GetDCDKubeLabels(dcd)
-	podAnnotations := dynamo.GetDCDKubeAnnotations(dcd)
+	podLabels := getDCDWorkloadPodLabels(dcd, component, componentType)
+	podAnnotations := dynamo.GetDCDKubeAnnotationsForComponent(dcd, component)
 	if parentName := dcd.GetParentGraphDeploymentName(); podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] == "" && parentName != "" {
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentName
 	}
@@ -328,9 +331,17 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	if parentGraphDeploymentName == "" {
 		parentGraphDeploymentName = dcd.Name
 	}
+
+	// Keep authored role sources available so the shared renderer preserves launch ownership.
+	componentForRendering := dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
+	if workerHash := dynamo.GetDCDEffectiveWorkerHash(dcd); workerHash != "" && dynamo.IsWorkerComponent(componentType) {
+		for _, podTemplate := range dynamo.EnsureComponentPodTemplates(componentForRendering) {
+			podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+		}
+	}
 	return r.generateComponentPodTemplateSpec(
 		ctx,
-		component,
+		componentForRendering,
 		podLabels,
 		podAnnotations,
 		componentType,
@@ -442,7 +453,7 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 
 	alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
 	expectedCompatibilityHash := dynamo.GetPodTemplateAnnotations(component)[commonconsts.SnapshotCandidateCompatibilityHashAnnotation]
-	automaticSnapshotJob, err := automaticSnapshotJobReferenceForDCD(dcd)
+	automaticSnapshotJob, err := automaticSnapshotJobReferenceForDCD(dcd, component)
 	if err != nil {
 		return nil, err
 	}
@@ -512,12 +523,15 @@ func podSnapshotUseForDCD(
 	return checkpoint.ManagedPodSnapshotUse(ownerUID)
 }
 
-func automaticSnapshotJobReferenceForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (*checkpoint.SnapshotJobReference, error) {
+func automaticSnapshotJobReferenceForDCD(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (*checkpoint.SnapshotJobReference, error) {
 	if _, managed := managedDGDUIDForDCD(dcd); !managed {
 		return nil, nil
 	}
 	reference, found, err := checkpoint.AutomaticSnapshotJobReferenceFromAnnotations(
-		dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+		dynamo.GetPodTemplateAnnotations(component),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid automatic SnapshotJob restore candidate")
@@ -640,17 +654,14 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	return service, false, nil
 }
 
-func (r *dcdWorkloadRenderer) getDCDWorkloadPodLabels(
-	ctx context.Context,
+func getDCDWorkloadPodLabels(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-) (map[string]string, error) {
-	labels := dynamo.GetDCDKubeLabels(dcd)
-	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
-	if err != nil {
-		return nil, err
-	}
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentType string,
+) map[string]string {
+	labels := dynamo.GetDCDKubeLabelsForComponent(dcd, component)
 	if componentType == "" {
-		return labels, nil
+		return labels
 	}
 	labels[commonconsts.KubeLabelDynamoComponentType] = componentType
 	specType := string(dcd.Spec.ComponentType)
@@ -659,7 +670,7 @@ func (r *dcdWorkloadRenderer) getDCDWorkloadPodLabels(
 		labels[commonconsts.KubeLabelDynamoSubComponentType] == "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = specType
 	}
-	return labels, nil
+	return labels
 }
 
 // getDCDWorkloadComponentType returns the component type that should be
