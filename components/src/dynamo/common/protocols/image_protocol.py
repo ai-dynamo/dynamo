@@ -60,6 +60,40 @@ class ImageNvExt(BaseModel):
     """
 
 
+class ImageTokenDetails(BaseModel):
+    """
+    A token count split by kind.
+    """
+
+    text_tokens: conint(ge=0)
+    image_tokens: conint(ge=0)
+
+
+class ImageUsage(BaseModel):
+    """
+    Token usage of an image generation. Keeps the wire format of the OpenAI
+    `ImageGenUsage`, including the singular `output_token_details`.
+    """
+
+    input_tokens: conint(ge=0)
+    """
+    Tokens (image and text) in the input prompt
+    """
+    total_tokens: conint(ge=0)
+    """
+    Tokens (image and text) used for the generation
+    """
+    output_tokens: conint(ge=0)
+    """
+    Tokens the model generated
+    """
+    output_token_details: ImageTokenDetails | None = None
+    input_tokens_details: ImageTokenDetails
+    """
+    The input tokens by kind
+    """
+
+
 class NvCreateImageRequest(BaseModel):
     """
     Request for image generation (/v1/images/generations and /v1/images/edits).
@@ -126,7 +160,4 @@ class NvImagesResponse(BaseModel):
     Image size in WxH format
     """
     quality: str | None = None
-    usage: dict[str, Any] | None = None
-    """
-    Token usage of the generation, when the model reports it
-    """
+    usage: ImageUsage | None = None
