@@ -17,7 +17,7 @@
 # - Keep the TRTLLM engine config conservative enough for a small smoke test.
 # - Restrict UCX away from RDMA/IB transports. The snapshot stack can migrate
 #   established TCP sockets, but it cannot dump UCX/OpenMPI mappings backed by
-#   /dev/infiniband/uverbs*. For one GPU, tcp,self is sufficient.
+#   /dev/infiniband/uverbs*. For one GPU, use tcp,self,cuda_copy.
 # - Mount /dev/net/tun. CRIU may need it while restoring network devices created
 #   by the TRT-LLM/PyTorch/OpenMPI stack even in this single-GPU recipe.
 apiVersion: nvidia.com/v1beta1
