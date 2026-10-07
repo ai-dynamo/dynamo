@@ -1251,8 +1251,76 @@ def vllm_processor_module(monkeypatch):
     return module
 
 
+def _logprobs_processor(vllm_processor_module):
+    return vllm_processor_module.VllmProcessor(
+        tokenizer=object(),
+        input_processor=SimpleNamespace(renderer=object(), model_config=None),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+
+
 @pytest.mark.asyncio
-async def test_generator_rejects_logprobs_including_zero_top_logprobs(
+@pytest.mark.parametrize("top_logprobs", [-1])
+async def test_generator_rejects_negative_top_logprobs_before_preprocess(
+    vllm_processor_module,
+    monkeypatch,
+    top_logprobs,
+):
+    preprocess_chat_request = AsyncMock()
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        preprocess_chat_request,
+    )
+    processor = _logprobs_processor(vllm_processor_module)
+
+    with pytest.raises(HttpError) as excinfo:
+        await anext(
+            processor._generator_inner(
+                {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "logprobs": True,
+                    "top_logprobs": top_logprobs,
+                }
+            )
+        )
+
+    assert excinfo.value.code == 400
+    assert "top_logprobs" in excinfo.value.message
+    assert str(top_logprobs) in excinfo.value.message
+    preprocess_chat_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("logprobs", [False, None])
+async def test_generator_rejects_top_logprobs_without_logprobs(
+    vllm_processor_module, monkeypatch, logprobs
+):
+    preprocess = AsyncMock(
+        side_effect=AssertionError("must reject before preprocessing")
+    )
+    monkeypatch.setattr(vllm_processor_module, "preprocess_chat_request", preprocess)
+    request = {
+        "model": "test",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "top_logprobs": 1,
+    }
+    if logprobs is not None:
+        request["logprobs"] = logprobs
+    processor = _logprobs_processor(vllm_processor_module)
+    with pytest.raises(HttpError) as excinfo:
+        await anext(processor._generator_inner(request))
+    assert excinfo.value.code == 400
+    assert "`logprobs` must be set to true" in excinfo.value.message
+    preprocess.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generator_rejects_integer_chat_logprobs_before_preprocess(
     vllm_processor_module,
     monkeypatch,
 ):
@@ -1262,17 +1330,43 @@ async def test_generator_rejects_logprobs_including_zero_top_logprobs(
         "preprocess_chat_request",
         preprocess_chat_request,
     )
-
-    processor = vllm_processor_module.VllmProcessor(
-        tokenizer=object(),
-        input_processor=object(),
-        output_processor=object(),
-        tool_parser_class=None,
-        reasoning_parser_class=None,
-        routed_engine=object(),
-    )
+    processor = _logprobs_processor(vllm_processor_module)
 
     with pytest.raises(HttpError) as excinfo:
+        await anext(
+            processor._generator_inner(
+                {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "logprobs": 3,
+                }
+            )
+        )
+
+    assert excinfo.value.code == 400
+    assert "boolean" in excinfo.value.message
+    preprocess_chat_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generator_accepts_zero_top_logprobs(
+    vllm_processor_module,
+    monkeypatch,
+):
+    class _ReachedPreprocess(Exception):
+        pass
+
+    async def stop_at_preprocess(*args, **kwargs):
+        raise _ReachedPreprocess
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        stop_at_preprocess,
+    )
+    processor = _logprobs_processor(vllm_processor_module)
+
+    with pytest.raises(_ReachedPreprocess):
         await anext(
             processor._generator_inner(
                 {
@@ -1284,9 +1378,87 @@ async def test_generator_rejects_logprobs_including_zero_top_logprobs(
             )
         )
 
-    assert excinfo.value.code == 400
-    assert "logprobs" in excinfo.value.message
-    preprocess_chat_request.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_generator_forwards_chat_logprobs_count(
+    vllm_processor_module,
+    monkeypatch,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset()
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=RequestForSampling(
+                    max_completion_tokens=None,
+                    max_tokens=1,
+                    logprobs=True,
+                    top_logprobs=1,
+                    cache_salt=None,
+                    mm_processor_kwargs=None,
+                ),
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
+
+    input_processor = SimpleNamespace(
+        generation_config_fields={},
+        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
+        process_inputs=process_inputs,
+        model_config=None,
+    )
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=input_processor,
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    monkeypatch.setattr(
+        processor,
+        "_prepare_mm_routing",
+        AsyncMock(return_value=(None, [], False)),
+    )
+    captured = {}
+
+    async def capture_generate_and_stream(*args, **kwargs):
+        captured["dynamo_preproc"] = args[2]
+        yield {"captured": True}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+
+    results = [
+        item
+        async for item in processor._generator_inner(
+            {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "logprobs": True,
+                "top_logprobs": 1,
+            }
+        )
+    ]
+
+    assert results == [{"captured": True}]
+    assert captured["dynamo_preproc"]["output_options"]["logprobs"] == 1
 
 
 @pytest.mark.asyncio
@@ -1798,6 +1970,7 @@ class TestRoutedEnginePath:
                     "index": 0,
                     "delta": {"content": "x"},
                     "finish_reason": None,
+                    "logprobs": None,
                 }
             ],
             "created": envelope["data"]["created"],
@@ -3636,3 +3809,411 @@ class TestReasoningTokenAccounting:
         usage = {"completion_tokens_details": {"reasoning_tokens": backend}}
         annotated = self._annotator(post).annotate(usage)
         assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
+
+
+def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
+    count = vllm_processor_module._sampling_logprobs_count
+    assert count(True, 1) == 1
+    assert count(True, None) == 0
+    assert count(True, 0) == 0
+    assert count(True, -1) is None
+    assert count(None, None) is None
+    assert count(False, 0) is None
+    assert count(None, 0) is None
+    assert count(False, True) is None
+
+
+def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module, tokenizer):
+    built = vllm_processor_module._chat_choice_logprobs(
+        [
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    {
+                        "rank": 2,
+                        "token_id": 11,
+                        "token": "Yo",
+                        "logprob": -1.5,
+                        "bytes": [89, 111],
+                    },
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    },
+                ],
+            }
+        ],
+        1,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    entry = built["content"][0]
+    assert entry["token"] == "Hi"
+    assert entry["logprob"] == -0.5
+    assert "token_id" not in entry
+    assert entry["top_logprobs"] == [
+        {"token": "Hi", "logprob": -0.5, "bytes": [72, 105]}
+    ]
+
+
+@pytest.mark.parametrize("token_text", [None, ""])
+def test_chat_choice_logprobs_decode_null_but_preserve_empty_text(
+    vllm_processor_module, tokenizer, token_text
+):
+    selected_id, alternative_id = tokenizer.encode(
+        "Hello world", add_special_tokens=False
+    )
+    rows = [
+        {"token_id": selected_id, "rank": 1, "token": token_text, "logprob": -0.25},
+        {"token_id": alternative_id, "rank": 2, "token": token_text, "logprob": -0.5},
+    ]
+    built = vllm_processor_module._chat_choice_logprobs(
+        [{"token_id": selected_id, "logprob": -0.25, "top": rows}],
+        2,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    expected = [
+        {
+            "token": text,
+            "logprob": logprob,
+            "bytes": list(text.encode()) if text else None,
+        }
+        for text, logprob in zip(
+            ["Hello", " world"] if token_text is None else ["", ""],
+            [-0.25, -0.5],
+        )
+    ]
+    assert built["content"] == [{**expected[0], "top_logprobs": expected}]
+
+
+def test_chat_choice_logprobs_zero_top_count_omits_alternatives(
+    vllm_processor_module, tokenizer
+):
+    built = vllm_processor_module._chat_choice_logprobs(
+        [
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    }
+                ],
+            }
+        ],
+        0,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    entry = built["content"][0]
+    assert entry["token"] == "Hi"
+    assert entry["logprob"] == -0.5
+    assert entry["top_logprobs"] == []
+
+
+def test_append_worker_logprobs_drops_misaligned_chunk(vllm_processor_module):
+    pending: list = []
+    vllm_processor_module._append_worker_logprobs(pending, [1, 2], [-0.1], None)
+    assert pending == []
+
+
+def test_chat_choice_logprobs_skips_non_dict_top_entry(
+    vllm_processor_module, tokenizer
+):
+    built = vllm_processor_module._chat_choice_logprobs(
+        [
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    None,
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    },
+                ],
+            }
+        ],
+        1,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    assert built["content"][0]["top_logprobs"] == [
+        {"token": "Hi", "logprob": -0.5, "bytes": [72, 105]}
+    ]
+
+
+def test_chat_choice_logprobs_formats_token_ids(vllm_processor_module, tokenizer):
+    built = vllm_processor_module._chat_choice_logprobs(
+        [
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    {
+                        "rank": 2,
+                        "token_id": 11,
+                        "token": "Yo",
+                        "logprob": -1.5,
+                        "bytes": [89, 111],
+                    },
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    },
+                ],
+            }
+        ],
+        2,
+        tokenizer=tokenizer,
+        return_tokens_as_token_ids=True,
+    )
+    assert built is not None
+    entry = built["content"][0]
+    assert entry["token"] == "token_id:10"
+    assert entry["bytes"] == list(b"token_id:10")
+    assert "token_id" not in entry
+    assert entry["top_logprobs"] == [
+        {
+            "token": "token_id:10",
+            "logprob": -0.5,
+            "bytes": list(b"token_id:10"),
+        },
+        {
+            "token": "token_id:11",
+            "logprob": -1.5,
+            "bytes": list(b"token_id:11"),
+        },
+    ]
+
+
+def _logprob_output(token_ids, finish_reason=None):
+    return SimpleNamespace(token_ids=list(token_ids), finish_reason=finish_reason)
+
+
+def _top_entry(token_id, logprob, token="t", raw_bytes=None):
+    entry = {"token_id": token_id, "token": token, "logprob": logprob}
+    if raw_bytes is not None:
+        entry["bytes"] = raw_bytes
+    return [entry]
+
+
+def test_choice_logprobs_decode_selected_tokens_without_top_rows(
+    vllm_processor_module, tokenizer
+):
+    token_ids = tokenizer.encode("Hello world", add_special_tokens=False)
+    assert len(token_ids) == 2
+    pending: list = []
+    emitted: list = []
+    post = SimpleNamespace(tokenizer=tokenizer, _suppress_reasoning_output=False)
+    vllm_processor_module._append_worker_logprobs(
+        pending, token_ids, [-0.25, -0.5], None
+    )
+    choice: dict = {"index": 0}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output(token_ids), pending, emitted, 0
+    )
+    assert choice["logprobs"]["content"] == [
+        {
+            "token": "Hello",
+            "logprob": -0.25,
+            "bytes": list(b"Hello"),
+            "top_logprobs": [],
+        },
+        {
+            "token": " world",
+            "logprob": -0.5,
+            "bytes": list(b" world"),
+            "top_logprobs": [],
+        },
+    ]
+
+
+def test_choice_logprobs_cover_one_multi_token_delta(vllm_processor_module, tokenizer):
+    pending: list = []
+    emitted: list = []
+    append = vllm_processor_module._append_worker_logprobs
+    apply = vllm_processor_module._apply_choice_logprobs
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
+    for token_id, logprob in ((1, -0.1), (2, -0.2), (3, -0.3)):
+        append(
+            pending,
+            [token_id],
+            [logprob],
+            [_top_entry(token_id, logprob, raw_bytes=[116])],
+        )
+    choice: dict = {"index": 0}
+    apply(choice, post, _logprob_output([1, 2, 3]), pending, emitted, 0)
+    assert [entry["logprob"] for entry in choice["logprobs"]["content"]] == [
+        -0.1,
+        -0.2,
+        -0.3,
+    ]
+    assert pending == []
+    assert emitted == []
+
+
+def test_choice_logprobs_wait_for_buffered_tool_parse(vllm_processor_module, tokenizer):
+    """Non-streaming tool parsing emits one choice for every held chunk."""
+    pending: list = []
+    emitted: list = []
+    append = vllm_processor_module._append_worker_logprobs
+    apply = vllm_processor_module._apply_choice_logprobs
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=False, _suppress_reasoning_output=False
+    )
+    for token_id, logprob in ((1, -0.1), (2, -0.2)):
+        append(
+            pending,
+            [token_id],
+            [logprob],
+            [_top_entry(token_id, logprob, raw_bytes=[116])],
+        )
+        apply(None, post, _logprob_output([token_id]), pending, emitted, 1)
+    assert [record["token_id"] for record in pending] == [1, 2]
+    assert emitted == [1, 2]
+    append(pending, [3], [-0.3], [_top_entry(3, -0.3, raw_bytes=[116])])
+    choice: dict = {"index": 0, "logprobs": None}
+    apply(choice, post, _logprob_output([3], "stop"), pending, emitted, 1)
+    assert [entry["logprob"] for entry in choice["logprobs"]["content"]] == [
+        -0.1,
+        -0.2,
+        -0.3,
+    ]
+    assert pending == []
+
+
+def test_choice_logprobs_use_token_id_text(vllm_processor_module, tokenizer):
+    pending: list = []
+    emitted: list = []
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
+    vllm_processor_module._append_worker_logprobs(
+        pending,
+        [10],
+        [-0.5],
+        [_top_entry(10, -0.5, token="Hi", raw_bytes=[72, 105])],
+    )
+    choice: dict = {"index": 0}
+    vllm_processor_module._apply_choice_logprobs(
+        choice,
+        post,
+        _logprob_output([10]),
+        pending,
+        emitted,
+        1,
+        return_tokens_as_token_ids=True,
+    )
+    entry = choice["logprobs"]["content"][0]
+    assert entry["token"] == "token_id:10"
+    assert entry["bytes"] == list(b"token_id:10")
+    assert entry["top_logprobs"] == [
+        {
+            "token": "token_id:10",
+            "logprob": -0.5,
+            "bytes": list(b"token_id:10"),
+        }
+    ]
+
+
+def test_trimmed_stop_token_is_not_attached(vllm_processor_module, tokenizer):
+    pending: list = []
+    emitted: list = []
+    append = vllm_processor_module._append_worker_logprobs
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
+    append(pending, [42], [-0.4], [_top_entry(42, -0.4, token="A", raw_bytes=[65])])
+    append(pending, [99], [-1.0], [_top_entry(99, -1.0, token="<stop>")])
+    choice: dict = {"index": 0, "logprobs": object()}
+    vllm_processor_module._apply_choice_logprobs(
+        choice,
+        post,
+        _logprob_output([42], "stop"),
+        pending,
+        emitted,
+        0,
+    )
+    assert [entry["logprob"] for entry in choice["logprobs"]["content"]] == [-0.4]
+    assert pending == []
+    assert emitted == []
+
+
+def test_misaligned_logprobs_do_not_poison_the_next_choice(
+    vllm_processor_module, tokenizer
+):
+    pending: list = []
+    emitted: list = []
+    append = vllm_processor_module._append_worker_logprobs
+    apply = vllm_processor_module._apply_choice_logprobs
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
+    append(pending, [3], [-0.3], [_top_entry(3, -0.3, raw_bytes=[116])])
+    missed: dict = {"index": 0, "logprobs": object()}
+    apply(missed, post, _logprob_output([4]), pending, emitted, 0)
+    assert missed["logprobs"] is None
+    assert pending == []
+    assert emitted == []
+    append(pending, [5], [-0.5], [_top_entry(5, -0.5, token="n", raw_bytes=[110])])
+    nxt: dict = {"index": 0}
+    apply(nxt, post, _logprob_output([5]), pending, emitted, 0)
+    assert [entry["logprob"] for entry in nxt["logprobs"]["content"]] == [-0.5]
+    assert nxt["logprobs"]["content"][0]["token"] == "n"
+
+
+def test_empty_terminal_choice_clears_raw_logprobs(vllm_processor_module):
+    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    choice = {"index": 0, "logprobs": object()}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output([], "stop"), [], [], 0
+    )
+    assert choice["logprobs"] is None
+
+
+def test_hidden_reasoning_logprobs_stay_suppressed(vllm_processor_module):
+    pending = [{"token_id": 7, "logprob": -0.4, "top": []}]
+    emitted = [7]
+    post = SimpleNamespace(
+        _fast_plain_text=False,
+        _suppress_reasoning_output=True,
+        previous_token_ids=[7, 8],
+    )
+    choice = {"index": 0, "logprobs": object()}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output([8], "stop"), pending, emitted, 0
+    )
+    assert choice["logprobs"] is None
+    assert pending == []
+    assert emitted == []
+
+
+def test_unrequested_logprobs_stay_null(vllm_processor_module):
+    pending = [{"token_id": 7, "logprob": -0.4, "top": []}]
+    emitted = [7]
+    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    choice = {"index": 0, "logprobs": object()}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output([8]), pending, emitted, None
+    )
+    assert choice["logprobs"] is None
+    assert pending == []
+    assert emitted == []
