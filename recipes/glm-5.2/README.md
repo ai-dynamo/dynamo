@@ -24,7 +24,7 @@ Dynamo + SGLang deployment profiles for the B200 and H200 agentic workload:
 | **KV cache offloading**  | HiCache CPU                                | HiCache CPU                                | None                                       | None                                       |
 | **KV transfer**          | N/A                                        | Mooncake over IB                           | N/A                                        | Mooncake over IB                           |
 
-All four variants run on `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0` (Dynamo 1.5.0, SGLang 0.5.18).
+All four variants run on `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1` (Dynamo 1.5.1, SGLang 0.5.18).
 
 
 ## Supported features

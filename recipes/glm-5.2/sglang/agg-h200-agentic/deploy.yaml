@@ -110,7 +110,7 @@ spec:
                 - name: DYN_SGL_ALLOW_TOP_LOGPROBS
                   value: "1"
                 # Forward-pass metrics are disabled: the SGLang 0.5.18 metrics reporter in
-                # sglang-runtime:1.5.0 crashes the scheduler on the first EAGLE decode batch.
+                # sglang-runtime:1.5.1 crashes the scheduler on the first EAGLE decode batch.
                 - name: DYN_FORWARDPASS_METRIC_PORT
                   value: ""
                 # Synthetic MTP acceptance length for performance benchmarking only.
