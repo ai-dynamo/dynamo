@@ -12,12 +12,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride,
-    protocols::RoutingConstraints,
-    scheduling::QueueRejection,
-    selector::{DefaultWorkerSelector, WorkerSelector},
+    PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
+    config::RouterConfigOverride, protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
@@ -31,8 +27,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, WorkerSelectorFactory},
-    local_model::runtime_config::ModelRuntimeConfig,
+    kv_router::{RoutingHost, SelectionPolicySource},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -100,6 +95,10 @@ enum PrefillOutcome {
     Bootstrap {
         bootstrap_info: BootstrapInfo,
         worker_id: u64,
+        /// The decode engine's KV receiver needs the prefill DP rank up front;
+        /// without it SGLang parks the request and asks the prefill bootstrap
+        /// server over HTTP, and the prefill forward waits on that round trip.
+        prefill_dp_rank: Option<u32>,
     },
     Completed {
         result: PrefillResult,
@@ -125,9 +124,12 @@ fn into_decode_request(
         PrefillOutcome::Bootstrap {
             bootstrap_info,
             worker_id,
+            prefill_dp_rank,
         } => {
             req.bootstrap_info = Some(bootstrap_info);
-            req.routing_mut().prefill_worker_id = Some(worker_id);
+            let routing = req.routing_mut();
+            routing.prefill_worker_id = Some(worker_id);
+            routing.prefill_dp_rank = prefill_dp_rank;
         }
         PrefillOutcome::Completed {
             result,
@@ -160,19 +162,9 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
 
 struct PreparedPrefill {
     worker_id: u64,
+    prefill_dp_rank: Option<u32>,
     bootstrap_info: Option<BootstrapInfo>,
     topology_constraints: Option<RoutingConstraints>,
-}
-
-/// Advisory prefill worker selection result.
-pub enum PrefillQueryOutcome {
-    Routed {
-        worker_id: u64,
-        dp_rank: Option<u32>,
-    },
-    QueueRejected {
-        rejection: QueueRejection,
-    },
 }
 
 enum PrefillCompletion {
@@ -220,17 +212,14 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// Client-visible logprobs should not be placed in `disaggregated_params`,
 /// which is an engine-owned KV handoff contract rather than a public response
 /// channel.
-pub struct PrefillRouter<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    binding: ArcSwapOption<PrefillBinding<Sel>>,
+pub struct PrefillRouter {
+    binding: ArcSwapOption<PrefillBinding>,
     target: Mutex<Option<WorkerSetTargetId>>,
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     /// Decode routing owns conditional-disagg planning and dispatch. This is
     /// installed after the frontend constructs its one decode `RoutingHost`.
-    decode_routing_host: OnceLock<Arc<RoutingHost<Sel>>>,
-    worker_selector_factory: Option<WorkerSelectorFactory<Sel>>,
+    decode_routing_host: OnceLock<Arc<RoutingHost>>,
+    selection_policy: Option<SelectionPolicySource>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
     /// Mode of the decode set that owns this router. Governs decode-side
@@ -257,27 +246,21 @@ where
     activation_task_state: Arc<()>,
 }
 
-struct PrefillBinding<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+struct PrefillBinding {
     target_id: WorkerSetTargetId,
     endpoint_id: EndpointId,
-    router: Arc<RoutingHost<Sel>>,
+    router: Arc<RoutingHost>,
     /// Resolved at activation from the prefill card. Lives here rather than on
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
 }
 
-struct PrefillBuildContext<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+struct PrefillBuildContext {
     model_manager: Arc<ModelManager>,
     /// Fallback mode for the prefill hop when the prefill card advertises none.
     decode_router_mode: RouterMode,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
+    selection_policy: SelectionPolicySource,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
@@ -291,19 +274,13 @@ pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
 }
 
-impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl PrefillRouterLifecycle for PrefillRouter {
     fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
     }
 }
 
-impl<Sel> Drop for PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl Drop for PrefillRouter {
     fn drop(&mut self) {
         tracing::debug!("Dropping PrefillRouter, cancelling background activation task");
         self.cancel_token.cancel();
@@ -311,15 +288,13 @@ where
 }
 
 #[async_trait]
-impl<Sel>
+impl
     Operator<
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
-    > for PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    > for PrefillRouter
 {
     async fn generate(
         &self,
@@ -364,7 +339,7 @@ where
                 .await
             {
                 Ok(Some(decision)) => {
-                    let signals = decision.plan.signals();
+                    let signals = decision.plan.signals;
                     tracing::info!(
                         request_id = %request_id,
                         worker_id = signals.worker.worker_id,
@@ -480,6 +455,7 @@ where
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
                     worker_id: prepared.worker_id,
+                    prefill_dp_rank: prepared.prefill_dp_rank,
                 }
             } else {
                 drop(prefill_phase_barrier);
@@ -500,6 +476,7 @@ where
                             PrefillOutcome::Bootstrap {
                                 bootstrap_info,
                                 worker_id: prepared.worker_id,
+                                prefill_dp_rank: prepared.prefill_dp_rank,
                             }
                         } else {
                             PrefillOutcome::Completed {
@@ -608,18 +585,12 @@ fn independent_prefill_context(
     Ok(prefill)
 }
 
-impl<Sel> PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl PrefillRouter {
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }
 
-    pub(crate) fn set_decode_routing_host(
-        &self,
-        routing_host: Arc<RoutingHost<Sel>>,
-    ) -> Result<()> {
+    pub(crate) fn set_decode_routing_host(&self, routing_host: Arc<RoutingHost>) -> Result<()> {
         match self.decode_routing_host.set(routing_host) {
             Ok(()) => Ok(()),
             Err(routing_host)
@@ -672,6 +643,7 @@ where
 
         Ok(PreparedPrefill {
             worker_id,
+            prefill_dp_rank: dp_rank,
             bootstrap_info,
             topology_constraints,
         })
@@ -901,6 +873,7 @@ mod tests {
                 handoff_id: None,
             },
             worker_id: 11,
+            prefill_dp_rank: Some(3),
         };
         let completed = PrefillOutcome::Completed {
             result: PrefillResult {
@@ -911,10 +884,16 @@ mod tests {
             worker_link: None,
         };
 
-        for (label, outcome, expected_worker) in
-            [("bootstrap", bootstrap, 11), ("completed", completed, 12)]
-        {
+        for (label, outcome, expected_worker, expected_dp_rank) in [
+            ("bootstrap", bootstrap, 11, Some(3)),
+            ("completed", completed, 12, None),
+        ] {
             let decode = into_decode_request(query_only_request(), outcome);
+            assert_eq!(
+                decode.routing.as_ref().and_then(|r| r.prefill_dp_rank),
+                expected_dp_rank,
+                "{label}: the bootstrap leg must tell decode which prefill DP rank owns the KV"
+            );
             assert!(
                 decode.staged_kv_cleanup,
                 "{label}: prefill staged KV for one decode worker, so the leg must be marked for cleanup dispatch"
@@ -929,7 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn conditional_disagg_rejects_unknown_decode_target_before_fallback() {
-        use crate::kv_router::KvRouter;
+        use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
         use dynamo_runtime::{
             DistributedRuntime, Runtime, distributed::DistributedConfig, pipeline::PushRouter,
         };
@@ -959,7 +938,7 @@ mod tests {
             workers,
             None,
             16,
-            DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+            SelectionPolicySource::Registry,
             Some(config),
             None,
             "decode",

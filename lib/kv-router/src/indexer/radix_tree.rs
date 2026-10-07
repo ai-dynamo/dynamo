@@ -3,6 +3,7 @@
 
 //! Single-threaded compressed radix tree for KV cache routing.
 
+use std::sync::Arc;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -83,6 +84,7 @@ impl RadixBlock {
 pub struct RadixTree {
     root: SharedRadixBlock,
     lookup: FxHashMap<WorkerWithDpRank, WorkerLookup>,
+    lifecycle: super::HashLifecycle,
 }
 
 impl Default for RadixTree {
@@ -113,11 +115,28 @@ impl Drop for RadixTree {
 }
 
 impl RadixTree {
+    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
+        let mut backend = Self::new();
+        backend.lifecycle = super::HashLifecycle::new(delegate);
+        backend
+    }
+
     pub fn new() -> Self {
         Self {
             root: Rc::new(RefCell::new(RadixBlock::root())),
             lookup: FxHashMap::default(),
+            lifecycle: super::HashLifecycle::default(),
         }
+    }
+
+    pub(crate) fn contains_worker_block(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> bool {
+        self.lookup
+            .get(&worker)
+            .is_some_and(|lookup| lookup.contains_key(&block_hash))
     }
 
     pub fn find_match_details(
@@ -325,6 +344,7 @@ impl RadixTree {
                     };
                     if !node_ref.state.covers_pos(worker, pos) {
                         self.lookup.get_mut(&worker).unwrap().remove(&parent_hash);
+                        self.lifecycle.remove(worker, parent_hash);
                         self.log_missing_parent(worker, event_id, &store);
                         return Err(KvCacheEventError::ParentBlockNotFound);
                     }
@@ -571,6 +591,7 @@ impl RadixTree {
                 Some(existing) if Rc::ptr_eq(&existing, node) => {}
                 _ => changed = true,
             }
+            self.lifecycle.insert(worker, block.block_hash);
         }
         changed
     }
@@ -601,12 +622,17 @@ impl RadixTree {
             return Err(KvCacheEventError::BlockNotFound);
         };
         let mut first_error = None;
-        let mut eagerly_removed = FxHashSet::default();
+        // Hashes this event already dropped while truncating a node. They only
+        // matter when a later hash misses the lookup, which is rare, so they are
+        // indexed on the first miss instead of on every truncation.
+        let mut eagerly_removed = Vec::new();
+        let mut eagerly_removed_index = FxHashSet::default();
         let mut block_hashes = remove.block_hashes.into_iter().peekable();
 
         while let Some(block_hash) = block_hashes.next() {
             let Some(node) = lookup.remove(&block_hash) else {
-                if eagerly_removed.contains(&block_hash) {
+                eagerly_removed_index.extend(eagerly_removed.drain(..));
+                if eagerly_removed_index.contains(&block_hash) {
                     continue;
                 }
                 tracing::warn!(
@@ -667,10 +693,11 @@ impl RadixTree {
                     .remove_worker_at_pos(worker, min_pos, min_hash)
             };
             RadixBlock::prune_unreachable(&node);
-            for stale_hash in outcome.stale_hashes {
+            for &stale_hash in &outcome.stale_hashes {
                 lookup.remove(&stale_hash);
-                eagerly_removed.insert(stale_hash);
+                self.lifecycle.remove(worker, stale_hash);
             }
+            eagerly_removed.extend_from_slice(&outcome.stale_hashes);
         }
 
         first_error.map_or(Ok(()), Err)
@@ -688,6 +715,11 @@ impl RadixTree {
             let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) else {
                 continue;
             };
+            if self.lifecycle.is_enabled() {
+                for &hash in blocks.keys() {
+                    self.lifecycle.remove(worker, hash);
+                }
+            }
             let mut seen = FxHashSet::default();
             for node in blocks.into_values() {
                 if !seen.insert(Rc::as_ptr(&node)) {
@@ -711,6 +743,11 @@ impl RadixTree {
         let Some(blocks) = self.lookup.remove(&worker) else {
             return;
         };
+        if self.lifecycle.is_enabled() {
+            for &hash in blocks.keys() {
+                self.lifecycle.remove(worker, hash);
+            }
+        }
         let mut seen = FxHashSet::default();
         for node in blocks.into_values() {
             if !seen.insert(Rc::as_ptr(&node)) {
@@ -1097,6 +1134,48 @@ mod tests {
         assert_eq!(
             snapshot_events(with_missing.dump_tree_as_events()),
             snapshot_events(expected.dump_tree_as_events())
+        );
+    }
+
+    #[test]
+    fn hashes_truncated_earlier_in_a_removal_are_not_missing() {
+        fn two_root_tree() -> RadixTree {
+            let mut tree = RadixTree::new();
+            tree.apply_event(create_store_event(0, 0, vec![1, 2, 3, 4], None))
+                .unwrap();
+            tree.apply_event(create_store_event(0, 1, vec![10], None))
+                .unwrap();
+            tree
+        }
+
+        let mut expected = two_root_tree();
+        expected
+            .apply_event(create_remove_event(0, 2, vec![2]))
+            .unwrap();
+        expected
+            .apply_event(create_remove_event(0, 3, vec![10]))
+            .unwrap();
+        let expected = snapshot_events(expected.dump_tree_as_events());
+
+        // Removing 2 truncates 3 and 4 before they are listed, and 10 is
+        // truncated after an unrelated miss has already been checked.
+        let mut listed_later = two_root_tree();
+        listed_later
+            .apply_event(create_remove_event(0, 2, vec![2, 10, 4, 3]))
+            .unwrap();
+        assert_eq!(
+            snapshot_events(listed_later.dump_tree_as_events()),
+            expected
+        );
+
+        let mut with_missing = two_root_tree();
+        assert_eq!(
+            with_missing.apply_event(create_remove_event(0, 2, vec![2, 999, 10, 3, 10])),
+            Err(KvCacheEventError::BlockNotFound)
+        );
+        assert_eq!(
+            snapshot_events(with_missing.dump_tree_as_events()),
+            expected
         );
     }
 

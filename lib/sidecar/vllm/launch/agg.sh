@@ -7,11 +7,14 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
+# Resolved relative to this script, not via $DYNAMO_HOME: some runtime images
+# (e.g. vllm_runtime.Dockerfile) bake DYNAMO_HOME to a minimal install path
+# with no examples/ directory, which would silently override this and break
+# sourcing. Matches examples/backends/vllm/launch/agg.sh's own approach.
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -39,6 +42,7 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  VLLM_RS_HTTP_PORT       vLLM HTTP port (default: 8100)"
             echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 50051)"
+            echo "  VLLM_DATA_PARALLEL_SIZE Number of local data-parallel ranks (default: 1)"
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS     Maximum concurrent sequences (default: 2)"
             echo "  DEFAULT_KV_CACHE_BYTES  KV cache cap when not profiling (default: 1119388000)"
@@ -82,7 +86,9 @@ vllm-rs serve "$MODEL" \
     --host 127.0.0.1 \
     --port "$VLLM_RS_HTTP_PORT" \
     --grpc-port "$VLLM_GRPC_PORT" \
+    --data-parallel-size "${VLLM_DATA_PARALLEL_SIZE:-1}" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

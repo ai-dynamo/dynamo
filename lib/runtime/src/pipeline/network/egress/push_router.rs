@@ -443,7 +443,9 @@ fn spawn_instance_removal_watcher<T, U>(
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 dispatch.on_instance_added(&eid).await;
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(e)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -534,7 +536,10 @@ fn spawn_multimodal_cache_cleanup_watcher(
                             Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
                                 indexer.remove_worker(eid.instance_id);
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Removed(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(error)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -1843,19 +1848,15 @@ where
         use crate::component::TransportType;
 
         let lookup = |id: u64| {
-            self.client
-                .instances()
-                .iter()
-                .find(|i| i.instance_id == id)
-                .map(|instance| {
-                    let (addr, kind) = match &instance.transport {
-                        TransportType::Tcp(tcp_endpoint) => {
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
-                    };
-                    (addr, kind, instance.clone())
-                })
+            self.client.instance_by_id(id).map(|instance| {
+                let (addr, kind) = match &instance.transport {
+                    TransportType::Tcp(tcp_endpoint) => {
+                        (tcp_endpoint.clone(), "transport.tcp.request")
+                    }
+                    TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                };
+                (addr, kind, instance)
+            })
         };
 
         if let Some((addr, kind, inst)) = lookup(instance_id) {

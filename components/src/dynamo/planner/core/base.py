@@ -801,8 +801,8 @@ class NativePlannerBase:
         """Emit power-budget gauges from DGD-resolved caps (read-only observe path).
 
         Per-replica watts come from the cached deployment state
-        (``power_watts_per_replica``, resolved once from the DGD worker
-        podTemplate annotation during Planner startup), so this performs no
+        (``power_watts_per_replica``, resolved once from operator-projected DGD
+        component status during Planner startup), so this performs no
         apiserver I/O and never blocks the tick loop. DGD admission rejects
         changes to the cached power tuple; changing it requires replacing the
         DGD and starting a new Planner. These gauges are advisory
@@ -834,8 +834,8 @@ class NativePlannerBase:
             if not self._power_projected_zero_warned:
                 logger.warning(
                     "power_projected_watts not published: per-replica watts "
-                    "unresolved (prefill=%s, decode=%s). Caps are authored on "
-                    "the DGD worker podTemplate annotation.",
+                    "unresolved (prefill=%s, decode=%s). Caps were not "
+                    "available in current DGD component status.",
                     p_watts,
                     d_watts,
                 )

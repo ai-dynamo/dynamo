@@ -89,16 +89,15 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
         required_blocks: 0,
         effective_overlap_blocks: 0.0,
         cached_tokens: 0,
+        max_raw_cached_tokens: None,
+        selected_raw_cached_tokens: None,
         potential_decode_blocks: 0,
     }
 }
 
 use super::*;
 
-impl<Sel> RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RoutingHost {
     fn select_lora_target(
         &self,
         request: &PreprocessedRequest,
@@ -347,7 +346,7 @@ where
             device_aware_telemetry,
         } = selection;
         let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
-            operation.as_ref().and_then(AffinityAcquire::target)
+            operation.as_ref().and_then(Hold::target).map(from_table)
         } else {
             None
         };
@@ -360,7 +359,7 @@ where
         let uses_occupancy = self
             .required_worker_inputs()
             .contains(WorkerInputs::OCCUPANCY);
-        let mut guard: RequestGuard<Sel> = RequestGuard::new_builtin(
+        let mut guard: RequestGuard = RequestGuard::new_builtin(
             self.request_metrics.clone(),
             initial_worker,
             occupancy_reservation,
@@ -371,6 +370,7 @@ where
         let request_context = request.context().clone();
         self.request_metrics
             .input_sequence_tokens
+            .with_label_values(&[request.phase().as_str(), &request.model])
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
@@ -522,13 +522,7 @@ where
         }
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
-        match operation {
-            Some(operation) => Ok((
-                metadata,
-                operation.into_stream(target, stream, self.session_affinity_mode)?,
-            )),
-            None => Ok((metadata, stream)),
-        }
+        Ok((metadata, self.bind_affinity(operation, target, stream)?))
     }
 }
 

@@ -162,6 +162,18 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "B300 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM}
+			}),
+		},
+		{
+			name: "canonical GB200 hardware is admitted",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeGB200}
+			}),
+		},
+		{
 			name: "independent create failures aggregate in API declaration order",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
@@ -174,6 +186,17 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		},
 
 		// Compatibility warnings.
+		{
+			name: "deprecated GB200 SXM SKU warns",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				//nolint:staticcheck // SA1019: Exercise admission of the deprecated API value.
+				request.Spec.Hardware = &nvidiacomv1beta1.HardwareSpec{GPUSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM}
+			}),
+			gpuDiscovery: true,
+			wantWarnings: []string{
+				`spec.hardware.gpuSku: "gb200_sxm" is deprecated; use "gb200". The legacy value will be removed in a future release`,
+			},
+		},
 		{
 			name: "deprecated v1beta1 DGD override component names warn",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
@@ -485,7 +508,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				oldObject:          tt.oldRequest,
 				gates:              gates,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
-				withoutTopology:    true,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
 				wantWebhookErrors:  tt.wantWebhook,

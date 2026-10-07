@@ -4,7 +4,7 @@
 use socket2::{Domain, SockAddr, SockRef, Socket, Type};
 use std::{
     collections::{HashMap, HashSet},
-    net::{IpAddr, SocketAddr, TcpListener},
+    net::{IpAddr, SocketAddr},
     os::fd::{AsFd, FromRawFd},
     sync::Arc,
     time::Duration,
@@ -19,10 +19,12 @@ use tokio_rustls::TlsAcceptor;
 /// restart and never get cleared by an `Added` event for the same identity.
 const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 
+/// Bound best-effort worker notification after a response handshake is cancelled.
+const HANDSHAKE_CANCEL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::Error;
 use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -35,10 +37,11 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use super::{
     CallHomeHandshake, ControlMessage, PendingConnections, RegisteredStream, StreamOptions,
-    StreamReceiver, StreamSender, TcpStreamConnectionInfo, TwoPartCodec,
+    StreamReceiver, StreamSender, TcpStreamConnectionInfo, TwoPartCodec, bind_listener,
 };
 use crate::discovery::EndpointInstanceId;
 use crate::engine::AsyncEngineContext;
+use crate::error::{DynamoError, ErrorType};
 use crate::pipeline::{
     PipelineError,
     network::{
@@ -47,7 +50,7 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
-use crate::utils::ip_resolver::resolve_host_or_interface;
+use crate::utils::ip_resolver::{resolve_host_or_interface, resolve_local_host};
 use anyhow::{Result, anyhow as error};
 
 pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
@@ -60,8 +63,9 @@ pub struct ServerOptions {
     #[builder(default = "0")]
     pub port: u16,
 
-    /// IP literal or exact network interface name used to bind and advertise the server.
+    /// IP literal, bracketed IPv6 literal, wildcard, or network interface name.
     /// When unset, Dynamo selects a local address automatically.
+    /// The field name is retained for source compatibility.
     #[builder(default)]
     pub interface: Option<String>,
 }
@@ -76,8 +80,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: IpAddr,
-    local_port: u16,
+    address: String,
     state: Arc<Mutex<State>>,
 }
 
@@ -99,9 +102,13 @@ struct RequestedSendConnection {
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamReceiver, StreamPrologueError>>,
+    /// Remains addressable after the worker's TCP call-home so discovery
+    /// removal can interrupt a stalled response prologue.
+    cancellation: tokio_util::sync::CancellationToken,
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine consumer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
+    defer_cancellation_until_prologue: bool,
 }
 
 /// Build the per-stream data-plane mpsc channel that bridges the socket task
@@ -137,6 +144,9 @@ fn data_plane_channel<T>(send_buffer_count: usize) -> (mpsc::Sender<T>, mpsc::Re
 struct State {
     tx_subjects: HashMap<String, RequestedSendConnection>,
     rx_subjects: HashMap<String, RequestedRecvConnection>,
+    /// Response registrations remain cancellable after `rx_subjects` is
+    /// consumed by call-home and until the response prologue is accepted.
+    rx_cancellations: HashMap<String, tokio_util::sync::CancellationToken>,
     /// subject UUID -> EndpointInstanceId. Full 4-field key isolates services
     /// that share an endpoint name across namespaces/components.
     subject_instance: HashMap<String, EndpointInstanceId>,
@@ -152,6 +162,29 @@ struct State {
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
+struct ResponseRegistrationGuard {
+    state: Arc<Mutex<State>>,
+    subject: String,
+    is_active: bool,
+}
+
+impl ResponseRegistrationGuard {
+    /// Serialize prologue acceptance with cancellation under the registration lock.
+    /// A removed cancellation entry means cancellation already won.
+    fn accept(mut self) -> bool {
+        self.is_active = false;
+        TcpStreamServer::finish_response_stream(&self.state, &self.subject)
+    }
+}
+
+impl Drop for ResponseRegistrationGuard {
+    fn drop(&mut self) {
+        if self.is_active {
+            TcpStreamServer::finish_response_stream(&self.state, &self.subject);
+        }
+    }
+}
+
 /// Drop tombstones older than [`TOMBSTONE_TTL`]. Called lazily on every
 /// `associate_instance` / `cancel_instance_streams` to bound the set size.
 fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: Instant) {
@@ -160,7 +193,7 @@ fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: 
 
 impl TcpStreamServer {
     pub fn local_address(&self) -> Result<SocketAddr> {
-        Ok(SocketAddr::new(self.local_ip, self.local_port))
+        Ok(self.address.parse()?)
     }
 
     pub fn options_builder() -> ServerOptionsBuilder {
@@ -175,38 +208,25 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface.as_deref() {
-            Some(host) => resolve_host_or_interface(host, &resolver).map_err(|error| {
+        let resolved_host = if let Some(host_or_interface) = options.interface.as_deref() {
+            resolve_host_or_interface(host_or_interface, &resolver).map_err(|error| {
                 PipelineError::Generic(format!(
-                    "Failed to resolve configured TCP host '{host}': {error}"
+                    "Failed to resolve configured TCP host '{host_or_interface}': {error}"
                 ))
-            })?,
-            None => {
-                let resolved_ip = resolver.local_ip().or_else(|err| match err {
-                    Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-                    _ => Err(err),
-                });
-
-                match resolved_ip {
-                    Ok(addr) => addr,
-                    // Only fall back to loopback when no routable IP exists at all;
-                    // propagate other resolver errors (I/O, platform) so
-                    // misconfigured hosts fail fast instead of silently binding
-                    // to 127.0.0.1.
-                    Err(Error::LocalIpAddressNotFound) => {
-                        tracing::warn!(
-                            "No routable local IP address found; falling back to 127.0.0.1"
-                        );
-                        IpAddr::from([127, 0, 0, 1])
-                    }
-                    Err(err) => {
-                        return Err(PipelineError::Generic(format!(
-                            "Failed to resolve local IP address: {err}"
-                        )));
-                    }
-                }
-            }
+            })?
+        } else {
+            resolve_local_host(&resolver).map_err(|error| {
+                PipelineError::Generic(format!("Failed to resolve local IP address: {error}"))
+            })?
         };
+
+        if resolved_host.used_loopback_fallback() {
+            tracing::warn!(
+                bind_ip = %resolved_host.bind_ip(),
+                advertise_ip = %resolved_host.advertise_ip(),
+                "No usable local IP address found; advertising loopback"
+            );
+        }
 
         let state = Arc::new(Mutex::new(State::default()));
 
@@ -215,20 +235,19 @@ impl TcpStreamServer {
             PipelineError::Generic(format!("Failed to build TCP TLS acceptor: {}", e))
         })?;
 
-        let local_port = Self::start(local_ip, options.port, state.clone(), tls_acceptor)
+        let bind_address = SocketAddr::new(resolved_host.bind_ip(), options.port);
+        let local_address = Self::start(bind_address, state.clone(), tls_acceptor)
             .await
-            .map_err(|e| {
-                PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
+            .map_err(|error| {
+                PipelineError::Generic(format!("Failed to start TcpStreamServer: {error}"))
             })?;
+        let advertised_address =
+            SocketAddr::new(resolved_host.advertise_ip(), local_address.port());
+        let address = advertised_address.to_string();
 
-        let local_addr = SocketAddr::new(local_ip, local_port);
-        tracing::debug!("tcp transport service on {local_addr}");
+        tracing::debug!(%local_address, %advertised_address, "tcp transport service started");
 
-        Ok(Arc::new(Self {
-            local_ip,
-            local_port,
-            state,
-        }))
+        Ok(Arc::new(Self { address, state }))
     }
 
     /// Associate one or both halves of a registration with a backend instance.
@@ -264,6 +283,9 @@ impl TcpStreamServer {
                 "Cancelling subject immediately: instance already removed (tombstoned)"
             );
             state.rx_subjects.remove(recv_subject);
+            if let Some(token) = state.rx_cancellations.remove(recv_subject) {
+                token.cancel();
+            }
             if let Some(s) = send_subject {
                 state.tx_subjects.remove(s);
             }
@@ -309,6 +331,9 @@ impl TcpStreamServer {
     pub async fn cancel_recv_stream(&self, subject: &str) {
         let mut state = self.state.lock();
         state.rx_subjects.remove(subject);
+        if let Some(token) = state.rx_cancellations.remove(subject) {
+            token.cancel();
+        }
         if let Some(key) = state.subject_instance.remove(subject)
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
         {
@@ -337,8 +362,8 @@ impl TcpStreamServer {
         }
     }
 
-    /// Cancel all pending streams for an instance — both response-side and
-    /// request-side halves of any bidirectional sessions tracked by
+    /// Cancel all pending stream handshakes for an instance — both response-
+    /// side and request-side halves of any bidirectional sessions tracked by
     /// `associate_instance` — and tombstone the id so any racing associate
     /// for the same id cancels too. Returns the number of streams cancelled.
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
@@ -355,6 +380,9 @@ impl TcpStreamServer {
             match kind {
                 StreamType::Response => {
                     state.rx_subjects.remove(subject);
+                    if let Some(token) = state.rx_cancellations.remove(subject) {
+                        token.cancel();
+                    }
                 }
                 StreamType::Request => {
                     state.tx_subjects.remove(subject);
@@ -391,28 +419,25 @@ impl TcpStreamServer {
     }
 
     async fn start(
-        local_ip: IpAddr,
-        local_port: u16,
+        bind_address: SocketAddr,
         state: Arc<Mutex<State>>,
         tls_acceptor: Option<TlsAcceptor>,
-    ) -> Result<u16> {
-        let addr = SocketAddr::new(local_ip, local_port);
+    ) -> Result<SocketAddr> {
         let state_clone = state.clone();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<SocketAddr>>();
         {
             let mut guard = state.lock();
             if guard.handle.is_some() {
                 panic!("TcpStreamServer already started");
             }
             guard.handle = Some(tokio::spawn(tcp_listener(
-                addr,
+                bind_address,
                 state_clone,
                 tls_acceptor,
                 ready_tx,
             )));
         }
-        let local_port = ready_rx.await??;
-        Ok(local_port)
+        ready_rx.await?
     }
 
     fn insert_request_stream(&self, subject: String, connection: RequestedSendConnection) {
@@ -420,7 +445,10 @@ impl TcpStreamServer {
     }
 
     fn insert_response_stream(&self, subject: String, connection: RequestedRecvConnection) {
-        self.state.lock().rx_subjects.insert(subject, connection);
+        let cancellation = connection.cancellation.clone();
+        let mut state = self.state.lock();
+        state.rx_subjects.insert(subject.clone(), connection);
+        state.rx_cancellations.insert(subject, cancellation);
     }
 
     fn take_request_stream(state: &Mutex<State>, subject: &str) -> Option<RequestedSendConnection> {
@@ -441,8 +469,15 @@ impl TcpStreamServer {
         state: &Mutex<State>,
         subject: &str,
     ) -> Option<RequestedRecvConnection> {
+        state.lock().rx_subjects.remove(subject)
+    }
+
+    /// Finish tracking a response registration after its prologue is accepted
+    /// or its connection handler exits. Returns whether cancellation had not
+    /// already removed the registration.
+    fn finish_response_stream(state: &Mutex<State>, subject: &str) -> bool {
         let mut state = state.lock();
-        let connection = state.rx_subjects.remove(subject);
+        let is_pending = state.rx_cancellations.remove(subject).is_some();
         if let Some(key) = state.subject_instance.remove(subject)
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
         {
@@ -451,7 +486,7 @@ impl TcpStreamServer {
                 state.instance_subjects.remove(&key);
             }
         }
-        connection
+        is_pending
     }
 }
 
@@ -481,7 +516,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = SocketAddr::new(self.local_ip, self.local_port).to_string();
+        let address = self.address.clone();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -539,7 +574,9 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedRecvConnection {
                 context: options.context.clone(),
                 connection: pending_recver_tx,
+                cancellation: tokio_util::sync::CancellationToken::new(),
                 send_buffer_count: options.send_buffer_count,
+                defer_cancellation_until_prologue: options.defer_cancellation_until_prologue,
             };
 
             let cleanup_subject = receiver_subject.clone();
@@ -559,6 +596,9 @@ impl ResponseService for TcpStreamServer {
                 tokio::spawn(async move {
                     let mut state = cleanup_state.lock();
                     state.rx_subjects.remove(&cleanup_subject);
+                    if let Some(token) = state.rx_cancellations.remove(&cleanup_subject) {
+                        token.cancel();
+                    }
                     if let Some(key) = state.subject_instance.remove(&cleanup_subject)
                         && let Some(subjects) = state.instance_subjects.get_mut(&key)
                     {
@@ -766,6 +806,29 @@ async fn handle_accept_error(err: &std::io::Error, backoff: &mut AcceptBackoff) 
 type BoxRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 
+/// Unblock the requester before attempting any network cleanup. A stalled
+/// worker must not keep either the requester or this socket task alive.
+async fn cancel_response_handshake(
+    connection: oneshot::Sender<Result<StreamReceiver, StreamPrologueError>>,
+    registration_guard: Option<ResponseRegistrationGuard>,
+    mut writer: FramedWrite<BoxWrite, TwoPartCodec>,
+) {
+    drop(registration_guard);
+    drop(connection);
+    let cleanup = async move {
+        if let Ok(bytes) = serde_json::to_vec(&ControlMessage::Kill) {
+            let _ = writer.send(TwoPartMessage::from_header(bytes.into())).await;
+        }
+        let _ = writer.into_inner().shutdown().await;
+    };
+    if time::timeout(HANDSHAKE_CANCEL_CLEANUP_TIMEOUT, cleanup)
+        .await
+        .is_err()
+    {
+        tracing::debug!("timed out notifying worker of cancelled response handshake");
+    }
+}
+
 // this method listens on a tcp port for incoming connections
 // new connections are expected to send a protocol specific handshake
 // for us to determine the subject they are interested in, in this case,
@@ -776,10 +839,9 @@ async fn tcp_listener(
     addr: SocketAddr,
     state: Arc<Mutex<State>>,
     tls_acceptor: Option<TlsAcceptor>,
-    read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
+    read_tx: tokio::sync::oneshot::Sender<Result<SocketAddr>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
+    let listener = bind_listener(addr)
         .map_err(|e| anyhow::anyhow!("Failed to start TcpListender on {}: {}", addr, e));
 
     let listener = match listener {
@@ -789,9 +851,7 @@ async fn tcp_listener(
                 .map_err(|e| anyhow::anyhow!("Failed get SocketAddr: {:?}", e))
                 .unwrap();
 
-            read_tx
-                .send(Ok(addr.port()))
-                .expect("Failed to send ready signal");
+            read_tx.send(Ok(addr)).expect("Failed to send ready signal");
 
             listener
         }
@@ -1061,27 +1121,62 @@ async fn tcp_listener(
         subject: String,
         state: Arc<Mutex<State>>,
         mut reader: FramedRead<BoxRead, TwoPartCodec>,
-        writer: FramedWrite<BoxWrite, TwoPartCodec>,
+        mut writer: FramedWrite<BoxWrite, TwoPartCodec>,
     ) -> Result<()> {
         let response_stream = TcpStreamServer::take_response_stream(&state, &subject).ok_or_else(|| {
             error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject)
         })?;
+        let registration_guard = ResponseRegistrationGuard {
+            state,
+            subject,
+            is_active: true,
+        };
 
         // unwrap response_stream
         let RequestedRecvConnection {
             context,
-            connection,
+            mut connection,
+            cancellation,
             send_buffer_count,
+            defer_cancellation_until_prologue,
         } = response_stream;
 
         // the [`Prologue`]
         // there must be a second control message it indicate the other segment's generate method was successful
         // No timeout here: the worker sends the prologue only after generate() setup completes,
         // which can take arbitrarily long (model load, queue delay, cold start).
-        let prologue = reader
-            .next()
-            .await
-            .ok_or(error!("Connection closed without a ControlMessge"))??;
+        let prologue = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                cancel_response_handshake(connection, Some(registration_guard), writer).await;
+                return Ok(());
+            }
+            _ = context.killed(), if !defer_cancellation_until_prologue => Err(ControlMessage::Kill),
+            _ = connection.closed() => Err(ControlMessage::Kill),
+            _ = context.stopped(), if !defer_cancellation_until_prologue => Err(ControlMessage::Stop),
+            prologue = reader.next() => Ok(prologue),
+        };
+        let prologue = match prologue {
+            Ok(prologue) => {
+                prologue.ok_or(error!("Connection closed without a ControlMessage"))??
+            }
+            Err(control) => {
+                drop(registration_guard);
+                let message = "Request cancelled before response stream was established";
+                let error = DynamoError::builder()
+                    .error_type(ErrorType::Cancelled)
+                    .message(message)
+                    .build();
+                let _ = connection.send(Err(StreamPrologueError::new(message, error)));
+                writer
+                    .send(TwoPartMessage::from_header(
+                        serde_json::to_vec(&control)?.into(),
+                    ))
+                    .await?;
+                writer.close().await?;
+                return Ok(());
+            }
+        };
 
         // deserialize prologue
         let prologue = match prologue.into_message_type() {
@@ -1126,6 +1221,14 @@ async fn tcp_listener(
                 typed_error: prologue.typed_error,
             }));
             return Err(returned);
+        }
+
+        // Discovery removal prevents new work but does not abort an established
+        // response stream. From this point normal transport failure or the
+        // request context owns cancellation.
+        if !registration_guard.accept() {
+            cancel_response_handshake(connection, None, writer).await;
+            return Ok(());
         }
 
         // Buffer size is driven by the registration options
@@ -1345,11 +1448,22 @@ mod tests {
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
     use crate::tls_utils::test_certs::self_signed_pair;
+    use crate::utils::ip_resolver::test_support::{ProbeOutcome, StubResolver};
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_no_env_vars_is_plaintext"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         // Also clear the client-CA var: ambient it would turn this into an error
         // (client CA without a server cert/key) instead of plaintext.
         temp_env::with_vars_unset(
@@ -1366,6 +1480,13 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::build_tls_acceptor_partial_config_errors"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
@@ -1389,6 +1510,13 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::build_tls_acceptor_both_paths_is_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
@@ -1401,6 +1529,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_with_client_ca_is_mtls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_with_client_ca_is_mtls"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         // A client CA turns the response-stream server into an mTLS acceptor.
         let (cert, key) = self_signed_pair();
         temp_env::with_vars(
@@ -1418,6 +1556,16 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_client_ca_without_server_identity_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::build_tls_acceptor_client_ca_without_server_identity_errors"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, _key) = self_signed_pair();
         temp_env::with_vars(
             [
@@ -1432,17 +1580,99 @@ mod tests {
         );
     }
 
-    // Mock resolver that always fails to simulate the fallback scenario
-    struct FailingIpResolver;
+    async fn registered_tcp_info(server: &TcpStreamServer) -> TcpStreamConnectionInfo {
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
 
-    impl IpResolver for FailingIpResolver {
-        fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-            Err(Error::LocalIpAddressNotFound)
+        let pending_connection = server.register(stream_options).await;
+        let connection_info = pending_connection
+            .recv_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone();
+        connection_info.try_into().unwrap()
+    }
+
+    #[tokio::test]
+    async fn wildcard_bind_advertises_concrete_ipv4_with_bound_port() {
+        for host in ["0.0.0.0", "::ffff:0.0.0.0", " [::ffff:0.0.0.0] "] {
+            let mut resolver = StubResolver::not_found();
+            resolver
+                .interfaces
+                .push(("eth0", "192.0.2.20".parse().unwrap()));
+            let options = ServerOptions::builder()
+                .port(0)
+                .interface(Some(host.to_string()))
+                .build()
+                .unwrap();
+            let server = TcpStreamServer::new_with_resolver(options, resolver)
+                .await
+                .unwrap();
+
+            let tcp_info = registered_tcp_info(&server).await;
+            let socket_addr: SocketAddr = tcp_info.address.parse().unwrap();
+            assert_eq!(socket_addr.ip(), "192.0.2.20".parse::<IpAddr>().unwrap());
+            assert_ne!(socket_addr.port(), 0);
+            assert!(!socket_addr.ip().is_unspecified());
+            // The advertised port must belong to the real wildcard listener.
+            let _connection = tokio::net::TcpStream::connect(SocketAddr::new(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                socket_addr.port(),
+            ))
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn real_bracketed_ipv6_host_binds_and_registers() {
+        if let Err(error) = std::net::TcpListener::bind("[::1]:0") {
+            eprintln!("Skipping IPv6 loopback bind test: {error}");
+            return;
         }
 
-        fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-            Err(Error::LocalIpAddressNotFound)
-        }
+        let options = ServerOptions::builder()
+            .port(0)
+            .interface(Some("[::1]".to_string()))
+            .build()
+            .unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, StubResolver::not_found())
+            .await
+            .unwrap();
+
+        let tcp_info = registered_tcp_info(&server).await;
+        let socket_addr: SocketAddr = tcp_info.address.parse().unwrap();
+        assert_eq!(socket_addr.ip(), IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+        assert_ne!(socket_addr.port(), 0);
+        assert!(
+            tcp_info.address.starts_with("[::1]:"),
+            "{}",
+            tcp_info.address
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_server_preserves_interface_enumeration_error() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interface_error = Some(ProbeOutcome::Platform("test-platform"));
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let error = TcpStreamServer::new_with_resolver(options, resolver)
+            .await
+            .err()
+            .expect("an interface enumeration failure must be returned");
+
+        let error = error.to_string();
+        assert!(
+            error.contains("failed to enumerate network interfaces"),
+            "{error}"
+        );
+        assert!(error.contains("test-platform"), "{error}");
     }
 
     #[tokio::test]
@@ -1459,26 +1689,7 @@ mod tests {
 
         let server = result.unwrap();
 
-        // Verify the server can be used by registering a stream
-        let context = Context::new(());
-        let stream_options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        let pending_connection = server.register(stream_options).await;
-
-        // Verify connection info is available and valid
-        let connection_info = pending_connection
-            .recv_stream
-            .as_ref()
-            .unwrap()
-            .connection_info
-            .clone();
-
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        let tcp_info = registered_tcp_info(&server).await;
         let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
 
         // Should have a valid port assigned
@@ -1552,7 +1763,7 @@ mod tests {
         let options = ServerOptions::builder().port(0).build().unwrap();
 
         // Use the failing resolver to force the fallback
-        let result = TcpStreamServer::new_with_resolver(options, FailingIpResolver).await;
+        let result = TcpStreamServer::new_with_resolver(options, StubResolver::not_found()).await;
         assert!(
             result.is_ok(),
             "Server creation should succeed with fallback even when IP detection fails"
@@ -1560,24 +1771,7 @@ mod tests {
 
         let server = result.unwrap();
 
-        // Get the actual bound address by registering a stream
-        let context = Context::new(());
-        let stream_options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        let pending_connection = server.register(stream_options).await;
-        let connection_info = pending_connection
-            .recv_stream
-            .as_ref()
-            .unwrap()
-            .connection_info
-            .clone();
-
-        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        let tcp_info = registered_tcp_info(&server).await;
         let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
 
         // With the failing resolver, fallback should ALWAYS be used
@@ -1603,23 +1797,32 @@ mod tests {
 
     #[tokio::test]
     async fn configured_ip_literals_bind_and_format_addresses() {
-        let ipv6_available = TcpListener::bind("[::1]:0").is_ok();
+        let ipv6_available = std::net::TcpListener::bind("[::1]:0").is_ok();
 
         for (host, expected_ip) in [
             ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
             ("::1", "::1".parse::<IpAddr>().unwrap()),
+            (" 127.0.0.1 ", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            (" [::1]\t", "::1".parse::<IpAddr>().unwrap()),
+            ("::ffff:127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            (" lo ", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            (" lo:1 ", "127.0.0.1".parse::<IpAddr>().unwrap()),
         ] {
             if expected_ip.is_ipv6() && !ipv6_available {
                 eprintln!("skipping IPv6 bind because this host does not support IPv6 loopback");
                 continue;
             }
 
+            let mut resolver = StubResolver::not_found();
+            resolver
+                .interfaces
+                .push(("lo:1", "127.0.0.1".parse().unwrap()));
             let server = TcpStreamServer::new_with_resolver(
                 ServerOptions {
                     port: 0,
                     interface: Some(host.to_string()),
                 },
-                FailingIpResolver,
+                resolver,
             )
             .await
             .unwrap();
@@ -1638,6 +1841,7 @@ mod tests {
             let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
             let address = tcp_info.address.parse::<SocketAddr>().unwrap();
 
+            assert_eq!(address, server.local_address().unwrap());
             assert_eq!(address.ip(), expected_ip);
             assert_ne!(address.port(), 0);
             if expected_ip.is_ipv6() {
@@ -1650,7 +1854,7 @@ mod tests {
     async fn test_server() -> Arc<TcpStreamServer> {
         TcpStreamServer::new_with_resolver(
             ServerOptions::builder().port(0).build().unwrap(),
-            FailingIpResolver,
+            StubResolver::not_found(),
         )
         .await
         .unwrap()
@@ -1933,6 +2137,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_dropped_registered_stream_wait_cleans_instance_indexes() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let recv_stream = pending.recv_stream.unwrap();
+        let tcp_info: TcpStreamConnectionInfo =
+            recv_stream.connection_info.clone().try_into().unwrap();
+        let subject = tcp_info.subject;
+        let instance = make_eid("ns", "comp", "generate", 42);
+        assert!(server.associate_instance(&subject, None, &instance).await);
+
+        let mut wait = Box::pin(recv_stream.wait());
+        assert!(futures::poll!(wait.as_mut()).is_pending());
+        drop(wait);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let cleaned = {
+                    let state = server.state.lock();
+                    !state.rx_subjects.contains_key(&subject)
+                        && !state.rx_cancellations.contains_key(&subject)
+                        && !state.subject_instance.contains_key(&subject)
+                        && !state.instance_subjects.contains_key(&instance)
+                };
+                if cleaned {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled wait did not clean response registration indexes");
+    }
+
+    #[tokio::test]
     async fn test_associate_after_cancel_is_immediately_cancelled() {
         // Simulates the race: cancel_instance_streams fires before associate_instance.
         let server = test_server().await;
@@ -2208,7 +2454,7 @@ mod tests {
     /// framed reader/writer along with the receiver.
     async fn open_registered_response_stream() -> TestResponseStream {
         let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+        let server = TcpStreamServer::new_with_resolver(options, StubResolver::not_found())
             .await
             .unwrap();
         let context = Context::new(());
@@ -2297,6 +2543,148 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_when_prologue_wait_is_cancelled() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending = server.register(options).await;
+        let registered_stream = pending.recv_stream.unwrap();
+        let (connection_info, stream_provider) = registered_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        let subject = tcp_info.subject.clone();
+        let instance = make_eid("ns", "comp", "generate", 42);
+        assert!(server.associate_instance(&subject, None, &instance).await);
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (read_half, write_half) = tokio::io::split(stream);
+        let mut framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+        let handshake = CallHomeHandshake {
+            subject: subject.clone(),
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while server.state.lock().rx_subjects.contains_key(&subject) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server did not accept response call-home");
+
+        assert_eq!(server.cancel_instance_streams(&instance).await, 1);
+        assert!(
+            time::timeout(Duration::from_secs(1), stream_provider)
+                .await
+                .expect("worker removal must unblock the response handshake")
+                .is_err()
+        );
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "cancelling the prologue wait should stop worker generation"
+        );
+        let state = server.state.lock();
+        assert!(!state.rx_subjects.contains_key(&subject));
+        assert!(!state.rx_cancellations.contains_key(&subject));
+        assert!(!state.subject_instance.contains_key(&subject));
+        assert!(!state.instance_subjects.contains_key(&instance));
+    }
+
+    /// Cover both orderings at the boundary between a pending handshake and an
+    /// established response. Reading a prologue alone must not defeat removal.
+    #[tokio::test]
+    async fn response_prologue_acceptance_is_ordered_with_worker_removal() {
+        let server = test_server().await;
+        for removal_first in [true, false] {
+            let instance = make_eid("ns", "comp", "generate", u64::from(removal_first));
+            let (subject, _provider) = register_and_get_subject(&server).await;
+            assert!(server.associate_instance(&subject, None, &instance).await);
+            let pending = TcpStreamServer::take_response_stream(&server.state, &subject).unwrap();
+            let guard = ResponseRegistrationGuard {
+                state: server.state.clone(),
+                subject: subject.clone(),
+                is_active: true,
+            };
+
+            if removal_first {
+                assert_eq!(server.cancel_instance_streams(&instance).await, 1);
+                assert!(
+                    !guard.accept(),
+                    "a cancelled handshake must not be accepted"
+                );
+                assert!(pending.cancellation.is_cancelled());
+            } else {
+                assert!(guard.accept());
+                assert_eq!(server.cancel_instance_streams(&instance).await, 0);
+                assert!(!pending.cancellation.is_cancelled());
+            }
+
+            let state = server.state.lock();
+            assert!(!state.rx_cancellations.contains_key(&subject));
+            assert!(!state.subject_instance.contains_key(&subject));
+            assert!(!state.instance_subjects.contains_key(&instance));
+        }
+    }
+
+    /// A peer that never reads Kill must not delay the requester or retain the
+    /// handshake registration. Its socket cleanup must also have a deadline.
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_handshake_unblocks_before_stalled_cleanup() {
+        let server = test_server().await;
+        let instance = make_eid("ns", "comp", "generate", 42);
+        let (subject, provider) = register_and_get_subject(&server).await;
+        assert!(server.associate_instance(&subject, None, &instance).await);
+        let pending = TcpStreamServer::take_response_stream(&server.state, &subject).unwrap();
+        let guard = ResponseRegistrationGuard {
+            state: server.state.clone(),
+            subject: subject.clone(),
+            is_active: true,
+        };
+        // One byte cannot hold a framed Kill; retaining the unread peer stalls send().
+        let (socket, _peer) = tokio::io::duplex(1);
+        let writer = FramedWrite::new(Box::new(socket) as BoxWrite, TwoPartCodec::default());
+        let cleanup = tokio::spawn(cancel_response_handshake(
+            pending.connection,
+            Some(guard),
+            writer,
+        ));
+
+        assert!(
+            time::timeout(Duration::from_millis(50), provider)
+                .await
+                .expect("requester must be released before network cleanup")
+                .is_err()
+        );
+        assert!(
+            !cleanup.is_finished(),
+            "peer should still be blocking the Kill write"
+        );
+        {
+            let state = server.state.lock();
+            assert!(!state.rx_cancellations.contains_key(&subject));
+            assert!(!state.subject_instance.contains_key(&subject));
+            assert!(!state.instance_subjects.contains_key(&instance));
+        }
+        time::advance(HANDSHAKE_CANCEL_CLEANUP_TIMEOUT).await;
+        time::timeout(Duration::from_millis(50), cleanup)
+            .await
+            .expect("network cleanup must stop at its deadline")
+            .unwrap();
+    }
+
     /// A framing/decode error from the worker side is unrecoverable for
     /// this stream but must not panic the worker. Server should send Kill
     /// and tear down only this connection.
@@ -2346,7 +2734,7 @@ mod tests {
     #[tokio::test]
     async fn test_tcp_stream_server_returns_error_on_invalid_prologue() {
         let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+        let server = TcpStreamServer::new_with_resolver(options, StubResolver::not_found())
             .await
             .unwrap();
         let context = Context::new(());
@@ -2403,7 +2791,7 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_typed_error_preserves_the_legacy_prologue_error() {
         let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+        let server = TcpStreamServer::new_with_resolver(options, StubResolver::not_found())
             .await
             .unwrap();
         let context = Context::new(());
@@ -2512,6 +2900,91 @@ mod tests {
             result.is_ok(),
             "concurrent response registration and call-home timed out"
         );
+    }
+
+    #[tokio::test]
+    async fn test_response_stream_cancellation_before_prologue() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            async {
+                let server = test_server().await;
+                for action in [Some(ControlMessage::Stop), Some(ControlMessage::Kill), None] {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        let context = Context::new(()).context();
+                        let options = StreamOptions::builder()
+                            .context(context.clone())
+                            .enable_request_stream(false)
+                            .enable_response_stream(true)
+                            .build()
+                            .unwrap();
+                        let pending = server.register(options).await;
+                        let (connection_info, stream_provider) =
+                            pending.recv_stream.unwrap().into_parts();
+                        let worker_context = Context::with_id_and_metadata(
+                            (),
+                            context.id().to_string(),
+                            Default::default(),
+                        )
+                        .context();
+                        let sender = TcpClient::create_response_stream(
+                            worker_context.clone(),
+                            connection_info,
+                            None,
+                        )
+                        .await
+                        .unwrap();
+
+                        let stream_provider = match action {
+                            Some(ControlMessage::Stop) => {
+                                context.stop_generating();
+                                Some(stream_provider)
+                            }
+                            Some(ControlMessage::Kill) => {
+                                context.kill();
+                                Some(stream_provider)
+                            }
+                            None => {
+                                drop(stream_provider);
+                                assert!(!context.is_stopped());
+                                None
+                            }
+                            Some(ControlMessage::Sentinel) => unreachable!(),
+                        };
+                        if let Some(stream_provider) = stream_provider {
+                            let failure = match stream_provider.await.unwrap() {
+                                Err(failure) => failure,
+                                Ok(_) => {
+                                    panic!("cancellation must not establish a response stream")
+                                }
+                            };
+                            assert_eq!(
+                                failure.typed_error.as_ref().map(|error| error.error_type()),
+                                Some(ErrorType::Cancelled)
+                            );
+                        }
+                        worker_context.stopped().await;
+                        sender.tx.closed().await;
+                        assert_eq!(
+                            worker_context.is_killed(),
+                            action != Some(ControlMessage::Stop)
+                        );
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("cancellation before prologue timed out: {action:?}")
+                    });
+                }
+            },
+        )
+        .await;
     }
 
     /// A worker that refuses a request before producing any response bytes must
