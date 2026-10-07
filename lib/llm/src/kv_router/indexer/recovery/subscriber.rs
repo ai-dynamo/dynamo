@@ -461,7 +461,7 @@ pub async fn start_subscriber(
     let membership_watch = if static_sources.is_empty() {
         membership_watch
     } else {
-        start_static_source_accounting(&static_sources, cancel.child_token())?;
+        start_static_source_accounting(&static_sources, indexer.clone(), cancel.child_token())?;
         with_static_sources(
             membership_watch,
             static_sources.clone(),

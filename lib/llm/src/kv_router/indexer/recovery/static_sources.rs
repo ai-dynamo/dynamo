@@ -26,9 +26,14 @@
 //! events, and envelopes dropped because the source was inactive. A reporter logs the totals
 //! every [`REPORT_INTERVAL_ENV`] seconds and optionally rewrites them as JSON to
 //! [`ACCOUNTING_OUT_ENV`]. It adds a `final` report when the subscriber is cancelled, which a
-//! signal-terminated router can skip, so read the file two intervals after the last publisher
-//! exits. With [`TIMED_START_ENV`], it also snapshots the totals at that instant so warm-up and
-//! timed delivery can be checked separately.
+//! signal-terminated router can skip, so read the file three intervals after the last publisher
+//! exits. The file also lists every static source's totals, so a checker can compare each
+//! phantom's delivery with what its publisher planned.
+//!
+//! With [`TIMED_START_ENV`] (and optionally [`TIMED_END_ENV`]) the reporter marks the timed
+//! window: at each instant it reads the totals, then times a FIFO barrier through the indexer's
+//! event queues (`drain_ms`). Delivery inside the window and a drained indexer at both edges can
+//! then be checked: admission feeds unbounded queues, so admitted is not applied.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -50,13 +55,26 @@ use crate::direct_zmq_sub_pool::{ENDPOINTS_PER_SUB_ENV, endpoints_per_sub_from_e
 use crate::discovery::{
     KvEventSource, KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus,
 };
+use crate::kv_router::Indexer;
 
 pub(crate) const STATIC_KV_SOURCES_ENV: &str = "DYN_EXPERIMENT_STATIC_KV_SOURCES";
 pub(crate) const ACCOUNTING_OUT_ENV: &str = "DYN_EXPERIMENT_STATIC_KV_ACCOUNTING_OUT";
 pub(crate) const REPORT_INTERVAL_ENV: &str = "DYN_EXPERIMENT_STATIC_KV_REPORT_S";
 pub(crate) const TIMED_START_ENV: &str = "DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS";
+pub(crate) const TIMED_END_ENV: &str = "DYN_EXPERIMENT_STATIC_KV_TIMED_END_UNIX_MS";
 const DEFAULT_REPORT_INTERVAL_S: f64 = 10.0;
 const MAX_REPORTED_ANOMALIES: usize = 16;
+/// A barrier still queued after this long is reported as a timeout (the arm fell far behind).
+const DRAIN_PROBE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Columns of each row in a report's `sources` list.
+const SOURCE_COLUMNS: [&str; 6] = [
+    "worker_id",
+    "events",
+    "write_blocks",
+    "first_event_id",
+    "last_event_id",
+    "gap_resets",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StaticKvSource {
@@ -401,25 +419,118 @@ impl StaticSourceAccounting {
         snapshot
     }
 
-    fn report(
-        &self,
-        kind: &str,
-        timed_start_unix_ms: Option<u64>,
-        warmup: Option<DeliveredTotals>,
-    ) -> serde_json::Value {
+    /// One row per static source, in [`SOURCE_COLUMNS`] order.
+    fn source_rows(&self) -> Vec<[u64; 6]> {
+        self.accounts
+            .iter()
+            .zip(self.worker_ids.iter())
+            .map(|(account, &worker_id)| {
+                [
+                    worker_id,
+                    account.events.load(Ordering::Relaxed),
+                    account.stored_blocks.load(Ordering::Relaxed)
+                        + account.removed_blocks.load(Ordering::Relaxed),
+                    account.first_event_id.load(Ordering::Relaxed),
+                    account.last_event_id.load(Ordering::Relaxed),
+                    account.gap_resets.load(Ordering::Relaxed),
+                ]
+            })
+            .collect()
+    }
+
+    /// The report the reporter logs; [`Self::file_report`] adds the per-source rows.
+    fn report(&self, kind: &str, interval_s: f64, window: &TimedWindow) -> serde_json::Value {
         let snapshot = self.snapshot();
-        let timed = warmup.map(|warmup| snapshot.totals.minus(warmup));
+        let warmup = window.start.as_ref().map(|start| start.totals);
+        // The timed window's delivery: up to the end mark once taken, otherwise so far.
+        let timed = window.start.as_ref().map(|start| {
+            let until = window
+                .end
+                .as_ref()
+                .map_or(snapshot.totals, |end| end.totals);
+            until.minus(start.totals)
+        });
+        let after_end = window
+            .end
+            .as_ref()
+            .map(|end| snapshot.totals.minus(end.totals));
         serde_json::json!({
             "kind": kind,
             "t_unix_ms": unix_now_ms(),
+            "report_interval_s": interval_s,
             "static_sources": self.worker_ids.len(),
             "endpoints_per_sub": self.endpoints_per_sub,
-            "timed_start_unix_ms": timed_start_unix_ms,
+            "timed_start_unix_ms": window.start_at_unix_ms,
+            "timed_end_unix_ms": window.end_at_unix_ms,
+            "start": window.start,
+            "end": window.end,
             "warmup": warmup,
             "timed": timed,
+            "after_end": after_end,
             "accounting": snapshot,
         })
     }
+
+    fn file_report(&self, mut report: serde_json::Value) -> serde_json::Value {
+        report["source_columns"] = serde_json::json!(SOURCE_COLUMNS);
+        report["sources"] = serde_json::json!(self.source_rows());
+        report
+    }
+}
+
+/// The admitted totals at one edge of the timed window, and how long the indexer's event
+/// queues took to complete everything queued before it.
+#[derive(Debug, Clone, Serialize)]
+struct WindowMark {
+    /// The instant the environment asked for.
+    requested_unix_ms: u64,
+    /// When the totals were actually read (the reporter runs on a loaded runtime).
+    taken_unix_ms: u64,
+    totals: DeliveredTotals,
+    /// Milliseconds for a FIFO barrier to pass every event-thread queue: about zero when the
+    /// indexer kept up, the backlog's drain time when it did not.
+    drain_ms: Option<f64>,
+    drain_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct TimedWindow {
+    start_at_unix_ms: Option<u64>,
+    end_at_unix_ms: Option<u64>,
+    start: Option<WindowMark>,
+    end: Option<WindowMark>,
+}
+
+async fn take_mark(
+    accounting: &StaticSourceAccounting,
+    indexer: &Indexer,
+    requested_unix_ms: u64,
+) -> WindowMark {
+    let taken_unix_ms = unix_now_ms();
+    let totals = accounting.totals();
+    let (drain_ms, drain_error) = match probe_drain(indexer).await {
+        Ok(ms) => (Some(ms), None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
+    WindowMark {
+        requested_unix_ms,
+        taken_unix_ms,
+        totals,
+        drain_ms,
+        drain_error,
+    }
+}
+
+/// Time a FIFO barrier through every event-thread queue of the indexer.
+async fn probe_drain(indexer: &Indexer) -> Result<f64> {
+    let Indexer::Concurrent { primary, .. } = indexer else {
+        bail!("only the thread-pool indexer (router event threads > 1) can be drain-probed");
+    };
+    let started = std::time::Instant::now();
+    tokio::time::timeout(DRAIN_PROBE_TIMEOUT, primary.flush_and_wait())
+        .await
+        .with_context(|| format!("still draining after {DRAIN_PROBE_TIMEOUT:?}"))??;
+    Ok(started.elapsed().as_secs_f64() * 1e3)
 }
 
 fn unix_now_ms() -> u64 {
@@ -429,9 +540,18 @@ fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn unix_ms_from_env(name: &str) -> Result<Option<u64>> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .with_context(|| format!("{name} must be unix milliseconds"))
+}
+
 /// Install the process-wide accounting for `sources` and start its reporter.
 pub(crate) fn start_static_source_accounting(
     sources: &[StaticKvSource],
+    indexer: Indexer,
     cancel: CancellationToken,
 ) -> Result<()> {
     let interval_s = match std::env::var(REPORT_INTERVAL_ENV) {
@@ -442,11 +562,14 @@ pub(crate) fn start_static_source_accounting(
             .with_context(|| format!("{REPORT_INTERVAL_ENV} must be a positive number"))?,
         Err(_) => DEFAULT_REPORT_INTERVAL_S,
     };
-    let timed_start_unix_ms = std::env::var(TIMED_START_ENV)
-        .ok()
-        .map(|value| value.parse::<u64>())
-        .transpose()
-        .with_context(|| format!("{TIMED_START_ENV} must be unix milliseconds"))?;
+    let timed_start_unix_ms = unix_ms_from_env(TIMED_START_ENV)?;
+    let timed_end_unix_ms = unix_ms_from_env(TIMED_END_ENV)?;
+    if let Some(end) = timed_end_unix_ms {
+        ensure!(
+            timed_start_unix_ms.is_some_and(|start| start < end),
+            "{TIMED_END_ENV} needs an earlier {TIMED_START_ENV}"
+        );
+    }
     let out = std::env::var_os(ACCOUNTING_OUT_ENV).map(PathBuf::from);
     let accounting = Arc::new(StaticSourceAccounting::new(
         sources,
@@ -461,55 +584,79 @@ pub(crate) fn start_static_source_accounting(
     }
     tokio::spawn(run_reporter(
         accounting,
-        Duration::from_secs_f64(interval_s),
-        timed_start_unix_ms,
+        indexer,
+        interval_s,
+        TimedWindow {
+            start_at_unix_ms: timed_start_unix_ms,
+            end_at_unix_ms: timed_end_unix_ms,
+            ..TimedWindow::default()
+        },
         out,
         cancel,
     ));
     Ok(())
 }
 
+/// A sleep until `at_unix_ms`, or `None` (logged) when that instant passed before startup.
+fn sleep_until_unix_ms(
+    at_unix_ms: Option<u64>,
+    now_ms: u64,
+    env: &str,
+) -> Option<std::pin::Pin<Box<tokio::time::Sleep>>> {
+    let at = at_unix_ms?;
+    if at <= now_ms {
+        tracing::error!(
+            requested_unix_ms = at,
+            now_unix_ms = now_ms,
+            env,
+            "EXPERIMENT: a timed-window edge passed before the indexer started; it is not marked"
+        );
+        return None;
+    }
+    Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+        at - now_ms,
+    ))))
+}
+
 async fn run_reporter(
     accounting: Arc<StaticSourceAccounting>,
-    interval: Duration,
-    timed_start_unix_ms: Option<u64>,
+    indexer: Indexer,
+    interval_s: f64,
+    mut window: TimedWindow,
     out: Option<PathBuf>,
     cancel: CancellationToken,
 ) {
     let now_ms = unix_now_ms();
-    let split_at = timed_start_unix_ms.filter(|&start| {
-        let future = start > now_ms;
-        if !future {
-            tracing::error!(
-                timed_start_unix_ms = start,
-                now_unix_ms = now_ms,
-                env = TIMED_START_ENV,
-                "EXPERIMENT: the timed start passed before the indexer started; reporting totals only"
-            );
-        }
-        future
-    });
-    let split_sleep = tokio::time::sleep(Duration::from_millis(
-        split_at.map_or(0, |start| start - now_ms),
-    ));
-    tokio::pin!(split_sleep);
-    let mut warmup = None;
-    let mut ticker = tokio::time::interval(interval);
+    let mut start_sleep = sleep_until_unix_ms(window.start_at_unix_ms, now_ms, TIMED_START_ENV);
+    let mut end_sleep = sleep_until_unix_ms(window.end_at_unix_ms, now_ms, TIMED_END_ENV);
+    if start_sleep.is_none() {
+        end_sleep = None;
+    }
+    let mut ticker = tokio::time::interval(Duration::from_secs_f64(interval_s));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let kind = tokio::select! {
             biased;
             _ = cancel.cancelled() => "final",
-            _ = &mut split_sleep, if split_at.is_some() && warmup.is_none() => {
-                warmup = Some(accounting.totals());
+            _ = async { start_sleep.as_mut().expect("guarded").await }, if start_sleep.is_some() => {
+                start_sleep = None;
+                let at = window.start_at_unix_ms.expect("a start sleep has a start");
+                window.start = Some(take_mark(&accounting, &indexer, at).await);
                 "split"
+            }
+            _ = async { end_sleep.as_mut().expect("guarded").await },
+                if end_sleep.is_some() && start_sleep.is_none() => {
+                end_sleep = None;
+                let at = window.end_at_unix_ms.expect("an end sleep has an end");
+                window.end = Some(take_mark(&accounting, &indexer, at).await);
+                "end"
             }
             _ = ticker.tick() => "interval",
         };
-        let report = accounting.report(kind, split_at, warmup);
+        let report = accounting.report(kind, interval_s, &window);
         tracing::warn!(report = %report, "EXPERIMENT static KV source accounting");
         if let Some(path) = &out
-            && let Err(error) = write_report(path, &report)
+            && let Err(error) = write_report(path, &accounting.file_report(report))
         {
             tracing::error!(%error, path = %path.display(), "EXPERIMENT: failed to write the static KV source accounting");
         }
@@ -521,7 +668,7 @@ async fn run_reporter(
 
 fn write_report(path: &Path, report: &serde_json::Value) -> Result<()> {
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(report)?)?;
+    std::fs::write(&tmp, serde_json::to_vec(report)?)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -869,16 +1016,70 @@ mod tests {
         accounting.record_rank_reset(10);
         assert_eq!(accounting.snapshot().rank_resets, 1);
 
-        let warmup = DeliveredTotals {
-            events: 1,
-            stored_blocks: 3,
-            removed_blocks: 0,
-            write_blocks: 3,
+        let mark = |write_blocks| WindowMark {
+            requested_unix_ms: 1,
+            taken_unix_ms: 2,
+            totals: DeliveredTotals {
+                events: 1,
+                stored_blocks: write_blocks,
+                removed_blocks: 0,
+                write_blocks,
+            },
+            drain_ms: Some(0.5),
+            drain_error: None,
         };
-        let report = accounting.report("final", Some(1), Some(warmup));
-        assert_eq!(report["timed"]["write_blocks"], 5);
+        let mut window = TimedWindow {
+            start_at_unix_ms: Some(1),
+            end_at_unix_ms: Some(3),
+            start: Some(mark(3)),
+            end: None,
+        };
+        let report = accounting.report("split", 10.0, &window);
+        assert_eq!(
+            report["timed"]["write_blocks"], 5,
+            "running until the end mark"
+        );
         assert_eq!(report["accounting"]["totals"]["events"], 4);
         assert_eq!(report["endpoints_per_sub"], 4);
+        assert!(report["after_end"].is_null());
+        assert!(report.get("sources").is_none(), "the log line stays small");
+
+        window.end = Some(mark(6));
+        let report = accounting.file_report(accounting.report("end", 10.0, &window));
+        assert_eq!(report["timed"]["write_blocks"], 3, "start to end mark");
+        assert_eq!(report["after_end"]["write_blocks"], 2);
+        assert_eq!(report["end"]["drain_ms"], 0.5);
+        assert_eq!(report["source_columns"][2], "write_blocks");
+        let row10 = &report["sources"][0];
+        assert_eq!(row10[0], 10);
+        assert_eq!((row10[1].clone(), row10[2].clone()), (3.into(), 6.into()));
+        assert_eq!((row10[3].clone(), row10[4].clone()), (1.into(), 5.into()));
+        assert_eq!(
+            report["sources"][1][3], 4,
+            "worker 11's first admitted event"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_probe_times_the_thread_pool_and_rejects_other_indexers() {
+        use dynamo_kv_router::ConcurrentRadixTreeCompressed;
+        use dynamo_kv_router::indexer::{LowerTierIndexers, ThreadPoolIndexer};
+
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            16,
+        ));
+        let indexer = Indexer::Concurrent {
+            primary,
+            lower_tier: LowerTierIndexers::new_with_metrics(2, 16, None),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        };
+        let drain_ms = probe_drain(&indexer).await.unwrap();
+        assert!((0.0..DRAIN_PROBE_TIMEOUT.as_secs_f64() * 1e3).contains(&drain_ms));
+        assert!(probe_drain(&Indexer::None).await.is_err());
     }
 
     #[derive(Clone, Default)]
