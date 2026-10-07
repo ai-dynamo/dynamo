@@ -749,24 +749,28 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         models.add(model)
         assert attributes["data-model"] == model
         assert "dynamo-diffusion-model" not in body
-        (modality,) = re.findall(
-            r'<p className="dynamo-diffusion-modality">([^<]+)</p>', body
-        )
-        assert modality == DIFFUSION_MODALITY_LABELS[attributes["data-case"]]
-        assert body.count("dynamo-diffusion-modality") == 1
         (href,) = re.findall(r'href="([^"]+)"', body)
         assert href == f"{source_pages[source]}.mdx"
         assert body.count("<a ") == 1
         assert "aria-label=" in body
         assert 'className="dynamo-diffusion-name"' in body
         assert "dynamo-diffusion-card-footer" not in body
-        header, _ = body.split('<p className="dynamo-diffusion-modality">', 1)
-        (arrow,) = re.findall(
-            r'<span className="dynamo-diffusion-card-arrow" aria-hidden="true">(.*?)</span>',
+        # The type chip closes the top row, after the title, so the grid places it
+        # top right. Cards have no arrow and no description line.
+        header, _ = body.split('<div className="dynamo-diffusion-chips">', 1)
+        (modality,) = re.findall(
+            r'</h3>\n<span className="dynamo-diffusion-chip dynamo-diffusion-modality">'
+            r"([^<]+)</span>\n</div>\n\n$",
             header,
         )
-        assert arrow == "↗"
-        assert body.count('className="dynamo-diffusion-card-arrow"') == 1
+        assert modality == DIFFUSION_MODALITY_LABELS[attributes["data-case"]]
+        assert body.count("dynamo-diffusion-modality") == 1
+        assert "dynamo-diffusion-card-arrow" not in body
+        assert "dynamo-diffusion-description" not in body
+        assert re.findall(r'<p className="([^"]+)"', body) == [
+            "dynamo-diffusion-provider"
+        ]
+        assert all(line.startswith("<") for line in body.split("\n") if line)
         assert "dynamo-diffusion-experimental" not in header
         (image,) = re.findall(r'<img[^>]+src="([^"]+)"', body)
         assert (page.parent / image).resolve().is_file()
@@ -807,7 +811,8 @@ def test_diffusion_weight_chips_match_the_recorded_checkpoint_files() -> None:
         size = f"{recorded['size_bytes'] / 1e9:.1f}"
         assert float(size) == recorded["size_gb"]
         assert attributes["data-size-gb"] == size
-        assert f"{size} GB weights" in body
+        (chip,) = re.findall(r'dynamo-diffusion-size"[^>]*>([^<]+)</span>', body)
+        assert chip == f"{size} GB"
         assert all(name.endswith(".safetensors") for name in recorded["files"])
         if any(name.startswith("transformer/") for name in recorded["files"]):
             assert all("/" in name for name in recorded["files"])
@@ -822,7 +827,9 @@ def test_diffusion_catalog_is_server_styled_accessible_and_responsive() -> None:
     assert "EXAMPLES_LAYOUT_CSS" in component
     assert "dangerouslySetInnerHTML" in component
     assert ".dark .dynamo-diffusion" in component
-    assert ".dynamo-diffusion-card-arrow" in component
+    assert "dynamo-diffusion-card-arrow" not in component
+    assert "dynamo-diffusion-description" not in component
+    assert '"logo provider type" "logo name name"' in component
     assert "dynamo-diffusion-card-footer" not in component
     assert ":focus-visible" in component
     assert "prefers-reduced-motion" in component
