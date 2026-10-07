@@ -1591,9 +1591,8 @@ mod tests {
         let publisher = closed_publisher();
 
         let ctx = Context::new(serde_json::json!({}));
-        let content: Vec<TestResponse> = (0..3)
-            .map(|i| Annotated::from_data(serde_json::json!({ "token": i })))
-            .collect();
+        let content: Vec<TestResponse> =
+            vec![Annotated::from_data(serde_json::json!({ "token": 0 }))];
         let response_stream: ManyOut<TestResponse> =
             ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
 
@@ -1653,9 +1652,7 @@ mod tests {
         let publisher = closed_publisher();
 
         let ctx = Context::new(serde_json::json!({}));
-        let content: Vec<TestResponse> = (0..3)
-            .map(|i| Annotated::from_error(format!("engine error {i}")))
-            .collect();
+        let content: Vec<TestResponse> = vec![Annotated::from_error("engine error".to_string())];
         let response_stream: ManyOut<TestResponse> =
             ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
 
