@@ -9,7 +9,6 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -157,7 +156,7 @@ func TestGroveCRDChangeRequeuesOnlyGroveDeployments(t *testing.T) {
 	component := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "component", Namespace: "default", Annotations: map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent}}}
 	reader := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(grove, component).Build()
 	setup := newGroveWatchSetup(reader, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{})
-	crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}}
+	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}}
 
 	t.Log("A PCS schema upgrade resumes affected Grove reconciliation")
 	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(grove)}}, setup.mapGroveCRDToRequests(t.Context(), crd))

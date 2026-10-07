@@ -296,6 +296,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 			kubeClient := builder.Build()
 			workloads := newGroveWorkloadsReconciler(
 				kubeClient,
+				dynamo.NewGroveCoherentSupport(kubeClient, kubeClient),
 				events.NewFakeRecorder(10),
 				newDGDWorkerRolloutReconciler(kubeClient, nil),
 				&configv1alpha1.OperatorConfiguration{},
@@ -383,6 +384,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 		Build()
 	workloads := newGroveWorkloadsReconciler(
 		kubeClient,
+		dynamo.NewGroveCoherentSupport(kubeClient, kubeClient),
 		events.NewFakeRecorder(10),
 		newDGDWorkerRolloutReconciler(kubeClient, nil),
 		&configv1alpha1.OperatorConfiguration{},
@@ -708,6 +710,7 @@ func TestGroveWorkloadsReconciler_SkipsHashObservationWhenHashIsCurrent(t *testi
 		Build()
 	workloads := newGroveWorkloadsReconciler(
 		kubeClient,
+		dynamo.NewGroveCoherentSupport(kubeClient, kubeClient),
 		events.NewFakeRecorder(10),
 		newDGDWorkerRolloutReconciler(kubeClient, nil),
 		&configv1alpha1.OperatorConfiguration{},
@@ -787,6 +790,7 @@ func TestGroveWorkloadsReconciler_DefersHashCommitUntilPCSWriteObserved(t *testi
 			kubeClient := builder.Build()
 			workloads := newGroveWorkloadsReconciler(
 				kubeClient,
+				dynamo.NewGroveCoherentSupport(kubeClient, kubeClient),
 				events.NewFakeRecorder(10),
 				newDGDWorkerRolloutReconciler(kubeClient, nil),
 				&configv1alpha1.OperatorConfiguration{},
@@ -879,7 +883,7 @@ func TestGroveProgram_DefersScalingAndPreservesStatus(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
 	writes := 0
 	kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, pclq, crd).WithStatusSubresource(dgd).WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, func() { writes++ })).Build()
-	reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: secrets}
+	reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, GroveCoherentSupport: dynamo.NewGroveCoherentSupport(kubeClient, kubeClient), Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: secrets}
 
 	t.Log("Run the complete program without scaling or dropping observed component facts")
 	result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
@@ -911,10 +915,10 @@ func TestGroveProgram_UnsupportedCoherentDoesNotCreatePCS(t *testing.T) {
 	for _, origin := range []string{"1.1.0", "1.6.0"} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Observe an older PCS schema with an explicitly opted-in DGD")
-			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: origin, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend, Replicas: ptr.To(int32(1))}}}}
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: origin, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend}}}}
 			crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}, Spec: apiextensionsv1.CustomResourceDefinitionSpec{Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{Name: "v1alpha1", Served: true}}}}
 			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(dgd, crd).Build()
-			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
+			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, GroveCoherentSupport: dynamo.NewGroveCoherentSupport(kubeClient, kubeClient), Config: &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
 
 			t.Log("Report the incompatibility instead of substituting a rollout strategy")
 			result, err := reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
@@ -932,10 +936,10 @@ func TestGroveProgram_UnsupportedCoherentDoesNotCreatePCS(t *testing.T) {
 			require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(crd), previous))
 			crd.ResourceVersion = previous.ResourceVersion
 			require.NoError(t, kubeClient.Update(t.Context(), crd))
-			renderer := reconciler.newGroveProgram().workloads.renderer
-			rendered, err := renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil, false)
+			_, err = reconciler.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 			require.NoError(t, err)
-			require.Equal(t, grovev1alpha1.CoherentStrategy, rendered.desired.Spec.UpdateStrategy.Type)
+			require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dgd), pcs))
+			require.Equal(t, grovev1alpha1.CoherentStrategy, pcs.Spec.UpdateStrategy.Type)
 		})
 	}
 }

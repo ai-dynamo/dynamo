@@ -4,18 +4,14 @@
 package dynamo
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // SupportedGroveUpdateStrategies returns the annotation values accepted by rendering and admission.
@@ -58,45 +54,21 @@ func ResolveGroveUpdateStrategy(dgd *v1beta1.DynamoGraphDeployment, existingPCS 
 	return desired, nil
 }
 
+// GroveCoherentUpdateSelected reports whether the PCS uses Coherent updates.
+// pcs must be non-nil.
+func GroveCoherentUpdateSelected(pcs *grovev1alpha1.PodCliqueSet) bool {
+	return pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovev1alpha1.CoherentStrategy
+}
+
 // GroveCoherentUpdateInProgress reports the provider's PCS-wide scaling lock.
 // pcs may be nil before initial creation; a missing PCS has no active update.
 func GroveCoherentUpdateInProgress(pcs *grovev1alpha1.PodCliqueSet) bool {
-	return pcs != nil && pcs.Spec.UpdateStrategy != nil && pcs.Spec.UpdateStrategy.Type == grovev1alpha1.CoherentStrategy && pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
-}
-
-// ErrGroveCoherentUnsupported identifies a cluster whose PCS schema lacks Coherent support.
-var ErrGroveCoherentUnsupported = errors.New("Grove Coherent updates require Grove v0.1.0-alpha.14 or later and its matching CRDs")
-
-// CheckGroveUpdateStrategySupport checks the installed PCS schema before writing Coherent intent.
-// reader and pcs must be non-nil. An enum proves schema support, not controller implementation support.
-func CheckGroveUpdateStrategySupport(ctx context.Context, reader client.Reader, pcs *grovev1alpha1.PodCliqueSet) error {
-	// Older strategies do not require the newly introduced Coherent capability.
-	if pcs.Spec.UpdateStrategy == nil || pcs.Spec.UpdateStrategy.Type != grovev1alpha1.CoherentStrategy {
-		return nil
-	}
-	crd := &apiextensionsv1.CustomResourceDefinition{}
-	if err := reader.Get(ctx, client.ObjectKey{Name: "podcliquesets.grove.io"}, crd); err != nil {
-		return fmt.Errorf("read Grove PodCliqueSet CRD: %w", err)
-	}
-
-	// Check the served version used by this operator, including its exact strategy enum.
-	for _, version := range crd.Spec.Versions {
-		if version.Name != grovev1alpha1.SchemeGroupVersion.Version || !version.Served || version.Schema == nil || version.Schema.OpenAPIV3Schema == nil {
-			continue
-		}
-		spec := version.Schema.OpenAPIV3Schema.Properties["spec"]
-		updateStrategy := spec.Properties["updateStrategy"]
-		strategyType := updateStrategy.Properties["type"]
-		for _, value := range strategyType.Enum {
-			if string(value.Raw) == `"Coherent"` {
-				return nil
-			}
-		}
-	}
-	return ErrGroveCoherentUnsupported
+	return pcs != nil && GroveCoherentUpdateSelected(pcs) && pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
 }
 
 // IsGroveCoherentScaleGuardRejection distinguishes Grove admission from RBAC Forbidden errors.
+// Grove exposes this guard through denial text rather than a dedicated status reason.
+// Recheck the message and regression tests when upgrading Grove; prefer a typed reason if Grove adds one.
 func IsGroveCoherentScaleGuardRejection(err error) bool {
 	return apierrors.IsForbidden(err) && strings.Contains(err.Error(), "spec.replicas changes are not allowed while a coherent update is in progress on PodCliqueSet")
 }

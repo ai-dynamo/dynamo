@@ -973,6 +973,51 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:    dgdAdmissionWithLabel(t, minimumAvailabilityDGDForAdmission(2, 2, "Coherent")),
 		},
 		{
+			name:          "Coherent replica reduction introduces full component disruption risk",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 2, "Coherent"),
+			deployment:    minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "Coherent scale from zero introduces full component disruption risk",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 0, "Coherent"),
+			deployment:    minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "Coherent scale up leaves serving capacity without warning",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			deployment:    minimumAvailabilityDGDForAdmission(1, 2, "Coherent"),
+		},
+		{
+			name: "Coherent explicit default replica count does not repeat the warning",
+			oldDeployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				betaWorkerComponent(dgd).Replicas = nil
+				return dgd
+			}(),
+			deployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+		},
+		{
+			name:          "Coherent omitted default replica count does not repeat the warning",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				betaWorkerComponent(dgd).Replicas = nil
+				return dgd
+			}(),
+		},
+		{
+			name:          "Coherent pod template edit still warns about existing full component disruption risk",
+			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Image += "-coherent-update"
+				return dgd
+			}(),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
 			name:          "removing the Coherent annotation restores RollingRecreate without warning",
 			oldDeployment: minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
 			deployment:    minimumAvailabilityDGDForAdmission(2, 2, ""),

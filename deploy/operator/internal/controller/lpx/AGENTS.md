@@ -61,8 +61,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Observation and Retries
 
-- Read through the cached client. Observe dependencies and validate them once
+- Read workload dependencies through the cached client and validate them once
   per reconciliation; do not add uncached reads or pre-write revalidation.
+  Grove schema capability discovery is the exception: watch CRD metadata, fetch
+  the schema through APIReader, and cache only the result by CRD UID/resource version.
 - Observations are not an atomic snapshot. Publishing previously observed
   intent during a concurrent edit is accepted; watches drive convergence.
   UID/resource-version preconditions and write conflicts protect mutations.

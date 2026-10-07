@@ -732,6 +732,32 @@ For deployments that explicitly select Coherent, review the [known recovery limi
 
 See [Coherent capacity and disruption](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#coherent-capacity-and-disruption) for budget semantics and examples. Coherent coordination applies within one PCS and does not guarantee zero downtime.
 
+### Recover from a stalled Coherent update
+
+If an update stalls because already-unavailable replicas exhaust the disruption budget, changing or removing the strategy annotation cannot unblock it: Dynamo waits for the active Grove update to finish before applying a strategy change. See [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873).
+
+> [!WARNING]
+> Recreating the DGD stops its workloads and interrupts serving. Plan downtime or move traffic to another deployment before using this reset path.
+
+1. Prepare a replacement manifest, such as `deployment.yaml`, with the same DGD name and namespace. Remove `metadata.annotations["nvidia.com/grove-update-strategy"]` to use RollingRecreate.
+2. Delete the DGD and wait for its owned resources to be removed. Replace the example name and namespace with those from your manifest:
+
+   ```bash
+   DGD_NAME="my-dgd"
+   DEPLOY_NAMESPACE="default"
+   kubectl delete dynamographdeployment "$DGD_NAME" -n "$DEPLOY_NAMESPACE" --cascade=foreground --wait=true
+   ```
+
+3. Recreate the deployment from the prepared manifest:
+
+   ```bash
+   kubectl apply -f deployment.yaml
+   ```
+
+   Verify that the components become Ready and inference succeeds before restoring traffic.
+
+For PodCliqueScalingGroup (PCSG) components, deleting stuck member pods does not unblock this failure: Grove refills them at the old revision. For a standalone PodClique, deleting the stuck pod is a proposed workaround that has not been verified on a running cluster; do not rely on it as a confirmed recovery procedure.
+
 ## Optional next steps
 
 These are independent capabilities you opt into per workload. None are required for a working deployment.

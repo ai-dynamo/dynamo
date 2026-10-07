@@ -223,7 +223,10 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		relevantChange := old == nil || options.groveStrategyChanged
 		if old != nil {
 			oldBudget := provideroverride.EffectiveGroveMinAvailable(old)
-			relevantChange = relevantChange || !k8sptr.Equal(old.Replicas, spec.Replicas) || oldBudget != budget ||
+			oldReplicas := k8sptr.Deref(old.Replicas, 1)
+			// Replica-only edits warn when they introduce full-component disruption risk.
+			replicaRiskIntroduced := oldReplicas != replicas && (oldReplicas <= 0 || oldBudget < oldReplicas)
+			relevantChange = relevantChange || replicaRiskIntroduced || oldBudget != budget ||
 				!apiequality.Semantic.DeepEqual(old.PodTemplate, spec.PodTemplate) || !apiequality.Semantic.DeepEqual(old.Roles, spec.Roles)
 		}
 		if relevantChange && replicas > 0 && budget >= replicas && minimum > 0 {

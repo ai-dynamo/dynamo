@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -50,10 +51,12 @@ type groveWorkloadsReconciler struct {
 	renderer        *groveWorkloadRenderer
 	scaler          *groveScaler
 	stableResources *groveStableResourcesReconciler
+	coherentSupport *dynamo.GroveCoherentSupport
 }
 
 func newGroveWorkloadsReconciler(
 	kubeClient client.Client,
+	coherentSupport *dynamo.GroveCoherentSupport,
 	recorder events.EventRecorder,
 	rollout *dgdWorkerRolloutReconciler,
 	config *configv1alpha1.OperatorConfiguration,
@@ -61,9 +64,10 @@ func newGroveWorkloadsReconciler(
 	dockerSecretRetriever DockerSecretRetriever,
 ) *groveWorkloadsReconciler {
 	return &groveWorkloadsReconciler{
-		syncer:  newDGDResourceSyncer(kubeClient, recorder),
-		rollout: rollout,
-		reader:  kubeClient,
+		syncer:          newDGDResourceSyncer(kubeClient, recorder),
+		rollout:         rollout,
+		reader:          kubeClient,
+		coherentSupport: coherentSupport,
 		renderer: newGroveWorkloadRenderer(
 			kubeClient,
 			config,
@@ -108,6 +112,16 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return groveWorkloadResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
+	}
+
+	// Validate Coherent capability before any provider workload mutation.
+	if dynamo.GroveCoherentUpdateSelected(renderedPodCliqueSet.desired) {
+		if err := r.coherentSupport.Check(ctx); err != nil {
+			if errors.Is(err, dynamo.ErrGroveCoherentUnsupported) {
+				return groveWorkloadResult{}, failWorkloadProgram("grove_update_strategy_unsupported", err)
+			}
+			return groveWorkloadResult{}, err
+		}
 	}
 
 	// Converge the ordinary PCS before rollout or readiness observation.

@@ -22,6 +22,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -56,7 +57,11 @@ func newGroveWatchSetup(reader client.Reader, config *configv1alpha1.OperatorCon
 
 func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 	return ctrlBuilder.
-		Watches(&apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(s.mapGroveCRDToRequests)).
+		Watches(&apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(s.mapGroveCRDToRequests),
+			builder.OnlyMetadata,
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetName() == dynamo.GrovePodCliqueSetCRDName
+			}), predicate.ResourceVersionChangedPredicate{})).
 		Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(event.CreateEvent) bool { return true },
 			DeleteFunc:  func(event.DeleteEvent) bool { return true },
@@ -229,7 +234,7 @@ func mapPodCliqueSetToDGDRequest(pcs *grovev1alpha1.PodCliqueSet) []ctrl.Request
 
 // mapGroveCRDToRequests retries Grove DGDs when the installed strategy schema changes.
 func (s *groveWatchSetup) mapGroveCRDToRequests(ctx context.Context, obj client.Object) []ctrl.Request {
-	if obj.GetName() != "podcliquesets.grove.io" {
+	if obj.GetName() != dynamo.GrovePodCliqueSetCRDName {
 		return nil
 	}
 	// The reader's configured namespace scope bounds the affected deployments.

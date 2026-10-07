@@ -79,6 +79,7 @@ type DynamoGraphDeploymentReconciler struct {
 	DockerSecretRetriever DockerSecretRetriever
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
+	GroveCoherentSupport  *dynamo.GroveCoherentSupport
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete

@@ -4,9 +4,7 @@
 package dynamo
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"testing"
 
@@ -19,14 +17,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestGenerateGrovePodCliqueSet_CoherentStrategyPreservesTemplates(t *testing.T) {
@@ -188,55 +181,6 @@ func TestParseGroveUpdateStrategy(t *testing.T) {
 			} else {
 				require.Error(t, err)
 			}
-		})
-	}
-}
-
-func TestCheckGroveUpdateStrategySupport(t *testing.T) {
-	for _, test := range []struct {
-		name, version                         string
-		served, coherent, denied, wantSupport bool
-	}{
-		{name: "old CRD", version: "v1alpha1", served: true},
-		{name: "supported CRD", version: "v1alpha1", served: true, coherent: true, wantSupport: true},
-		{name: "unserved version", version: "v1alpha1", coherent: true},
-		{name: "different version", version: "v1beta1", served: true, coherent: true},
-		{name: "read forbidden", version: "v1alpha1", served: true, coherent: true, denied: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Install a PCS schema with the selected strategy capability")
-			scheme := runtime.NewScheme()
-			require.NoError(t, apiextensionsv1.AddToScheme(scheme))
-			values := []apiextensionsv1.JSON{{Raw: []byte(`"RollingRecreate"`)}, {Raw: []byte(`"OnDelete"`)}}
-			if test.coherent {
-				values = append(values, apiextensionsv1.JSON{Raw: []byte(`"Coherent"`)})
-			}
-			crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}, Spec: apiextensionsv1.CustomResourceDefinitionSpec{Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{Name: test.version, Served: test.served, Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Properties: map[string]apiextensionsv1.JSONSchemaProps{
-				"spec": {Properties: map[string]apiextensionsv1.JSONSchemaProps{"updateStrategy": {Properties: map[string]apiextensionsv1.JSONSchemaProps{"type": {Enum: values}}}}},
-			}}}}}}}
-			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(crd)
-			if test.denied {
-				builder.WithInterceptorFuncs(interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-					return apierrors.NewForbidden(schema.GroupResource{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}, crd.Name, errors.New("RBAC denied"))
-				}})
-			}
-			reader := builder.Build()
-			pcs := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{UpdateStrategy: &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.CoherentStrategy}}}
-
-			t.Log("Reject unsupported coherent intent without hiding permission errors")
-			err := CheckGroveUpdateStrategySupport(t.Context(), reader, pcs)
-			if test.denied {
-				require.True(t, apierrors.IsForbidden(err))
-				require.NotErrorIs(t, err, ErrGroveCoherentUnsupported)
-			} else if test.wantSupport {
-				require.NoError(t, err)
-			} else {
-				require.ErrorIs(t, err, ErrGroveCoherentUnsupported)
-			}
-
-			t.Log("Legacy strategies do not require capability reads")
-			pcs.Spec.UpdateStrategy = nil
-			require.NoError(t, CheckGroveUpdateStrategySupport(t.Context(), reader, pcs))
 		})
 	}
 }

@@ -62,7 +62,11 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("register LPR owner UID index: %w", err)
 	}
 
-	return ctrlBuilder.Watches(&apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(r.mapGroveCRDToLPXGraphDeployments)).Owns(&corev1.ConfigMap{}).
+	return ctrlBuilder.Watches(&apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(r.mapGroveCRDToLPXGraphDeployments),
+		builder.OnlyMetadata,
+		builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+			return obj.GetName() == dynamo.GrovePodCliqueSetCRDName
+		}), predicate.ResourceVersionChangedPredicate{})).Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
 		Owns(&grovev1alpha1.PodCliqueSet{}).
 		Watches(&grovev1alpha1.PodClique{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliquePredicate())).
@@ -209,7 +213,7 @@ func podCliqueScalingGroupPredicate() predicate.Funcs {
 
 // mapGroveCRDToLPXGraphDeployments retries owned workloads after a Grove schema upgrade.
 func (r *graphReconciler) mapGroveCRDToLPXGraphDeployments(ctx context.Context, obj client.Object) []ctrl.Request {
-	if obj.GetName() != "podcliquesets.grove.io" {
+	if obj.GetName() != dynamo.GrovePodCliqueSetCRDName {
 		return nil
 	}
 	deployments := &v1alpha1.LPXGraphDeploymentList{}

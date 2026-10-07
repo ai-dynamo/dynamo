@@ -39,12 +39,13 @@ type graphReconciler struct {
 	modelRegistry         lpx.ModelRegistry
 	config                *configv1alpha1.OperatorConfiguration
 	dockerSecretRetriever dynamo.SecretsRetriever
+	coherentSupport       *dynamo.GroveCoherentSupport
 
 	client.Client
 }
 
 // Setup registers the LPX controller and its dependencies when LPX is enabled.
-func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig, secrets dynamo.SecretsRetriever) error {
+func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig, secrets dynamo.SecretsRetriever, coherentSupport *dynamo.GroveCoherentSupport) error {
 	if !runtimeConfig.Gate.Enabled(features.LPX) {
 		return nil
 	}
@@ -55,6 +56,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		config:                config,
 		dockerSecretRetriever: secrets,
 		Client:                mgr.GetClient(),
+		coherentSupport:       coherentSupport,
 	}
 
 	if runtimeConfig.Gate.Enabled(features.Grove) {
@@ -86,7 +88,8 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
 
 // Reconcile observes dependencies once, then persists the final child status.
-// Cached misses and write conflicts are retried; no APIReader is used.
+// Workload observations use the cache; schema discovery uses the shared capability checker.
+// Cached misses and write conflicts are retried.
 // These observations are not an atomic snapshot; watches converge later edits.
 func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	deployment := &v1alpha1.LPXGraphDeployment{}
@@ -215,8 +218,11 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, err
 	}
 
-	if err := dynamo.CheckGroveUpdateStrategySupport(ctx, r.Client, desiredPCS); err != nil {
-		return ctrl.Result{}, err
+	// Reject unsupported Coherent intent before deleting or changing a workload.
+	if dynamo.GroveCoherentUpdateSelected(desiredPCS) {
+		if err := r.coherentSupport.Check(ctx); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Grove rolls compatible layouts; immutable structure or OnDelete builds replace the PCS.

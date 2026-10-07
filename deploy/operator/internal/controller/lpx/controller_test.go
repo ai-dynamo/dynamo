@@ -3117,12 +3117,14 @@ func newLPXTestReconciler(
 		LPX: configv1alpha1.LPXConfiguration{Enabled: true},
 	}
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, DRA: true, LPX: true}}
+	kubeClient := newLPXTestClient(t, seed...)
 	return &graphReconciler{
-		Client:        newLPXTestClient(t, seed...),
-		recorder:      recorder,
-		runtimeConfig: runtimeConfig,
-		modelRegistry: registry,
-		config:        config,
+		Client:          kubeClient,
+		coherentSupport: dynamo.NewGroveCoherentSupport(kubeClient, kubeClient),
+		recorder:        recorder,
+		runtimeConfig:   runtimeConfig,
+		modelRegistry:   registry,
+		config:          config,
 	}
 }
 

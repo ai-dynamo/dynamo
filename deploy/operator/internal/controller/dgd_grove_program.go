@@ -99,6 +99,7 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		lpxRestartProgress: newLPXRestartProgressResolver(r.Client),
 		workloads: newGroveWorkloadsReconciler(
 			r.Client,
+			r.GroveCoherentSupport,
 			r.Recorder,
 			rollout,
 			r.Config,
