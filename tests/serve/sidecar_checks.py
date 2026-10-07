@@ -2,25 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
-import time
 import uuid
-from pathlib import Path
-
-import requests
 
 from dynamo.runtime import Context
 from tests.router.helper import managed_runtime, poll_for_worker_instances
-from tests.utils.client import send_request
 from tests.utils.engine_metrics import EngineMetrics
-from tests.utils.payloads import ChatPayload
-from tests.utils.prometheus import find_metric_samples
-
-
-def _metrics(port: int) -> str:
-    response = requests.get(f"http://127.0.0.1:{port}/metrics", timeout=2)
-    response.raise_for_status()
-    return response.text
 
 
 def _assert_native_completion(
@@ -102,7 +88,7 @@ def assert_native_cancellation_and_recovery(
                     assert (
                         output["token_ids"] and output.get("finish_reason") is None
                     ), output
-                    await asyncio.to_thread(metrics.wait_for_scheduler, active=True)
+                    await asyncio.to_thread(metrics.wait_for_scheduler, is_active=True)
                     if is_explicit_stop:
                         context.stop_generating()
                         await asyncio.wait_for(drain_cancelled(stream), timeout=10)
@@ -123,43 +109,3 @@ def assert_native_cancellation_and_recovery(
                 await asyncio.to_thread(metrics.wait_for_scheduler)
 
     asyncio.run(native_checks())
-
-
-def _transferred(
-    backend: str, prefill_http_port: int, probe_path: Path | None = None
-) -> float:
-    if backend == "sglang":
-        return sum(
-            find_metric_samples(
-                _metrics(prefill_http_port), "sglang:kv_transfer_total_mb_sum"
-            )
-        )
-    assert probe_path is not None
-    return sum(
-        json.loads(line)["bytes"] for line in probe_path.read_text().splitlines()
-    )
-
-
-def assert_kv_transfer(
-    *,
-    backend: str,
-    payload: ChatPayload,
-    prefill_http_port: int,
-    prefill_metrics: EngineMetrics,
-    decode_metrics: EngineMetrics,
-    probe_path: Path | None = None,
-) -> None:
-    """Require a fresh completed transfer as well as a successful response."""
-
-    before = _transferred(backend, prefill_http_port, probe_path)
-    payload.body["messages"][0]["content"] = (
-        f"Request {uuid.uuid4()}. " + payload.body["messages"][0]["content"]
-    )
-    with send_request(payload.url(), payload.body) as response:
-        payload.process_response(response)
-    deadline = time.monotonic() + 10
-    while _transferred(backend, prefill_http_port, probe_path) <= before:
-        assert time.monotonic() < deadline, f"{backend}: no completed KV transfer"
-        time.sleep(0.05)
-    decode_metrics.wait_for_scheduler()
-    prefill_metrics.wait_for_scheduler()

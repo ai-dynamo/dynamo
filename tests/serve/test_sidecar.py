@@ -18,10 +18,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.sidecar_checks import (
-    assert_kv_transfer,
-    assert_native_cancellation_and_recovery,
-)
+from tests.serve.sidecar_checks import assert_native_cancellation_and_recovery
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
 from tests.utils.engine_process import EngineConfig
@@ -29,13 +26,14 @@ from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
     LONG_PROMPT_FOR_CACHING,
     chat_payload_default,
-    chat_payload_with_logprobs,
+    streaming_chat_payload_with_logprobs,
 )
 from tests.utils.payloads import (
     ChatPayload,
     DisaggregatedChatPayload,
     GuidedDecodingChatPayload,
     HttpCancellationPayload,
+    KvTransferPayload,
     StreamingChatPayload,
 )
 from tests.utils.port_utils import (
@@ -94,47 +92,54 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
 )
 
 
-def _disaggregated_chat_payload(
-    *, has_exact_accounting: bool = True
-) -> DisaggregatedChatPayload:
+def _disaggregated_chat_payload() -> DisaggregatedChatPayload:
     return DisaggregatedChatPayload(
         body={
             "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
-            "max_tokens": 8 if has_exact_accounting else 64,
+            "max_tokens": 64,
             "n": 1,
             "temperature": 0,
             "stream": False,
+            "nvext": {"extra_fields": ["worker_id"]},
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_num_choices=1,
+    )
+
+
+def _disaggregated_token_count_payload() -> DisaggregatedChatPayload:
+    return DisaggregatedChatPayload(
+        body={
+            "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
+            "max_tokens": 8,
+            "n": 1,
+            "temperature": 0,
+            "stream": False,
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
             "nvext": {
                 "extra_fields": [
                     "worker_id",
                     "completion_token_ids",
                     "prompt_token_ids",
                 ]
-                if has_exact_accounting
-                else ["worker_id"]
             },
-            **(
-                {"ignore_eos": True, "chat_template_kwargs": {"enable_thinking": False}}
-                if has_exact_accounting
-                else {}
-            ),
         },
-        repeat_count=1,
         expected_response=[],
         expected_log=[],
         expected_num_choices=1,
-        expected_finish_reason="length" if has_exact_accounting else None,
-        expected_completion_tokens=8 if has_exact_accounting else None,
+        expected_finish_reason="length",
+        expected_completion_tokens=8,
     )
 
 
 def _compatibility_payloads():
-    logprobs = chat_payload_with_logprobs(
+    logprobs = streaming_chat_payload_with_logprobs(
         content="Count from one to ten.",
         expected_response=[],
         max_tokens=8,
         top_logprobs=2,
-        stream=True,
         prompt_logprobs=2,
         extra_body={
             "ignore_eos": True,
@@ -144,12 +149,11 @@ def _compatibility_payloads():
     logprobs.expected_finish_reason = "length"
     logprobs.expected_completion_tokens = 8
     logprobs.min_token_chunks = 2
-    unicode_logprobs = chat_payload_with_logprobs(
+    unicode_logprobs = streaming_chat_payload_with_logprobs(
         content="Repeat these characters: café € 中文.",
         expected_response=[],
         max_tokens=8,
         top_logprobs=2,
-        stream=True,
         extra_body={
             "return_tokens_as_token_ids": False,
             "ignore_eos": True,
@@ -321,7 +325,7 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[_disaggregated_chat_payload(has_exact_accounting=False)],
+        request_payloads=[_disaggregated_chat_payload()],
     ),
     "vllm_disaggregated": EngineConfig(
         name="vllm_disaggregated",
@@ -342,7 +346,7 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[_disaggregated_chat_payload()],
+        request_payloads=[_disaggregated_token_count_payload()],
     ),
     "sglang_disaggregated": EngineConfig(
         name="sglang_disaggregated",
@@ -360,7 +364,7 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[_disaggregated_chat_payload(has_exact_accounting=False)],
+        request_payloads=[_disaggregated_chat_payload()],
     ),
 }
 
@@ -437,20 +441,27 @@ def test_serve_deployment(
                     engine_ports[4]
                 )
 
-            def validate_transfer():
-                payload = _disaggregated_chat_payload().with_model(config.model)
-                payload.port = config.frontend_port
-                assert_kv_transfer(
-                    backend=backend,
-                    payload=payload,
-                    prefill_http_port=int(engine_env["VLLM_PREFILL_HTTP_PORT"]),
-                    prefill_metrics=VllmMetricsChecker(
-                        f"http://127.0.0.1:{engine_env['VLLM_PREFILL_HTTP_PORT']}/metrics"
-                    ),
-                    decode_metrics=VllmMetricsChecker(
-                        f"http://127.0.0.1:{engine_env['VLLM_DECODE_HTTP_PORT']}/metrics"
-                    ),
-                    probe_path=probe_path,
+            if backend == "vllm":
+                transfer = _disaggregated_token_count_payload()
+                config = dataclasses.replace(
+                    config,
+                    request_payloads=[
+                        *config.request_payloads,
+                        KvTransferPayload(
+                            body=transfer.body,
+                            expected_response=[],
+                            expected_log=[],
+                            expected_finish_reason=transfer.expected_finish_reason,
+                            expected_completion_tokens=transfer.expected_completion_tokens,
+                            prefill_metrics=VllmMetricsChecker(
+                                f"http://127.0.0.1:{engine_env['VLLM_PREFILL_HTTP_PORT']}/metrics",
+                                transfer_probe=probe_path,
+                            ),
+                            decode_metrics=VllmMetricsChecker(
+                                f"http://127.0.0.1:{engine_env['VLLM_DECODE_HTTP_PORT']}/metrics"
+                            ),
+                        ),
+                    ],
                 )
 
             run_serve_deployment(
@@ -458,7 +469,6 @@ def test_serve_deployment(
                 request,
                 ports=dynamo_dynamic_ports,
                 extra_env=engine_env,
-                post_validation=validate_transfer if backend == "vllm" else None,
             )
     elif config.name == "vllm_aggregated":
         backend = config.name.removesuffix("_aggregated")

@@ -20,6 +20,7 @@ import math
 import re
 import struct
 import time
+import uuid
 import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -211,7 +212,7 @@ class HttpCancellationPayload(BasePayload):
                 if content:
                     break
             assert content, "Stream ended without generated content"
-            self.metrics.wait_for_scheduler(active=True)
+            self.metrics.wait_for_scheduler(is_active=True)
         finally:
             response.close()
         self.metrics.assert_cancelled(
@@ -359,6 +360,31 @@ class DisaggregatedChatPayload(ChatPayload):
             raise AssertionError(
                 f"Expected distinct prefill and decode workers: {dict(workers)!r}"
             )
+
+
+@dataclass
+class KvTransferPayload(DisaggregatedChatPayload):
+    """Require a fresh completed KV transfer for this frontend request."""
+
+    prefill_metrics: EngineMetrics = field(kw_only=True)
+    decode_metrics: EngineMetrics = field(kw_only=True)
+    _transfer_before: float | None = field(default=None, init=False, repr=False)
+
+    def before_request(self) -> None:
+        self.prefill_metrics.wait_for_scheduler()
+        self.decode_metrics.wait_for_scheduler()
+        self._transfer_before = self.prefill_metrics.transfer_progress()
+        message = self.body["messages"][0]
+        message["content"] = f"Request {uuid.uuid4()}. " + message["content"]
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        assert (
+            self._transfer_before is not None
+        ), "Missing pre-request transfer baseline"
+        self.prefill_metrics.wait_for_transfer(before=self._transfer_before)
+        self.decode_metrics.wait_for_scheduler()
+        self.prefill_metrics.wait_for_scheduler()
 
 
 class RouterNvextChatPayload(ChatPayload):

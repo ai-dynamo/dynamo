@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Engine observations used by cancellation checks on an otherwise idle deployment."""
+"""Engine observations for cancellation and completed KV transfer checks."""
 
+import json
 import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 
@@ -54,6 +56,20 @@ class EngineMetrics(ABC):
     def assert_recovered(self, *, before: float, max_tokens: int) -> None:
         """Verify the backend's progress counter observed the recovery request."""
 
+    @abstractmethod
+    def transfer_progress(self) -> float:
+        """Read a monotonic measure of completed KV transfers."""
+
+    def wait_for_transfer(self, *, before: float) -> None:
+        deadline = time.monotonic() + self.settle_timeout
+        while True:
+            progress = self.transfer_progress()
+            assert progress >= before, "Completed KV transfer counter reset"
+            if progress > before:
+                return
+            assert time.monotonic() < deadline, "No new completed KV transfer"
+            time.sleep(0.05)
+
     def _wait_for_progress(
         self, *, before: float, minimum: float, maximum: float
     ) -> None:
@@ -68,15 +84,15 @@ class EngineMetrics(ABC):
             ), f"Recovery progress did not reach {minimum}: {delta=}"
             time.sleep(0.05)
 
-    def wait_for_scheduler(self, *, active: bool = False) -> None:
+    def wait_for_scheduler(self, *, is_active: bool = False) -> None:
         deadline = time.monotonic() + self.settle_timeout
         while True:
             running, waiting = self.scheduler_counts()
-            ready = running > 0 if active else running == waiting == 0
-            if ready:
+            is_ready = running > 0 if is_active else running == waiting == 0
+            if is_ready:
                 return
             assert time.monotonic() < deadline, (
-                f"Scheduler active={active}: running={running}, waiting={waiting}; "
+                f"Scheduler is_active={is_active}: running={running}, waiting={waiting}; "
                 f"metrics={self.url}"
             )
             time.sleep(0.05)
@@ -92,7 +108,10 @@ class EngineMetrics(ABC):
         )
 
 
+@dataclass
 class VllmMetricsChecker(EngineMetrics):
+    transfer_probe: Path | None = None
+
     def scheduler_counts(self) -> tuple[float, float]:
         body = self.scrape()
         return (
@@ -109,6 +128,13 @@ class VllmMetricsChecker(EngineMetrics):
 
     def assert_recovered(self, *, before: float, max_tokens: int) -> None:
         self._wait_for_progress(before=before, minimum=max_tokens, maximum=max_tokens)
+
+    def transfer_progress(self) -> float:
+        assert self.transfer_probe is not None, "Missing completed-transfer probe"
+        return sum(
+            json.loads(line)["bytes"]
+            for line in self.transfer_probe.read_text().splitlines()
+        )
 
 
 @dataclass
@@ -147,3 +173,6 @@ class SGLangMetricsChecker(EngineMetrics):
     def assert_recovered(self, *, before: float, max_tokens: int) -> None:
         # Overlap scheduling can count an additional iteration after finishing.
         self._wait_for_progress(before=before, minimum=max_tokens - 1, maximum=math.inf)
+
+    def transfer_progress(self) -> float:
+        return sum(self.samples(self.scrape(), "sglang:kv_transfer_total_mb_sum"))
