@@ -53,6 +53,7 @@ def setup(monkeypatch, update):
 
 
 def test_completed_inflight_full_blocks_publish_after_gpu_completion(monkeypatch):
+    monkeypatch.setattr(hooks, "_INFLIGHT_PUBLISH_STEPS", 1)
     first = SimpleNamespace(
         block_id=1,
         block_hash=b"first",
@@ -118,6 +119,80 @@ def test_completed_inflight_full_blocks_publish_after_gpu_completion(monkeypatch
 
     assert count == 1
     assert published == [([2], {"active": False, "release_duplicates": False})]
+
+
+def test_inflight_publications_are_batched_and_flushed_before_frees(monkeypatch):
+    """Completed blocks queue up; any free publishes them first."""
+    monkeypatch.setattr(hooks, "_INFLIGHT_PUBLISH_STEPS", 3)
+    published = []
+    monkeypatch.setattr(
+        hooks,
+        "_publish_hbm_blocks",
+        lambda _pool, blocks, **_kw: published.append(
+            sorted(block.block_id for block in blocks)
+        )
+        or True,
+    )
+    blocks = [
+        SimpleNamespace(
+            block_id=slot,
+            block_hash=bytes([slot]),
+            block_hash_num_tokens=16 * slot,
+            ref_cnt=1,
+            is_null=False,
+        )
+        for slot in range(1, 4)
+    ]
+    pool = SimpleNamespace(
+        _gms_kv_directory=SimpleNamespace(enabled=True, authoritative=True),
+        _gms_kv_leases_by_block={slot: KVLease(slot, 7) for slot in range(1, 4)},
+        _gms_kv_directory_slot_by_hash={},
+    )
+    request = SimpleNamespace(
+        num_computed_tokens=0, num_in_flight_tokens=0, is_finished=lambda: False
+    )
+    scheduler = SimpleNamespace(
+        kv_cache_manager=SimpleNamespace(
+            block_pool=pool,
+            coordinator=SimpleNamespace(
+                single_type_managers=[
+                    SimpleNamespace(block_size=16, req_to_blocks={"r": blocks})
+                ]
+            ),
+        ),
+        requests={"r": request},
+    )
+    output = SimpleNamespace(num_scheduled_tokens={"r": 16})
+
+    for committed in (16, 32):
+        request.num_computed_tokens = committed
+        hooks._publish_completed_inflight_blocks(scheduler, output)
+    assert published == []
+
+    # A free of any block publishes the queue before blocks can be reused.
+    flushed = []
+
+    class Stop(Exception):
+        pass
+
+    flush = hooks._flush_inflight_publications
+
+    def flush_then_stop(target):
+        flushed.append(flush(target))
+        raise Stop
+
+    monkeypatch.setattr(hooks, "_flush_inflight_publications", flush_then_stop)
+    pool._gms_completed_frees = [[blocks[0]]]
+    with pytest.raises(Stop):
+        hooks._flush_completed_frees(pool)
+    assert published == [[1, 2]] and flushed == [2]
+
+    request.num_computed_tokens = 48
+    monkeypatch.setattr(hooks, "_flush_inflight_publications", flush)
+    hooks._publish_completed_inflight_blocks(scheduler, output)
+    hooks._publish_completed_inflight_blocks(scheduler, output)
+    hooks._publish_completed_inflight_blocks(scheduler, output)
+    assert published == [[1, 2], [3]]
 
 
 def test_incremental_publication_does_not_release_live_duplicate():
