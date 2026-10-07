@@ -100,6 +100,7 @@ async def test_run_one_does_not_clobber_an_operator_set_backend(monkeypatch) -> 
     assert os.environ["DYN_HTTP_BACKEND"] == "aiohttp"
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("labels", "expected_exit"),
@@ -143,8 +144,6 @@ async def test_sweep_exit_status_flags_a_pair_that_measured_nothing(
 
 
 class _LoopbackResolver:
-    """Connect-time DNS that answers every host name with 127.0.0.1."""
-
     def __init__(self, *args, **kwargs) -> None:
         pass
 
@@ -164,6 +163,8 @@ class _LoopbackResolver:
         pass
 
 
+@pytest.mark.integration
+@pytest.mark.timeout(30)
 def test_main_reaches_the_local_media_server(monkeypatch) -> None:
     """The media server runs on localhost, which the fetch path refuses by
     default. The sweep used to fail every request there and still exit 0.
@@ -187,9 +188,6 @@ def test_main_reaches_the_local_media_server(monkeypatch) -> None:
         def log_message(self, *args) -> None:
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
     @contextlib.contextmanager
     def fake_media_server(**kwargs):
         yield f"http://media.sweep.test:{server.server_port}/test"
@@ -211,6 +209,11 @@ def test_main_reaches_the_local_media_server(monkeypatch) -> None:
     # the test, which also removes the value that main() writes.
     monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "")
     monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL")
+    # Start the server last, so that no setup step can fail and leave it
+    # running.
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     try:
         exit_status = sweep.main(
             [
@@ -227,6 +230,7 @@ def test_main_reaches_the_local_media_server(monkeypatch) -> None:
     finally:
         server.shutdown()
         server.server_close()
+        thread.join(timeout=5)
 
     assert len(hits) == 3
     assert exit_status == 0

@@ -38,6 +38,8 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    # Real connections to stub servers on loopback.
+    pytest.mark.timeout(30),
 ]
 
 _PROXY_HOST = "proxy.test"
@@ -47,8 +49,6 @@ _STRICT = UrlValidationPolicy(allow_http=True, allow_private_ips=False)
 
 
 class _LoopbackInner:
-    """Connect-time DNS that answers every host name with 127.0.0.1."""
-
     def __init__(self, *args, **kwargs) -> None:
         pass
 
