@@ -8,23 +8,38 @@ hide-toc: true
 ---
 
 import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
 
 Choose a cloud or integration example, then filter its available inference backends.
 
-<ExamplesCatalog>
+<ExamplesCatalog topicFilter={false}>
 
 <div className="dynamo-example-card" data-example="cloud-deployments" data-topic="cloud-and-integrations" data-topic-label="Cloud and Integrations" data-targets="kubernetes:vllm kubernetes:sglang" data-keywords="agg.yaml disagg-p5.yaml disagg-tcp.yaml disagg.yaml">
-<span className="dynamo-example-eyebrow">Cloud and Integrations · Example</span>
-### [Cloud Deployments](cloud-deployments.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="cloud" /></span>
+
+### Cloud Deployments
+
 DynamoGraphDeployment manifests for Amazon EKS and Google GKE.
-<div className="dynamo-example-badges"><span>Kubernetes: vLLM, SGLang</span></div>
+
+<ExampleTargets targets="kubernetes:vllm kubernetes:sglang" />
+
+<a className="dynamo-example-card-link" href="cloud-deployments.mdx">Open Cloud Deployments example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="batch-gateway" data-topic="cloud-and-integrations" data-topic-label="Cloud and Integrations" data-targets="kubernetes:vllm" data-keywords="dynamo.yaml">
-<span className="dynamo-example-eyebrow">Cloud and Integrations · Example</span>
-### [llm-d Batch Gateway](batch-gateway.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="boxes-stacked" /></span>
+
+### llm-d Batch Gateway
+
 Batch inference on a dedicated Dynamo worker pool.
-<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span></div>
+
+<ExampleTargets targets="kubernetes:vllm" />
+
+<a className="dynamo-example-card-link" href="batch-gateway.mdx">Open llm-d Batch Gateway example</a>
+
 </div>
 
 </ExamplesCatalog>

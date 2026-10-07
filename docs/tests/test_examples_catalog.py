@@ -29,6 +29,20 @@ SECTION_OVERVIEWS = {
 LANDING_PAGES = {"overview", "diffusion-overview", *SECTION_OVERVIEWS}
 EMBED = re.compile(r'<Code\s+src="([^"]+)"')
 CARD = re.compile(r'<div className="dynamo-example-card" ([^>]+)>')
+CARD_BLOCK = re.compile(
+    r'<div className="dynamo-example-card" ([^>]+)>\n(.*?)\n</div>\n', re.DOTALL
+)
+# Blank lines keep each part a separate MDX block, which Fern needs to resolve
+# the card link. The link stays out of the heading because Fern's heading click
+# handler copies the heading anchor instead of following a link inside it.
+CARD_BODY = re.compile(
+    r'\n<span className="dynamo-example-icon"><Icon icon="(?P<icon>[a-z0-9-]+)" /></span>\n\n'
+    r'(?:<p className="dynamo-example-topic">(?P<topic>[^<]+)</p>\n\n)?'
+    r"### (?P<title>[^\n\[\]<>]+)\n\n"
+    r"(?P<description>[^\n<]+)\n\n"
+    r'<ExampleTargets targets="(?P<targets>[^"]+)" />\n\n'
+    r'<a className="dynamo-example-card-link" href="(?P<href>[^"]+)">(?P<link>[^<]+)</a>\n'
+)
 ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
 
 
@@ -41,6 +55,16 @@ def cards() -> dict[str, dict[str, str]]:
         result[key] = attributes
     assert result, "empty examples catalog"
     return result
+
+
+def card_blocks(page: Path) -> list[tuple[dict[str, str], str]]:
+    text = page.read_text()
+    blocks = [
+        (dict(ATTRIBUTE.findall(attributes)), body)
+        for attributes, body in CARD_BLOCK.findall(text)
+    ]
+    assert len(blocks) == len(CARD.findall(text)), page
+    return blocks
 
 
 def embeds(page: Path) -> set[Path]:
@@ -71,7 +95,7 @@ def test_catalog_pages_and_navigation_agree() -> None:
     overview = (EXAMPLES / "overview.mdx").read_text()
     for name in pages:
         assert f"pages/recipes/examples/{name}.mdx" in paths
-        assert re.search(rf"\]\({re.escape(name)}\.mdx\)", overview)
+        assert f'<a className="dynamo-example-card-link" href="{name}.mdx">' in overview
     for name in LANDING_PAGES:
         assert f"pages/recipes/examples/{name}.mdx" in paths
     assert "[Diffusion Overview](diffusion-overview.mdx)" in overview
@@ -81,18 +105,17 @@ def test_catalog_pages_and_navigation_agree() -> None:
 
 
 def test_subsection_overviews_mirror_the_main_catalog_cards() -> None:
-    def normalize(body: str) -> str:
-        return re.sub(r">\s+<", "><", " ".join(body.split()))
+    # Only the mixed-topic main overview labels each card with its topic.
+    def without_topic(attributes: dict[str, str], body: str) -> str:
+        label = f'<p className="dynamo-example-topic">{attributes["data-topic-label"]}</p>\n\n'
+        assert body.count(label) == 1, attributes["data-example"]
+        return body.replace(label, "")
 
-    source = (EXAMPLES / "overview.mdx").read_text()
+    source = EXAMPLES / "overview.mdx"
+    assert source.read_text().count("<ExamplesCatalog>") == 1
     source_cards = {
-        attributes["data-example"]: (attributes, normalize(body))
-        for raw_attributes, body in re.findall(
-            r'<div className="dynamo-example-card" ([^>]+)>(.*?)</div>\s*</div>',
-            source,
-            re.DOTALL,
-        )
-        for attributes in [dict(ATTRIBUTE.findall(raw_attributes))]
+        attributes["data-example"]: (attributes, without_topic(attributes, body))
+        for attributes, body in card_blocks(source)
     }
     assert set(source_cards) == set(cards())
 
@@ -112,15 +135,10 @@ def test_subsection_overviews_mirror_the_main_catalog_cards() -> None:
     for page_name, topic in SECTION_OVERVIEWS.items():
         page = EXAMPLES / f"{page_name}.mdx"
         text = page.read_text()
-        assert text.count("<ExamplesCatalog>") == 1
-        entries = [
-            (dict(ATTRIBUTE.findall(raw_attributes)), normalize(body))
-            for raw_attributes, body in re.findall(
-                r'<div className="dynamo-example-card" ([^>]+)>(.*?)</div>\s*</div>',
-                text,
-                re.DOTALL,
-            )
-        ]
+        # A single-topic page hides the Topic filter, as it does the topic label.
+        assert text.count("<ExamplesCatalog topicFilter={false}>") == 1
+        assert "dynamo-example-topic" not in text
+        entries = card_blocks(page)
         expected = {
             name: card
             for name, card in source_cards.items()
@@ -151,6 +169,80 @@ def test_subsection_overviews_mirror_the_main_catalog_cards() -> None:
         for name, metadata in cards().items()
         if metadata["data-topic"] != "diffusion"
     }
+
+
+@pytest.mark.parametrize("page_name", ["overview", *SECTION_OVERVIEWS])
+def test_catalog_cards_share_the_icon_chip_and_link_layout(page_name: str) -> None:
+    page = EXAMPLES / f"{page_name}.mdx"
+    text = page.read_text()
+    assert 'import { ExampleTargets } from "@/components/ExampleTargets";' in text
+    for retired in ("dynamo-example-eyebrow", "dynamo-example-badges", "· Example"):
+        assert retired not in text, retired
+    icons: dict[str, list[str]] = {}
+    for attributes, body in card_blocks(page):
+        name = attributes["data-example"]
+        card = CARD_BODY.fullmatch(body)
+        assert card, f"{page_name}: {name}"
+        assert card["targets"] == attributes["data-targets"], name
+        assert card["href"] == f"{name}.mdx", name
+        assert card["link"] == f"Open {card['title']} example", name
+        assert card["topic"] == (
+            attributes["data-topic-label"] if page_name == "overview" else None
+        ), name
+        icons.setdefault(attributes["data-topic"], []).append(card["icon"])
+    for topic, names in icons.items():
+        # Cards that share a topic page need distinguishable icons.
+        assert len(names) == len(set(names)), (page_name, topic)
+
+
+def test_card_chips_cover_every_declared_backend_and_platform() -> None:
+    options = (FERN / "components/example-options.ts").read_text()
+
+    def keys(name: str) -> set[str]:
+        (block,) = re.findall(
+            rf"export const {name}: Record<string, string> = \{{(.*?)\}};",
+            options,
+            re.DOTALL,
+        )
+        return set(re.findall(r"^\s*(\w+):", block, re.MULTILINE))
+
+    backends, platforms = keys("EXAMPLE_BACKENDS"), keys("EXAMPLE_PLATFORMS")
+    targets = [
+        target.split(":")
+        for card in cards().values()
+        for target in card["data-targets"].split()
+    ]
+    assert {backend for _, backend in targets} <= backends
+    assert {platform for platform, _ in targets} == platforms
+    chips = (FERN / "components/ExampleTargets.tsx").read_text()
+    for platform in platforms:
+        assert re.search(rf"^\s*{platform}: \(", chips, re.MULTILINE), platform
+    assert 'className="dynamo-example-sr"' in chips
+    assert 'aria-hidden="true"' in chips
+    styles = (FERN / "components/ExamplesCatalog.tsx").read_text()
+    # Inference engines get the diffusion catalog's tints; test backends stay neutral.
+    for backend in backends - {"mocker", "sample", "custom"}:
+        assert f'.dynamo-example-chip[data-backend="{backend}"]' in styles, backend
+
+
+def test_examples_catalog_is_styled_accessible_and_responsive() -> None:
+    component = (FERN / "components/ExamplesCatalog.tsx").read_text()
+    # Development examples keep the neutral default accent.
+    for topic in {card["data-topic"] for card in cards().values()} - {
+        "development-examples"
+    }:
+        assert f'.dynamo-example-card[data-topic="{topic}"]' in component, topic
+    assert ".dark .dynamo-examples" in component
+    assert ".dynamo-example-card-link:focus-visible" in component
+    assert "prefers-reduced-motion" in component
+    assert "@media (max-width:" in component
+    assert ".dynamo-example-card[hidden] { display: none !important; }" in component
+    assert 'role="search"' in component
+    assert 'aria-atomic="true"' in component
+    assert "topicFilter = true" in component
+    assert "<PlatformGlyph" in component
+    assert "dynamo-example-eyebrow" not in component
+    assert "dynamo-example-badges" not in component
 
 
 def variants(page: Path) -> list[dict[str, str]]:
@@ -593,6 +685,15 @@ def test_experimental_diffusion_preserves_image_and_cache_requirements(
         assert env["HF_HUB_CACHE"] == mount["mountPath"] + "/hub"
 
 
+DIFFUSION_MODALITY_LABELS = {
+    "text-to-image": "Text → Image",
+    "text-to-text": "Text → Text",
+    "text-to-audio": "Text → Audio",
+    "text-to-video": "Text → Video",
+    "image-to-video": "Image → Video",
+}
+
+
 def diffusion_cards() -> list[tuple[dict[str, str], str]]:
     text = (EXAMPLES / "diffusion-overview.mdx").read_text()
     return [
@@ -647,14 +748,19 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         model = args[args.index(flag) + 1]
         models.add(model)
         assert attributes["data-model"] == model
-        assert model in body
+        assert "dynamo-diffusion-model" not in body
+        (modality,) = re.findall(
+            r'<p className="dynamo-diffusion-modality">([^<]+)</p>', body
+        )
+        assert modality == DIFFUSION_MODALITY_LABELS[attributes["data-case"]]
+        assert body.count("dynamo-diffusion-modality") == 1
         (href,) = re.findall(r'href="([^"]+)"', body)
         assert href == f"{source_pages[source]}.mdx"
         assert body.count("<a ") == 1
         assert "aria-label=" in body
         assert 'className="dynamo-diffusion-name"' in body
         assert "dynamo-diffusion-card-footer" not in body
-        header, _ = body.split('<p className="dynamo-diffusion-model">', 1)
+        header, _ = body.split('<p className="dynamo-diffusion-modality">', 1)
         (arrow,) = re.findall(
             r'<span className="dynamo-diffusion-card-arrow" aria-hidden="true">(.*?)</span>',
             header,
