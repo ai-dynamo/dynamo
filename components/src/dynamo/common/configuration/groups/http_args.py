@@ -105,8 +105,8 @@ class HttpConfigBase(ConfigBase):
     # Per-backend semantics:
     #   httpx → ``Timeout.read`` (``connect`` / ``pool`` stay independent
     #           so a stuck handshake or saturated pool still fast-fails).
-    #   aiohttp → ``ClientTimeout.total`` (aiohttp has no separate read
-    #             component; the override caps the whole request).
+    #   aiohttp → ``ClientTimeout.total``: the override caps the whole
+    #             request. It does not change the caller's ``read_timeout``.
     per_call_timeout_override: Optional[float]
 
     # TCP+TLS-handshake budget in seconds. Independent of the per-call /
