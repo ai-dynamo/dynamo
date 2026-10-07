@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{% set dgd = base.dynamographdeployment | only %}
+{% for name, service in dgd.spec.services.items() if service.componentType == "worker" %}
+{% set gpu_count = service.resources.limits.gpu | int %}
+{% set claim_name = dgd.metadata.name ~ '-' ~ (name | lower | replace('_', '-')) ~ '-a4-devices' %}
+{% if not loop.first %}
+---
+{% endif %}
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ claim_name }}
+spec:
+  spec:
+    devices:
+      constraints:
+      {% for index in range(gpu_count) %}
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-{{ index }}
+            - rdma-{{ index }}
+      {% endfor %}
+      requests:
+      {% for index in range(gpu_count) %}
+        - name: gpu-{{ index }}
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-{{ index }}
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
+      {% endfor %}
+{% endfor %}
