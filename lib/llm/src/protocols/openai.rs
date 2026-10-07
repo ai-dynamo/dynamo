@@ -25,6 +25,8 @@ pub mod embeddings;
 pub mod generate;
 pub mod images;
 #[cfg(test)]
+mod media_fixtures;
+#[cfg(test)]
 mod media_schemas;
 pub mod models;
 pub mod pooling;

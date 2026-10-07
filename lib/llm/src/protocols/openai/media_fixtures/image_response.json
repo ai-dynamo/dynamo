@@ -1,0 +1,29 @@
+{
+  "created": 1700000000,
+  "data": [
+    {
+      "url": "https://example.com/image-1.webp",
+      "revised_prompt": "A tabby cat on a sunny windowsill."
+    },
+    {
+      "b64_json": "UklGRg=="
+    }
+  ],
+  "background": "transparent",
+  "output_format": "webp",
+  "size": "1024x1024",
+  "quality": "high",
+  "usage": {
+    "input_tokens": 10,
+    "total_tokens": 30,
+    "output_tokens": 20,
+    "output_token_details": {
+      "text_tokens": 0,
+      "image_tokens": 20
+    },
+    "input_tokens_details": {
+      "text_tokens": 10,
+      "image_tokens": 0
+    }
+  }
+}
