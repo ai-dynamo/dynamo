@@ -60,7 +60,9 @@ use crate::local_model::runtime_config::{
     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
-use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
+use crate::local_model::runtime_config::{
+    SGLANG_GENERATE_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
+};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -1696,6 +1698,9 @@ pub struct OpenAIPreprocessor {
     /// variants are initialized independently on demand.
     embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
+    /// Exclusive bound for client token ids (`nvext.token_data`, token
+    /// prompts, and embedding token input), from `token_id_bound`.
+    token_id_bound: Option<usize>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
@@ -1755,6 +1760,35 @@ pub struct OpenAIPreprocessor {
 }
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+
+/// Exclusive bound for client token ids: the larger of the model's vocab size
+/// and the tokenizer's largest id plus one, so ids that only the model or only
+/// the tokenizer has (e.g. an image placeholder) stay valid. A zero counts as
+/// unknown. `None` means no check.
+fn token_id_bound(model_vocab: Option<usize>, tokenizer_bound: Option<usize>) -> Option<usize> {
+    model_vocab
+        .into_iter()
+        .chain(tokenizer_bound)
+        .filter(|&size| size > 0)
+        .max()
+}
+
+/// Reject token ids `>= bound` (client 400). `None` means no check.
+/// `field` names the request field in the error.
+fn ensure_token_ids_in_vocab(
+    field: &str,
+    tokens: &[crate::protocols::TokenIdType],
+    bound: Option<usize>,
+) -> anyhow::Result<()> {
+    if let Some(bound) = bound
+        && let Some(&bad) = tokens.iter().find(|&&t| t as usize >= bound)
+    {
+        return Err(invalid_argument_error(format!(
+            "{field} token id {bad} is out of range (must be < {bound})"
+        )));
+    }
+    Ok(())
+}
 
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 fn resolve_qwen_video_processor_contract(
@@ -2097,6 +2131,19 @@ impl OpenAIPreprocessor {
                 reasoning_parser,
                 request.chat_template_args(),
             )
+    }
+
+    fn request_requires_reasoning<R: OAIChatLikeRequest>(
+        request: &R,
+        reasoning_parser: Option<&str>,
+        has_thinking_budget: bool,
+    ) -> bool {
+        Self::guided_output_requires_reasoning(request, reasoning_parser)
+            || (has_thinking_budget
+                && Self::sglang_effective_reasoning_enabled(
+                    reasoning_parser,
+                    request.chat_template_args(),
+                ))
     }
 
     fn structured_response_supports_sglang_reasoning_gate(reasoning_parser: Option<&str>) -> bool {
@@ -2459,6 +2506,15 @@ impl OpenAIPreprocessor {
             );
         };
         let model_info = model_info.get_model_info()?;
+        // The tokenizer trait exposes no ids, so the card keeps the bound.
+        let tokenizer_id_bound = mdc.tokenizer_id_bound().unwrap_or_else(|| {
+            tracing::warn!(
+                model = %mdc.display_name,
+                "Tokenizer not loaded from this model card: only vocab_size bounds client token ids"
+            );
+            None
+        });
+        let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer_id_bound);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
@@ -2778,6 +2834,7 @@ impl OpenAIPreprocessor {
             tokenizer,
             embedding_tokenizers,
             model_info,
+            token_id_bound,
             mdcsum,
             lora_name,
             runtime_config,
@@ -3052,6 +3109,20 @@ impl OpenAIPreprocessor {
             builder.eos_token_ids(eos_token_ids);
         }
 
+        let has_thinking_budget = stop_conditions.max_thinking_tokens.is_some();
+        if has_thinking_budget
+            && self
+                .runtime_config
+                .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
+            && Self::has_structured_response_format(request)
+            && !Self::structured_response_supports_sglang_reasoning_gate(
+                self.runtime_config.reasoning_parser.as_deref(),
+            )
+        {
+            return Err(invalid_argument_error(
+                "thinking_token_budget is not supported with GPT-OSS structured output on SGLang",
+            ));
+        }
         builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
 
@@ -3138,11 +3209,11 @@ impl OpenAIPreprocessor {
             builder.extra_args(Some(extra_args));
         }
 
-        // SGLang needs this request-scoped signal in addition to its native
-        // reasoning parser so guided JSON starts after the reasoning boundary.
-        builder.require_reasoning(Self::guided_output_requires_reasoning(
+        // SGLang needs this signal for guided output and per-request budgets.
+        builder.require_reasoning(Self::request_requires_reasoning(
             request,
             self.runtime_config.reasoning_parser.as_deref(),
+            has_thinking_budget,
         ));
 
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
@@ -4580,6 +4651,8 @@ impl OpenAIPreprocessor {
                             }
                         }
                     }
+                    // A token prompt skips the tokenizer, so bound its ids here.
+                    ensure_token_ids_in_vocab("prompt", &tokens_out, self.token_id_bound)?;
                 }
             }
             PromptInput::Text(_) => {
@@ -4617,6 +4690,12 @@ impl OpenAIPreprocessor {
                             let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
                                 token_data
                             {
+                                // token_data skips the tokenizer, so bound its ids here.
+                                ensure_token_ids_in_vocab(
+                                    "nvext.token_data",
+                                    tokens,
+                                    self.token_id_bound,
+                                )?;
                                 tracing::info!(
                                     token_count = tokens.len(),
                                     first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
@@ -4824,10 +4903,15 @@ impl OpenAIPreprocessor {
                     .map(|encoding| encoding.token_ids().to_vec())
                     .collect()
             }
+            // Token input skips the tokenizer, so bound its ids here.
             dynamo_protocols::types::EmbeddingInput::IntegerArray(token_ids) => {
+                ensure_token_ids_in_vocab("input", token_ids, self.token_id_bound)?;
                 vec![token_ids.clone()]
             }
             dynamo_protocols::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
+                for token_ids in token_arrays {
+                    ensure_token_ids_in_vocab("input", token_ids, self.token_id_bound)?;
+                }
                 token_arrays.clone()
             }
         };
@@ -5818,6 +5902,7 @@ impl OpenAIPreprocessor {
             metrics_template: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
             nvext: Option<serde_json::Value>,
+            prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
             response_template: Option<dynamo_protocols::types::CreateChatCompletionStreamResponse>,
         }
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
@@ -5871,10 +5956,9 @@ impl OpenAIPreprocessor {
 
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer Dynamo metadata)
         let jail_input = stream.map(move |mut a| {
-            let has_metadata = a
-                .data
-                .as_ref()
-                .is_some_and(|nv| nv.llm_metrics.is_some() || nv.nvext.is_some());
+            let has_metadata = a.data.as_ref().is_some_and(|nv| {
+                nv.llm_metrics.is_some() || nv.nvext.is_some() || nv.prompt_logprobs.is_some()
+            });
             if has_metadata {
                 let mut p = pending_in
                     .lock()
@@ -5899,6 +5983,9 @@ impl OpenAIPreprocessor {
                         p.metrics_template = Some(metrics);
                     }
                     merge_response_nvext(&mut p.nvext, nv.nvext.take());
+                    if let Some(prompt_logprobs) = nv.prompt_logprobs.take() {
+                        p.prompt_logprobs = Some(prompt_logprobs);
+                    }
                 }
             }
             if is_glm47 && let Some(data) = &a.data {
@@ -6003,6 +6090,7 @@ impl OpenAIPreprocessor {
             // nvext must wait for a non-payload-usage output with a choice.
             let has_choices = a.data.as_ref().is_some_and(|data| !data.choices.is_empty());
             let is_payload_usage = a.event.as_deref() == Some(ANNOTATION_PAYLOAD_USAGE);
+            let mut prompt_logprobs = None;
             let (llm_metrics, nvext) = a.data.as_ref().map_or((None, None), |_| {
                 let mut p = pending_out
                     .lock()
@@ -6014,6 +6102,7 @@ impl OpenAIPreprocessor {
                     metrics
                 });
                 let nvext = if has_choices && !is_payload_usage {
+                    prompt_logprobs = p.prompt_logprobs.take();
                     p.nvext.take()
                 } else {
                     None
@@ -6024,6 +6113,7 @@ impl OpenAIPreprocessor {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext,
+                    prompt_logprobs,
                     llm_metrics,
                 }),
                 id: a.id,
@@ -6130,6 +6220,7 @@ impl OpenAIPreprocessor {
                     p.metrics_template = None;
                     p.chunk_tokens = 0;
                     p.nvext = None;
+                    p.prompt_logprobs = None;
                     p.response_template = None;
                 }
                 yield error;
@@ -6147,13 +6238,15 @@ impl OpenAIPreprocessor {
                     metrics
                 });
                 let nvext = p.nvext.take();
-                if llm_metrics.is_none() && nvext.is_none() {
+                let prompt_logprobs = p.prompt_logprobs.take();
+                if llm_metrics.is_none() && nvext.is_none() && prompt_logprobs.is_none() {
                     None
                 } else {
                     p.response_template.take().map(|inner| Annotated {
                         data: Some(NvCreateChatCompletionStreamResponse {
                             inner,
                             nvext,
+                            prompt_logprobs,
                             llm_metrics,
                         }),
                         id: None,
@@ -7658,6 +7751,327 @@ impl
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
 
 #[cfg(test)]
+mod token_data_tests {
+    use super::*;
+    use crate::common::checked_file::CheckedFile;
+    use crate::model_card::{ModelDeploymentCard, ModelInfoType, TokenizerKind};
+
+    /// `config.json` has `vocab_size` 128256; the mock tokenizer is smaller.
+    const LLAMA_DIR: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    /// The tokenizer has 32000 ids.
+    const TINYLLAMA_DIR: &str = "tests/data/sample-models/TinyLlama_v1.1";
+    const NO_VOCAB_SIZE: &str = r#"{"architectures":[],"model_type":"","eos_token_id":2}"#;
+    /// Ids 0 and 2 only, as in the HF `incomplete_vocab` test.
+    const GAP_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[],
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"b":2},"unk_token":"<unk>"}}"#;
+    /// Ids 0 and 1, and an added token that HF gives id 2.
+    const ADDED_TOKEN_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[{"id":2,
+        "content":"<x>","special":true,"single_word":false,"lstrip":false,"rstrip":false,
+        "normalized":false}],
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"a":1},"unk_token":"<unk>"}}"#;
+
+    /// TinyLlama's card with the given `config.json` and, if set, `tokenizer.json`.
+    fn tinyllama_card(
+        config: &str,
+        tokenizer: Option<&str>,
+    ) -> (ModelDeploymentCard, tempfile::TempDir) {
+        let mut mdc = ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, config).unwrap();
+        mdc.model_info = Some(ModelInfoType::HfConfigJson(
+            CheckedFile::from_disk(&path).unwrap(),
+        ));
+        if let Some(tokenizer) = tokenizer {
+            let path = dir.path().join("tokenizer.json");
+            std::fs::write(&path, tokenizer).unwrap();
+            mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                CheckedFile::from_disk(&path).unwrap(),
+            ));
+        }
+        (mdc, dir)
+    }
+
+    /// TinyLlama's tokenizer with the given `config.json`.
+    fn tinyllama_with_config(config: &str) -> (Arc<OpenAIPreprocessor>, tempfile::TempDir) {
+        let (mdc, dir) = tinyllama_card(config, None);
+        (OpenAIPreprocessor::new(mdc).unwrap(), dir)
+    }
+
+    fn request(token_data: &[u32]) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {"token_data": token_data}
+        }))
+        .unwrap()
+    }
+
+    async fn assert_rejected(preprocessor: &OpenAIPreprocessor, token_data: &[u32]) {
+        let error = preprocessor
+            .preprocess_request(&request(token_data), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
+    }
+
+    async fn assert_forwarded(preprocessor: &OpenAIPreprocessor, token_data: &[u32]) {
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request(token_data), None)
+            .await
+            .unwrap();
+        assert_eq!(preprocessed.token_ids.as_slice(), token_data);
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_model_vocab() {
+        let mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_rejected(&preprocessor, &[1, 128256]).await;
+        assert_rejected(&preprocessor, &[u32::MAX]).await;
+        assert_forwarded(&preprocessor, &[1, 128255]).await;
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_tokenizer_vocab() {
+        // No `vocab_size` in config.json: the tokenizer sets the bound.
+        let (preprocessor, _dir) =
+            tinyllama_with_config(r#"{"architectures":[],"model_type":"","eos_token_id":2}"#);
+        assert_rejected(&preprocessor, &[1, 32000]).await;
+        assert_forwarded(&preprocessor, &[1, 31999]).await;
+
+        // A tokenizer id at or above the model's `vocab_size` stays valid.
+        let (preprocessor, _dir) = tinyllama_with_config(
+            r#"{"architectures":[],"model_type":"","eos_token_id":2,"vocab_size":31999}"#,
+        );
+        assert_forwarded(&preprocessor, &[1, 31999]).await;
+        assert_rejected(&preprocessor, &[1, 32000]).await;
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_largest_tokenizer_id() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        let encoding = mdc.tokenizer().unwrap().encode("b").unwrap();
+        assert_eq!(encoding.token_ids(), [2]);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_forwarded(&preprocessor, &[0, 2]).await;
+        assert_rejected(&preprocessor, &[0, 3]).await;
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_added_tokens() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(ADDED_TOKEN_TOKENIZER));
+        let encoding = mdc.tokenizer().unwrap().encode("<x>").unwrap();
+        assert_eq!(encoding.token_ids(), [2]);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_forwarded(&preprocessor, &[0, 2]).await;
+        assert_rejected(&preprocessor, &[0, 3]).await;
+    }
+
+    fn completion(prompt: serde_json::Value) -> NvCreateCompletionRequest {
+        serde_json::from_value(serde_json::json!({"model": "test-model", "prompt": prompt}))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn token_prompt_is_bounded_by_model_vocab() {
+        let mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        for prompt in [
+            serde_json::json!([1, 128256]),
+            serde_json::json!([[1, 128256]]),
+            serde_json::json!([u32::MAX]),
+        ] {
+            let error = preprocessor
+                .preprocess_request(&completion(prompt), None)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<DynamoError>()
+                    .map(DynamoError::error_type),
+                Some(ErrorType::InvalidArgument),
+                "{error:#}"
+            );
+        }
+        let in_range: [u32; 2] = [1, 128255];
+        for prompt in [serde_json::json!(in_range), serde_json::json!([in_range])] {
+            let (preprocessed, _, _) = preprocessor
+                .preprocess_request(&completion(prompt), None)
+                .await
+                .unwrap();
+            assert_eq!(preprocessed.token_ids.as_slice(), in_range);
+        }
+    }
+
+    #[tokio::test]
+    async fn token_prompt_is_bounded_by_largest_tokenizer_id() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&completion(serde_json::json!([0, 2])), None)
+            .await
+            .unwrap();
+        assert_eq!(preprocessed.token_ids.as_slice(), [0, 2]);
+        let error = preprocessor
+            .preprocess_request(&completion(serde_json::json!([0, 3])), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
+    }
+
+    /// Records the token ids of each request that reaches the backend.
+    #[derive(Default)]
+    struct RecordingEmbeddingBackend(Mutex<Vec<Vec<Vec<u32>>>>);
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedEmbeddingRequest>,
+            ManyOut<Annotated<EmbeddingsEngineOutput>>,
+            Error,
+        > for RecordingEmbeddingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedEmbeddingRequest>,
+        ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            self.0.lock().unwrap().push(request.token_ids);
+            Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_token_input_is_bounded_by_model_vocab() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        mdc.model_type = crate::model_type::ModelType::Embedding;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+        let backend = Arc::new(RecordingEmbeddingBackend::default());
+        let next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
+        > = backend.clone();
+        let embed = |input: serde_json::Value| {
+            let request: NvCreateEmbeddingRequest =
+                serde_json::from_value(serde_json::json!({"model": "test-model", "input": input}))
+                    .unwrap();
+            PipelineContext::new(request)
+        };
+
+        for input in [
+            serde_json::json!([1, 128256]),
+            serde_json::json!([[1, 2], [1, 128256]]),
+            serde_json::json!([u32::MAX]),
+        ] {
+            let Err(error) =
+                Operator::generate(preprocessor.as_ref(), embed(input), next.clone()).await
+            else {
+                panic!("an out-of-range token input must fail");
+            };
+            assert_eq!(
+                error
+                    .downcast_ref::<DynamoError>()
+                    .map(DynamoError::error_type),
+                Some(ErrorType::InvalidArgument),
+                "{error:#}"
+            );
+        }
+        assert!(
+            backend.0.lock().unwrap().is_empty(),
+            "no request reached the backend"
+        );
+
+        for input in [
+            serde_json::json!([1, 128255]),
+            serde_json::json!([[1, 2], [3, 128255]]),
+        ] {
+            Operator::generate(preprocessor.as_ref(), embed(input), next.clone())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *backend.0.lock().unwrap(),
+            vec![vec![vec![1, 128255]], vec![vec![1, 2], vec![3, 128255]]]
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_token_input_is_bounded_by_largest_tokenizer_id() {
+        let (mut mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        mdc.model_type = crate::model_type::ModelType::Embedding;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+        let backend = Arc::new(RecordingEmbeddingBackend::default());
+        let next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
+        > = backend.clone();
+        let embed = |input: serde_json::Value| {
+            let request: NvCreateEmbeddingRequest =
+                serde_json::from_value(serde_json::json!({"model": "test-model", "input": input}))
+                    .unwrap();
+            PipelineContext::new(request)
+        };
+
+        Operator::generate(
+            preprocessor.as_ref(),
+            embed(serde_json::json!([0, 2])),
+            next.clone(),
+        )
+        .await
+        .unwrap();
+        let Err(error) = Operator::generate(
+            preprocessor.as_ref(),
+            embed(serde_json::json!([0, 3])),
+            next.clone(),
+        )
+        .await
+        else {
+            panic!("an out-of-range token input must fail");
+        };
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
+        assert_eq!(*backend.0.lock().unwrap(), vec![vec![vec![0, 2]]]);
+    }
+
+    #[test]
+    fn token_id_bound_ignores_unknown_and_zero_sizes() {
+        assert_eq!(token_id_bound(Some(151936), Some(151669)), Some(151936));
+        assert_eq!(token_id_bound(Some(128256), Some(128257)), Some(128257));
+        assert_eq!(token_id_bound(None, Some(32000)), Some(32000));
+        assert_eq!(token_id_bound(Some(0), Some(0)), None);
+        assert_eq!(token_id_bound(None, None), None);
+        assert!(ensure_token_ids_in_vocab("prompt", &[u32::MAX], None).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod strip_tests {
     use super::{NormalizedArgsRequest, OpenAIPreprocessor};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
@@ -8147,6 +8561,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         })
     }
@@ -8332,6 +8747,37 @@ mod tests {
         assert_eq!(
             roles,
             vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_jail_preserves_prompt_logprobs_metadata() {
+        let expected: crate::protocols::common::llm_backend::PromptLogprobs =
+            serde_json::from_value(serde_json::json!([
+                null,
+                {"17": {"logprob": -0.25, "rank": 1, "decoded_token": " hello"}}
+            ]))
+            .expect("valid prompt logprobs");
+        let mut chunk = terminal_chat_stream_chunk();
+        chunk.data.as_mut().unwrap().prompt_logprobs = Some(Arc::new(expected.clone()));
+
+        let output = OpenAIPreprocessor::apply_tool_calling_jail(
+            None,
+            None,
+            None,
+            false,
+            false,
+            stream::iter(vec![chunk]),
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(
+            output
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .find_map(|data| data.prompt_logprobs.as_deref()),
+            Some(&expected)
         );
     }
 
@@ -10628,6 +11074,172 @@ mod tests {
         assert!(OpenAIPreprocessor::backend_extra_args(&request, true, None).is_none());
     }
 
+    #[test]
+    fn test_sglang_gpt_oss_structured_output_rejects_thinking_budget() {
+        use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.reasoning_parser = Some("gpt_oss".to_string());
+        mdc.runtime_config
+            .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for response_format in [
+            serde_json::json!({"type": "json_object"}),
+            serde_json::json!({"type": "json_schema", "json_schema": {
+                "name": "result", "schema": {"type": "object", "properties": {}}
+            }}),
+        ] {
+            for budget_fields in [
+                serde_json::json!({"thinking_token_budget": 32}),
+                serde_json::json!({"thinking_token_budget": 0}),
+                serde_json::json!({"nvext": {"max_thinking_tokens": 16}}),
+                serde_json::json!({"thinking_token_budget": 0, "nvext": {"max_thinking_tokens": 16}}),
+            ] {
+                let mut value = serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "response_format": response_format,
+                });
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(budget_fields.as_object().unwrap().clone());
+                let request: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+                let error = preprocessor
+                    .builder(&request)
+                    .err()
+                    .expect("SGLang cannot honor GPT-OSS structured output with a thinking budget");
+                assert_eq!(
+                    error.downcast_ref::<DynamoError>().unwrap().error_type(),
+                    ErrorType::InvalidArgument,
+                );
+                assert!(error.to_string().contains("thinking_token_budget"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_gpt_oss_thinking_budget_preserves_supported_output_paths() {
+        use crate::local_model::runtime_config::{
+            SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+
+        for (capability, budget, structured, expected_reasoning) in [
+            (SGLANG_GENERATE_CAPABILITY, Some(32), false, true),
+            (SGLANG_GENERATE_CAPABILITY, None, true, false),
+            (VLLM_INFERENCE_V1_GENERATE_CAPABILITY, Some(0), true, true),
+        ] {
+            let mut mdc = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            mdc.runtime_config.reasoning_parser = Some("gpt_oss".to_string());
+            mdc.runtime_config
+                .set_engine_specific(capability, true)
+                .unwrap();
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking_token_budget": budget,
+                "response_format": if structured { serde_json::json!({"type": "json_object"}) } else { serde_json::Value::Null },
+            })).unwrap();
+            let preprocessed = preprocessor
+                .builder(&request)
+                .unwrap()
+                .token_ids(vec![1])
+                .build()
+                .unwrap();
+            assert_eq!(preprocessed.require_reasoning, expected_reasoning);
+            assert_eq!(preprocessed.stop_conditions.max_thinking_tokens, budget);
+        }
+    }
+
+    #[test]
+    fn test_request_requires_reasoning_with_thinking_budget() {
+        let cases = [
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 0}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"nvext": {"max_thinking_tokens": 16}}),
+                Some("qwen3"),
+                true,
+            ),
+            (serde_json::json!({}), Some("qwen3"), false),
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                None,
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                Some("gemma4"),
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "chat_template_kwargs": {"enable_thinking": true}}),
+                Some("gemma4"),
+                true,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "chat_template_kwargs": {"enable_thinking": false}}),
+                Some("qwen3"),
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "response_format": {"type": "json_object"}}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"response_format": {"type": "json_object"}}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"response_format": {"type": "json_object"}}),
+                Some("gpt_oss"),
+                false,
+            ),
+        ];
+        for (fields, parser, expected) in cases {
+            let mut value = serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+            let has_budget = request
+                .extract_stop_conditions()
+                .unwrap()
+                .max_thinking_tokens
+                .is_some();
+            assert_eq!(
+                OpenAIPreprocessor::request_requires_reasoning(&request, parser, has_budget),
+                expected,
+                "parser={parser:?}, fields={fields}",
+            );
+        }
+    }
+
     /// Verifies the SGLang reasoning gate covers forced tool JSON and
     /// structured assistant output while honoring per-request thinking controls.
     #[test]
@@ -11188,6 +11800,7 @@ mod tests {
             nvext: None,
             metadata: None,
             return_tokens_as_token_ids: None,
+            no_stop_trim: None,
             unsupported_fields: Default::default(),
         };
         let next: Arc<
@@ -11198,6 +11811,35 @@ mod tests {
             Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
         let Err(err) = result else {
             panic!("over-budget completion should fail admission");
+        };
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_completion_operator_rejects_out_of_range_token_prompt() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        // The card's vocab_size is 128256.
+        let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "prompt": [1, 128256]
+        }))
+        .unwrap();
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableBackend);
+
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("an out-of-range token prompt should fail before dispatch");
         };
         let dynamo_err = err
             .downcast_ref::<DynamoError>()

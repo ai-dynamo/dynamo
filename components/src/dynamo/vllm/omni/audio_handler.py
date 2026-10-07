@@ -8,6 +8,7 @@ OmniHandler holds an instance as ``self.audio`` (composition).
 """
 
 import logging
+import re
 from typing import Any, Dict, Union
 
 from transformers import AutoTokenizer
@@ -36,6 +37,24 @@ logger = logging.getLogger(__name__)
 # (MiMo-Audio, Qwen3-Omni, Stable Audio, etc.) use a plain text prompt.
 # Mirrors vLLM-Omni's _TTS_MODEL_STAGES in serving_speech.py.
 _TTS_MODEL_STAGES: set = {"qwen3_tts"}
+
+# The one task each Qwen3-TTS checkpoint variant serves, keyed by the
+# letters-only lowercase form of ``hf_config.tts_model_type``. Mirrors
+# vLLM-Omni's Qwen3TTSAdapter, which rejects other tasks before the engine.
+_TTS_VARIANTS = {
+    "customvoice": "CustomVoice",
+    "voicedesign": "VoiceDesign",
+    "base": "Base",
+}
+# Variant marker ending the checkpoint directory name, for re-exports without metadata.
+_TTS_VARIANT_PATH_SUFFIX = re.compile(
+    r"(?:^|[-_.])(custom[-_.]?voice|voice[-_.]?design|base)$"
+)
+# Longest reference clip decoded. Mirrors vLLM-Omni's _REF_AUDIO_MAX_DURATION and
+# bounds what a client-supplied clip can claim in memory.
+_TTS_REF_AUDIO_MAX_SECONDS = 30
+# Frame cap independent of the client-declared sample rate.
+_TTS_REF_AUDIO_MAX_FRAMES = _TTS_REF_AUDIO_MAX_SECONDS * 48000
 
 # Fallback language set used when model config is unavailable.
 _TTS_LANGUAGES_FALLBACK = {
@@ -135,6 +154,33 @@ class AudioGenerationHandler:
         except Exception as e:
             logger.warning("Could not load languages from model config: %s", e)
         return set()
+
+    def _tts_model_variant(self) -> str | None:
+        """Task served by the loaded Qwen3-TTS checkpoint, or None if unknown.
+
+        Checkpoint metadata wins. Only when it is absent or unrecognised is the
+        checkpoint directory name inspected (``models--org--name`` for a Hugging
+        Face ``snapshots/<revision>`` path), never its ancestors, and a marker
+        must end the name so ``database`` does not read as ``Base``.
+        """
+        model_config = getattr(self.engine_client, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        configured = getattr(hf_config, "tts_model_type", None)
+        if isinstance(configured, str):
+            variant = _TTS_VARIANTS.get(re.sub(r"[^a-z]", "", configured.lower()))
+            if variant is not None:
+                return variant
+
+        model_path = getattr(model_config, "model", None)
+        if not isinstance(model_path, str):
+            return None
+        parts = [part for part in re.split(r"[\\/]+", model_path) if part]
+        if len(parts) > 2 and parts[-2] == "snapshots":
+            parts = parts[:-2]
+        match = _TTS_VARIANT_PATH_SUFFIX.search(parts[-1].lower()) if parts else None
+        if match is None:
+            return None
+        return _TTS_VARIANTS[re.sub(r"[-_.]", "", match.group(1))]
 
     # -- TTS model detection --------------------------------------------------
 
@@ -269,6 +315,15 @@ class AudioGenerationHandler:
 
     # -- Qwen3-TTS-specific helpers -------------------------------------------
 
+    @staticmethod
+    def _tts_task_type(req: NvCreateAudioSpeechRequest) -> str:
+        """Task the engine will run; reference inputs imply Base, as in vLLM-Omni."""
+        if req.task_type is not None:
+            return req.task_type
+        if req.ref_audio is not None or req.ref_text is not None:
+            return "Base"
+        return "CustomVoice"
+
     async def _engine_inputs_tts(
         self, req: NvCreateAudioSpeechRequest, *, stream_audio: bool
     ) -> EngineInputs:
@@ -278,7 +333,7 @@ class AudioGenerationHandler:
         if req.voice is not None:
             req.voice = req.voice.lower()
 
-        task_type = req.task_type or "CustomVoice"
+        task_type = self._tts_task_type(req)
 
         tts_params: Dict[str, Any] = {
             "text": [req.input],
@@ -325,13 +380,23 @@ class AudioGenerationHandler:
 
     def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
         """Validate Qwen3-TTS-specific request parameters."""
-        task_type = req.task_type or "CustomVoice"
+        task_type = self._tts_task_type(req)
 
         _ALLOWED_TASK_TYPES = {"CustomVoice", "VoiceDesign", "Base"}
         if task_type not in _ALLOWED_TASK_TYPES:
             raise ValueError(
                 f"Invalid task_type '{task_type}'. "
                 f"Supported: {', '.join(sorted(_ALLOWED_TASK_TYPES))}"
+            )
+
+        # A checkpoint serves one task. Submitting another reaches the engine
+        # and kills the stage, so refuse it here with a client error.
+        variant = self._tts_model_variant()
+        if variant is not None and task_type != variant:
+            raise ValueError(
+                f"Qwen3-TTS {variant} checkpoint does not support "
+                f"task_type='{task_type}'. Use task_type='{variant}' or load "
+                f"the matching {task_type} checkpoint."
             )
 
         if req.language is not None:
@@ -448,7 +513,14 @@ class AudioGenerationHandler:
             )
 
         try:
-            wav_data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+            with sf.SoundFile(io.BytesIO(audio_bytes)) as audio:
+                sr = audio.samplerate
+                max_frames = min(
+                    int(sr * _TTS_REF_AUDIO_MAX_SECONDS), _TTS_REF_AUDIO_MAX_FRAMES
+                )
+                # One frame past the cap, so an overlong clip is refused
+                # without decoding the rest of it.
+                wav_data = audio.read(max_frames + 1, dtype="float32", always_2d=True)
         except sf.LibsndfileError as exc:
             # LibsndfileError is a RuntimeError, so without this a payload that
             # is valid base64 but not audio still reaches the client as a 500.
@@ -456,7 +528,15 @@ class AudioGenerationHandler:
                 f"ref_audio is not readable audio ({len(audio_bytes)} bytes): "
                 "unrecognised format"
             ) from exc
-        return wav_data, int(sr)
+        if len(wav_data) > max_frames:
+            raise ValueError(
+                f"ref_audio too long (max {_TTS_REF_AUDIO_MAX_SECONDS} seconds "
+                f"and {_TTS_REF_AUDIO_MAX_FRAMES} samples)"
+            )
+        # Qwen3-TTS takes a mono waveform. A plain list survives the trip to the
+        # engine process; a NumPy array nested in the prompt arrives there as a
+        # bare descriptor.
+        return wav_data.mean(axis=1).tolist(), int(sr)
 
     def _estimate_tts_prompt_len(self, tts_params: Dict[str, Any]) -> int:
         """Estimate Qwen3-TTS prompt length using its tokenizer.
