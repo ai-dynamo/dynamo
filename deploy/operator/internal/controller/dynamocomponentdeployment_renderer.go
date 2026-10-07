@@ -134,7 +134,7 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "failed to resolve role pod template")
 		}
-		podLabels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, effective)
+		podLabels := dynamo.GetDGDComponentPodLabels(dgd, componentName, effective)
 		podAnnotations := dynamo.ApplyDGDComponentTopologyAnnotations(
 			dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, effective),
 			dgd,

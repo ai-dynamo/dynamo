@@ -1251,6 +1251,37 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	assert.False(t, hasTopologyLabelVolume(cliques["frontend"].Spec.PodSpec.Volumes))
 }
 
+func TestGetDGDComponentResourceLabelsDoesNotSynthesizeLegacySubComponentType(t *testing.T) {
+	for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeDecode, v1beta1.ComponentTypePrefill} {
+		t.Run(string(componentType), func(t *testing.T) {
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: componentType,
+				PodTemplate:   &corev1.PodTemplateSpec{},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component},
+				},
+			}
+			original := dgd.DeepCopy()
+			labels := GetDGDComponentResourceLabels(dgd, "worker", &dgd.Spec.Components[0])
+			require.NotContains(t, labels, commonconsts.KubeLabelDynamoSubComponentType)
+			podLabels := GetDGDComponentPodLabels(dgd, "worker", &dgd.Spec.Components[0])
+			require.Equal(t, string(componentType), podLabels[commonconsts.KubeLabelDynamoSubComponentType])
+			require.Equal(t, original, dgd)
+
+			dgd.Spec.Components[0].PodTemplate.Labels = map[string]string{
+				commonconsts.KubeLabelDynamoSubComponentType: "custom",
+			}
+			labels = GetDGDComponentResourceLabels(dgd, "worker", &dgd.Spec.Components[0])
+			require.Equal(t, "custom", labels[commonconsts.KubeLabelDynamoSubComponentType])
+			podLabels = GetDGDComponentPodLabels(dgd, "worker", &dgd.Spec.Components[0])
+			require.Equal(t, "custom", podLabels[commonconsts.KubeLabelDynamoSubComponentType])
+		})
+	}
+}
+
 func TestGeneratePodMetadata_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
 	alpha := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{

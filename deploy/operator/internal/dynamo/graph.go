@@ -570,9 +570,17 @@ func GetDGDComponentResourceLabels(dgd *v1beta1.DynamoGraphDeployment, component
 	if dgd != nil {
 		maps.Copy(labels, dgd.Spec.Labels)
 		maps.Copy(labels, getDGDComponentAlphaLabels(dgd, componentName))
-		if alphaComponent := getDGDAlphaComponent(dgd, componentName); alphaComponent != nil && alphaComponent.SubComponentType != "" {
-			labels[commonconsts.KubeLabelDynamoSubComponentType] = alphaComponent.SubComponentType
-		}
+	}
+	maps.Copy(labels, GetPodTemplateLabels(component))
+	return labels
+}
+
+// GetDGDComponentPodLabels preserves alpha worker identity for workload pods,
+// without adding conversion-derived labels to stable Services.
+func GetDGDComponentPodLabels(dgd *v1beta1.DynamoGraphDeployment, componentName string, component *v1beta1.DynamoComponentDeploymentSharedSpec) map[string]string {
+	labels := GetDGDComponentResourceLabels(dgd, componentName, component)
+	if alphaComponent := getDGDAlphaComponent(dgd, componentName); alphaComponent != nil && alphaComponent.SubComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = alphaComponent.SubComponentType
 	}
 	maps.Copy(labels, GetPodTemplateLabels(component))
 	return labels
