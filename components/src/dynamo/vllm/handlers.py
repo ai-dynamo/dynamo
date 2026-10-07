@@ -160,7 +160,7 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 _KV_HINT_EXTRA_ARGS_KEY: Final = "kv_hint"
 # Runtime capability advertising that build_sampling_params honors `vllm_xargs`.
-# The frontend routes requests carrying the field only to WorkerSets publishing it.
+# The frontend dispatches requests carrying the field only to workers publishing it.
 VLLM_XARGS_CAPABILITY: Final = "vllm_xargs"
 # vLLM fills these extra_args keys from dedicated request fields; never from
 # client-supplied `vllm_xargs`.

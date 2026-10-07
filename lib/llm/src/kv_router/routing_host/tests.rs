@@ -4513,3 +4513,98 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
 
     runtime.shutdown();
 }
+
+fn vllm_xargs_request() -> PreprocessedRequest {
+    let mut request = request();
+    request.extra_args = Some(serde_json::json!({
+        "sampling_options": {"vllm_xargs": {"diffusion_read_only": true}}
+    }));
+    request
+}
+
+fn describe_worker(capabilities: &MemberCapabilities, worker_id: u64, vllm_xargs: bool) {
+    let mut card = crate::model_card::ModelDeploymentCard::default();
+    if vllm_xargs {
+        card.runtime_config
+            .set_engine_specific(
+                crate::local_model::runtime_config::VLLM_XARGS_CAPABILITY,
+                true,
+            )
+            .unwrap();
+    }
+    capabilities.replace([(worker_id, &card)]);
+}
+
+async fn serve(host: &RoutingHost, request: PreprocessedRequest) -> Result<(), Error> {
+    let mut stream = host.generate(Context::new(request)).await?;
+    while stream.next().await.is_some() {}
+    Ok(())
+}
+
+/// Engine selection admits only WorkerSets whose members all advertise a
+/// request's capability, but a worker lacking it can be admitted before the
+/// selected request is dispatched. Dispatch must refuse that worker rather than
+/// let it drop the request's options, while ordinary requests still reach it.
+async fn assert_dispatch_requires_capability(
+    host: RoutingHost,
+    worker_ids: &Mutex<Vec<u64>>,
+    worker_id: u64,
+) {
+    let capabilities = Arc::new(MemberCapabilities::default());
+    describe_worker(&capabilities, worker_id, false);
+    let host = host.with_member_capabilities(Some(capabilities.clone()));
+
+    let error = serve(&host, vllm_xargs_request()).await.unwrap_err();
+    assert!(
+        match_error_chain(error.as_ref(), &[ErrorType::Unavailable], &[]),
+        "{error:#}"
+    );
+    assert!(worker_ids.lock().unwrap().is_empty());
+
+    serve(&host, request()).await.unwrap();
+    describe_worker(&capabilities, worker_id, true);
+    serve(&host, vllm_xargs_request()).await.unwrap();
+    assert_eq!(
+        worker_ids.lock().unwrap().as_slice(),
+        &[worker_id, worker_id]
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_requires_worker_capability() {
+    let (host, dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch("kv-capability-fence").await;
+    assert_dispatch_requires_capability(host, &dispatch.worker_ids, worker_id).await;
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_dispatch_requires_worker_capability() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-capability-fence".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let load_context = test_load_context(&client).await;
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::RoundRobin,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
+    assert_dispatch_requires_capability(host, &dispatch.worker_ids, worker_id).await;
+    runtime.shutdown();
+}

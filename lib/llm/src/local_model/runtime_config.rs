@@ -129,8 +129,15 @@ pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 ///
 /// Other backends, text-input workers and older vLLM workers would drop the
 /// field, so the frontend routes `vllm_xargs` requests only to WorkerSets
-/// advertising this and rejects them when none do.
+/// whose every member, and every prefill peer, advertises this.
 pub const VLLM_XARGS_CAPABILITY: &str = "vllm_xargs";
+
+/// Capabilities a request can require of the specific workers serving it.
+///
+/// These flags are not part of the MDC checksum, so WorkerSet members can
+/// disagree on them during a rolling upgrade; the frontend tracks them per
+/// committed member instead of trusting the representative card.
+pub(crate) const REQUEST_CAPABILITIES: &[&str] = &[VLLM_XARGS_CAPABILITY];
 
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

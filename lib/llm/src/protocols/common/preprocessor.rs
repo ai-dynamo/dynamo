@@ -672,6 +672,16 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
+    /// Worker runtime capability this request's forwarded sampling options
+    /// require of the worker serving it.
+    pub(crate) fn required_worker_capability(&self) -> Option<&'static str> {
+        self.extra_args
+            .as_ref()?
+            .get("sampling_options")?
+            .get("vllm_xargs")
+            .map(|_| crate::local_model::runtime_config::VLLM_XARGS_CAPABILITY)
+    }
+
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
     /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
     pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {

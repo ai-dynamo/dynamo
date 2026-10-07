@@ -545,6 +545,12 @@ impl RoutingHost {
         let phase = request.phase();
         let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
+        if let Err(error) =
+            self.ensure_worker_capability(request.content(), selection.worker.worker_id)
+        {
+            guard.abort_with_error(Some(error.as_ref())).await;
+            return Err(error);
+        }
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 

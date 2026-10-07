@@ -5,8 +5,12 @@
 //! WorkerSet owns a complete pipeline (engines, KV router, prefill router) built
 //! from its specific ModelDeploymentCard.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
@@ -20,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
+    local_model::runtime_config::REQUEST_CAPABILITIES,
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -37,6 +42,74 @@ use crate::{
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
 
+/// How many of a WorkerSet's workers advertise a request capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CapabilitySupport {
+    All,
+    Partial,
+    None,
+}
+
+/// Request capabilities advertised by each committed member of a WorkerSet.
+///
+/// The discovery host replaces this before the controller admits a newcomer
+/// and after it withdraws a departed worker, so every admitted worker is
+/// described. Workers not described here are treated as unsupported.
+#[derive(Default)]
+pub(crate) struct MemberCapabilities {
+    snapshot: ArcSwap<MemberCapabilitySnapshot>,
+}
+
+#[derive(Default)]
+struct MemberCapabilitySnapshot {
+    member_count: usize,
+    /// Member instance IDs advertising each capability in [`REQUEST_CAPABILITIES`].
+    capable: HashMap<&'static str, HashSet<u64>>,
+}
+
+impl MemberCapabilities {
+    /// Replace the committed membership with `members` (instance ID, card).
+    pub(crate) fn replace<'a>(
+        &self,
+        members: impl IntoIterator<Item = (u64, &'a ModelDeploymentCard)>,
+    ) {
+        let mut instance_ids = HashSet::new();
+        let mut capable: HashMap<&'static str, HashSet<u64>> = HashMap::new();
+        for (instance_id, card) in members {
+            instance_ids.insert(instance_id);
+            for &capability in REQUEST_CAPABILITIES {
+                if card.runtime_config.supports_runtime_capability(capability) {
+                    capable.entry(capability).or_default().insert(instance_id);
+                }
+            }
+        }
+        self.snapshot.store(Arc::new(MemberCapabilitySnapshot {
+            member_count: instance_ids.len(),
+            capable,
+        }));
+    }
+
+    pub(crate) fn support(&self, capability: &str) -> CapabilitySupport {
+        let snapshot = self.snapshot.load();
+        let capable = snapshot.capable.get(capability).map_or(0, HashSet::len);
+        if capable == 0 {
+            CapabilitySupport::None
+        } else if capable == snapshot.member_count {
+            CapabilitySupport::All
+        } else {
+            CapabilitySupport::Partial
+        }
+    }
+
+    pub(crate) fn worker_supports(&self, worker_id: u64, capability: &str) -> bool {
+        self.snapshot
+            .load()
+            .capable
+            .get(capability)
+            .is_some_and(|workers| workers.contains(&worker_id))
+    }
+}
+
 /// A topology hop must retain the provider's admission and configuration, even
 /// when other cards share its endpoint or the endpoint is reused by a successor.
 #[derive(Clone)]
@@ -46,6 +119,7 @@ pub(crate) struct CommittedWorkerSetTarget {
     pub(crate) generation: u64,
     pub(crate) card: Arc<ModelDeploymentCard>,
     pub(crate) admitted_ids: watch::Receiver<Vec<u64>>,
+    pub(crate) member_capabilities: Arc<MemberCapabilities>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +271,10 @@ pub struct WorkerSet {
     /// Admission and configuration exported through committed topology reconciliation.
     topology_target: Option<CommittedWorkerSetTarget>,
 
+    /// Per-member request capabilities, tracked for discovery-backed sets.
+    /// The representative card cannot answer for members that disagree.
+    member_capabilities: Option<Arc<MemberCapabilities>>,
+
     /// MDC checksum for this set's configuration
     mdcsum: String,
 
@@ -249,6 +327,7 @@ impl WorkerSet {
             namespace,
             endpoint_id: None,
             topology_target: None,
+            member_capabilities: None,
             mdcsum,
             card,
             chat_engine: None,
@@ -298,6 +377,28 @@ impl WorkerSet {
 
     pub(crate) fn topology_target(&self) -> Option<&CommittedWorkerSetTarget> {
         self.topology_target.as_ref()
+    }
+
+    /// Track per-member request capabilities; discovery commits keep them current.
+    pub(crate) fn track_member_capabilities(&mut self) -> Arc<MemberCapabilities> {
+        Arc::clone(
+            self.member_capabilities
+                .get_or_insert_with(Default::default),
+        )
+    }
+
+    pub(crate) fn member_capabilities(&self) -> Option<&Arc<MemberCapabilities>> {
+        self.member_capabilities.as_ref()
+    }
+
+    /// How many of this set's workers advertise `capability`. Untracked
+    /// (in-process) sets serve one engine described by their card.
+    pub(crate) fn request_capability_support(&self, capability: &str) -> CapabilitySupport {
+        match &self.member_capabilities {
+            Some(members) => members.support(capability),
+            None if self.supports_runtime_capability(capability) => CapabilitySupport::All,
+            None => CapabilitySupport::None,
+        }
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -498,6 +599,7 @@ impl WorkerSet {
             namespace: self.namespace.clone(),
             endpoint_id: self.endpoint_id.clone(),
             topology_target: self.topology_target.clone(),
+            member_capabilities: self.member_capabilities.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),

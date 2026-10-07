@@ -285,6 +285,12 @@ impl RoutingHost {
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
+        // Every dispatch branch prepares the request for its final worker,
+        // including transport fallbacks, so the capability check rides along.
+        let prepare = |request: &mut PreprocessedRequest, target: AffinityTarget| {
+            self.ensure_worker_capability(request, target.worker_id)?;
+            prepare(request, target)
+        };
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(request.content(), phase)?;

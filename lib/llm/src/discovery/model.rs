@@ -6,7 +6,7 @@
 //!
 //! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use dashmap::DashMap;
 use rand::Rng;
@@ -14,9 +14,10 @@ use serde::Serialize;
 
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
-use super::worker_set::WorkerSet;
+use super::worker_set::{CapabilitySupport, WorkerSet};
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::protocols::openai::ParsingOptions;
+use crate::worker_type::WorkerType;
 
 use crate::types::{
     RealtimeBidirectionalEngine,
@@ -659,14 +660,16 @@ impl Model {
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
-    /// Select a chat engine, restricted to WorkerSets advertising
-    /// `required_capability` when the request needs one.
+    /// Select a chat engine. A request needing `required_capability` only
+    /// reaches WorkerSets whose workers and prefill peers all advertise it.
     pub fn get_chat_engine_with_parsing(
         &self,
         required_capability: Option<&str>,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
+        let filter = self.capability_filter(required_capability);
         self.select_worker_set_with(|ws| {
-            supports_capability(ws, required_capability)
+            filter
+                .admits(ws)
                 .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
                 .flatten()
         })
@@ -675,14 +678,16 @@ impl Model {
         })
     }
 
-    /// Select a completions engine, restricted to WorkerSets advertising
-    /// `required_capability` when the request needs one.
+    /// Select a completions engine. A request needing `required_capability`
+    /// only reaches WorkerSets whose workers and prefill peers all advertise it.
     pub fn get_completions_engine_with_parsing(
         &self,
         required_capability: Option<&str>,
     ) -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
+        let filter = self.capability_filter(required_capability);
         self.select_worker_set_with(|ws| {
-            supports_capability(ws, required_capability)
+            filter
+                .admits(ws)
                 .then(|| {
                     ws.completions_engine
                         .clone()
@@ -749,25 +754,28 @@ impl Model {
         }
     }
 
-    /// Like [`Self::engine_error`], but distinguishes a model whose serving
-    /// WorkerSets exist yet none advertises `required_capability`.
+    /// Like [`Self::engine_error`], but a model whose serving workers nowhere
+    /// advertise `required_capability` is a client error. Partial support, as
+    /// during a rolling upgrade, stays unavailable.
     fn capability_engine_error(
         &self,
         required_capability: Option<&str>,
         has_engine: fn(&WorkerSet) -> bool,
     ) -> ModelManagerError {
         let mut engine_exists = false;
-        let mut capable_engine_exists = false;
+        let mut capability_advertised = false;
         for entry in self.worker_sets.iter() {
             let ws = entry.value();
             if has_engine(ws) {
                 engine_exists = true;
-                capable_engine_exists |= supports_capability(ws, required_capability);
+                capability_advertised |= required_capability.is_none_or(|capability| {
+                    ws.request_capability_support(capability) != CapabilitySupport::None
+                });
             }
         }
         if let Some(capability) = required_capability
             && engine_exists
-            && !capable_engine_exists
+            && !capability_advertised
         {
             return ModelManagerError::CapabilityUnsupported {
                 model: self.name.clone(),
@@ -775,6 +783,26 @@ impl Model {
             };
         }
         self.engine_error(engine_exists)
+    }
+
+    fn capability_filter<'a>(&self, capability: Option<&'a str>) -> CapabilityFilter<'a> {
+        let unsupported_prefill_namespaces = capability
+            .map(|capability| {
+                self.worker_sets
+                    .iter()
+                    .filter(|entry| {
+                        let ws = entry.value();
+                        ws.card().worker_type == Some(WorkerType::Prefill)
+                            && ws.request_capability_support(capability) != CapabilitySupport::All
+                    })
+                    .map(|entry| entry.value().namespace().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        CapabilityFilter {
+            capability,
+            unsupported_prefill_namespaces,
+        }
     }
 
     // -- Internal selection --
@@ -864,9 +892,22 @@ impl Model {
     }
 }
 
-/// Whether `ws` may serve a request needing `required_capability` (if any).
-fn supports_capability(ws: &WorkerSet, required_capability: Option<&str>) -> bool {
-    required_capability.is_none_or(|capability| ws.supports_runtime_capability(capability))
+/// WorkerSets that may serve a request requiring a capability: every worker
+/// must advertise it, including the prefill peers a decode set hands off to.
+struct CapabilityFilter<'a> {
+    capability: Option<&'a str>,
+    unsupported_prefill_namespaces: HashSet<String>,
+}
+
+impl CapabilityFilter<'_> {
+    fn admits(&self, ws: &WorkerSet) -> bool {
+        let Some(capability) = self.capability else {
+            return true;
+        };
+        ws.request_capability_support(capability) == CapabilitySupport::All
+            && (ws.card().worker_type != Some(WorkerType::Decode)
+                || !self.unsupported_prefill_namespaces.contains(ws.namespace()))
+    }
 }
 
 #[cfg(test)]
