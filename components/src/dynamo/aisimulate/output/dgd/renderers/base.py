@@ -123,6 +123,10 @@ def _apply_router_config(dgd: dict[str, Any], candidate: CandidateLike) -> None:
         )
 
     policy = router.get("policy", router.get("mode"))
+    if not isinstance(policy, str):
+        raise CandidateMaterializationError(
+            f"candidate router policy must be kv_router or round_robin, got {policy!r}"
+        )
     router_mode = {"kv_router": "kv", "round_robin": "round-robin"}.get(policy)
     if router_mode is None:
         raise CandidateMaterializationError(
@@ -200,6 +204,10 @@ def _apply_context_length(dgd: dict[str, Any], candidate: CandidateLike) -> None
             f"candidate context_length must be a positive integer, got {context_length!r}"
         )
     backend = candidate.config.get("backend")
+    if not isinstance(backend, str):
+        raise CandidateMaterializationError(
+            f"cannot materialize context_length for backend {backend!r}"
+        )
     arg_name = _CONTEXT_LENGTH_ARG.get(backend)
     if arg_name is None:
         raise CandidateMaterializationError(
