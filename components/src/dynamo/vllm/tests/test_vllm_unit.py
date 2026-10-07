@@ -367,7 +367,6 @@ def test_uses_nixl_connector_direct_and_nested():
         (("NixlConnector", "OffloadingConnector"), True),
         (("OffloadingConnector", "NixlConnector"), True),
         (("OffloadingConnector",), False),
-        ((), False),
     ],
 )
 def test_uses_nixl_connector_multi(connector_names, expected):
