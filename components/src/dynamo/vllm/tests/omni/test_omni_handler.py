@@ -17,7 +17,13 @@ try:
     from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
-    from dynamo.common.http import HttpConfigurationError, HttpError, HttpStatusError
+    import dynamo.common.http as dynamo_http
+    from dynamo.common.http import (
+        AiohttpClient,
+        HttpConfigurationError,
+        HttpError,
+        HttpStatusError,
+    )
     from dynamo.common.multimodal import ImageLoader
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
@@ -1690,3 +1696,32 @@ class TestAudioHandlerFieldMapping:
             NvCreateAudioSpeechRequest(input="hi")
         )
         assert result.request_type == RequestType.AUDIO_GENERATION
+
+
+class TestRefAudioRejection:
+    """A rejected ref_audio URL reaches the client as a failed response."""
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_ref_audio_url_fails_the_request(self, monkeypatch):
+        """The frontend answers a failed audio response with a 400."""
+        monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+        monkeypatch.setattr(dynamo_http, "_default", AiohttpClient())
+        handler = _make_handler()
+        handler.config.output_modalities = ["audio"]
+        handler.audio = _make_audio_handler()
+        handler.audio._is_tts_model = MagicMock(return_value=True)
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+
+        chunks = [
+            chunk
+            async for chunk in handler._generate_openai_mode(
+                {"input": "hi", "ref_audio": "https://100.64.0.1/ref.wav"},
+                MagicMock(),
+                "req-1",
+            )
+        ]
+
+        assert [chunk["status"] for chunk in chunks] == ["failed"]
+        assert "blocked range" in chunks[0]["error"]

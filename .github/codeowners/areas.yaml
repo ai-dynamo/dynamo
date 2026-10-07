@@ -967,6 +967,8 @@ shared:
   - operator
   - lpx
 - glob: deploy/**/*lpx*
+  owners: [operator]
+- glob: deploy/helm/**/*lpx*
   owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
