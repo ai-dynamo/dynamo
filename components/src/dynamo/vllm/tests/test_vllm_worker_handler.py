@@ -2450,6 +2450,7 @@ class TestRLAdminRouteHardening:
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler._paused = False
+        handler._lora_state = mod.LoRAState()
         handler.engine_client = SimpleNamespace(
             pause_generation=AsyncMock(
                 side_effect=[TypeError("unsupported keyword"), None]
@@ -2464,6 +2465,30 @@ class TestRLAdminRouteHardening:
         assert handler._paused is True
         assert handler.engine_client.pause_generation.await_count == 2
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_modern_pause_reports_declined_cache_reset(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler._lora_state = mod.LoRAState()
+        handler.engine_client = SimpleNamespace(
+            pause_generation=AsyncMock(),
+            reset_prefix_cache=AsyncMock(return_value=False),
+        )
+
+        resp = await handler.pause_generation({"mode": "abort", "clear_cache": True})
+
+        assert resp["status"] == "error"
+        assert "KV blocks are still in use" in resp["message"]
+        assert handler._paused is True
+        handler.engine_client.pause_generation.assert_awaited_once_with(
+            mode="abort", clear_cache=True
+        )
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+            reset_running_requests=True,
+            reset_connector=True,
+        )
 
     @pytest.mark.asyncio
     async def test_keep_pause_rejects_active_lora_requests(self):
@@ -2558,6 +2583,31 @@ class TestRLAdminRouteHardening:
         handler.engine_client.collective_rpc = AsyncMock()
         handler.engine_client.reset_prefix_cache = AsyncMock()
         return handler
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint"}),
+            (
+                "update_weights_from_distributed",
+                {"engine_rpc": "update_weights"},
+            ),
+        ],
+    )
+    async def test_weight_update_stops_when_cache_reset_is_declined(self, route, body):
+        handler = self._make_rl_handler()
+        handler._paused = True
+        handler._weight_version = "old-version"
+        handler.engine_client.reset_prefix_cache.return_value = False
+
+        resp = await getattr(handler, route)({**body, "weight_version": "new-version"})
+
+        assert resp["status"] == "error"
+        assert "KV blocks are still in use" in resp["message"]
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        assert handler._weight_version == "old-version"
 
     @pytest.mark.asyncio
     async def test_get_weight_version_reports_undeclared_before_any_update(self):
