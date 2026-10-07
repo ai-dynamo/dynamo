@@ -1436,7 +1436,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._shutdown_worker()
 
     async def _reset_prefix_cache(self, **kwargs: Any) -> None:
-        """Reset vLLM's prefix cache or raise when vLLM declines the reset."""
         reset_successful = await self.engine_client.reset_prefix_cache(**kwargs)
         if reset_successful is False:
             raise RuntimeError(
@@ -2062,6 +2061,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self._paused = True
                     if clear_cache:
                         await self._reset_prefix_cache()
+                else:
+                    # Current vLLM discards a declined cache-reset result inside
+                    # pause_generation(), so verify it explicitly while paused.
+                    self._paused = True
+                    if clear_cache:
+                        await self._reset_prefix_cache(
+                            reset_running_requests=True,
+                            reset_connector=True,
+                        )
                 self._paused = True
                 logger.info(
                     f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})"
@@ -2232,11 +2240,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 else {"weight_path": path}
             )
             try:
-                await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
-                # Weights changed: any prefix/KV cache computed under the old
-                # weights is now stale and must not be reused. Invalidate it
-                # while still holding _pause_lock (generation is paused).
+                # Refuse the update unless stale entries can be removed first;
+                # otherwise new weights could be applied over an old cache.
                 await self._reset_prefix_cache()
+                await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 if "weight_version" in body:
                     self._weight_version = version
                 logger.info(
@@ -2300,11 +2307,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
             }
             try:
-                await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
                 if reset_prefix_cache:
-                    # Weights changed: stale prefix/KV cache must be invalidated
-                    # before resume so it is not reused under the new weights.
+                    # Refuse the update unless stale entries can be removed first;
+                    # otherwise new weights could be applied over an old cache.
                     await self._reset_prefix_cache()
+                await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
                 if "weight_version" in body:
                     self._weight_version = version
                 logger.info(
