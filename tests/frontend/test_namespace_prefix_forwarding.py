@@ -19,6 +19,7 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize("prefix", [None, "", "ns"])
 async def test_namespace_prefix_reaches_entrypoint(monkeypatch, prefix):
+    """Keep an empty CLI prefix distinct from an omitted prefix at the Rust boundary."""
     for name in list(os.environ):
         if name.startswith("DYN_"):
             monkeypatch.delenv(name)
