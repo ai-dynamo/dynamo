@@ -8,18 +8,22 @@ use dynamo_mocker::live::deterministic_token_id;
 
 #[tokio::test]
 async fn service_requires_a_trtllm_single_rank_aggregated_engine() {
-    let vllm = MockEngineArgsBuilder::default()
-        .engine_type(EngineType::Vllm)
-        .build()
-        .unwrap();
+    let vllm = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Vllm
+        }
+    }))
+    .unwrap();
     let error = construction_error(config(), vllm);
     assert!(error.contains("engine_type"), "{error}");
 
-    let multi_rank = MockEngineArgsBuilder::default()
-        .engine_type(EngineType::Trtllm)
-        .dp_size(2u32)
-        .build()
-        .unwrap();
+    let multi_rank = MockerConfig::from_value(serde_json::json!({
+        "dp_size": 2u32,
+        "engine": {
+            "backend": EngineType::Trtllm
+        }
+    }))
+    .unwrap();
     let error = construction_error(config(), multi_rank);
     assert!(error.contains("dp_size"), "{error}");
 
@@ -262,15 +266,17 @@ async fn capacity_rejection_is_an_in_band_internal_error() {
     for mode in [ServerMode::Aggregated, ServerMode::Decode] {
         let service = TrtllmMockerService::new(
             MockerServerConfig { mode, ..config() },
-            MockEngineArgsBuilder::default()
-                .engine_type(EngineType::Trtllm)
-                .num_gpu_blocks(1usize)
-                .block_size(4usize)
-                .max_num_seqs(Some(8))
-                .max_num_batched_tokens(Some(64))
-                .speedup_ratio(0.0)
-                .build()
-                .unwrap(),
+            MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "backend": EngineType::Trtllm,
+                    "num_gpu_blocks": 1usize,
+                    "block_size": 4usize,
+                    "max_num_seqs": 8,
+                    "max_num_batched_tokens": 64,
+                    "speedup_ratio": 0.0
+                }
+            }))
+            .unwrap(),
         )
         .unwrap();
         let mut oversized = request("req-cap", 4);

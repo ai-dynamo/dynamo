@@ -3,11 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Recent pinned nightly wheel builds plus the rolling nightly runtime
- * container tags. Version data lives in releases.data.ts so the human page,
- * install selector, JSON, and llms-only tables stay aligned.
+ * container tags. Rows come from gen_nightly_selector.py, which reads the
+ * pypi.nvidia.com wheel indexes, so the human page, install selector, JSON, and
+ * llms-only tables stay aligned. A night is listed once both its ai-dynamo and
+ * ai-dynamo-runtime wheels published; an incomplete night is omitted.
  */
 
-import { NIGHTLY_BUILDS, type NightlyBuild } from "./releases.data";
+import { NIGHTLY_BUILDS, type NightlyBuild } from "./nightly-selector-data.generated";
 
 const NIGHTLY_CSS = `
 .dynref-nightly-row {
@@ -145,9 +147,16 @@ export function NightlyBuilds() {
           Nightly wheels are pinned by date. Runtime containers use rolling NGC tags, so the container buttons always pull the latest nightly image.
         </p>
         <div>
-          {NIGHTLY_BUILDS.map((build) => (
-            <NightlyRow key={build.version} build={build} />
-          ))}
+          {NIGHTLY_BUILDS.length === 0 ? (
+            <p className="dynref-muted">
+              Not currently available — no nightly wheel builds are currently
+              published.
+            </p>
+          ) : (
+            NIGHTLY_BUILDS.map((build) => (
+              <NightlyRow key={build.version} build={build} />
+            ))
+          )}
         </div>
       </section>
     </>
