@@ -43,13 +43,14 @@ func newGroveScaler(kubeClient client.Client) *groveScaler {
 
 // Reconcile applies component replica changes to the Grove resources created
 // asynchronously from the PodCliqueSet. pcs may be nil before creation.
-// It returns whether replica changes are deferred until a coherent update completes.
+// It returns whether scaling is deferred and whether a scale-guard denial needs
+// a retry because the cached PCS has no active update to await.
 func (s *groveScaler) Reconcile(
 	ctx context.Context,
 	req groveReconcileRequest,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 	pcs *grovev1alpha1.PodCliqueSet,
-) (deferred bool, err error) {
+) (deferred, retrySoon bool, err error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
 	managedComponents := req.ManagedComponents()
@@ -94,7 +95,7 @@ func (s *groveScaler) Reconcile(
 				if apierrors.IsNotFound(err) {
 					continue
 				}
-				return deferred, err
+				return deferred, retrySoon, err
 			}
 			switch resource := child.(type) {
 			case *grovev1alpha1.PodClique:
@@ -105,7 +106,7 @@ func (s *groveScaler) Reconcile(
 			continue
 		}
 
-		// Admission can observe rollout start before this controller's cached PCS does.
+		// Admission and controller observations can disagree at rollout start or completion.
 		if err := s.scaleResource(
 			ctx,
 			gvr,
@@ -115,6 +116,7 @@ func (s *groveScaler) Reconcile(
 		); err != nil {
 			if dynamo.IsGroveCoherentScaleGuardRejection(err) {
 				deferred = true
+				retrySoon = true
 				continue
 			}
 			logger.Error(
@@ -125,12 +127,12 @@ func (s *groveScaler) Reconcile(
 				"resourceName", resourceName,
 				"replicas", replicas,
 			)
-			return deferred, fmt.Errorf("failed to scale %s %s: %w", resourceKind, resourceName, err)
+			return deferred, retrySoon, fmt.Errorf("failed to scale %s %s: %w", resourceKind, resourceName, err)
 		}
 	}
 
 	logger.V(1).Info("Successfully reconciled Grove scaling operations", "deferred", deferred)
-	return deferred, nil
+	return deferred, retrySoon, nil
 }
 
 func (s *groveScaler) scaleResource(

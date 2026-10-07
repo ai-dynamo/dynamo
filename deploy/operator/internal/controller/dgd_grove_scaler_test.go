@@ -73,7 +73,7 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).
 		Build()
 
-	_, err := newGroveScaler(kubeClient).Reconcile(
+	_, _, err := newGroveScaler(kubeClient).Reconcile(
 		t.Context(),
 		groveReconcileRequest{DGD: dgd},
 		map[string]*checkpoint.CheckpointInfo{
@@ -175,7 +175,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 			WithRESTMapper(groveScaleRESTMapper()).
 			Build()
-		_, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil)
+		_, _, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil)
 		require.NoError(t, err)
 	})
 
@@ -189,7 +189,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 				},
 			}).
 			Build()
-		_, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil)
+		_, _, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil)
 		require.ErrorContains(t, err, "scale read failed")
 	})
 }
@@ -214,14 +214,16 @@ func groveScaleRESTMapper() meta.RESTMapper {
 
 func TestGroveScaler_CoherentDeferral(t *testing.T) {
 	for _, test := range []struct {
-		name                                       string
-		active, multinode, atDesired, guard, rback bool
+		name                                                   string
+		active, multinode, atDesired, guard, rback, noProgress bool
 	}{
 		{name: "active standalone", active: true},
 		{name: "active scaling group", active: true, multinode: true},
 		{name: "active but no scale change", active: true, atDesired: true},
 		{name: "completion resumes scaling"},
-		{name: "admission wins rollout-start race", guard: true},
+		{name: "admission wins rollout-start race", guard: true, noProgress: true},
+		{name: "admission lags observed completion", guard: true},
+		{name: "scaling group admission lags observed completion", guard: true, multinode: true},
 		{name: "RBAC forbidden propagates", rback: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -242,6 +244,9 @@ func TestGroveScaler_CoherentDeferral(t *testing.T) {
 			if !test.active {
 				pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
 			}
+			if test.noProgress {
+				pcs.Status.UpdateProgress = nil
+			}
 			writes := 0
 			funcs := groveScaleInterceptor(interceptor.Funcs{}, func() { writes++ })
 			if test.guard || test.rback {
@@ -256,15 +261,17 @@ func TestGroveScaler_CoherentDeferral(t *testing.T) {
 			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithRESTMapper(groveScaleRESTMapper()).WithObjects(child).WithInterceptorFuncs(funcs).Build()
 
 			t.Log("Defer rollout scaling without swallowing RBAC failures")
-			deferred, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, pcs)
+			deferred, retrySoon, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, pcs)
 			if test.rback {
 				require.Error(t, err)
 				require.True(t, apierrors.IsForbidden(err))
 				require.False(t, deferred)
+				require.False(t, retrySoon)
 				return
 			}
 			require.NoError(t, err)
 			require.Equal(t, (test.active && !test.atDesired) || test.guard, deferred)
+			require.Equal(t, test.guard, retrySoon)
 			if deferred || test.atDesired {
 				require.Zero(t, writes)
 			} else {

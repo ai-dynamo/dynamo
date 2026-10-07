@@ -198,6 +198,9 @@ func (p *groveProgram) Reconcile(
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
 
+	// Retain a scale-guard retry while the remaining operations converge workload status.
+	programResult.RequeueAfter = groveResult.RequeueAfter
+
 	// Publish scaling deferral without discarding observed component status or readiness.
 	condition := metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionFalse, ObservedGeneration: req.DGD.Generation, Reason: "ScalingAllowed", Message: "No Grove replica changes are deferred"}
 	if groveResult.ScalingDeferred {

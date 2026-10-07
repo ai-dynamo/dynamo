@@ -50,7 +50,7 @@ func TestClusterGroveScalerUsesScaleSubresource(t *testing.T) {
 	require.NoError(t, env.Client().Create(ctx, podClique))
 
 	t.Log("Scale the PodClique through the production controller-runtime subresource path")
-	_, err := newGroveScaler(env.Client()).Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil, nil)
+	_, _, err := newGroveScaler(env.Client()).Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil, nil)
 	require.NoError(t, err)
 
 	t.Log("Read the PodClique back and verify the API server applied the scale update")

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -36,10 +37,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// groveWorkloadResult retains Grove's scaling wait alongside the complete workload observation.
+const groveScaleGuardRetryInterval = 5 * time.Second
+
+// groveWorkloadResult retains Grove's scaling wait and retry alongside the workload observation.
 type groveWorkloadResult struct {
 	ReconcileResult
 	ScalingDeferred bool
+	RequeueAfter    time.Duration
 }
 
 // groveWorkloadsReconciler owns the complete provider workload sequence while
@@ -153,7 +157,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	scalingDeferred, err := r.scaler.Reconcile(ctx, req, checkpointInfos, syncedPodCliqueSet)
+	scalingDeferred, retrySoon, err := r.scaler.Reconcile(ctx, req, checkpointInfos, syncedPodCliqueSet)
 	if err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
 		return groveWorkloadResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
@@ -177,7 +181,13 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
-	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, nil
+
+	// Retry a scale-guard denial even when the PCS completion event was already consumed.
+	workloadResult := groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}
+	if retrySoon {
+		workloadResult.RequeueAfter = groveScaleGuardRetryInterval
+	}
+	return workloadResult, nil
 }
 
 // reconcilePodCliqueSet returns the current PCS and whether it was created or updated.
