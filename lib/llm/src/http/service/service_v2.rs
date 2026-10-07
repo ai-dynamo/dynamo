@@ -840,22 +840,11 @@ pub struct HttpServiceConfig {
 /// Keep the builder's environment fallback scoped to one namespace unless a
 /// non-empty prefix is set. The frontend supplies its own resolved filter.
 fn namespace_filter_from_env() -> NamespaceFilter {
-    let namespace_prefix = std::env::var("DYN_NAMESPACE_PREFIX").ok();
-    if let Some(prefix) = namespace_prefix
-        .as_deref()
-        .filter(|prefix| !prefix.is_empty())
-    {
-        return NamespaceFilter::from_namespace_and_prefix(None, Some(prefix));
-    }
-
-    let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| "dynamo".to_string());
-    let worker_suffix = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok();
-    match worker_suffix.filter(|suffix| !suffix.is_empty()) {
-        Some(suffix) if !namespace.ends_with(&format!("-{suffix}")) => {
-            NamespaceFilter::Exact(format!("{namespace}-{suffix}"))
-        }
-        _ => NamespaceFilter::Exact(namespace),
-    }
+    dynamo_rl::resolve_namespace_filter(
+        std::env::var("DYN_NAMESPACE").ok().as_deref(),
+        std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
+        std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
+    )
 }
 
 fn default_rl_port() -> u16 {

@@ -97,6 +97,26 @@ pub struct RlDiscoveryConfig {
     pub max_concurrent_probes: usize,
 }
 
+/// Without a non-empty prefix, retain an exact namespace (defaulting to `dynamo`)
+/// rather than the dynamic frontend's global default. Apply a worker suffix once.
+pub fn resolve_namespace_filter(
+    namespace: Option<&str>,
+    namespace_prefix: Option<&str>,
+    worker_suffix: Option<&str>,
+) -> NamespaceFilter {
+    if let Some(prefix) = namespace_prefix.filter(|prefix| !prefix.is_empty()) {
+        return NamespaceFilter::from_namespace_and_prefix(None, Some(prefix));
+    }
+
+    let namespace = namespace.unwrap_or(DEFAULT_NAMESPACE);
+    match worker_suffix.filter(|suffix| !suffix.is_empty()) {
+        Some(suffix) if !namespace.ends_with(&format!("-{suffix}")) => {
+            NamespaceFilter::Exact(format!("{namespace}-{suffix}"))
+        }
+        _ => NamespaceFilter::Exact(namespace.to_string()),
+    }
+}
+
 /// The scope reported back to the caller in [`RlWorkersResponse::namespace`].
 ///
 /// Protocol version 1 types that field as a plain string, so a prefix scope reports the
@@ -198,6 +218,17 @@ pub struct RlDiscoveryState {
 impl RlDiscoveryState {
     pub fn new(config: RlDiscoveryConfig) -> Self {
         let namespace_filter = NamespaceFilter::Exact(config.namespace.clone());
+        Self::new_with_namespace_filter(config, namespace_filter)
+    }
+
+    /// Unlike [`Self::new`], apply the environment's namespace prefix and worker
+    /// suffix to `config.namespace` using [`resolve_namespace_filter`].
+    pub fn new_from_env(config: RlDiscoveryConfig) -> Self {
+        let namespace_filter = resolve_namespace_filter(
+            Some(&config.namespace),
+            std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
+            std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
+        );
         Self::new_with_namespace_filter(config, namespace_filter)
     }
 
@@ -929,7 +960,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn explicit_config_ignores_environment_namespace_scope() {
+    async fn constructors_distinguish_explicit_and_environment_namespace_scope() {
         temp_env::async_with_vars(
             [
                 ("DYN_NAMESPACE_PREFIX", Some("other")),
@@ -937,16 +968,22 @@ mod tests {
             ],
             async {
                 let distributed = test_runtime().await;
-                let state = RlDiscoveryState::new(RlDiscoveryConfig {
+                let config = RlDiscoveryConfig {
                     runtime: distributed,
                     namespace: "ns".to_string(),
                     rl_endpoint: "rl".to_string(),
                     component_filter: None,
                     request_timeout: Duration::from_secs(1),
                     max_concurrent_probes: 1,
-                });
+                };
 
+                let state = RlDiscoveryState::new(config.clone());
                 assert_eq!(namespace_scope(&state.namespace_filter), "ns");
+                let env_state = RlDiscoveryState::new_from_env(config);
+                assert_eq!(
+                    env_state.namespace_filter,
+                    NamespaceFilter::Prefix("other".to_string())
+                );
             },
         )
         .await;
