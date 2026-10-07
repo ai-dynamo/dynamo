@@ -80,7 +80,6 @@ reuse_key() {
   printf '%s\n' "${listing}" | sha256sum | cut -c1-16
 }
 
-# Succeed when the image index at $1 holds every platform in EPP_PLATFORMS.
 has_all_platforms() {
   local ref="$1" raw have platform
   if ! raw="$(docker buildx imagetools inspect --raw "${ref}" 2>"${ERR_FILE}")"; then
