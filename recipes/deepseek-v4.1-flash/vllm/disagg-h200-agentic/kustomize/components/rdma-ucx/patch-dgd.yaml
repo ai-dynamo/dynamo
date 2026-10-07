@@ -32,49 +32,19 @@
   value: '4'
 - op: replace
   path: /spec/components/1/podTemplate/spec/containers/0/command
-  value: &rdma_command
-  - /bin/bash
-  - -lc
-  - |-
-    set -euo pipefail
-    UCX_NET_DEVICES="$(python3 - <<'PY'
-    import json
-    import os
-    from pathlib import Path
-
-    addresses = os.environ['PCIDEVICE_RDMA_IB'].split(',')
-    info = json.loads(os.environ['PCIDEVICE_RDMA_IB_INFO'])
-    if len(addresses) != 4 or len(set(addresses)) != 4 or set(info) != set(addresses):
-        raise RuntimeError('Expected four allocated InfiniBand devices')
-    devices = []
-    for address in addresses:
-        verbs = Path(info[address]['rdma']['uverbs'])
-        if not verbs.is_char_device():
-            raise RuntimeError(f'Allocated device is unavailable: {verbs}')
-        ibdev = Path('/sys/class/infiniband_verbs') / verbs.name / 'ibdev'
-        if ibdev.is_symlink():
-            name = ibdev.resolve(strict=True).name
-        elif ibdev.is_file():
-            name = ibdev.read_text().strip()
-        else:
-            names = list((ibdev.parent / 'device/infiniband').glob('*'))
-            if len(names) != 1:
-                raise RuntimeError(f'Cannot map {verbs} to one IB device')
-            name = names[0].name
-        state = (Path('/sys/class/infiniband') / name / 'ports/1/state').read_text()
-        if not state.startswith('4:'):
-            raise RuntimeError(f'InfiniBand port is not active: {name}')
-        devices.append(f'{name}:1')
-    if len(set(devices)) != 4:
-        raise RuntimeError('Allocated devices do not map to four distinct NICs')
-    print(','.join(sorted(devices)))
-    PY
-    )"
-    export UCX_NET_DEVICES
-    echo "Selected UCX_NET_DEVICES=${UCX_NET_DEVICES}"
-    exec "$@"
-  - --
-  - python3
+  value: [python3, /rdma-binder/bind_rdma.py, --, python3]
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/volumeMounts/-
+  value:
+    name: rdma-binder
+    mountPath: /rdma-binder
+    readOnly: true
+- op: add
+  path: /spec/components/1/podTemplate/spec/volumes/-
+  value:
+    name: rdma-binder
+    configMap:
+      name: dsv41-flash-h200-rdma-binder
 - op: test
   path: /spec/components/2/name
   value: DecodeWorker
@@ -94,4 +64,16 @@
   value: '4'
 - op: replace
   path: /spec/components/2/podTemplate/spec/containers/0/command
-  value: *rdma_command
+  value: [python3, /rdma-binder/bind_rdma.py, --, python3]
+- op: add
+  path: /spec/components/2/podTemplate/spec/containers/0/volumeMounts/-
+  value:
+    name: rdma-binder
+    mountPath: /rdma-binder
+    readOnly: true
+- op: add
+  path: /spec/components/2/podTemplate/spec/volumes/-
+  value:
+    name: rdma-binder
+    configMap:
+      name: dsv41-flash-h200-rdma-binder
