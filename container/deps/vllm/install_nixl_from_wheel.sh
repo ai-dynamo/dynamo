@@ -141,16 +141,30 @@ echo "Installed NIXL wheel prefix: ${prefix} -> $(readlink -f "${prefix}")"
 
 if [ -n "${ucx_prefix}" ]; then
     [ -n "${cuda_major}" ] || die "--ucx-prefix requires --cuda-major"
+    command -v patchelf >/dev/null || die "--ucx-prefix requires patchelf"
     ucx_lib_dir="${wheel_lib_dir%/*}/nixl_cu${cuda_major}.libs"
     [ -d "${ucx_lib_dir}/ucx" ] || die "missing wheel UCX modules: ${ucx_lib_dir}/ucx"
 
-    # MPI asks for generic UCX SONAMEs; NIXL's wheel uses auditwheel-renamed
-    # libraries. Point both names at the same files before either is loaded.
+    # MPI asks for generic UCX SONAMEs; the wheel uses auditwheel-renamed ones.
+    # A symlink alone does not register MPI's name when LD_PRELOAD uses an
+    # absolute path. Give the preloaded file the generic SONAME as well, so
+    # MPI cannot load system UCX through its RPATH or an inherited search path.
+    # Keep the hashed filenames for the wheel's DT_NEEDED references: the
+    # loader recognizes the same inode and reuses the already loaded library.
     # Keep aliases beside their targets so UCX can find its modules via $ORIGIN.
     shopt -s nullglob
     for library in libucm libucs libuct libucp; do
         candidates=("${ucx_lib_dir}/${library}-"*.so.0.*)
         [ "${#candidates[@]}" -eq 1 ] || die "expected one wheel ${library}: ${candidates[*]}"
+        if [ "$(patchelf --print-soname "${candidates[0]}")" != "${library}.so.0" ]; then
+            # Do not modify a file that uv may have hard-linked from its cache.
+            patched_library="$(mktemp "${candidates[0]}.XXXXXX")"
+            cp --preserve=mode,timestamps "${candidates[0]}" "${patched_library}"
+            patchelf --set-soname "${library}.so.0" "${patched_library}"
+            mv -f "${patched_library}" "${candidates[0]}"
+        fi
+        [ "$(patchelf --print-soname "${candidates[0]}")" = "${library}.so.0" ] || \
+            die "failed to set ${library} SONAME"
         alias_path="${ucx_lib_dir}/${library}.so.0"
         [ ! -e "${alias_path}" ] || [ -L "${alias_path}" ] || die "refusing to replace ${alias_path}"
         ln -sfn "${candidates[0]##*/}" "${alias_path}"
