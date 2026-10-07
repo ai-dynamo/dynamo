@@ -354,6 +354,8 @@ areas:
   - dynamo.code-workspace
   - hatch_build.py
   - lib/bindings/kvbm/pyproject.toml
+  - lib/sidecar/build-with-cache.sh
+  - lib/sidecar/test_build_cache.py
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
@@ -956,10 +958,6 @@ shared:
   owners:
   - operator
   - planner
-- glob: deploy/operator/internal/gpu/discovery.go
-  owners:
-  - operator
-  - observability
 - glob: deploy/operator/internal/controller/lpx/
   owners:
   - operator
@@ -969,6 +967,8 @@ shared:
   - operator
   - lpx
 - glob: deploy/**/*lpx*
+  owners: [operator]
+- glob: deploy/helm/**/*lpx*
   owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:

@@ -8,11 +8,13 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, usage,
+    LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
+use dynamo_sidecar_common::{
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
+};
 use futures::stream::BoxStream;
 use serde_json::{Map, Value, json};
 use tokio::sync::OnceCell;
@@ -97,12 +99,18 @@ impl VllmSidecarEngine {
 
     /// Parse CLI arguments without connecting; discovery runs after probe startup.
     pub fn from_cli() -> Result<
-        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
         DynamoError,
     > {
         let args = <Args as clap::Parser>::parse();
         let vllm_http_url = Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args, vllm_http_url, false))
+        Ok((
+            args.sidecar.common.runtime.clone(),
+            Self::from_parsed_async(args, vllm_http_url, false),
+        ))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -110,12 +118,18 @@ impl VllmSidecarEngine {
     pub fn try_from_args_async(
         argv: Vec<String>,
     ) -> Result<
-        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
         SidecarStartupError,
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         let vllm_http_url = Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args, vllm_http_url, false))
+        Ok((
+            args.sidecar.common.runtime.clone(),
+            Self::from_parsed_async(args, vllm_http_url, false),
+        ))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -194,6 +208,7 @@ impl VllmSidecarEngine {
             .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
+            runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
             // Disaggregated workers register under fixed role components so the
             // frontend can route the disaggregated handoff; aggregated keeps the
