@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""OpenAI Realtime dispatch and transcription for standard vLLM models."""
+"""Manage Realtime transcription sessions backed by vLLM streaming audio input."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ import binascii
 import logging
 import math
 import uuid
-from collections.abc import AsyncGenerator, Callable, Mapping
-from typing import Any, Protocol
+from collections.abc import AsyncGenerator, Callable
+from typing import Any
 
 import numpy as np
 
 from dynamo._core import Context
 
-from .connection import RealtimeConnection, RealtimeTurn
-from .events import (
+from ..connection import RealtimeConnection, RealtimeTurn
+from ..events import (
     input_audio_buffer_cleared_event,
     input_audio_buffer_committed_event,
     input_audio_transcription_completed_event,
@@ -28,7 +28,7 @@ from .events import (
     invalid_request_error_event,
     session_updated_event,
 )
-from .serving import StreamingInputFactory, build_realtime_serving
+from ..factories import StreamingInputFactory, build_realtime_serving
 
 logger = logging.getLogger(__name__)
 
@@ -38,68 +38,6 @@ RESAMPLE_BLOCK_MILLISECONDS = 100
 MAX_UTTERANCE_SECONDS = 60
 
 SamplingParamsFactory = Callable[[], Any]
-
-
-class RealtimeSessionHandler(Protocol):
-    def generate(
-        self,
-        request_stream: AsyncGenerator[Any, None],
-        context: Context,
-    ) -> AsyncGenerator[dict, None]:
-        ...
-
-
-class RealtimeHandler:
-    """Select one session handler from the initial ``session.update`` event."""
-
-    def __init__(self, handlers: Mapping[str, RealtimeSessionHandler]) -> None:
-        self._handlers = dict(handlers)
-
-    async def generate(
-        self,
-        request_stream: AsyncGenerator[Any, None],
-        context: Context,
-    ) -> AsyncGenerator[dict, None]:
-        try:
-            first_event = await anext(request_stream)
-        except StopAsyncIteration:
-            return
-
-        if (
-            not isinstance(first_event, dict)
-            or first_event.get("type") != "session.update"
-        ):
-            yield invalid_request_error_event(
-                "invalid_event",
-                "first event must be session.update",
-                client_event_id=(
-                    first_event.get("event_id")
-                    if isinstance(first_event, dict)
-                    else None
-                ),
-            )
-            return
-
-        session = first_event.get("session")
-        session_type = session.get("type") if isinstance(session, dict) else None
-        handler = (
-            self._handlers.get(session_type) if isinstance(session_type, str) else None
-        )
-        if handler is None:
-            yield invalid_request_error_event(
-                "unsupported_session",
-                f"unsupported session type: {session_type!r}",
-                client_event_id=first_event.get("event_id"),
-            )
-            return
-
-        async def replay() -> AsyncGenerator[Any, None]:
-            yield first_event
-            async for event in request_stream:
-                yield event
-
-        async for event in handler.generate(replay(), context):
-            yield event
 
 
 def _default_sampling_params() -> Any:
@@ -137,7 +75,7 @@ class _Turn(RealtimeTurn):
         self.request_id = f"rt_{uuid.uuid4().hex}"
         self.input_rate = input_rate
         self.model_sample_rate = model_sample_rate
-        self.pending_audio = np.empty(0, dtype=np.float32)
+        self.pending_audio: np.ndarray = np.empty(0, dtype=np.float32)
         self.received_samples = 0
         self.audio: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
 
