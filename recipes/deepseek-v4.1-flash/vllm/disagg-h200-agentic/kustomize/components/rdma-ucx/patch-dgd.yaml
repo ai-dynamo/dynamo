@@ -24,6 +24,27 @@
   value:
     name: UCX_TLS
     value: rc_x,rc,cuda_copy,cuda_ipc,tcp
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/resources/requests/rdma~1ib
+  value: '4'
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/resources/limits/rdma~1ib
+  value: '4'
+- op: replace
+  path: /spec/components/1/podTemplate/spec/containers/0/command
+  value: [python3, /rdma-binder/bind_rdma.py, --, python3]
+- op: add
+  path: /spec/components/1/podTemplate/spec/containers/0/volumeMounts/-
+  value:
+    name: rdma-binder
+    mountPath: /rdma-binder
+    readOnly: true
+- op: add
+  path: /spec/components/1/podTemplate/spec/volumes/-
+  value:
+    name: rdma-binder
+    configMap:
+      name: dsv41-flash-h200-rdma-binder
 - op: test
   path: /spec/components/2/name
   value: DecodeWorker
@@ -35,3 +56,24 @@
   value:
     name: UCX_TLS
     value: rc_x,rc,cuda_copy,cuda_ipc,tcp
+- op: add
+  path: /spec/components/2/podTemplate/spec/containers/0/resources/requests/rdma~1ib
+  value: '4'
+- op: add
+  path: /spec/components/2/podTemplate/spec/containers/0/resources/limits/rdma~1ib
+  value: '4'
+- op: replace
+  path: /spec/components/2/podTemplate/spec/containers/0/command
+  value: [python3, /rdma-binder/bind_rdma.py, --, python3]
+- op: add
+  path: /spec/components/2/podTemplate/spec/containers/0/volumeMounts/-
+  value:
+    name: rdma-binder
+    mountPath: /rdma-binder
+    readOnly: true
+- op: add
+  path: /spec/components/2/podTemplate/spec/volumes/-
+  value:
+    name: rdma-binder
+    configMap:
+      name: dsv41-flash-h200-rdma-binder

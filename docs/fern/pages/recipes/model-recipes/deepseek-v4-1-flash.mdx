@@ -110,14 +110,18 @@ The worker memory and shared-memory requests match the tested configuration.
 
 <div data-recipe-framework="vllm" data-variant="disagg">
 
-- Configure RDMA devices in the cluster Kustomization. The recipe Kustomization
-  supplies the UCX transport settings.
+- The recipe Kustomization supplies UCX transport settings. For B200 and GB200,
+  add the cluster's RDMA device and interface settings.
 
 </div>
 
 <div data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
 
-- Place the prefill and decode workers on separate RDMA-capable H200 nodes, with four GPUs per worker. Set device allocation and interfaces in the cluster Kustomization's [InfiniBand component](https://github.com/ai-dynamo/dynamo/tree/main/recipes/templates/kustomize/components/provider-networking/ib/disagg).
+- Place the prefill and decode workers on separate RDMA-capable H200 nodes, with
+  four GPUs per worker. The recipe requests four `rdma/ib` devices per worker
+  and selects their assigned NICs at startup. The cluster must provide the
+  `rdma/ib` device plugin and PCI allocation metadata. Do not set a static
+  `UCX_NET_DEVICES` value.
 
 </div>
 
