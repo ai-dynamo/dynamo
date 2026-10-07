@@ -823,10 +823,10 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
   process calls `os.fork()`. A child process forked without `exec` runs without background threads.
 
   Background threads lower the memory that the extension's jemalloc keeps while idle. They purge on
-  their own schedule, though, so resident memory can stay higher for several seconds after an
-  allocation burst than with `background_thread:false`. Check both peak and idle memory against the
-  container's memory limit. `_RJEM_MALLOC_CONF=background_thread:false` turns the threads off, and
-  the allocating threads then purge unused memory themselves.
+  their own schedule, though, so resident memory can stay above its idle level for several seconds
+  after an allocation burst. Check both peak and idle memory against the container's memory limit.
+  `_RJEM_MALLOC_CONF=background_thread:false` turns the threads off. The allocating threads then
+  purge unused memory themselves, so a process that goes idle can keep more memory.
 </ParamField>
 
 ## HTTP endpoints
