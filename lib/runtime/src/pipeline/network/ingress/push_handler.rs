@@ -251,8 +251,7 @@ where
     /// upstream response transport, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
     /// classification (client-side disconnect vs. real failure), and the
-    /// health-check notifier policy (notify on every non-error chunk the
-    /// engine produces, before publishing it, and at clean stream end).
+    /// health-check notifications.
     async fn pump_response_stream<U>(
         &self,
         mut stream: ManyOut<U>,
