@@ -974,7 +974,8 @@ class TestGenerateLocally:
             "sampling_options": {},
         }
         chunks = [
-            chunk async for chunk in handler.generate_locally(request, self._make_context())
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
         ]
 
         assert chunks

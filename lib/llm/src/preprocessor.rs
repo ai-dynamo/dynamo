@@ -223,6 +223,8 @@ fn tool_content_part_as_user(
     })
 }
 
+type MediaInfo = (&'static str, Option<url::Url>, Option<String>);
+
 enum MultimodalContentPart<'a> {
     User(&'a ChatCompletionRequestUserMessageContentPart),
     Tool(&'a ChatCompletionRequestToolMessageContentPart),
@@ -236,7 +238,7 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
-    fn media_info(&self) -> Result<Option<(&'static str, Option<url::Url>, Option<String>)>> {
+    fn media_info(&self) -> Result<Option<MediaInfo>> {
         Ok(match self {
             Self::User(part) => match *part {
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => Some((
@@ -3377,19 +3379,17 @@ impl OpenAIPreprocessor {
                 })
             })
         });
-        let formatted_prompt = if self.normalize_tool_call_args
-            || continue_final
-            || render_audio_placeholder
-        {
-            self.apply_template_inner(&NormalizedArgsRequest {
-                inner: request,
-                normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
-                render_audio_placeholder,
-            })?
-        } else {
-            self.apply_template_inner(request)?
-        };
+        let formatted_prompt =
+            if self.normalize_tool_call_args || continue_final || render_audio_placeholder {
+                self.apply_template_inner(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: self.normalize_tool_call_args,
+                    continue_final_message: continue_final,
+                    render_audio_placeholder,
+                })?
+            } else {
+                self.apply_template_inner(request)?
+            };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
         };
@@ -8099,8 +8099,14 @@ mod strip_tests {
         };
         assert!(wrapped.typed_messages().is_none());
         let messages = serde_json::to_value(wrapped.messages()).unwrap();
-        assert_eq!(messages[0]["content"][1], serde_json::json!({"type": "audio"}));
-        assert_eq!(messages[0]["content"][2], serde_json::json!({"type": "audio"}));
+        assert_eq!(
+            messages[0]["content"][1],
+            serde_json::json!({"type": "audio"})
+        );
+        assert_eq!(
+            messages[0]["content"][2],
+            serde_json::json!({"type": "audio"})
+        );
     }
 
     #[test]

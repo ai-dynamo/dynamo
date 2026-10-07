@@ -6,8 +6,8 @@ loading propagate (so the frontend returns a 4xx) instead of swallowing them to
 None."""
 
 import base64
-import io
 import http.server
+import io
 import json
 import threading
 import time
@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
-import soundfile as sf
 import pytest_asyncio
+import soundfile as sf
 import torch
 from safetensors.torch import save as safetensors_save
 
