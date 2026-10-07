@@ -179,9 +179,23 @@ request_classifier:
   type: acme-queue-budget
   parameters:
     max_wait_ms: 2000
+
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard_all
+    policy_family: standard
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 1
+    prefill_busy_threshold_frac: 1.0
 ```
 
 The `type` selects the registered provider; `parameters` supplies its configuration. Unknown types, duplicate registrations, and invalid parameters stop startup. Omit `request_classifier` to use Dynamo's pass-through behavior.
+
+The policy class enables queueing when every eligible worker's active prefill tokens exceed its `max_num_batched_tokens`. Requests wait in the router until a worker is available or the two-second budget expires. Without a busy threshold, requests proceed to workers, where the classifier's deadline cannot limit their wait. See [Policy-Class Queues](configuration-and-tuning.md#policy-class-queues) to tune queueing for your workload.
 
 ## Available Inputs and Decisions
 
