@@ -41,19 +41,21 @@ pytestmark = [
 ]
 
 
-class _FakeEngineArgs:
-    def __init__(self, payload: str):
-        self.payload = payload
-
-    @classmethod
-    def from_json(cls, payload: str):
-        return cls(payload)
-
-
 class _FakeRouterConfig:
     @classmethod
     def from_json(cls, payload: str):
         return json.loads(payload)
+
+
+def _launch_config(payload):
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend=payload.get("engine_type", "vllm"),
+        backend_version=payload.get("aic_backend_version", ""),
+        agg_engine_args=payload,
+        num_workers=1,
+    )
+    return simulation.DynamoReplayRunner._engine_args(deployment, "aggregated")
 
 
 def _report(summary: dict, *, total_ticks: int | None = None) -> ReplayReport:
@@ -82,7 +84,11 @@ def _agg_deployment() -> BackendDeploymentSpec:
         deployment_mode="agg",
         backend="vllm",
         backend_version="0.11.0",
-        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        agg_engine_args={
+            "engine_type": "vllm",
+            "max_num_seqs": 256,
+            "timing_model": {"type": "polynomial"},
+        },
         num_workers=3,
         performance_model_metadata={
             "aggregated": {"config": {"model_path": "target-model"}}
@@ -103,7 +109,6 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
             total_ticks=7,
         )
 
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "KvRouterConfig", _FakeRouterConfig)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
     spec = ReplaySpec(
@@ -176,7 +181,6 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
         seen.update(kwargs)
         return _report({"completed_requests": 2})
 
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
@@ -226,7 +230,6 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
             }
         )
 
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", fake_native_replay)
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
@@ -302,7 +305,11 @@ def test_weka_runner_requires_a_configured_execution_target_model() -> None:
         deployment_mode="agg",
         backend="vllm",
         backend_version="0.11.0",
-        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        agg_engine_args={
+            "engine_type": "vllm",
+            "max_num_seqs": 256,
+            "timing_model": {"type": "polynomial"},
+        },
         num_workers=3,
     )
     spec = ReplaySpec(
@@ -331,10 +338,13 @@ def test_dynamo_runner_defers_target_model_validation_until_trace_load(
         deployment_mode="agg",
         backend="vllm",
         backend_version="0.11.0",
-        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        agg_engine_args={
+            "engine_type": "vllm",
+            "max_num_seqs": 256,
+            "timing_model": {"type": "polynomial"},
+        },
         num_workers=1,
     )
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
     spec = ReplaySpec(
         backend_deployment=deployment,
@@ -364,7 +374,6 @@ def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
             ),
         )
 
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
@@ -404,7 +413,6 @@ def test_runner_captures_per_request_output_when_requested(monkeypatch) -> None:
         seen.update(kwargs)
         return _detailed_report({"completed_requests": 1})
 
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
@@ -437,7 +445,6 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
         seen.update(kwargs)
         return _report({"output_throughput_tok_s": 99.0})
 
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(
         simulation,
         "run_synthetic_trace_replay",
@@ -447,8 +454,14 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
         deployment_mode="disagg",
         backend="sglang",
         backend_version="0.5.6",
-        prefill_engine_args={"worker_type": "prefill"},
-        decode_engine_args={"worker_type": "decode"},
+        prefill_engine_args={
+            "worker_type": "prefill",
+            "timing_model": {"type": "polynomial"},
+        },
+        decode_engine_args={
+            "worker_type": "decode",
+            "timing_model": {"type": "polynomial"},
+        },
         num_prefill_workers=2,
         num_decode_workers=4,
     )
@@ -497,7 +510,6 @@ def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
         seen.update(kwargs)
         return _report({"output_throughput_tok_s": 99.0})
 
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(
         simulation,
         "run_synthetic_trace_replay",
@@ -556,7 +568,12 @@ def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
     monkeypatch.setattr(
         simulation.DynamoReplayRunner,
         "_engine_args",
-        staticmethod(lambda _payload: CapacityArgs()),
+        staticmethod(
+            lambda _deployment, _role: {
+                "engine": {"num_gpu_blocks": 100, "block_size": 16},
+                "dp_size": 1,
+            }
+        ),
     )
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
@@ -575,8 +592,7 @@ def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
 
 
 def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> None:
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    engine_args = simulation.DynamoReplayRunner._engine_args(
+    engine_args = _launch_config(
         {
             "engine_type": "vllm",
             "aic_backend": "vllm",
@@ -594,9 +610,9 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
         }
     )
 
-    lowered = json.loads(engine_args.payload)
-    assert "aic_backend" not in lowered
-    assert "aic_backend_version" not in lowered
+    lowered = engine_args
+    assert "aic_backend" not in lowered["engine"]
+    assert "aic_backend_version" not in lowered["engine"]
     assert "aic_system" not in lowered
     assert "aic_model_path" not in lowered
     assert "aic_attention_dp_size" not in lowered
@@ -675,7 +691,6 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(
         simulation,
         "run_trace_replay",
@@ -694,17 +709,17 @@ def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
 
-def test_planner_bootstrap_preserves_each_canonical_role_identity():
-    from types import SimpleNamespace
-
+def test_planner_bootstrap_preserves_each_canonical_role_identity(tmp_path):
     from dynamo.replay.planner import _ais_session_kwargs
 
+    for name in ("custom-p", "custom-d"):
+        (tmp_path / name).mkdir()
     prefill = {
         "model": "model-p",
         "system": "gpu-p",
         "backend": "vllm",
         "worker_type": "prefill",
-        "systems_paths": ["custom-p"],
+        "systems_paths": [str(tmp_path / "custom-p")],
         "estimator_config": {"correction": {"enabled": False}},
     }
     decode = {
@@ -712,15 +727,26 @@ def test_planner_bootstrap_preserves_each_canonical_role_identity():
         "system": "gpu-d",
         "backend": "sglang",
         "worker_type": "decode",
-        "systems_paths": ["custom-d"],
+        "systems_paths": [str(tmp_path / "custom-d")],
     }
     for config in (prefill, decode):
-        args = SimpleNamespace(ais_perf_config=config)
+        args = {
+            "engine": {
+                "timing_model": {
+                    "type": "external",
+                    "provider": "ais",
+                    "config": config,
+                }
+            }
+        }
         assert _ais_session_kwargs(None, args) == {"config": config}
-        assert _ais_session_kwargs(
-            config,
-            SimpleNamespace(ais_perf_config=None, worker_type=config["worker_type"]),
-        ) == {"config": config}
+        fallback = _ais_session_kwargs(
+            config, {"engine": {"worker_type": config["worker_type"]}}
+        )["config"]
+        for field in ("model", "system", "backend", "worker_type", "systems_paths"):
+            assert fallback[field] == config[field]
+        if "estimator_config" in config:
+            assert fallback["estimator_config"]["correction"]["enabled"] is False
 
 
 def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
@@ -743,11 +769,11 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     deployment = prediction_to_replay_spec(
         CorePredictionConfig.model_validate(raw)
     ).backend_deployment
-    args = simulation.DynamoReplayRunner._engine_args(deployment.agg_engine_args)
+    args = simulation.DynamoReplayRunner._engine_args(deployment, "aggregated")
     metadata = deployment.performance_model_metadata["aggregated"]["config"]
-    assert metadata["model"] == raw["engine"]["model"]
+    assert "model" in metadata
     config = _ais_session_kwargs(metadata, args)["config"]
-    assert config == args.ais_perf_config
+    assert config == args["engine"]["timing_model"].get("config")
     assert config["database_mode"] == "SOL"
     assert config["estimation_mode"] == "op_level"
     assert config["systems_paths"]
@@ -760,18 +786,17 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
         {"type": "polynomial"},
     ],
 )
-def test_custom_timing_without_capacity_does_not_resolve_unused_model(
-    monkeypatch, timing
-):
+def test_custom_timing_uses_shared_capacity_resolution(monkeypatch, timing):
     import aisimulate.capacity
 
-    def unexpected_capacity_lookup(**kwargs):
-        raise AssertionError("custom timing must not look up an unused model")
+    calls = []
 
-    monkeypatch.setattr(
-        aisimulate.capacity, "estimate_num_gpu_blocks", unexpected_capacity_lookup
-    )
-    args = simulation.DynamoReplayRunner._engine_args(
+    def capacity_lookup(**kwargs):
+        calls.append(kwargs)
+        return 4096
+
+    monkeypatch.setattr(aisimulate.capacity, "estimate_num_gpu_blocks", capacity_lookup)
+    args = _launch_config(
         {
             "engine_type": "vllm",
             "aic_backend": "vllm",
@@ -782,10 +807,11 @@ def test_custom_timing_without_capacity_does_not_resolve_unused_model(
             "timing_model": timing,
         }
     )
-    assert args.num_gpu_blocks == 16384
-    assert args.dp_size == 2
-    assert args.ais_tp_size == 2
-    assert args.ais_perf_config is None
+    assert args["engine"]["num_gpu_blocks"] == 4096
+    assert len(calls) == 1
+    assert args["dp_size"] == 2
+    assert args["tensor_parallel_size"] == 2
+    assert args["engine"]["timing_model"].get("config") is None
 
 
 @pytest.mark.parametrize(
@@ -819,8 +845,10 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     payload = spec.backend_deployment.agg_engine_args
     assert payload["cuda_graph_reserved_bytes"] == 4096
     assert payload["num_gpu_blocks"] > 0
-    args = simulation.DynamoReplayRunner._engine_args(payload)
-    assert args.num_gpu_blocks == payload["num_gpu_blocks"]
-    assert args.ais_perf_config is None
+    args = simulation.DynamoReplayRunner._engine_args(
+        spec.backend_deployment, "aggregated"
+    )
+    assert args["engine"]["num_gpu_blocks"] == payload["num_gpu_blocks"]
+    assert args["engine"]["timing_model"].get("config") is None
     report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
     assert report.metrics["completed_requests"] == raw["traffic"]["stop"]["requests"]

@@ -34,24 +34,26 @@ def main() -> None:
         "current",
     ]
 
-    import json
-
     from dynamo.frontend.main import parse_args
     from dynamo.llm import AisPerfConfig, KvRouterConfig
-    from dynamo.mocker import MockEngineArgs
+    from dynamo.mocker.config import normalize_mocker_config
     from dynamo.replay import run_synthetic_trace_replay
 
     config, _, _ = parse_args()
     assert config.router_mode == "kv"
     assert config.router_prefill_load_model == "ais"
     perf = AisPerfConfig(**config.ais_perf_kwargs())
-    engine_args = MockEngineArgs.from_json(
-        json.dumps(
-            {
-                "ais_perf_config": perf.to_dict(),
+    engine_args = normalize_mocker_config(
+        {
+            "engine": {
                 "num_gpu_blocks": 1024,
+                "timing_model": {
+                    "type": "external",
+                    "provider": "ais",
+                    "config": perf.to_dict(),
+                },
             }
-        )
+        }
     )
     # Exercise Dynamo's actual embedded Rust callback and Replay engine together.
     # This catches a wheel/crate EngineSpec mismatch that an SDK-only query misses.

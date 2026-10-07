@@ -15,7 +15,7 @@ use super::{
     OfflineDisaggReplayConfig, ReplayCaptureOptions, ReplayPrefillLoadEstimator, ReplayRouterMode,
     ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, MockerConfig};
 use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_weka_agentic_graph};
 use crate::scheduler::RouterEventVisibility;
 
@@ -110,7 +110,7 @@ fn online_replay_options(
 }
 
 fn online_replay_config(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     num_workers: usize,
@@ -152,7 +152,7 @@ fn single_turn_trace_requests(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_loaded_trace_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -181,7 +181,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -228,7 +228,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_loaded_trace_with_router_mode_and_capture_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -364,7 +364,7 @@ pub fn simulate_loaded_trace_disagg_with_router_mode_and_capture_options(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_loaded_trace_live_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -387,7 +387,7 @@ pub fn simulate_loaded_trace_live_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_loaded_trace_live_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -419,7 +419,7 @@ pub fn simulate_loaded_trace_live_with_router_mode_and_options(
 }
 
 pub fn generate_trace_worker_artifacts_offline(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
 ) -> Result<ReplayWorkerArtifacts> {
     let args = args.normalized()?;
@@ -428,7 +428,7 @@ pub fn generate_trace_worker_artifacts_offline(
 
 /// Generate offline replay artifacts with a test visibility override for KV events.
 pub fn generate_trace_worker_artifacts_offline_with_kv_event_visibility(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     visibility: ReplayKvEventVisibility,
 ) -> Result<ReplayWorkerArtifacts> {
@@ -441,7 +441,7 @@ pub fn generate_trace_worker_artifacts_offline_with_kv_event_visibility(
 }
 
 pub fn simulate_trace_file(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace_path: &Path,
     trace_block_size: usize,
     num_workers: usize,
@@ -461,7 +461,7 @@ pub fn simulate_trace_file(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_file_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -490,7 +490,7 @@ pub fn simulate_trace_file_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_file_with_router_mode_and_format(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -528,7 +528,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -777,7 +777,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observ
 }
 
 pub fn simulate_trace_live_file(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace_path: &Path,
     trace_block_size: usize,
     num_workers: usize,
@@ -797,7 +797,7 @@ pub fn simulate_trace_live_file(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_live_file_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -823,7 +823,7 @@ pub fn simulate_trace_live_file_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_live_file_with_router_mode_and_format(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -855,7 +855,7 @@ pub fn simulate_trace_live_file_with_router_mode_and_format(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_live_file_with_router_mode_and_format_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -925,7 +925,7 @@ pub fn simulate_trace_live_file_with_router_mode_and_format_and_options(
 }
 
 pub fn simulate_trace_requests(
-    args: MockEngineArgs,
+    args: MockerConfig,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -944,7 +944,7 @@ pub fn simulate_trace_requests(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_requests_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -970,7 +970,7 @@ pub fn simulate_trace_requests_with_router_mode(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_requests_with_router_mode_and_runtime_observers(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -1064,7 +1064,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
 }
 
 pub fn simulate_trace_live_requests(
-    args: MockEngineArgs,
+    args: MockerConfig,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -1081,7 +1081,7 @@ pub fn simulate_trace_live_requests(
 }
 
 pub fn simulate_trace_live_requests_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -1104,7 +1104,7 @@ pub fn simulate_trace_live_requests_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_live_requests_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -1135,7 +1135,7 @@ pub fn simulate_trace_live_requests_with_router_mode_and_options(
 }
 
 pub fn simulate_concurrency_file(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace_path: &Path,
     trace_block_size: usize,
     max_in_flight: usize,
@@ -1155,7 +1155,7 @@ pub fn simulate_concurrency_file(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_file_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -1184,7 +1184,7 @@ pub fn simulate_concurrency_file_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_file_with_router_mode_and_format(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -1221,7 +1221,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_file_with_router_mode_and_format_and_runtime_observers(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -1393,7 +1393,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_
 }
 
 pub fn simulate_concurrency_live_file(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace_path: &Path,
     trace_block_size: usize,
     max_in_flight: usize,
@@ -1413,7 +1413,7 @@ pub fn simulate_concurrency_live_file(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_live_file_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -1439,7 +1439,7 @@ pub fn simulate_concurrency_live_file_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_live_file_with_router_mode_and_format(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -1470,7 +1470,7 @@ pub fn simulate_concurrency_live_file_with_router_mode_and_format(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_live_file_with_router_mode_and_format_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace_path: &Path,
@@ -1517,7 +1517,7 @@ pub fn simulate_concurrency_live_file_with_router_mode_and_format_and_options(
 }
 
 pub fn simulate_concurrency_live_requests(
-    args: MockEngineArgs,
+    args: MockerConfig,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -1534,7 +1534,7 @@ pub fn simulate_concurrency_live_requests(
 }
 
 pub fn simulate_concurrency_live_requests_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -1557,7 +1557,7 @@ pub fn simulate_concurrency_live_requests_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_live_requests_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -1588,7 +1588,7 @@ pub fn simulate_concurrency_live_requests_with_router_mode_and_options(
 }
 
 pub fn simulate_concurrency_requests(
-    args: MockEngineArgs,
+    args: MockerConfig,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -1607,7 +1607,7 @@ pub fn simulate_concurrency_requests(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_requests_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -1633,7 +1633,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_requests_with_router_mode_and_runtime_observers(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     requests: Vec<DirectRequest>,
@@ -1731,7 +1731,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode_and_runtime_observe
 }
 
 pub fn simulate_trace_workload(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     num_workers: usize,
 ) -> Result<TraceSimulationReport> {
@@ -1747,7 +1747,7 @@ pub fn simulate_trace_workload(
 }
 
 pub fn simulate_trace_workload_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -1770,7 +1770,7 @@ pub fn simulate_trace_workload_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 fn simulate_trace_workload_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -1797,7 +1797,7 @@ fn simulate_trace_workload_with_router_mode_and_options(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_workload_with_router_mode_and_options_and_runtime_observers(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -1913,7 +1913,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_o
 }
 
 pub fn simulate_trace_live_workload(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     num_workers: usize,
 ) -> Result<TraceSimulationReport> {
@@ -1928,7 +1928,7 @@ pub fn simulate_trace_live_workload(
 }
 
 pub fn simulate_trace_live_workload_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -1949,7 +1949,7 @@ pub fn simulate_trace_live_workload_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_live_workload_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -1975,7 +1975,7 @@ pub fn simulate_trace_live_workload_with_router_mode_and_options(
 }
 
 pub fn simulate_concurrency_workload(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,
@@ -1994,7 +1994,7 @@ pub fn simulate_concurrency_workload(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_workload_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -2019,7 +2019,7 @@ pub fn simulate_concurrency_workload_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_workload_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -2048,7 +2048,7 @@ pub fn simulate_concurrency_workload_with_router_mode_and_options(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_workload_with_router_mode_and_options_and_runtime_observers(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -2169,7 +2169,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options_and_run
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_agentic_trace_workload_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,
@@ -2198,7 +2198,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_agentic_trace_workload_with_router_mode_and_telemetry(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,
@@ -2231,7 +2231,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode_and_telemetry(
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_agentic_trace_workload_with_router_mode_and_runtime_observers(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,
@@ -2359,7 +2359,7 @@ pub fn simulate_agentic_trace_workload_disagg_with_router_mode_and_runtime_obser
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_agentic_trace_live_workload_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: AgenticTrace,
@@ -2386,7 +2386,7 @@ pub fn simulate_agentic_trace_live_workload_with_router_mode_and_options(
 }
 
 pub fn simulate_concurrency_live_workload(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,
@@ -2403,7 +2403,7 @@ pub fn simulate_concurrency_live_workload(
 }
 
 pub fn simulate_concurrency_live_workload_with_router_mode(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -2426,7 +2426,7 @@ pub fn simulate_concurrency_live_workload_with_router_mode(
 
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_live_workload_with_router_mode_and_options(
-    args: MockEngineArgs,
+    args: MockerConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
@@ -2455,8 +2455,7 @@ pub fn simulate_concurrency_live_workload_with_router_mode_and_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::perf_model::PerfModel;
-    use crate::common::protocols::{EngineType, NativeHostOffloadConfig, SglangArgs, WorkerType};
+    use crate::common::protocols::{EngineType, NativeHostOffloadConfig, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use crate::replay::ReplayRuntimeObservers;
     use aisimulate_core::replay::{
@@ -2469,33 +2468,38 @@ mod tests {
     use std::collections::BTreeSet;
     use std::io::Write;
     use std::rc::Rc;
-    use std::sync::Arc;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
-    fn replay_test_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(128)
-            .max_num_batched_tokens(Some(64))
-            .max_num_seqs(Some(8))
-            .speedup_ratio(1000.0)
-            .build()
-            .unwrap()
+    fn replay_test_args() -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 128,
+                "max_num_batched_tokens": 64,
+                "max_num_seqs": 8,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap()
     }
 
     fn disagg_test_config() -> OfflineDisaggReplayConfig {
         OfflineDisaggReplayConfig {
-            prefill_args: MockEngineArgs {
-                worker_type: WorkerType::Prefill,
-                block_size: 4,
-                ..MockEngineArgs::default()
-            },
-            decode_args: MockEngineArgs {
-                worker_type: WorkerType::Decode,
-                block_size: 4,
-                ..MockEngineArgs::default()
-            },
+            prefill_args: MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": WorkerType::Prefill,
+                    "block_size": 4
+                }
+            }))
+            .unwrap(),
+            decode_args: MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": WorkerType::Decode,
+                    "block_size": 4
+                }
+            }))
+            .unwrap(),
             num_prefill_workers: 1,
             num_decode_workers: 1,
         }
@@ -2567,13 +2571,15 @@ mod tests {
 
     #[test]
     fn kv_event_lag_reaches_offline_kv_router_replay() {
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(128)
-            .max_num_batched_tokens(Some(64))
-            .max_num_seqs(Some(8))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 128,
+                "max_num_batched_tokens": 64,
+                "max_num_seqs": 8,
+            },
+        }))
+        .unwrap();
         let router_config = KvRouterConfig {
             overlap_score_credit: 100.0,
             overlap_score_credit_decay: 0.0,
@@ -2722,10 +2728,8 @@ mod tests {
     fn single_target_kv_router_replays_trace_and_concurrency(
         #[values(EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm)] engine_type: EngineType,
     ) {
-        let args = MockEngineArgs {
-            engine_type,
-            ..replay_test_args()
-        };
+        let mut args = replay_test_args();
+        args.backend = engine_type;
         let trace_report = simulate_trace_requests_with_router_mode(
             args.clone(),
             None,
@@ -2865,15 +2869,17 @@ mod tests {
         decode_engine: EngineType,
     ) -> OfflineDisaggReplayConfig {
         let role_args = |engine_type, worker_type: WorkerType, dp_size: u32| {
-            MockEngineArgs::builder()
-                .engine_type(engine_type)
-                .worker_type(worker_type)
-                .dp_size(dp_size)
-                .block_size(4)
-                .num_gpu_blocks(64)
-                .speedup_ratio(1000.0)
-                .build()
-                .unwrap()
+            MockerConfig::from_value(serde_json::json!({
+                "dp_size": dp_size,
+                "engine": {
+                    "backend": engine_type,
+                    "worker_type": worker_type,
+                    "block_size": 4,
+                    "num_gpu_blocks": 64,
+                    "speedup_ratio": 1000.0
+                }
+            }))
+            .unwrap()
         };
         OfflineDisaggReplayConfig {
             prefill_args: role_args(prefill_engine, WorkerType::Prefill, PREFILL_DP_SIZE),
@@ -2886,20 +2892,23 @@ mod tests {
     /// vLLM args whose G1 holds exactly one 10-token request (3 blocks), so
     /// any later request on the same rank evicts the previous prompt. Decode
     /// steps are slow so a two-token request keeps its worker busy for ~100 ms.
-    fn host_offload_args(host_offload: Option<NativeHostOffloadConfig>) -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(3)
-            .max_num_batched_tokens(Some(64))
-            .max_num_seqs(Some(1))
-            .kv_cache_bytes_per_token(Some(1024))
-            .native_host_offload(host_offload)
-            .perf_model(Arc::new(PerfModel::Fixed {
-                prefill_ms: 1.0,
-                decode_ms: 100.0,
-            }))
-            .build()
-            .unwrap()
+    fn host_offload_args(host_offload: Option<NativeHostOffloadConfig>) -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 3,
+                "max_num_batched_tokens": 64,
+                "max_num_seqs": 1,
+                "kv_cache_bytes_per_token": 1024,
+                "native_host_offload": host_offload,
+                "timing_model": {
+                    "type": "fixed",
+                    "prefill_ms": 1.0,
+                    "decode_ms": 100.0
+                }
+            }
+        }))
+        .unwrap()
     }
 
     fn prompt_request(id: u128, first_token: u32, arrival_ms: f64, output: usize) -> DirectRequest {
@@ -2913,7 +2922,7 @@ mod tests {
     }
 
     fn replay_with_records(
-        args: MockEngineArgs,
+        args: MockerConfig,
         requests: Vec<DirectRequest>,
         num_workers: usize,
     ) -> TraceSimulationReport {
@@ -3217,17 +3226,19 @@ mod tests {
     #[case::vllm(EngineType::Vllm)]
     #[case::trtllm(EngineType::Trtllm)]
     fn native_g1_runs_through_offline_replay_entrypoint(#[case] engine_type: EngineType) {
-        let args = MockEngineArgs::builder()
-            .engine_type(engine_type)
-            .block_size(4)
-            .num_gpu_blocks(16)
-            .max_num_batched_tokens(Some(16))
-            .max_num_seqs(Some(2))
-            .enable_prefix_caching(true)
-            .enable_chunked_prefill(true)
-            .speedup_ratio(1000.0)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": engine_type,
+                "block_size": 4,
+                "num_gpu_blocks": 16,
+                "max_num_batched_tokens": 16,
+                "max_num_seqs": 2,
+                "enable_prefix_caching": true,
+                "enable_chunked_prefill": true,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
         let requests = [11_u128, 22]
             .into_iter()
             .enumerate()
@@ -3257,18 +3268,18 @@ mod tests {
 
     #[test]
     fn one_worker_sglang_impossible_request_returns_dead_end_error() {
-        let args = MockEngineArgs::builder()
-            .engine_type(EngineType::Sglang)
-            .block_size(4)
-            .num_gpu_blocks(1)
-            .speedup_ratio(1000.0)
-            .sglang(Some(SglangArgs {
-                page_size: Some(4),
-                chunked_prefill_size: Some(8),
-                ..Default::default()
-            }))
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": EngineType::Sglang,
+                "block_size": 4,
+                "num_gpu_blocks": 1,
+                "speedup_ratio": 1000.0,
+                "sglang": {
+                    "chunked_prefill_size": 8
+                }
+            }
+        }))
+        .unwrap();
         let request = DirectRequest {
             tokens: vec![1; 8],
             max_output_tokens: 2,
@@ -3360,13 +3371,9 @@ mod tests {
 
         for engine_type in [EngineType::Vllm, EngineType::Sglang] {
             let mut args = replay_test_args();
-            args.engine_type = engine_type;
+            args.backend = engine_type;
             if engine_type == EngineType::Sglang {
-                args.sglang = Some(SglangArgs {
-                    page_size: Some(4),
-                    chunked_prefill_size: Some(64),
-                    ..Default::default()
-                });
+                args.sglang.chunked_prefill_size = 64;
             }
             let report = simulate_agentic_trace_workload_with_router_mode(
                 args,

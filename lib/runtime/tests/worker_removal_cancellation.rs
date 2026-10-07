@@ -215,18 +215,23 @@ async fn assert_removal_drains_established_response_stream(distributed: &Distrib
 
 #[tokio::test]
 async fn tcp_worker_removal_cancels_pending_handshakes_but_drains_established_streams() {
-    // Both scenarios share the process-wide request-plane listener and its runtime.
-    let runtime = Runtime::from_current().unwrap();
-    let config = DistributedConfig {
-        response_plane: Some(ResponsePlaneMode::Tcp),
-        ..DistributedConfig::process_local()
-    };
-    let distributed = DistributedRuntime::new(runtime.clone(), config)
-        .await
-        .unwrap();
+    // The runtime's explicit response plane must also govern worker ingress,
+    // even when the process environment selects a different transport.
+    temp_env::async_with_vars([("DYN_RESPONSE_PLANE", Some("quic"))], async {
+        // Both scenarios share the process-wide request-plane listener and its runtime.
+        let runtime = Runtime::from_current().unwrap();
+        let config = DistributedConfig {
+            response_plane: Some(ResponsePlaneMode::Tcp),
+            ..DistributedConfig::process_local()
+        };
+        let distributed = DistributedRuntime::new(runtime.clone(), config)
+            .await
+            .unwrap();
 
-    assert_removal_cancels_request_waiting_for_response_stream(&distributed).await;
-    assert_removal_drains_established_response_stream(&distributed).await;
+        assert_removal_cancels_request_waiting_for_response_stream(&distributed).await;
+        assert_removal_drains_established_response_stream(&distributed).await;
 
-    runtime.shutdown();
+        runtime.shutdown();
+    })
+    .await;
 }
