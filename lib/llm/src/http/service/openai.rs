@@ -5579,7 +5579,7 @@ async fn handler_audio_speech(
             request.response_format.as_deref().unwrap_or("wav"),
             "pcm" | "wav"
         )
-        && request.speed.is_none_or(|speed| speed == 1.0);
+        && request.speed == 1.0;
     let request_id = get_or_create_request_id(&headers);
     if streams_audio_chunks {
         // Advertise that this frontend can concatenate incremental worker

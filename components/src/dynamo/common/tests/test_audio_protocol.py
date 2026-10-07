@@ -4,6 +4,7 @@
 """Unit tests for dynamo.common.protocols.audio_protocol module."""
 
 import pytest
+from pydantic import ValidationError
 
 from dynamo.common.protocols.audio_protocol import (
     AudioData,
@@ -18,9 +19,9 @@ pytestmark = [
 ]
 
 
-def test_audio_request_wire_shape_adds_no_defaults():
-    # The model carries the fields the client sent and nothing else. The
-    # handlers own the defaults for `response_format` and `speed`.
+def test_audio_request_wire_shape():
+    # `speed` is the one request field with a protocol default; the frontend
+    # fills it in. The handlers own the default for `response_format`.
     request = NvCreateAudioSpeechRequest(
         input="hello",
         model="qwen-tts",
@@ -35,9 +36,16 @@ def test_audio_request_wire_shape_adds_no_defaults():
         "model": "qwen-tts",
         "voice": "vivian",
         "data_source": "b64_json",
+        "speed": 1.0,
         "task_type": "CustomVoice",
         "language": "English",
     }
+
+
+@pytest.mark.parametrize("speed", [0.1, 5.0])
+def test_audio_request_rejects_speed_outside_supported_range(speed):
+    with pytest.raises(ValidationError):
+        NvCreateAudioSpeechRequest(input="hi", speed=speed)
 
 
 def test_audio_response_wire_shape():
