@@ -19,6 +19,13 @@ export interface NightlyBackendBuild {
   latest?: boolean;
 }
 
+export interface NightlyBuild {
+  version: string;
+  date: string;
+  packages: string[];
+  note?: string;
+}
+
 export const NIGHTLY_BACKEND_BUILDS: NightlyBackendBuild[] = [
   { backend: "sglang", backendVersion: "0.5.21", dynamo: "1.6.0.dev20261006", date: "Oct 6, 2026", tag: "20261006-7d7d3da", latest: true },
   { backend: "sglang", backendVersion: "0.5.19", dynamo: "1.6.0.dev20261004", date: "Oct 4, 2026", tag: "20261004-1cbc578" },
@@ -29,6 +36,12 @@ export const NIGHTLY_BACKEND_BUILDS: NightlyBackendBuild[] = [
   { backend: "vllm", backendVersion: "0.30.0", dynamo: "1.6.0.dev20261006", date: "Oct 6, 2026", tag: "20261006-7d7d3da", latest: true },
   { backend: "vllm", backendVersion: "0.29.0", dynamo: "1.6.0.dev20260928", date: "Sep 28, 2026", tag: "20260928-b75173c" },
   { backend: "vllm", backendVersion: "0.28.0", dynamo: "1.5.0.dev20260914", date: "Sep 14, 2026", tag: "20260914-11b85b9" },
+];
+
+export const NIGHTLY_BUILDS: NightlyBuild[] = [
+  { version: "1.6.0.dev20261007", date: "Oct 7, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"] },
+  { version: "1.6.0.dev20261006", date: "Oct 6, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"] },
+  { version: "1.6.0.dev20261004", date: "Oct 4, 2026", packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"] },
 ];
 
 export default NIGHTLY_BACKEND_BUILDS;
