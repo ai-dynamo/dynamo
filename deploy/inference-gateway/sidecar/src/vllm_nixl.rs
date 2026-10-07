@@ -23,12 +23,12 @@
 //! this module are documented where they are enforced below:
 //!
 //! * the decode destination is the locally configured engine, so `remote_host`
-//!   and `remote_port` never become an HTTP destination ([`Self::send_decode`]);
+//!   and `remote_port` never become an HTTP destination (`VllmNixlAdapter::send_decode`);
 //! * `n != 1` and a client-supplied `kv_transfer_params` are rejected before the
 //!   prefill leg ([`prepare_prefill_request`]);
 //! * an empty `remote_block_ids` is a valid handoff, not a missing one
 //!   ([`validate_prefill_handoff`]);
-//! * neither leg is retried ([`Self::execute`]).
+//! * neither leg is retried (`VllmNixlAdapter::execute`).
 
 use std::sync::Arc;
 use std::time::Duration;
