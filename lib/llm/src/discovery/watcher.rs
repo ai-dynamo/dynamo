@@ -31,8 +31,8 @@ use crate::{
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
     local_model::runtime_config::{
-        TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY, TokenizerBackend,
+        VLLM_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -56,7 +56,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
-    types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
+    types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
     worker_type::WorkerType,
 };
 
@@ -412,16 +412,21 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        validate_card_parser_version(card)?;
+
         validate_policy_worker_role(card, &self.plugins)?;
 
         // Prepare without exact video routing unless the cohort agreed on a contract.
-        if spec.video_contract.is_none()
-            && card
-                .runtime_config
-                .runtime_data
-                .remove(VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY)
-                .is_some()
-        {
+        let mut removed_video_contract = false;
+        if spec.video_contract.is_none() {
+            for key in [
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            ] {
+                removed_video_contract |= card.runtime_config.runtime_data.remove(key).is_some();
+            }
+        }
+        if removed_video_contract {
             tracing::warn!(
                 target: "mm_routing",
                 model_name = card.name(),
@@ -430,7 +435,6 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
-
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
         // are process-local, so preserve them when the MDC supplies the base config.
@@ -915,7 +919,7 @@ impl ModelWatcher {
             if card.model_type.supports_realtime() {
                 // `Text` is overloaded for Realtime; its I/O passes through.
                 let realtime_router = PushRouter::<
-                    RealtimeClientEvent,
+                    DynamoRealtimeClientEvent,
                     Annotated<RealtimeServerEvent>,
                 >::from_client_with_monitor(
                     client.clone(), router_config.router_mode, None
@@ -1340,6 +1344,21 @@ fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_card_parser_version(card: &ModelDeploymentCard) -> anyhow::Result<()> {
+    if should_validate_parser_version(card) {
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
+            card.runtime_config.tool_call_parser.as_deref(),
+            card.runtime_config.reasoning_parser.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
+    card.model_type.supports_chat()
+        && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
+}
+
 fn effective_router_config<'a>(
     worker_config: Option<&'a RouterConfig>,
     frontend_config: &'a RouterConfig,
@@ -1389,13 +1408,21 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
 
 /// Hashes the published Qwen video prompt-expansion contract.
 pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
-    let mut contract = card
-        .runtime_config
-        .runtime_data
-        .get(VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY)?
-        .clone();
-    canonicalize_json(&mut contract);
-    Some(blake3::hash(contract.to_string().as_bytes()).to_string())
+    let mut contracts = serde_json::Map::new();
+    for key in [
+        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    ] {
+        if let Some(contract) = card.runtime_config.runtime_data.get(key) {
+            contracts.insert(key.to_string(), contract.clone());
+        }
+    }
+    if contracts.is_empty() {
+        return None;
+    }
+    let mut contracts = serde_json::Value::Object(contracts);
+    canonicalize_json(&mut contracts);
+    Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
 }
 
 fn canonicalize_json(value: &mut serde_json::Value) {
@@ -1446,6 +1473,43 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn qwen_video_contract_digest_is_canonical_and_engine_specific() {
+        fn card_with_contract(key: &str, contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert(key.to_string(), contract);
+            card
+        }
+
+        let absent = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(qwen_video_contract_digest(&absent), None);
+
+        let vllm = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+        );
+        let reordered_vllm = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"resize_mode": "round_ties_even", "placeholder_target": "bare_video_token"}),
+        );
+        let sglang = card_with_contract(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+        );
+
+        assert_eq!(
+            qwen_video_contract_digest(&vllm),
+            qwen_video_contract_digest(&reordered_vllm)
+        );
+        assert_ne!(
+            qwen_video_contract_digest(&vllm),
+            qwen_video_contract_digest(&sglang),
+            "engine-specific contracts must not share a cohort fingerprint"
+        );
+    }
 
     #[tokio::test]
     async fn retired_worker_set_prevents_late_prefill_from_retained_chat_pipeline() {
@@ -1687,8 +1751,7 @@ mod tests {
         if std::env::var("DYNAMO_ALIAS_TEST").as_deref() != Ok(test_name) {
             let output = tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
                     .env("DYNAMO_ALIAS_TEST", test_name)
                     .env("DYN_TCP_RPC_HOST", "127.0.0.1")
                     .env("DYN_TCP_RPC_PORT", "0")
@@ -1700,19 +1763,7 @@ mod tests {
             .await
             .expect("classify subprocess must finish within its deadline")
             .expect("classify subprocess must start");
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout
-                    .lines()
-                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
-                "classify subprocess must run exactly one passing test: {stdout}"
-            );
+            crate::test_utils::assert_isolated_success(&output);
             return;
         }
 
@@ -2046,8 +2097,7 @@ mod tests {
             // more than libtest's default 2 MiB stack, like the prefill routing tests.
             let output = tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
                     .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
                     .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
                     .env("DYN_TCP_RPC_HOST", "127.0.0.1")
@@ -2060,12 +2110,7 @@ mod tests {
             .await
             .expect("classifier subprocess timed out")
             .unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            crate::test_utils::assert_isolated_success(&output);
             return;
         }
         use dynamo_kv_router::scheduling::{
@@ -2973,6 +3018,55 @@ request_classifier:
 
         card.worker_type = Some(WorkerType::Decode);
         assert!(validate_policy_worker_role(&card, &custom).is_ok());
+    }
+
+    #[test]
+    fn parser_validation_skips_non_chat_and_prefill_workers() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::parser_validation_skips_non_chat_and_prefill_workers"
+            ),
+            &[("DYN_PARSER_VERSION", "2")],
+        ) {
+            return;
+        }
+
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        card.model_type = ModelType::Embedding;
+        assert!(validate_card_parser_version(&card).is_ok());
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(validate_card_parser_version(&card).is_ok());
+        for role in [None, Some(WorkerType::Decode), Some(WorkerType::Encode)] {
+            card.worker_type = role;
+            assert!(validate_card_parser_version(&card).is_err());
+        }
+        card.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        card.runtime_config.reasoning_parser = Some("qwen3".to_string());
+        assert!(validate_card_parser_version(&card).is_ok());
+    }
+
+    #[test]
+    fn parser_version_validation_applies_only_to_chat_surfaces() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+
+        card.model_type = ModelType::Embedding;
+        assert!(!should_validate_parser_version(&card));
+
+        card.model_type = ModelType::Chat;
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Encode);
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(!should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Decode);
+        assert!(should_validate_parser_version(&card));
     }
 
     #[test]

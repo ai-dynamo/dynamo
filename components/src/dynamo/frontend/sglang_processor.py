@@ -22,6 +22,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
@@ -222,6 +223,13 @@ def _runtime_config_parser_name(
     return value if isinstance(value, str) and value else None
 
 
+def _guided_json_is_content(preproc: dict[str, Any]) -> bool:
+    return (
+        "json" in (preproc["sampling_options"]["guided_decoding"] or {})
+        and not preproc["require_reasoning"]
+    )
+
+
 def _unsupported_n_message(n: int) -> str:
     return f"Unsupported value: 'n={n}'. " "This endpoint currently supports only n=1."
 
@@ -359,8 +367,9 @@ def _preprocess_worker(
         pre.tool_call_parser,
         pre.reasoning_parser,
         require_reasoning=_guided_output_requires_reasoning(
-            request, pre.force_reasoning, _w_reasoning_parser_name
+            request, pre.force_reasoning, _w_reasoning_parser_name, pre.guided_decoding
         ),
+        force_reasoning=pre.force_reasoning,
     )
 
     effective_reasoning_parser_name = (
@@ -386,8 +395,13 @@ def _build_dynamo_preproc(
     tool_call_parser: ToolCallParserType | None = None,
     reasoning_parser: ReasoningParser | None = None,
     require_reasoning: bool = False,
+    force_reasoning: bool = False,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
+    thinking_token_budget = resolve_thinking_token_budget(request)
+    require_reasoning = require_reasoning or (
+        thinking_token_budget is not None and force_reasoning
+    )
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
     stop = request.get("stop")
@@ -449,6 +463,7 @@ def _build_dynamo_preproc(
             "stop_token_ids": stop_token_ids,
             "min_tokens": request.get("min_tokens", 0),
             "ignore_eos": request.get("ignore_eos", False),
+            "max_thinking_tokens": thinking_token_budget,
         },
         "sampling_options": {
             "n": request.get("n", 1),
@@ -617,8 +632,12 @@ class SglangProcessor:
                 pre.tool_call_parser,
                 pre.reasoning_parser,
                 require_reasoning=_guided_output_requires_reasoning(
-                    request, pre.force_reasoning, self.reasoning_parser_name
+                    request,
+                    pre.force_reasoning,
+                    self.reasoning_parser_name,
+                    pre.guided_decoding,
                 ),
+                force_reasoning=pre.force_reasoning,
             )
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc
@@ -638,6 +657,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=pre.named_zero_arg_tool,
+            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
@@ -690,6 +710,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
             force_reasoning=preproc_result.force_reasoning,
+            tokenizer=self.tokenizer,
         )
 
         post = SglangStreamingPostProcessor(
@@ -702,6 +723,9 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=preproc_result.named_zero_arg_tool,
+            guided_json_is_content=_guided_json_is_content(
+                preproc_result.dynamo_preproc
+            ),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
@@ -849,8 +873,12 @@ class SglangProcessor:
                 cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
                 if cached_tokens is not None:
                     metrics["cached_tokens"] = cached_tokens
-                envelope["event"] = "llm_metrics"
-                envelope["comment"] = [json.dumps(metrics)]
+                # Attach metrics to data when available; otherwise use an annotation.
+                if data := envelope.get("data"):
+                    data["llm_metrics"] = metrics
+                else:
+                    envelope["event"] = "llm_metrics"
+                    envelope["comment"] = [json.dumps(metrics)]
 
                 pending_token_ids = []
                 pending_log_probs = None

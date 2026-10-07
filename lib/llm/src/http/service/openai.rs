@@ -1405,6 +1405,20 @@ async fn completions_single(
 
         Ok(sse_stream.into_response())
     } else {
+        // Observe metrics as frames arrive, ahead of the backend-error preflight,
+        // for the same reason as the chat handler (#11349): the preflight buffers
+        // leading annotation frames, so observing after it would stamp TTFT/ITL
+        // with release time instead of arrival time.
+        let mut http_queue_guard = Some(http_queue_guard);
+        let stream = stream.inspect(move |response| {
+            // Calls observe_response() on each token - drops http_queue_guard on first token
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
         // Preserve typed backend errors before the completions aggregator turns
         // them into strings. In particular, Python ValueError/TypeError arrives
         // as Backend(InvalidArgument) and must remain an HTTP 400.
@@ -1415,17 +1429,6 @@ async fn completions_single(
                 inflight_guard.mark_error(extract_error_type_from_response(&error_response));
                 error_response
             })?;
-
-        // Tap the stream to collect metrics for non-streaming requests without altering items
-        let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream.inspect(move |response| {
-            // Calls observe_response() on each token - drops http_queue_guard on first token
-            process_response_and_observe_metrics(
-                response,
-                &mut response_collector,
-                &mut http_queue_guard,
-            );
-        });
 
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
@@ -3798,17 +3801,14 @@ async fn chat_completions(
         }
         Ok(sse_stream.into_response())
     } else {
-        // Check first event for backend errors before aggregating (non-streaming only)
-        let stream_with_check = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
-            .await
-            .map_err(|error_response| {
-                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                error_response
-            })?;
-
+        // Observe metrics as frames arrive, ahead of the backend-error preflight:
+        // the preflight buffers leading annotation frames, so observing after it
+        // would stamp TTFT/ITL with release time instead of arrival time (#11349).
+        // Consequently a request that fails after a leading metrics frame still
+        // records that frame, as the streaming path does; payload capture does
+        // not change this.
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream_with_check.inspect(move |response| {
+        let stream = stream.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
             process_chat_response_and_observe_metrics(
                 response,
@@ -3816,6 +3816,15 @@ async fn chat_completions(
                 &mut http_queue_guard,
             );
         });
+
+        // Check first event for backend errors before aggregating (non-streaming only)
+        let stream = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
 
         let response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
@@ -4104,6 +4113,8 @@ async fn handler_responses(
     response
 }
 
+/// Serve Responses requests through Chat Completions, retaining request metadata
+/// and tool identities for unary and streaming response reconstruction.
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn responses(
     state: Arc<service_v2::State>,
@@ -4170,6 +4181,10 @@ async fn responses(
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
+        tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
+            request.inner.tools.as_deref().unwrap_or_default(),
+            Some(&request.inner.input),
+        )),
         model: request.inner.model.clone(),
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
@@ -4449,24 +4464,26 @@ async fn responses(
     } else {
         // Non-streaming path: aggregate stream into single response
 
-        // Check first event for backend errors before aggregating (non-streaming only)
-        let stream_with_check =
-            check_for_backend_error(engine_stream, BackendErrorCheck::UntilFirstEvent)
-                .await
-                .map_err(|error_response| {
-                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                    error_response
-                })?;
-
+        // Same order as non-streaming chat: observe metrics ahead of the
+        // backend-error preflight so buffered leading annotation frames do
+        // not shift TTFT/ITL to release time (#11349); see the note there.
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream_with_check.inspect(move |response| {
+        let stream = engine_stream.inspect(move |response| {
             process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
             );
         });
+
+        // Check first event for backend errors before aggregating (non-streaming only)
+        let stream = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
 
         let response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
@@ -5918,7 +5935,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
+    use crate::protocols::common::extensions::NvExt;
     use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
@@ -6145,6 +6162,104 @@ mod tests {
         let err =
             ensure_json_content_type(&headers).expect_err("non-json content type should fail");
         assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_null_flags() {
+        for (options, expected) in [
+            (serde_json::json!(null), None),
+            (serde_json::json!({}), Some((false, false))),
+            (
+                serde_json::json!({"continuous_usage_stats": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+            (
+                serde_json::json!({"include_usage": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": true, "continuous_usage_stats": null}),
+                Some((true, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": null, "continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+        ] {
+            let mut payload = serde_json::json!({
+                "model": "test-model", "stream": true, "stream_options": options,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            let chat: NvCreateChatCompletionRequest =
+                parse_json_request("chat completions", &serde_json::to_vec(&payload).unwrap())
+                    .unwrap();
+            payload.as_object_mut().unwrap().remove("messages");
+            payload["prompt"] = serde_json::json!("hello");
+            let completion: NvCreateCompletionRequest =
+                parse_json_request("completions", &serde_json::to_vec(&payload).unwrap()).unwrap();
+            crate::engines::ValidateRequest::validate(&chat).unwrap();
+            crate::engines::ValidateRequest::validate(&completion).unwrap();
+            for parsed in [chat.inner.stream_options, completion.inner.stream_options] {
+                assert_eq!(
+                    parsed.map(|opts| (opts.include_usage, opts.continuous_usage_stats)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_rejects_invalid_types() {
+        for options in [
+            serde_json::json!(false),
+            serde_json::json!({"include_usage": "true", "continuous_usage_stats": null}),
+            serde_json::json!({"include_usage": null, "continuous_usage_stats": 0}),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "model": "test-model", "messages": [{"role": "user", "content": "hello"}],
+                "prompt": "hello", "stream_options": options,
+            }))
+            .unwrap();
+            assert_eq!(
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                parse_json_request::<NvCreateCompletionRequest>("completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let body =
+            br#"{"model":"test-model","messages":42,"stream_options":{"include_usage":null}}"#;
+        assert_eq!(
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_preserves_duplicate_field_errors() {
+        let chat_body = br#"{
+            "model":"first-model",
+            "model":"second-model",
+            "messages":[{"role":"user","content":"hello"}],
+            "stream_options":{"include_usage":null}
+        }"#;
+        let chat_error =
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", chat_body)
+                .unwrap_err();
+        assert_eq!(chat_error.0, StatusCode::BAD_REQUEST);
+        assert!(chat_error.1.message.contains("duplicate field `model`"));
     }
 
     #[test]
@@ -6401,10 +6516,11 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
-                compaction: Some(AgentCompaction {
-                    trigger: Some("automatic".to_string()),
-                    ..Default::default()
-                }),
+                agent_headers: std::collections::BTreeMap::from([(
+                    "x-claude-code-compaction".into(),
+                    vec!["automatic".into()],
+                )])
+                .into(),
                 input_trigger: None,
             },
         );
@@ -6422,11 +6538,8 @@ mod tests {
         );
         assert_eq!(agent_context.session_final, Some(true));
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.trigger.as_deref()),
-            Some("automatic")
+            agent_context.agent_headers["x-claude-code-compaction"],
+            ["automatic"]
         );
     }
 
@@ -6447,11 +6560,8 @@ mod tests {
             .expect("agent context attached");
         assert_eq!(agent_context.session_id, "codex-thread");
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.implementation.as_deref()),
-            Some("local")
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
     }
 
@@ -8231,6 +8341,7 @@ mod tests {
     fn test_bad_base_request_for_completion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -8256,6 +8367,7 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -8280,6 +8392,7 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -8304,6 +8417,7 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -8328,6 +8442,7 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -8354,6 +8469,7 @@ mod tests {
 
         // Logprobs: Should be a positive integer between 0 and 5
         let request = NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -8383,6 +8499,7 @@ mod tests {
 
         // Test metadata field with nested object
         let request = NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
@@ -8691,6 +8808,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
@@ -9341,6 +9459,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
@@ -9431,6 +9550,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
@@ -9842,6 +9962,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         };
         Annotated {
@@ -10476,6 +10597,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }
     }

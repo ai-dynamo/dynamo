@@ -39,6 +39,12 @@ const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const WATCH_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const WATCH_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const WATCH_RESYNC_GET_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_LEASE_TTL_SECS: u64 = 30;
+/// etcd's default `--grpc-keepalive-min-time`; pinging faster gets GOAWAY `too_many_pings`.
+const ETCD_SERVER_KEEPALIVE_MIN_TIME: Duration = Duration::from_secs(5);
+const WATCH_CHANNEL_CAPACITY: usize = 32;
 
 /// ETCD Client
 #[derive(Clone)]
@@ -181,8 +187,11 @@ impl Client {
         runtime: &Runtime,
     ) -> Result<(Arc<Connector>, u64)> {
         let token = runtime.primary_token();
-        let connector =
-            Connector::new(config.etcd_url.clone(), config.etcd_connect_options.clone()).await?;
+        let connect_options = config
+            .etcd_connect_options
+            .clone()
+            .or_else(|| with_default_keep_alive(None, config.lease_ttl));
+        let connector = Connector::new(config.etcd_url.clone(), connect_options).await?;
 
         let lease_id = if config.attach_lease {
             create_lease(connector.clone(), config.lease_ttl, runtime.clone())
@@ -213,6 +222,20 @@ impl Client {
     /// Get the primary lease ID.
     pub fn lease_id(&self) -> u64 {
         self.primary_lease
+    }
+
+    /// Probe etcd connectivity via the maintenance status RPC.
+    /// Returns immediately with no side effects; a missing key is not an error.
+    /// A follower can answer this RPC even without quorum, so we also reject
+    /// leader == 0, which indicates no elected leader and means linearizable
+    /// reads will time out.
+    pub(crate) async fn check_connection(&self) -> anyhow::Result<()> {
+        let resp = self.etcd_client().maintenance_client().status().await?;
+        anyhow::ensure!(
+            resp.leader() != 0,
+            "etcd has no elected leader (quorum lost)"
+        );
+        Ok(())
     }
 
     /// Atomically create a key-value pair if it doesn't already exist.
@@ -509,8 +532,8 @@ impl Client {
     /// Core watch implementation that sets up a resilient watcher for a key prefix.
     ///
     /// Creates a background task that maintains a watch stream with automatic reconnection
-    /// on recoverable errors. If `include_existing` is true, existing keys are included
-    /// in the initial watch events.
+    /// on recoverable errors. If `include_existing` is true, the first event is one
+    /// [`WatchEvent::Resync`] that holds every existing key, possibly none.
     async fn watch_internal(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
@@ -520,16 +543,14 @@ impl Client {
             .get_start_revision(prefix.as_ref(), include_existing)
             .await?;
 
-        // Size channel to fit all existing KVs (avoids deadlock when sending before return)
-        let existing_count = existing_kvs.as_ref().map_or(0, |kvs| kvs.len());
-        let (tx, rx) = mpsc::channel(existing_count + 32);
+        let (tx, rx) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
 
-        // Send existing KVs before returning so they're immediately available to consumers
         if let Some(kvs) = existing_kvs {
-            tracing::trace!("sending {} existing kvs", kvs.len());
-            for kv in kvs {
-                tx.send(WatchEvent::Put(kv)).await?;
-            }
+            tracing::trace!(
+                count = kvs.len(),
+                "sending the existing kvs as the initial snapshot"
+            );
+            tx.send(WatchEvent::Resync(kvs)).await?;
         }
 
         // Watch for new events in background
@@ -593,12 +614,39 @@ impl Client {
                     }
                 }
 
-                // Start a new watch stream
-                let watch_stream =
-                    match Self::new_watch_stream(&connector, &prefix_str, start_revision).await {
-                        Ok(stream) => stream,
-                        Err(_) => return,
+                // Start a new watch stream. Never give up while there are receivers: exiting
+                // here freezes discovery for the lifetime of the process.
+                let mut stream_backoff = WATCH_RETRY_INITIAL_BACKOFF;
+                let watch_stream = loop {
+                    let result = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => return,
+                        _ = tx.closed() => return,
+                        result = Self::new_watch_stream(&connector, &prefix_str, start_revision) => result,
                     };
+                    match result {
+                        Ok(stream) => break stream,
+                        Err(err) => {
+                            if tx.is_closed() || cancel_token.is_cancelled() {
+                                return;
+                            }
+                            tracing::warn!(
+                                error = %err,
+                                prefix = %prefix_str,
+                                backoff_ms = stream_backoff.as_millis(),
+                                "failed to establish etcd watch stream; retrying"
+                            );
+                            tokio::select! {
+                                biased;
+                                _ = cancel_token.cancelled() => return,
+                                _ = tx.closed() => return,
+                                _ = tokio::time::sleep(Self::watch_retry_backoff(stream_backoff)) => {}
+                            }
+                            stream_backoff =
+                                stream_backoff.saturating_mul(2).min(WATCH_RETRY_MAX_BACKOFF);
+                        }
+                    }
+                };
 
                 first_connect = false;
 
@@ -895,6 +943,7 @@ pub struct ClientOptions {
 impl Default for ClientOptions {
     fn default() -> Self {
         let mut connect_options = None;
+        let lease_ttl = default_lease_ttl();
 
         if let (Ok(username), Ok(password)) = (
             std::env::var(env_etcd::auth::ETCD_AUTH_USERNAME),
@@ -917,11 +966,16 @@ impl Default for ClientOptions {
             );
         }
 
+        // Without HTTP/2 keepalive, an etcd member that hangs without closing its TCP
+        // connections leaves watch streams open but silent forever, so deletes are never
+        // seen and the reconnect/resync path never runs.
+        connect_options = with_default_keep_alive(connect_options, lease_ttl);
+
         ClientOptions {
             etcd_url: default_servers(),
             etcd_connect_options: connect_options,
             attach_lease: true,
-            lease_ttl: default_lease_ttl(),
+            lease_ttl,
             startup_connect_timeout: default_startup_connect_timeout(),
         }
     }
@@ -943,21 +997,23 @@ fn default_lease_ttl() -> u64 {
             Ok(ttl) if ttl > 0 => ttl,
             Ok(_) => {
                 tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to 10.",
-                    env_etcd::ETCD_LEASE_TTL
+                    "{} must be >= 1; got 0. Falling back to {}.",
+                    env_etcd::ETCD_LEASE_TTL,
+                    DEFAULT_LEASE_TTL_SECS
                 );
-                10
+                DEFAULT_LEASE_TTL_SECS
             }
             Err(err) => {
                 tracing::warn!(
-                    "Invalid {}='{}' ({err}). Falling back to 10.",
+                    "Invalid {}='{}' ({err}). Falling back to {}.",
                     env_etcd::ETCD_LEASE_TTL,
-                    raw
+                    raw,
+                    DEFAULT_LEASE_TTL_SECS
                 );
-                10
+                DEFAULT_LEASE_TTL_SECS
             }
         },
-        Err(_) => 10,
+        Err(_) => DEFAULT_LEASE_TTL_SECS,
     }
 }
 
@@ -985,6 +1041,97 @@ fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
         },
         None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
     }
+}
+
+/// Resolve the etcd channel keepalive `(interval, timeout)`, or `None` when disabled
+/// (`ETCD_KEEPALIVE_INTERVAL_SECONDS=0`).
+fn keep_alive_from_values(
+    interval: Option<&str>,
+    timeout: Option<&str>,
+) -> Option<(Duration, Duration)> {
+    let interval = match interval {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(0) => return None,
+            Ok(seconds) => Duration::from_secs(seconds),
+            Err(error) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({error}). Falling back to {}.",
+                    env_etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS,
+                    raw,
+                    DEFAULT_KEEPALIVE_INTERVAL.as_secs()
+                );
+                DEFAULT_KEEPALIVE_INTERVAL
+            }
+        },
+        None => DEFAULT_KEEPALIVE_INTERVAL,
+    };
+    if interval < ETCD_SERVER_KEEPALIVE_MIN_TIME {
+        tracing::warn!(
+            "{}={} is below etcd's default --grpc-keepalive-min-time ({}s); the server may \
+             close the connection with GOAWAY too_many_pings.",
+            env_etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS,
+            interval.as_secs(),
+            ETCD_SERVER_KEEPALIVE_MIN_TIME.as_secs()
+        );
+    }
+    let timeout = match timeout {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
+            Ok(_) => {
+                tracing::warn!(
+                    "{} must be >= 1; got 0. Falling back to {}.",
+                    env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
+                    DEFAULT_KEEPALIVE_TIMEOUT.as_secs()
+                );
+                DEFAULT_KEEPALIVE_TIMEOUT
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({error}). Falling back to {}.",
+                    env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
+                    raw,
+                    DEFAULT_KEEPALIVE_TIMEOUT.as_secs()
+                );
+                DEFAULT_KEEPALIVE_TIMEOUT
+            }
+        },
+        None => DEFAULT_KEEPALIVE_TIMEOUT,
+    };
+    Some((interval, timeout))
+}
+
+fn default_keep_alive() -> Option<(Duration, Duration)> {
+    keep_alive_from_values(
+        std::env::var(env_etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS)
+            .ok()
+            .as_deref(),
+        std::env::var(env_etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn with_default_keep_alive(
+    connect_options: Option<ConnectOptions>,
+    lease_ttl: u64,
+) -> Option<ConnectOptions> {
+    let Some((interval, timeout)) = default_keep_alive() else {
+        return connect_options;
+    };
+    if interval.saturating_add(timeout) >= Duration::from_secs(lease_ttl) {
+        tracing::warn!(
+            interval_secs = interval.as_secs(),
+            timeout_secs = timeout.as_secs(),
+            lease_ttl_secs = lease_ttl,
+            "etcd keepalive detection can take as long as the primary lease TTL"
+        );
+    }
+    Some(
+        connect_options
+            .unwrap_or_default()
+            .with_keep_alive(interval, timeout)
+            .with_keep_alive_while_idle(false),
+    )
 }
 
 fn default_startup_connect_timeout() -> Duration {
@@ -1058,6 +1205,8 @@ impl KvCache {
 
             tokio::spawn(async move {
                 let mut rx = watcher.rx;
+                // The first resync is the initial snapshot; a later one means the watch reconnected.
+                let mut is_established = false;
 
                 while let Some(event) = rx.recv().await {
                     match event {
@@ -1084,11 +1233,20 @@ impl KvCache {
                                 replacement.insert(key, value);
                             }
 
-                            tracing::warn!(
-                                prefix,
-                                new_count = replacement.len(),
-                                "KvCache replacing state from etcd watch resync"
-                            );
+                            if is_established {
+                                tracing::warn!(
+                                    prefix,
+                                    new_count = replacement.len(),
+                                    "KvCache replacing state from etcd watch resync"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    prefix,
+                                    count = replacement.len(),
+                                    "KvCache loaded the initial snapshot"
+                                );
+                            }
+                            is_established = true;
                             let mut cache_write = cache.write().await;
                             *cache_write = replacement;
                         }
@@ -1167,6 +1325,26 @@ mod unit_tests {
         assert_eq!(
             startup_connect_timeout_from_value(Some("invalid")),
             DEFAULT_STARTUP_CONNECT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn parses_keep_alive() {
+        let defaults = Some((DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_KEEPALIVE_TIMEOUT));
+        assert_eq!(keep_alive_from_values(None, None), defaults);
+        assert_eq!(keep_alive_from_values(Some("0"), None), None);
+        assert_eq!(keep_alive_from_values(Some("0"), Some("3")), None);
+        assert_eq!(
+            keep_alive_from_values(Some("30"), Some("10")),
+            Some((Duration::from_secs(30), Duration::from_secs(10)))
+        );
+        assert_eq!(
+            keep_alive_from_values(Some("invalid"), Some("junk")),
+            defaults
+        );
+        assert_eq!(
+            keep_alive_from_values(Some("20"), Some("0")),
+            Some((Duration::from_secs(20), DEFAULT_KEEPALIVE_TIMEOUT))
         );
     }
 

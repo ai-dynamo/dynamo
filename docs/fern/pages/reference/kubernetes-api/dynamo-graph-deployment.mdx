@@ -11,6 +11,11 @@ A DGD is the resource that persists and serves traffic. Author one directly when
 
 This page documents the `nvidia.com/v1beta1` API — the served, current version.
 
+LPX components are experimental and require the operator's `lpx.enabled` setting. When disabled,
+admission rejects new or changed LPX components but permits otherwise valid updates that leave them
+unchanged, and deletion. Existing LPX DGDs report a disabled status without further workload
+reconciliation; installed CRDs and workloads are preserved.
+
 <Info>
   Each entry in `spec.components` is a `DynamoComponentDeploymentSharedSpec` — the same fields documented on the [DCD Reference](dynamo-component-deployment.mdx#shared-component-spec). This page covers the **graph-level** fields; per-component fields live there.
 </Info>
@@ -50,7 +55,9 @@ spec:
 </ParamField>
 
 <Note>
-  Each new component must supply a `podTemplate.spec.containers` entry named `main` with a non-empty `image`. For an image without a parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to the image's Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
+  Each new non-LPX component must supply `spec.components[*].podTemplate.spec.containers[name=main]` with a non-empty `image`. The runtime image is `spec.components[*].podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.components[*].podTemplate.spec.containers[name=main].image` otherwise. If that image has no parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to its Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
+
+  LPX components use `roles[].podTemplate` instead and do not require `runtimeVersionOverride`. See [Shared component spec](dynamo-component-deployment.mdx#shared-component-spec).
 </Note>
 
 <ParamField path="providerOverride" type="ProviderOverride">
@@ -58,23 +65,25 @@ spec:
 </ParamField>
 
 <ParamField path="backendFramework" type="string">
-  Backend framework for the graph. Sets backend-specific defaults the operator injects into each component's `main` container.
+  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's command and arguments. When set, it must match the detected worker framework. LPX components omit this field. Backend-specific defaults apply to `spec.components[*].podTemplate.spec.containers[name=main]`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
 <ParamField path="env" type="[]core/v1.EnvVar">
-  Environment variables prepended to every component's environment. A component-specific `env` entry with the same name takes precedence and may reference values from this list.
+  Environment variables prepended to each component's `main` container environment and, in Dynamo sidecar mode, its `runtime` init container environment. A container-specific `env` entry with the same name takes precedence and may reference values from this list.
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
 </ParamField>
 
 <ParamField path="annotations" type="map[string]string">
-  Annotations propagated to all child resources (scaling adapters, DCDs, Deployments, and pod templates). Component-level `podTemplate` values take precedence on conflict.
+  Annotations propagated to all child resources (scaling adapters, DCDs, Deployments, and pod templates). Values on the selected component or role `podTemplate` take precedence on conflict.
 </ParamField>
 
 <ParamField path="labels" type="map[string]string">
   Labels propagated to all child resources. Same precedence rules as `annotations`.
+
+  For LPX, metadata synchronization keeps the PCS labels and clique templates consistent after queue edits. Moving an existing KAI PodGroup to another queue depends on the Grove backend; metadata synchronization does not recreate existing PodGroups.
 </ParamField>
 
 <ParamField path="priorityClassName" type="string">
@@ -83,6 +92,7 @@ spec:
 
 <ParamField path="restart" type="Restart">
   Restart policy for the graph. Must be unset on creation; set or change `restart.id` on an existing DGD to trigger a restart.
+  Graphs containing LPX components require explicit `restart.strategy.type: Parallel`; Sequential and omitted strategies are rejected.
 </ParamField>
 
 <Indent>
@@ -270,6 +280,18 @@ Replica information for a single component, keyed by component name in `status.c
 
 <ParamField path="runtimeNamespace" type="string">
   Effective Dynamo runtime namespace for the component. Workers may include a generation suffix; non-workers use the base namespace. During a rolling update, worker status retains the old active revision's namespace until cutover completes.
+</ParamField>
+
+<ParamField path="servedModelName" type="string">
+  Effective primary model identity resolved from the fully rendered serving Pod. The operator checks `--served-model-name`, `--model-name`, `--model`, and `--model-path` in that order. Omitted when the rendered command declares none of those flags. During a rolling update, worker status retains the old active revision's value until cutover completes.
+</ParamField>
+
+<ParamField path="runtimeComponentName" type="string">
+  Explicit Dynamo runtime component identity resolved from the serving Pod's `--endpoint` value. Omitted when the rendered command does not declare a component override. During a rolling update, worker status retains the old active revision's value until cutover completes.
+</ParamField>
+
+<ParamField path="gpuPowerLimitWatts" type="integer">
+  Effective per-GPU power limit configured for the component. Omitted when no positive component-level power limit is configured. Minimum `1`.
 </ParamField>
 
 <ParamField path="gpusPerEngine" type="integer">
