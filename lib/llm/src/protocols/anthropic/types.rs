@@ -14,7 +14,7 @@ pub use dynamo_protocols::types::anthropic::*;
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
     ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
@@ -43,13 +43,13 @@ fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequest
     ));
 }
 
-fn system_message_content(content: &AnthropicMessageContent) -> String {
+fn system_message_content(content: AnthropicMessageContent) -> String {
     match content {
-        AnthropicMessageContent::Text { content } => content.clone(),
+        AnthropicMessageContent::Text { content } => content,
         AnthropicMessageContent::Blocks { content } => content
-            .iter()
+            .into_iter()
             .filter_map(|block| match block {
-                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                AnthropicContentBlock::Text { text, .. } => Some(text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -63,13 +63,13 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         let mut messages = Vec::new();
 
         // Prepend system message if present
-        if let Some(system_content) = &req.system {
-            push_system_message(system_content.text.clone(), &mut messages);
+        if let Some(system_content) = req.system {
+            push_system_message(system_content.text, &mut messages);
         }
 
         // Convert each Anthropic message
-        for msg in &req.messages {
-            match (&msg.role, &msg.content) {
+        for msg in req.messages {
+            match (msg.role, msg.content) {
                 // System messages may appear in messages[] from agent clients.
                 (AnthropicRole::System, content) => {
                     push_system_message(system_message_content(content), &mut messages);
@@ -78,7 +78,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 (AnthropicRole::User, AnthropicMessageContent::Text { content }) => {
                     messages.push(ChatCompletionRequestMessage::User(
                         ChatCompletionRequestUserMessage {
-                            content: ChatCompletionRequestUserMessageContent::Text(content.clone()),
+                            content: ChatCompletionRequestUserMessageContent::Text(content),
                             name: None,
                         },
                     ));
@@ -93,7 +93,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                         #[allow(deprecated)]
                         ChatCompletionRequestAssistantMessage {
                             content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                content.clone(),
+                                content,
                             )),
                             reasoning_content: None,
                             refusal: None,
@@ -113,14 +113,9 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         }
 
         // Convert tools
-        let tools = req
-            .tools
-            .as_deref()
-            .map(convert_anthropic_tools)
-            .transpose()?;
+        let tools = req.tools.map(convert_anthropic_tools).transpose()?;
 
         // Convert tool_choice
-        let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
         let parallel_tool_calls = req
             .tool_choice
             .as_ref()
@@ -129,6 +124,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 AnthropicToolChoice::Named(named) => named.disable_parallel_tool_use,
             })
             .map(|disabled| !disabled);
+        let tool_choice = req.tool_choice.map(convert_anthropic_tool_choice);
 
         // Convert stop_sequences -> stop
         let stop = req
@@ -193,7 +189,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 /// Convert user-role content blocks into chat completion messages.
 /// Tool results become separate Tool messages; text/image blocks become user messages.
 fn convert_user_blocks(
-    blocks: &[AnthropicContentBlock],
+    blocks: Vec<AnthropicContentBlock>,
     messages: &mut Vec<ChatCompletionRequestMessage>,
 ) -> Result<(), anyhow::Error> {
     // Accumulate content parts (text + image). When the message contains images,
@@ -208,14 +204,14 @@ fn convert_user_blocks(
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
                     ChatCompletionRequestMessageContentPartText {
                         prompt_cache_breakpoint: None,
-                        text: text.clone(),
+                        text,
                     },
                 ));
             }
             AnthropicContentBlock::Image { source } => {
                 has_image = true;
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                    convert_image(source)?,
+                    convert_image(&source)?,
                 ));
             }
             AnthropicContentBlock::ToolResult {
@@ -228,14 +224,13 @@ fn convert_user_blocks(
                 has_image = false;
 
                 let content = content
-                    .as_ref()
                     .map(convert_tool_result_content)
                     .transpose()?
                     .unwrap_or_default();
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
                         content,
-                        tool_call_id: tool_use_id.clone(),
+                        tool_call_id: tool_use_id,
                     },
                 ));
             }
@@ -258,7 +253,7 @@ fn convert_user_blocks(
 
 fn convert_image(
     source: &AnthropicImageSource,
-) -> Result<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
+) -> Result<ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
     if source.source_type != "base64" {
         anyhow::bail!(
             "unsupported image source type {:?}; only base64 is supported",
@@ -269,19 +264,24 @@ fn convert_image(
     let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
     let url =
         url::Url::parse(&data_uri).map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
-    let image_url = ImageUrl::from(url.to_string());
-    let image = ChatCompletionRequestMessageContentPartImageArgs::default()
-        .image_url(image_url)
-        .build()?;
-    Ok(image)
+    #[allow(deprecated)]
+    let image_url = ImageUrl {
+        url,
+        detail: None,
+        uuid: None,
+    };
+    Ok(ChatCompletionRequestMessageContentPartImage {
+        image_url: Some(image_url),
+        uuid: None,
+    })
 }
 
 fn convert_tool_result_content(
-    content: &ToolResultContent,
+    content: ToolResultContent,
 ) -> Result<ChatCompletionRequestToolMessageContent, anyhow::Error> {
     let blocks = match content {
         ToolResultContent::Text(text) => {
-            return Ok(ChatCompletionRequestToolMessageContent::Text(text.clone()));
+            return Ok(ChatCompletionRequestToolMessageContent::Text(text));
         }
         ToolResultContent::Blocks(blocks) => blocks,
     };
@@ -300,7 +300,7 @@ fn convert_tool_result_content(
         .any(|block| matches!(block, ToolResultContentBlock::Image { .. }))
     {
         return Ok(ChatCompletionRequestToolMessageContent::Text(
-            content.clone().into_text(),
+            ToolResultContent::Blocks(blocks).into_text(),
         ));
     }
 
@@ -311,13 +311,13 @@ fn convert_tool_result_content(
                 parts.push(ChatCompletionRequestToolMessageContentPart::Text(
                     ChatCompletionRequestMessageContentPartText {
                         prompt_cache_breakpoint: None,
-                        text: text.clone(),
+                        text,
                     },
                 ));
             }
             ToolResultContentBlock::Image { source } => {
                 parts.push(ChatCompletionRequestToolMessageContentPart::ImageUrl(
-                    convert_image(source)?,
+                    convert_image(&source)?,
                 ));
             }
             ToolResultContentBlock::Other(_) => unreachable!("validated above"),
@@ -383,7 +383,7 @@ fn flush_user_content_parts(
 /// reconstructed from a flattened `reasoning_content` will differ token-by-token from the
 /// original assistant turn, causing a cache miss on every multi-tool exchange.
 fn convert_assistant_blocks(
-    blocks: &[AnthropicContentBlock],
+    blocks: Vec<AnthropicContentBlock>,
     messages: &mut Vec<ChatCompletionRequestMessage>,
 ) {
     let mut text_content = String::new();
@@ -396,13 +396,13 @@ fn convert_assistant_blocks(
     for block in blocks {
         match block {
             AnthropicContentBlock::Text { text, .. } => {
-                text_content.push_str(text);
+                text_content.push_str(&text);
             }
             AnthropicContentBlock::Thinking { thinking, .. } => {
                 if !pending_reasoning.is_empty() {
                     pending_reasoning.push('\n');
                 }
-                pending_reasoning.push_str(thinking);
+                pending_reasoning.push_str(&thinking);
             }
             AnthropicContentBlock::RedactedThinking { .. } => {
                 // Redacted thinking is encrypted model reasoning. We can't read
@@ -421,11 +421,11 @@ fn convert_assistant_blocks(
                 // same as client tool use for conversion purposes.
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
-                    id: id.clone(),
+                    id,
                     r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
-                        name: name.clone(),
-                        arguments: serde_json::to_string(input).unwrap_or_default(),
+                        name,
+                        arguments: serde_json::to_string(&input).unwrap_or_default(),
                     },
                 });
             }
@@ -455,9 +455,8 @@ fn convert_assistant_blocks(
         Some(ReasoningContent::Segments(segments))
     } else {
         let flat: String = segments
-            .iter()
+            .into_iter()
             .filter(|s| !s.is_empty())
-            .cloned()
             .collect::<Vec<_>>()
             .join("\n");
         if flat.is_empty() {
@@ -490,20 +489,20 @@ fn convert_assistant_blocks(
 
 /// Convert Anthropic tools to ChatCompletionTools.
 fn convert_anthropic_tools(
-    tools: &[AnthropicTool],
+    tools: Vec<AnthropicTool>,
 ) -> Result<Vec<ChatCompletionTool>, anyhow::Error> {
     tools
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(tool_index, tool)| {
-            let schema = tool.input_schema.clone().ok_or_else(|| {
+            let schema = tool.input_schema.ok_or_else(|| {
                 anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
             Ok(ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
-                    name: tool.name.clone(),
-                    description: tool.description.clone(),
+                    name: tool.name,
+                    description: tool.description,
                     parameters: Some(schema),
                     strict: None,
                 },
@@ -513,7 +512,7 @@ fn convert_anthropic_tools(
 }
 
 /// Convert Anthropic tool_choice to ChatCompletionToolChoiceOption.
-fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
+fn convert_anthropic_tool_choice(tc: AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
     match tc {
         AnthropicToolChoice::Simple(simple) => match simple.choice_type {
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
@@ -533,9 +532,7 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
         AnthropicToolChoice::Named(named) => {
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
-                function: FunctionName {
-                    name: named.name.clone(),
-                },
+                function: FunctionName { name: named.name },
             })
         }
     }
@@ -1787,7 +1784,7 @@ mod tests {
             serde_json::json!({"type": "document"}),
         )]);
 
-        let error = convert_tool_result_content(&content).unwrap_err();
+        let error = convert_tool_result_content(content).unwrap_err();
         assert!(
             error
                 .to_string()

@@ -1178,13 +1178,7 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
 /// The backend's rendered prompt and cache-hit split are not available when
 /// the event is emitted. Final `message_delta` usage replaces this estimate.
 fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
-    AnthropicCountTokensRequest {
-        model: req.model.clone(),
-        messages: req.messages.clone(),
-        system: req.system.clone(),
-        tools: req.tools.clone(),
-    }
-    .estimate_tokens()
+    req.estimate_tokens()
 }
 
 fn gate_anthropic_nvext(

@@ -22,15 +22,14 @@ use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
-    ChatCompletionRequestMessageContentPartImageArgs, ChatCompletionRequestMessageContentPartText,
-    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
-    ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    CreateChatCompletionRequest, FinishReason, FunctionName, FunctionObject, FunctionType,
-    ImageUrl, ReasoningContent, ReasoningEffort as ChatReasoningEffort, ResponseFormat,
-    ServiceTier as ChatServiceTier,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
+    ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
+    ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
+    FinishReason, FunctionName, FunctionObject, FunctionType, ImageUrl, ReasoningContent,
+    ReasoningEffort as ChatReasoningEffort, ResponseFormat, ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -261,7 +260,7 @@ pub(crate) enum ResponsesConversionError {
 }
 
 fn convert_input_image_to_chat_image(
-    img: &InputImageContent,
+    img: InputImageContent,
 ) -> Result<ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
     let url_str = match (img.file_id.as_deref(), img.image_url.as_deref()) {
         (None, None) => {
@@ -287,24 +286,27 @@ fn convert_input_image_to_chat_image(
     let url = url::Url::parse(url_str).map_err(|error| {
         ResponsesConversionError::InvalidArgument(format!("Invalid image URL: {error}"))
     })?;
-    let mut image_url = ImageUrl::from(url.to_string());
-    image_url.detail = Some(img.detail.clone());
-    Ok(ChatCompletionRequestMessageContentPartImageArgs::default()
-        .image_url(image_url)
-        .build()?)
+    #[allow(deprecated)]
+    let image_url = ImageUrl {
+        url,
+        detail: Some(img.detail),
+        uuid: None,
+    };
+    Ok(ChatCompletionRequestMessageContentPartImage {
+        image_url: Some(image_url),
+        uuid: None,
+    })
 }
 
-/// Convert a slice of InputContent to ChatCompletionRequestUserMessageContent.
+/// Convert owned InputContent parts to ChatCompletionRequestUserMessageContent.
 fn convert_input_content_to_user_content(
-    content: &[InputContent],
+    mut content: Vec<InputContent>,
 ) -> Result<ChatCompletionRequestUserMessageContent, anyhow::Error> {
-    // If there's a single InputText, treat as simple text
-    if content.len() == 1
-        && let InputContent::InputText(t) = &content[0]
+    // If there's a single InputText, treat as simple text.
+    if matches!(content.as_slice(), [InputContent::InputText(_)])
+        && let Some(InputContent::InputText(t)) = content.pop()
     {
-        return Ok(ChatCompletionRequestUserMessageContent::Text(
-            t.text.clone(),
-        ));
+        return Ok(ChatCompletionRequestUserMessageContent::Text(t.text));
     }
 
     let mut chat_parts = Vec::with_capacity(content.len());
@@ -315,7 +317,7 @@ fn convert_input_content_to_user_content(
                     ChatCompletionRequestMessageContentPartText {
                         prompt_cache_breakpoint: None,
 
-                        text: t.text.clone(),
+                        text: t.text,
                     },
                 ));
             }
@@ -364,20 +366,19 @@ fn convert_input_content_to_user_content(
     Ok(ChatCompletionRequestUserMessageContent::Array(chat_parts))
 }
 
-/// Convert a slice of InputContent to a plain text string (for system/developer/assistant messages).
-fn convert_input_content_to_text(content: &[InputContent]) -> String {
+/// Convert owned InputContent parts to plain text (for system/developer/assistant messages).
+fn convert_input_content_to_text(content: Vec<InputContent>) -> String {
     content
-        .iter()
+        .into_iter()
         .filter_map(|p| match p {
-            InputContent::InputText(t) => Some(t.text.as_str()),
+            InputContent::InputText(t) => Some(t.text),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("")
+        .collect()
 }
 
 fn convert_function_call_output_content(
-    content: &[InputContent],
+    content: Vec<InputContent>,
 ) -> Result<ChatCompletionRequestToolMessageContent, anyhow::Error> {
     if content
         .iter()
@@ -396,7 +397,7 @@ fn convert_function_call_output_content(
                     ChatCompletionRequestMessageContentPartText {
                         prompt_cache_breakpoint: None,
 
-                        text: text.text.clone(),
+                        text: text.text,
                     },
                 ));
             }
@@ -437,20 +438,24 @@ struct PendingAssistant {
 }
 
 impl PendingAssistant {
-    fn push_text(&mut self, text: &str) {
+    fn push_text(&mut self, text: String) {
         self.touched = true;
         if text.is_empty() {
             return;
         }
         match self.content.as_mut() {
-            Some(existing) => existing.push_str(text),
-            None => self.content = Some(text.to_string()),
+            Some(existing) => existing.push_str(&text),
+            None => self.content = Some(text),
         }
     }
 
-    fn push_reasoning(&mut self, text: &str) {
+    fn push_reasoning(&mut self, text: String) {
         self.touched = true;
-        self.pending_reasoning.push_str(text);
+        if self.pending_reasoning.is_empty() {
+            self.pending_reasoning = text;
+        } else {
+            self.pending_reasoning.push_str(&text);
+        }
     }
 
     fn push_tool_call(&mut self, call: ChatCompletionMessageToolCall) {
@@ -471,7 +476,7 @@ impl PendingAssistant {
         {
             Some(ReasoningContent::Segments(self.reasoning_segments))
         } else {
-            let text = self.reasoning_segments.concat();
+            let text: String = self.reasoning_segments.into_iter().collect();
             (!text.is_empty()).then_some(ReasoningContent::Text(text))
         };
 
@@ -516,7 +521,7 @@ impl PendingAssistant {
 
 /// Convert InputParam::Items to a Vec of ChatCompletionRequestMessages.
 fn convert_input_items_to_messages(
-    items: &[InputItem],
+    items: Vec<InputItem>,
     names: &ToolNameMap,
 ) -> Result<Vec<ChatCompletionRequestMessage>, anyhow::Error> {
     let mut messages = Vec::with_capacity(items.len());
@@ -530,7 +535,7 @@ fn convert_input_items_to_messages(
                         std::mem::take(&mut pending).flush_into(&mut messages);
                         let chat_msg = match msg.role {
                             InputRole::System | InputRole::Developer => {
-                                let text = convert_input_content_to_text(&msg.content);
+                                let text = convert_input_content_to_text(msg.content);
                                 ChatCompletionRequestMessage::System(
                                     ChatCompletionRequestSystemMessage {
                                         content: ChatCompletionRequestSystemMessageContent::Text(
@@ -542,7 +547,7 @@ fn convert_input_items_to_messages(
                                 )
                             }
                             InputRole::User => {
-                                let content = convert_input_content_to_user_content(&msg.content)?;
+                                let content = convert_input_content_to_user_content(msg.content)?;
                                 ChatCompletionRequestMessage::User(
                                     ChatCompletionRequestUserMessage {
                                         content,
@@ -563,30 +568,29 @@ fn convert_input_items_to_messages(
                         // awareness of a separate refusal field.
                         let text = out_msg
                             .content
-                            .iter()
+                            .into_iter()
                             .map(|c| match c {
-                                InputOutputMessageContent::OutputText(t) => t.text.as_str(),
-                                InputOutputMessageContent::Refusal(r) => r.refusal.as_str(),
+                                InputOutputMessageContent::OutputText(t) => t.text,
+                                InputOutputMessageContent::Refusal(r) => r.refusal,
                             })
-                            .collect::<Vec<_>>()
-                            .join("");
-                        pending.push_text(&text);
+                            .collect();
+                        pending.push_text(text);
                     }
                 },
                 Item::FunctionCall(fc) => {
                     pending.push_tool_call(ChatCompletionMessageToolCall {
-                        id: fc.call_id.clone(),
+                        id: fc.call_id,
                         r#type: FunctionType::Function,
                         function: dynamo_protocols::types::FunctionCall {
                             name: names.encode(fc.namespace.as_deref(), &fc.name),
-                            arguments: fc.arguments.clone(),
+                            arguments: fc.arguments,
                         },
                     });
                 }
                 Item::FunctionCallOutput(fco) => {
                     std::mem::take(&mut pending).flush_into(&mut messages);
-                    let content = match &fco.output {
-                        FunctionCallOutput::Text(text) => text.clone().into(),
+                    let content = match fco.output {
+                        FunctionCallOutput::Text(text) => text.into(),
                         FunctionCallOutput::Content(parts) => {
                             convert_function_call_output_content(parts)?
                         }
@@ -594,29 +598,23 @@ fn convert_input_items_to_messages(
                     messages.push(ChatCompletionRequestMessage::Tool(
                         ChatCompletionRequestToolMessage {
                             content,
-                            tool_call_id: fco.call_id.clone(),
+                            tool_call_id: fco.call_id,
                         },
                     ));
                 }
                 Item::Reasoning(r) => {
                     let content = r
                         .content
-                        .as_ref()
-                        .map(|parts| {
-                            parts
-                                .iter()
-                                .map(|part| part.text.as_str())
-                                .collect::<String>()
-                        })
+                        .map(|parts| parts.into_iter().map(|part| part.text).collect::<String>())
                         .filter(|text| !text.is_empty());
                     let summary = || {
                         r.summary
-                            .iter()
-                            .map(|SummaryPart::SummaryText(part)| part.text.as_str())
+                            .into_iter()
+                            .map(|SummaryPart::SummaryText(part)| part.text)
                             .collect::<String>()
                     };
                     let text = content.unwrap_or_else(summary);
-                    pending.push_reasoning(&text);
+                    pending.push_reasoning(text);
                 }
                 other => {
                     // Unknown / unsupported variants (ComputerCall, WebSearchCall,
@@ -627,7 +625,7 @@ fn convert_input_items_to_messages(
                     // semantic turn. Flush first, then skip.
                     tracing::debug!(
                         "Skipping unsupported input item type during conversion: {:?}",
-                        std::mem::discriminant(other)
+                        std::mem::discriminant(&other)
                     );
                     std::mem::take(&mut pending).flush_into(&mut messages);
                 }
@@ -640,8 +638,8 @@ fn convert_input_items_to_messages(
                     // to text (drops images/files — matching the strict
                     // `Item::Message(Input)` system/developer path above).
                     ResponseRole::System | ResponseRole::Developer => {
-                        let text = match &easy.content {
-                            EasyInputContent::Text(t) => t.clone(),
+                        let text = match easy.content {
+                            EasyInputContent::Text(t) => t,
                             EasyInputContent::ContentList(parts) => {
                                 convert_input_content_to_text(parts)
                             }
@@ -662,9 +660,9 @@ fn convert_input_items_to_messages(
                     // dropped (mirrors the strict `Item::Message(Input::User)`
                     // path). Issue #9468.
                     ResponseRole::User => {
-                        let content = match &easy.content {
+                        let content = match easy.content {
                             EasyInputContent::Text(t) => {
-                                ChatCompletionRequestUserMessageContent::Text(t.clone())
+                                ChatCompletionRequestUserMessageContent::Text(t)
                             }
                             EasyInputContent::ContentList(parts) => {
                                 convert_input_content_to_user_content(parts)?
@@ -683,13 +681,13 @@ fn convert_input_items_to_messages(
                     // any structured content to text — same as the strict
                     // `MessageItem::Output` path.
                     ResponseRole::Assistant => {
-                        let text = match &easy.content {
-                            EasyInputContent::Text(t) => t.clone(),
+                        let text = match easy.content {
+                            EasyInputContent::Text(t) => t,
                             EasyInputContent::ContentList(parts) => {
                                 convert_input_content_to_text(parts)
                             }
                         };
-                        pending.push_text(&text);
+                        pending.push_text(text);
                     }
                 }
             }
@@ -708,19 +706,19 @@ fn convert_input_items_to_messages(
 ///
 /// Preserve unambiguous bare names and assign reversible aliases to collisions.
 /// Unsupported tool kinds are rejected instead of silently discarded.
-fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<ChatCompletionTool>> {
+fn convert_tools(tools: Vec<Tool>, names: &ToolNameMap) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
     let mut push_function = |name: &str,
-                             description: &Option<String>,
-                             parameters: &Option<serde_json::Value>,
+                             description: Option<String>,
+                             parameters: Option<serde_json::Value>,
                              strict: Option<bool>,
                              namespace: Option<&str>| {
         converted.push(ChatCompletionTool {
             r#type: ChatCompletionToolType::Function,
             function: FunctionObject {
                 name: names.encode(namespace, name),
-                description: description.clone(),
-                parameters: parameters.clone(),
+                description,
+                parameters,
                 strict,
             },
         });
@@ -729,23 +727,23 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
     for tool in tools {
         match tool {
             Tool::Function(f) => {
-                push_function(&f.name, &f.description, &f.parameters, f.strict, None)
+                push_function(&f.name, f.description, f.parameters, f.strict, None)
             }
             Tool::Namespace(namespace) => {
-                for tool in &namespace.tools {
+                for tool in namespace.tools {
                     match tool {
                         NamespaceToolParamTool::Function(f) => push_function(
                             &f.name,
-                            &f.description,
-                            &f.parameters,
+                            f.description,
+                            f.parameters,
                             f.strict,
                             Some(&namespace.name),
                         ),
-                        _ => return unsupported_tool(tool, "tools"),
+                        other => return unsupported_tool(&other, "tools"),
                     }
                 }
             }
-            _ => return unsupported_tool(tool, "tools"),
+            other => return unsupported_tool(&other, "tools"),
         }
     }
     Ok(converted)
@@ -830,7 +828,7 @@ fn allowed_function_names(
 /// Convert tools and tool choice together so an `allowed_tools` subset cannot
 /// be separated from the tool definitions it constrains.
 fn convert_tools_and_choice(
-    tools: Option<&[Tool]>,
+    tools: Option<Vec<Tool>>,
     tool_choice: Option<&ToolChoiceParam>,
     names: &ToolNameMap,
 ) -> anyhow::Result<(
@@ -877,12 +875,16 @@ fn convert_tools_and_choice(
 
 /// Convert Responses API `text.format` to Chat Completions `response_format`.
 pub fn convert_text_format(text: &ResponseTextParam) -> Option<ResponseFormat> {
-    match &text.format {
+    convert_owned_text_format(text.format.clone())
+}
+
+fn convert_owned_text_format(format: TextResponseFormatConfiguration) -> Option<ResponseFormat> {
+    match format {
         TextResponseFormatConfiguration::Text => None,
         TextResponseFormatConfiguration::JsonObject => Some(ResponseFormat::JsonObject),
-        TextResponseFormatConfiguration::JsonSchema(s) => Some(ResponseFormat::JsonSchema {
-            json_schema: s.clone(),
-        }),
+        TextResponseFormatConfiguration::JsonSchema(s) => {
+            Some(ResponseFormat::JsonSchema { json_schema: s })
+        }
     }
 }
 
@@ -918,10 +920,10 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         let mut messages = Vec::new();
 
         // Prepend instructions as system message if present
-        if let Some(instructions) = &resp.inner.instructions {
+        if let Some(instructions) = resp.inner.instructions {
             messages.push(ChatCompletionRequestMessage::System(
                 ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(instructions.clone()),
+                    content: ChatCompletionRequestSystemMessageContent::Text(instructions),
                     name: None,
                     tools: None,
                 },
@@ -929,11 +931,11 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         }
 
         // Convert input to messages
-        match &resp.inner.input {
+        match resp.inner.input {
             InputParam::Text(text) => {
                 messages.push(ChatCompletionRequestMessage::User(
                     ChatCompletionRequestUserMessage {
-                        content: ChatCompletionRequestUserMessageContent::Text(text.clone()),
+                        content: ChatCompletionRequestUserMessageContent::Text(text),
                         name: None,
                     },
                 ));
@@ -992,11 +994,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
 
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
-        let (tools, tool_choice) = convert_tools_and_choice(
-            resp.inner.tools.as_deref(),
-            resp.inner.tool_choice.as_ref(),
-            &names,
-        )?;
+        let (tools, tool_choice) =
+            convert_tools_and_choice(resp.inner.tools, resp.inner.tool_choice.as_ref(), &names)?;
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
@@ -1007,12 +1006,14 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         let reasoning_effort = resp
             .inner
             .reasoning
-            .as_ref()
-            .and_then(|r| r.effort.clone())
+            .and_then(|r| r.effort)
             .map(ChatReasoningEffort::from);
 
         // Map text.format to response_format
-        let response_format = resp.inner.text.as_ref().and_then(convert_text_format);
+        let response_format = resp
+            .inner
+            .text
+            .and_then(|text| convert_owned_text_format(text.format));
 
         // Map service_tier
         let service_tier = resp
