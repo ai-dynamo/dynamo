@@ -38,13 +38,14 @@ The diffusion overview's searchable, filterable card grid. Keep card markup, pro
 the single native sidebar-page link per card in MDX so Fern can rewrite them. The component injects
 scoped styles on the server, including dark mode, keyboard focus, and reduced-motion support. Its
 neutral panels, fields, and pill chips mirror the Reference palette (`ReferenceStyles`, the
-`CompatibilityHero` select, and the `.dynamo-chip-*` tints in `main.css`): modality is the only
-colored chip, experimental entries use the dashed-amber badge, and hover and focus states use green.
-`DiffusionCatalogControls` reads the rendered card metadata and chip labels for type, backend,
-provider, weight size, and experimental-status filters. Search includes card text, model IDs, and
-source paths; sorting supports names, chip values, and numeric weight sizes. It reorders the native
-cards so keyboard and screen-reader order follow the visual order. All cards remain readable
-without JavaScript, and no model metadata is fetched in the browser.
+`CompatibilityHero` select, and the `.dynamo-chip-*` tints in `main.css`). Each card's modality
+band carries its type color, backend chips carry per-backend tints, experimental entries use the
+dashed-amber badge, and hover and focus states use green.
+`DiffusionCatalogControls` reads the rendered card metadata, the modality label, and chip labels
+for type, backend, provider, weight size, and experimental-status filters. Search includes card
+text, model IDs, and source paths; sorting supports names, labels, and numeric weight sizes. It
+reorders the native cards so keyboard and screen-reader order follow the visual order. All cards
+remain readable without JavaScript, and no model metadata is fetched in the browser.
 
 ```mdx
 import { DiffusionCatalog } from "@/components/DiffusionCatalog";
@@ -186,20 +187,34 @@ refreshed by their own workflows, and need no local step.
 
 ### ExamplesCatalog
 
-The main Examples overview owns the catalog metadata and its version-aware Markdown links.
-Subsection overview pages mirror only their topic's cards, with tests enforcing parity. The
-component adds search and topic/platform/backend filters to either page shape.
+The main Examples overview owns the catalog metadata and its version-aware card links.
+Subsection overview pages mirror only their topic's cards, without the topic label, and pass
+`topicFilter={false}` to drop the single-option Topic filter; tests enforce parity. The component
+adds search and topic/platform/backend filters to either page shape. Its styles match
+`DiffusionCatalog`: each topic tints the card's icon tile, topic label, arrow, and glow, backend
+chips reuse the diffusion catalog's tints, and hover and focus states use green. `ExampleTargets`
+renders one chip per backend from the card's `platform:backend` pairs, with a Kubernetes or
+Local / CLI glyph for each platform; the results row shows a key for the glyphs.
 
 ```mdx
 import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
 
 <ExamplesCatalog>
 
-<div className="dynamo-example-card" data-example="aggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:vllm kubernetes:vllm" data-keywords="agg.sh agg.yaml">
+<div className="dynamo-example-card" data-example="aggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:vllm local:vllm" data-keywords="agg.sh agg.yaml">
 
-### [Aggregated Serving](aggregated.mdx)
+<span className="dynamo-example-icon"><Icon icon="cube" /></span>
+
+<p className="dynamo-example-topic">Basic Serving</p>
+
+### Aggregated Serving
 
 Frontend and aggregated workers.
+
+<ExampleTargets targets="kubernetes:vllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="aggregated.mdx">Open Aggregated Serving example</a>
 
 </div>
 

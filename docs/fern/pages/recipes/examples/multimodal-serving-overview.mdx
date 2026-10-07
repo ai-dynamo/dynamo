@@ -8,51 +8,94 @@ hide-toc: true
 ---
 
 import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
 
 Choose a multimodal example, then filter its available deployment platforms and inference backends.
 
-<ExamplesCatalog>
+<ExamplesCatalog topicFilter={false}>
 
 <div className="dynamo-example-card" data-example="multimodal" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_multimodal.sh agg_multimodal_xpu.sh agg_vision.sh">
-<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
-### [Aggregated Multimodal Serving](multimodal.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="photo-film" /></span>
+
+### Aggregated Multimodal Serving
+
 Serve image and video inputs with an aggregated language-model worker.
-<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+
+<ExampleTargets targets="local:sglang local:trtllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="multimodal.mdx">Open Aggregated Multimodal Serving example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="multimodal-routing" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_multimodal_router.sh agg_multimodal_router_chat_processor.sh agg_multimodal_router_chat_processor_xpu.sh agg_multimodal_router_xpu.sh">
-<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
-### [Multimodal KV Routing](multimodal-routing.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="signs-post" /></span>
+
+### Multimodal KV Routing
+
 Route multimodal requests using text and media cache overlap.
-<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+
+<ExampleTargets targets="local:sglang local:trtllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="multimodal-routing.mdx">Open Multimodal KV Routing example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="encode-pd" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_e_pd.sh disagg_multimodal_e_pd.sh multimodal_epd.sh">
-<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
-### [Separate Encode and PD](encode-pd.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="diagram-next" /></span>
+
+### Separate Encode and PD
+
 A dedicated encoder with a combined prefill/decode worker (E/PD).
-<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+
+<ExampleTargets targets="local:sglang local:trtllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="encode-pd.mdx">Open Separate Encode and PD example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="encode-prefill-decode" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_multimodal_epd.sh disagg_multimodal_epd_xpu.sh epd_disagg.sh epd_multimodal_image_and_embeddings.sh multimodal_disagg.sh">
-<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
-### [Separate Encode, Prefill, and Decode](encode-prefill-decode.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="diagram-project" /></span>
+
+### Separate Encode, Prefill, and Decode
+
 Dedicated encode, prefill, and decode workers (E/P/D).
-<div className="dynamo-example-badges"><span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span></div>
+
+<ExampleTargets targets="local:sglang local:trtllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="encode-prefill-decode.mdx">Open Separate Encode, Prefill, and Decode example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="multimodal-prefill-decode" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:trtllm local:vllm" data-keywords="disagg_multimodal.sh disagg_multimodal_p_d.sh">
-<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
-### [Multimodal Prefill and Decode](multimodal-prefill-decode.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="arrows-split-up-and-left" /></span>
+
+### Multimodal Prefill and Decode
+
 Multimodal prefill/decode separation without a dedicated encoder.
-<div className="dynamo-example-badges"><span>Local / CLI: TensorRT-LLM, vLLM</span></div>
+
+<ExampleTargets targets="local:trtllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="multimodal-prefill-decode.mdx">Open Multimodal Prefill and Decode example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="custom-encoders" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:vllm" data-keywords="agg_custom.sh agg_qwen3_5_native.sh">
-<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
-### [Custom Encoders](custom-encoders.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="puzzle-piece" /></span>
+
+### Custom Encoders
+
 Launch a language-model backend with a custom vision encoder.
-<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+
+<ExampleTargets targets="local:vllm" />
+
+<a className="dynamo-example-card-link" href="custom-encoders.mdx">Open Custom Encoders example</a>
+
 </div>
 
 </ExamplesCatalog>

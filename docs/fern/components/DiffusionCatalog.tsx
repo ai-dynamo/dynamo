@@ -26,8 +26,8 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
 /* Surfaces, fields, and chips mirror the shared site palette: the Reference
    panels and badges (ReferenceStyles), the CompatibilityHero select, and the
    main.css .dynamo-chip-* tints. Values stay literal because the published
-   theme drops main.css. Modality is the only colored chip; green remains the
-   interactive accent. */
+   theme drops main.css. The modality band carries each card's color, backend
+   chips carry per-backend tints, and green remains the interactive accent. */
 .dynamo-diffusion {
   --diffusion-text: #1a1a1a;
   --diffusion-muted: #666666;
@@ -53,6 +53,12 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   --diffusion-blue-fg: #1d4ed8;
   --diffusion-blue-bg: rgba(37, 99, 235, 0.1);
   --diffusion-blue-border: rgba(37, 99, 235, 0.28);
+  --diffusion-sky-fg: #0369a1;
+  --diffusion-sky-bg: rgba(2, 132, 199, 0.1);
+  --diffusion-sky-border: rgba(2, 132, 199, 0.28);
+  --diffusion-pink-fg: #be185d;
+  --diffusion-pink-bg: rgba(219, 39, 119, 0.1);
+  --diffusion-pink-border: rgba(219, 39, 119, 0.28);
   --diffusion-gray-fg: #5f5e5a;
   --diffusion-gray-bg: rgba(120, 120, 120, 0.1);
   --diffusion-gray-border: rgba(120, 120, 120, 0.28);
@@ -84,6 +90,12 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   --diffusion-blue-fg: #93c5fd;
   --diffusion-blue-bg: rgba(59, 130, 246, 0.18);
   --diffusion-blue-border: rgba(59, 130, 246, 0.42);
+  --diffusion-sky-fg: #7dd3fc;
+  --diffusion-sky-bg: rgba(56, 189, 248, 0.16);
+  --diffusion-sky-border: rgba(56, 189, 248, 0.4);
+  --diffusion-pink-fg: #f9a8d4;
+  --diffusion-pink-bg: rgba(236, 72, 153, 0.18);
+  --diffusion-pink-border: rgba(236, 72, 153, 0.4);
   --diffusion-gray-fg: #a8a8a8;
   --diffusion-gray-bg: #242424;
   --diffusion-gray-border: #383838;
@@ -199,24 +211,36 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   margin: 0 !important; font-size: 18px !important; line-height: 1.3 !important;
   font-weight: 650; letter-spacing: -.02em; color: var(--diffusion-text); overflow-wrap: anywhere;
 }
-.dynamo-diffusion .dynamo-diffusion-model {
-  margin: 2px 0 0 !important; color: var(--diffusion-muted); overflow-wrap: anywhere;
-  font-family: var(--font-code, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; line-height: 1.5;
+/* The inset accent bar follows the site convention for recommended rows and the active sidebar link. */
+.dynamo-diffusion .dynamo-diffusion-modality {
+  display: flex; align-items: center; min-height: 34px;
+  margin: 0 !important; padding: 6px 12px 6px 14px;
+  border: 1px solid var(--diffusion-accent-border); border-radius: 8px;
+  color: var(--diffusion-accent-fg); background: var(--diffusion-accent-bg);
+  box-shadow: inset 3px 0 0 var(--diffusion-accent-fg);
+  font-size: 12px; font-weight: 700; line-height: 1.3; letter-spacing: .08em; text-transform: uppercase;
 }
 .dynamo-diffusion .dynamo-diffusion-description {
   margin: 0 !important; font-size: 13.5px; line-height: 1.6; color: var(--diffusion-muted);
 }
 .dynamo-diffusion-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 2px; }
 .dynamo-diffusion-chip {
-  display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px;
+  display: inline-flex; align-items: center; min-height: 22px; padding: 2px 9px;
   border: 1px solid transparent; border-radius: 999px;
-  font-size: 11px; font-weight: 600; line-height: 1.2; white-space: nowrap;
-}
-.dynamo-diffusion-modality {
-  color: var(--diffusion-accent-fg); background: var(--diffusion-accent-bg); border-color: var(--diffusion-accent-border);
+  font-size: 11.5px; font-weight: 600; line-height: 1.2; white-space: nowrap;
 }
 .dynamo-diffusion-backend {
   color: var(--diffusion-gray-fg); background: var(--diffusion-gray-bg); border-color: var(--diffusion-gray-border);
+}
+/* TensorRT-LLM uses NVIDIA green. vLLM-Omni avoids the amber of the experimental badge beside it. */
+.dynamo-diffusion-card[data-backend="sglang"] .dynamo-diffusion-backend {
+  color: var(--diffusion-sky-fg); background: var(--diffusion-sky-bg); border-color: var(--diffusion-sky-border);
+}
+.dynamo-diffusion-card[data-backend="trtllm"] .dynamo-diffusion-backend {
+  color: var(--diffusion-green-fg); background: var(--diffusion-green-bg); border-color: var(--diffusion-green-border);
+}
+.dynamo-diffusion-card[data-backend="vllm"] .dynamo-diffusion-backend {
+  color: var(--diffusion-pink-fg); background: var(--diffusion-pink-bg); border-color: var(--diffusion-pink-border);
 }
 .dynamo-diffusion-size {
   color: var(--diffusion-muted); background: transparent; border-color: var(--diffusion-gray-border);

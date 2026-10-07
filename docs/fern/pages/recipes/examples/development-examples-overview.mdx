@@ -8,16 +8,24 @@ hide-toc: true
 ---
 
 import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
 
 Choose a development example, then filter its available deployment platforms and backends.
 
-<ExamplesCatalog>
+<ExamplesCatalog topicFilter={false}>
 
 <div className="dynamo-example-card" data-example="custom-backends" data-topic="development-examples" data-topic-label="Development Examples" data-targets="kubernetes:custom kubernetes:mocker local:tritonserver local:sample" data-keywords="agg.sh agg.yaml agg_diffusion.sh disagg.sh disagg.yaml hello_world.yaml identity.sh multimodal_agg.sh multimodal_disagg.sh">
-<span className="dynamo-example-eyebrow">Development Examples · Example</span>
-### [Custom Backends and Testing](custom-backends.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="code" /></span>
+
+### Custom Backends and Testing
+
 Hello World, sample backends, Mocker deployments, and Triton Server.
-<div className="dynamo-example-badges"><span>Kubernetes: Custom, Mocker</span><span>Local / CLI: Triton Server, Sample</span></div>
+
+<ExampleTargets targets="kubernetes:custom kubernetes:mocker local:tritonserver local:sample" />
+
+<a className="dynamo-example-card-link" href="custom-backends.mdx">Open Custom Backends and Testing example</a>
+
 </div>
 
 </ExamplesCatalog>
