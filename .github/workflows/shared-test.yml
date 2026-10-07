@@ -274,7 +274,23 @@ jobs:
         working-directory: /workspace
         run: |
           set +e
-          python ./dev/sanity_check.py --runtime-check --no-gpu-check
+          # Native imports can stall before the checker prints its result tree.
+          # Capture their Python stacks before the runner kills the container.
+          python -u - ./dev/sanity_check.py --runtime-check --no-gpu-check <<'PY'
+          import faulthandler
+          import os
+          import runpy
+          import sys
+
+          sys.argv = sys.argv[1:]
+          sys.path[0] = os.path.dirname(sys.argv[0])
+          faulthandler.enable()
+          faulthandler.dump_traceback_later(30, repeat=True)
+          try:
+              runpy.run_path(sys.argv[0], run_name="__main__")
+          finally:
+              faulthandler.cancel_dump_traceback_later()
+          PY
           SANITY_CHECK_EXIT_CODE=$?
           if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
             echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
