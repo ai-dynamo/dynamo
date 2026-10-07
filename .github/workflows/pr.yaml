@@ -460,6 +460,9 @@ jobs:
       target: runtime
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
+      extra_build_args: |
+        RUNTIME_IMAGE=lmsysorg/sglang
+        RUNTIME_IMAGE_TAG=v0.5.21-cu130-runtime
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'

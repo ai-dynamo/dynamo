@@ -27,6 +27,32 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd:$PATH
 
 {% if device == "cuda" %}
+# Apply the GLM-5.3-Flash backports before installing Dynamo or compiling Python
+# bytecode. The bundle checks the exact v0.5.21 source HEAD, a clean checkout,
+# checksums, and every hunk; a base-image upgrade must reconcile these patches.
+RUN --mount=type=bind,source=./container/deps/sglang/patches/v0.5.21,target=/tmp/sglang-patches,readonly \
+    bash /tmp/sglang-patches/apply.sh --apply /sgl-workspace/sglang && \
+    python3 -c 'from pathlib import Path; import importlib.util; path = Path(importlib.util.find_spec("sglang").origin).resolve(); assert path.is_relative_to("/sgl-workspace/sglang/python"), path; print("Patched SGLang import:", path)'
+
+# v0.5.21 ships Transformers 5.12.1, whose AutoProcessor silently falls back to
+# a text tokenizer for GLM-5.3-Flash. Match upstream SGLang's processor dependency
+# pair without letting pip replace the rest of the engine stack (sglang#39831).
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --break-system-packages --no-deps \
+        "transformers==5.19.0" "tokenizers==0.23.2"
+
+# Verify lazy imports and AutoProcessor registration, not just package presence.
+RUN python3 - <<'PYEOF'
+from importlib.metadata import version
+from transformers import Glm5NextImageProcessor, Glm5NextProcessor, Glm5NextVideoProcessor
+from transformers.models.auto.processing_auto import processor_class_from_name
+
+assert version("transformers") == "5.19.0"
+assert version("tokenizers") == "0.23.2"
+assert processor_class_from_name("Glm5NextProcessor") is Glm5NextProcessor
+print("GLM-5.3-Flash processors:", Glm5NextImageProcessor, Glm5NextVideoProcessor)
+PYEOF
+
 # Install the TurboJPEG runtime used by frontend JPEG decoding and bring
 # base-image OS packages up to the current patch releases. --only-upgrade skips
 # anything not already installed while keeping both operations in one layer.
