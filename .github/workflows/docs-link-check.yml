@@ -17,6 +17,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
+      # Main-branch links to newly added files must resolve in the PR checkout.
+      # Keep this alias outside the scan root so lychee does not walk it twice.
+      - name: Resolve repository main links against this checkout
+        run: ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/lychee-main-checkout"
+
       - name: Restore lychee cache
         id: restore-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
@@ -29,6 +34,7 @@ jobs:
         id: lychee
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
         with:
+          # Only the remapped checkout links override .lycheeignore's file:// exclusion.
           args: &lychee_args >-
             --cache
             --no-progress
@@ -36,6 +42,8 @@ jobs:
             --retry-wait-time 3
             --timeout 30
             --root-dir ${{ github.workspace }}
+            --remap '^https://github[.]com/ai-dynamo/dynamo/(blob|tree)/main/ file://${{ runner.temp }}/lychee-main-checkout/'
+            --include '^file://${{ runner.temp }}/lychee-main-checkout/'
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
             --exclude-path "./container/compliance/spdx_licenses/.*"

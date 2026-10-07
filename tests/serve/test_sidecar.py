@@ -19,23 +19,31 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.serve.sidecar_checks import (
-    assert_cancellation_and_recovery,
-    assert_kv_transfer,
-    assert_sglang_transfer_wait_cancelled,
-    kv_transfer_total,
+    NativeCancellationPayload,
+    SGLangHttpCancellationPayload,
+    SGLangTransferRecoveryPayload,
+    assert_native_cancellation_and_recovery,
 )
 from tests.utils.constants import DynamoPortRange
+from tests.utils.engine_metrics import (
+    EngineMetrics,
+    SGLangMetricsChecker,
+    VllmMetricsChecker,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
     LONG_PROMPT_FOR_CACHING,
     chat_payload_default,
-    chat_payload_with_logprobs,
+    streaming_chat_payload_with_logprobs,
 )
 from tests.utils.payloads import (
     ChatPayload,
     DisaggregatedChatPayload,
     GuidedDecodingChatPayload,
+    HttpCancellationPayload,
+    KvTransferPayload,
+    StreamingChatPayload,
 )
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
@@ -93,47 +101,54 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
 )
 
 
-def _disaggregated_chat_payload(
-    *, has_exact_accounting: bool = True
-) -> DisaggregatedChatPayload:
+def _disaggregated_chat_payload() -> DisaggregatedChatPayload:
     return DisaggregatedChatPayload(
         body={
             "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
-            "max_tokens": 8 if has_exact_accounting else 64,
+            "max_tokens": 64,
             "n": 1,
             "temperature": 0,
             "stream": False,
+            "nvext": {"extra_fields": ["worker_id"]},
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_num_choices=1,
+    )
+
+
+def _disaggregated_token_count_payload() -> DisaggregatedChatPayload:
+    return DisaggregatedChatPayload(
+        body={
+            "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
+            "max_tokens": 8,
+            "n": 1,
+            "temperature": 0,
+            "stream": False,
+            "ignore_eos": True,
+            "chat_template_kwargs": {"enable_thinking": False},
             "nvext": {
                 "extra_fields": [
                     "worker_id",
                     "completion_token_ids",
                     "prompt_token_ids",
                 ]
-                if has_exact_accounting
-                else ["worker_id"]
             },
-            **(
-                {"ignore_eos": True, "chat_template_kwargs": {"enable_thinking": False}}
-                if has_exact_accounting
-                else {}
-            ),
         },
-        repeat_count=1,
         expected_response=[],
         expected_log=[],
         expected_num_choices=1,
-        expected_finish_reason="length" if has_exact_accounting else None,
-        expected_completion_tokens=8 if has_exact_accounting else None,
+        expected_finish_reason="length",
+        expected_completion_tokens=8,
     )
 
 
 def _compatibility_payloads():
-    logprobs = chat_payload_with_logprobs(
+    logprobs = streaming_chat_payload_with_logprobs(
         content="Count from one to ten.",
         expected_response=[],
         max_tokens=8,
         top_logprobs=2,
-        stream=True,
         prompt_logprobs=2,
         extra_body={
             "ignore_eos": True,
@@ -143,12 +158,11 @@ def _compatibility_payloads():
     logprobs.expected_finish_reason = "length"
     logprobs.expected_completion_tokens = 8
     logprobs.min_token_chunks = 2
-    unicode_logprobs = chat_payload_with_logprobs(
+    unicode_logprobs = streaming_chat_payload_with_logprobs(
         content="Repeat these characters: café € 中文.",
         expected_response=[],
         max_tokens=8,
         top_logprobs=2,
-        stream=True,
         extra_body={
             "return_tokens_as_token_ids": False,
             "ignore_eos": True,
@@ -184,6 +198,32 @@ def _compatibility_payloads():
         needs_token_ids=True,
     )
     return [chat_payload_default(), logprobs, unicode_logprobs, structured]
+
+
+def _http_cancellation_payloads(metrics: EngineMetrics):
+    body = {
+        "messages": [{"role": "user", "content": "Count from one to a thousand."}],
+        "max_tokens": 2048,
+        "ignore_eos": True,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
+    }
+    return [
+        HttpCancellationPayload(
+            body=body,
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
+        ),
+        StreamingChatPayload(
+            body={**body, "max_tokens": 4, "stream_options": {"include_usage": True}},
+            expected_response=[],
+            expected_log=[],
+            expected_finish_reason="length",
+            expected_completion_tokens=4,
+        ),
+    ]
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -303,7 +343,7 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[_disaggregated_chat_payload(has_exact_accounting=False)],
+        request_payloads=[_disaggregated_chat_payload()],
     ),
     "vllm_disaggregated": EngineConfig(
         name="vllm_disaggregated",
@@ -324,7 +364,7 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[_disaggregated_chat_payload()],
+        request_payloads=[_disaggregated_token_count_payload()],
     ),
     "sglang_disaggregated": EngineConfig(
         name="sglang_disaggregated",
@@ -347,7 +387,7 @@ sidecar_configs = {
         health_check_workers=True,
         health_check_worker_count=2,
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
-        request_payloads=[_disaggregated_chat_payload()],
+        request_payloads=[_disaggregated_token_count_payload()],
     ),
 }
 
@@ -424,43 +464,58 @@ def test_serve_deployment(
                     engine_ports[4]
                 )
 
-            def validate_transfer():
-                def transfer():
-                    payload = _disaggregated_chat_payload().with_model(config.model)
-                    payload.port = config.frontend_port
-                    assert_kv_transfer(
-                        backend=backend,
-                        payload=payload,
-                        prefill_http_port=int(
-                            engine_env[f"{backend.upper()}_PREFILL_HTTP_PORT"]
-                        ),
-                        decode_http_port=int(
-                            engine_env[f"{backend.upper()}_DECODE_HTTP_PORT"]
-                        ),
-                        probe_path=probe_path if backend == "vllm" else None,
+            if backend in ("vllm", "sglang"):
+                prefill_url = f"http://127.0.0.1:{engine_env[f'{backend.upper()}_PREFILL_HTTP_PORT']}/metrics"
+                decode_url = f"http://127.0.0.1:{engine_env[f'{backend.upper()}_DECODE_HTTP_PORT']}/metrics"
+                if backend == "vllm":
+                    prefill_metrics = VllmMetricsChecker(
+                        prefill_url, transfer_probe=probe_path
                     )
-
-                transfer()
+                    decode_metrics = VllmMetricsChecker(decode_url)
+                else:
+                    prefill_metrics = SGLangMetricsChecker(prefill_url)
+                    decode_metrics = SGLangMetricsChecker(decode_url)
+                transfer = _disaggregated_token_count_payload()
+                config = dataclasses.replace(
+                    config,
+                    request_payloads=[
+                        *config.request_payloads,
+                        KvTransferPayload(
+                            body=transfer.body,
+                            expected_response=[],
+                            expected_log=[],
+                            expected_finish_reason=transfer.expected_finish_reason,
+                            expected_completion_tokens=transfer.expected_completion_tokens,
+                            prefill_metrics=prefill_metrics,
+                            decode_metrics=decode_metrics,
+                        ),
+                    ],
+                )
                 if backend == "sglang":
-                    assert_sglang_transfer_wait_cancelled(
-                        namespace=engine_env["DYN_NAMESPACE"],
-                        model=config.model,
-                        decode_http_port=int(engine_env["SGLANG_DECODE_HTTP_PORT"]),
-                        bootstrap_port=int(
-                            engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"]
-                        ),
-                        discovery_backend=discovery_backend,
+                    recovery = _disaggregated_token_count_payload()
+                    config.request_payloads.append(
+                        SGLangTransferRecoveryPayload(
+                            body=recovery.body,
+                            expected_response=[],
+                            expected_log=[],
+                            expected_finish_reason=recovery.expected_finish_reason,
+                            expected_completion_tokens=recovery.expected_completion_tokens,
+                            prefill_metrics=prefill_metrics,
+                            decode_metrics=decode_metrics,
+                            namespace=engine_env["DYN_NAMESPACE"],
+                            decode_http_port=int(engine_env["SGLANG_DECODE_HTTP_PORT"]),
+                            bootstrap_port=int(
+                                engine_env["SGLANG_DISAGGREGATION_BOOTSTRAP_PORT"]
+                            ),
+                            discovery_backend=discovery_backend,
+                        )
                     )
-                    transfer()
 
             run_serve_deployment(
                 config,
                 request,
                 ports=dynamo_dynamic_ports,
                 extra_env=engine_env,
-                post_validation=validate_transfer
-                if backend in ("vllm", "sglang")
-                else None,
             )
     elif config.name in ("vllm_aggregated", "sglang_aggregated"):
         backend = config.name.removesuffix("_aggregated")
@@ -468,6 +523,20 @@ def test_serve_deployment(
         monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
         monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
         with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:
+            metrics_type = (
+                VllmMetricsChecker if backend == "vllm" else SGLangMetricsChecker
+            )
+            metrics = metrics_type(f"http://127.0.0.1:{engine_ports[0]}/metrics")
+            native_payloads = [NativeCancellationPayload(config.model)]
+            if backend == "sglang":
+                native_payloads.append(SGLangHttpCancellationPayload(config.model))
+            config = dataclasses.replace(
+                config,
+                request_payloads=[
+                    *config.request_payloads,
+                    *_http_cancellation_payloads(metrics),
+                ],
+            )
             run_serve_deployment(
                 config,
                 request,
@@ -479,12 +548,10 @@ def test_serve_deployment(
                     else "SGLANG_HTTP_PORT": str(engine_ports[0]),
                     f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
                 },
-                post_validation=lambda: assert_cancellation_and_recovery(
-                    backend=backend,
-                    model=config.model,
+                post_validation=lambda: assert_native_cancellation_and_recovery(
+                    metrics=metrics,
+                    payloads=native_payloads,
                     namespace=namespace,
-                    frontend_port=config.frontend_port,
-                    engine_http_port=engine_ports[0],
                     discovery_backend=discovery_backend,
                 ),
             )
@@ -573,7 +640,11 @@ def test_sidecar_kv_routing(
             else ("agg.sh" if dep else "agg_kv_router.sh")
         ),
         script_args=(
-            ["--disable-cuda-graph", "--disable-piecewise-cuda-graph"]
+            [
+                "--disable-cuda-graph",
+                "--cuda-graph-backend-prefill",
+                "disabled",
+            ]
             if backend == "sglang"
             else []
         ),
@@ -742,15 +813,25 @@ def test_sidecar_kv_routing(
                     dynamo_dynamic_ports.kv_event_ports[worker_index]
                 )
 
-        def transfer_total():
+        transfer_metrics: list[EngineMetrics] = []
+        if is_disaggregated:
             if backend == "vllm":
-                return kv_transfer_total(backend, 0, probe_path)
-            return sum(
-                kv_transfer_total(
-                    backend, int(engine_env[f"SGLANG_PREFILL{index}_HTTP_PORT"])
+                transfer_metrics.append(
+                    VllmMetricsChecker(
+                        f"http://127.0.0.1:{engine_env['VLLM_PREFILL1_HTTP_PORT']}/metrics",
+                        transfer_probe=probe_path,
+                    )
                 )
-                for index in (1, 2)
-            )
+            else:
+                transfer_metrics.extend(
+                    SGLangMetricsChecker(
+                        f"http://127.0.0.1:{engine_env[f'SGLANG_PREFILL{index}_HTTP_PORT']}/metrics"
+                    )
+                    for index in (1, 2)
+                )
+
+        def transfer_total() -> float:
+            return sum(metrics.transfer_progress() for metrics in transfer_metrics)
 
         system_ports = dynamo_dynamic_ports.system_ports
         if is_disaggregated:

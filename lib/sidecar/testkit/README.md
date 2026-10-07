@@ -219,10 +219,10 @@ establish complete parity with the legacy Python backend.
 `tests/serve/test_sidecar.py` starts the frontend, production sidecar executable
 and real engines through the existing launch scripts. Payloads validate HTTP
 streaming, logprobs, structured output, distinct prefill/decode workers and
-KV-aware routing, including exact token/usage accounting. Post-validation checks
-scheduler cleanup after client disconnection, recovery on the same deployment,
-and completed KV transfers.
-GPU assertions share each deployment's existing startup and teardown.
+KV-aware routing, including exact token/usage accounting. Payloads also check
+HTTP disconnection, scheduler cleanup, recovery and fresh completed KV transfers.
+GPU assertions share each deployment's existing startup and teardown, and use
+the same engine-metrics adapters for cancellation and completed transfers.
 
 GPU post-validation also uses the existing Dynamo client to check explicit
 cancellation and consumer drop on the same deployment. Cancellation must release
