@@ -67,9 +67,23 @@ def test_image_loader_uses_trtllm_configured_limit(monkeypatch) -> None:
     )
 
 
+@pytest.fixture
+def audio_registry(monkeypatch):
+    monkeypatch.setattr(
+        mmp,
+        "MULTIMODAL_PLACEHOLDER_REGISTRY",
+        SimpleNamespace(
+            is_valid=lambda model_type, modality: model_type == "multimodal"
+            and modality == "audio"
+        ),
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source_type", ["data", "https"])
-async def test_audio_is_forwarded_to_trtllm_processor(source_type, monkeypatch) -> None:
+async def test_audio_is_forwarded_to_trtllm_processor(
+    source_type, monkeypatch, audio_registry
+) -> None:
     wav = io.BytesIO()
     sf.write(wav, np.zeros(1600, dtype=np.float32), 16000, format="WAV")
     audio_bytes = wav.getvalue()
@@ -113,7 +127,7 @@ async def test_audio_is_forwarded_to_trtllm_processor(source_type, monkeypatch) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload", ["AAAA!!!!", "AAAA"])
-async def test_invalid_audio_returns_client_error(payload) -> None:
+async def test_invalid_audio_returns_client_error(payload, audio_registry) -> None:
     processor = MultimodalRequestProcessor(
         model_type="multimodal",
         model_dir="unused",
@@ -132,6 +146,35 @@ async def test_invalid_audio_returns_client_error(payload) -> None:
             ep_disaggregated_params=None,
         )
     assert excinfo.value.status == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_type", ["qwen3_vl", "unknown"])
+async def test_unsupported_audio_returns_client_error_before_loading(
+    model_type, audio_registry
+) -> None:
+    processor = MultimodalRequestProcessor(
+        model_type=model_type,
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    processor._load_audio = AsyncMock()
+
+    with pytest.raises(HttpStatusError, match="does not support audio input") as excinfo:
+        await processor.process_openai_request(
+            {
+                "extra_args": {"formatted_prompt": "Transcribe this"},
+                "multi_modal_data": {
+                    "audio_url": [{"Url": "https://example.com/speech.wav"}]
+                },
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    assert excinfo.value.status == 400
+    processor._load_audio.assert_not_awaited()
 
 
 @pytest.mark.asyncio

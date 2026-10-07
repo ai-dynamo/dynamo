@@ -27,6 +27,7 @@ import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
 from tensorrt_llm.inputs.multimodal_data import VideoData
+from tensorrt_llm.inputs.registry import MULTIMODAL_PLACEHOLDER_REGISTRY
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
@@ -464,6 +465,15 @@ class MultimodalRequestProcessor:
             raise HttpStatusError(
                 400,
                 "Audio with disaggregated encoder inputs is not supported by TensorRT-LLM",
+                "audio_url",
+            )
+
+        if audio_items and not MULTIMODAL_PLACEHOLDER_REGISTRY.is_valid(
+            self.model_type, "audio"
+        ):
+            raise HttpStatusError(
+                400,
+                "This model does not support audio input in TensorRT-LLM",
                 "audio_url",
             )
 
