@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\nSPDX-License-Identifier: Apache-2.0",
+  "$id": "https://github.com/ai-dynamo/dynamo/docs/recipes/_catalog/schema.json",
+  "title": "Dynamo recipe catalog entry",
+  "description": "JSON Schema (draft 2020-12) for ONE recipe object, i.e. the contents of docs/recipes/_catalog/recipes/<id>.yaml. Derived from the data in the former recipes.yaml. Active recipes carry a rendered `page`; deferred recipes carry a `deferred_reason` and have no rendered page.",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "provider",
+    "model",
+    "status",
+    "targets",
+    "maintainer"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable slug; must match the filename and the page slug in docs/index.yml.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "title": {
+      "type": "string",
+      "description": "Display title."
+    },
+    "page": {
+      "type": "string",
+      "description": "docs-relative path to the rendered MDX page (active recipes only).",
+      "pattern": "\\.mdx$"
+    },
+    "provider": {
+      "type": "string",
+      "description": "Model provider key used by landing-page filters (e.g. moonshot, nvidia, qwen)."
+    },
+    "model": {
+      "type": "object",
+      "description": "Model identity.",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "hf_id": { "type": "string" },
+        "precision": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "status": {
+      "type": "string",
+      "enum": ["validated", "experimental"]
+    },
+    "artifacts": {
+      "type": "object",
+      "description": "Recipe-owned published artifacts used for exact adoption attribution.",
+      "required": ["recipe_specific_image_periods"],
+      "properties": {
+        "recipe_specific_images": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^nvcr\\.io/nvidia/ai-dynamo/[A-Za-z0-9._-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+          }
+        },
+        "recipe_specific_image_periods": {
+          "type": "array",
+          "description": "Inclusive ownership windows during which an image tag was exclusively attributable to this recipe. An omitted effective_from includes all retained telemetry before effective_to.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["image", "source_revision"],
+            "properties": {
+              "image": {
+                "type": "string",
+                "pattern": "^nvcr\\.io/nvidia/ai-dynamo/[A-Za-z0-9._-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+              },
+              "effective_from": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "effective_to": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "source_revision": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "source_kind": {
+                "type": "string",
+                "enum": ["deploy-asset", "github-release"]
+              },
+              "release_tag": {
+                "type": "string",
+                "minLength": 1
+              },
+              "release_state": {
+                "type": "string",
+                "enum": ["draft", "prerelease", "release"]
+              }
+            },
+            "dependentRequired": {
+              "release_tag": ["release_state"],
+              "release_state": ["release_tag"]
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "source_kind": { "const": "github-release" }
+                  },
+                  "required": ["source_kind"]
+                },
+                "then": {
+                  "required": ["release_tag", "release_state"]
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Deployable recipe targets (recommended targets only; benchmark control arms live in the benchmarks catalog).",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "recommended",
+          "hardware",
+          "runtime",
+          "topology",
+          "techniques",
+          "workload",
+          "deploy",
+          "expected_performance"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "recommended": { "type": "boolean" },
+          "hardware": {
+            "type": "object",
+            "properties": {
+              "gpu": { "type": "string" },
+              "count": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": true
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "framework": { "type": "string" },
+              "image": { "type": "string" }
+            },
+            "additionalProperties": true
+          },
+          "topology": {
+            "type": "string",
+            "enum": ["aggregated", "disaggregated"]
+          },
+          "techniques": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "workload": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string" },
+              "traffic": { "type": "string" },
+              "sla": { "type": "string" }
+            },
+            "additionalProperties": true
+          },
+          "deploy": {
+            "type": "object",
+            "required": ["asset"],
+            "properties": {
+              "asset": { "type": "string" }
+            },
+            "additionalProperties": true
+          },
+          "benchmark": {
+            "type": "object",
+            "description": "Omitted when no benchmark exists.",
+            "properties": {
+              "tool": { "type": "string" },
+              "asset": { "type": "string" }
+            },
+            "additionalProperties": true
+          },
+          "expected_performance": {
+            "type": "object",
+            "required": ["available"],
+            "properties": {
+              "available": { "type": "boolean" },
+              "summary": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "related_benchmarks": {
+      "type": "array",
+      "description": "Ids in the benchmarks catalog.",
+      "items": { "type": "string" }
+    },
+    "maintainer": {
+      "type": ["string", "null"],
+      "description": "Named maintainer (null = unassigned; tracked as a gap)."
+    },
+    "gaps": {
+      "type": "array",
+      "description": "Known contribution-standard gaps.",
+      "items": { "type": "string" }
+    },
+    "deferred_reason": {
+      "type": "string",
+      "description": "Why this recipe is held back from the rendered R1 surface (deferred recipes only)."
+    }
+  },
+  "additionalProperties": false,
+  "if": {
+    "not": { "required": ["deferred_reason"] }
+  },
+  "then": {
+    "required": ["page"]
+  }
+}

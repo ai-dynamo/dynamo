@@ -1,0 +1,108 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Set up KV Cache Offloading
+subtitle: Add a KV cache offloading connector to a worker in a DynamoGraphDeployment so KV blocks spill to host memory or disk.
+---
+
+KV cache offloading lets a worker keep more KV cache than fits in GPU memory by spilling blocks to host (CPU) memory or local disk. This serves longer contexts and reuses cached prefixes across requests. This page shows how to turn it on **inside a DynamoGraphDeployment (DGD)** — the engine-internals and local-CLI details live in the per-backend pages linked at the end.
+
+This is a [how-to](../model-deployment/deploy-with-dgd.md) for an existing deployment. If you have not authored a DGD yet, start with the [DGD Guide](../model-deployment/deploy-with-dgd.md).
+
+## The pattern
+
+Offloading is configured **on the worker**, not the Frontend. For vLLM workers, pass a `--kv-transfer-config` JSON argument that names and configures the connector:
+
+```yaml
+spec:
+  components:
+  - name: VllmDecodeWorker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --kv-transfer-config
+          - '{"kv_connector":"<Connector>","kv_role":"kv_both","kv_connector_extra_config":{...}}'
+```
+
+<Steps toc={true}>
+<Step title="Choose a connector" id="choose-a-connector">
+Each offloading backend uses the same `--kv-transfer-config` hook with a different `kv_connector`. Pick one — they are alternatives, not layers.
+
+| Backend | `kv_connector` | Sizing | Best for |
+|---|---|---|---|
+| **LMCache** | `LMCacheConnectorV1` | `lmcache.max_local_cpu_size` in `kv_connector_extra_config` | vLLM host-memory offloading |
+| **[LMCache MP](./lmcache.mdx)** | `LMCacheMPConnector` | LMCache server config | Prefill-once / reuse-everywhere across a fleet |
+| **FlexKV** | `FlexKVConnectorV1` | `DYNAMO_USE_FLEXKV=1`, `FLEXKV_CPU_CACHE_GB` (env) | Distributed KV offloading runtime |
+| **SGLang HiCache** | n/a — use `--enable-hierarchical-cache` and `DYN_SHARED_CACHE_TYPE` instead | `DYN_SHARED_CACHE_MULTIPLIER` | SGLang hierarchical cache with a tier-aware router |
+
+<Note>
+SGLang HiCache does not use the `--kv-transfer-config` connector mechanism. On an SGLang worker, set `--enable-hierarchical-cache` in `args` and `DYN_SHARED_CACHE_TYPE` in the container `env`. See [Using HiCache](../../developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md).
+</Note>
+
+</Step>
+<Step title="Configure LMCache on a vLLM worker" id="configure-lmcache-on-a-vllm-worker">
+This aggregated vLLM worker uses LMCache to offload KV blocks to 20 GB of host memory:
+
+```yaml
+spec:
+  components:
+  - name: VllmDecodeWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --kv-transfer-config
+          - '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.local_cpu":true,"lmcache.max_local_cpu_size":20}}'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              memory: 40Gi
+            requests:
+              nvidia.com/gpu: "1"
+              memory: 30Gi
+```
+
+Two things to size together:
+
+- `lmcache.max_local_cpu_size` sets the host-memory cache size in GB for each worker.
+- `resources.limits.memory` must hold the LMCache tier and the engine's normal host-memory footprint.
+
+Use LMCache's persistent L2 adapters when the deployment needs a storage tier beyond host memory.
+
+</Step>
+<Step title="Verify" id="verify">
+After the worker is `Running`, send repeated requests that share a long prefix. Compare Time To First Token (TTFT) and LMCache hit metrics across the requests.
+
+</Step>
+</Steps>
+
+## Related pages
+
+These cover engine internals, the local-CLI workflow, and tuning for each backend:
+
+- [Deploy LMCache MP](./lmcache.mdx) — full LMCache MP deployment walkthrough (operator, `LMCacheEngine`, worker).
+- [Local KV Cache Offloading](../../cli/kv-cache-offloading/overview.mdx) — compare the available backends and run their local examples.
+- [Using HiCache](../../developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md) — SGLang hierarchical cache.
+- [Publish KV Events](../../developer-guide/advanced-customizations/writing-custom-backends/publish-kv-events.md) — publish KV events from a custom engine.

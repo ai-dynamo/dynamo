@@ -1,0 +1,506 @@
+# Dynamo Dark Theme for D2
+# Import into sibling diagrams: ...@theme.d2
+#
+# Design: Muted fills, subtle borders, selective accent color.
+# Color palette from design_tokens.yaml
+
+# ---------------------------------------------------------------------------
+# Theme overrides
+# ---------------------------------------------------------------------------
+vars: {
+  d2-config: {
+    theme-overrides: {
+      # Neutral shades -- dark background
+      N1: "#e0e0e0"
+      N2: "#a0a0a0"
+      N3: "#707070"
+      N4: "#404040"
+      N5: "#5d5d5d"
+      N6: "#151515"
+      N7: "#0a0a0a"
+
+      # Base colors -- container nesting
+      B1: "#0a0a0a"
+      B2: "#111111"
+      B3: "#181818"
+      B4: "#222222"
+      B5: "#5d5d5d"
+      B6: "#404040"
+
+      # Accents
+      AA2: "#76b900"
+      AA4: "#3d7ab5"
+      AA5: "#c4a035"
+
+      AB4: "#7a3050"
+      AB5: "#2a6b55"
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Reusable classes
+# ---------------------------------------------------------------------------
+
+classes: {
+
+  # --- Hardware components (outlined style with muted accent) ---
+
+  gpu: {
+    style: {
+      opacity: 0.75
+      fill: "#151515"
+      stroke: "#4a8c00"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  nic: {
+    style: {
+      opacity: 0.75
+      fill: "#2a1520"
+      stroke: "#7a3050"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  cpu: {
+    style: {
+      opacity: 0.75
+      fill: "#0f1e30"
+      stroke: "#3d7ab5"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  # --- Logical components (selective accent fills) ---
+
+  data_component: {
+    style: {
+      opacity: 0.75
+      fill: "#2a4a10"
+      stroke: "#5a9a30"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  flag_component: {
+    style: {
+      opacity: 0.75
+      fill: "#1e1a14"
+      stroke: "#7a6a45"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  # --- Depth gradient (radix tree levels, desaturated green) ---
+
+  depth_0: {
+    style: {
+      opacity: 0.75
+      fill: "#2a4a10"
+      stroke: "#5a9a30"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  depth_1: {
+    style: {
+      opacity: 0.75
+      fill: "#224010"
+      stroke: "#4a8828"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  depth_2: {
+    style: {
+      opacity: 0.75
+      fill: "#1a3510"
+      stroke: "#3a7520"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  depth_3: {
+    style: {
+      opacity: 0.75
+      fill: "#142a0c"
+      stroke: "#2c6018"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  # --- Software / Service components ---
+
+  service: {
+    style: {
+      opacity: 0.75
+      fill: "#1a1428"
+      stroke: "#7650a0"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  api: {
+    style: {
+      opacity: 0.75
+      fill: "#1a1428"
+      stroke: "#8060b0"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  database: {
+    style: {
+      opacity: 0.75
+      fill: "#142025"
+      stroke: "#3a7a70"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  cache: {
+    style: {
+      opacity: 0.75
+      fill: "#142025"
+      stroke: "#50a090"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  queue: {
+    style: {
+      opacity: 0.75
+      fill: "#201810"
+      stroke: "#a06040"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  event: {
+    style: {
+      opacity: 0.75
+      fill: "#201810"
+      stroke: "#c08050"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  # --- Infrastructure / Deployment ---
+
+  container_runtime: {
+    style: {
+      opacity: 0.75
+      fill: "#101820"
+      stroke: "#4080a0"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  load_balancer: {
+    style: {
+      opacity: 0.75
+      fill: "#1a1a10"
+      stroke: "#909040"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  endpoint: {
+    style: {
+      opacity: 0.75
+      fill: "#151515"
+      stroke: "#616161"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  # --- Status / Semantic ---
+
+  critical: {
+    style: {
+      opacity: 0.75
+      fill: "#2a1010"
+      stroke: "#b04040"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  success: {
+    style: {
+      opacity: 0.75
+      fill: "#102010"
+      stroke: "#40a040"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+      bold: true
+    }
+  }
+
+  neutral: {
+    style: {
+      opacity: 0.75
+      fill: "#1a1a1a"
+      stroke: "#636363"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#e0e0e0"
+      font-size: 16
+    }
+  }
+
+  # --- Containers (subtle, receding) ---
+
+  outer_frame: {
+    style: {
+      fill: "#0a0a0a"
+      stroke: "#5d5d5d"
+      stroke-width: 1
+      font-color: "#e0e0e0"
+      font-size: 20
+      bold: true
+    }
+  }
+
+  container_l1: {
+    style: {
+      fill: "#111111"
+      stroke: "#616161"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#c0c0c0"
+      font-size: 18
+      bold: true
+    }
+  }
+
+  container_l2: {
+    style: {
+      fill: "#181818"
+      stroke: "#666666"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#a0a0a0"
+      font-size: 16
+    }
+  }
+
+  container_l3: {
+    style: {
+      fill: "#1e1e1e"
+      stroke: "#6a6a6a"
+      stroke-width: 1
+      border-radius: 0
+      font-color: "#909090"
+      font-size: 14
+    }
+  }
+
+  # --- Text elements ---
+
+  section_title: {
+    shape: text
+    style: {
+      font-size: 20
+      bold: true
+      font-color: "#e0e0e0"
+    }
+  }
+
+  annotation: {
+    shape: text
+    style: {
+      font-size: 14
+      font-color: "#8a8a8a"
+      italic: true
+    }
+  }
+
+  # --- Connection types (muted, thin) ---
+
+  data_flow: {
+    style: {
+      stroke: "#c4a035"
+      stroke-width: 2
+      font-color: "#c4a035"
+      font-size: 14
+    }
+  }
+
+  control_flow: {
+    style: {
+      stroke: "#3d7ab5"
+      stroke-width: 1
+      stroke-dash: 4
+      font-color: "#5a90c0"
+      font-size: 14
+    }
+  }
+
+  poll_flow: {
+    style: {
+      stroke: "#4a8c00"
+      stroke-width: 1
+      stroke-dash: 3
+      opacity: 0.5
+      font-color: "#4a8c00"
+      font-size: 14
+    }
+  }
+
+  nvlink: {
+    style: {
+      stroke: "#c4a035"
+      stroke-width: 2
+      font-color: "#c4a035"
+      font-size: 14
+    }
+  }
+
+  rdma_flow: {
+    style: {
+      stroke: "#7a3050"
+      stroke-width: 2
+      font-color: "#c06080"
+      font-size: 14
+    }
+  }
+
+  # --- Software / Pipeline connections ---
+
+  api_call: {
+    style: {
+      stroke: "#6a4890"
+      stroke-width: 1
+      font-color: "#9070c0"
+      font-size: 14
+    }
+  }
+
+  event_flow: {
+    style: {
+      stroke: "#a06040"
+      stroke-width: 1
+      stroke-dash: 4
+      font-color: "#c08050"
+      font-size: 14
+    }
+  }
+
+  pipeline: {
+    style: {
+      stroke: "#3a7a70"
+      stroke-width: 2
+      font-color: "#50a090"
+      font-size: 14
+    }
+  }
+
+  dependency: {
+    style: {
+      stroke: "#767676"
+      stroke-width: 1
+      stroke-dash: 3
+      font-color: "#8a8a8a"
+      font-size: 14
+    }
+  }
+
+  critical_path: {
+    style: {
+      stroke: "#b04040"
+      stroke-width: 2
+      font-color: "#d06060"
+      font-size: 14
+    }
+  }
+
+  traversal: {
+    style: {
+      stroke: "#e0e0e0"
+      stroke-width: 1
+      stroke-dash: 2
+      font-color: "#c0c0c0"
+      font-size: 14
+    }
+  }
+}
