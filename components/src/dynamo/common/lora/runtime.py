@@ -41,6 +41,8 @@ class RuntimeLoRAPluginError(RuntimeLoRAError):
 
 @dataclass(frozen=True)
 class ResolveContext:
+    """Resolution context with a deadline computed using the running loop's time()."""
+
     adapter_key: str
     base_model_name: str
     cache_root: Path
@@ -235,10 +237,16 @@ class RuntimeLoRAResolverChain:
                 )
             except asyncio.CancelledError:
                 raise
-            except RuntimeLoRAError:
-                raise
-            except Exception as exc:
-                raise RuntimeLoRAPluginError("runtime LoRA resolver failed") from exc
+            except RuntimeLoRANotFoundError:
+                raise RuntimeLoRANotFoundError(
+                    "runtime LoRA source was not found"
+                ) from None
+            except RuntimeLoRAResolverUnavailableError:
+                raise RuntimeLoRAResolverUnavailableError(
+                    "runtime LoRA resolver unavailable"
+                ) from None
+            except Exception:
+                raise RuntimeLoRAPluginError("runtime LoRA resolver failed") from None
             if result is None:
                 continue
             if not isinstance(result, ResolvedLoRA):
@@ -249,11 +257,20 @@ class RuntimeLoRAResolverChain:
                 raise RuntimeLoRAPluginError(
                     "runtime LoRA resolver returned an invalid local_path"
                 )
+            try:
+                revision_bytes = (
+                    result.source_revision.encode("utf-8")
+                    if isinstance(result.source_revision, str)
+                    else b""
+                )
+            except UnicodeEncodeError:
+                raise RuntimeLoRAPluginError(
+                    "runtime LoRA resolver returned an invalid source_revision"
+                ) from None
             if (
                 not isinstance(result.source_revision, str)
                 or not result.source_revision
-                or len(result.source_revision.encode("utf-8"))
-                > _MAX_SOURCE_REVISION_BYTES
+                or len(revision_bytes) > _MAX_SOURCE_REVISION_BYTES
                 or any(
                     ord(character) < 0x20 or ord(character) == 0x7F
                     for character in result.source_revision
