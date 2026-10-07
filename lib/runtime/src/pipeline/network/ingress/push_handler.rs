@@ -1587,11 +1587,9 @@ mod tests {
     /// making progress, so the canary timer must be reset.
     #[tokio::test]
     async fn publish_failure_with_engine_progress_still_resets_canary() {
-        let chunks: Vec<TestResponse> = (0..3)
-            .map(|i| Annotated::from_data(serde_json::json!({ "token": i })))
-            .collect();
+        let chunk = TestResponse::from_data(serde_json::json!({ "token": 0 }));
         assert!(
-            pump_with_dead_publisher(stream::iter(chunks)).await,
+            pump_with_dead_publisher(stream::iter([chunk])).await,
             "a produced non-error chunk must reset the canary even when the publish fails"
         );
     }
