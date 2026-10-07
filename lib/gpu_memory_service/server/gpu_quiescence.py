@@ -364,12 +364,21 @@ class GPUQuiescenceManager:
         """
         loop = asyncio.get_running_loop()
         readable: asyncio.Future[bytes] = loop.create_future()
+        peer_reset = False
 
         def read_record() -> None:
+            nonlocal peer_reset
             try:
                 data = os.read(read_fd, _CRASH_RECORD.size)
             except BlockingIOError:
                 return
+            except ConnectionResetError:
+                # A killed peer can reset the socket instead of closing it
+                # cleanly. Its last descriptor is gone exactly as with EOF;
+                # treating the reset as an error left the cohort to the much
+                # slower liveness timeout.
+                peer_reset = True
+                data = b""
             except OSError as exc:
                 if not readable.done():
                     readable.set_exception(exc)
@@ -385,7 +394,7 @@ class GPUQuiescenceManager:
 
         signal_number: int | None = None
         native_record = bool(data)
-        source = "socket-eof"
+        source = "socket-reset" if peer_reset else "socket-eof"
         if data:
             if len(data) != _CRASH_RECORD.size:
                 logger.error(

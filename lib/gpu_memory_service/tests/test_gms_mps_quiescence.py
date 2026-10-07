@@ -820,6 +820,56 @@ async def test_crash_interlock_quiesces_then_kills_registered_cohort(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_crash_interlock_treats_peer_reset_like_eof(monkeypatch):
+    """A killed client may reset its socket instead of closing it cleanly."""
+    manager = GPUQuiescenceManager()
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setenv("DYN_GMS_MPS_SERVER_PID", "444")
+    pid = os.getpid()
+    start = quiescence.process_start_time(pid)
+    assert start is not None
+    killed = []
+    notified = []
+
+    async def control(_backend, *command):
+        if command[0] == "get_client_list":
+            return 0, ""
+        return 0, "0"
+
+    def reset_read(_fd, _size):
+        raise ConnectionResetError(104, "Connection reset by peer")
+
+    monkeypatch.setattr(manager, "_control", control)
+    monkeypatch.setattr(quiescence, "process_state", lambda _pid: "T")
+    monkeypatch.setattr(
+        quiescence,
+        "signal_client",
+        lambda target, sig: killed.append((target.pid, sig)),
+    )
+    monkeypatch.setattr(
+        manager, "_notify_gpu_failure", lambda client, source: notified.append(source)
+    )
+    monkeypatch.setattr(quiescence, "publish_gpu_failure_marker", lambda *a, **k: None)
+    write_fd = manager.register(
+        backend="vllm",
+        cohort="old",
+        pid=pid,
+        process_start_time_value=start,
+        rank=0,
+        crash_interlock=True,
+    )
+    task = manager._crash_tasks[("vllm", "old", pid)]
+    monkeypatch.setattr(quiescence.os, "read", reset_read)
+    os.write(write_fd, b"x")
+    await asyncio.wait_for(task, timeout=1)
+    os.close(write_fd)
+
+    assert notified == ["socket-reset"]
+    assert ("vllm", "old") in manager._retired
+    assert ("vllm", "old") in manager._proofs
+
+
+@pytest.mark.asyncio
 async def test_terminate_all_predecessors_trips_native_interlock(monkeypatch):
     manager = GPUQuiescenceManager()
     monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
