@@ -76,6 +76,8 @@ def _make_handler(stage_types=("diffusion",)):
     # BaseOmniHandler.__init__ is mocked out in tests; recreate LoRA state attrs
     # expected by BaseWorkerHandler helpers called by OmniHandler.
     handler._lora_state = LoRAState()
+    handler._paused = False
+    handler._pause_lock = asyncio.Lock()
     handler.loaded_loras = handler._lora_state.loaded_loras
     handler._lora_load_locks = handler._lora_state.lora_load_locks
     handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
@@ -493,6 +495,40 @@ class _AsyncReturn:
 
 class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
+
+    @pytest.mark.parametrize(
+        "negative_prompt,with_image",
+        [
+            (None, False),
+            ("", False),
+            ("blurry", False),
+            ("模糊 🛶", False),
+            ("blurry", True),
+        ],
+    )
+    def test_video_negative_prompt(self, negative_prompt, with_image):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a small boat",
+            model="test-model",
+            response_format="b64_json",
+            nvext=VideoNvExt(negative_prompt=negative_prompt),
+        )
+        image = Image.new("RGB", (64, 64)) if with_image else None
+
+        result = handler._engine_inputs_from_video(req, image=image)
+
+        assert result.prompt["prompt"] == req.prompt
+        if negative_prompt is None:
+            assert "negative_prompt" not in result.prompt
+        else:
+            assert result.prompt["negative_prompt"] == negative_prompt
+        if with_image:
+            assert result.prompt["multi_modal_data"]["image"] is image
+        else:
+            assert "multi_modal_data" not in result.prompt
+        assert result.request_type == RequestType.VIDEO_GENERATION
+        assert result.response_format == "b64_json"
 
     @pytest.mark.asyncio
     async def test_t2v_no_multi_modal_data_and_i2v_attaches_image(self):
@@ -1087,6 +1123,26 @@ class TestParseOmniRequest:
 
         assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
         assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
+
+    def test_video_request_uses_nvext_negative_prompt(self):
+        request = {
+            "model": "test-model",
+            "prompt": "a small boat",
+            "size": "320x192",
+            "nvext": {"negative_prompt": "blurry, distorted"},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["video"]))
+
+        assert result["engine_inputs"]["negative_prompt"] == "blurry, distorted"
+        assert result["original_prompt"]["negative_prompt"] == "blurry, distorted"
+
+    def test_video_request_without_negative_prompt_omits_it(self):
+        request = {"model": "test-model", "prompt": "a small boat", "size": "320x192"}
+
+        result = asyncio.run(parse_omni_request(request, ["video"]))
+
+        assert "negative_prompt" not in result["engine_inputs"]
 
     def test_image_request_uses_nvext_dimensions_consistently(self):
         request = {

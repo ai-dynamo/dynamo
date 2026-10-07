@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
-    ResponseState, build_generate_request, data_parallel_rank, normalize_response_options,
+    ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
+    normalize_response_options, request_has_multimodal_input,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -39,6 +40,7 @@ pub struct VllmSidecarEngine {
     is_lora_enabled: bool,
     is_hot_swap_requested: bool,
     lifecycle: lora::LoraLifecycle,
+    routing_image_token_id: OnceCell<Option<u32>>,
     cancel: CancellationToken,
 }
 
@@ -67,6 +69,7 @@ impl VllmSidecarEngine {
             runtime_endpoint: OnceCell::new(),
             lora_downloader: OnceCell::new(),
             lifecycle: lora::LoraLifecycle::default(),
+            routing_image_token_id: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -92,20 +95,44 @@ impl VllmSidecarEngine {
         Self::from_parsed(args).map_err(Into::into)
     }
 
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        if args.sidecar.common.dyn_tool_call_parser.is_some()
-            || args.sidecar.common.dyn_reasoning_parser.is_some()
-        {
-            return Err(client::invalid_argument(
-                "vLLM gRPC does not preserve the request options required by Dynamo tool-call and reasoning parsers",
-            ));
-        }
+    /// Parse CLI arguments without connecting; discovery runs after probe startup.
+    pub fn from_cli() -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        DynamoError,
+    > {
+        let args = <Args as clap::Parser>::parse();
+        let vllm_http_url = Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args, vllm_http_url, false))
+    }
 
-        let endpoint = args.sidecar.grpc_endpoint;
-        let enable_rl = args.sidecar.common.enable_rl;
-        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
-        let vllm_http_url = args
-            .vllm_http_endpoint
+    /// Parse embedded launcher arguments now, then discover metadata after the
+    /// shared sidecar runner has started probes and connected the runtime.
+    pub fn try_from_args_async(
+        argv: Vec<String>,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        SidecarStartupError,
+    > {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        let vllm_http_url = Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args, vllm_http_url, false))
+    }
+
+    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        let vllm_http_url = Self::validate_args(&args)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
+        runtime.block_on(Self::from_parsed_async(args, vllm_http_url, true))
+    }
+
+    fn validate_args(args: &Args) -> Result<Option<RlAdminBaseUrl>, DynamoError> {
+        // Reject overflow before runtime connections, but start the actual
+        // engine deadline only when the bootstrap future is polled.
+        client::startup_deadline(args.sidecar.grpc.config().startup_deadline)?;
+        args.vllm_http_endpoint
+            .as_ref()
             .map(|endpoint| {
                 RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
                     client::invalid_argument(format!(
@@ -113,14 +140,48 @@ impl VllmSidecarEngine {
                     ))
                 })
             })
-            .transpose()?;
+            .transpose()
+    }
+
+    async fn from_parsed_async(
+        args: Args,
+        vllm_http_url: Option<RlAdminBaseUrl>,
+        bootstrap: bool,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let endpoint = &args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
-        eprintln!(
-            "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
-            transport.startup_deadline
-        );
-        let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
+        if bootstrap {
+            eprintln!(
+                "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
+                transport.startup_deadline
+            );
+        } else {
+            tracing::info!(%endpoint, startup_deadline = ?transport.startup_deadline,
+                "Discovering vLLM model metadata");
+        }
+        let model = bootstrap_discover(endpoint, transport, bootstrap_deadline, bootstrap).await?;
+        Self::from_discovered(args, model, vllm_http_url)
+    }
+
+    fn from_discovered(
+        args: Args,
+        model: DiscoveredModel,
+        vllm_http_url: Option<RlAdminBaseUrl>,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let dynamo_parsers = args.sidecar.common.dyn_tool_call_parser.is_some()
+            || args.sidecar.common.dyn_reasoning_parser.is_some();
+        if dynamo_parsers && let Some(parser) = model.reasoning_parser() {
+            // vLLM's own reasoning parser gates structured output on request
+            // settings that the gRPC protocol cannot carry.
+            return Err(client::invalid_argument(format!(
+                "Dynamo parsers need vLLM without its own reasoning parser, but vLLM runs `{parser}`; start vllm-rs with `--reasoning-parser none`"
+            )));
+        }
+        let endpoint = args.sidecar.grpc_endpoint;
+        let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
+        let transport = args.sidecar.grpc.config();
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() && !model.supports_multimodal {
             return Err(client::invalid_argument(format!(
@@ -146,14 +207,13 @@ impl VllmSidecarEngine {
             custom_jinja_template: args.sidecar.common.custom_jinja_template,
             model_name: model.source.clone(),
             served_model_name: Some(model.served_name.clone()),
-            // gRPC cannot yet preserve the parser request semantics.
-            tool_call_parser: None,
-            reasoning_parser: None,
+            tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
+            reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
                 .exclude_tools_when_tool_choice_none,
-            enable_kv_routing: true,
+            enable_kv_routing: !mode.is_encode(),
             disaggregation_mode: mode,
             route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl,
@@ -691,6 +751,12 @@ impl LLMEngine for VllmSidecarEngine {
         let (model, server) = client.discover(startup_deadline).await?;
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
+        let engine_config = observed.engine_config(!self.mode.is_encode())?;
+        let routing_image_token_id =
+            resolve_routing_image_token_id(&observed, startup_deadline).await;
+        self.routing_image_token_id
+            .set(routing_image_token_id)
+            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
         let connection_count = client.connection_count();
         self.client
             .set(client)
@@ -703,7 +769,7 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "vLLM gRPC services are ready"
         );
-        Ok(observed.engine_config())
+        Ok(engine_config)
     }
 
     async fn generate(
@@ -711,12 +777,7 @@ impl LLMEngine for VllmSidecarEngine {
         request: dynamo_backend_common::PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        if request
-            .multi_modal_data
-            .as_ref()
-            .is_some_and(|media| media.values().any(|items| !items.is_empty()))
-            && !self.model.supports_multimodal
-        {
+        if request_has_multimodal_input(&request) && !self.model.supports_multimodal {
             return Err(client::invalid_argument(format!(
                 "model `{}` does not advertise multimodal support",
                 self.model.served_name
@@ -727,7 +788,10 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let request = normalize_response_options(request)?;
+        let mut request = normalize_response_options(request)?;
+        if self.model.reasoning_parser().is_none() {
+            consume_reasoning_parser_args(&mut request.extra_args);
+        }
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
@@ -1070,6 +1134,7 @@ impl LLMEngine for VllmSidecarEngine {
         if reported_sources.is_empty() {
             return Ok(Vec::new());
         }
+        let image_token_id = self.routing_image_token_id.get().copied().flatten();
         for source in reported_sources {
             if source.transport != "zmq" {
                 tracing::warn!(
@@ -1103,6 +1168,7 @@ impl LLMEngine for VllmSidecarEngine {
                 endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,
+                image_token_id,
             });
         }
         if ranks.len() != expected_dp_size as usize {
@@ -1112,6 +1178,100 @@ impl LLMEngine for VllmSidecarEngine {
             )));
         }
         Ok(sources)
+    }
+}
+
+#[cfg(feature = "mm-routing")]
+const MM_ROUTING_CONFIG_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(feature = "mm-routing")]
+fn routing_config_fetch_deadline(now: Instant, startup_deadline: Instant) -> Instant {
+    now.checked_add(MM_ROUTING_CONFIG_FETCH_TIMEOUT)
+        .map_or(startup_deadline, |deadline| deadline.min(startup_deadline))
+}
+
+#[cfg(feature = "mm-routing")]
+async fn resolve_routing_image_token_id(
+    model: &DiscoveredModel,
+    startup_deadline: Instant,
+) -> Option<u32> {
+    use dynamo_llm::local_model::LocalModel;
+    use dynamo_llm::preprocessor::mm_routing::image::resolve_exact_routing_image_token_id;
+    use std::path::PathBuf;
+    use tokio::time::timeout_at;
+
+    if !model.supports_multimodal {
+        return None;
+    }
+
+    let source_path = PathBuf::from(&model.source);
+    let model_dir = if source_path.is_dir() {
+        source_path
+    } else {
+        let fetch_deadline = routing_config_fetch_deadline(Instant::now(), startup_deadline);
+        let fetched = timeout_at(fetch_deadline, LocalModel::fetch(&model.source, true))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("model configuration fetch timed out")));
+        match fetched {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    model = %model.source,
+                    fetch_timeout_secs = MM_ROUTING_CONFIG_FETCH_TIMEOUT.as_secs(),
+                    %error,
+                    "Unable to fetch model configuration; exact multimodal KV routing is disabled"
+                );
+                return None;
+            }
+        }
+    };
+    let image_token_id = resolve_exact_routing_image_token_id(&model.source, &model_dir);
+    match image_token_id {
+        Some(image_token_id) => tracing::info!(
+            model = %model.source,
+            image_token_id,
+            "Resolved image placeholder token for multimodal KV routing"
+        ),
+        None => tracing::warn!(
+            model = %model.source,
+            model_dir = %model_dir.display(),
+            "Exact multimodal routing prerequisites are unavailable; source metadata will omit the image token"
+        ),
+    }
+    image_token_id
+}
+
+#[cfg(not(feature = "mm-routing"))]
+async fn resolve_routing_image_token_id(
+    _model: &DiscoveredModel,
+    _startup_deadline: Instant,
+) -> Option<u32> {
+    None
+}
+
+#[cfg(all(test, feature = "mm-routing"))]
+mod mm_routing_tests {
+    use super::*;
+
+    #[test]
+    fn config_fetch_deadline_is_capped_independently_of_startup() {
+        let now = Instant::now();
+        let long_startup_deadline = now
+            .checked_add(std::time::Duration::from_secs(30 * 60))
+            .expect("test startup deadline");
+        assert_eq!(
+            routing_config_fetch_deadline(now, long_startup_deadline),
+            now.checked_add(MM_ROUTING_CONFIG_FETCH_TIMEOUT)
+                .expect("test config fetch deadline")
+        );
+
+        let short_startup_deadline = now
+            .checked_add(std::time::Duration::from_secs(5))
+            .expect("test startup deadline");
+        assert_eq!(
+            routing_config_fetch_deadline(now, short_startup_deadline),
+            short_startup_deadline
+        );
     }
 }
 
@@ -1252,34 +1412,229 @@ fn required_object_json(body: &Map<String, Value>, field: &str) -> Result<Vec<u8
         .map_err(|error| client::invalid_argument(format!("invalid `{field}`: {error}")))
 }
 
-fn bootstrap_discover(
+async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: GrpcTransportConfig,
     startup_deadline: Instant,
+    bootstrap: bool,
 ) -> Result<DiscoveredModel, DynamoError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-    runtime.block_on(async {
-        let bootstrap_transport = GrpcTransportConfig {
-            connections: std::num::NonZeroUsize::MIN,
-            ..transport
-        };
-        let client =
-            VllmClient::connect(endpoint, bootstrap_transport, startup_deadline, true).await?;
-        client
-            .wait_for_services(
-                &[CONTROL_SERVICE],
-                startup_deadline,
-                transport.retry_interval,
-            )
-            .await?;
-        let (model, server) = client.discover(startup_deadline).await?;
-        DiscoveredModel::from_proto(model, server)
-    })
+    let bootstrap_transport = GrpcTransportConfig {
+        connections: std::num::NonZeroUsize::MIN,
+        ..transport
+    };
+    let client =
+        VllmClient::connect(endpoint, bootstrap_transport, startup_deadline, bootstrap).await?;
+    client
+        .wait_for_services(
+            &[CONTROL_SERVICE],
+            startup_deadline,
+            transport.retry_interval,
+        )
+        .await?;
+    let (model, server) = client.discover(startup_deadline).await?;
+    DiscoveredModel::from_proto(model, server)
 }
 
 fn is_hot_swap_requested() -> bool {
     dynamo_runtime::config::env_is_truthy("DYN_LORA_HOTSWAP_ENABLED")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures::{minimal_request, model_info, server_info};
+
+    use clap::Parser;
+    use dynamo_backend_common::{BackendError, ErrorType};
+
+    fn args(mode: &str) -> Args {
+        Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--namespace",
+            "test-namespace",
+            "--component",
+            "configured-component",
+            "--endpoint",
+            "tokens",
+            "--disaggregation-mode",
+            mode,
+            "--custom-jinja-template",
+            "local-template.jinja",
+        ])
+        .unwrap()
+    }
+
+    fn worker(mode: &str) -> (VllmSidecarEngine, WorkerConfig) {
+        let mut info = model_info();
+        info.supports_multimodal = true;
+        let model = DiscoveredModel::from_proto(info, server_info()).unwrap();
+        VllmSidecarEngine::from_discovered(args(mode), model, None).unwrap()
+    }
+
+    #[test]
+    fn worker_defaults_omit_parsers_and_preserve_encode_options() {
+        for mode in ["aggregated", "prefill", "decode", "encode"] {
+            let (_, config) = worker(mode);
+            assert!(config.tool_call_parser.is_none());
+            assert!(config.reasoning_parser.is_none());
+            if mode == "encode" {
+                assert_eq!(config.namespace, "test-namespace");
+                assert_eq!(config.component, "encode");
+                assert_eq!(config.endpoint, "tokens");
+                assert_eq!(
+                    config.custom_jinja_template.as_deref(),
+                    Some(std::path::Path::new("local-template.jinja"))
+                );
+                assert_eq!(config.model_name, "model-source");
+                assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+                assert!(!config.enable_kv_routing);
+                assert_eq!(config.disaggregation_mode.as_str(), "encode");
+            }
+        }
+    }
+
+    #[test]
+    fn worker_advertises_configured_parsers() {
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--dyn-tool-call-parser",
+            "qwen3_coder",
+            "--dyn-reasoning-parser",
+            "qwen3",
+        ])
+        .unwrap();
+        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
+        // Native parser names differ from the explicit Dynamo configuration.
+        let mut info = model_info();
+        info.reasoning_parser = String::new();
+        let model = DiscoveredModel::from_proto(info, server_info()).unwrap();
+        let (_, config) = VllmSidecarEngine::from_discovered(args, model, vllm_http_url).unwrap();
+        assert_eq!(config.tool_call_parser.as_deref(), Some("qwen3_coder"));
+        assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn dynamo_parsers_need_an_engine_without_a_reasoning_parser() {
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--dyn-reasoning-parser",
+            "qwen3",
+        ])
+        .unwrap();
+        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
+        // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let error = VllmSidecarEngine::from_discovered(args, model, vllm_http_url)
+            .err()
+            .expect("startup must fail");
+        assert!(error.to_string().contains("--reasoning-parser none"));
+    }
+
+    #[test]
+    fn encode_requires_multimodal_model() {
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let error = VllmSidecarEngine::from_discovered(args("encode"), model, None)
+            .err()
+            .expect("encode requires media");
+        assert!(error.to_string().contains("requires a multimodal engine"));
+    }
+
+    #[tokio::test]
+    async fn draft_updates_require_both_native_capabilities() {
+        for flags in [
+            None,
+            Some((false, false)),
+            Some((false, true)),
+            Some((true, false)),
+            Some((true, true)),
+        ] {
+            let mut server = server_info();
+            match flags {
+                None => server.rl_capabilities = None,
+                Some((transfer, draft)) => {
+                    let capabilities = server.rl_capabilities.as_mut().unwrap();
+                    capabilities.weight_transfer_enabled = transfer;
+                    capabilities.draft_weight_updates_enabled = draft;
+                }
+            }
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            let (engine, _) =
+                VllmSidecarEngine::from_discovered(args("aggregated"), model, None).unwrap();
+            let supported = flags == Some((true, true));
+            assert_eq!(
+                engine
+                    .supported_updates()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "start_draft_weight_update"),
+                supported,
+                "capabilities: {flags:?}"
+            );
+            assert!(engine.client.get().is_none());
+            if !supported {
+                assert_eq!(
+                    engine
+                        .engine_update("start_draft_weight_update".into(), serde_json::json!({}))
+                        .await
+                        .unwrap(),
+                    serde_json::json!({
+                        "status": "error",
+                        "message": "unsupported engine update: start_draft_weight_update"
+                    }),
+                    "capabilities: {flags:?}"
+                );
+                assert!(engine.client.get().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn worker_options_and_model_identity_are_preserved() {
+        for (mode, component) in [
+            ("aggregated", "configured-component"),
+            ("prefill", "prefill"),
+            ("decode", "backend"),
+        ] {
+            let (_, config) = worker(mode);
+            assert_eq!(config.namespace, "test-namespace");
+            assert_eq!(config.component, component);
+            assert_eq!(config.endpoint, "tokens");
+            assert_eq!(
+                config.custom_jinja_template.as_deref(),
+                Some(std::path::Path::new("local-template.jinja"))
+            );
+            assert_eq!(config.model_name, "model-source");
+            assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+            assert!(config.enable_kv_routing);
+            assert_eq!(
+                config.disaggregation_mode.as_str(),
+                if mode == "aggregated" { "agg" } else { mode }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unstarted_generation_fails_and_cleanup_is_idempotent() {
+        let (engine, _) = worker("aggregated");
+        let context = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let error = engine
+            .generate(minimal_request(), context)
+            .await
+            .err()
+            .expect("unstarted engine");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        engine.cleanup().await.unwrap();
+        engine.cleanup().await.unwrap();
+        assert!(engine.cancel.is_cancelled());
+    }
 }

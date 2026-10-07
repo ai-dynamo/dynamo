@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
@@ -28,7 +29,7 @@ use dynamo_kv_router::services::selection::{
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
     SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
     SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
-    WorkerRequest, WorkerSelectionPolicyRegistry,
+    WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use tokio_util::sync::CancellationToken;
@@ -253,7 +254,7 @@ impl EmbeddedSelection {
         let service = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),
             worker_type,
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .worker_selection_policy_factory(args.policy_factory)
         .host_manages_request_lifecycle()

@@ -124,8 +124,10 @@ tests the sidecar and Dynamo handoff wire-flow only.
   "all" candidate requests are truncated to 20 rather than returning the full
   set. (vLLM's default `max_logprobs` is also 20, but rejects over-limit
   requests instead of truncating.)
-- Length termination only; stop strings, EOS, and structured decoding are
-  accepted on the wire but are not simulated.
+- Length and explicit stop-token termination; stop strings, EOS, and structured
+  decoding are accepted on the wire but are not simulated. The synthetic token
+  plan is unchanged by minimum-token constraints; stop matching begins after
+  that minimum, without simulating logit masking.
 - Prefix-cache bypass and cache-salt controls are rejected because the Mocker
   server does not emulate their isolation semantics.
 - One Mocker data-parallel rank per server process.

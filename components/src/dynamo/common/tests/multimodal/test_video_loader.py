@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import sys
 from unittest.mock import AsyncMock
 
@@ -14,6 +15,8 @@ from dynamo.common.multimodal import video_loader as video_loader_module
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB  # isort: skip
 
 pytestmark = [
     pytest.mark.unit,
@@ -33,6 +36,21 @@ async def test_load_video_rejects_http_by_default():
 
     with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_video("http://example.com/x.mp4")
+
+
+@pytest.mark.asyncio
+async def test_load_video_logs_rejected_data_url_bounded(monkeypatch, caplog):
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    oversized = "data:video/mp4;base64," + "A" * (1024 * 1024)
+    loader = VideoLoader(url_policy=UrlValidationPolicy())
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(UrlValidationError, match="exceeds"):
+            await loader.load_video(oversized)
+
+    assert "URL rejected loading video" in caplog.text
+    assert "payload elided" in caplog.text
+    assert max(len(record.getMessage()) for record in caplog.records) < 1024
 
 
 @pytest.mark.asyncio
@@ -73,6 +91,25 @@ async def test_load_video_uses_vllm_media_connector():
     assert loaded_frames.flags["C_CONTIGUOUS"]
     np.testing.assert_array_equal(loaded_frames, np.ascontiguousarray(frames))
     assert loaded_metadata == metadata
+
+
+@pytest.mark.asyncio
+async def test_http_fetch_honors_configured_media_limit(monkeypatch):
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    loader = VideoLoader(
+        url_policy=UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    )
+    frames = np.zeros((1, 2, 2, 3), dtype=np.uint8)
+    metadata = {"fps": 1.0, "frames_indices": [0], "total_num_frames": 1}
+    mock_fetch = AsyncMock(return_value=b"video")
+    mock_decode = AsyncMock(return_value=(frames, metadata))
+    monkeypatch.setattr(video_loader_module, "fetch_bytes", mock_fetch)
+    monkeypatch.setattr(loader, "_create_vllm_video_io", lambda kwargs=None: object())
+    monkeypatch.setattr(loader, "_decode_video_bytes", mock_decode)
+
+    await loader._load_video_with_vllm("https://example.com/limited.mp4")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
 
 
 @pytest.mark.asyncio

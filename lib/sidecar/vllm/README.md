@@ -37,12 +37,14 @@ It is a standalone Rust executable and is also compiled into
 - Data-parallel rank routing and KV-event source discovery
 - Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
 - Image, video, and audio URL and data-URI inputs; cache UUIDs remain image-only
+- Preprocessed image features with dense placeholders, plus sparse placeholders when the renderer preserves `is_embed`. Sparse layouts such as Nemotron-H Omni require a vLLM revision containing [vllm-project/vllm#54548](https://github.com/vllm-project/vllm/pull/54548) on Python renderer round-trips.
 - Dynamic LoRA load, unload, list, discovery, and request selection when vLLM enables LoRA
 - Opaque encoder-cache handoff through vLLM `ec_transfer_params`
+- Multimodal-aware KV routing for images
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
-The sidecar does not support beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+The sidecar does not support beam search or `n > 1`. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. The Dynamo frontend accepts inline media through OpenAI-compatible `data:` URLs; it does not expose a separate raw-byte media variant.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
 
@@ -120,18 +122,9 @@ to that port to trusted consumers because KV events contain request token IDs.
 
 ### Native Generate compatibility
 
-`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed
-in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421). The sidecar
-therefore does not advertise `vllm_inference_v1_generate`. Aggregated and decode
-requests from v1.4 frontends can still use the legacy
-`extra_args.vllm_tito.sampling_params` envelope for controls already preserved
-in the typed request: `max_tokens`, `min_tokens`, `ignore_eos`, `logprobs`,
-`prompt_logprobs`, and `skip_special_tokens`. Other sampling settings fail
-with an explicit unsupported-request error.
-Use the chat/completions APIs with the supported typed controls instead.
-Prefill and encode still use their canonical one-token request; they do not
-apply decode sampling JSON. Native Generate can be enabled after an upstream
-protocol release includes both the payload and its capability flag.
+`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421), so the sidecar projects typed controls into the gRPC request and advertises `vllm_inference_v1_generate`. During rolling upgrades, v1.4 frontends can supply the legacy `extra_args.vllm_tito.sampling_params` envelope; canonical typed fields take precedence when both are present. Requests that rely on distinctions proto 0.3 cannot represent, such as explicit `top_k=0`, `top_k=-1`, or `min_p=0`, fail explicitly instead of silently changing sampling behavior.
+
+Prefill and encode use their canonical one-token request and do not apply decode sampling controls.
 
 ### Runtime compatibility
 
@@ -148,7 +141,8 @@ all plugins. An exported `VLLM_PLUGINS` overrides this default. The `dev` and
 Start vLLM with its gRPC listener:
 
 ```bash
-vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
+vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051 \
+  --reasoning-parser none
 ```
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
@@ -171,6 +165,42 @@ python -m dynamo.vllm.sidecar \
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
+
+### Tool-call and reasoning parsing
+
+Configure Dynamo frontend parsing on the sidecar with the same flags used by
+`python -m dynamo.vllm` and `python -m dynamo.sglang`. For the Qwen3 example above:
+
+```bash
+python -m dynamo.vllm.sidecar \
+  --grpc-endpoint 127.0.0.1:50051 \
+  --dyn-tool-call-parser hermes \
+  --dyn-reasoning-parser qwen3
+```
+
+`DYN_TOOL_CALL_PARSER` and `DYN_REASONING_PARSER` provide the equivalent environment
+settings. Use Dynamo parser names. The sidecar advertises these names to the
+Dynamo frontend, which parses the generated output. vLLM's gRPC generation path
+bypasses its chat output parsers, so setting native vLLM parsers does not parse
+the response twice.
+
+When these flags and environment variables are absent, the sidecar advertises no
+parsers. It does not infer Dynamo parser settings from vLLM's native parser names.
+
+Dynamo parsers need vLLM to run without its own reasoning parser, so start
+`vllm-rs` with `--reasoning-parser none`, as the launch scripts and deploy
+examples do. vLLM's reasoning parser decides where structured output starts from
+per-request reasoning metadata (`reasoning_ended` / `reasoning_parser_kwargs`)
+that the gRPC protocol cannot carry. If a Dynamo parser flag is set and vLLM
+reports its own reasoning parser, the sidecar exits at startup. With no engine
+reasoning parser, vLLM never reads that metadata, so the sidecar removes it, and
+vLLM applies structured output, such as a JSON schema or a required or named
+`tool_choice`, from the first output token. If vLLM runs its own reasoning
+parser, a request that carries this metadata still fails.
+
+Requests that require visible stop-token preservation or `max_thinking_tokens`
+still fail explicitly in the gRPC request converter. These limitations affect
+some tool terminators, such as `harmony` tool calls.
 
 ### RL workflows
 
@@ -207,9 +237,22 @@ The update request bodies match vLLM's RL HTTP schemas: `init_weight_transfer_en
 
 The RL endpoint, engine routes, and raw HTTP compatibility surface are administrative interfaces that can pause serving, release GPU memory, and replace model weights. The sidecar does not add HTTP authentication to the advertised URL. Enable these interfaces only on trusted request and system networks, or place the HTTP endpoint behind an authenticated private proxy without embedding credentials in the published URL.
 
-The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
+The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser names returned by Control are used for engine identity validation; configure Dynamo frontend parsers explicitly as described above.
 
 For hybrid data parallelism, run one vLLM gRPC frontend and sidecar per node with `--data-parallel-hybrid-lb` and the node's local DP size and starting rank. Point each sidecar's `--grpc-endpoint` at its local frontend. This requires a vLLM build that reports local DP size.
+
+For a multimodal model, the sidecar resolves the model's chat image-placeholder
+token from its local or Hugging Face configuration and attaches it to every ZMQ
+source. This lets backend events use the same canonical image hash as frontend
+routing. If the model configuration or exact-routing prerequisites cannot be
+resolved, inference remains available but falls back to ordinary text-prefix KV
+routing.
+
+The forwarded 64-hex vLLM media identifier contains Dynamo's 64-bit routing hash
+and becomes part of vLLM's encoder and prefix-cache identity. Treat passed-through
+HTTP URLs as immutable: changing the bytes behind one URL can reuse stale media
+cache state. User-supplied media UUIDs retain their vLLM semantics and disable
+exact Dynamo multimodal credit.
 
 Aggregated serving is the default. The sidecar role is configured explicitly because the current Control API does not report it:
 
@@ -221,6 +264,8 @@ Aggregated serving is the default. The sidecar role is configured explicitly bec
 ### Encoder disaggregation
 
 Encoder disaggregation uses Dynamo's Encode worker discovery and routing contract. All media items in one request are sent together to one Encode worker; per-item fan-out is not supported. Text-only requests bypass Encode workers. If the encoder hop fails, the downstream request retains its original media and vLLM encodes it inline.
+
+Encode workers accept image and video media, also together in one request. The Encode worker runs the vision encoder, but each engine that receives the request still fetches and preprocesses all of its media, and decodes each video.
 
 The encoder vLLM instance must use an EC producer connector and the aggregated or prefill instance must use the matching EC consumer connector. The sidecar treats the connector metadata as an opaque JSON object and carries it over the existing gRPC `KVCacheParameters.ec_transfer_params` and `FinishInfo.ec_transfer_params` fields. In E+P+D, decode's vLLM gRPC frontend uses that metadata with the original media description to reconstruct model-specific positions such as Qwen-VL mRoPE, then removes the EC parameters before EngineCore consumes the prefill KV handoff. Decode therefore uses NIXL without an EC connector and does not load the encoder embedding again. This path requires vLLM Rust frontend support for metadata-only remote-prefill decode from [vLLM #54814](https://github.com/vllm-project/vllm/pull/54814) or a later release containing it.
 
@@ -281,7 +326,17 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the pinned `vllm-proto` crate.
+The vLLM engine runs in `spec.components[*].podTemplate.spec.containers[name=main]`, alongside the
+restartable Dynamo sidecar in `spec.components[*].podTemplate.spec.initContainers[name=runtime]`.
+Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo sidecar mode;
+keep `restartPolicy: Always`.
+
+The operator injects probes into `spec.components[*].podTemplate.spec.initContainers[name=runtime]`:
+`/live` for startup and liveness, and `/health` for runtime readiness, independent of engine loading.
+Kubernetes-native gRPC probes on port `50051` gate pod readiness and restart
+unhealthy engine containers, with a 30-minute startup budget; increase this for
+larger models. The engine listens on `0.0.0.0` for kubelet probes, while the
+sidecar connects over loopback.
 
 The Dynamo vLLM runtime image exposes `vllm-rs` through the
 [wrapper described above](#runtime-compatibility). On CPU and XPU, check that
@@ -292,10 +347,9 @@ upstream vLLM images and locate the binary inside the Python package.
 
 - A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature
   gate) with the Dynamo operator and a GPU node (multiple GPUs plus an RDMA fabric
-  for `disagg.yaml`). The engine runs as a native sidecar (`initContainers` with
-  `restartPolicy: Always`), which requires that version.
+  for `disagg.yaml`). The native sidecar in `spec.components[*].podTemplate.spec.initContainers[name=runtime]`
+  uses `restartPolicy: Always`, which requires that version.
 - `kubectl` set to that cluster, and a namespace to deploy into.
-- A Hugging Face token for the model.
 - A container registry you can push to and the cluster can pull from.
 
 ### 1. Build and push the sidecar image
@@ -305,7 +359,7 @@ Build and push the image to a registry your cluster can pull from:
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
+  -t <your-registry>/dynamo-sidecar:1.6.0 --push .
 ```
 
 See [Build the image](../README.md#build-the-image) for a single-architecture
@@ -314,17 +368,24 @@ build. These manifests set the container `command` to
 
 ### 2. Point the manifest at your image
 
-In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set the `main` worker image to
-the one you pushed. Add `imagePullSecrets` if your registry is private.
+In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set
+`spec.components[*].podTemplate.spec.initContainers[name=runtime].image` to the one you pushed.
+Keep the vLLM engine image in `spec.components[*].podTemplate.spec.containers[name=main].image`.
+Add `imagePullSecrets` if your registry is private.
+For a custom image tag without a semantic version, set `spec.components[*].runtimeVersionOverride`
+to the Dynamo version built into the sidecar image.
 
-### 3. Create the Hugging Face token secret
+For custom mounts on `spec.components[*].podTemplate.spec.initContainers[name=runtime]`, declare matching entries in
+`spec.components[*].podTemplate.spec.volumes`; the operator does not infer PVC volumes from
+init-container mounts. `spec.components[*].compilationCache` configures the engine in
+`spec.components[*].podTemplate.spec.containers[name=main]` and creates its pod volume; it does not
+mount the cache into `spec.components[*].podTemplate.spec.initContainers[name=runtime]`.
 
-```bash
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="$HF_TOKEN" -n <namespace>
-```
+For TLS-enabled deployments, mount the certificate Secrets on the runtime container.
+A co-located frontend also needs its own certificate mounts. See the
+[sidecar-mode TLS example](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/tls.md#dynamo-sidecar-mode).
 
-### 4. Deploy
+### 3. Deploy
 
 ```bash
 kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
@@ -336,7 +397,7 @@ Wait for the worker pod to reach `2/2 Running`:
 kubectl get pods -n <namespace> -w
 ```
 
-### 5. Send a request
+### 4. Send a request
 
 ```bash
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000 &

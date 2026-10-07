@@ -3,7 +3,7 @@
 
 import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -99,11 +99,49 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
 
     assert result == {"image": image, "video": video, "audio": [audio_a, audio_b]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
     processor.video_loader.load_video_batch.assert_awaited_once_with(video_items, {})
     processor.audio_loader.load_audio_batch.assert_awaited_once_with(audio_items)
     processor.audio_loader.load_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_image_cache_uses_frontend_scope():
+    processor = _processor()
+    image_items = [{"Url": "https://example.com/image.png"}]
+
+    await processor.extract_multimodal_data(
+        {
+            "image_cache_scope": " session-42 ",
+            "multi_modal_data": {"image_url": image_items},
+        },
+        "request-1",
+        None,
+    )
+
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope="session-42", preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_cache_has_no_scope_for_malformed_scope():
+    processor = _processor()
+    image_items = [{"Url": "https://example.com/image.png"}]
+
+    await processor.extract_multimodal_data(
+        {
+            "image_cache_scope": "   ",
+            "multi_modal_data": {"image_url": image_items},
+        },
+        "request-1",
+        None,
+    )
+
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
 
 
 @pytest.mark.asyncio
@@ -243,10 +281,11 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     result = await processor.extract_multimodal_data(
         {
+            "image_cache_scope": "session-42",
             "multi_modal_data": {
                 "image_url": [{"Url": "https://example.com/image.png"}],
                 "video_url": [{"Url": "https://example.com/video.mp4"}],
-            }
+            },
         },
         "request-encoder",
         None,
@@ -265,6 +304,12 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     assert result == {"image": decoded_image}
     processor.embedding_loader.load_multimodal_embeddings.assert_awaited_once()
+    assert (
+        processor.embedding_loader.load_multimodal_embeddings.call_args.kwargs[
+            "cache_scope"
+        ]
+        == "session-42"
+    )
 
 
 @pytest.mark.asyncio
@@ -288,7 +333,7 @@ async def test_extracts_uuid_only_media_as_aligned_none_slots():
 
     assert result == {"image": [image, None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
     processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
 
@@ -307,7 +352,7 @@ async def test_extracts_uuid_only_unified_vision_chunk_as_bare_none_slot():
 
     assert result == {"vision_chunk": [None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
 
 
@@ -367,7 +412,7 @@ async def test_rejects_malformed_encoder_image_item_before_dispatch():
 async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -379,7 +424,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -391,7 +436,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -411,7 +456,7 @@ async def test_decode_cannot_hide_disabled_media_with_expanded_tokens():
         enabled=False,
     )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -1097,14 +1142,24 @@ async def test_qwen_decode_merges_placeholder_image_with_reloaded_video(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_non_qwen_decode_uses_expanded_prompt_tokens():
+async def test_non_qwen_decode_keeps_original_tokens_when_image_loads():
+    """Loaded image media keeps the placeholder token ids.
+
+    Substituting expanded_prompt_token_ids as well makes vLLM expand the
+    image placeholder a second time. Decode's prompt then grows by N-1 and
+    NIXL asserts num_decode_blocks <= len(prefill_group).
+    """
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (2, 2), color=(1, 2, 3))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [{"Url": "https://image"}]
 
     prepared = await _prepare_prompt(
         processor,
         {
             "token_ids": [1, 2],
-            "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
             "prefill_result": {
                 "disaggregated_params": {
                     "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
@@ -1116,9 +1171,230 @@ async def test_non_qwen_decode_uses_expanded_prompt_tokens():
         DisaggregationMode.DECODE,
     )
 
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    assert prepared.prompt.get("type") != "multimodal"
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_uses_expanded_tokens_without_image():
+    """No image to expand: still use prefill's expanded token ids."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-expanded-only",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
     assert prepared.prompt["prompt_token_ids"] == [1, 99, 99, 2]
-    assert prepared.prompt["multi_modal_data"] is None
+    assert prepared.prompt.get("multi_modal_data") is None
     processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+def _engine_cache_identity(prompt) -> tuple:
+    """What vLLM folds into the KV block hash for this prompt's media.
+
+    vLLM reads multi_modal_uuids only when multi_modal_data is present
+    (renderers/base.py::_process_tokens).
+    """
+    if prompt.get("multi_modal_data"):
+        return ("multi_modal_uuids", repr(prompt.get("multi_modal_uuids")))
+    return ("tokens_only", None)
+
+
+async def _non_qwen_decode_prompt(
+    *,
+    mm_hash: str,
+    image=None,
+    image_item=None,
+    processor=None,
+):
+    """A non-Qwen decode request: same text, one image, forwarded hash."""
+    if processor is None:
+        processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    if image is None:
+        image = Image.new("RGB", (4, 4), color=(ord(mm_hash[0]) % 256, 0, 0))
+    if image_item is None:
+        image_item = {"Url": f"https://example.com/{mm_hash}.png"}
+    processor.image_loader.load_image_batch.return_value = [image]
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": [image_item]},
+            "extra_args": {
+                "mm_hashes": [mm_hash],
+                "expanded_token_ids": [1, 99, 99, 2],
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        f"request-{mm_hash}",
+        None,
+        DisaggregationMode.DECODE,
+    )
+    return prepared, processor
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_keeps_distinct_images_distinct():
+    """Distinct images yield distinct engine identity via multi_modal_data + hashes."""
+    image_a = Image.new("RGB", (8, 8), color=(10, 20, 30))
+    image_b = Image.new("RGB", (8, 8), color=(200, 100, 50))
+    a, proc_a = await _non_qwen_decode_prompt(
+        mm_hash="a1b2c3d4e5f60718",
+        image=image_a,
+    )
+    b, proc_b = await _non_qwen_decode_prompt(
+        mm_hash="f0e1d2c3b4a59687",
+        image=image_b,
+    )
+
+    assert a.prompt.get("type") != "multimodal"
+    assert b.prompt.get("type") != "multimodal"
+    assert "cache_salt" not in a.prompt
+    assert "cache_salt" not in b.prompt
+    assert a.prompt["multi_modal_data"] == {"image": image_a}
+    assert b.prompt["multi_modal_data"] == {"image": image_b}
+    assert a.prompt["multi_modal_uuids"] == {"image": ["a1b2c3d4e5f60718" + "0" * 48]}
+    assert b.prompt["multi_modal_uuids"] == {"image": ["f0e1d2c3b4a59687" + "0" * 48]}
+    assert _engine_cache_identity(a.prompt) != _engine_cache_identity(b.prompt), (
+        "two different images give the decode engine the same cache identity "
+        f"({_engine_cache_identity(a.prompt)}); with identical token ids their KV "
+        "block hashes collide and decode can serve one request's image KV to the other"
+    )
+    proc_a.image_loader.load_image_batch.assert_awaited()
+    proc_b.image_loader.load_image_batch.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_awaits_image_loader_for_url():
+    """Non-Qwen decode loads the original http(s) Url via ImageLoader, like prefill."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (3, 3), color=(7, 8, 9))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [{"Url": "https://example.com/a1b2c3d4e5f60718.png"}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {
+                "mm_hashes": ["a1b2c3d4e5f60718"],
+                "expanded_token_ids": [1, 99, 99, 2],
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-a1b2c3d4e5f60718",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == "https://example.com/a1b2c3d4e5f60718.png"
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_loads_data_url_via_image_loader():
+    """Client-supplied data: URLs are handed to ImageLoader unchanged."""
+    processor = _processor(model="llava-hf/llava-1.5-7b-hf")
+    image = Image.new("RGB", (2, 2), color=(11, 22, 33))
+    processor.image_loader.load_image_batch.return_value = [image]
+    data_url = "data:image/png;base64,iVBORw0KGgo="
+    image_items = [{"Url": data_url}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-data-url",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
+    called_items = processor.image_loader.load_image_batch.call_args[0][0]
+    assert called_items[0]["Url"] == data_url
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_decode_loads_decoded_nixl_when_frontend_decoding():
+    """Decoded/NIXL slots load via ImageLoader when enable_frontend_decoding is on."""
+    processor = _processor(
+        model="llava-hf/llava-1.5-7b-hf",
+        frontend_decoding=True,
+    )
+    image = Image.new("RGB", (2, 2), color=(40, 50, 60))
+    processor.image_loader.load_image_batch.return_value = [image]
+    image_items = [
+        {"Decoded": {"shape": [2, 2, 3], "content_hash": "0123456789abcdef"}}
+    ]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {"image_url": image_items},
+            "extra_args": {"mm_hashes": ["a1b2c3d4e5f60718"]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {"expanded_prompt_token_ids": [1, 99, 99, 2]}
+                }
+            },
+        },
+        "request-decoded-nixl",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["prompt_token_ids"] == [1, 2]
+    assert prepared.prompt["multi_modal_data"] == {"image": image}
+    assert "cache_salt" not in prepared.prompt
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
 
 
 @pytest.mark.asyncio
@@ -1345,6 +1621,7 @@ def test_qwen_handoff_applies_per_request_pixel_overrides(monkeypatch):
         min_pixels=65536,
         max_pixels=16777216,
         vision_hidden_dim=2048,
+        decode_embedding_dim=2048,
     )
     captured = {}
 
@@ -1390,12 +1667,13 @@ def test_qwen_handoff_computes_grid_for_pil_images():
             min_pixels=65536,
             max_pixels=16777216,
             vision_hidden_dim=2048,
+            decode_embedding_dim=8192,
         ),
     )
 
     assert result == {
         "image_grid_thw": [[1, 30, 40]],
-        "embeddings_shape": [300, 2048],
+        "embeddings_shape": [300, 8192],
     }
 
 
@@ -1616,3 +1894,44 @@ def test_k3_long_prompt_splices_only_rare_pads():
     assert result[10 : 10 + len(_K3_NATIVE_IDS)] == _K3_NATIVE_IDS
     assert result[-(len(_K3_NATIVE_IDS) + 9) : -9] == _K3_NATIVE_IDS
     assert len(result) == len(tokens) + 2 * (len(_K3_NATIVE_IDS) - 1)
+
+
+class TestLoadQwenGridParams:
+    """Tests for embedding dimensions loaded from Qwen vision configs."""
+
+    @pytest.mark.parametrize(
+        ("deepstack_config", "expected_decode_embedding_dim"),
+        [
+            pytest.param(
+                {"deepstack_visual_indexes": [8, 16, 24]}, 8192, id="deepstack"
+            ),
+            pytest.param({"deepstack_visual_indexes": []}, 2048, id="empty"),
+            pytest.param({"deepstack_visual_indexes": None}, 2048, id="none"),
+            pytest.param({}, 2048, id="missing"),
+        ],
+    )
+    def test_decode_embedding_dim(
+        self, deepstack_config, expected_decode_embedding_dim
+    ):
+        processor = SimpleNamespace(
+            patch_size=16, merge_size=2, min_pixels=65536, max_pixels=16777216
+        )
+        vision_config = SimpleNamespace(
+            hidden_size=1024, out_hidden_size=2048, **deepstack_config
+        )
+        with (
+            patch.object(
+                qwen_mod.AutoImageProcessor, "from_pretrained", return_value=processor
+            ),
+            patch.object(
+                qwen_mod.AutoConfig,
+                "from_pretrained",
+                return_value=SimpleNamespace(vision_config=vision_config),
+            ),
+        ):
+            params = qwen_mod.load_qwen_grid_params("Qwen/Qwen3-VL-2B-Instruct")
+
+        assert params is not None
+        assert params.vision_hidden_dim == 2048
+        # DeepStack concatenates intermediate outputs with the final vision output.
+        assert params.decode_embedding_dim == expected_decode_embedding_dim
