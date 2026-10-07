@@ -440,6 +440,95 @@ impl Manifest {
     }
 }
 
+/// Default floor for removed/stored blocks over a timed window: below it the capture's KV was
+/// still filling, so the stream under-represents eviction (removes never reached steady state).
+pub const DEFAULT_MIN_TIMED_REMOVE_RATIO: f64 = 0.8;
+
+/// One base's warm-up and timed write mix.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EvictionRow {
+    pub base: usize,
+    pub warmup_stored_blocks: u64,
+    pub warmup_removed_blocks: u64,
+    /// Blocks still resident after the warm-up (stored minus removed) over the capture's KV
+    /// capacity, when the manifest records it. Near 1 means eviction started before the timed
+    /// section.
+    pub warmup_resident_fraction: Option<f64>,
+    pub timed_stored_blocks: u64,
+    pub timed_removed_blocks: u64,
+    pub timed_remove_ratio: f64,
+}
+
+/// Per-stream eviction over the warm-up and timed sections, and the streams whose timed section
+/// removes fewer than `min_timed_remove_ratio` of the blocks it stores.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EvictionReport {
+    pub min_timed_remove_ratio: f64,
+    /// Per-worker KV capacity in blocks of the capture (`provenance.key.num_gpu_blocks`).
+    pub capacity_blocks: Option<u64>,
+    pub timed_remove_ratio: f64,
+    pub bases_below_min: Vec<usize>,
+    pub rows: Vec<EvictionRow>,
+}
+
+impl EvictionReport {
+    pub fn steady(&self) -> bool {
+        self.bases_below_min.is_empty()
+    }
+}
+
+fn ratio(removed: u64, stored: u64) -> f64 {
+    if stored == 0 {
+        return 0.0;
+    }
+    removed as f64 / stored as f64
+}
+
+pub fn eviction_report(manifest: &Manifest, min_timed_remove_ratio: f64) -> EvictionReport {
+    let capacity_blocks = manifest
+        .provenance
+        .pointer("/key/num_gpu_blocks")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|&blocks| blocks > 0);
+    let rows: Vec<EvictionRow> = manifest
+        .bases
+        .iter()
+        .enumerate()
+        .map(|(base, info)| EvictionRow {
+            base,
+            warmup_stored_blocks: info.warmup.stored_blocks,
+            warmup_removed_blocks: info.warmup.removed_blocks,
+            warmup_resident_fraction: capacity_blocks.map(|capacity| {
+                info.warmup
+                    .stored_blocks
+                    .saturating_sub(info.warmup.removed_blocks) as f64
+                    / capacity as f64
+            }),
+            timed_stored_blocks: info.timed.stored_blocks,
+            timed_removed_blocks: info.timed.removed_blocks,
+            timed_remove_ratio: ratio(info.timed.removed_blocks, info.timed.stored_blocks),
+        })
+        .collect();
+    let bases_below_min = rows
+        .iter()
+        .filter(|row| row.timed_remove_ratio < min_timed_remove_ratio)
+        .map(|row| row.base)
+        .collect();
+    let (removed, stored) = rows.iter().fold((0, 0), |(removed, stored), row| {
+        (
+            removed + row.timed_removed_blocks,
+            stored + row.timed_stored_blocks,
+        )
+    });
+    EvictionReport {
+        min_timed_remove_ratio,
+        capacity_blocks,
+        timed_remove_ratio: ratio(removed, stored),
+        bases_below_min,
+        rows,
+    }
+}
+
 pub fn base_file_name(base: usize) -> String {
     format!("base-{base:05}.bin")
 }
@@ -608,6 +697,35 @@ mod tests {
         assert_eq!(info.timed.removed_blocks, 1);
         assert_eq!(info.timed.cleared, 1);
         assert_eq!((info.first_ts_us, info.last_ts_us), (Some(9), Some(20)));
+    }
+
+    #[test]
+    fn eviction_report_flags_streams_still_filling() {
+        let base = |warmup: (u64, u64), timed: (u64, u64)| BaseInfo {
+            warmup: SectionTotals {
+                stored_blocks: warmup.0,
+                removed_blocks: warmup.1,
+                ..SectionTotals::default()
+            },
+            timed: SectionTotals {
+                stored_blocks: timed.0,
+                removed_blocks: timed.1,
+                ..SectionTotals::default()
+            },
+            ..BaseInfo::default()
+        };
+        let manifest = Manifest::new(
+            1,
+            vec![base((1200, 200), (100, 95)), base((300, 0), (100, 10))],
+            serde_json::json!({ "key": { "num_gpu_blocks": 1000 } }),
+        );
+        let report = eviction_report(&manifest, DEFAULT_MIN_TIMED_REMOVE_RATIO);
+        assert_eq!(report.capacity_blocks, Some(1000));
+        assert_eq!(report.bases_below_min, vec![1]);
+        assert!(!report.steady());
+        assert_eq!(report.rows[0].warmup_resident_fraction, Some(1.0));
+        assert_eq!(report.rows[1].warmup_resident_fraction, Some(0.3));
+        assert!((report.timed_remove_ratio - 0.525).abs() < 1e-12);
     }
 
     #[test]

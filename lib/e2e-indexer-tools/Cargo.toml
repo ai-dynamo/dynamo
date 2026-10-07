@@ -66,3 +66,7 @@ required-features = ["bins"]
 [[bin]]
 name = "phantom_plan"
 required-features = ["bins"]
+
+[[bin]]
+name = "delivery_check"
+required-features = ["bins"]

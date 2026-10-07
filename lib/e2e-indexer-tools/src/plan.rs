@@ -169,6 +169,57 @@ impl TimeMap {
     }
 }
 
+/// libzmq's default `ZMQ_MAX_SOCKETS`; the runtime shares one ZMQ context per process.
+pub const ZMQ_MAX_SOCKETS: u64 = 1023;
+/// Direct-ZMQ SUB sockets the serving indexer opens per live worker besides KV events, one per
+/// topic and not grouped by `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB`: `kv_metrics` and
+/// `active_sequences_events` (each mocker worker has its own runtime and publishers).
+pub const DEFAULT_SOCKETS_PER_LIVE_SOURCE: u64 = 2;
+/// Headroom for the indexer's other sockets (frontends' publishers, internals).
+pub const DEFAULT_SOCKET_RESERVE: u64 = 64;
+
+/// The serving indexer's ZMQ socket budget for one load point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct IndexerSockets {
+    /// KV event sources: phantoms plus live workers.
+    pub kv_sources: u64,
+    /// `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB`: the smallest fan-in that fits the budget.
+    pub endpoints_per_sub: u64,
+    pub kv_sub_sockets: u64,
+    /// Sockets outside the KV SUB pool: per-live-worker topics plus the reserve.
+    pub other_sockets: u64,
+    pub socket_cap: u64,
+    /// Suggested `ulimit -n`: one TCP connection per KV source, a mailbox per KV SUB socket,
+    /// a connection and a mailbox per other socket, and 1024 spare.
+    pub min_nofile: u64,
+}
+
+pub fn indexer_sockets(
+    phantoms: u64,
+    live_sources: u64,
+    sockets_per_live_source: u64,
+    reserve: u64,
+    socket_cap: u64,
+) -> Result<IndexerSockets> {
+    let other_sockets = live_sources * sockets_per_live_source + reserve;
+    ensure!(
+        other_sockets < socket_cap,
+        "{live_sources} live sources need {} ungrouped sockets ({sockets_per_live_source} each) plus a reserve of {reserve}, at or above the {socket_cap}-socket libzmq cap; DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB groups only KV event sockets, so use fewer live workers",
+        live_sources * sockets_per_live_source
+    );
+    let kv_sources = phantoms + live_sources;
+    let endpoints_per_sub = kv_sources.div_ceil(socket_cap - other_sockets).max(1);
+    let kv_sub_sockets = kv_sources.div_ceil(endpoints_per_sub);
+    Ok(IndexerSockets {
+        kv_sources,
+        endpoints_per_sub,
+        kv_sub_sockets,
+        other_sockets,
+        socket_cap,
+        min_nofile: kv_sources + kv_sub_sockets + 2 * other_sockets + 1024,
+    })
+}
+
 pub fn unix_now_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -200,6 +251,31 @@ mod tests {
             assert!(seen.insert(salt_hash(hash, 7)));
         }
         assert_ne!(salt_hash(42, 7), salt_hash(42, 8));
+    }
+
+    #[test]
+    fn socket_budget_sizes_the_sub_fan_in_and_rejects_ungroupable_live_sockets() {
+        let at = |phantoms, live| {
+            indexer_sockets(
+                phantoms,
+                live,
+                DEFAULT_SOCKETS_PER_LIVE_SOURCE,
+                DEFAULT_SOCKET_RESERVE,
+                ZMQ_MAX_SOCKETS,
+            )
+        };
+        // 1x: 2000 KV sources over 1023 - 200*2 - 64 = 559 sockets.
+        let one = at(1800, 200).unwrap();
+        assert_eq!((one.endpoints_per_sub, one.kv_sub_sockets), (4, 500));
+        assert!(one.kv_sub_sockets + one.other_sockets <= ZMQ_MAX_SOCKETS);
+        // 10x phantoms with the same live workers.
+        let ten = at(18_000, 200).unwrap();
+        assert_eq!(ten.endpoints_per_sub, 33);
+        assert!(ten.kv_sub_sockets + ten.other_sockets <= ZMQ_MAX_SOCKETS);
+        // A small run still states its fan-in explicitly.
+        assert_eq!(at(4, 1).unwrap().endpoints_per_sub, 1);
+        // 2000 live workers need 4000 ungrouped sockets: no fan-in fixes that.
+        assert!(at(18_000, 2_000).is_err());
     }
 
     #[test]

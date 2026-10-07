@@ -353,7 +353,8 @@ mod phantom_export {
 
     use anyhow::{bail, ensure};
     use dynamo_e2e_indexer_tools::stream::{
-        BaseInfo, BaseStream, EventLists, Manifest, base_file_name, write_base,
+        BaseInfo, BaseStream, DEFAULT_MIN_TIMED_REMOVE_RATIO, EventLists, Manifest, base_file_name,
+        eviction_report, write_base,
     };
     use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 
@@ -509,6 +510,18 @@ mod phantom_export {
             .collect();
         let manifest = Manifest::new(block_size, infos, provenance);
         manifest.write(out_dir)?;
+        // Flag, do not refuse: the streams are written either way, and phantom_plan and the
+        // publishers refuse streams still filling unless told otherwise.
+        let eviction = eviction_report(&manifest, DEFAULT_MIN_TIMED_REMOVE_RATIO);
+        if !eviction.steady() {
+            eprintln!(
+                "warning: {} of {} phantom streams remove fewer than {} of the blocks they store in the timed section (aggregate {:.3}); the capture had not reached steady-state eviction. Capture with a smaller --num-gpu-blocks or a longer --agentic-warmup-sim-ms (see the eviction report)",
+                eviction.bases_below_min.len(),
+                eviction.rows.len(),
+                DEFAULT_MIN_TIMED_REMOVE_RATIO,
+                eviction.timed_remove_ratio
+            );
+        }
         let sum = |f: &dyn Fn(&BaseInfo) -> u64| manifest.bases.iter().map(f).sum::<u64>();
         Ok(serde_json::json!({
             "mode": "export_phantom_streams",
@@ -518,12 +531,15 @@ mod phantom_export {
             "t0_us": manifest.t0_us,
             "t1_us": manifest.t1_us,
             "warmup_write_blocks": sum(&|base| base.warmup.write_blocks()),
+            "warmup_stored_blocks": sum(&|base| base.warmup.stored_blocks),
+            "warmup_removed_blocks": sum(&|base| base.warmup.removed_blocks),
             "timed_events": sum(&|base| base.timed.events),
             "timed_lists": sum(&|base| base.timed.lists),
             "timed_stored_blocks": sum(&|base| base.timed.stored_blocks),
             "timed_removed_blocks": sum(&|base| base.timed.removed_blocks),
             "queries": sum(&|base| base.queries),
             "query_blocks": sum(&|base| base.query_blocks),
+            "eviction": eviction,
         }))
     }
 }

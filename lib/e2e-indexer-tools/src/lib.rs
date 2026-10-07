@@ -8,6 +8,7 @@
 //! KV event envelopes (accepted via the `DYN_EXPERIMENT_STATIC_KV_SOURCES` patch) and the
 //! `kv_indexer_query` request-plane endpoint. See `README.md`.
 
+pub mod delivery;
 pub mod plan;
 pub mod stream;
 
