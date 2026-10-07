@@ -61,7 +61,6 @@ from dynamo.common.multimodal.embedding_transfer import (
 from dynamo.common.rl import (
     RLAdminValidationError,
     RLRouteRegistry,
-    env_bool,
     require_lora_load_request,
     require_lora_unload_request,
 )
@@ -104,6 +103,11 @@ from .engine_generate import (
     publish_engine_generate_capability,
 )
 from .engine_monitor import VllmEngineMonitor
+from .lora_lifecycle import (
+    AdminLoRALoadTransaction,
+    run_lora_engine_mutation,
+    run_lora_mutation,
+)
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
@@ -1278,6 +1282,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._served_model_aliases = tuple(config.served_model_aliases or ())
         self.engine_args = config.engine_args
         self._lora_state = LoRAState()
+        self._lora_capacity: int | None = None
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
         # inference request supplies its LoRARequest.
@@ -2546,6 +2551,102 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         message = str(error).lower()
         return "not loaded" in message or "not found" in message
 
+    async def _rollback_admin_lora_engine(
+        self,
+        lora_name: str,
+        old_info: LoRAInfo | None,
+        *,
+        old_engine_loaded: bool,
+        remove_lora_id: int | None,
+    ) -> tuple[bool, BaseException | None]:
+        """Remove a candidate adapter and restore the previous engine state."""
+        cancellation_requested = False
+        failure: BaseException | None = None
+        if remove_lora_id is not None:
+            cancelled, _removed, error = await run_lora_engine_mutation(
+                self._pause_lock, self.engine_client.remove_lora(remove_lora_id)
+            )
+            cancellation_requested = cancellation_requested or cancelled
+            if error is not None and not (
+                isinstance(error, Exception) and self._is_lora_not_loaded_error(error)
+            ):
+                failure = error
+                self._lora_state.rollback_reserved_ids.add(remove_lora_id)
+                self._lora_state.uncertain_engine_lora_ids.add(remove_lora_id)
+            else:
+                self._lora_state.rollback_reserved_ids.discard(remove_lora_id)
+                self._lora_state.uncertain_engine_lora_ids.discard(remove_lora_id)
+            self._engine_loaded_loras.discard(lora_name)
+
+        if old_engine_loaded and old_info is not None:
+            cancelled, restored, error = await run_lora_engine_mutation(
+                self._pause_lock,
+                self.engine_client.add_lora(
+                    LoRARequest(
+                        lora_name=lora_name,
+                        lora_int_id=old_info.id,
+                        lora_path=old_info.path,
+                    )
+                ),
+            )
+            cancellation_requested = cancellation_requested or cancelled
+            if error is not None:
+                failure = error
+                self._lora_state.rollback_reserved_ids.add(old_info.id)
+                self._lora_state.uncertain_engine_lora_ids.add(old_info.id)
+                self._engine_loaded_loras.discard(lora_name)
+            elif restored is not True:
+                failure = RuntimeError("vLLM rejected the rollback adapter")
+                self._lora_state.rollback_reserved_ids.add(old_info.id)
+                self._lora_state.uncertain_engine_lora_ids.add(old_info.id)
+                self._engine_loaded_loras.discard(lora_name)
+            else:
+                self._engine_loaded_loras.add(lora_name)
+                self._lora_state.rollback_reserved_ids.discard(old_info.id)
+                self._lora_state.uncertain_engine_lora_ids.discard(old_info.id)
+                if remove_lora_id is None or remove_lora_id == old_info.id:
+                    failure = None
+
+        if failure is None and old_info is not None:
+            self._lora_state.loaded_loras[lora_name] = old_info
+        else:
+            self._lora_state.loaded_loras.pop(lora_name, None)
+
+        return cancellation_requested, failure
+
+    async def _reconcile_uncertain_lora_discovery(
+        self, lora_name: str, old_info: LoRAInfo | None
+    ) -> tuple[bool, BaseException | None]:
+        """Make an ambiguous prior discovery mutation definitive before loading."""
+        if lora_name not in self._lora_state.discovery_uncertain_loras:
+            return False, None
+        operation = (
+            self._unregister_lora_discovery(lora_name)
+            if old_info is None
+            else self._register_lora_discovery(lora_name, old_info.id)
+        )
+        cancelled, _result, error = await run_lora_mutation(operation)
+        if error is None:
+            self._lora_state.discovery_uncertain_loras.discard(lora_name)
+        return cancelled, error
+
+    async def _reserve_admin_lora_slot(
+        self, lora_name: str, lora_capacity: int | None
+    ) -> int | None:
+        """Reserve a bounded engine ID and placeholder for a new admin adapter."""
+        async with self._lora_capacity_guard:
+            occupied_slots = len(self._lora_state.loaded_loras) + len(
+                self._lora_state.uncertain_engine_lora_ids
+            )
+            if lora_capacity is not None and occupied_slots >= lora_capacity:
+                return None
+            lora_id = self._lora_state.allocate_lora_id(
+                lora_name, lora_name_to_id(lora_name)
+            )
+            self._lora_state.admin_reserved_ids[lora_name] = lora_id
+            self._lora_state.loaded_loras[lora_name] = LoRAInfo(id=-1, path="")
+            return lora_id
+
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
         return self._lora_state.get_lock(lora_name)
@@ -2716,17 +2817,37 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             self._track_lora_request_activation(admitted_lora_request)
             self._lora_state.begin_request(admitted_lora_request.lora_name)
 
-        engine_generator = create_generator(admitted_lora_request)
+        engine_generator = None
+        generation_cancelled = False
         try:
+            engine_generator = create_generator(admitted_lora_request)
             async for result in engine_generator:
                 yield result
+        except asyncio.CancelledError:
+            generation_cancelled = True
+            raise
         finally:
-            try:
-                close = getattr(engine_generator, "aclose", None)
-                if close is not None:
-                    await close()
-            finally:
-                self._lora_state.end_request(admitted_lora_request.lora_name)
+
+            async def finish_admission():
+                try:
+                    close = getattr(engine_generator, "aclose", None)
+                    if close is not None:
+                        await close()
+                finally:
+                    self._lora_state.end_request(admitted_lora_request.lora_name)
+
+            release_cancelled, _released, release_error = await run_lora_mutation(
+                finish_admission()
+            )
+            if generation_cancelled or release_cancelled:
+                if release_error is not None:
+                    logger.error(
+                        "Failed to release active LoRA lease during cancellation: %s",
+                        release_error,
+                    )
+                raise asyncio.CancelledError
+            if release_error is not None:
+                raise release_error
 
     def _preload_lora_into_engine(self) -> bool:
         """Whether lifecycle registration should eagerly activate the adapter.
@@ -2757,303 +2878,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         try:
             try:
                 lora_name, lora_uri = require_lora_load_request(request)
-            except RLAdminValidationError as e:
-                yield {"status": "error", "message": str(e)}
+            except RLAdminValidationError as error:
+                yield {"status": "error", "message": str(error)}
                 return
 
-            # Debug: Log the incoming request
-            logger.debug(f"load_lora request keys: {list(request.keys())}")
-            logger.debug(f"load_lora request: {request}")
+            logger.debug("load_lora request keys: %s", list(request.keys()))
+            logger.debug("load_lora request: %s", request)
 
-            # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
             async with lock:
-                capacity_reserved = False
-                committed_lora_info = False
-                try:
-                    old_info = self._lora_state.loaded_loras.get(lora_name)
-                    hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
-                    is_hot_swap = old_info is not None and hot_swap_enabled
-                    old_engine_loaded = lora_name in self._engine_loaded_loras
+                result = await AdminLoRALoadTransaction(self, lora_name, lora_uri).run()
 
-                    if old_info is not None and not hot_swap_enabled:
-                        logger.info(
-                            f"LoRA adapter already loaded: {lora_name} "
-                            f"with ID {old_info.id}"
-                        )
-                        yield {
-                            "status": "success",
-                            "message": f"LoRA adapter '{lora_name}' already loaded",
-                            "lora_name": lora_name,
-                            "lora_id": old_info.id,
-                            "hot_swap": False,
-                        }
-                        return
-
-                    lora_capacity = getattr(self, "_lora_capacity", None)
-                    # Guard capacity check: serialize new adapter loads to prevent two
-                    # concurrent loads from both observing capacity below limit and proceeding.
-                    if lora_capacity is not None and old_info is None:
-                        async with self._lora_capacity_guard:
-                            # Re-check under lock in case another load slipped in
-                            if len(self._lora_state.loaded_loras) >= lora_capacity:
-                                yield {
-                                    "status": "error",
-                                    "message": (
-                                        "LoRA capacity exceeded: "
-                                        f"at most {lora_capacity} adapter(s) may be loaded"
-                                    ),
-                                    "lora_name": lora_name,
-                                }
-                                return
-                            # Reserve a capacity slot with placeholder (will be replaced below).
-                            self._lora_state.loaded_loras[lora_name] = LoRAInfo(
-                                id=-1, path=""
-                            )
-                            capacity_reserved = True
-
-                    logger.info(
-                        f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
-                    )
-                    path_ok, lora_path_or_error = await self._resolve_lora_source_path(
-                        lora_uri
-                    )
-                    if not path_ok:
-                        if capacity_reserved:
-                            self._lora_state.loaded_loras.pop(lora_name, None)
-                        yield {
-                            "status": "error",
-                            "message": lora_path_or_error,
-                        }
-                        return
-
-                    lora_path = lora_path_or_error
-                    logger.debug(f"LoRA downloaded to: {lora_path}")
-
-                    # Generate deterministic ID from lora_name before using it
-                    lora_id = lora_name_to_id(lora_name)
-
-                    if is_hot_swap and old_info is not None and old_engine_loaded:
-                        try:
-                            async with self._pause_lock:
-                                if getattr(
-                                    self, "_paused", False
-                                ) and self._lora_state.active_requests.get(
-                                    lora_name, 0
-                                ):
-                                    raise RuntimeError(
-                                        f"Cannot hot-swap LoRA '{lora_name}' while generation "
-                                        "is paused with active requests; resume generation or "
-                                        "abort the requests first"
-                                    )
-                            await self._lora_state.wait_until_idle(lora_name)
-                            async with self._pause_lock:
-                                await self.engine_client.remove_lora(old_info.id)
-                            self._engine_loaded_loras.discard(lora_name)
-                        except Exception as e:
-                            if capacity_reserved:
-                                self._lora_state.loaded_loras.pop(lora_name, None)
-                            logger.error(
-                                f"Failed to remove existing LoRA '{lora_name}' "
-                                f"before hot-swap: {e}"
-                            )
-                            yield {
-                                "status": "error",
-                                "message": (
-                                    f"Failed to remove existing LoRA '{lora_name}' "
-                                    f"before hot-swap: {e}"
-                                ),
-                                "lora_name": lora_name,
-                            }
-                            return
-
-                    # Initial prefill registration is metadata-only. A hot
-                    # swap must still replace any lazily activated old adapter
-                    # atomically before the prefix cache is reset.
-                    preload_into_engine = (
-                        self._preload_lora_into_engine() or is_hot_swap
-                    )
-                    if preload_into_engine:
-                        try:
-                            async with self._pause_lock:
-                                await self.engine_client.add_lora(
-                                    LoRARequest(
-                                        lora_name=lora_name,
-                                        lora_int_id=lora_id,
-                                        lora_path=lora_path,
-                                    )
-                                )
-                            self._engine_loaded_loras.add(lora_name)
-                        except Exception as e:
-                            if (
-                                is_hot_swap
-                                and old_info is not None
-                                and old_engine_loaded
-                            ):
-                                try:
-                                    async with self._pause_lock:
-                                        await self.engine_client.add_lora(
-                                            LoRARequest(
-                                                lora_name=lora_name,
-                                                lora_int_id=old_info.id,
-                                                lora_path=old_info.path,
-                                            )
-                                        )
-                                    self._engine_loaded_loras.add(lora_name)
-                                except Exception as rollback_error:
-                                    self._lora_state.loaded_loras.pop(lora_name, None)
-                                    logger.exception(
-                                        f"Rollback failed for LoRA {lora_name}: "
-                                        f"{rollback_error}"
-                                    )
-                            else:
-                                # For new loads that weren't hot-swap, clean up reservation
-                                if capacity_reserved:
-                                    self._lora_state.loaded_loras.pop(lora_name, None)
-                            yield {
-                                "status": "error",
-                                "message": f"Failed to add LoRA '{lora_name}': {e}",
-                                "lora_name": lora_name,
-                            }
-                            return
-
-                    # Insert or update the real LoRA info (replaces placeholder if reserved).
-                    self._lora_state.loaded_loras[lora_name] = LoRAInfo(
-                        id=lora_id, path=lora_path
-                    )
-                    committed_lora_info = True
-                    logger.info(
-                        f"Successfully {'hot-swapped' if is_hot_swap else 'loaded'} "
-                        f"LoRA adapter: {lora_name} with ID {lora_id}"
-                    )
-
-                    if is_hot_swap:
-                        try:
-                            async with self._pause_lock:
-                                await self.engine_client.reset_prefix_cache()
-                        except Exception as e:
-                            # The new adapter is already active in the engine, but
-                            # the prefix cache still holds entries computed under
-                            # the old adapter and could be reused incorrectly.
-                            # Roll the ENGINE back to old_info (remove new, re-add
-                            # old) so engine state and our tracking stay consistent
-                            # — a metadata-only rollback would leave the new adapter
-                            # live while we report/route the old one (codex).
-                            rolled_back = "tracking only"
-                            if old_info is not None:
-                                try:
-                                    if preload_into_engine:
-                                        async with self._pause_lock:
-                                            await self.engine_client.remove_lora(
-                                                lora_id
-                                            )
-                                        self._engine_loaded_loras.discard(lora_name)
-                                    if old_engine_loaded:
-                                        async with self._pause_lock:
-                                            await self.engine_client.add_lora(
-                                                LoRARequest(
-                                                    lora_name=lora_name,
-                                                    lora_int_id=old_info.id,
-                                                    lora_path=old_info.path,
-                                                )
-                                            )
-                                        self._engine_loaded_loras.add(lora_name)
-                                    self._lora_state.loaded_loras[lora_name] = old_info
-                                    rolled_back = (
-                                        "engine+tracking"
-                                        if old_engine_loaded
-                                        else "tracking only"
-                                    )
-                                except Exception as rollback_error:
-                                    # Engine is in an indeterminate adapter state;
-                                    # drop tracking so we never claim a clean swap.
-                                    self._lora_state.loaded_loras.pop(lora_name, None)
-                                    logger.exception(
-                                        f"LoRA '{lora_name}' hot-swap engine "
-                                        f"rollback failed: {rollback_error}"
-                                    )
-                            else:
-                                self._lora_state.loaded_loras.pop(lora_name, None)
-                            logger.error(
-                                f"LoRA '{lora_name}' hot-swap rolled back "
-                                f"({rolled_back}): prefix cache reset failed: {e}"
-                            )
-                            yield {
-                                "status": "error",
-                                "message": (
-                                    f"LoRA '{lora_name}' hot-swap aborted; prefix "
-                                    f"cache reset failed: {e}"
-                                ),
-                                "lora_name": lora_name,
-                                "lora_id": lora_id,
-                            }
-                            return
-
-                    if not is_hot_swap:
-                        try:
-                            await self._register_lora_discovery(lora_name, lora_id)
-                            logger.info(
-                                f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
-                            )
-                        except Exception as e:
-                            logger.exception(
-                                f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
-                            )
-
-                            # Roll back engine state when this worker preloaded;
-                            # prefill only needs to discard the cached metadata.
-                            try:
-                                if preload_into_engine:
-                                    logger.debug(
-                                        f"Rolling back: removing LoRA '{lora_name}' from engine"
-                                    )
-                                    async with self._pause_lock:
-                                        await self.engine_client.remove_lora(lora_id)
-                                    self._engine_loaded_loras.discard(lora_name)
-                                self._lora_state.loaded_loras.pop(lora_name, None)
-                                logger.debug(
-                                    f"Successfully rolled back LoRA '{lora_name}'"
-                                )
-                            except Exception as rollback_error:
-                                logger.exception(
-                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                                )
-
-                            # Return error status since registration failed
-                            yield {
-                                "status": "error",
-                                "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
-                                "lora_name": lora_name,
-                            }
-                            return
-
-                    yield {
-                        "status": "success",
-                        "message": (
-                            f"LoRA adapter '{lora_name}' "
-                            f"{'hot-swapped' if is_hot_swap else 'loaded'} successfully"
-                        ),
-                        "lora_name": lora_name,
-                        "lora_id": lora_id,
-                        "hot_swap": is_hot_swap,
-                    }
-                except Exception as e:
-                    # Catch unexpected exceptions (e.g., from lora_name_to_id, engine calls)
-                    # and clean up the capacity reservation to prevent ghost entries.
-                    if capacity_reserved:
-                        self._lora_state.loaded_loras.pop(lora_name, None)
-                    logger.exception(f"Failed to load LoRA adapter: {e}")
-                    yield {"status": "error", "message": str(e)}
-                finally:
-                    # Always release placeholder reservations even when the
-                    # coroutine exits via cancellation/BaseException.
-                    if capacity_reserved and not committed_lora_info:
-                        existing = self._lora_state.loaded_loras.get(lora_name)
-                        if existing is not None and existing.id == -1:
-                            self._lora_state.loaded_loras.pop(lora_name, None)
-        except Exception as e:
-            logger.exception(f"Failed to load LoRA adapter: {e}")
-            yield {"status": "error", "message": str(e)}
+            response: dict[str, Any] = {
+                "status": result.status,
+                "message": result.message,
+            }
+            if result.lora_name is not None:
+                response["lora_name"] = result.lora_name
+            if result.lora_id is not None:
+                response["lora_id"] = result.lora_id
+            if result.hot_swap is not None:
+                response["hot_swap"] = result.hot_swap
+            yield response
+        except Exception as error:
+            logger.exception("Failed to load LoRA adapter: %s", error)
+            yield {"status": "error", "message": str(error)}
 
     async def unload_lora(self, request=None):
         """
@@ -3074,6 +2923,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lock = self._get_lora_lock(lora_name)
             async with lock:
                 try:
+                    if self._lora_state.is_runtime_managed(lora_name):
+                        yield {
+                            "status": "error",
+                            "message": (
+                                "Request-time LoRA adapters cannot be unloaded through "
+                                "the admin endpoint"
+                            ),
+                        }
+                        return
+
                     # Check if the LoRA exists *after* waiting for any in-progress load.
                     lora = self._lora_state.loaded_loras.get(lora_name)
                     if lora is None:
@@ -3107,22 +2966,58 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # tracking state. Otherwise requests can still route here
                     # after _resolve_lora_request has forgotten the adapter and
                     # silently execute against the base model.
+                    unregister_cancelled = False
                     if self.generate_endpoint is not None:
                         logger.debug(
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
-                        try:
-                            await self._unregister_lora_discovery(lora_name)
+                        (
+                            unregister_cancelled,
+                            _unregistered,
+                            unregister_error,
+                        ) = await run_lora_mutation(
+                            self._unregister_lora_discovery(lora_name)
+                        )
+                        if unregister_error is None:
+                            self._lora_state.discovery_uncertain_loras.discard(
+                                lora_name
+                            )
                             logger.info(
                                 f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
                             )
-                        except Exception as e:
-                            logger.exception(
-                                f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
+                        else:
+                            logger.error(
+                                f"Failed to unregister LoRA {lora_name} "
+                                f"ModelDeploymentCard: {unregister_error}"
                             )
+                            (
+                                register_cancelled,
+                                _registered,
+                                register_error,
+                            ) = await run_lora_mutation(
+                                self._register_lora_discovery(lora_name, lora_id)
+                            )
+                            if register_error is not None:
+                                self._lora_state.discovery_uncertain_loras.add(
+                                    lora_name
+                                )
+                                logger.error(
+                                    "Failed to restore discovery for LoRA %s: %s",
+                                    lora_name,
+                                    register_error,
+                                )
+                            else:
+                                self._lora_state.discovery_uncertain_loras.discard(
+                                    lora_name
+                                )
+                            if unregister_cancelled or register_cancelled:
+                                raise asyncio.CancelledError
                             yield {
                                 "status": "error",
-                                "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
+                                "message": (
+                                    f"Failed to unregister LoRA '{lora_name}' from "
+                                    f"discovery registry: {unregister_error}"
+                                ),
                                 "lora_name": lora_name,
                             }
                             return
@@ -3135,15 +3030,67 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # vLLM may have activated the adapter lazily for an
                     # inference request. Remove only adapters known to have
                     # reached vLLM.
+                    remove_cancelled = False
                     if lora_name in self._engine_loaded_loras:
-                        try:
-                            async with self._pause_lock:
-                                await self.engine_client.remove_lora(lora_id)
-                        except Exception as e:
-                            if not self._is_lora_not_loaded_error(e):
-                                raise
+                        (
+                            remove_cancelled,
+                            _removed,
+                            remove_error,
+                        ) = await run_lora_engine_mutation(
+                            self._pause_lock, self.engine_client.remove_lora(lora_id)
+                        )
+                        if remove_error is not None and not (
+                            isinstance(remove_error, Exception)
+                            and self._is_lora_not_loaded_error(remove_error)
+                        ):
+                            (
+                                rollback_cancelled,
+                                rollback_error,
+                            ) = await self._rollback_admin_lora_engine(
+                                lora_name,
+                                lora,
+                                old_engine_loaded=True,
+                                remove_lora_id=None,
+                            )
+                            register_cancelled = False
+                            register_error = None
+                            if (
+                                rollback_error is None
+                                and self.generate_endpoint is not None
+                            ):
+                                (
+                                    register_cancelled,
+                                    _registered,
+                                    register_error,
+                                ) = await run_lora_mutation(
+                                    self._register_lora_discovery(lora_name, lora_id)
+                                )
+                                if register_error is None:
+                                    self._lora_state.discovery_uncertain_loras.discard(
+                                        lora_name
+                                    )
+                                else:
+                                    self._lora_state.discovery_uncertain_loras.add(
+                                        lora_name
+                                    )
+                            if rollback_error is not None:
+                                self._lora_state.loaded_loras.pop(lora_name, None)
+                            if (
+                                unregister_cancelled
+                                or remove_cancelled
+                                or rollback_cancelled
+                                or register_cancelled
+                            ):
+                                raise asyncio.CancelledError
+                            failure = rollback_error or register_error or remove_error
+                            raise RuntimeError(
+                                f"Failed to remove LoRA '{lora_name}': {failure}"
+                            )
                         self._engine_loaded_loras.discard(lora_name)
                     del self._lora_state.loaded_loras[lora_name]
+                    self._lora_state.discovery_uncertain_loras.discard(lora_name)
+                    if unregister_cancelled or remove_cancelled:
+                        raise asyncio.CancelledError
 
                     logger.info(
                         f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
