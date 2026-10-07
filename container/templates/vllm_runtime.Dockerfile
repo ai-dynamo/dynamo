@@ -19,6 +19,7 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
+ARG ENABLE_VLLM_OMNI
 ARG TRANSFORMERS_VERSION
 ARG TOKENIZERS_VERSION
 ARG NIXL_REF
@@ -177,21 +178,21 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
-{# cuda installs into the system interpreter (/usr/local/bin); xpu and cpu run out
-   of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
-{% set vllm_rs_link = "/usr/local/bin/vllm-rs" if device == "cuda" else "${VIRTUAL_ENV}/bin/vllm-rs" %}
-{# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
-   on its own line inside the RUN breaks the backslash continuation. #}
-{% set vllm_rs_required = "1" if device == "cuda" else "0" %}
-{# TODO: Remove this workaround once bundled vllm-rs accepts extra output fields. #}
+{% if device != "cuda" %}
+{% set vllm_rs_link = "${VIRTUAL_ENV}/bin/vllm-rs" %}
+{# vLLM <0.31 rejects the extra output fields added by Omni. #}
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
+{% endif %}
 
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
+# Without Omni, preserve the release base's dependency pairing.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        uv pip install {{ pip_target }} --no-deps \
+            "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"; \
+    fi
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -265,10 +266,30 @@ RUN set -eux; \
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        set -eux; \
+        export UV_CACHE_DIR=/root/.cache/uv; \
+        export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
+        bash /tmp/install_vllm_omni.sh; \
+    fi
+
+{% if device == "cuda" %}
+# #58215's DSA sentinel bound is native to v0.31.0. Carry only the
+# remaining requested fixes: #58038 (optional telemetry), #57662 (region
+# geometry deduplication), and #55374 (piecewise-prefix loading).
+RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm-patches,readonly \
+    --mount=type=bind,source=./container/deps/vllm/validate_patches_runtime.py,target=/tmp/validate_patches_runtime.py,readonly \
     set -eux; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
-    bash /tmp/install_vllm_omni.sh
+    python3 -c 'import os, vllm; assert os.environ["VLLM_BUILD_COMMIT"] == "db9527a46873454610df6dbedf79a36d6bf1a7f6"; assert vllm.__version__ == "0.31.0", vllm.__version__'; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
+    site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
+    for patch_file in /tmp/vllm-patches/*.patch; do \
+        patch --batch --forward --fuzz=0 -p1 -d "${site_parent}" < "${patch_file}"; \
+    done; \
+    python3 /tmp/validate_patches_runtime.py; \
+    rm -rf /var/lib/apt/lists/*
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -511,6 +532,17 @@ RUN set -eux; \
 # at runtime or it cannot import; set it in the image and ensure the K8s
 # pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+
+# DeepGEMM JIT needs the nvcc shipped by the pinned base image.
+RUN set -eux; \
+    nvcc=/usr/local/cuda-13.0/bin/nvcc; \
+    test -x "${nvcc}"; \
+    mkdir -p /usr/local/cuda/bin; \
+    if [ "$(readlink -f /usr/local/cuda/bin/nvcc 2>/dev/null || true)" != "$(readlink -f "${nvcc}")" ]; then \
+        ln -sf "${nvcc}" /usr/local/cuda/bin/nvcc; \
+    fi; \
+    test -x /usr/local/cuda/bin/nvcc; \
+    /usr/local/cuda/bin/nvcc --version
 {% endif %}
 
 {% if target not in ("dev", "local-dev") and context.vllm.enable_modelexpress == "true" %}
@@ -527,17 +559,26 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 {% endif %}
 
 # Check that later package layers preserve the Omni-compatible versions.
-RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
+RUN {{ python_executable }} - "${ENABLE_VLLM_OMNI}" "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
 import importlib.metadata as md
 import sys
 
-for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
-    actual = md.version(package)
-    if actual != expected:
-        raise RuntimeError(f"expected {package} {expected}, found {actual}")
+# Importing Transformers also enforces its supported tokenizers range when
+# Omni is disabled and we retain the release base's dependency pairing.
+import transformers
+
+if sys.argv[1] == "true":
+    for package, expected in zip(("transformers", "tokenizers"), sys.argv[2:]):
+        actual = md.version(package)
+        if actual != expected:
+            raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
 
-# Use the packaged binary to match the installed vLLM version.
+{% if device == "cuda" %}
+# vLLM 0.31 ships a compatible vllm-rs on PATH.
+RUN timeout 30s vllm-rs --help >/dev/null
+{% else %}
+# Older CPU/XPU versions still need the plugin allowlist wrapper.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
@@ -553,13 +594,11 @@ RUN set -eu; \
         else \
             ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
         fi; \
-        vllm-rs --help >/dev/null; \
-    elif [ "{{ vllm_rs_required }}" = "1" ]; then \
-        echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
-        exit 1; \
+        timeout 30s vllm-rs --help >/dev/null; \
     else \
         echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
     fi
+{% endif %}
 
 USER dynamo
 

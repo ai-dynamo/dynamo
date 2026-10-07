@@ -148,10 +148,10 @@ def make_image_payload_cached_tokens(
 class UuidPassthroughChatPayload(ChatPayload):
     """Send a URL+UUID cache fill followed by a UUID-only cache hit.
 
-    When ``exercise_embedding_cache`` is true, insert a second URL+UUID fill
-    with a different UUID. Tests can pair this sequence with a one-image GPU
-    encoder cache so the final request must load the first embedding from
-    Dynamo's CPU embedding cache.
+    When ``exercise_embedding_cache`` is true, insert ``eviction_fill_count``
+    URL+UUID fills with distinct UUIDs. Their embeddings must exceed the GPU
+    encoder cache capacity so the final request loads the first embedding
+    from Dynamo's CPU embedding cache.
     """
 
     def __init__(
@@ -163,10 +163,20 @@ class UuidPassthroughChatPayload(ChatPayload):
         temperature: float = 0.0,
         timeout: int = 60,
         exercise_embedding_cache: bool = False,
+        eviction_fill_count: int = 1,
     ):
+        if eviction_fill_count < 1:
+            raise ValueError("eviction_fill_count must be positive")
         self._uuid_image_uuid = image_uuid
-        self._uuid_eviction_image_uuid = (
-            f"{image_uuid}-eviction" if exercise_embedding_cache else None
+        self._uuid_eviction_image_uuids = (
+            [
+                f"{image_uuid}-eviction"
+                if index == 0
+                else f"{image_uuid}-eviction-{index}"
+                for index in range(eviction_fill_count)
+            ]
+            if exercise_embedding_cache
+            else []
         )
         self._uuid_final_expected_log = (
             [
@@ -176,7 +186,7 @@ class UuidPassthroughChatPayload(ChatPayload):
             if exercise_embedding_cache
             else []
         )
-        repeat_count = 3 if exercise_embedding_cache else 2
+        repeat_count = len(self._uuid_eviction_image_uuids) + 2
         self._uuid_bodies = [
             self._build_uuid_body(index, max_tokens, temperature)
             for index in range(repeat_count)
@@ -205,14 +215,14 @@ class UuidPassthroughChatPayload(ChatPayload):
         max_tokens: int,
         temperature: float,
     ) -> dict:
-        eviction_image_uuid = self._uuid_eviction_image_uuid
+        eviction_image_uuids = self._uuid_eviction_image_uuids
         if request_index == 0:
             image_url = {"url": MULTIMODAL_IMG_URL}
             image_uuid = self._uuid_image_uuid
             text = _MULTIMODAL_COLOR_PROMPT
-        elif request_index == 1 and eviction_image_uuid is not None:
+        elif 1 <= request_index <= len(eviction_image_uuids):
             image_url = {"url": MULTIMODAL_IMG_URL}
-            image_uuid = eviction_image_uuid
+            image_uuid = eviction_image_uuids[request_index - 1]
             text = _MULTIMODAL_COLOR_PROMPT
         else:
             image_url = None
@@ -262,11 +272,13 @@ def make_image_payload_uuid_passthrough(
     expected_response: list[str],
     *,
     exercise_embedding_cache: bool = False,
+    eviction_fill_count: int = 1,
 ) -> ChatPayload:
     """Build the maintained vLLM cached multimodal UUID smoke payload."""
     return UuidPassthroughChatPayload(
         expected_response=expected_response,
         exercise_embedding_cache=exercise_embedding_cache,
+        eviction_fill_count=eviction_fill_count,
     )
 
 

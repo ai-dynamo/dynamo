@@ -117,15 +117,22 @@ def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
     )
 
 
-def _run_compute_queued(waiting, skipped_waiting):
+def _run_compute_queued(
+    waiting, skipped_waiting=None, *, kv_holding_waiting=None, deferred_waiting=None
+):
     """Invoke the real ``InstrumentedScheduler._compute_queued`` on a stub.
 
     Bypasses ``__init__`` (which needs full vLLM config) and populates only
-    the two attributes the method reads.
+    the owning queues for the old or new scheduler layout.
     """
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.waiting = waiting
-    stub.skipped_waiting = skipped_waiting
+    if skipped_waiting is not None:
+        stub.skipped_waiting = skipped_waiting
+    if kv_holding_waiting is not None:
+        stub.kv_holding_waiting = kv_holding_waiting
+    if deferred_waiting is not None:
+        stub.deferred_waiting = deferred_waiting
     return InstrumentedScheduler._compute_queued(stub)
 
 
@@ -361,6 +368,64 @@ def test_waiting_preempted_requests_count_as_queued_decode():
 # ---------------------------------------------------------------------------
 # self.skipped_waiting classification (the fix)
 # ---------------------------------------------------------------------------
+
+
+def test_new_waiting_queues_count_deferred_requests_only_once():
+    grammar = _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=128)
+    remote = _make_request(
+        RequestStatus.WAITING_FOR_REMOTE_KVS,
+        num_tokens=1000,
+        num_computed_tokens=1000,
+    )
+    preempted = _make_request(
+        RequestStatus.PREEMPTED, num_tokens=256, num_computed_tokens=240
+    )
+    q = _run_compute_queued(
+        waiting=[_make_request(RequestStatus.WAITING, num_tokens=64), grammar],
+        kv_holding_waiting=[remote, preempted],
+        deferred_waiting=[grammar, remote],
+    )
+    assert q.num_prefill_requests == 2
+    assert q.sum_prefill_tokens == 192
+    assert q.var_prefill_length == 1024
+    assert q.num_decode_requests == 2
+    assert q.sum_decode_kv_tokens == 1240
+    assert q.var_decode_kv_tokens == 144400
+
+
+def test_new_waiting_queues_empty_snapshot():
+    q = _run_compute_queued(waiting=[], kv_holding_waiting=[], deferred_waiting=[])
+    assert q.num_prefill_requests == 0
+    assert q.num_decode_requests == 0
+
+
+def test_new_waiting_queue_replaces_legacy_queue():
+    remote = _make_request(
+        RequestStatus.WAITING_FOR_REMOTE_KVS,
+        num_tokens=512,
+        num_computed_tokens=480,
+    )
+    q = _run_compute_queued(
+        waiting=[], skipped_waiting=[remote], kv_holding_waiting=[remote]
+    )
+    assert q.num_decode_requests == 1
+    assert q.sum_decode_kv_tokens == 480
+
+
+def test_remote_kv_wait_in_primary_queue_counts_as_decode():
+    q = _run_compute_queued(
+        waiting=[
+            _make_request(
+                RequestStatus.WAITING_FOR_REMOTE_KVS,
+                num_tokens=512,
+                num_computed_tokens=480,
+            )
+        ],
+        kv_holding_waiting=[],
+    )
+    assert q.num_prefill_requests == 0
+    assert q.num_decode_requests == 1
+    assert q.sum_decode_kv_tokens == 480
 
 
 def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
@@ -789,6 +854,25 @@ def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
         ]
     )
     assert common.max_num_running_reqs == 128
+
+
+@pytest.mark.parametrize(
+    "cap_attribute",
+    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
+)
+def test_admission_cap_affects_digest_and_block_budget(cap_attribute):
+    stub = _digest_stub(max_num_running_reqs=128)
+    manager = SimpleNamespace(block_size=16)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=[manager])
+    )
+    setattr(manager, cap_attribute, 32)
+    first_digest = stub._bench_grid_invariants_digest()
+    assert stub._bench_blocks_per_req(1024, apply_admission_cap=True) == 32
+
+    setattr(manager, cap_attribute, 48)
+    assert stub._bench_grid_invariants_digest() != first_digest
+    assert stub._bench_blocks_per_req(1024, apply_admission_cap=True) == 48
 
 
 def test_benchmark_synchronizer_rejects_grid_mismatch_before_warmup():

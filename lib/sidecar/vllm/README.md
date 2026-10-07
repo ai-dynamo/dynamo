@@ -129,13 +129,10 @@ Prefill and encode use their canonical one-token request and do not apply decode
 
 The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's `vllm-proto` dependency is pinned in the workspace `Cargo.toml`.
 
-vLLM-Omni changes the engine response format, causing `vllm-rs` to reject
-responses. The Dynamo vLLM runtime image provides a `vllm-rs` wrapper that
-disables Omni by default. Use `vllm-rs` from `PATH` when starting the engine.
-
-The wrapper enables only ModelExpress when installed; otherwise it disables
-all plugins. An exported `VLLM_PLUGINS` overrides this default. The `dev` and
-`local-dev` images do not install Omni and retain normal plugin discovery.
+The CUDA image uses the packaged vLLM 0.31 `vllm-rs` on `PATH`. Older CPU/XPU
+images retain a wrapper that enables only ModelExpress when installed; an
+exported `VLLM_PLUGINS` overrides that default. The `dev` and `local-dev`
+images do not install Omni and retain normal plugin discovery.
 
 Start vLLM with its gRPC listener:
 

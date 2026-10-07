@@ -80,6 +80,10 @@ inputs:
     description: 'Override Datadog automatic test retries for this pytest invocation; empty inherits the job environment'
     required: false
     default: ''
+  allow_no_tests:
+    description: 'Accept pytest exit 5 for an intentionally optional test partition; other exit codes remain failures'
+    required: false
+    default: 'false'
 
 runs:
   using: "composite"
@@ -116,6 +120,7 @@ runs:
         TRITON_ARTIFACTORY_USER: ${{ inputs.triton_artifactory_user }}
         TRITON_ARTIFACTORY_TOKEN: ${{ inputs.triton_artifactory_token }}
         VERIFY_GPU: ${{ inputs.verify_gpu }}
+        ALLOW_NO_TESTS: ${{ inputs.allow_no_tests }}
       run: |
         # Sanitize test_type for the JUnit and coverage filenames this step
         # writes: remove commas and spaces.
@@ -291,6 +296,13 @@ runs:
 
         TEST_EXIT_CODE=$?
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+        # A profiled parallel stage may consume the entire GPU test pool,
+        # leaving its sequential remainder empty. Opt in only for that
+        # partition; failures, collection errors and interruptions stay fatal.
+        if [[ "${TEST_EXIT_CODE}" == "5" && "${ALLOW_NO_TESTS}" == "true" ]]; then
+          echo "⏭️  Optional test partition has no selected tests (pytest exit 5)"
+          TEST_EXIT_CODE=0
+        fi
         # Back to fail-fast: a failure while processing results must fail the
         # step instead of being masked by the pytest status returned below.
         set -e

@@ -509,16 +509,24 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     MmCase(
                         suffix="uuid_passthrough",
                         payload=make_image_payload_uuid_passthrough(
-                            ["green"], exercise_embedding_cache=True
+                            ["green"],
+                            exercise_embedding_cache=True,
+                            # EC consumers now enable embedding-only audio/video,
+                            # raising the pinned nightly's encoder cache to 2496
+                            # slots even with those tower modalities disabled.
+                            # Ten distinct 256-slot fills exceed that budget.
+                            eviction_fill_count=10,
                         ),
                         extra_script_args=[
                             "--mm-processor-cache-gb",
                             "4",
                             "--multimodal-embedding-cache-capacity-gb",
                             "1",
-                            # Gemma 4 budgets 280 embeddings per image; the
-                            # 512x512 fixture emits 256. A 280-slot GPU cache can
-                            # retain only one, so the second fill evicts the first.
+                            # Bound image processing to the fixture's 256 slots.
+                            # The GPU cache also budgets embedding-only modalities;
+                            # max-num-batched-tokens alone does not cap it at 280.
+                            "--mm-processor-kwargs",
+                            '{"max_soft_tokens": 280}',
                             "--max-num-batched-tokens",
                             "280",
                             "--limit-mm-per-prompt",
