@@ -66,6 +66,10 @@ class AiohttpClient(HttpClient):
         # aiohttp marks an injected resolver as externally owned, so closing a
         # session never closes it. Hold each one and close it ourselves.
         self._resolvers: dict[tuple[bool, bool], BlocklistResolver] = {}
+        # One cookie jar per connect policy, shared by its direct and proxied
+        # sessions. A redirect between them then keeps its cookies, as it did
+        # when one session served both.
+        self._cookie_jars: dict[bool, aiohttp.CookieJar] = {}
 
     def _effective_timeout(
         self, timeout: float, read_timeout: Optional[float] = None
@@ -156,7 +160,12 @@ class AiohttpClient(HttpClient):
             # derived. DYN_MM_ALLOW_INTERNAL is the deployment knob.
             resolver=resolver,
         )
-        return aiohttp.ClientSession(connector=connector, trust_env=True)
+        cookie_jar = self._cookie_jars.get(allow_private_ips)
+        if cookie_jar is None:
+            cookie_jar = self._cookie_jars[allow_private_ips] = aiohttp.CookieJar()
+        return aiohttp.ClientSession(
+            connector=connector, trust_env=True, cookie_jar=cookie_jar
+        )
 
     async def _get_session(
         self, allow_private_ips: bool, via_proxy: bool = False
@@ -327,3 +336,4 @@ class AiohttpClient(HttpClient):
             for resolver in self._resolvers.values():
                 await resolver.close()
             self._resolvers = {}
+            self._cookie_jars = {}

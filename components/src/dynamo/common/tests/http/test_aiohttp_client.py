@@ -433,6 +433,26 @@ async def test_each_policy_pool_gets_the_full_connection_limit(monkeypatch) -> N
         await client.close()
 
 
+@_allows_cleanup_closed_notice
+async def test_direct_and_proxied_sessions_share_a_cookie_jar(monkeypatch) -> None:
+    """A redirect between a direct and a proxied hop keeps its cookies.
+
+    One session served both kinds of hop before the client split them, so the
+    two sessions of a connect policy share one jar. The permissive pool keeps
+    its own jar, as it did before.
+    """
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    client = AiohttpClient()
+    try:
+        direct = await client._get_session(False)
+        proxied = await client._get_session(False, via_proxy=True)
+        permissive = await client._get_session(True)
+        assert direct.cookie_jar is proxied.cookie_jar
+        assert permissive.cookie_jar is not direct.cookie_jar
+    finally:
+        await client.close()
+
+
 async def test_the_default_configuration_only_ever_builds_one_pool(monkeypatch) -> None:
     """Without DYN_MM_ALLOW_INTERNAL the connect policy is always strict.
 
