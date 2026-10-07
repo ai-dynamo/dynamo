@@ -3,6 +3,8 @@
 
 """OpenAI-compatible realtime serving for the vLLM backend."""
 
-from .handler import RealtimeHandler, RealtimeTextHandler, RealtimeTranscriptionHandler
+from .handler import RealtimeHandler
+from .text_handler import RealtimeTextHandler
+from .transcription_handler import RealtimeTranscriptionHandler
 
 __all__ = ["RealtimeHandler", "RealtimeTextHandler", "RealtimeTranscriptionHandler"]

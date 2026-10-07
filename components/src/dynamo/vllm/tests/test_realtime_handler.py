@@ -15,7 +15,8 @@ from dynamo.vllm.realtime import (
     RealtimeTextHandler,
     RealtimeTranscriptionHandler,
 )
-from dynamo.vllm.realtime.handler import _text_prompt, _TextPrefill, _TextTurn
+from dynamo.vllm.realtime.text_handler import _TextPrefill, _TextTurn
+from dynamo.vllm.realtime.text_utils import _text_prompt
 
 pytestmark = [
     pytest.mark.unit,
@@ -320,7 +321,7 @@ def test_text_session_streams_canonical_response_and_preserves_usage():
 @pytest.mark.parametrize("overflow", [False, True])
 def test_text_commit_cancels_warming_before_final_generation(monkeypatch, overflow):
     monkeypatch.setattr(
-        "dynamo.vllm.realtime.handler.MAX_TEXT_BUFFER_BYTES", len("Hello world")
+        "dynamo.vllm.realtime.text_handler.MAX_TEXT_BUFFER_BYTES", len("Hello world")
     )
     updates_seen = []
     prefill_messages = []
@@ -530,7 +531,7 @@ def test_text_prefill_failure_does_not_fail_final_generation():
 
 @pytest.mark.parametrize("prefill_fails", [False, True])
 def test_text_buffer_coalesces_updates_and_limits_bytes(monkeypatch, prefill_fails):
-    monkeypatch.setattr("dynamo.vllm.realtime.handler.MAX_TEXT_BUFFER_BYTES", 8)
+    monkeypatch.setattr("dynamo.vllm.realtime.text_handler.MAX_TEXT_BUFFER_BYTES", 8)
 
     async def scenario():
         seen = asyncio.Event()
@@ -599,7 +600,7 @@ def test_text_buffer_must_be_committed_before_response():
     ],
 )
 def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message):
-    monkeypatch.setattr("dynamo.vllm.realtime.handler.MAX_TEXT_BUFFER_BYTES", 8)
+    monkeypatch.setattr("dynamo.vllm.realtime.text_handler.MAX_TEXT_BUFFER_BYTES", 8)
 
     async def chat_completion(messages, max_output_tokens):
         assert messages == [
@@ -899,6 +900,63 @@ def test_context_cancellation_closes_pending_text_generation(
     asyncio.run(asyncio.wait_for(scenario(), timeout=1))
 
 
+def test_connection_cancellation_waits_for_response_cancel_cleanup():
+    async def scenario():
+        started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def chat_completion(messages, max_output_tokens):
+            del messages, max_output_tokens
+
+            async def frames():
+                try:
+                    started.set()
+                    yield 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                    await asyncio.Event().wait()
+                finally:
+                    cleanup_started.set()
+                    await release_cleanup.wait()
+                    closed.set()
+
+            return frames()
+
+        handler = RealtimeHandler(
+            {
+                "realtime": RealtimeTextHandler(
+                    model_name=TEXT_MODEL, chat_completion_factory=chat_completion
+                )
+            }
+        )
+
+        async def request_stream():
+            yield {"type": "session.update", "session": _text_session()}
+            yield _text_item("Wait")
+            yield {"type": "response.create"}
+            await started.wait()
+            yield {"type": "response.cancel"}
+
+        async def consume():
+            async for _ in handler.generate(request_stream(), _Context()):
+                pass
+
+        consumer = asyncio.create_task(consume())
+        try:
+            await cleanup_started.wait()
+            consumer.cancel()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(consumer), timeout=0.01)
+        finally:
+            release_cleanup.set()
+            result = await asyncio.gather(consumer, return_exceptions=True)
+
+        assert isinstance(result[0], asyncio.CancelledError)
+        assert closed.is_set()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+
 @pytest.mark.parametrize("stop_context", [False, True])
 def test_cancellation_under_backpressure_closes_chat_stream(stop_context):
     async def scenario():
@@ -947,14 +1005,14 @@ def test_cancellation_under_backpressure_closes_chat_stream(stop_context):
 def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early):
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 
-    from dynamo.vllm.realtime.serving import build_realtime_text_factories
+    from dynamo.vllm.realtime.factories import build_realtime_text_factories
 
     monkeypatch.setattr(OpenAIServingChat, "__init__", lambda self, **kwargs: None)
     monkeypatch.setattr(
         "vllm.renderers.online_renderer.OnlineRenderer", lambda **kwargs: None
     )
     monkeypatch.setattr(
-        "dynamo.vllm.realtime.serving._build_models", lambda **kwargs: None
+        "dynamo.vllm.realtime.factories._build_models", lambda **kwargs: None
     )
 
     async def scenario():
@@ -1351,7 +1409,8 @@ def test_from_engine_rejects_unsupported_model_at_startup(monkeypatch):
     pytest.importorskip("vllm.model_executor.models.interfaces")
     serving = SimpleNamespace(model_cls=SimpleNamespace(supports_realtime=False))
     monkeypatch.setattr(
-        "dynamo.vllm.realtime.handler.build_realtime_serving", lambda **_: serving
+        "dynamo.vllm.realtime.transcription_handler.build_realtime_serving",
+        lambda **_: serving,
     )
 
     with pytest.raises(ValueError, match="does not support realtime transcription"):
@@ -1423,14 +1482,14 @@ def test_text_serving_preserves_error_message(monkeypatch, caplog, operation):
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 
-    from dynamo.vllm.realtime.serving import build_realtime_text_factories
+    from dynamo.vllm.realtime.factories import build_realtime_text_factories
 
     monkeypatch.setattr(OpenAIServingChat, "__init__", lambda self, **kwargs: None)
     monkeypatch.setattr(
         "vllm.renderers.online_renderer.OnlineRenderer", lambda **kwargs: None
     )
     monkeypatch.setattr(
-        "dynamo.vllm.realtime.serving._build_models", lambda **kwargs: None
+        "dynamo.vllm.realtime.factories._build_models", lambda **kwargs: None
     )
     message = "The model has no chat template configured"
 

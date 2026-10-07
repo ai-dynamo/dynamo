@@ -109,7 +109,8 @@ class RealtimeConnection(Generic[TurnT]):
         """Cancel a turn after retaining all output it has already produced."""
         if turn.task is not None:
             turn.cancel()
-            await asyncio.gather(turn.task, return_exceptions=True)
+            # Cancelling the input pump must not interrupt the engine's abort.
+            await asyncio.shield(asyncio.gather(turn.task, return_exceptions=True))
             # _drive_turn normally closes the queue. Add a marker as well for a
             # task cancelled before its coroutine had a chance to start.
             await turn.events.put(None)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared construction for vLLM realtime serving adapters."""
+"""Construct vLLM serving adapters and callbacks for Realtime handlers."""
 
 from __future__ import annotations
 
@@ -14,14 +14,19 @@ from typing import Any
 
 import numpy as np
 
+#: Adapt float32 audio chunks and generated-token feedback to vLLM StreamingInput.
 StreamingInputFactory = Callable[
     [AsyncGenerator[np.ndarray, None], "asyncio.Queue[list[int]]"],
     AsyncGenerator[Any, None],
 ]
+#: Await with chat messages and an optional output-token limit to obtain a stream
+#: of OpenAI chat-completion SSE frames. The caller owns closing that stream.
 ChatCompletionFactory = Callable[
     [list[dict[str, str]], int | None],
     Awaitable[AsyncGenerator[str, None]],
 ]
+#: Consume cumulative user-text updates alongside committed chat history to warm
+#: the prefix cache. Cancellation must complete engine cleanup before returning.
 TextPrefillFactory = Callable[
     [list[dict[str, str]], AsyncGenerator[str, None]],
     Coroutine[Any, Any, None],
@@ -69,7 +74,20 @@ def build_realtime_text_factories(
     model_path: str,
     chat_template_path: str | None,
 ) -> tuple[ChatCompletionFactory, TextPrefillFactory]:
-    """Build final-generation and incremental-prefill text adapters."""
+    """Bind final-generation and prefix-warming callbacks to one vLLM engine.
+
+    ``model_name`` is the served API name; ``model_path`` identifies its weights.
+    ``chat_template_path`` optionally overrides the model's default chat template.
+    Both callbacks use vLLM's chat renderer to apply that template and tokenize.
+
+    Awaiting the first callback with chat messages and an optional output-token
+    limit returns an SSE stream that the caller must close. The second consumes
+    cumulative pending-user text with committed chat history and warms stable,
+    complete prefix-cache blocks through vLLM StreamingInput. Cancel and await
+    this prefill callback before final generation, which renders the exact
+    committed conversation independently. Without prefix caching, updates are
+    consumed without starting speculative generation.
+    """
     from vllm.engine.protocol import StreamingInput
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
