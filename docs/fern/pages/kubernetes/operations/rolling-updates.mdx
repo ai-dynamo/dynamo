@@ -15,6 +15,22 @@ Start with a healthy DGD deployed in your cluster. If it is receiving traffic, f
 Commands use `vllm-disagg` in namespace `dynamo`, with `Frontend`, `PrefillWorker`, and `DecodeWorker` components and a source manifest named `vllm-disagg.yaml`. Substitute your own names.
 </Note>
 
+### What Does Zero Downtime Require?
+
+<Anchor id="zero-downtime-updates" />
+
+During live traffic, keep enough serving capacity available to accept new requests while existing requests finish.
+
+| Deployment | What must remain available |
+|---|---|
+| Aggregated | At least one Ready aggregated worker replica. |
+| Disaggregated | At least one Ready prefill replica and one Ready decode replica **in the same generation**. Workers from different generations cannot form a serving pair. |
+| Both | At least one Ready frontend, with existing connections allowed to drain during replacement. |
+
+<Tip>
+These are minimum availability requirements. Keep enough capacity to handle your traffic while replicas are replaced; one remaining replica may not sustain your normal throughput or latency. For multinode workers, count complete serving replicas, not individual Ready pods.
+</Tip>
+
 ## Plan the Rollout
 
 ### Check Version Compatibility
@@ -130,27 +146,27 @@ See [Multinode Orchestration](../installation/multinode-orchestration.md) for pr
 <Tabs>
 <Tab title="Deployment">
 
-| Strategy | Use during live traffic |
-|---|---|
-| **`RollingUpdate` (default, recommended)** | Use `maxSurge: "1"` and `maxUnavailable: "0"`; reserve resources for an extra replica per component. |
-| `Recreate` | Stops old pods before starting replacements; permits a component outage. |
+| Strategy | Behavior | Zero-downtime rollout? |
+|---|---|---|
+| **`RollingUpdate` (default)** | Gradually replaces replicas. | Recommended, with sufficient capacity and draining. |
+| `Recreate` | Stops existing replicas before starting replacements. | No; permits a component outage. |
 
-Set strategy and budgets on each component's `podTemplate.metadata.annotations`. See [Deployment Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#deployment-backed-components).
+See [Deployment Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#deployment-backed-components) to select a strategy.
 
 </Tab>
 <Tab title="Grove">
 
-| Strategy | Use during live traffic |
-|---|---|
-| **`RollingRecreate` (default, recommended)** | Replaces pods without surge. Use at least two replicas per component and enough remaining capacity to serve traffic. |
-| `OnDelete` | Replaces pods only after manual deletion; requires a separately coordinated replacement procedure. |
+| Strategy | Behavior | Zero-downtime rollout? |
+|---|---|---|
+| **`RollingRecreate` (default)** | Automatically replaces pods progressively. | Recommended, with sufficient capacity and draining. |
+| `OnDelete` | Replaces existing pods only after manual deletion. | Requires manual coordination; outside this walkthrough. |
 
-This walkthrough uses `RollingRecreate`. Set `nvidia.com/grove-update-strategy` in the DGD's `metadata.annotations`; it applies to both workers and frontend. See [Grove Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-backed-components).
+This walkthrough uses `RollingRecreate`. See [Grove Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-backed-components) to select a strategy.
 
 </Tab>
 <Tab title="LeaderWorkerSet">
 
-DGD uses the default rolling update: **one worker replica at a time, without surge**. Use at least two replicas per worker component and enough remaining capacity to serve traffic. DGD does not expose LWS update budgets.
+DGD uses the default rolling update to gradually replace worker replicas; it does not expose a strategy selection. This supports zero-downtime updates with sufficient capacity and draining.
 
 For the frontend, follow the Deployment tab. See [LWS Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#lws-backed-workers).
 
@@ -158,7 +174,7 @@ For the frontend, follow the Deployment tab. See [LWS Update Controls](../../ref
 </Tabs>
 
 <Note>
-Changing any worker pod template rolls all worker components. A frontend-only change does not create a new worker generation. Check the capacity and draining requirements below before applying either change.
+Changing any worker pod template rolls all worker components. A frontend-only change does not create a new worker generation.
 </Note>
 
 ### Choose the Update Order
@@ -167,34 +183,63 @@ Frontend and worker updates can run in parallel. During live traffic, update the
 
 For a worker rollout, keep the frontend pod template unchanged. For a frontend rollout, preserve the current worker configuration. Keep a known-good manifest after each successful stage so rollback can target the affected components.
 
-### Capacity and Spare GPUs
+### Plan Capacity and Rollout Pace
 
+<Anchor id="capacity-and-spare-gpus" />
 <Anchor id="capacity-during-the-rollout" />
 <Anchor id="control-the-pace" />
+
+<Tabs>
+<Tab title="Deployment">
+
 <Anchor id="deployment-backed-workers-1" />
+
+`maxSurge` allows extra replicas above the desired count. `maxUnavailable` limits how many desired replicas can be unavailable during replacement.
+
+| Budget | Availability | Spare resources |
+|---|---|---|
+| **Surge `1`, unavailable `0` (recommended)** | Retains the desired number of available replicas. | One extra replica per component. |
+| Surge `0`, unavailable `1` | Allows one unavailable replica per component; a single-replica component has an outage. | Reuses existing resources. |
+
+Budget GPUs across all worker components: each surge worker needs its requested GPUs on one node. A four-GPU worker needs four free GPUs on the same node. Frontend surge pods need extra CPU and memory.
+
+**Rollout pace:** larger budgets allow more concurrent replacements, subject to readiness and available resources. Larger unavailable budgets also reduce serving capacity. Set budgets per component using the [Deployment annotations](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#deployment-backed-components) shown in the update procedure.
+
+</Tab>
+<Tab title="Grove">
+
 <Anchor id="grove-backed-workers-1" />
+
+| Setting | Effect |
+|---|---|
+| No surge | Existing pods are replaced using their released resources. |
+| Default `maxUnavailable: 1` per PodClique | One pod per PodClique can be unavailable; DGD does not expose this budget. |
+| Replica count | Use at least two replicas per component, including the frontend, with enough remaining capacity to serve traffic. |
+
+For multinode workers, budget complete serving replicas: losing a constituent pod can make its replica unavailable. See [Multinode Orchestration](../installation/multinode-orchestration.md).
+
+**Rollout pace:** replacements advance under Grove's default budget; DGD exposes no concurrency knob. To retain more serving capacity, scale up and wait for readiness before updating. See [Grove Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-backed-components).
+
+</Tab>
+<Tab title="LeaderWorkerSet">
+
 <Anchor id="lws-backed-workers-1" />
 
-Choose a budget for each worker component before editing the manifest:
+| Setting | Effect |
+|---|---|
+| No surge | Replaces workers using existing resources. |
+| One replica replaced at a time | A component with `R` replicas has `R - 1` remaining during replacement. |
+| Replica count | Use at least two replicas per worker component, with enough remaining capacity to serve traffic. A multinode replica includes the entire leader/worker group. |
 
-| Backing resource | Plan | Capacity and GPU requirement |
-|---|---|---|
-| Deployment | `maxSurge: "1"`, `maxUnavailable: "0"` | Keep the desired number of available workers; reserve GPUs for one extra worker per component. |
-| Deployment | `maxSurge: "0"`, `maxUnavailable: "1"` | Reuse existing GPUs; accept one unavailable worker per component, including an outage for a single-replica component. |
-| Grove or LWS | At least two replicas per worker component | There is no surge; reserve enough serving capacity to tolerate replacement of a pod or replica. |
+**Rollout pace:** replicas are replaced sequentially; DGD exposes no update-budget knobs. Scale up before updating if additional serving capacity is needed. Follow the Deployment tab for frontend capacity. See [LWS Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#lws-backed-workers).
 
-A surge worker needs its requested GPUs on one node. For example, a worker requesting four GPUs needs four free GPUs on a single node for its replacement to start before it exits. A smaller unavailable budget disturbs less capacity at once but can make the rollout take longer.
+</Tab>
+</Tabs>
 
-Set Deployment budgets with the annotations shown in the update procedure. For supported values, defaults, and annotation locations, see [Rolling Update Controls](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#rolling-update-controls).
-
-Keep enough Ready frontend replicas behind the Service or load balancer to carry live traffic during replacement. For Deployment-backed frontends, use `maxUnavailable: "0"` and `maxSurge: "1"` and reserve the CPU and memory for the extra pod. For Grove frontends, use at least two replicas because there is no surge; scale up and wait for readiness before changing the image.
-
-<Anchor id="zero-downtime-updates" />
+Scheduling, model loading, readiness, and request draining determine how long each replacement takes.
 
 <Tip>
-To retain serving capacity, keep `replicas - maxUnavailable` at least 1 for Deployment-backed workers, and use at least two replicas per worker component with Grove or LWS. Avoid `Recreate` when an outage is unacceptable.
-
-For disaggregated serving, replica counts alone do not guarantee uninterrupted service: a routable generation needs both prefill and decode workers. Check application traffic throughout the update. See [generation readiness](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md#readiness-gates).
+For disaggregated serving, check that prefill and decode remain available **within the same generation** throughout replacement. Per-component replica counts alone do not guarantee uninterrupted service. Verify application traffic; see [generation readiness](../../developer-guide/knowledge-base/concepts/system-architecture/rolling-updates.md#readiness-gates).
 </Tip>
 
 <Anchor id="warm-up-and-latency" />
