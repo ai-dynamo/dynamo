@@ -8,37 +8,66 @@ hide-toc: true
 ---
 
 import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
 
 Choose a workload example, then filter its available deployment platforms and inference backends.
 
-<ExamplesCatalog>
+<ExamplesCatalog topicFilter={false}>
 
 <div className="dynamo-example-card" data-example="lora" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:vllm local:sglang local:vllm" data-keywords="agg_lora.sh agg_lora.yaml agg_lora_hf.sh agg_lora_hf.yaml agg_lora_router.sh agg_lora_router_xpu.sh agg_lora_xpu.sh agg_qwen_lora.yaml lora_agg.sh omni_lora_agg.sh">
-<span className="dynamo-example-eyebrow">Workloads · Example</span>
-### [LoRA Serving](lora.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="plug" /></span>
+
+### LoRA Serving
+
 LoRA adapters for text, multimodal, and vLLM-Omni serving.
-<div className="dynamo-example-badges"><span>Kubernetes: vLLM</span><span>Local / CLI: SGLang, vLLM</span></div>
+
+<ExampleTargets targets="kubernetes:vllm local:sglang local:vllm" />
+
+<a className="dynamo-example-card-link" href="lora.mdx">Open LoRA Serving example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="embeddings" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang local:vllm" data-keywords="agg_embed.sh agg_embed_multiworker.sh">
-<span className="dynamo-example-eyebrow">Workloads · Example</span>
-### [Text Embeddings](embeddings.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="circle-nodes" /></span>
+
+### Text Embeddings
+
 Embedding workers, load balancing, and model-name dispatch.
-<div className="dynamo-example-badges"><span>Local / CLI: SGLang, vLLM</span></div>
+
+<ExampleTargets targets="local:sglang local:vllm" />
+
+<a className="dynamo-example-card-link" href="embeddings.mdx">Open Text Embeddings example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="classification" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_classify.sh">
-<span className="dynamo-example-eyebrow">Workloads · Example</span>
-### [Sequence Classification](classification.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="tags" /></span>
+
+### Sequence Classification
+
 vLLM sequence classification and pooling.
-<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+
+<ExampleTargets targets="local:vllm" />
+
+<a className="dynamo-example-card-link" href="classification.mdx">Open Sequence Classification example</a>
+
 </div>
 
 <div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_omni_realtime.sh agg_realtime_transcription.sh">
-<span className="dynamo-example-eyebrow">Workloads · Example</span>
-### [Audio and Realtime Serving](audio.mdx)
+
+<span className="dynamo-example-icon"><Icon icon="microphone" /></span>
+
+### Audio and Realtime Serving
+
 Transcription and realtime speech-to-speech serving.
-<div className="dynamo-example-badges"><span>Local / CLI: vLLM</span></div>
+
+<ExampleTargets targets="local:vllm" />
+
+<a className="dynamo-example-card-link" href="audio.mdx">Open Audio and Realtime Serving example</a>
+
 </div>
 
 </ExamplesCatalog>
