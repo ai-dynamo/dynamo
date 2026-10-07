@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Rolling Update Architecture
-subtitle: How worker generations, routing, and Kubernetes controllers coordinate an update.
+subtitle: How worker generations, frontend replacement, and version compatibility shape DGD updates.
 ---
 
-NVIDIA Dynamo groups cooperating workers into generations so a deployment can replace worker configurations without mixing incompatible prefill and decode peers. This page covers components with `type: worker`, `type: prefill`, or `type: decode`.
+NVIDIA Dynamo groups cooperating workers into generations so a deployment can replace worker configurations without mixing incompatible prefill and decode peers. Frontends update independently and discover the worker generations that are serving. This page covers frontend replacement and worker generations for components with `type: worker`, `type: prefill`, or `type: decode`.
 
 For the operator procedure, see [Rolling Updates](../../../../kubernetes/operations/rolling-updates.mdx). For annotation names, defaults, and status fields, see the [DGD Reference](../../../../reference/kubernetes-api/dynamo-graph-deployment.mdx#rolling-update-controls).
 
@@ -50,6 +50,8 @@ On Grove and LWS paths, the operator records the hash after reconciling the chan
 ### Generation Isolation
 
 Workers discover peers in their own runtime namespace. A new prefill worker connects to decode workers in the new generation, while old prefill workers continue using old decode workers. This prevents cross-generation KV transfers during a change to the worker configuration.
+
+When a protocol or backend/runtime upgrade changes how prefill and decode communicate, both component changes belong in the same desired DGD manifest. The operator derives one new generation for that configuration, isolating the new pair from the old pair. Applying a prefill-only protocol change would instead create a generation containing the new prefill configuration and the unchanged decode configuration; namespace isolation cannot make that pair compatible.
 
 The frontend retains the base runtime namespace and can discover both generations:
 
@@ -133,6 +135,24 @@ The operator uses LWS's default rolling replacement: one replica, including its 
 
 These paths do not use Dynamo's managed DCD replacement state machine. The `RollingUpdateNotSupported` event indicates that distinction; it does not mean that Grove or LWS failed to update the workload.
 
+### Frontend Replacement
+
+A frontend's pod template is outside the worker-generation hash. A frontend-only change updates its existing Deployment or Grove PodClique without creating a new worker generation. Conversely, a worker-generation change does not restart an unchanged frontend.
+
+For a Deployment-backed frontend, Kubernetes performs replacement using the Deployment strategy rendered by the operator. The Deployment strategy annotations also apply here, but Dynamo's cross-generation worker reconciler does not coordinate frontend replicas. With Grove, the frontend PodClique follows the PodCliqueSet's update strategy and has no surge path.
+
+Frontend and worker replacement can overlap. Each old or new frontend must be compatible with every worker generation it may discover during that overlap. Sequential updates under live traffic reduce the number of changing components and allow application behavior to be verified after each stage; they are an operational recommendation, not a controller-enforced ordering.
+
+Frontend readiness determines which replicas should receive new traffic through the Service or load balancer. Existing requests and streams remain attached to the frontend that accepted them. HTTP draining gives them time to finish, bounded by the frontend's shutdown timeout and the pod's termination grace period. A replacement frontend does not inherit those connections. See [Graceful Shutdown Architecture](../fault-tolerance/graceful-shutdown-architecture.md).
+
+## Version Compatibility During Transitions
+
+An update can temporarily contain old and new frontend replicas and multiple worker generations. Compatibility must hold for those intermediate states, as well as for the intended final and rollback states. The [tutorial's compatibility checks](../../../../kubernetes/operations/rolling-updates.mdx#check-version-compatibility) describe the operator/runtime and frontend/worker support windows.
+
+Frontend-to-worker compatibility covers Dynamo discovery metadata and wire protocols; generation isolation handles separation of old and new cooperating workers. These are separate mechanisms. Prefill and decode must still use a compatible protocol within each generation, which is why their protocol upgrades are applied together.
+
+The operator resolves each component's runtime version from its runtime image or `runtimeVersionOverride` and uses that version to select PodSpec feature gates, including flags, environment variables, and probes. The override declares the runtime actually present in the image; it does not change the image or make unsupported versions compatible. In sidecar mode, the relevant runtime image belongs to the `runtime` init container. See [Runtime Version Compatibility](../../../../reference/kubernetes-api/dynamo-component-deployment.mdx#runtime-version-compatibility).
+
 ## Capacity During Transitions
 
 ### Surge and Unavailability
@@ -169,7 +189,7 @@ See [KV Cache Offloading](../../../../kubernetes/kv-cache-offloading/overview.md
 
 ## Rollback and Interrupted Updates
 
-Rollback restores a previous desired worker configuration. The operator recomputes its hash and converges the backing resources toward that generation using their normal replacement mechanism.
+Rollback restores the affected components' previous desired configuration while preserving compatibility with components that remain upgraded. Worker rollback recomputes the worker hash and converges the backing resources toward that generation; frontend rollback replaces frontend pods through their Deployment or Grove controller without changing the worker generation. A prefill/decode protocol rollback restores both component configurations together.
 
 During a managed Deployment rollout, reverting the worker templates changes the target generation. The generation being rolled out becomes old capacity, while the restored generation scales up within the selected budget. Old DCD deletion waits until replicas reach zero and their pods have terminated. Mid-rollout rollback with this behavior is supported from operator 1.5.0.
 
@@ -184,6 +204,8 @@ Dynamo reports managed Deployment rollout progress in `status.rollingUpdate`. Th
 During managed replacement, `status.components.<name>.componentNames` can contain both generations, and `runtimeNamespace` retains the old generation's namespace until the component completes. Exact field definitions live in the [DGD status reference](../../../../reference/kubernetes-api/dynamo-graph-deployment.mdx#status).
 
 Grove reports replacement progress through PodCliqueSet `status.updateProgress`, including `updateEndedAt`; LWS reports replica progress in LeaderWorkerSet status. The DGD hash annotation alone cannot establish their completion. The [tutorial's verification step](../../../../kubernetes/operations/rolling-updates.mdx#watch-the-rollout) combines backing-controller status, worker readiness, generation labels, and application checks.
+
+Frontend replacement is observed through its Deployment or PodClique status, the DGD's frontend component status, and application requests. `status.rollingUpdate` does not describe frontend progress and may still show a completed worker rollout while a frontend is being replaced. See [Verify the frontend rollout](../../../../kubernetes/operations/rolling-updates.mdx#verify-the-frontend-rollout).
 
 ### Unsupported Controls
 
