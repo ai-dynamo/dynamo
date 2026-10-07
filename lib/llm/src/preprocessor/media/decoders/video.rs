@@ -64,7 +64,6 @@ pub struct VideoMetadata {
     pub(crate) sampled_timestamps: Vec<f64>,
 }
 
-/// Derives the selected video's duration from its packet timestamps.
 fn get_source_duration_from_video_packets(
     input: &mut ffmpeg_next::format::context::Input,
     stream_index: usize,
