@@ -45,7 +45,7 @@ REF_TAG="${REF_TAG:-ref}"
 reuse_key() {
   local dockerfile="${EPP_DIR}/Dockerfile"
   local -a paths
-  local listing
+  local listing status
 
   # The key reads only one-line `COPY --from=dynamo` instructions. Any other
   # use of the dynamo context could add an input that the key misses.
@@ -68,11 +68,18 @@ reuse_key() {
   )
 
   # The build context must hold exactly the committed objects.
-  if [ -n "$(git status --porcelain --ignored -- "${paths[@]}")" ]; then
+  if ! status="$(git status --porcelain --ignored -- "${paths[@]}")"; then
+    echo "git status failed on the EPP inputs" >&2
+    return 1
+  fi
+  if [ -n "${status}" ]; then
     echo "EPP inputs differ from HEAD" >&2
     return 1
   fi
-  listing="$(git ls-tree HEAD -- "${paths[@]}")"
+  if ! listing="$(git ls-tree HEAD -- "${paths[@]}")"; then
+    echo "git ls-tree failed on the EPP inputs" >&2
+    return 1
+  fi
   if [ "$(printf '%s\n' "${listing}" | wc -l)" -ne "${#paths[@]}" ]; then
     echo "Some EPP inputs are not tracked files: ${paths[*]}" >&2
     return 1
