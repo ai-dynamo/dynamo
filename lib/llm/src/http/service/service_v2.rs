@@ -1535,8 +1535,6 @@ impl HttpServiceConfigBuilder {
                      or enable_rl) but HttpServiceConfig.runtime is not set."
                 ));
             };
-            // Embedders that set `runtime` but not `namespace_filter` keep the scope
-            // they had before the filter was threaded through the builder.
             let namespace_filter = config
                 .namespace_filter
                 .clone()
@@ -2003,8 +2001,6 @@ mod tests {
         body["namespace"].as_str().expect("namespace").to_string()
     }
 
-    /// Issue #15726: the RL listener must use the scope the frontend resolved, not
-    /// re-read the namespace environment variables.
     #[tokio::test]
     #[serial_test::serial]
     async fn test_rl_router_uses_builder_namespace_filter() {
