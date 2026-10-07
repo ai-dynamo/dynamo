@@ -2532,3 +2532,28 @@ def test_build_native_generate_request_forwards_prefill_dp_rank():
         prefill_dp_rank=3,
     )
     assert native.disagg_prefill_dp_rank == 3
+
+
+@pytest.mark.parametrize(
+    ("enabled", "routing", "expected"),
+    [
+        (False, {"priority_jump": 2.0}, None),
+        (True, {"priority_jump": 2.0}, 1),
+        (True, {"priority": 3, "priority_jump": 2.0}, 4),
+        (True, {"priority": 3}, 3),
+        (True, {"priority_jump": 0.0}, None),
+    ],
+)
+def test_routing_priority_puts_replays_ahead_only_with_priority_scheduling(
+    enabled, routing, expected
+):
+    from types import SimpleNamespace
+
+    from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+    handler = SimpleNamespace(
+        config=SimpleNamespace(
+            server_args=SimpleNamespace(enable_priority_scheduling=enabled)
+        )
+    )
+    assert BaseWorkerHandler._routing_priority(handler, routing) == expected

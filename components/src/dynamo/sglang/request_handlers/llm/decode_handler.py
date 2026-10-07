@@ -639,7 +639,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         _raise_if_conditional_disagg_bypass(request)
         sglang_request_id = new_sglang_request_id()
         input_param = self._get_input_param(request)
-        priority = (request.get("routing") or {}).get("priority")
+        priority = self._routing_priority(request.get("routing") or {})
         native_payload = native_generate_payload(request)
         native_session_request_id = None
         if native_payload is not None:

@@ -625,6 +625,23 @@ class BaseWorkerHandler(
         # LoRA tracking (via LoraMixin)
         self._init_lora_tracking()
 
+    def _routing_priority(self, routing: Dict[str, Any]) -> Any:
+        """Request priority from routing hints, in Dynamo's convention.
+
+        A migration replay of a stream that already delivered tokens carries
+        routing.priority_jump. With priority scheduling it goes ahead of
+        requests of the same priority, so after a takeover the streams that
+        were generating get the free slots before requests that had not
+        started. SGLang may abort a prioritized request when priority
+        scheduling is disabled, so the priority is unchanged then.
+        """
+        priority = routing.get("priority")
+        if (routing.get("priority_jump") or 0) > 0 and getattr(
+            self.config.server_args, "enable_priority_scheduling", False
+        ):
+            priority = int(priority or 0) + 1
+        return priority
+
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
             normalized = int(priority)
