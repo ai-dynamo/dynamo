@@ -181,7 +181,7 @@ spec:
               --dtype bfloat16 \
               --max-num-seqs 40 \
               --kv-cache-dtype fp8 \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false}}'
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false}}'
           resources:
             claims:
               - name: gpu-rdma-resource
