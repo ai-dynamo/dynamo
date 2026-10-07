@@ -26,6 +26,7 @@ data:
 
       tokenizer:
         name: ${TOKENIZER}
+        revision: 901464083161bf8612a29ff7ad29914cd4ab4a85
         trust_remote_code: true
 
       endpoint:
