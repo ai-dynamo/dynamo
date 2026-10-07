@@ -693,16 +693,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/vllm-pr-57816-reset-eager-off
     patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/vllm-pr-57816.patch; \
     rm -rf /var/lib/apt/lists/*
 
-# Map NemotronH_Omni_Reasoning_V3 vision weights; without this vLLM silently
-# drops 586 vision_model/vision_projector tensors and the tower runs on random
-# init (fluent but fabricated image output).
-RUN --mount=type=bind,source=./container/deps/vllm/vllm-nemotron-omni-vision-weight-mapping.patch,target=/tmp/vllm-omni-vision.patch \
-    set -eu; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends patch; \
-    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("vllm").origin).parent.parent)')"; \
-    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/vllm-omni-vision.patch; \
-    rm -rf /var/lib/apt/lists/*
 
 # Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
 RUN python3 -m pip uninstall --yes soxr
