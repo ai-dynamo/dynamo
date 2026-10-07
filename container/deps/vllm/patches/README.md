@@ -28,13 +28,16 @@ Apply the remaining requested patches in filename order:
 | `002-pr55374` | Piecewise-prefix loading and range-aware connector selection | [55374](https://github.com/vllm-project/vllm/pull/55374), `d3e956268db8682b43a059fd622128fc320e2762` and `877a3c671e69d628ecd868219ac10b554088bd73` |
 
 These three PRs are open and their functionality is absent from the base as of
-2026-10-05. All three patches apply to v0.31.0 with zero fuzz and no offsets;
+2026-10-05. All three patches apply to v0.31.0 with zero fuzz. Patch 002 has
+line offsets against this release;
 no additional runtime patches are introduced. The patches are ports of the
 stack carried by Dynamo PR 15112.
 The region-key port preserves the newer `route_packed_layers` handling. The
 range-load port reuses the existing `cdiv` import and advances the native NIXL
 connector version from 13 to 14 to keep the new protocol distinguishable.
 All workers participating in a transfer must use the same patched protocol.
+The CUDA dev and local-dev images retain the unpatched protocol 13. Do not pair
+one of these workers with a patched runtime worker (protocol 14).
 
 Validation: zero-fuzz application to the exact source commit, Python 3.12
 syntax checks, CPU source probes for pull/push signatures, token-window slicing,

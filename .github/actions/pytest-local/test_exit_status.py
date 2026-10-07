@@ -40,7 +40,7 @@ class ExitStatusTest(unittest.TestCase):
         self.assertEqual(workflow.count("allow_no_tests:"), 1)
         sequential = workflow.split("      - name: Run GPU tests (sequential)", 1)[1]
         self.assertIn("allow_no_tests:", sequential)
-        self.assertIn("inputs.run_gpu_parallel_tests && 'true' || 'false'", sequential)
+        self.assertIn("inputs.allow_empty_sequential_gpu_partition", sequential)
 
 
 if __name__ == "__main__":

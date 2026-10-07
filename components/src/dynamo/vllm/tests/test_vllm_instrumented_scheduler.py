@@ -399,6 +399,19 @@ def test_new_waiting_queues_empty_snapshot():
     assert q.num_decode_requests == 0
 
 
+def test_new_waiting_queue_replaces_legacy_queue():
+    remote = _make_request(
+        RequestStatus.WAITING_FOR_REMOTE_KVS,
+        num_tokens=512,
+        num_computed_tokens=480,
+    )
+    q = _run_compute_queued(
+        waiting=[], skipped_waiting=[remote], kv_holding_waiting=[remote]
+    )
+    assert q.num_decode_requests == 1
+    assert q.sum_decode_kv_tokens == 480
+
+
 def test_remote_kv_wait_in_primary_queue_counts_as_decode():
     q = _run_compute_queued(
         waiting=[
@@ -841,6 +854,25 @@ def test_capacity_digest_ignores_request_limit_filtered_capture_sizes():
         ]
     )
     assert common.max_num_running_reqs == 128
+
+
+@pytest.mark.parametrize(
+    "cap_attribute",
+    ["_max_admission_blocks_per_request", "max_admission_blocks_per_request"],
+)
+def test_admission_cap_affects_digest_and_block_budget(cap_attribute):
+    stub = _digest_stub(max_num_running_reqs=128)
+    manager = SimpleNamespace(block_size=16)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=[manager])
+    )
+    setattr(manager, cap_attribute, 32)
+    first_digest = stub._bench_grid_invariants_digest()
+    assert stub._bench_blocks_per_req(1024, apply_admission_cap=True) == 32
+
+    setattr(manager, cap_attribute, 48)
+    assert stub._bench_grid_invariants_digest() != first_digest
+    assert stub._bench_blocks_per_req(1024, apply_admission_cap=True) == 48
 
 
 def test_benchmark_synchronizer_rejects_grid_mismatch_before_warmup():

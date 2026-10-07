@@ -695,7 +695,7 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    # vLLM 0.29 preserves the empty modality key; nightly elides it. Both
+    # vLLM 0.29 preserves the empty modality key; v0.31 omits it. Both
     # represent all UUID-addressed items being cache hits.
     assert parse_mm_data.call_args_list in (
         [call({"vision_chunk": []}, validate=False)],

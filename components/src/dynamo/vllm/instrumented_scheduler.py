@@ -94,7 +94,7 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
-from itertools import count
+from itertools import chain, count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -2175,20 +2175,19 @@ class InstrumentedScheduler(AsyncScheduler):
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
 
-        for waiting_queue in (
-            self.waiting,
-            getattr(self, "skipped_waiting", ()),
-            getattr(self, "kv_holding_waiting", ()),
-        ):
-            for request in waiting_queue:
-                if request.status in (
-                    RequestStatus.PREEMPTED,
-                    RequestStatus.WAITING_FOR_REMOTE_KVS,
-                ):
-                    # Remote KV waits and local preempts resume decode.
-                    decode_kv.add(request.num_computed_tokens)
-                else:
-                    prefill.add(request.num_tokens)
+        # vLLM 0.31 replaces skipped_waiting with kv_holding_waiting.
+        other_waiting = getattr(
+            self, "kv_holding_waiting", getattr(self, "skipped_waiting", ())
+        )
+        for request in chain(self.waiting, other_waiting):
+            if request.status in (
+                RequestStatus.PREEMPTED,
+                RequestStatus.WAITING_FOR_REMOTE_KVS,
+            ):
+                # Remote KV waits and local preempts resume decode.
+                decode_kv.add(request.num_computed_tokens)
+            else:
+                prefill.add(request.num_tokens)
 
         return QueuedRequestMetrics(
             num_prefill_requests=prefill.n,
@@ -2504,6 +2503,14 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- Grid generation ------------------------------------------------
 
+    @staticmethod
+    def _kvwarm_admission_cap(manager) -> int | None:
+        if hasattr(manager, "max_admission_blocks_per_request"):
+            cap = manager.max_admission_blocks_per_request
+        else:
+            cap = getattr(manager, "_max_admission_blocks_per_request", None)
+        return cap if isinstance(cap, int) and cap > 0 else None
+
     def _bench_grid_invariants_digest(self) -> str:
         coordinator = getattr(
             getattr(self, "kv_cache_manager", None), "coordinator", None
@@ -2517,9 +2524,7 @@ class InstrumentedScheduler(AsyncScheduler):
                         f"{type(manager).__module__}.{type(manager).__qualname__}"
                     ),
                     "block_size": getattr(manager, "block_size", None),
-                    "admission_cap": getattr(
-                        manager, "_max_admission_blocks_per_request", None
-                    ),
+                    "admission_cap": self._kvwarm_admission_cap(manager),
                     "mamba_cache_mode": getattr(manager, "mamba_cache_mode", None),
                     "num_prefill_checkpoint_blocks": getattr(
                         getattr(manager, "kv_cache_spec", None),
@@ -3244,7 +3249,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 continue
 
             blocks = math.ceil(num_tokens / block_size)
-            admission_cap = getattr(manager, "_max_admission_blocks_per_request", None)
+            admission_cap = self._kvwarm_admission_cap(manager)
             if (
                 apply_admission_cap
                 and isinstance(admission_cap, int)

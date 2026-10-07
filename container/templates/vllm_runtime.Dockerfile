@@ -178,15 +178,12 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
-{# cuda installs into the system interpreter (/usr/local/bin); xpu and cpu run out
-   of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
-{% set vllm_rs_link = "/usr/local/bin/vllm-rs" if device == "cuda" else "${VIRTUAL_ENV}/bin/vllm-rs" %}
-{# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
-   on its own line inside the RUN breaks the backslash continuation. #}
-{% set vllm_rs_required = "1" if device == "cuda" else "0" %}
-{# TODO: Remove this workaround once bundled vllm-rs accepts extra output fields. #}
+{% if device != "cuda" %}
+{% set vllm_rs_link = "${VIRTUAL_ENV}/bin/vllm-rs" %}
+{# vLLM <0.31 rejects the extra output fields added by Omni. #}
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
+{% endif %}
 
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
 # Without Omni, preserve the release base's dependency pairing.
@@ -288,10 +285,9 @@ RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm-patc
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
     site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
     for patch_file in /tmp/vllm-patches/*.patch; do \
-        patch --batch --forward -p1 -d "${site_parent}" < "${patch_file}"; \
+        patch --batch --forward --fuzz=0 -p1 -d "${site_parent}" < "${patch_file}"; \
     done; \
     python3 /tmp/validate_patches_runtime.py; \
-    apt-get purge -y patch; \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
@@ -537,12 +533,8 @@ RUN set -eux; \
 # pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
-# DeepGEMM JIT needs nvcc in the shipped runtime. Install after all package
-# mutations; avoid cuda-compiler's unnecessary GPL cuda-cuxxfilt dependency.
+# DeepGEMM JIT needs the nvcc shipped by the pinned base image.
 RUN set -eux; \
-    apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        cuda-nvcc-13-0; \
     nvcc=/usr/local/cuda-13.0/bin/nvcc; \
     test -x "${nvcc}"; \
     mkdir -p /usr/local/cuda/bin; \
@@ -550,8 +542,7 @@ RUN set -eux; \
         ln -sf "${nvcc}" /usr/local/cuda/bin/nvcc; \
     fi; \
     test -x /usr/local/cuda/bin/nvcc; \
-    /usr/local/cuda/bin/nvcc --version; \
-    rm -rf /var/lib/apt/lists/*
+    /usr/local/cuda/bin/nvcc --version
 {% endif %}
 
 {% if target not in ("dev", "local-dev") and context.vllm.enable_modelexpress == "true" %}
@@ -583,35 +574,31 @@ if sys.argv[1] == "true":
             raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
 
-# Use the packaged binary to match the installed vLLM version.
-# Upstream may put a symlink on PATH. Rename the wrapper over that directory
-# entry instead of following the symlink and overwriting the packaged binary.
+{% if device == "cuda" %}
+# vLLM 0.31 ships a compatible vllm-rs on PATH.
+RUN timeout 30s vllm-rs --help >/dev/null
+{% else %}
+# Older CPU/XPU versions still need the plugin allowlist wrapper.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
         if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
-            wrapper="$(mktemp "{{ vllm_rs_link }}.XXXXXX")"; \
-            trap 'rm -f "${wrapper}"' EXIT; \
             printf '%s\n' \
                 '#!/bin/sh' \
                 '# Keep Omni from changing the EngineCore output schema.' \
                 'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
                 'export VLLM_PLUGINS' \
                 "exec \"${pkg}/vllm-rs\" \"\$@\"" \
-                > "${wrapper}"; \
-            chmod 755 "${wrapper}"; \
-            mv -f "${wrapper}" {{ vllm_rs_link }}; \
-            trap - EXIT; \
+                > {{ vllm_rs_link }}; \
+            chmod 755 {{ vllm_rs_link }}; \
         else \
             ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
         fi; \
         timeout 30s vllm-rs --help >/dev/null; \
-    elif [ "{{ vllm_rs_required }}" = "1" ]; then \
-        echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
-        exit 1; \
     else \
         echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
     fi
+{% endif %}
 
 USER dynamo
 
