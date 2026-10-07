@@ -747,6 +747,7 @@ requirements.txt                                                                
 /deploy/operator/internal/webhook/**/*checkpoint*                                                       @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
 /.github/actions/build-deploy-component/action.yml                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-planner-codeowners
 /.github/actions/check-deploy-component/action.yml                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/aisimulate/output/dgdr_run/                                                      @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/common/backend/publisher.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/backend/telemetry.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/common/utils/image_utils.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
