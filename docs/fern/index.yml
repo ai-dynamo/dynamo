@@ -234,7 +234,7 @@ navigation:
           - page: LoRA Adapters
             path: pages/kubernetes/operations/lora-adapters.md
           - page: Rolling Updates
-            path: pages/kubernetes/operations/rolling-updates.md
+            path: pages/kubernetes/operations/rolling-updates.mdx
 
   # ==================== Local Guide ====================
   - tab: cli-guide

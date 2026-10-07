@@ -62,15 +62,9 @@ Nothing moves cache between generations by default, and offloading to a tier ins
 
 The budgets also set the rollout's shape. A smaller `maxUnavailable` means more steps, and each step waits for a new pod to load the model and pass its readiness probe, so the rollout takes longer but disturbs less capacity at once. Roll during low traffic when you can.
 
-### Graceful Shutdown
-
-Every pod a rollout replaces goes through [graceful shutdown](../fault-tolerance/graceful-shutdown.md): the worker stops taking new requests, finishes the ones in flight, and exits. Kubernetes waits `terminationGracePeriodSeconds` for that, 60 seconds by default on operator-created pods, and then kills the pod. A request still running at that point fails unless request migration recovers it.
-
-To size the grace period, measure the worker's P99 request duration from the `dynamo_component_request_duration_seconds` histogram, add a buffer, and set that value in the worker's `podTemplate.spec.terminationGracePeriodSeconds`. Keep the Dynamo shutdown timeouts described on the graceful shutdown page below it. The grace period also bounds the rollout: each step can take up to that long for an old pod to leave.
-
 ## Update the Workers
 
-The examples use a disaggregated vLLM deployment with one frontend, one prefill worker, and one decode worker.
+The examples use a disaggregated vLLM deployment with one frontend, two prefill workers, and four decode workers.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -118,37 +112,52 @@ spec:
                   nvidia.com/gpu: "1"
 ```
 
-To update the workers:
+<Note>
+Keep the manifest in version control. Rolling back is applying the previous version of the file.
+</Note>
 
-1. Edit the pod template of a worker component. This example raises the decode context length.
+<Steps toc={true} tocDepth={3}>
 
-   ```yaml
-       - name: DecodeWorker
-         type: decode
-         replicas: 4
-         podTemplate:
-           spec:
-             containers:
-               - name: main
-                 image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
-                 command: [python3]
-                 args: [-m, dynamo.vllm, --model, Qwen/Qwen3-0.6B, --disaggregation-mode, decode, --max-model-len, "32768"]
-   ```
+<Step title="Prepare workers to drain" id="graceful-shutdown">
 
-2. Apply the manifest.
+Check whether each worker's termination grace period accommodates your request durations and cleanup time. Use the worker's P99 request duration from the `dynamo_component_request_duration_seconds` histogram as a starting point and add a buffer.
 
-   ```bash
-   kubectl apply -n dynamo -f vllm-disagg.yaml
-   ```
+If needed, set `podTemplate.spec.terminationGracePeriodSeconds` in each worker component's manifest. Follow the [graceful shutdown guide](../fault-tolerance/graceful-shutdown.md) to configure the internal drain timeouts within that budget.
 
-3. Watch the rollout. See [Watch the Rollout](#watch-the-rollout).
+Make these changes in the manifest you will apply in step 3. New settings apply to the replacement pods; the existing pods drain using their current settings.
 
-Both worker components roll, even though only the decode template changed, because the worker hash covers all workers. The frontend does not restart.
+</Step>
 
-> [!NOTE]
-> Keep the manifest in version control. Rolling back is applying the previous version of the file.
+<Step title="Edit the worker configuration">
 
-## Watch the Rollout
+Edit the pod template of a worker component in the same manifest, preserving its other settings. This example raises the decode context length:
+
+```yaml
+    - name: DecodeWorker
+      type: decode
+      replicas: 4
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+              command: [python3]
+              args: [-m, dynamo.vllm, --model, Qwen/Qwen3-0.6B, --disaggregation-mode, decode, --max-model-len, "32768"]
+```
+
+</Step>
+
+<Step title="Apply the updated manifest">
+
+```bash
+kubectl apply -n dynamo -f vllm-disagg.yaml
+```
+
+Both worker components roll, even when only the decode template changes, because the worker hash covers all workers. The frontend does not restart.
+
+</Step>
+
+<Step title="Verify the rollout" id="watch-the-rollout">
 
 Every worker pod carries its generation in the `nvidia.com/dynamo-worker-hash` label. This command works for every backing resource and shows old and new pods side by side:
 
@@ -162,11 +171,12 @@ The DGD records the active generation in the `nvidia.com/current-worker-hash-v2`
 ```bash
 kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.metadata.annotations.nvidia\.com/current-worker-hash-v2}{"\n"}'
 kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.components.DecodeWorker}{"\n"}'
+kubectl get dgd vllm-disagg -n dynamo -o jsonpath='{.status.state}{"\n"}'
 ```
 
-The rollout is complete when `status.state` returns to `successful` and every worker pod shows the new hash.
+The rollout is complete when `status.state` returns to `successful` and every worker pod is Ready and shows the new hash. Use the section for your backing resource below to inspect progress while you wait.
 
-### Deployment-Backed Workers
+#### Deployment-Backed Workers
 
 The operator tracks a managed rolling update in `status.rollingUpdate`:
 
@@ -193,7 +203,7 @@ kubectl get dcd -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg
   -L nvidia.com/dynamo-worker-hash
 ```
 
-### Grove-Backed Workers
+#### Grove-Backed Workers
 
 Grove tracks the update on the PodCliqueSet, which is named after the DGD:
 
@@ -203,7 +213,7 @@ kubectl get podcliqueset vllm-disagg -n dynamo -o jsonpath='{.status.updateProgr
 
 `updateEndedAt` is set when Grove has replaced every pod.
 
-### LWS-Backed Workers
+#### LWS-Backed Workers
 
 LWS replaces one replica, all of its ranks, at a time:
 
@@ -211,15 +221,39 @@ LWS replaces one replica, all of its ranks, at a time:
 kubectl get leaderworkerset -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg
 ```
 
+</Step>
+
+</Steps>
+
 ## Roll Back
 
-A rollback is an update to the previous pod templates. Apply the previous version of the manifest:
+A rollback is an update to the previous pod templates.
+
+<Steps toc={true} tocDepth={3}>
+
+<Step title="Restore the previous manifest">
+
+Retrieve the last known-good version of `vllm-disagg.yaml` from version control, including the previous worker pod templates.
+
+</Step>
+
+<Step title="Apply the previous manifest">
 
 ```bash
 kubectl apply -n dynamo -f vllm-disagg.yaml
 ```
 
-The operator computes the previous worker hash, so the workers return to the previous generation through the same rollout as any other change. Watch it the same way.
+The operator computes the previous worker hash, so the workers return to the previous generation through the same rollout as any other change.
+
+</Step>
+
+<Step title="Verify recovery">
+
+Use the commands in [Verify the rollout](#watch-the-rollout). Confirm that `status.state` returns to `successful` and every worker pod is Ready and shows the restored generation's hash.
+
+</Step>
+
+</Steps>
 
 You can roll back while a rollout is still in progress. On Deployment-backed workers the operator treats the previous pod templates as the new target: the generation that was rolling out becomes the old generation and scales down within `maxUnavailable`, while the previous generation scales back up within `maxSurge`. The operator deletes an old DCD only after it reaches zero replicas and its pods have terminated. Available since operator 1.5.0; earlier releases could delete the serving generation on a mid-rollout rollback.
 
@@ -275,8 +309,9 @@ To stop the old generation before the new one starts, set `Recreate`. The operat
             nvidia.com/deployment-strategy: Recreate
 ```
 
-> [!WARNING]
-> `Recreate` causes an outage of that component while its pods restart. Use it when old and new generations must not run at the same time, or when the cluster has no spare GPUs for a surge.
+<Warning>
+`Recreate` causes an outage of that component while its pods restart. Use it when old and new generations must not run at the same time, or when the cluster has no spare GPUs for a surge.
+</Warning>
 
 ### Grove-Backed Workers
 
