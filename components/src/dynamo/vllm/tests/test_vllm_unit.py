@@ -3667,3 +3667,24 @@ def test_failover_cli_flag_gets_isolated_vllm_compile_cache(monkeypatch):
     assert _isolate_failover_compile_cache(["dynamo.vllm", "--gms-shadow-mode"]) == (
         "/cache/vllm-gms-failover/1"
     )
+
+
+@pytest.mark.parametrize(
+    ("policy", "routing", "expected"),
+    [
+        ("fcfs", {"priority_jump": 2.0}, 0),
+        ("priority", {"priority_jump": 2.0}, -1),
+        ("priority", {"priority": 3, "priority_jump": 2.0}, -4),
+        ("priority", {"priority": 3}, -3),
+        ("priority", {"priority_jump": 0.0}, 0),
+    ],
+)
+def test_engine_priority_puts_replays_ahead_only_under_priority_policy(
+    policy, routing, expected
+):
+    from dynamo.vllm.handlers import engine_priority
+
+    engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(scheduler_config=SimpleNamespace(policy=policy))
+    )
+    assert engine_priority(engine_client, routing) == expected

@@ -1192,6 +1192,24 @@ def _as_exact_int(value: object) -> Optional[int]:
             return None
     return None
 
+def engine_priority(engine_client, routing: dict) -> int:
+    """vLLM priority for a request (lower is scheduled first).
+
+    A migration replay of a stream that already delivered tokens carries
+    routing.priority_jump. With priority scheduling it goes ahead of requests
+    of the same priority, so after a takeover the streams that were generating
+    get the free slots before requests that had not started. Under FCFS vLLM
+    rejects a nonzero priority, so the priority is unchanged.
+    """
+    priority = -int(routing.get("priority", 0))
+    if (routing.get("priority_jump") or 0) > 0:
+        scheduler_config = getattr(
+            getattr(engine_client, "vllm_config", None), "scheduler_config", None
+        )
+        if str(getattr(scheduler_config, "policy", "fcfs")) == "priority":
+            priority -= 1
+    return priority
+
 
 class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
@@ -4053,7 +4071,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (
             engine_generate_input.priority
             if engine_generate_input is not None
-            else -int(routing.get("priority", 0))
+            else engine_priority(getattr(self, "engine_client", None), routing)
         )
 
         trace_headers = context.trace_headers()
@@ -4154,7 +4172,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = engine_priority(getattr(self, "engine_client", None), routing)
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
         first_token_output_seen = False
@@ -4377,7 +4395,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = engine_priority(getattr(self, "engine_client", None), routing)
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
