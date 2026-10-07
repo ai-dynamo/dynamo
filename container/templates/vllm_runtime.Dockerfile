@@ -177,15 +177,12 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
-{# cuda installs into the system interpreter (/usr/local/bin); xpu and cpu run out
-   of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
-{% set vllm_rs_link = "/usr/local/bin/vllm-rs" if device == "cuda" else "${VIRTUAL_ENV}/bin/vllm-rs" %}
-{# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
-   on its own line inside the RUN breaks the backslash continuation. #}
-{% set vllm_rs_required = "1" if device == "cuda" else "0" %}
-{# TODO: Remove this workaround once bundled vllm-rs accepts extra output fields. #}
+{% if device != "cuda" %}
+{% set vllm_rs_link = "${VIRTUAL_ENV}/bin/vllm-rs" %}
+{# vLLM <0.31 rejects the extra output fields added by Omni. #}
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
+{% endif %}
 
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
@@ -390,6 +387,48 @@ RUN set -eu; \
         exit 1; \
     fi
 
+{% if device == "cuda" %}
+# Delete the base image's PyNvVideoCodec before the install below replaces it.
+# The vllm-openai base ships 2.0.4, which bundles a complete FFmpeg including a
+# libavcodec the codec gate denies on presence.
+#
+# Uninstall first, then rm. The wheel's RECORD is the only complete list of what
+# it wrote -- it reaches top-level `samples/` and `benchmarks/` trees and an
+# FFmpeg source tarball outside site-packages -- so deleting the dist-info first
+# would orphan those. The rm covers what does not depend on the installer
+# honouring its own metadata; `pynvvideocodec*` takes the dist-info and the stray
+# `pynvvideocodec.` directory beside it.
+#
+# find_spec, not an import: PyNvVideoCodec's __init__ dlopens libnvidia-encode,
+# which no builder has, so an import raises whether or not the wheel is there.
+#
+# Fails if the base stops shipping it, rather than quietly removing nothing.
+RUN set -eu; \
+    purelib="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    data="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["data"])')"; \
+    before="$(python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none)"; \
+    echo "PyNvVideoCodec in base image: ${before}"; \
+    if [ "${before}" = "none" ]; then \
+        echo "ERROR: the vllm-openai base no longer ships PyNvVideoCodec, so this" >&2; \
+        echo "       removal has nothing to act on -- delete this RUN and keep the" >&2; \
+        echo "       requirements install below, which is then the only copy." >&2; \
+        exit 1; \
+    fi; \
+    python3 -m pip uninstall --yes pynvvideocodec; \
+    rm -rf "${purelib}/PyNvVideoCodec" "${purelib}"/pynvvideocodec* "${data}/external/ffmpeg"; \
+    if python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("PyNvVideoCodec") else 1)'; then \
+        echo "ERROR: PyNvVideoCodec is still importable after the removal above; the" >&2; \
+        echo "       base ships it somewhere these paths do not reach." >&2; \
+        exit 1; \
+    fi; \
+    leftover="$(find "${data}/external" -name 'ffmpeg-*.tar.*' 2>/dev/null || true)"; \
+    if [ -n "${leftover}" ]; then \
+        echo "ERROR: a bundled FFmpeg source tarball survived the removal:" >&2; \
+        echo "${leftover}" >&2; \
+        exit 1; \
+    fi
+{% endif %}
+
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
 # GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
 # with a source install that leaves no binary on disk. On cuda, IMAGEIO_FFMPEG_EXE
@@ -413,6 +452,96 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
         --no-deps --requirement /tmp/requirements.vllm.txt && \
     rm -rf /opt/uv/cache
+
+# Assert what the removal and install left. A requirements specifier constrains
+# what pip installs; it cannot say "exactly one copy on disk" or "no libavcodec",
+# and those are the properties the codec gate depends on. Checked beside the
+# install so a regression names its cause instead of surfacing as a scan
+# violation later.
+# PINNED is duplicated from the requirements file deliberately -- this stage
+# must not parse the file it is checking; a test asserts the two agree.
+RUN python3 - <<'PYEOF'
+import csv
+import glob
+import os
+import re
+import sys
+from importlib.metadata import distributions
+
+PINNED = "2.2.3"
+NAME = "pynvvideocodec"
+# Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
+# families rather than the four this package happens to have shed, so a future
+# release vendoring libpostproc or libx264 is caught here -- beside the install
+# that introduced it -- instead of as an unattributed scan violation later.
+DENIED = (
+    "libavcodec",
+    "libavdevice",
+    "libavfilter",
+    "libswscale",
+    "libswresample",
+    "libpostproc",
+    "libx264",
+    "libx265",
+    "libfdk-aac",
+)
+
+
+def canonical(name):
+    return re.sub(r"[-_.]+", "-", name or "").lower()
+
+
+# Enumerated over sys.path rather than one scheme directory: these images carry
+# both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
+# and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
+# alone is guaranteed to be the install target or the only place a copy can hide.
+# A surviving base copy beside the new one is the failure being looked for, which
+# is also why this counts distributions instead of asking for one version.
+installed = [d for d in distributions() if canonical(d.metadata["Name"]) == NAME]
+versions = sorted(d.version for d in installed)
+print("PyNvVideoCodec distributions on sys.path:", versions)
+if len(installed) != 1:
+    sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
+if versions[0] != PINNED:
+    sys.exit(f"ERROR: PyNvVideoCodec is {versions[0]}, but the requirements file "
+             f"pins {PINNED}")
+
+site = os.path.normpath(str(installed[0].locate_file("")))
+pkg = os.path.join(site, "PyNvVideoCodec")
+bundled = sorted(
+    os.path.relpath(p, pkg)
+    for p in glob.glob(os.path.join(pkg, "**", "lib*.so*"), recursive=True)
+)
+print("PyNvVideoCodec bundles:", bundled)
+# Positive first, and on both libraries: an empty package directory satisfies
+# every negative check below while shipping no demuxer at all.
+for required in ("libavformat", "libavutil"):
+    if not any(os.path.basename(n).startswith(required) for n in bundled):
+        sys.exit(
+            f"ERROR: PyNvVideoCodec bundles no {required}, so the checks below "
+            f"would pass vacuously; found {bundled}"
+        )
+denied = [n for n in bundled if os.path.basename(n).startswith(DENIED)]
+if denied:
+    sys.exit(f"ERROR: PyNvVideoCodec bundles libraries the codec gate denies: {denied}")
+
+# The FFmpeg source tarball lands outside site-packages, so its directory is read
+# from the wheel's own RECORD rather than guessed from a sysconfig path -- the
+# RECORD is what the installer actually wrote, and it moves if the layout does.
+record = installed[0].read_text("RECORD") or ""
+declared = [
+    row[0]
+    for row in csv.reader(record.splitlines())
+    if row and row[0].endswith((".tar.xz", ".tar.gz", ".tar.bz2"))
+]
+if len(declared) != 1:
+    sys.exit(f"ERROR: expected one source tarball in the RECORD, found {declared}")
+external = os.path.dirname(os.path.normpath(os.path.join(site, declared[0])))
+tarballs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(external, "ffmpeg-*.tar.*")))
+print("bundled FFmpeg source tarballs in", external, "->", tarballs)
+if len(tarballs) != 1:
+    sys.exit(f"ERROR: expected exactly one bundled FFmpeg source tarball, found {tarballs}")
+PYEOF
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an
@@ -502,14 +631,31 @@ RUN set -eux; \
     ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
     python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 
-# PyNvVideoCodec is KEPT (removed from the purge above) but UPGRADED to >=2.2.0 by
-# the requirements install: the base image's 2.0.4 bundles a full FFmpeg (incl.
-# libavcodec) that the codec gate rejects, while 2.2.0 bundles only libavutil +
-# libavformat (container demux, no software codec). It provides the built-in
-# H.264/H.265 video-input path (NVDEC hardware decode via libnvcuvid;
+# PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.3 by
+# the removal and requirements install above: the base image's 2.0.4 bundles a
+# full FFmpeg 8.1.1 (incl. libavcodec) that the codec gate rejects, while 2.2.3
+# bundles only libavutil.so.61 + libavformat.so.63 (FFmpeg 9.0.1, container
+# demux, no software codec). It provides the built-in H.264/H.265 video-input
+# path (NVDEC hardware decode via libnvcuvid;
 # common/multimodal/nvdec_decoder.py) and requires the driver "video" capability
 # at runtime or it cannot import; set it in the image and ensure the K8s
 # pod/runtimeClass does not drop it.
+#
+# This deliberately overrides a dependency of vLLM's: `importlib.metadata.requires
+# ("vllm")` lists `PyNvVideoCodec==2.0.4`, an exact pin, and the image ships 2.2.3
+# against it. Unlike the equivalent override in trtllm_runtime.Dockerfile, do not
+# expect a resolver complaint in the build log to confirm it -- that stage runs
+# real `pip`, which prints one; this one runs `uv pip install --no-deps`, which
+# does not. `uv pip check` on the finished image is what surfaces it.
+#
+# The override is deliberate: 2.0.4 is the version whose bundled libavcodec the
+# codec gate rejects, so the override is the point. vLLM's own consumer is
+# vllm/multimodal/video_decoders/pynvvideocodec.py
+# (PyNvVideoCodecVideoBackendMixin), and everything it touches -- SimpleDecoder,
+# OutputColorType, get_batch_frames_by_index, get_stream_metadata,
+# reconfigure_decoder -- still exists in 2.2.3. The one API 2.2.3 drops is
+# SimpleDecoder.stop(), which neither vLLM nor Dynamo calls. Re-check that list
+# when the base image moves.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% endif %}
 
@@ -537,6 +683,12 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
         raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
 
+{% if device == "cuda" %}
+# Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
+RUN python3 -m pip uninstall --yes soxr
+
+RUN vllm-rs --help >/dev/null
+{% else %}
 # Use the packaged binary to match the installed vLLM version.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
@@ -554,12 +706,10 @@ RUN set -eu; \
             ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
         fi; \
         vllm-rs --help >/dev/null; \
-    elif [ "{{ vllm_rs_required }}" = "1" ]; then \
-        echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
-        exit 1; \
     else \
         echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
     fi
+{% endif %}
 
 USER dynamo
 

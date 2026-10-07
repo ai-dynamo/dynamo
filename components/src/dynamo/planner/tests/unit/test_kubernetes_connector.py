@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import shlex
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
@@ -31,6 +32,7 @@ from dynamo.planner.errors import (
     GPUShapeUnavailableError,
     ModelNameNotFoundError,
     PlannerError,
+    PowerAnnotationMissingError,
     SubComponentNotFoundError,
 )
 from dynamo.planner.monitoring.dgd_services import (
@@ -106,9 +108,49 @@ def _component(name, component_type=None, replicas=None, args=None, gpu=None):
 
 
 def _deployment(*components):
+    component_statuses = {}
+    for component in components:
+        status = {}
+        container = next(
+            (
+                container
+                for container in component.get("podTemplate", {})
+                .get("spec", {})
+                .get("containers", [])
+                if container.get("name") == "main"
+            ),
+            {},
+        )
+        args = []
+        for arg in container.get("args", []):
+            args.extend(shlex.split(arg))
+        for flag in ("--served-model-name", "--model-name", "--model"):
+            if flag in args and len(args) > args.index(flag) + 1:
+                status["servedModelName"] = args[args.index(flag) + 1]
+                break
+        if "--endpoint" in args and len(args) > args.index("--endpoint") + 1:
+            endpoint = args[args.index("--endpoint") + 1].removeprefix("dyn://")
+            parts = endpoint.split(".")
+            if len(parts) == 3:
+                status["runtimeComponentName"] = parts[1]
+
+        resources = container.get("resources", {})
+        gpu = resources.get("limits", {}).get(
+            "nvidia.com/gpu",
+            resources.get("requests", {}).get("nvidia.com/gpu"),
+        )
+        if gpu is not None:
+            per_engine = int(gpu) * int(
+                component.get("multinode", {}).get("nodeCount", 1)
+            )
+            status["gpusPerEngine"] = per_engine
+            status["gpusPerReplica"] = per_engine
+        component_statuses[component["name"]] = status
+
     return {
-        "metadata": {"name": "test-graph"},
+        "metadata": {"name": "test-graph", "generation": 1},
         "spec": {"components": list(components)},
+        "status": {"observedGeneration": 1, "components": component_statuses},
     }
 
 
@@ -967,151 +1009,85 @@ def test_protocol_positional_flags_match_kubernetes_connector(
     assert connector.get_gpu_counts(False, True) == (0, 4)
 
 
-# Tests for Service.get_gpu_count()
-def test_service_get_gpu_count_valid():
-    """Test that get_gpu_count returns GPU count from main container limits."""
-    service = Service(
-        name="test-service",
-        service=_component("test-service", replicas=1, gpu=4),
-    )
-    assert service.get_gpu_count() == 4
-
-
-def test_service_get_gpu_count_from_requests_fallback():
-    """Test that get_gpu_count falls back to main container requests."""
-    service = Service(
-        name="test-service",
-        service={
-            "replicas": 1,
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "resources": {"requests": {"nvidia.com/gpu": "2"}},
-                        }
-                    ]
-                }
-            },
-        },
-    )
-    assert service.get_gpu_count() == 2
-
-
-def test_service_get_gpu_count_limits_preferred_over_requests():
-    """Test that limits are preferred over requests when both are present."""
-    service = Service(
-        name="test-service",
-        service={
-            "replicas": 1,
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "resources": {
-                                "limits": {"nvidia.com/gpu": "4"},
-                                "requests": {"nvidia.com/gpu": "2"},
-                            },
-                        }
-                    ]
-                }
-            },
-        },
-    )
-    assert service.get_gpu_count() == 4
-
-
-def test_service_get_gpu_count_integer_value():
-    """Test that get_gpu_count works with integer GPU values"""
-    service = Service(
-        name="test-service",
-        service={
-            "replicas": 1,
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "resources": {"limits": {"nvidia.com/gpu": 2}},
-                        }
-                    ]
-                }
-            },
-        },
-    )
-    assert service.get_gpu_count() == 2
-
-
-def test_service_get_gpu_count_missing_raises_error():
-    """Test that get_gpu_count raises ValueError when GPU count is missing"""
-    service = Service(
-        name="test-service",
-        service={"replicas": 1},
-    )
-    with pytest.raises(ValueError) as exc_info:
-        service.get_gpu_count()
-    assert "No GPU count specified" in str(exc_info.value)
-    assert "test-service" in str(exc_info.value)
-
-
-def test_service_get_gpu_count_invalid_raises_error():
-    """An invalid scalar GPU count fails before legacy shape fallback."""
-    service = Service(
-        name="test-service",
-        service={
-            "replicas": 1,
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "resources": {"limits": {"nvidia.com/gpu": "invalid"}},
-                        }
-                    ]
-                }
-            },
-        },
-    )
-    with pytest.raises(ValueError) as exc_info:
-        service.get_gpu_count()
-    assert "Invalid GPU count" in str(exc_info.value)
-
-
-def test_service_reads_v1beta_pod_template_main_container():
+# Planner component facts come exclusively from current operator status.
+def test_service_reads_current_component_status_without_inspecting_roles():
     service = Service(
         name="prefill",
         service={
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "sidecar",
-                            "args": ["--ignored"],
-                        },
-                        {
-                            "name": "main",
-                            "args": [
-                                "--endpoint",
-                                "ns.custom-prefill.generate",
-                                "--model",
-                                "Qwen/Qwen3-8B",
-                            ],
-                            "resources": {
-                                "limits": {
-                                    "nvidia.com/gpu": "2",
+            "roles": [
+                {
+                    "name": "leader",
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "args": ["--model", "wrong-leader-model"],
+                                    "resources": {"limits": {"nvidia.com/gpu": "99"}},
                                 }
-                            },
-                        },
-                    ]
-                }
-            }
+                            ]
+                        }
+                    },
+                },
+                {
+                    "name": "worker",
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "args": ["--model", "wrong-worker-model"],
+                                }
+                            ]
+                        }
+                    },
+                },
+            ]
         },
     )
+    deployment = {
+        "metadata": {"generation": 2},
+        "status": {
+            "observedGeneration": 2,
+            "components": {
+                "prefill": {
+                    "servedModelName": "Qwen/Qwen3-8B",
+                    "runtimeComponentName": "custom-prefill",
+                    "gpuPowerLimitWatts": 300,
+                    "gpusPerEngine": 2,
+                    "gpusPerReplica": 4,
+                }
+            },
+        },
+    }
 
-    assert service.get_model_name() == "Qwen/Qwen3-8B"
-    assert service.get_component_name_from_endpoint_arg() == "custom-prefill"
-    assert service.get_gpu_count() == 2
+    assert service.get_model_name(deployment) == "Qwen/Qwen3-8B"
+    assert service.get_runtime_component_name(deployment) == "custom-prefill"
+    assert service.get_gpu_power_limit_watts(deployment) == 300
+    assert service.get_gpu_shape(deployment).gpus_per_engine == 2
+    assert service.get_gpu_shape(deployment).gpus_per_replica == 4
+
+
+def test_service_ignores_stale_component_status():
+    service = Service(name="decode", service={"name": "decode"})
+    deployment = {
+        "metadata": {"generation": 3},
+        "status": {
+            "observedGeneration": 2,
+            "components": {
+                "decode": {
+                    "servedModelName": "stale-model",
+                    "runtimeComponentName": "stale-decode",
+                    "gpuPowerLimitWatts": 300,
+                }
+            },
+        },
+    }
+
+    assert service.get_model_name(deployment) is None
+    assert service.get_runtime_component_name(deployment) is None
+    with pytest.raises(PowerAnnotationMissingError):
+        service.get_gpu_power_limit_watts(deployment)
 
 
 # Tests for KubernetesConnector.get_gpu_counts()
@@ -1207,7 +1183,7 @@ def test_get_gpu_shapes_separates_engine_width_from_sidecar_cost(
 
 
 @pytest.mark.parametrize("sidecar_gpu", [0, 1])
-def test_missing_shape_falls_back_only_for_zero_gpu_sidecar(
+def test_missing_shape_does_not_inspect_sidecar_spec(
     kubernetes_connector, mock_kube_api, sidecar_gpu
 ):
     component = _component("decode-worker", "decode", replicas=1, gpu=4)
@@ -1221,15 +1197,8 @@ def test_missing_shape_falls_back_only_for_zero_gpu_sidecar(
     deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
     mock_kube_api.get_graph_deployment.return_value = deployment
 
-    if sidecar_gpu == 0:
-        assert kubernetes_connector.get_gpu_counts(
-            require_prefill=False, require_decode=True
-        ) == (0, 4)
-    else:
-        with pytest.raises(GPUShapeUnavailableError, match="auxiliary-GPU"):
-            kubernetes_connector.get_gpu_shapes(
-                require_prefill=False, require_decode=True
-            )
+    with pytest.raises(GPUShapeUnavailableError, match="not current"):
+        kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
 
 
 def test_missing_shape_for_pure_dra_worker_fails_closed(
@@ -1250,12 +1219,12 @@ def test_missing_shape_for_pure_dra_worker_fails_closed(
     deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
     mock_kube_api.get_graph_deployment.return_value = deployment
 
-    with pytest.raises(GPUShapeUnavailableError, match="DRA"):
+    with pytest.raises(GPUShapeUnavailableError, match="not current"):
         kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
 
 
 @pytest.mark.parametrize("sidecar_gpu", [0, 1])
-def test_missing_shape_falls_back_only_for_zero_gpu_native_sidecar(
+def test_missing_shape_does_not_inspect_native_sidecar_spec(
     kubernetes_connector, mock_kube_api, sidecar_gpu
 ):
     component = _component("decode-worker", "decode", replicas=1, gpu=4)
@@ -1270,19 +1239,12 @@ def test_missing_shape_falls_back_only_for_zero_gpu_native_sidecar(
     deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
     mock_kube_api.get_graph_deployment.return_value = deployment
 
-    if sidecar_gpu == 0:
-        assert kubernetes_connector.get_gpu_counts(
-            require_prefill=False, require_decode=True
-        ) == (0, 4)
-    else:
-        with pytest.raises(GPUShapeUnavailableError, match="auxiliary-GPU"):
-            kubernetes_connector.get_gpu_shapes(
-                require_prefill=False, require_decode=True
-            )
+    with pytest.raises(GPUShapeUnavailableError, match="not current"):
+        kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
 
 
 @pytest.mark.parametrize("init_gpu", [0, 8])
-def test_missing_shape_falls_back_only_for_zero_gpu_one_shot_init(
+def test_missing_shape_does_not_inspect_one_shot_init_spec(
     kubernetes_connector, mock_kube_api, init_gpu
 ):
     component = _component("decode-worker", "decode", replicas=1, gpu=4)
@@ -1296,18 +1258,11 @@ def test_missing_shape_falls_back_only_for_zero_gpu_one_shot_init(
     deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
     mock_kube_api.get_graph_deployment.return_value = deployment
 
-    if init_gpu == 0:
-        assert kubernetes_connector.get_gpu_counts(
-            require_prefill=False, require_decode=True
-        ) == (0, 4)
-    else:
-        with pytest.raises(GPUShapeUnavailableError, match="auxiliary-GPU"):
-            kubernetes_connector.get_gpu_shapes(
-                require_prefill=False, require_decode=True
-            )
+    with pytest.raises(GPUShapeUnavailableError, match="not current"):
+        kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
 
 
-def test_typed_worker_with_explicit_zero_shape_is_rejected(
+def test_worker_with_zero_physical_shape_uses_logical_gpu_fallback(
     kubernetes_connector, mock_kube_api
 ):
     deployment = _deployment(_component("decode-worker", "decode", replicas=1))
@@ -1318,41 +1273,13 @@ def test_typed_worker_with_explicit_zero_shape_is_rejected(
     }
     mock_kube_api.get_graph_deployment.return_value = deployment
 
-    with pytest.raises(GPUShapeUnavailableError, match="authoritative zero-GPU"):
-        kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
-
-
-@pytest.mark.parametrize(
-    ("command", "args"),
-    [
-        (None, ["-m", "dynamo.mocker", "--model-name", "test-model"]),
-        (["python3", "-m", "dynamo.mocker"], ["--model-name", "test-model"]),
-    ],
-    ids=["module-in-args", "module-in-command"],
-)
-def test_typed_mocker_worker_with_zero_physical_shape_uses_configured_fallback(
-    kubernetes_connector, mock_kube_api, command, args
-):
-    component = _component(
-        "decode-worker",
-        "decode",
-        replicas=1,
-        args=args,
-    )
-    if command is not None:
-        component["podTemplate"]["spec"]["containers"][0]["command"] = command
-    deployment = _deployment(component)
-    deployment["metadata"]["generation"] = 2
-    deployment["status"] = {
-        "observedGeneration": 2,
-        "components": {"decode-worker": {"gpusPerEngine": 0, "gpusPerReplica": 0}},
-    }
-    mock_kube_api.get_graph_deployment.return_value = deployment
-
     assert kubernetes_connector.get_gpu_shapes(
         require_prefill=False, require_decode=True
     ) == (None, None)
-    with pytest.raises(DeploymentValidationError, match="configured logical GPU"):
+    with pytest.raises(
+        DeploymentValidationError,
+        match="Decode mocker requires a configured logical GPU",
+    ):
         kubernetes_connector.get_gpu_counts(
             require_prefill=False, require_decode=True, deployment=deployment
         )
@@ -1378,17 +1305,18 @@ def test_get_gpu_counts_rejects_noncurrent_dra_status(
 
 
 def test_get_gpu_counts_missing_gpu_raises_error(kubernetes_connector, mock_kube_api):
-    """Test get_gpu_counts raises DeploymentValidationError when GPU count missing"""
+    """A missing operator-projected GPU shape fails closed."""
     mock_deployment = _deployment(
         _component("prefill-worker", "prefill", replicas=1),
         _component("decode-worker", "decode", replicas=1, gpu=4),
     )
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
-    with pytest.raises(DeploymentValidationError) as exc_info:
+    with pytest.raises(GPUShapeUnavailableError) as exc_info:
         kubernetes_connector.get_gpu_counts()
 
-    assert "prefill GPU shape" in str(exc_info.value)
+    assert "prefill-worker" in str(exc_info.value)
+    assert "gpusPerEngine/gpusPerReplica" in str(exc_info.value)
 
 
 def test_get_gpu_counts_service_not_found_raises_error(
@@ -1773,7 +1701,7 @@ def test_resolve_dgd_service_prefill_uses_backend_default_for_filter(
     assert expected_component == "prefill"
 
 
-def test_resolve_dgd_service_v1beta_endpoint_override(
+def test_resolve_dgd_service_uses_projected_endpoint_override(
     kubernetes_connector, mock_kube_api
 ):
     mock_deployment = _deployment(
@@ -1925,69 +1853,6 @@ def test_resolve_dgd_service_malformed_endpoint_falls_back_to_default(
     )
 
     assert expected_component == "prefill"
-
-
-def test_service_get_component_name_from_endpoint_arg_present():
-    service = Service(
-        name="prefill",
-        service={
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "args": [
-                                "--endpoint",
-                                "ns.custom-comp.generate",
-                                "--other",
-                                "flag",
-                            ],
-                        }
-                    ]
-                }
-            }
-        },
-    )
-    assert service.get_component_name_from_endpoint_arg() == "custom-comp"
-
-
-def test_service_get_component_name_from_endpoint_arg_absent():
-    service = Service(
-        name="prefill",
-        service={
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "args": ["--model", "Qwen/Qwen3-8B"],
-                        }
-                    ]
-                }
-            }
-        },
-    )
-    assert service.get_component_name_from_endpoint_arg() is None
-
-
-def test_service_get_component_name_from_endpoint_arg_missing_value():
-    """--endpoint with no following arg should return None, not raise IndexError."""
-    service = Service(
-        name="prefill",
-        service={
-            "podTemplate": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": "main",
-                            "args": ["--endpoint"],
-                        }
-                    ]
-                }
-            }
-        },
-    )
-    assert service.get_component_name_from_endpoint_arg() is None
 
 
 @pytest.mark.asyncio

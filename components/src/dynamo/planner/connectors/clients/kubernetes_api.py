@@ -492,13 +492,12 @@ class KubernetesAPI:
     def worker_pods_settled(
         self,
         deployment: dict,
-        expected_power_by_component: Mapping[str, str],
+        expected_power_by_component: Mapping[str, int],
     ) -> tuple[bool, list[str]]:
         """True when all non-terminal pods carry the expected per-GPU annotation.
 
         ``expected_power_by_component`` maps each power-relevant component name
-        to the raw ``dynamo.nvidia.com/gpu-power-limit`` string from the DGD
-        snapshot (verbatim, for exact propagation verification).
+        to the operator-projected per-GPU power limit.
 
         Terminal means phase Succeeded or Failed. Terminating pods
         (DeletionTimestamp set) in Running/Pending/Unknown are non-terminal:
@@ -519,7 +518,7 @@ class KubernetesAPI:
             self.list_pods_for_graph(dgd_name)
         )
 
-        for component_name, expected_raw in expected_power_by_component.items():
+        for component_name, expected_watts in expected_power_by_component.items():
             all_pods = pods_by_component.get(component_name, [])
             non_terminal = [
                 p
@@ -550,13 +549,17 @@ class KubernetesAPI:
                         f" (phase={phase}, terminating): waiting for pod to disappear"
                     )
                     continue
-                actual = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
-                if actual != expected_raw:
+                actual_raw = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
+                try:
+                    actual_watts = int(str(actual_raw).strip())
+                except (TypeError, ValueError):
+                    actual_watts = None
+                if actual_watts != expected_watts:
                     phase = (pod.status.phase if pod.status else None) or "?"
                     pending.append(
                         f"{component_name}/{pod.metadata.name}"
                         f" (phase={phase}):"
-                        f" annotation {actual!r} != {expected_raw!r}"
+                        f" annotation {actual_raw!r} != {expected_watts!r}"
                     )
 
         return not pending, pending
@@ -681,19 +684,14 @@ class KubernetesAPI:
                 decode_name=decode_component_name,
             )
 
-            # Build per-component expected annotation strings from the same
-            # DGD snapshot. A missing or malformed annotation is invalid
-            # configuration — raise immediately rather than retrying.
-            # Use the raw DGD annotation string: the operator copies it verbatim
-            # onto Pod annotations, so the settlement comparison must use the
-            # same raw value to get an exact match.
+            # Build per-component expected limits from operator-owned status.
+            # A missing or malformed value is invalid configuration — raise
+            # immediately rather than retrying.
             components_map = get_components_by_name(graph_deployment)
-            expected_power: dict[str, str] = {}
+            expected_power: dict[str, int] = {}
             for name in power_names:
                 svc = Service(name=name, service=components_map.get(name, {}))
-                # Raises PowerAnnotationMissingError / PowerAnnotationInvalidError
-                # on bad config; let those propagate as a fail-fast startup error.
-                expected_power[name] = svc.get_gpu_power_limit_annotation()
+                expected_power[name] = svc.get_gpu_power_limit_watts(graph_deployment)
 
             pods_ok, pods_pending = self.worker_pods_settled(
                 graph_deployment, expected_power

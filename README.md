@@ -42,8 +42,10 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
+| Thu, Oct 15, 2026 | **[CoreWeave x NVIDIA Dynamo Meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=CoreWeave+x+NVIDIA+Dynamo+Meetup&dates=20261016T010000Z%2F20261016T040000Z&location=San+Francisco%2C+CA+%28venue+details+via+Luma+registration%29&details=Join+CoreWeave+and+NVIDIA+Dynamo+for+technical+talks+and+developer+networking+on+production+inference+and+RL+post-training.%0A%0ATopics%3A+CoreWeave+Forge%2C+Dynamo+inference+at+scale%2C+efficient+rollouts%2C+and+fast+weight+updates.%0A%0AAgenda+%28Pacific%29%3A%0A6%3A00+pm%3A+Doors+open%0A6%3A30+pm%3A+CoreWeave+talk%0A6%3A45+pm%3A+NVIDIA+Dynamo+talk%0A7%3A00%E2%80%939%3A00+pm%3A+Developer+networking%0A%0ARegister%3A+https%3A%2F%2Fluma.com%2FCWDynOctMeetup%0ARegistration+is+required.+Use+Luma+for+attendance+approval+and+venue+details.+Adding+this+calendar+event+does+not+register+you.)** | San Francisco |
+| Wed, Oct 21, 2026 | **[UNTERGRUND, An evening for the people building the next generation of open source.](https://calendar.google.com/calendar/render?action=TEMPLATE&text=UNTERGRUND%2C+An+evening+for+the+people+building+the+next+generation+of+open+source.&dates=20261021T170000Z%2F20261021T200000Z&location=The+Feuerle+Collection%2C+Hallesches+Ufer+70%2C+10963+Berlin-Bezirk+Friedrichshain-Kreuzberg%2C+Germany&details=Get+up-to-date+information+at%3A+https%3A%2F%2Fluma.com%2Funtergrund-berlin%3Fpk%3Dg-MPMdmMSC9xexAXN%0A%0AAddress%3A%0AThe+Feuerle+Collection%0ABerlin%2C+Germany%0A%0AAn+evening+for+the+people+building+the+next+generation+of+open+source.+Come+for+the+kind+of+conversations+with+AI+leaders+that+only+happen+off+the+record.%0A%0AFor+one+night%2C+a+WWII+bunker+in+Berlin+belongs+to+us.+Deep+inside+this+historical+bunker%2C+its+walls+hold+a+private+art+collection+you+won%E2%80%99t+see+anywhere+else.+Concrete+and+shadow%2C+museum+light%2C+a+DJ%2C+and+cocktails+worth+savoring.+One+of+Berlin%E2%80%99s+best-known+EDM+violinists+and+an+incredibly+talented+beat+boxer+will+emerge+into+the+night+at+moments+no+one+announces.%0A%0ALeave+your+phone+behind.+It%E2%80%99s+the+Berlin+way.%0A%0AYou%E2%80%99ll+take+home+a+piece+of%E2%80%A6%0A%0AHosted+by+Together+AI%0A%0AJoin+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhxr-ssrp-daf%0AOr+dial%3A+%28US%29+%2B1+470-839-8177+PIN%3A+247554242%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhxr-ssrp-daf%3Fpin%3D6735962442102%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)** | Hallesches Ufer 70 |
+| Wed, Sep 23, 2026 | ~~[Dynamo community meeting](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok)~~ | [Online](https://meet.google.com/heb-demu-qok) |
 | Thu, Sep 10, 2026 | ~~[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)~~ | [Luma](https://luma.com/BaseDynSGL) |
-| Mon, Aug 24, 2026 | ~~[vLLM x Dynamo meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0)~~ | [Luma](https://luma.com/r8o604o0) |
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
@@ -138,15 +140,19 @@ the Gateway API setup, supported features, and configuration.
 
 ### Option A: Container (fastest)
 
+Choose either vLLM or SGLang:
+
+#### vLLM
+
 ```bash
-# Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+# Pull a prebuilt container
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
-python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file &
 
-# Send a request
+# Once the worker is ready, send a request
 curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
   "model": "Qwen/Qwen3-0.6B",
   "messages": [{"role": "user", "content": "Hello!"}],
@@ -154,19 +160,45 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+#### SGLang
+
+```bash
+# Pull a prebuilt container
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+
+# Inside the container — start frontend and worker
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+
+# Once the worker is ready, send a request
+curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [{"role": "user", "content": "Hello!"}],
+  "max_tokens": 100
+}' | jq
+```
+
+Also available: [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
-Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then:
+Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then choose your backend:
+
+#### vLLM
 
 ```bash
-uv pip install --prerelease=allow "ai-dynamo[sglang]"   # or [vllm]
+uv pip install --prerelease=allow "ai-dynamo[vllm]"
+```
+
+#### SGLang
+
+```bash
+uv pip install --prerelease=allow "ai-dynamo[sglang]"
 ```
 
 > **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for TRT-LLM-specific instructions.
 
-Then start the frontend and a worker as shown above. See the [full installation guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for system dependencies and backend-specific notes.
+Then start the frontend and the matching worker as shown above. See the [full installation guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for system dependencies and backend-specific notes.
 
 ### Option C: Kubernetes (recommended)
 

@@ -53,6 +53,7 @@ from dynamo.sglang.gateway import (
     effective_gateway_workers,
     gateway_engine_id,
 )
+from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
@@ -221,7 +222,8 @@ async def _register_model_with_runtime_config(
             input_type,
             output_type,
             endpoint,
-            _register_model_source_path(engine, server_args),
+            dynamo_args.model_source_uri
+            or _register_model_source_path(engine, server_args),
             server_args.served_model_name,
             kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
@@ -433,6 +435,15 @@ async def get_runtime_config(
     # generation overflow handling to their downstream backend.
     if engine is not None:
         publish_token_budget(runtime_config, _get_token_budget(engine, server_args))
+        # Hash forwarding currently exists on SGLang's aggregated generation
+        # path. Do not advertise exact video routing to disaggregated workers,
+        # whose prefill/decode handlers would otherwise publish incompatible
+        # KV-event placeholder hashes.
+        if dynamo_args.frontend_decoding and server_args.disaggregation_mode in (
+            None,
+            "null",
+        ):
+            publish_sglang_qwen_video_processor_contract(runtime_config, engine)
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
