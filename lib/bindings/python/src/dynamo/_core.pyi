@@ -3315,6 +3315,8 @@ class backend:
             discovery_backend: Optional[str] = None,
             request_plane: Optional[str] = None,
             event_plane: Optional[str] = None,
+            *,
+            response_plane: Optional[str] = None,
         ) -> None: ...
 
     class WorkerConfig:

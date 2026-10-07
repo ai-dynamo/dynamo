@@ -42,12 +42,12 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
     let args = Args::try_parse_from(argv).map_err(SidecarStartupError::from)?;
     SglangSidecarEngine::validate_args(&args).map_err(SidecarStartupError::from)?;
     dynamo_sidecar_common::run_task(|runtime, shutdown| async move {
+        use dynamo_runtime::DistributedRuntime;
         use dynamo_runtime::system_status_server::SystemProbePolicy;
-        use dynamo_runtime::{DistributedRuntime, distributed::DistributedConfig};
         let startup = async {
             let drt = DistributedRuntime::new_with_probe_policy(
                 runtime.clone(),
-                DistributedConfig::try_from_settings()?,
+                args.sidecar.common.runtime.to_distributed_config()?,
                 SystemProbePolicy::RuntimeOnly,
             )
             .await?;
