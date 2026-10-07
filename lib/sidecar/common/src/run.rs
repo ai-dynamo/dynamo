@@ -16,6 +16,18 @@ use crate::SidecarStartupError;
 pub fn run<E: LLMEngine + 'static>(
     bootstrap: impl Future<Output = Result<(E, WorkerConfig), DynamoError>>,
 ) -> anyhow::Result<()> {
+    run_task(
+        |runtime, shutdown| async move { run_until_shutdown(bootstrap, &runtime, shutdown).await },
+    )
+}
+
+/// Run a sidecar task with the shared runtime and process-signal lifecycle.
+/// The task owns discovery and may serve inference or relay telemetry only.
+pub fn run_task<F, Fut>(task: F) -> anyhow::Result<()>
+where
+    F: FnOnce(Runtime, CancellationToken) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     logging::init();
     let runtime = Runtime::from_settings()?;
     let secondary = runtime.secondary();
@@ -35,7 +47,7 @@ pub fn run<E: LLMEngine + 'static>(
             signal_runtime.mark_shutting_down();
         });
 
-        let result = run_until_shutdown(bootstrap, &runtime, shutdown.clone()).await;
+        let result = task(runtime.clone(), shutdown.clone()).await;
         shutdown.cancel();
         signal_handle.abort();
         let _ = signal_handle.await;

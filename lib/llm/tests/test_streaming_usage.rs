@@ -774,6 +774,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         nvext: None,
         metadata: None,
         return_tokens_as_token_ids: None,
+        no_stop_trim: None,
         unsupported_fields: Default::default(),
     }
 }
