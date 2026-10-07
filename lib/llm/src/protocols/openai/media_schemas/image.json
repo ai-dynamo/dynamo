@@ -136,6 +136,71 @@
           "natural"
         ]
       },
+      "ImageTokenDetails": {
+        "type": "object",
+        "description": "A token count split by kind.",
+        "required": [
+          "text_tokens",
+          "image_tokens"
+        ],
+        "properties": {
+          "text_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "image_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ImageUsage": {
+        "type": "object",
+        "description": "Token usage of an image generation. Keeps the wire format of the OpenAI\n`ImageGenUsage`, including the singular `output_token_details`.",
+        "required": [
+          "input_tokens",
+          "total_tokens",
+          "output_tokens",
+          "input_tokens_details"
+        ],
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tokens (image and text) in the input prompt",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tokens (image and text) used for the generation",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tokens the model generated",
+            "minimum": 0
+          },
+          "output_token_details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageTokenDetails",
+                "description": "The output tokens by kind"
+              }
+            ]
+          },
+          "input_tokens_details": {
+            "$ref": "#/components/schemas/ImageTokenDetails",
+            "description": "The input tokens by kind"
+          }
+        }
+      },
       "MediaDelivery": {
         "type": "string",
         "description": "Delivery mode of generated media: a URL to the file, or the bytes as\nbase64 text.\n\nThe set has two values. A request with an unknown value fails to parse.",
@@ -352,15 +417,15 @@
             ]
           },
           "usage": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "description": "Token usage of the generation, when the model reports it",
-            "additionalProperties": {},
-            "propertyNames": {
-              "type": "string"
-            }
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageUsage",
+                "description": "Token usage of the generation, when the model reports it"
+              }
+            ]
           }
         }
       }
