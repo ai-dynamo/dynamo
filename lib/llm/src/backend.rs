@@ -100,6 +100,8 @@ fn fill_missing_top_logprob_text(
         for entry in position.iter_mut() {
             if entry.token.is_none()
                 && let Ok(decoded) = tokenizer.decode(&[entry.token_id], skip_special_tokens)
+                && decoded.is_complete()
+                && !decoded.as_str().contains('\u{fffd}')
             {
                 let token: String = decoded.into();
                 if entry.bytes.is_none() && !token.is_empty() {
@@ -359,7 +361,11 @@ impl
                                     state
                                         .tokenizer
                                         .decode(&[*token_id], state.skip_special_tokens)
-                                        .map(|decoded| Some(decoded.into()))
+                                        .map(|decoded| {
+                                            (decoded.is_complete()
+                                                && !decoded.as_str().contains('\u{fffd}'))
+                                            .then(|| decoded.into())
+                                        })
                                 })
                                 .collect::<anyhow::Result<Vec<_>>>();
                             match tokens {
@@ -1503,6 +1509,96 @@ mod tests {
             "token decode failure must end the choice: {:?}",
             output.finish_reason
         );
+    }
+
+    #[tokio::test]
+    async fn engine_text_logprobs_do_not_fabricate_split_token_bytes() {
+        let mut tokenizer = tokenizers::Tokenizer::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+        ))
+        .expect("TinyLlama tokenizer");
+        tokenizer.add_tokens(&[tokenizers::AddedToken::from("\u{fffd}suffix", false)]);
+        let replacement_id = tokenizer.token_to_id("\u{fffd}suffix").unwrap();
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(
+            crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(tokenizer),
+        );
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        // The first three byte-fallback IDs represent the euro sign together.
+        let token_ids = vec![229, 133, 175, replacement_id];
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![LLMEngineOutput {
+                    token_ids: token_ids.clone(),
+                    text: Some("€\u{fffd}suffix".to_string()),
+                    log_probs: Some(vec![-0.125; token_ids.len()]),
+                    top_logprobs: Some(
+                        token_ids
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &token_id)| {
+                                vec![TopLogprob {
+                                    rank: 1,
+                                    token_id,
+                                    token: None,
+                                    logprob: -0.125,
+                                    bytes: (index == 0).then(|| vec![0xe2]),
+                                }]
+                            })
+                            .collect(),
+                    ),
+                    finish_reason: Some(FinishReason::Length),
+                    ..Default::default()
+                }]),
+            });
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+        assert_eq!(output.text.as_deref(), Some("€\u{fffd}suffix"));
+        assert_eq!(output.tokens, vec![None; token_ids.len()]);
+
+        let options = DeltaGeneratorOptions::new(None, None, true, None);
+        let mut generator =
+            DeltaGenerator::new("test-model".to_string(), options, "unicode".to_string());
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("OpenAI response conversion succeeds");
+        let content = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs")
+            .content
+            .as_ref()
+            .expect("selected logprobs");
+        assert_eq!(content.len(), token_ids.len());
+        for (index, entry) in content.iter().enumerate() {
+            assert_eq!(entry.token_id, Some(token_ids[index]));
+            assert_eq!(entry.token, "");
+            assert_eq!(entry.bytes, None);
+            assert_eq!(entry.top_logprobs[0].token, "");
+            assert_eq!(
+                entry.top_logprobs[0].bytes,
+                (index == 0).then(|| vec![0xe2]),
+                "preserve known candidate bytes without fabricating unknown bytes"
+            );
+        }
     }
 
     #[tokio::test]

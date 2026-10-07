@@ -20,7 +20,7 @@ def test_streaming_logprobs_require_complete_token_metadata(case):
         stream=True, prompt_logprobs=1, top_logprobs=1, expected_response=[]
     )
     payload.min_token_chunks = 2
-    token = {"token": "token_id:17", "logprob": -0.1, "bytes": [49, 55]}
+    token = {"token": "token_id:17", "logprob": -9999.0, "bytes": [49, 55]}
     logprob = {**token, "token_id": 17, "top_logprobs": [token]}
     chunks = [
         {
@@ -45,7 +45,7 @@ def test_streaming_logprobs_require_complete_token_metadata(case):
             "nvext": {
                 "completion_token_ids": [17],
                 "prompt_token_ids": [4, 5],
-                "prompt_logprobs": [None, {"5": {"logprob": -0.2}}],
+                "prompt_logprobs": [None, {"5": {"logprob": -9999.0}}],
             },
         },
         {

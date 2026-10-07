@@ -329,9 +329,7 @@ def _validate_chat_logprobs(content_logprobs, top_count: int) -> None:
         assert len(candidates) >= top_count, "Missing requested top logprobs"
         for entry in [item, *candidates]:
             value = entry["logprob"]
-            assert (
-                math.isfinite(value) and -9999 < value <= 0
-            ), f"Invalid logprob: {entry!r}"
+            assert math.isfinite(value) and value <= 0, f"Invalid logprob: {entry!r}"
             assert isinstance(entry["token"], str), f"Invalid token: {entry!r}"
             assert "bytes" in entry, f"Missing token bytes: {entry!r}"
             if entry["token"]:
@@ -493,7 +491,7 @@ class StreamingChatPayload(BasePayload):
                         int(candidate) >= 0
                     ), f"Invalid prompt token ID: {candidate!r}"
                     value = entry["logprob"]
-                    assert math.isfinite(value) and -9999 < value <= 0, entry
+                    assert math.isfinite(value) and value <= 0, entry
                     if entry.get("rank") is not None:
                         assert type(entry["rank"]) is int and entry["rank"] > 0, entry
         return content
