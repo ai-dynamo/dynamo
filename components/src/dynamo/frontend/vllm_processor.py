@@ -75,17 +75,10 @@ def _sampling_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
     ``SamplingParams.logprobs`` is an integer count of extra alternatives.
     When ``logprobs`` is true, the count comes from ``top_logprobs``. An
     omitted ``top_logprobs`` is ``0``: the sampled token, with an empty
-    alternative list. A positive integer ``top_logprobs`` enables that count
-    on its own, including when ``logprobs`` is false or omitted. ``0`` is a
-    real count, so callers must distinguish it from ``None``.
+    alternative list. ``0`` is a real count, so callers must distinguish it
+    from ``None``.
     """
     if logprobs is not True:
-        if (
-            isinstance(top_logprobs, int)
-            and not isinstance(top_logprobs, bool)
-            and top_logprobs > 0
-        ):
-            return top_logprobs
         return None
     if top_logprobs is None:
         return 0
@@ -99,7 +92,7 @@ def _sampling_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
 
 
 def _reject_unsupported_chat_logprobs(logprobs: Any, top_logprobs: Any) -> None:
-    """Reject chat logprob values the worker would silently drop.
+    """Validate chat logprob options before preprocessing.
 
     ``parse_logprob_options`` ignores every negative count, so forwarding one
     returns HTTP 200 with the logprobs omitted. Chat ``logprobs`` is a
@@ -118,6 +111,12 @@ def _reject_unsupported_chat_logprobs(logprobs: Any, top_logprobs: Any) -> None:
                 "Validation: `top_logprobs` must be an integer >= 0, got "
                 f"{top_logprobs}. A negative count is dropped by the worker "
                 "and the logprobs would be omitted from the response.",
+            )
+        if top_logprobs > 0 and logprobs is not True:
+            raise HttpError(
+                400,
+                "Validation: when using `top_logprobs`, "
+                "`logprobs` must be set to true.",
             )
         return
     if logprobs is True and top_logprobs is not None:
@@ -190,6 +189,8 @@ def _chat_choice_logprobs(
                 token = f"token_id:{entry_token_id}"
                 entry_bytes = _utf8_bytes(token)
             else:
+                if raw_entry.get("token") is None and entry_token_id is not None:
+                    token = tokenizer.decode(entry_token_id)
                 entry_bytes = raw_entry.get("bytes")
                 if not isinstance(entry_bytes, list):
                     entry_bytes = _utf8_bytes(token)

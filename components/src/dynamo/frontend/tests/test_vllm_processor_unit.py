@@ -1296,6 +1296,30 @@ async def test_generator_rejects_negative_top_logprobs_before_preprocess(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("logprobs", [False, None])
+async def test_generator_rejects_top_logprobs_without_logprobs(
+    vllm_processor_module, monkeypatch, logprobs
+):
+    preprocess = AsyncMock(
+        side_effect=AssertionError("must reject before preprocessing")
+    )
+    monkeypatch.setattr(vllm_processor_module, "preprocess_chat_request", preprocess)
+    request = {
+        "model": "test",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "top_logprobs": 1,
+    }
+    if logprobs is not None:
+        request["logprobs"] = logprobs
+    processor = _logprobs_processor(vllm_processor_module)
+    with pytest.raises(HttpError) as excinfo:
+        await anext(processor._generator_inner(request))
+    assert excinfo.value.code == 400
+    assert "`logprobs` must be set to true" in excinfo.value.message
+    preprocess.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_generator_rejects_integer_chat_logprobs_before_preprocess(
     vllm_processor_module,
     monkeypatch,
@@ -3693,8 +3717,6 @@ def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
     assert count(True, 0) == 0
     assert count(True, -1) is None
     assert count(None, None) is None
-    assert count(False, 3) == 3
-    assert count(None, 5) == 5
     assert count(False, 0) is None
     assert count(None, 0) is None
     assert count(False, True) is None
@@ -3735,6 +3757,37 @@ def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module, tokenizer
     assert entry["top_logprobs"] == [
         {"token": "Hi", "logprob": -0.5, "bytes": [72, 105]}
     ]
+
+
+@pytest.mark.parametrize("token_text", [None, ""])
+def test_chat_choice_logprobs_decode_null_but_preserve_empty_text(
+    vllm_processor_module, tokenizer, token_text
+):
+    selected_id, alternative_id = tokenizer.encode(
+        "Hello world", add_special_tokens=False
+    )
+    rows = [
+        {"token_id": selected_id, "rank": 1, "token": token_text, "logprob": -0.25},
+        {"token_id": alternative_id, "rank": 2, "token": token_text, "logprob": -0.5},
+    ]
+    built = vllm_processor_module._chat_choice_logprobs(
+        [{"token_id": selected_id, "logprob": -0.25, "top": rows}],
+        2,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    expected = [
+        {
+            "token": text,
+            "logprob": logprob,
+            "bytes": list(text.encode()) if text else None,
+        }
+        for text, logprob in zip(
+            ["Hello", " world"] if token_text is None else ["", ""],
+            [-0.25, -0.5],
+        )
+    ]
+    assert built["content"] == [{**expected[0], "top_logprobs": expected}]
 
 
 def test_chat_choice_logprobs_zero_top_count_omits_alternatives(
