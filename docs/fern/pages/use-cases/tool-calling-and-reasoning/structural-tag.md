@@ -127,9 +127,8 @@ tool arguments inside the structural tag:
 
 ### `auto` (default)
 
-- Tools with `strict: true` — their actual parameter schema is used.
-- Tools without `strict` — an unconstrained schema is used, allowing
-  the model to generate any valid content in the parser's native format.
+- Tools with `strict: true` or without `strict` — their actual parameter schema is used.
+- Tools with `strict: false` — an unconstrained schema is used, allowing the model to generate any valid content in the parser's native format.
 
 ### `strict`
 
