@@ -69,19 +69,23 @@ runs:
       id: check-health
       continue-on-error: true
       shell: bash
+      env:
+        BUILDER_NAME: ${{ inputs.builder_name }}
       run: |
-        echo "Checking BuildKit builder '${{ inputs.builder_name }}'..."
-        docker buildx inspect "${{ inputs.builder_name }}" --bootstrap
+        echo "Checking BuildKit builder health..."
+        docker buildx inspect --bootstrap -- "$BUILDER_NAME"
         echo "Builder is healthy."
 
     - name: Remove stale builder (if unhealthy)
       if: steps.check-health.outcome == 'failure'
       shell: bash
+      env:
+        BUILDER_NAME: ${{ inputs.builder_name }}
       run: |
-        echo "::warning::Builder '${{ inputs.builder_name }}' is unhealthy. Removing and re-initializing..."
+        echo "::warning::Builder is unhealthy. Removing and re-initializing..."
         # Other image jobs may still use the same run-scoped Kubernetes pods.
         # Only the workflow cleanup job should delete those shared daemons.
-        docker buildx rm --keep-daemon "${{ inputs.builder_name }}" || true
+        docker buildx rm --keep-daemon -- "$BUILDER_NAME" || true
 
     - name: Re-initialize builder (if unhealthy)
       if: steps.check-health.outcome == 'failure'
