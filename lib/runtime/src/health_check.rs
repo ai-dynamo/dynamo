@@ -314,6 +314,13 @@ impl HealthCheckManager {
 
 const STOP_GRACE: Duration = Duration::from_millis(100);
 
+/// Yield between response items so deadlines and shutdown can interrupt ready streams.
+async fn drain_stream_items<S: Stream + Unpin>(stream: &mut S) {
+    while stream.next().await.is_some() {
+        tokio::task::yield_now().await;
+    }
+}
+
 /// Drain a canary response until completion, its shared deadline, or runtime shutdown.
 async fn drain_response_stream<S>(
     mut stream: S,
@@ -326,15 +333,16 @@ where
     let context = stream.context();
 
     let outcome = tokio::select! {
-        _ = (&mut stream).for_each(|_| async {}) => DrainOutcome::Completed,
-        _ = tokio::time::sleep_until(deadline) => DrainOutcome::TimedOut,
+        biased;
         _ = cancel.cancelled() => DrainOutcome::Cancelled,
+        _ = tokio::time::sleep_until(deadline) => DrainOutcome::TimedOut,
+        _ = drain_stream_items(&mut stream) => DrainOutcome::Completed,
     };
 
     if outcome != DrainOutcome::Completed {
         context.stop_generating();
         // Keep polling briefly so the producer can observe the stop signal.
-        let _ = tokio::time::timeout(STOP_GRACE, (&mut stream).for_each(|_| async {})).await;
+        let _ = tokio::time::timeout(STOP_GRACE, drain_stream_items(&mut stream)).await;
     }
 
     outcome
@@ -469,6 +477,45 @@ mod bounded_drain_tests {
             stream::iter([healthy_item()]).chain(stream::pending()),
             live,
         )
+    }
+
+    /// Ready items must not starve either stop condition or the post-stop deadline.
+    #[tokio::test(start_paused = true)]
+    async fn ready_stream_cannot_starve_deadline_or_cancellation() {
+        for cancel_drain in [false, true] {
+            let live = Arc::new(AtomicUsize::new(0));
+            let mut polls = 0;
+            let inner = stream::repeat_with(move || {
+                polls += 1;
+                // Fail promptly if a single poll tries to consume this endless stream.
+                assert!(polls < 100, "the drain must yield between ready items");
+                healthy_item()
+            });
+            let response_stream = probed_response_stream(inner, &live);
+            let context = response_stream.context();
+            let cancel = CancellationToken::new();
+            let drain = drain_response_stream(
+                response_stream,
+                tokio::time::Instant::now() + Duration::from_millis(10),
+                cancel.clone(),
+            );
+            tokio::pin!(drain);
+            assert!(futures::poll!(drain.as_mut()).is_pending());
+
+            let expected = if cancel_drain {
+                cancel.cancel();
+                DrainOutcome::Cancelled
+            } else {
+                tokio::time::advance(Duration::from_millis(10)).await;
+                DrainOutcome::TimedOut
+            };
+            assert!(futures::poll!(drain.as_mut()).is_pending());
+            assert!(context.is_stopped());
+
+            tokio::time::advance(STOP_GRACE).await;
+            assert_eq!(drain.await, expected);
+            assert_eq!(live.load(Ordering::SeqCst), 0);
+        }
     }
 
     /// A deadline must release the response and signal the engine to stop.
