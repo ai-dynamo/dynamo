@@ -28,6 +28,11 @@ const DP_RANK: u32 = 0;
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
 type BoxedStatusResult<T> = Result<T, Box<Status>>;
 
+enum GenerationEvent {
+    Output(OutputSignal),
+    Aborted,
+}
+
 /// Wire-level role exposed by one mock server process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ServerMode {
@@ -242,15 +247,20 @@ impl VllmMockerService {
             .clone()
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
-        let prepared =
-            PreparedRequest::new(request.into_inner(), &self.config).map_err(|status| *status)?;
-        let live = self
-            .engine
-            .submit(prepared.direct_request())
-            .await
-            .map_err(|error| {
-                Status::internal(format!("Mocker request submission failed: {error}"))
-            })?;
+        let prepared = PreparedRequest::new(
+            request.into_inner(),
+            &self.config,
+            self.server_info.kv_block_size as usize,
+            (self.server_info.max_model_len > 0).then_some(self.server_info.max_model_len),
+        )
+        .map_err(|status| *status)?;
+        let direct = prepared.direct_request();
+        let live = if prepared.has_decode_handoff {
+            self.engine.submit_decode(direct).await
+        } else {
+            self.engine.submit(direct).await
+        }
+        .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
         Ok((prepared, live, permit))
     }
 }
@@ -272,9 +282,15 @@ impl pb::inference_server::Inference for VllmMockerService {
             if signal.completed {
                 return Ok(Response::new(pb::GenerateResponse {
                     prompt_info: Some(prepared.prompt_info()),
-                    outputs: Some(prepared.sequence_output(&output_ids, true)),
+                    outputs: Some(prepared.sequence_output(&output_ids, output_ids.len(), true)),
                 }));
             }
+        }
+        if live.is_aborted() {
+            return Ok(Response::new(pb::GenerateResponse {
+                prompt_info: Some(prepared.prompt_info()),
+                outputs: Some(prepared.aborted_output(&output_ids)),
+            }));
         }
         Err(Status::internal(
             "Mocker output channel closed before a terminal response",
@@ -303,9 +319,14 @@ impl pb::inference_server::Inference for VllmMockerService {
                     // which cancels any unfinished scheduler work promptly.
                     _ = signal_tx.closed() => break,
                     signal = live.recv() => {
-                        let Some(signal) = signal else { break };
+                        let Some(signal) = signal else {
+                            if live.is_aborted() {
+                                let _ = signal_tx.send(GenerationEvent::Aborted).await;
+                            }
+                            break;
+                        };
                         let completed = signal.completed;
-                        if signal_tx.send(signal).await.is_err() || completed {
+                        if signal_tx.send(GenerationEvent::Output(signal)).await.is_err() || completed {
                             break;
                         }
                     }
@@ -320,13 +341,20 @@ impl pb::inference_server::Inference for VllmMockerService {
             };
 
             let mut generated = 0usize;
-            while let Some(signal) = signal_rx.recv().await {
+            while let Some(event) = signal_rx.recv().await {
+                let GenerationEvent::Output(signal) = event else {
+                    yield pb::GenerateResponse {
+                        prompt_info: None,
+                        outputs: Some(prepared.aborted_output(&[])
+                            .with_total_output_tokens(generated)),
+                    };
+                    return;
+                };
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 generated += 1;
                 yield pb::GenerateResponse {
                     prompt_info: None,
-                    outputs: Some(prepared.sequence_output(&[token_id], signal.completed)
-                        .with_total_output_tokens(generated)),
+                    outputs: Some(prepared.sequence_output(&[token_id], generated, signal.completed)),
                 };
                 if signal.completed {
                     return;

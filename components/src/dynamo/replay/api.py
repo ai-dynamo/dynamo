@@ -73,6 +73,7 @@ class _CommonReplayOptions(TypedDict, total=False):
     capture_per_request: bool
     capture_planner_details: bool
     telemetry_options: TelemetryOptions | None
+    kv_event_lag_ms: float | None
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
@@ -260,6 +261,7 @@ def run_trace_replay(
     execution_model=None,
     weka_nested_timestamp_basis=None,
     telemetry_options=None,
+    kv_event_lag_ms=None,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
@@ -267,6 +269,12 @@ def run_trace_replay(
     and execution. Planner creation and bootstrap happen before that boundary.
     ``weka_nested_timestamp_basis`` overrides Weka nested timestamp interpretation;
     omitting it retains AISimulate's automatic selection.
+
+    ``kv_event_lag_ms`` delays the KV cache events (blocks stored and removed)
+    the router's indexer observes by that much simulated time. Prefill and
+    request completions stay immediate, as a live router observes them in-band
+    on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
+    KV-router replay only.
 
     Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
     leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
@@ -320,6 +328,7 @@ def run_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "kv_event_lag_ms": kv_event_lag_ms,
     }
     replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
@@ -451,8 +460,10 @@ def run_synthetic_trace_replay(
     capture_per_request=False,
     capture_planner_details=True,
     telemetry_options=None,
+    kv_event_lag_ms=None,
 ) -> ReplayReport | dict[str, Any]:
-    """Run synthetic replay with the same optional ``TelemetryOptions`` contract."""
+    """Run synthetic replay with the same optional ``TelemetryOptions`` and
+    ``kv_event_lag_ms`` contracts as :func:`run_trace_replay`."""
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -479,6 +490,7 @@ def run_synthetic_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
+        "kv_event_lag_ms": kv_event_lag_ms,
     }
     replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":

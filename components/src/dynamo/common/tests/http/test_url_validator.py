@@ -611,11 +611,13 @@ async def test_redirect_chain_in_the_limit_message_is_bounded() -> None:
     long_hop = "https://example.com/" + "A" * 200_000
 
     class _Client(HttpClient):
-        async def _fetch_simple(self, url, timeout, *, max_bytes=None, policy=None):
+        async def _fetch_simple(
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+        ):
             raise AssertionError("unused")
 
         async def _fetch_body_or_redirect(
-            self, url, timeout, *, max_bytes=None, policy=None
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
         ):
             return None, long_hop
 

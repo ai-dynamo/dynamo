@@ -47,7 +47,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
   > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
   > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
   > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-  > | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14-rc1 |
+  > | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
 
   </Tab>
 </Tabs>
@@ -226,4 +226,4 @@ args:
 The immutable operator origin version controls this behavior. An operator-only upgrade does not add
 the variables or change the command line of an existing DGD, so it does not roll that workload. To
 use the aliases, create the DGD with Dynamo Operator 1.6.0 or later. When Grove is managed outside
-the Dynamo platform chart, install Grove `v0.1.0-alpha.14-rc1` or later before creating the DGD.
+the Dynamo platform chart, install Grove `v0.1.0-alpha.14` or later before creating the DGD.
