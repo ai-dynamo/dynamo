@@ -99,6 +99,7 @@ jobs:
           flavor: general
           arch: linux/amd64,linux/arm64
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          fresh_builder: 'true'
 
       - name: Calculate extra tags
         id: extra-tags
