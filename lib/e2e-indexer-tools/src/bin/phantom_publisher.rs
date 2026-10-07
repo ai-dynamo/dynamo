@@ -14,6 +14,10 @@
 //! (the XPUB socket reports subscriptions; `--subscribe-timeout-s` fails the run). The warm-up
 //! prefix is then paced by block rate and the timed section open loop on the shared wall-clock
 //! mapping. Sends that hit the high-water mark are dropped, as a PUB socket would, but counted.
+//!
+//! The summary lists, per phantom, what it planned and what it sent (events, write blocks, last
+//! event ID), so `delivery_check` can require exact delivery per phantom. `finished_unix_ms` is
+//! stamped after the ZMQ context terminated, i.e. after the sockets' linger flush.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -183,10 +187,20 @@ impl Section {
     }
 }
 
+/// One phantom's successful sends; written only by its own task.
+#[derive(Default)]
+struct PhantomTally {
+    events: AtomicU64,
+    write_blocks: AtomicU64,
+    last_event_id: AtomicU64,
+}
+
 #[derive(Default)]
 struct Shared {
     warmup: Section,
     timed: Section,
+    /// Indexed by the phantom's offset in this process.
+    per_phantom: Vec<PhantomTally>,
     /// Timed-section lateness versus the schedule, measured once the send returns.
     lag: Latency,
     send_errors: Counter,
@@ -217,12 +231,17 @@ fn write_blocks(events: &[RouterEvent]) -> (u64, u64) {
 
 struct Phantom {
     index: u64,
+    /// Offset in this process (index into `Shared::per_phantom`).
+    slot: usize,
     worker_id: u64,
     salt_key: u64,
     delay_us: u64,
     base: Arc<ProcessedBase>,
     /// Timed lists this phantom sends: those whose deadline falls before the stop.
     timed_end: usize,
+    /// Everything it sends when nothing is dropped: the warm-up (unless skipped) and the timed
+    /// lists before `timed_end`. Event IDs run contiguously from 1 over both.
+    planned: WriteTotals,
     socket: PhantomSocket,
 }
 
@@ -267,7 +286,22 @@ fn send(
     })();
     *sequence += 1;
     match result {
-        Ok((SendOutcome::Sent, bytes)) => section.record(events, bytes),
+        Ok((SendOutcome::Sent, bytes)) => {
+            section.record(events, bytes);
+            let (stored, removed) = write_blocks(events);
+            let tally = &shared.per_phantom[phantom.slot];
+            tally
+                .events
+                .fetch_add(events.len() as u64, Ordering::Relaxed);
+            tally
+                .write_blocks
+                .fetch_add(stored + removed, Ordering::Relaxed);
+            if let Some(last) = events.last() {
+                tally
+                    .last_event_id
+                    .store(last.event.event_id, Ordering::Relaxed);
+            }
+        }
         Ok((SendOutcome::HwmDrop, _)) => section.record_drop(events),
         Err(error) => {
             if shared.send_errors.total() == 0 {
@@ -433,14 +467,16 @@ fn plan_sends(
             };
         }
         let prefixes: Vec<usize> = group.iter().map(|phantom| phantom.timed_end).collect();
-        for totals in prefix_totals(&base.timed, &prefixes) {
-            planned_timed.add(totals);
-        }
-        if warmup {
-            let warmup_totals = prefix_totals(&base.warmup, &[base.warmup.lists()])[0];
-            for _ in 0..group.len() {
-                planned_warmup.add(warmup_totals);
-            }
+        let warmup_totals = if warmup {
+            prefix_totals(&base.warmup, &[base.warmup.lists()])[0]
+        } else {
+            WriteTotals::default()
+        };
+        for (phantom, timed) in group.iter_mut().zip(prefix_totals(&base.timed, &prefixes)) {
+            planned_timed.add(timed);
+            planned_warmup.add(warmup_totals);
+            phantom.planned = warmup_totals;
+            phantom.planned.add(timed);
         }
         start = end;
     }
@@ -582,11 +618,13 @@ async fn main() -> Result<()> {
         tracing::debug!(phantom = index, %bound, "phantom bound");
         phantom_states.push(Phantom {
             index,
+            slot: offset,
             worker_id: layout.worker_id(index),
             salt_key: layout.salt_key(index),
             delay_us: layout.start_delay_us(index, args.start_spread_ms * 1000),
             base,
             timed_end: 0,
+            planned: WriteTotals::default(),
             socket,
         });
     }
@@ -655,7 +693,14 @@ async fn main() -> Result<()> {
         })
     );
 
+    let planned_per_phantom: Vec<(u64, WriteTotals)> = phantom_states
+        .iter()
+        .map(|phantom| (phantom.worker_id, phantom.planned))
+        .collect();
     let shared = Arc::new(Shared {
+        per_phantom: (0..phantom_states.len())
+            .map(|_| PhantomTally::default())
+            .collect(),
         first_timed_send_us: AtomicU64::new(u64::MAX),
         ..Shared::default()
     });
@@ -701,15 +746,26 @@ async fn main() -> Result<()> {
         })
     };
 
+    let aborts: Vec<_> = handles.iter().map(|handle| handle.abort_handle()).collect();
     let all_done = futures::future::join_all(handles);
+    tokio::pin!(all_done);
     tokio::select! {
-        _ = all_done => {}
+        _ = &mut all_done => {}
         _ = tokio::signal::ctrl_c() => {
             shared.stop.store(true, Ordering::Relaxed);
             tracing::warn!("interrupted; stopping phantoms");
+            // A phantom may sleep until a distant deadline: cancel it so its socket closes.
+            for abort in &aborts {
+                abort.abort();
+            }
+            all_done.await;
         }
     }
     reporter.abort();
+    let sends_done_unix_ms = unix_now_us() / 1000;
+    // Every socket is closed; terminating the context waits for their linger flush, so the
+    // indexer has been handed every message before `finished_unix_ms`.
+    tokio::task::spawn_blocking(move || drop(context)).await?;
 
     let first = shared.first_timed_send_us.load(Ordering::Relaxed);
     let last = shared.last_timed_send_us.load(Ordering::Relaxed);
@@ -721,9 +777,29 @@ async fn main() -> Result<()> {
     let timed_write_blocks = shared.timed.sent().write_blocks();
     let mut sent = shared.warmup.sent();
     sent.add(shared.timed.sent());
+    let per_phantom_rows: Vec<[u64; 7]> = planned_per_phantom
+        .iter()
+        .zip(&shared.per_phantom)
+        .map(|((worker_id, planned), tally)| {
+            [
+                *worker_id,
+                planned.events,
+                planned.write_blocks(),
+                // Event IDs run contiguously from 1 through the warm-up and the timed lists.
+                if warmup { planned.events } else { 0 },
+                tally.events.load(Ordering::Relaxed),
+                tally.write_blocks.load(Ordering::Relaxed),
+                tally.last_event_id.load(Ordering::Relaxed),
+            ]
+        })
+        .collect();
     let summary = json!({
         "kind": "summary",
+        "sends_done_unix_ms": sends_done_unix_ms,
         "finished_unix_ms": unix_now_us() / 1000,
+        "stop_at_unix_ms": stop_at_unix_us.map(|stop| stop / 1000),
+        "first_timed_send_unix_ms": (first != u64::MAX).then_some(first / 1000),
+        "last_timed_send_unix_ms": (first != u64::MAX).then_some(last / 1000),
         "plan": plan,
         "subscribe_latency": subscribe_latency,
         "warmup": shared.warmup.totals(),
@@ -740,8 +816,22 @@ async fn main() -> Result<()> {
         "unsubscribed_phantoms": shared.unsubscribed.load(Ordering::Relaxed),
         "send_errors": shared.send_errors.total(),
         "interrupted": shared.stop.load(Ordering::Relaxed),
+        "per_phantom_columns": [
+            "worker_id",
+            "planned_events",
+            "planned_write_blocks",
+            "planned_last_event_id",
+            "sent_events",
+            "sent_write_blocks",
+            "last_sent_event_id",
+        ],
+        "per_phantom": per_phantom_rows,
     });
-    println!("{summary}");
+    let mut line = summary.clone();
+    line.as_object_mut()
+        .expect("the summary is an object")
+        .remove("per_phantom");
+    println!("{line}");
     if let Some(path) = &args.summary_out {
         std::fs::write(path, serde_json::to_string_pretty(&summary)?)?;
     }

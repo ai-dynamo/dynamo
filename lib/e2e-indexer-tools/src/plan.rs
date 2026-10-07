@@ -183,8 +183,10 @@ pub const DEFAULT_SOCKET_RESERVE: u64 = 64;
 pub struct IndexerSockets {
     /// KV event sources: phantoms plus live workers.
     pub kv_sources: u64,
-    /// `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB`: the smallest fan-in that fits the budget.
+    /// `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB`: the pinned value, or the smallest fan-in that fits.
     pub endpoints_per_sub: u64,
+    /// The smallest fan-in that fits the budget at this load point.
+    pub min_endpoints_per_sub: u64,
     pub kv_sub_sockets: u64,
     /// Sockets outside the KV SUB pool: per-live-worker topics plus the reserve.
     pub other_sockets: u64,
@@ -194,12 +196,15 @@ pub struct IndexerSockets {
     pub min_nofile: u64,
 }
 
+/// The indexer's socket budget. `pinned` fixes `DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB` (for example
+/// one value across a whole sweep, so every point takes the same ingest path); it must fit.
 pub fn indexer_sockets(
     phantoms: u64,
     live_sources: u64,
     sockets_per_live_source: u64,
     reserve: u64,
     socket_cap: u64,
+    pinned: Option<u64>,
 ) -> Result<IndexerSockets> {
     let other_sockets = live_sources * sockets_per_live_source + reserve;
     ensure!(
@@ -208,11 +213,19 @@ pub fn indexer_sockets(
         live_sources * sockets_per_live_source
     );
     let kv_sources = phantoms + live_sources;
-    let endpoints_per_sub = kv_sources.div_ceil(socket_cap - other_sockets).max(1);
+    let min_endpoints_per_sub = kv_sources.div_ceil(socket_cap - other_sockets).max(1);
+    if let Some(pinned) = pinned {
+        ensure!(
+            pinned >= min_endpoints_per_sub,
+            "the pinned endpoints per SUB socket ({pinned}) is below the {min_endpoints_per_sub} this load point needs under the {socket_cap}-socket cap"
+        );
+    }
+    let endpoints_per_sub = pinned.unwrap_or(min_endpoints_per_sub);
     let kv_sub_sockets = kv_sources.div_ceil(endpoints_per_sub);
     Ok(IndexerSockets {
         kv_sources,
         endpoints_per_sub,
+        min_endpoints_per_sub,
         kv_sub_sockets,
         other_sockets,
         socket_cap,
@@ -262,6 +275,7 @@ mod tests {
                 DEFAULT_SOCKETS_PER_LIVE_SOURCE,
                 DEFAULT_SOCKET_RESERVE,
                 ZMQ_MAX_SOCKETS,
+                None,
             )
         };
         // 1x: 2000 KV sources over 1023 - 200*2 - 64 = 559 sockets.
@@ -276,6 +290,26 @@ mod tests {
         assert_eq!(at(4, 1).unwrap().endpoints_per_sub, 1);
         // 2000 live workers need 4000 ungrouped sockets: no fan-in fixes that.
         assert!(at(18_000, 2_000).is_err());
+
+        // A sweep pins one fan-in: a smaller point keeps the grouped path...
+        let pin = |phantoms, pinned| {
+            indexer_sockets(
+                phantoms,
+                200,
+                DEFAULT_SOCKETS_PER_LIVE_SOURCE,
+                DEFAULT_SOCKET_RESERVE,
+                ZMQ_MAX_SOCKETS,
+                Some(pinned),
+            )
+        };
+        let small = pin(180, 4).unwrap();
+        assert_eq!(
+            (small.endpoints_per_sub, small.min_endpoints_per_sub),
+            (4, 1)
+        );
+        assert_eq!(small.kv_sub_sockets, 95);
+        // ...and a pin too small for the point is refused.
+        assert!(pin(1800, 3).is_err());
     }
 
     #[test]

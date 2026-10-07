@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
-use dynamo_e2e_indexer_tools::delivery::DEFAULT_MIN_DELIVERED_FRACTION;
+use dynamo_e2e_indexer_tools::delivery::Rule;
 use dynamo_e2e_indexer_tools::plan::{
     DEFAULT_SOCKET_RESERVE, DEFAULT_SOCKETS_PER_LIVE_SOURCE, DEFAULT_WORKER_ID_BASE, PhantomLayout,
     TimeMap, ZMQ_MAX_SOCKETS, indexer_sockets, natural_rates, resolve_speedup,
@@ -60,6 +60,11 @@ struct Args {
     socket_reserve: u64,
     #[arg(long, default_value_t = ZMQ_MAX_SOCKETS)]
     zmq_max_sockets: u64,
+    /// Pin DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB instead of the smallest value that fits. Pin one
+    /// value (at least 2, so every point takes the grouped SUB path) for a whole sweep, in both
+    /// arms; it must fit the largest point.
+    #[arg(long)]
+    endpoints_per_sub: Option<u64>,
     /// Write the indexer's experiment environment here (`export` lines). Source the same file
     /// in both arms.
     #[arg(long)]
@@ -71,8 +76,6 @@ struct Args {
     /// Plan despite streams below --min-timed-remove-ratio (smoke tests only).
     #[arg(long)]
     allow_low_eviction: bool,
-    #[arg(long, default_value_t = DEFAULT_MIN_DELIVERED_FRACTION)]
-    min_delivered_fraction: f64,
 }
 
 fn publisher_args(
@@ -147,6 +150,7 @@ fn main() -> Result<()> {
         args.sockets_per_live_source,
         args.socket_reserve,
         args.zmq_max_sockets,
+        args.endpoints_per_sub,
     )?;
     let eviction = eviction_report(&manifest, args.min_timed_remove_ratio);
     let flagged_rows: Vec<_> = eviction
@@ -185,8 +189,10 @@ fn main() -> Result<()> {
             "env": { "DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB": sockets.endpoints_per_sub },
         },
         "acceptance": {
-            "min_delivered_fraction": args.min_delivered_fraction,
-            "rule": "per arm, run delivery_check on the publisher summaries and the indexer accounting; the load point is invalid if either arm is: delivered write blocks below min_delivered_fraction of planned (run, warm-up, and timed), any gap or rank reset, any lost prefix, late warm-up, send errors, or a stale snapshot",
+            "defaults": Rule::default(),
+            "expect_endpoints_per_sub": sockets.endpoints_per_sub,
+            "rule": "per arm, run delivery_check --expect-endpoints-per-sub <this plan's value> on every publisher summary and the indexer accounting (read three report intervals after the last publisher exits); the load point is invalid if either arm is: any phantom not delivered exactly as planned (events, write blocks, first and last event ID); the timed start or end mark missing; warm-up not exactly admitted at the start mark; window delivery below min_window_fraction of planned timed or above it; event queues not drained within max_drain_ms at either mark; timed send lag p99 or max over bounds or a send past the stop; any gap or rank reset; a late warm-up, send error or interruption; a source-count or endpoints_per_sub mismatch; or a stale file",
+            "indexer_env": "launch the indexer with DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS = --start-at-unix-ms and DYN_EXPERIMENT_STATIC_KV_TIMED_END_UNIX_MS = start + duration + 1-10 s",
         },
     });
     println!("{}", serde_json::to_string_pretty(&plan)?);

@@ -8,8 +8,12 @@
 #   (a) publishers started BEFORE the indexer hold at the subscription gate, then deliver the
 #       whole warm-up once the indexer subscribes;
 #   (b) removes flow end to end and are counted (use streams with eviction);
-#   (c) the indexer's delivered counters equal the publisher's sent totals (delivery_check
-#       --require-exact), and driver lookups hit the phantoms' blocks.
+#   (c) the full delivery rule passes (delivery_check): every phantom delivered exactly as
+#       planned, warm-up complete at the timed start, the window delivered between the indexer's
+#       start and end marks, event queues drained at both marks, pacing within bounds; and
+#       driver lookups hit the phantoms' blocks;
+#   (d) the indexer ran the grouped SUB path: ENDPOINTS_PER_SUB (default 2) phantoms per socket,
+#       pinned through phantom_plan exactly as a sweep pins it.
 #
 #   WORK=<scratch dir> STREAMS=<phantom-stream dir> lib/e2e-indexer-tools/scripts/local_smoke.sh
 #
@@ -38,6 +42,10 @@ LEAD_S=${LEAD_S:-90}
 # Seconds the publisher must hold at the gate before the indexer starts.
 GATE_HOLD_S=${GATE_HOLD_S:-10}
 REPORT_S=${REPORT_S:-2}
+# Pinned DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB; at least 2 exercises the grouped SUB path.
+ENDPOINTS_PER_SUB=${ENDPOINTS_PER_SUB:-2}
+# Seconds after the publishers' stop at which the indexer marks the window's end.
+END_GRACE_S=${END_GRACE_S:-2}
 # Streams without steady-state eviction need PLAN_ARGS=--allow-low-eviction.
 read -r -a PLAN_EXTRA <<<"${PLAN_ARGS:-}"
 # Page size 1 needs the SGLang mocker engine: MOCKER_ARGS="--engine-type sglang".
@@ -90,10 +98,12 @@ print(v)' "$1" "$2"
 }
 
 "$BIN/phantom_plan" --streams "$STREAMS" --total-phantoms "$PHANTOMS" --speedup "$SPEEDUP" \
-  --duration-s "$DURATION_S" --live-sources 1 --publishers "127.0.0.1:$PUB_PORT:$PHANTOMS" \
+  --duration-s "$DURATION_S" --live-sources 1 --endpoints-per-sub "$ENDPOINTS_PER_SUB" \
+  --publishers "127.0.0.1:$PUB_PORT:$PHANTOMS" \
   --sources-out "$WORK/sources.txt" --indexer-env-out "$WORK/indexer.env" "${PLAN_EXTRA[@]}" \
   >"$WORK/plan.json"
 cat "$WORK/indexer.env"
+grep -q "^export DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB=$ENDPOINTS_PER_SUB\$" "$WORK/indexer.env"
 
 start mocker "$PY" -m dynamo.mocker --model-path "$MODEL" --model-name smoke-model \
   --block-size "$BLOCK_SIZE" --num-workers 1 "${MOCKER_EXTRA[@]}"
@@ -101,6 +111,7 @@ wait_for mocker "$WORK/logs/mocker.log" "generate" 240
 
 # (a) The publisher starts first and must hold at the subscription gate.
 START_AT=$(( $(date +%s%3N) + LEAD_S * 1000 ))
+END_AT=$(( START_AT + (DURATION_S + END_GRACE_S) * 1000 ))
 echo "$START_AT" >"$WORK/start_at_unix_ms"
 start publisher "$BIN/phantom_publisher" --streams "$STREAMS" --total-phantoms "$PHANTOMS" \
   --count "$PHANTOMS" --advertise-host 127.0.0.1 --base-port "$PUB_PORT" --bind-host 127.0.0.1 \
@@ -120,10 +131,15 @@ start indexer bash -c 'set -a; source "$1"; shift; exec "$@"' _ "$WORK/indexer.e
   env DYN_EXPERIMENT_STATIC_KV_ACCOUNTING_OUT="$WORK/accounting.json" \
   DYN_EXPERIMENT_STATIC_KV_REPORT_S="$REPORT_S" \
   DYN_EXPERIMENT_STATIC_KV_TIMED_START_UNIX_MS="$START_AT" \
+  DYN_EXPERIMENT_STATIC_KV_TIMED_END_UNIX_MS="$END_AT" \
   "$PY" -m dynamo.router --endpoint dynamo.backend.generate --serve-indexer \
   --router-block-size "$BLOCK_SIZE"
 wait_for "publisher gate" "$WORK/logs/publisher.log" '"kind":"subscribed"' 240
 echo "publisher passed the gate after the indexer subscribed"
+# (d) The indexer configured the pinned fan-in.
+sed 's/\x1b\[[0-9;]*m//g' "$WORK/logs/indexer.log" |
+  grep "Configured direct-ZMQ KV ingress SUB fan-in" | grep -q "endpoints_per_sub=$ENDPOINTS_PER_SUB "
+echo "indexer configured endpoints_per_sub=$ENDPOINTS_PER_SUB"
 
 start frontend "$PY" -m dynamo.frontend --http-port "$HTTP_PORT" --router-mode kv \
   --use-remote-indexer --kv-cache-block-size "$BLOCK_SIZE"
@@ -149,15 +165,16 @@ while kill -0 "$PUBLISHER_PID" 2>/dev/null; do sleep 1; done
 FINISHED=$(json_get "$WORK/publisher-summary.json" finished_unix_ms)
 for _ in $(seq 60); do
   [ -f "$WORK/accounting.json" ] &&
-    [ "$(json_get "$WORK/accounting.json" t_unix_ms)" -gt $(( FINISHED + 2 * REPORT_S * 1000 )) ] &&
+    [ "$(json_get "$WORK/accounting.json" t_unix_ms)" -gt $(( FINISHED + 3 * REPORT_S * 1000 )) ] &&
     break
   sleep 1
 done
 cp "$WORK/accounting.json" "$WORK/accounting-final.json"
 
-# (c) delivered == sent, plus the rule; (b) removes were delivered and counted.
+# (c) the delivery rule; (b) removes were delivered and counted.
 "$BIN/delivery_check" --publisher-summary "$WORK/publisher-summary.json" \
-  --indexer-accounting "$WORK/accounting-final.json" --require-exact --label smoke \
+  --indexer-accounting "$WORK/accounting-final.json" \
+  --expect-endpoints-per-sub "$ENDPOINTS_PER_SUB" --label smoke \
   | tee "$WORK/delivery.json"
 REMOVED=$(json_get "$WORK/accounting-final.json" accounting.totals.removed_blocks)
 echo "delivered removed blocks: $REMOVED"
