@@ -62,7 +62,7 @@ use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 #[cfg(feature = "mm-routing")]
 use crate::preprocessor::media::MediaFetcher;
-use crate::preprocessor::media::{MediaDecoder, MediaLoader};
+use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -3260,6 +3260,22 @@ impl OpenAIPreprocessor {
 
                 match (url, uuid) {
                     (Some(url), _) => {
+                        // Every media URL passes here, with or without frontend
+                        // decoding, so this applies the workers' data: URL cap.
+                        if url.scheme() == "data" {
+                            let size = url.as_str().len();
+                            let limit = max_data_url_bytes();
+                            if size > limit {
+                                let message = format!(
+                                    "{type_str} data: URL is {size} bytes, exceeds the {limit}-byte limit. \
+                                     To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) on \
+                                     both the frontend and the workers."
+                                );
+                                // The text holds a fixed modality key and two
+                                // numbers, so the 400 body can carry it.
+                                return Err(invalid_argument_error(message));
+                            }
+                        }
                         if has_media_loader {
                             fetch_tasks.push(MediaFetchTask {
                                 modality: type_str,
@@ -9713,6 +9729,14 @@ mod tests {
         {% if not ns.has_user %}{{ raise_exception('No user query found in messages.') }}{% endif %}\
         {{ messages[0]['content'] }}";
 
+    const REQUIRES_LEADING_SYSTEM_TEMPLATE: &str = "\
+        {%- for message in messages -%}\
+            {%- if message['role'] == 'system' and not loop.first -%}\
+                {{- raise_exception('System message must be at the beginning.') -}}\
+            {%- endif -%}\
+            {{- message['role'] }}:{{ message['content'] }}\n\
+        {%- endfor -%}";
+
     fn render_through_preprocessor(
         formatter: &dyn OAIPromptFormatter,
         request: &dyn OAIChatLikeRequest,
@@ -9766,6 +9790,43 @@ mod tests {
         let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
 
         assert_eq!(rendered.as_str(), "hello");
+    }
+
+    #[test]
+    fn test_nonleading_system_message_normalized_for_strict_template() {
+        let formatter = test_prompt_formatter(REQUIRES_LEADING_SYSTEM_TEMPLATE);
+        let anthropic_request: crate::protocols::anthropic::AnthropicCreateMessageRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "max_tokens": 100,
+                "system": "You are Claude Code.",
+                "messages": [
+                    {"role": "user", "content": "Run make test."},
+                    {"role": "system", "content": "Available agent types and skills."}
+                ],
+                "tools": [{
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"}
+                        },
+                        "required": ["command"]
+                    }
+                }]
+            }))
+            .unwrap();
+        let request: NvCreateChatCompletionRequest = anthropic_request.try_into().unwrap();
+
+        let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
+
+        assert_eq!(
+            rendered.as_str(),
+            "system:You are Claude Code.\
+             user:Run make test.\
+             user:Available agent types and skills."
+        );
     }
 
     #[test]
@@ -11087,6 +11148,67 @@ mod tests {
             ImageDimFetchFailure::from_error(anyhow::anyhow!("image header was truncated"));
         let recoverable = recoverable.to_error();
         assert!(!MediaFetcher::is_policy_rejection(&recoverable));
+    }
+
+    /// The gather loop applies the workers' data: URL cap on the path that
+    /// passes URLs through to the backend, where no worker check runs first.
+    #[tokio::test]
+    async fn gather_rejects_data_url_over_the_size_cap() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert!(preprocessor.media_loader.is_none());
+
+        let request_with_data_url = |size: usize| -> NvCreateChatCompletionRequest {
+            let prefix = "data:audio/wav;base64,";
+            let url = format!("{prefix}{}", "A".repeat(size - prefix.len()));
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "audio_url", "audio_url": {"url": url}}]
+                }]
+            }))
+            .unwrap()
+        };
+
+        temp_env::async_with_vars([("DYN_MM_MAX_DATA_URL_MB", Some("1"))], async {
+            let limit = 1024 * 1024;
+            let mut builder = PreprocessedRequest::builder();
+            preprocessor
+                .gather_multi_modal_data(&request_with_data_url(limit), &mut builder, None, &[])
+                .await
+                .expect("a data: URL at the cap is accepted");
+
+            let mut builder = PreprocessedRequest::builder();
+            let error = preprocessor
+                .gather_multi_modal_data(&request_with_data_url(limit + 1), &mut builder, None, &[])
+                .await
+                .expect_err("a data: URL over the cap is rejected");
+            let dynamo_error = error
+                .downcast_ref::<DynamoError>()
+                .expect("error should preserve the DynamoError type");
+            assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+            assert!(
+                dynamo_error.message().contains(
+                    "audio_url data: URL is 1048577 bytes, exceeds the 1048576-byte limit"
+                ),
+                "{}",
+                dynamo_error.message()
+            );
+            assert!(
+                dynamo_error.message().contains(
+                    "To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) on both \
+                     the frontend and the workers."
+                ),
+                "{}",
+                dynamo_error.message()
+            );
+        })
+        .await;
     }
 
     /// A blocked destination on the URL-passthrough path must fail the whole

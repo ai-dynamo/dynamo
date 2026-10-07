@@ -114,7 +114,7 @@ class DgdPlannerComponentConfig(Component):
             spec=PodSpec(
                 containers=[
                     Container(
-                        image="nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.0",  # placeholder
+                        image="nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.1",  # placeholder
                         workingDir=f"{get_workspace_dir()}/components/src/dynamo/planner",
                         command=["python3", "-m", "dynamo.planner"],
                         args=[],

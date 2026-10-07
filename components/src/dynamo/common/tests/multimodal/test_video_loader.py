@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import sys
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-from dynamo.common.http import HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import codec_errors
 from dynamo.common.multimodal import video_loader as video_loader_module
@@ -33,6 +34,21 @@ async def test_load_video_rejects_http_by_default():
 
     with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_video("http://example.com/x.mp4")
+
+
+@pytest.mark.asyncio
+async def test_load_video_logs_rejected_data_url_bounded(monkeypatch, caplog):
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    oversized = "data:video/mp4;base64," + "A" * (1024 * 1024)
+    loader = VideoLoader(url_policy=UrlValidationPolicy())
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(UrlValidationError, match="exceeds"):
+            await loader.load_video(oversized)
+
+    assert "URL rejected loading video" in caplog.text
+    assert "payload elided" in caplog.text
+    assert max(len(record.getMessage()) for record in caplog.records) < 1024
 
 
 @pytest.mark.asyncio
@@ -536,3 +552,25 @@ async def test_load_video_preserves_missing_decoder_error(monkeypatch):
         await loader.load_video("https://example.com/x.mp4")
 
     assert exc_info.value is err
+
+
+@pytest.mark.asyncio
+async def test_load_video_preserves_a_configuration_error(monkeypatch):
+    """An operator fault must not reach the client as a 4xx.
+
+    Same reasoning as the audio loader: the generic ``except Exception`` there
+    rewrites unknown errors as ``ValueError``, which maps to ``InvalidArgument``.
+    """
+    from dynamo.common.multimodal.video_loader import VideoLoader
+
+    loader = VideoLoader.__new__(VideoLoader)
+
+    async def _boom(*args, **kwargs):
+        raise HttpConfigurationError("egress proxy is not trusted")
+
+    monkeypatch.setattr(loader, "_load_video_with_vllm", _boom, raising=False)
+
+    with pytest.raises(HttpConfigurationError) as excinfo:
+        await loader.load_video("https://example.com/v.mp4")
+
+    assert not isinstance(excinfo.value, ValueError)

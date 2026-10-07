@@ -7,6 +7,8 @@ subtitle: Let workers finish in-flight requests and release resources cleanly wh
 
 When Kubernetes terminates a pod (rollout, scale-down, node drain), Dynamo workers stop accepting new requests, keep serving in-flight ones through a grace period, then release engine and connection resources before exiting. This is **on by default** — every component handles `SIGTERM`/`SIGINT` and drains automatically. The steps below tune *how long* it waits and make sure interrupted requests are recovered.
 
+Once shutdown proceeds past the grace period and any backend-specific draining, workers initiate cancellation of unfinished requests. The Frontend can migrate these requests to a healthy worker when migration is enabled and policy permits it; otherwise the client receives an error. Exhausted retries or an exceeded sequence-length cap can prevent recovery.
+
 The knobs are three timeouts plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain (bounded by a timeout) before resources are cleaned up.
 
 > **How it works:** the signal handlers, the `graceful_shutdown()` sequence, per-backend `cleanup()` code, and error-initiated shutdown are documented in [Graceful Shutdown Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md).
@@ -54,7 +56,7 @@ The defaults are sound for most deployments. Raise the relevant timeout only for
 
 <Step title="Enable migration so drained requests retry">
 
-Draining lets *current* requests finish, but a request interrupted by an unexpected worker loss still needs somewhere to go. Enable [request migration](request-migration.md) on the Frontend so disconnected streams are retried on healthy workers. Set `DYN_MIGRATION_LIMIT` in the Frontend `env:` (or `--migration-limit` in its `args:`):
+Draining lets *current* requests finish during the grace period set by `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, but a request interrupted after the shutdown grace period expires or by an unexpected worker loss still needs somewhere to go. Enable [request migration](request-migration.md) on the Frontend for rolling upgrades and scale-downs as well, so eligible interrupted requests are retried on healthy workers. Set `DYN_MIGRATION_LIMIT` in the Frontend `env:` (or `--migration-limit` in its `args:`):
 
 ```yaml
   - name: Frontend
@@ -90,7 +92,7 @@ During Frontend shutdown, `/health` returns 503 so readiness routing stops, whil
 finish or `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires.
 
 During worker shutdown, endpoints unregister and stop receiving new work while admitted requests
-complete. If a pod receives `SIGKILL` before draining finishes, increase
+have time to complete. If a pod receives `SIGKILL` before draining finishes, increase
 `terminationGracePeriodSeconds` (step 1) or lower the relevant internal timeout (step 2).
 
 </Step>
