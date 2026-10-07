@@ -127,7 +127,8 @@ pub(super) fn rl_router(
     namespace_filter: crate::namespace::NamespaceFilter,
 ) -> anyhow::Result<axum::Router> {
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
-    let state = dynamo_rl::RlDiscoveryState::new_with_namespace_filter(config, namespace_filter);
+    let state = dynamo_rl::RlDiscoveryState::new_with_namespace_filter(config, namespace_filter)
+        .with_namespace_prefix_mode(crate::namespace::NamespacePrefixMode::from_env());
     Ok(dynamo_rl::rl_router(state))
 }
 

@@ -48,6 +48,18 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.6.0
 
+#### Runtime Compatibility
+
+##### Operator Namespace Discovery Isolation
+
+**Change:** A frontend in a DynamoGraphDeployment (DGD) named `foo` can currently discover workers from a DGD named `foo-bar` in the same Kubernetes namespace and route requests to them. Strict namespace-prefix matching prevents this cross-deployment discovery for ordinary overlapping names such as `foo` and `foo-bar`.
+
+**Affected:** Deployments in the same Kubernetes namespace whose DGD names share a prefix. Their frontends, including frontend sidecars, and native Rust EPP components can discover the other deployment's workers. Deployments without overlapping names are unaffected by this issue.
+
+**Action:** Upgrade the operator and the affected frontend and native EPP images to Dynamo 1.6.0 or later. Runtime image 1.6.0 introduces `DYN_NAMESPACE_PREFIX_STRICT`; the updated operator enables it for supported images. For custom images, set `runtimeVersionOverride` when the image tag does not identify the Dynamo runtime version. Frontend sidecars use their own image version. With a compatible older operator, set `DYN_NAMESPACE_PREFIX_STRICT=true` explicitly on those containers after upgrading their runtime images.
+
+**Existing deployments:** An operator-only upgrade leaves older runtime images affected. Upgrading an affected component's runtime image with the updated operator enables strict matching and rolls that component. Manual namespace prefixes retain literal matching unless strict mode is enabled. Strict matching still accepts names ending in an eight-character lowercase hexadecimal suffix or `-legacy`; it does not distinguish a separate DGD with such a name from a worker generation.
+
 #### CRD and admission breaking changes
 
 ##### Reserved runtime init container name
@@ -304,7 +316,7 @@ Kubernetes: `>=1.30.0-0`
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.14 |
-| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.1 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
 ## Values
