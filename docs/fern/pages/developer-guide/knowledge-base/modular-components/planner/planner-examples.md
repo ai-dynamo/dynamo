@@ -10,6 +10,19 @@ integrations. For DGDR manifests, see
 [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx). For the full configuration
 reference, see the [Planner Guide](planner-guide.md).
 
+## Compare Autoscaling Policies with Planner Gym
+
+**Experimental.** [Planner Gym](https://github.com/ai-dynamo/dynamo/tree/main/gyms/planner-gym)
+compares Dynamo Planner, a KEDA/HPA policy port, reactive scaling, and fixed
+capacity on the same CPU replay substrate. Its
+[getting started guide](https://github.com/ai-dynamo/dynamo/blob/main/gyms/planner-gym/docs/getting-started.md)
+runs a two-policy comparison using the public Mooncake trace bundled with
+Dynamo. No GPU or model weights are needed.
+
+Inspect SLO-qualified goodput per average GPU together with latency,
+good-request rate, GPU-hours, and scaling activity. The online backend uses
+AIPerf to compare existing endpoints; deployment cost telemetry is not collected.
+
 ## Custom Load Predictors
 
 Each YAML block in this section is a standalone `PlannerConfig`. Save the block
