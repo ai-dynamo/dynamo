@@ -53,5 +53,9 @@ name = "phantom_publisher"
 required-features = ["bins"]
 
 [[bin]]
+name = "query_driver"
+required-features = ["bins"]
+
+[[bin]]
 name = "phantom_plan"
 required-features = ["bins"]
