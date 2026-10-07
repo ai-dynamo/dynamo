@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pydantic import ValidationError
 from sglang.srt.managers.io_struct import GenerateReqInput
 
 from dynamo.common.constants import DisaggregationMode
@@ -37,8 +39,10 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
+    engine_consumes_media,
     extract_media_urls,
     raise_if_unextracted_multimodal,
+    reject_unconsumed_media,
 )
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.worker_handler import SglangUtils
@@ -111,6 +115,8 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
     )
 
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
     handler._generate_bootstrap_room = lambda: "room"
@@ -184,6 +190,7 @@ async def test_prefill_forwards_first_token_logprob_options(
 
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
     handler.engine = SimpleNamespace(async_generate=async_generate)
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
     handler.bootstrap_host = "prefill.invalid"
     handler.bootstrap_port = None
     handler.enable_trace = False
@@ -310,6 +317,9 @@ def _new_decode_handler(
     use_sglang_tokenizer: bool = False,
     skip_tokenizer_init: bool = False,
     enable_rl: bool = False,
+    enable_strict_thinking: bool = True,
+    reasoning_parser: str | None = "qwen3",
+    grammar_backend: str = "xgrammar",
     serving_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
 ):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
@@ -320,6 +330,9 @@ def _new_decode_handler(
         server_args=SimpleNamespace(
             served_model_name="test-model",
             skip_tokenizer_init=skip_tokenizer_init,
+            enable_strict_thinking=enable_strict_thinking,
+            reasoning_parser=reasoning_parser,
+            grammar_backend=grammar_backend,
         ),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
@@ -1246,6 +1259,93 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert "seed" not in sampling_params
 
 
+def test_build_sampling_params_maps_thinking_budget_for_token_requests():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "require_reasoning": True,
+            "stop_conditions": {
+                "max_tokens": 128,
+                "max_thinking_tokens": 32,
+            },
+        }
+    )
+
+    assert sampling_params["custom_params"] == {"thinking_budget": 32}
+
+
+@pytest.mark.parametrize("budget", [0, 16])
+def test_build_sampling_params_rejects_gpt_oss_structured_budget(monkeypatch, budget):
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "128")
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    handler.config.server_args.reasoning_parser = "gpt-oss"
+    with pytest.raises(InvalidArgument, match="GPT-OSS.*json_schema"):
+        handler._build_sampling_params(
+            {
+                "sampling_options": {"guided_decoding": {"json": {"type": "object"}}},
+                "stop_conditions": {"max_tokens": 128, "max_thinking_tokens": budget},
+                "require_reasoning": True,
+            }
+        )
+
+
+@pytest.mark.parametrize("budget", [0, 32])
+def test_build_sampling_params_ignores_budget_when_wire_omits_false_reasoning(budget):
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    # Rust omits require_reasoning when preprocessing disables thinking.
+    request = json.loads(
+        '{"model":"test-model","token_ids":[1,2,3],'
+        '"sampling_options":{},"output_options":{},'
+        f'"stop_conditions":{{"max_tokens":128,"max_thinking_tokens":{budget}}}}}'
+    )
+
+    sampling_params = handler._build_sampling_params(request)
+
+    assert sampling_params["max_new_tokens"] == 128
+    assert "custom_params" not in sampling_params
+
+
+def test_build_sampling_params_rejects_budget_with_sglang_tokenizer():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    with pytest.raises(InvalidArgument, match="requires Dynamo frontend preprocessing"):
+        handler._build_sampling_params(
+            {
+                "max_tokens": 128,
+                "thinking_token_budget": 0,
+                "require_reasoning": True,
+            }
+        )
+
+
+def test_build_sampling_params_drops_raw_custom_params_without_public_budget():
+    handler = _new_decode_handler(use_sglang_tokenizer=True)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "max_tokens": 128,
+            "custom_params": {"thinking_budget": -1},
+        }
+    )
+
+    assert "custom_params" not in sampling_params
+
+
+def test_build_sampling_params_omits_thinking_budget_when_unset():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {"max_tokens": 128},
+        }
+    )
+
+    assert "custom_params" not in sampling_params
+
+
 def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
@@ -1450,6 +1550,38 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     assert sampling_params["ignore_eos"] is True
 
 
+@pytest.mark.parametrize("value", [True, "32", 1.0, -1, 2**32])
+def test_multimodal_stop_conditions_reject_invalid_thinking_budget(value):
+    with pytest.raises(ValidationError):
+        StopConditions.model_validate({"max_thinking_tokens": value})
+
+
+def test_multimodal_build_sampling_params_maps_thinking_budget():
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            require_reasoning=True,
+            stop_conditions=StopConditions(
+                max_tokens=64,
+                max_thinking_tokens=16,
+            ),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    sampling_params = SglangUtils.build_sampling_params(
+        request,
+        server_args=SimpleNamespace(
+            enable_strict_thinking=True,
+            reasoning_parser="qwen3",
+            skip_tokenizer_init=False,
+            grammar_backend="xgrammar",
+        ),
+    )
+
+    assert sampling_params["custom_params"] == {"thinking_budget": 16}
+
+
 @pytest.mark.parametrize(
     "schema",
     [
@@ -1583,6 +1715,80 @@ class TestMultimodalGuard:
                     "multi_modal_uuids": {"image_url": ["cached-image"]},
                 }
             )
+
+    @pytest.mark.parametrize(
+        "engine, consumes_media",
+        [
+            (
+                SimpleNamespace(
+                    tokenizer_manager=SimpleNamespace(
+                        model_config=SimpleNamespace(is_multimodal=False)
+                    )
+                ),
+                False,
+            ),
+            (
+                SimpleNamespace(
+                    tokenizer_manager=SimpleNamespace(
+                        model_config=SimpleNamespace(is_multimodal=True)
+                    )
+                ),
+                True,
+            ),
+            (SimpleNamespace(), True),
+            (None, True),
+        ],
+        ids=["text_only", "multimodal", "no_model_config", "no_engine"],
+    )
+    def test_engine_consumes_media(self, engine, consumes_media):
+        assert engine_consumes_media(engine) is consumes_media
+
+    @pytest.mark.parametrize(
+        "media_request",
+        [
+            {
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/a.jpg"}]
+                },
+            },
+            {
+                "token_ids": [1, 2, 3],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "https://example.com/a.jpg"},
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+        ids=["extracted", "raw_message"],
+    )
+    def test_rejects_media_the_engine_does_not_consume(self, media_request):
+        with pytest.raises(InvalidArgument, match="does not accept image input"):
+            reject_unconsumed_media(media_request, consumes_media=False)
+
+    def test_allows_media_the_engine_consumes(self):
+        reject_unconsumed_media(
+            {
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/a.jpg"}]
+                },
+            },
+            consumes_media=True,
+        )
+
+    def test_allows_text_and_empty_media_lists(self):
+        reject_unconsumed_media(
+            {"token_ids": [1, 2, 3], "multi_modal_data": {"image_url": []}},
+            consumes_media=False,
+        )
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):

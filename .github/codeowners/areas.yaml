@@ -223,6 +223,7 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+  - gyms/planner-gym/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
@@ -955,10 +956,6 @@ shared:
   owners:
   - operator
   - planner
-- glob: deploy/operator/internal/gpu/discovery.go
-  owners:
-  - operator
-  - observability
 - glob: deploy/operator/internal/controller/lpx/
   owners:
   - operator

@@ -88,6 +88,7 @@ vllm-rs serve "$MODEL" \
     --grpc-port "$VLLM_GRPC_PORT" \
     --data-parallel-size "${VLLM_DATA_PARALLEL_SIZE:-1}" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

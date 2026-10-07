@@ -229,13 +229,13 @@ impl SglangMockerService {
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("Mocker concurrent request limit reached"))?;
         let prepared = PreparedRequest::new(request, &self.config).map_err(|status| *status)?;
-        let live = self
-            .engine
-            .submit(prepared.direct_request())
-            .await
-            .map_err(|error| {
-                Status::internal(format!("Mocker request submission failed: {error}"))
-            })?;
+        let direct = prepared.direct_request();
+        let live = if prepared.has_decode_handoff {
+            self.engine.submit_decode(direct).await
+        } else {
+            self.engine.submit(direct).await
+        }
+        .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
         Ok((prepared, live, permit))
     }
 
@@ -312,9 +312,14 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
                     biased;
                     _ = signal_tx.closed() => break,
                     signal = live.recv() => {
-                        let Some(signal) = signal else { break };
+                        let Some(signal) = signal else {
+                            if live.is_aborted() {
+                                let _ = signal_tx.send(Err(Status::cancelled("Request aborted"))).await;
+                            }
+                            break;
+                        };
                         let completed = signal.completed;
-                        if signal_tx.send(signal).await.is_err() || completed {
+                        if signal_tx.send(Ok(signal)).await.is_err() || completed {
                             break;
                         }
                     }
@@ -327,6 +332,7 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
             // The sidecar contract enables SGLang's incremental streaming output,
             // so each response contains only this chunk's token and metadata.
             while let Some(signal) = signal_rx.recv().await {
+                let signal = signal?;
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 let output_id = i32::try_from(token_id)
                     .map_err(|_| Status::internal("synthetic token ID does not fit i32"))?;

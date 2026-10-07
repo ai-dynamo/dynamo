@@ -96,14 +96,14 @@ Components without a frontend sidecar or using pod discovery are unaffected by t
 
 #### Dependency compatibility
 
-**Change:** The bundled Grove version is now `v0.1.0-alpha.14-rc1`. It provides the group-wide pod
+**Change:** The bundled Grove version is now `v0.1.0-alpha.14`. It provides the group-wide pod
 index and environment-variable ordering used by Dynamo's backend-independent `DYNAMO_RANK` and
 `DYNAMO_LEADER_ADDRESS` aliases.
 
 **Affected:** New multinode DGDs created by Dynamo 1.6.0 when Grove is managed outside the platform
 chart.
 
-**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.14-rc1` or later before
+**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.14` or later before
 creating new multinode DGDs.
 
 **Existing deployments:** The operator origin version gates alias injection. An operator-only
@@ -303,7 +303,7 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.6.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.14-rc1 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.14 |
 | oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
@@ -456,7 +456,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14-rc1 |
+| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
 [v1.4.0 upgrade notes](#v140) for the topology API transition and the
