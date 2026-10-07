@@ -7,14 +7,15 @@ SPDX-License-Identifier: Apache-2.0
 
 Deploy GLM-5.3-Flash with NVIDIA Dynamo and SGLang using the GB200 Kustomize
 overlays. These recipes use `RadixArk/GLM-5.3-Flash-NVFP4` at revision
-`f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35` and the source configurations' image,
-`lmsysorg/sglang:nightly-dev-cu13-20261001-b37e6f79`.
+`f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35`. All frontend and worker containers use
+`dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime`.
 
-> [!NOTE]
-> The third-party image
-> must include the compatible `dynamo.frontend` and `dynamo.sglang` entry points
-> and the GLM-specific SGLang kernels. `runtimeVersionOverride: 1.6.0` declares
-> the runtime version to the operator; it does not install Dynamo in the image.
+This Dynamo image builds on `lmsysorg/sglang:v0.5.21-cu130-runtime` with the
+GLM-5.3-Flash backports, Transformers 5.19.0, and Tokenizers 0.23.2. It includes
+the Dynamo entry points and `Glm5NextProcessor` image/video processing support.
+Both recipes enable `--enable-multimodal` and `--frontend-decoding` on all
+SGLang workers: the Dynamo frontend decodes images and videos before passing
+them to the backend.
 
 | Setting | Aggregated | Disaggregated |
 | --- | --- | --- |
@@ -29,6 +30,7 @@ overlays. These recipes use `RadixArk/GLM-5.3-Flash-NVFP4` at revision
 | Static memory fraction | 0.70 | Prefill 0.70 / decode 0.78 |
 | Maximum running requests | 64 | Prefill 64 / decode 256 per worker |
 | KV transfer | Not applicable | Mooncake over NVLink with MNNVL |
+| Input modalities | Text, images, video | Text, images, video |
 
 ## Prerequisites
 
@@ -40,6 +42,8 @@ overlays. These recipes use `RadixArk/GLM-5.3-Flash-NVFP4` at revision
   requires the `nvidia.com/gpu.clique` node label and uses Pod affinity to keep
   the three workers together without embedding a site-specific clique ID.
 - Standalone Kustomize v5.8.1 for reproducible rendering, and `kubectl`.
+- Registry access to the pinned Dynamo image. Configure `imagePullSecrets`
+  for frontend and worker Pods in your private overlay when authentication is required.
 - A namespace containing a populated ReadWriteMany PVC named
   `shared-model-cache`, accessible to all worker nodes. The SGLang checkpoint
   differs from the checkpoint used by the sibling vLLM recipes.
@@ -146,9 +150,11 @@ python3 scripts/kustomize-matrix.py check "$RECIPE/.kustomize-matrix.yaml"
 
 ## Changes from the Source Configurations
 
-- The source engine arguments, replicas, GPU counts, memory requests, pinned
-  checkpoint, and image are retained. The recipe uses canonical worker cache
+- The source engine tuning, replicas, GPU counts, memory requests, and pinned
+  checkpoint are retained. The recipe uses canonical worker cache
   names, exec-form commands, and the standard beta worker security context.
+- The source image is replaced by the patched Dynamo SGLang runtime image
+  above. All workers enable multimodal processing and frontend media decoding.
 - Experiment labels, namespace, pull Secrets, priority class, and physical
   ComputeDomain and clique IDs are omitted. GB200 placement and fresh
   ComputeDomains are composed through components.

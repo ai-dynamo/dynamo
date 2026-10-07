@@ -112,7 +112,7 @@ targets:
     count: 4
   runtime:
     framework: sglang
-    image: lmsysorg/sglang:nightly-dev-cu13-20261001-b37e6f79
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
   model:
     hf_id: RadixArk/GLM-5.3-Flash-NVFP4
     revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
@@ -139,7 +139,7 @@ targets:
     count: 12
   runtime:
     framework: sglang
-    image: lmsysorg/sglang:nightly-dev-cu13-20261001-b37e6f79
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-d98da56221899faf0f81e340eff1cf1186ca201d-sglang-runtime
   model:
     hf_id: RadixArk/GLM-5.3-Flash-NVFP4
     revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
