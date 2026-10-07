@@ -201,8 +201,6 @@ impl RlDiscoveryState {
         Self::new_with_namespace_filter(config, namespace_filter)
     }
 
-    /// Constructs the listener state with an explicit discovery scope.
-    ///
     /// The HTTP frontend passes the [`NamespaceFilter`] it resolved for model discovery,
     /// so `/v1/rl/workers` lists exactly the namespaces the frontend routes to.
     pub fn new_with_namespace_filter(

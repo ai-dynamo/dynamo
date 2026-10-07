@@ -40,9 +40,8 @@ impl NamespaceFilter {
     ///    anything else is a literal [`NamespaceFilter::Prefix`]. The suffix is ignored.
     /// 2. A namespace that is absent, empty or [`GLOBAL_NAMESPACE`]: every namespace.
     ///    The suffix is ignored because `Global` already contains `dynamo-<suffix>`.
-    /// 3. A namespace with a non-empty suffix: exactly `{namespace}-{suffix}`, the
-    ///    namespace a worker started with that suffix registers under (see
-    ///    `get_worker_namespace` in `components/src/dynamo/common/utils/namespace.py`).
+    /// 3. A namespace with a non-empty suffix: append `-{suffix}` unless already
+    ///    present, matching the apply-once rule in Rust backend `CommonArgs`.
     /// 4. Otherwise exactly the namespace.
     pub fn from_namespace_prefix_and_suffix(
         namespace: Option<&str>,
@@ -61,8 +60,10 @@ impl NamespaceFilter {
             return NamespaceFilter::Global;
         };
         match worker_suffix.filter(|suffix| !suffix.is_empty()) {
-            Some(suffix) => NamespaceFilter::Exact(format!("{ns}-{suffix}")),
-            None => NamespaceFilter::Exact(ns.to_string()),
+            Some(suffix) if !ns.ends_with(&format!("-{suffix}")) => {
+                NamespaceFilter::Exact(format!("{ns}-{suffix}"))
+            }
+            _ => NamespaceFilter::Exact(ns.to_string()),
         }
     }
 
@@ -151,6 +152,20 @@ mod tests {
                 None,
                 Some("abc123"),
                 NamespaceFilter::Exact("ns-abc123".to_string()),
+            ),
+            (
+                "an already-applied suffix is not repeated",
+                Some("team-blue"),
+                None,
+                Some("blue"),
+                NamespaceFilter::Exact("team-blue".to_string()),
+            ),
+            (
+                "the suffix must include its hyphen to count as applied",
+                Some("teamblue"),
+                None,
+                Some("blue"),
+                NamespaceFilter::Exact("teamblue-blue".to_string()),
             ),
             (
                 "an empty suffix counts as absent",

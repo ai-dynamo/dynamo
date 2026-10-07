@@ -153,7 +153,7 @@ Three inputs decide the scope, and the first rule that applies wins:
 |---|---|
 | `--namespace-prefix` or `DYN_NAMESPACE_PREFIX` | Match every namespace that starts with this literal string, so `ns` matches `ns`, `ns-abc123`, and also `ns2`. An empty value or `dynamo` means every namespace |
 | `--namespace` or `DYN_NAMESPACE` unset, empty, or `dynamo` | Match every namespace. The worker suffix is not applied, because every namespace already includes the suffixed ones |
-| `DYN_NAMESPACE_WORKER_SUFFIX` with a non-global namespace | Match the single namespace `{namespace}-{suffix}`, the namespace a worker given that suffix registers under |
+| `DYN_NAMESPACE_WORKER_SUFFIX` with a non-global namespace | Match the exact namespace after appending `-{suffix}` if it is not already present, following the Rust backend's apply-once rule |
 | `--namespace` or `DYN_NAMESPACE` | Match this exact namespace |
 
 The prefix is a literal string match, not a deployment boundary. Choose a prefix that no other deployment name starts with: under `ns`, the pause, resume, and weight-update endpoints of a deployment named `ns2` also appear in `/v1/rl/workers`, and the frontend routes inference requests to its workers too. Namespace scope is a discovery filter, not access control.
