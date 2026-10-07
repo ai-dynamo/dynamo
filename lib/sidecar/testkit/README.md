@@ -166,8 +166,10 @@ Each suite exercises a different request path:
 The SGLang HTTP cancellation regression uses a local HTTP peer and the production
 sidecar engine. It holds an admitted request before headers or during streaming,
 then checks targeted abort before disconnect, another request's isolation and
-recovery. These CPU checks do not exercise cancellation before engine admission
-or during physical KV transfer.
+recovery. The existing SGLang aggregate GPU deployment checks actual scheduler
+drain and recovery for both native gRPC and HTTP cancellation and consumer drop.
+These checks do not synchronize cancellation before engine admission or during
+physical KV transfer.
 
 The controller sits at the native protocol boundary. Each request ID has its
 own plan and observations, so a test can hold or fail one request while proving
@@ -186,7 +188,7 @@ clients. That makes peer-loss tests deterministic.
 | --- | --- | --- |
 | `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM and SGLang; native rejection, malformed responses and shutdown during pending SGLang health checks | CPU, ordinary pre-merge Cargo tests |
 | `router_sidecar_mocker_integration.rs` | Both backends: registration/error recovery, model alias publication, health-gated readiness, unhealthy startup, cancellation, SIGTERM and real PrefillRouter handoff; SGLang tokenizer/parser discovery, native tracing and changed-role startup | CPU, ordinary pre-merge Cargo tests |
-| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing | GPU, existing sidecar E2E jobs in post-merge and nightly |
+| `tests/serve/test_sidecar.py` | Real engine logprobs, structured output, cancellation and recovery, completed KV transfer, and routing; the `disagg` KV-routing cases warm two prefill caches and require cache-based selection plus a completed transfer to decode | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.
 Both vLLM and SGLang register the shared wire and process scenarios.
