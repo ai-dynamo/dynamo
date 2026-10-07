@@ -19,8 +19,11 @@ package dgdrrunpublisher
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
@@ -43,6 +46,22 @@ const (
 	LabelCandidateID = "nvidia.com/dgdr-candidate-id"
 )
 
+// maxLabelValue is the Kubernetes limit on a label value; run names may be up to 253.
+const maxLabelValue = 63
+
+// RunLabelValue is the label-safe, stable selector value for a run name. Names that
+// fit are used as-is; longer ones are truncated and suffixed with a hash of the full
+// name so they stay distinct. Every reader and writer of LabelRunName must use it.
+func RunLabelValue(runName string) string {
+	if len(runName) <= maxLabelValue {
+		return runName
+	}
+	sum := sha256.Sum256([]byte(runName))
+	suffix := hex.EncodeToString(sum[:8])
+	prefix := strings.TrimRight(runName[:maxLabelValue-len(suffix)-1], "-_.")
+	return prefix + "-" + suffix
+}
+
 // KubeCluster is the Cluster implementation backed by a controller-runtime client. It
 // should be a direct (uncached) client: the publisher is a short-lived sidecar, so it
 // neither needs nor wants an informer cache.
@@ -63,7 +82,7 @@ var _ Cluster = (*KubeCluster)(nil)
 
 func (k *KubeCluster) ListCandidates(ctx context.Context) ([]dgdcreconcile.CurrentDGDC, error) {
 	var list v1beta2.DynamoGraphDeploymentCandidateList
-	if err := k.Client.List(ctx, &list, client.InNamespace(k.Namespace), client.MatchingLabels{LabelRunName: k.RunName}); err != nil {
+	if err := k.Client.List(ctx, &list, client.InNamespace(k.Namespace), client.MatchingLabels{LabelRunName: RunLabelValue(k.RunName)}); err != nil {
 		return nil, err
 	}
 	out := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
@@ -97,7 +116,7 @@ func (k *KubeCluster) CreateCandidate(ctx context.Context, name string, candidat
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: k.Namespace,
 			Name:      name,
-			Labels:    map[string]string{LabelRunName: k.RunName, LabelCandidateID: candidate.ID},
+			Labels:    map[string]string{LabelRunName: RunLabelValue(k.RunName), LabelCandidateID: candidate.ID},
 		},
 		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{
 			DynamoGraphDeploymentSpec: doc.Spec,
