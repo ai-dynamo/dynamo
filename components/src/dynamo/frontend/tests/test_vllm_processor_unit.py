@@ -2253,6 +2253,65 @@ class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
     tool_call_end_token = "<|im_end|>"
 
 
+@pytest.mark.parametrize("step_tokens", [1, 2, 3, 4, 5, 6])
+def test_parallel_tool_calls_survive_multi_token_steps(tokenizer, step_tokens):
+    """One step can close a call and open the next (e.g. MTP); the second call
+    must not leak as content."""
+    from vllm.reasoning import ReasoningParserManager
+    from vllm.tool_parsers import ToolParserManager
+
+    request, _, _, _, _ = _prepare_request(
+        json.loads(json.dumps(TOOL_REQUEST)),
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+    )
+    call = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>{}</arg_value></tool_call>"
+    ids = tokenizer.encode(
+        "<think>x</think>" + call.format("Paris") + call.format("Rome"),
+        add_special_tokens=False,
+    )
+    for offset in range(step_tokens):
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=ToolParserManager.get_tool_parser("glm47")(
+                tokenizer, tools=request.tools
+            ),
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("glm45"),
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+        steps = [ids[:offset]] if offset else []
+        steps += [
+            ids[i : i + step_tokens] for i in range(offset, len(ids), step_tokens)
+        ]
+        names, args, content = [], [], ""
+        for n, step in enumerate(steps):
+            choice = post.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=tokenizer.decode(step, skip_special_tokens=False),
+                    token_ids=step,
+                    finish_reason="tool_calls" if n == len(steps) - 1 else None,
+                    logprobs=None,
+                )
+            )
+            delta = choice["delta"] if choice else {}
+            content += delta.get("content") or ""
+            for tool_call in delta.get("tool_calls") or []:
+                function = tool_call.get("function") or {}
+                if function.get("name"):
+                    names.append(function["name"])
+                    args.append("")
+                args[-1] += function.get("arguments") or ""
+
+        assert names == ["get_weather", "get_weather"], (offset, names, content)
+        assert [json.loads(a)["city"] for a in args] == ["Paris", "Rome"]
+        assert not content.strip(), (offset, content)
+
+
 class TestControlMarkerStrip:
     """Unconsumed special tokens must not reach the client.
 

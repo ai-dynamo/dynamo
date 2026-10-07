@@ -1116,6 +1116,17 @@ class StreamingPostProcessor:
             )
         )
 
+    def _tool_buffer_closed(self, text: str) -> bool:
+        # With multi-token steps (e.g. MTP) one chunk can close a call and open
+        # the next, so a buffer holding an end marker may still be mid-call.
+        pos, marker = max(
+            ((text.rfind(m), m) for m in self._tool_end_markers()), default=(-1, "")
+        )
+        if pos < 0:
+            return False
+        tail = text[pos + len(marker) :]
+        return not any(m in tail for m in self._tool_start_markers())
+
     # A text-grammar reasoning parser can only split the stream if the model's
     # content-kind control markers survive detokenisation, which is why
     # ParserEngine.adjust_request forces `skip_special_tokens = False`. But nothing
@@ -1370,12 +1381,9 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            buffer_complete = (
-                any(
-                    marker in self._tool_text_buffer
-                    for marker in self._tool_end_markers()
-                )
-            ) or output.finish_reason
+            buffer_complete = output.finish_reason or self._tool_buffer_closed(
+                self._tool_text_buffer
+            )
             if buffer_complete:
                 buffered_text = self._tool_text_buffer
                 self._tool_text_buffer = None
