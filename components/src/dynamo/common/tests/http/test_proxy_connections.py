@@ -174,7 +174,6 @@ async def test_a_direct_fetch_to_the_proxy_host_is_filtered(
 
 
 async def test_a_trusted_private_proxy_still_carries_the_fetch(monkeypatch) -> None:
-    """Control: a trusted proxy on a private address still works."""
     monkeypatch.setenv("DYN_MM_TRUST_EGRESS_PROXY", "1")
     async with _LoopbackServer() as proxy:
         _configure_proxy(monkeypatch, proxy.port)
@@ -210,7 +209,6 @@ async def test_a_cached_proxy_answer_is_not_reused_for_a_direct_fetch(
 
 
 async def test_the_proxy_host_name_without_a_proxy_setting_is_filtered() -> None:
-    """Control: with no proxy configured, the same host name is refused."""
     async with _LoopbackServer() as server:
         client = AiohttpClient()
         try:
