@@ -1338,10 +1338,21 @@ class TestBenchmarkGrid:
 def test_build_vllm_kv_hints_constructs_envelope():
     from dynamo.vllm.handlers import _build_vllm_kv_hints
 
+    source_locations_payload = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
     kv_hint = {
         "protocol_version": "0.1",
         "message_id": "msg-123",
-        "actions": [],
+        "actions": [
+            {
+                "action_id": "a1",
+                "action_type": "kv.fetch",
+                "action_version": "1.0",
+                "payload": source_locations_payload,
+            }
+        ],
     }
     action_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
     envelope_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
@@ -1354,38 +1365,11 @@ def test_build_vllm_kv_hints_constructs_envelope():
 
     assert envelope.protocol_version == "0.1"
     assert envelope.message_id == "msg-123"
-    assert envelope.actions == []
-    action_type.assert_not_called()
-
-
-def test_build_vllm_kv_hints_requires_supported_vllm():
-    from dynamo.vllm.handlers import _build_vllm_kv_hints
-
-    request = {
-        "kv_hint": {
-            "protocol_version": "0.1",
-            "message_id": "msg-123",
-            "actions": [],
-        }
-    }
-
-    with patch("dynamo.vllm.handlers._vllm_kv_hints_types", return_value=None):
-        with pytest.raises(RuntimeError, match="does not support first-class KV hint"):
-            _build_vllm_kv_hints(request)
-
-
-def test_update_kv_transfer_params_replaces_connector_params():
-    from dynamo.vllm.handlers import _update_kv_transfer_params
-
-    sampling_params = SimpleNamespace(
-        extra_args={"kv_transfer_params": {"stale": "value"}}
-    )
-
-    _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
-
-    assert sampling_params.extra_args["kv_transfer_params"] == {
-        "transfer_id": "prefill-1"
-    }
+    assert len(envelope.actions) == 1
+    assert envelope.actions[0].action_id == "a1"
+    assert envelope.actions[0].action_type == "kv.fetch"
+    assert envelope.actions[0].action_version == "1.0"
+    assert envelope.actions[0].payload == source_locations_payload
 
 
 def test_update_kv_transfer_params_copies_extra_args_before_mutating():

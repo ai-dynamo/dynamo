@@ -4041,6 +4041,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
         session_id = session_id_from_request(request)
+        # For P/D, apply hints only to prefill workers (kv_params is None).
         kv_hints = _build_vllm_kv_hints(request) if kv_params is None else None
 
         # In disagg decode mode, defer engine_client.abort() until the first
