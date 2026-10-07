@@ -3,6 +3,7 @@
 
 import asyncio
 import sys
+import traceback
 import types
 from pathlib import Path
 
@@ -12,9 +13,11 @@ from dynamo.common.lora.runtime import (
     ResolveContext,
     ResolvedLoRA,
     RuntimeLoRAConfigurationError,
+    RuntimeLoRAError,
     RuntimeLoRANotFoundError,
     RuntimeLoRAPluginError,
     RuntimeLoRAResolverChain,
+    RuntimeLoRAResolverUnavailableError,
     load_runtime_lora_resolver,
 )
 
@@ -169,10 +172,39 @@ async def test_timeout_cancels_resolver(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_provider_exception_details_are_not_exposed(tmp_path):
+@pytest.mark.parametrize(
+    "error_type,expected_type,message",
+    [
+        (OSError, RuntimeLoRAPluginError, "runtime LoRA resolver failed"),
+        (RuntimeLoRAError, RuntimeLoRAPluginError, "runtime LoRA resolver failed"),
+        (
+            RuntimeLoRAPluginError,
+            RuntimeLoRAPluginError,
+            "runtime LoRA resolver failed",
+        ),
+        (
+            RuntimeLoRAConfigurationError,
+            RuntimeLoRAPluginError,
+            "runtime LoRA resolver failed",
+        ),
+        (
+            RuntimeLoRANotFoundError,
+            RuntimeLoRANotFoundError,
+            "runtime LoRA source was not found",
+        ),
+        (
+            RuntimeLoRAResolverUnavailableError,
+            RuntimeLoRAResolverUnavailableError,
+            "runtime LoRA resolver unavailable",
+        ),
+    ],
+)
+async def test_provider_exception_details_are_not_exposed(
+    tmp_path, error_type, expected_type, message
+):
     class FailingResolver(Resolver):
         async def resolve(self, *, source_uri, context):
-            raise OSError("credential-for-private-provider")
+            raise error_type("credential-for-private-provider")
 
     chain = RuntimeLoRAResolverChain([FailingResolver()], {"wandb-artifact"})
     context = ResolveContext(
@@ -184,13 +216,18 @@ async def test_provider_exception_details_are_not_exposed(tmp_path):
         request_id="request-id",
     )
 
-    with pytest.raises(RuntimeLoRAPluginError) as exc_info:
+    with pytest.raises(expected_type) as exc_info:
         await chain.resolve(
             source_uri="wandb-artifact:///entity/project/adapter:v1",
             context=context,
         )
 
-    assert str(exc_info.value) == "runtime LoRA resolver failed"
+    assert str(exc_info.value) == message
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__
+    assert "credential-for-private-provider" not in "".join(
+        traceback.format_exception(exc_info.value)
+    )
 
 
 def test_allowlist_must_intersect_declared_schemes():
@@ -204,6 +241,7 @@ def test_allowlist_must_intersect_declared_schemes():
     [
         ResolvedLoRA(Path("adapter"), ""),
         ResolvedLoRA(Path("adapter"), "revision\nsecret"),
+        ResolvedLoRA(Path("adapter"), "revision\ud800"),
         ResolvedLoRA(Path("adapter"), "immutable", size_bytes=-1),
     ],
 )
