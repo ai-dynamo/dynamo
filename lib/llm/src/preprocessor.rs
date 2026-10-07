@@ -11380,7 +11380,7 @@ mod tests {
             request.common.skip_special_tokens = skip;
             for lora in [None, Some("adapter".to_string())] {
                 let output = preprocessor
-                    .builder_with_lora(&request, lora)
+                    .builder_with_lora(&request, lora, None)
                     .unwrap()
                     .token_ids(vec![])
                     .build()
