@@ -1,0 +1,557 @@
+diff --git a/python/sglang/srt/layers/attention/attention_registry.py b/python/sglang/srt/layers/attention/attention_registry.py
+index 165e7165ccfb..873ddda494dd 100644
+--- a/python/sglang/srt/layers/attention/attention_registry.py
++++ b/python/sglang/srt/layers/attention/attention_registry.py
+@@ -38,6 +38,7 @@
+     from sglang.srt.model_executor.model_runner import ModelRunner
+ 
+ ATTENTION_BACKENDS = {}
++HYBRID_GDN_SM100_BACKENDS = {"triton", "trtllm_mha", "fa4", "flashinfer"}
+ 
+ 
+ def register_attention_backend(name):
+@@ -438,7 +439,7 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
+                     # GDN models. In particular, quantized KV recipes use it
+                     # to expose an FP8 dequant workspace while a different
+                     # backend (for example TRT-LLM GenMHA) owns decode.
+-                    allowed = {"triton", "trtllm_mha", "fa4", "flashinfer"}
++                    allowed = HYBRID_GDN_SM100_BACKENDS
+                 prefill_be = runner.prefill_attention_backend_str
+                 decode_be = runner.decode_attention_backend_str
+                 assert prefill_be in allowed and decode_be in allowed, (
+diff --git a/python/sglang/srt/layers/attention/linear/gdn_backend.py b/python/sglang/srt/layers/attention/linear/gdn_backend.py
+index 15ac8abac0b8..5045bf580999 100644
+--- a/python/sglang/srt/layers/attention/linear/gdn_backend.py
++++ b/python/sglang/srt/layers/attention/linear/gdn_backend.py
+@@ -515,6 +515,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
+ 
+     needs_cpu_seq_lens: bool = False
+     supports_mis: bool = True
++    requires_contiguous_prefill_state: bool = True
+ 
+     def __init__(self, model_runner: ModelRunner):
+         _validate_gdn_linear_attn_backends(model_runner.linear_attn_backends)
+@@ -881,6 +882,32 @@ def forward_decode(
+ 
+         return (core_attn_out, z) if return_z else core_attn_out
+ 
++    def _convolve_prefill(
++        self,
++        layer: RadixLinearAttention,
++        forward_batch: ForwardBatch,
++        mixed_qkv: torch.Tensor,
++        conv_states: torch.Tensor,
++        cache_indices: torch.Tensor,
++    ) -> torch.Tensor:
++        return causal_conv1d_fn(
++            mixed_qkv.transpose(0, 1),
++            layer.conv_weights,
++            layer.bias,
++            activation=layer.activation,
++            conv_states=conv_states,
++            has_initial_state=forward_batch.extend_prefix_lens > 0,
++            cache_indices=cache_indices,
++            query_start_loc=self.forward_metadata.query_start_loc,
++            seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
++        ).transpose(0, 1)[: mixed_qkv.shape[0]]
++
++    @staticmethod
++    def _prefill_gates(
++        layer: RadixLinearAttention, a: torch.Tensor, b: torch.Tensor
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        return fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
++
+     def forward_extend(
+         self,
+         layer: RadixLinearAttention,
+@@ -938,8 +965,6 @@ def forward_extend(
+                 and getattr(mamba_pool, "replayssm_cache_base", None) is not None
+                 and not getattr(mamba_pool, "replayssm_is_kda", False)
+             )
+-        else:
+-            has_initial_states = forward_batch.extend_prefix_lens > 0
+ 
+         # Page-major envelope: the prefill kernels (CUDA causal_conv1d_fwd,
+         # chunk_gated_delta_rule) write state back in place assuming a contiguous
+@@ -953,7 +978,8 @@ def forward_extend(
+         # and chunk_gated_delta_rule kernels honor the pool's real slot stride +
+         # int64 indexing, like packed_decode / causal_conv1d_update already do.
+         needs_state_gather = (
+-            (not is_target_verify)
++            self.requires_contiguous_prefill_state
++            and (not is_target_verify)
+             and (not is_cpu())
+             and (not conv_states.is_contiguous() or not ssm_states.is_contiguous())
+         )
+@@ -991,26 +1017,21 @@ def forward_extend(
+             )
+             mixed_qkv = mixed_qkv_processed.transpose(1, 2).view(seq_len, -1)
+         else:
+-            mixed_qkv = mixed_qkv.transpose(0, 1)
+             if forward_metadata.has_mamba_track_mask:
+                 mixed_qkv_to_track = mixed_qkv[
+-                    :, forward_metadata.track_conv_indices
+-                ].transpose(0, 1)
++                    forward_metadata.track_conv_indices
++                ].transpose(1, 2)
+                 conv_states[forward_metadata.conv_states_mask_indices] = (
+                     mixed_qkv_to_track
+                 )
+ 
+-            mixed_qkv = causal_conv1d_fn(
++            mixed_qkv = self._convolve_prefill(
++                layer,
++                forward_batch,
+                 mixed_qkv,
+-                layer.conv_weights,
+-                layer.bias,
+-                activation=layer.activation,
+-                conv_states=conv_states_contig,
+-                has_initial_state=has_initial_states,
+-                cache_indices=state_cache_indices,
+-                query_start_loc=query_start_loc,
+-                seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+-            ).transpose(0, 1)[:seq_len]
++                conv_states_contig,
++                state_cache_indices,
++            )
+ 
+         actual_seq_len = mixed_qkv.shape[0]
+         qkv_dim = layer.q_dim + layer.k_dim + layer.v_dim
+@@ -1098,7 +1119,21 @@ def forward_extend(
+                     retrieve_parent_token=retrieve_parent_token,
+                 )
+         else:
+-            g, beta = fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
++            g, beta = self._prefill_gates(layer, a, b)
++            h_track_buf = None
++            if (
++                forward_metadata.has_mamba_track_mask
++                and forward_metadata.track_ssm_h_src.numel() > 0
++                and self.kernel_dispatcher.extend_kernel.supports_track_state_snapshot
++            ):
++                # Snapshot-capable kernels can supply just the selected FP32
++                # checkpoint instead of materializing all per-chunk states.
++                assert forward_metadata.track_chunk_idx is not None
++                h_track_buf = torch.empty(
++                    (len(cache_indices), *ssm_states.shape[1:]),
++                    dtype=torch.float32,
++                    device=ssm_states.device,
++                )
+             core_attn_out, last_recurrent_state, h = self.kernel_dispatcher.extend(
+                 q=query,
+                 k=key,
+@@ -1116,6 +1151,14 @@ def forward_extend(
+                     forward_metadata.state_checkpoint_every_n_tokens
+                 ),
+                 output=kwargs.get("linear_attn_output"),
++                layer_id=layer.layer_id,
++                extend_prefix_lens=forward_batch.extend_prefix_lens,
++                track_state=h_track_buf,
++                track_chunk_idx=(
++                    forward_metadata.track_chunk_idx
++                    if h_track_buf is not None
++                    else None
++                ),
+             )
+ 
+             if is_npu() and last_recurrent_state is not None:
+@@ -1132,7 +1175,11 @@ def forward_extend(
+ 
+             if forward_metadata.has_mamba_track_mask:
+                 self._track_mamba_state_extend(
+-                    forward_batch, h, ssm_states, forward_metadata
++                    forward_batch,
++                    h,
++                    ssm_states,
++                    forward_metadata,
++                    h_track_buf=h_track_buf,
+                 )
+ 
+         return core_attn_out
+diff --git a/python/sglang/srt/layers/attention/linear/kda_backend.py b/python/sglang/srt/layers/attention/linear/kda_backend.py
+index 49e373e01eaf..321646259423 100644
+--- a/python/sglang/srt/layers/attention/linear/kda_backend.py
++++ b/python/sglang/srt/layers/attention/linear/kda_backend.py
+@@ -793,6 +793,28 @@ def forward_decode(
+ 
+         return core_attn_out
+ 
++    def _convolve_prefill(
++        self,
++        layer: RadixLinearAttention,
++        forward_batch: ForwardBatch,
++        mixed_qkv: torch.Tensor,
++        conv_states: torch.Tensor,
++        cache_indices: torch.Tensor,
++    ) -> torch.Tensor:
++        # Depthwise conv is channel-independent, so one packed call over the
++        # full qkv width matches the decode path and saves two kernel launches.
++        return causal_conv1d_fn(
++            mixed_qkv.transpose(0, 1),
++            layer.conv_weights,
++            layer.bias,
++            activation="silu",
++            conv_states=conv_states,
++            has_initial_state=forward_batch.extend_prefix_lens > 0,
++            cache_indices=cache_indices,
++            query_start_loc=self.forward_metadata.query_start_loc,
++            seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
++        ).transpose(0, 1)
++
+     def forward_extend(
+         self,
+         layer: RadixLinearAttention,
+@@ -820,7 +842,6 @@ def forward_extend(
+             raise RuntimeError(
+                 "extend_prefix_lens cannot be None in non-TARGET_VERIFY mode."
+             )
+-        has_initial_state = forward_batch.extend_prefix_lens > 0
+ 
+         physical_num_tokens = mixed_qkv.shape[0]
+         logical_num_tokens = self.forward_metadata.logical_num_tokens
+@@ -841,19 +862,9 @@ def forward_extend(
+                 self.forward_metadata.conv_states_mask_indices
+             ] = mixed_qkv[self.forward_metadata.track_conv_indices]
+ 
+-        # Depthwise conv is channel-independent, so one packed call over the
+-        # full qkv width matches the decode path and saves two kernel launches.
+-        qkv = causal_conv1d_fn(
+-            mixed_qkv.transpose(0, 1),
+-            layer.conv_weights,
+-            layer.bias,
+-            activation="silu",
+-            conv_states=conv_states,
+-            has_initial_state=has_initial_state,
+-            cache_indices=cache_indices,
+-            query_start_loc=query_start_loc,
+-            seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+-        ).transpose(0, 1)
++        qkv = self._convolve_prefill(
++            layer, forward_batch, mixed_qkv, conv_states, cache_indices
++        )
+         q, k, v = qkv.split([layer.q_dim, layer.k_dim, layer.v_dim], dim=-1)
+ 
+         q = q.unflatten(-1, (-1, layer.head_q_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
+@@ -907,6 +918,8 @@ def forward_extend(
+             lower_bound=layer.lower_bound,
+             beta_is_raw=gate_was_flat,
+             extend_seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
++            extend_prefix_lens=forward_batch.extend_prefix_lens,
++            layer_id=layer.layer_id,
+             # draft_extend_v2 must stay rollback-able, so kernels that commit state
+             # in place (e.g. FlashKDA) must not run for it.
+             is_spec_decode=forward_batch.forward_mode.is_draft_extend_v2(),
+diff --git a/python/sglang/srt/mem_cache/kv_cache_configurator.py b/python/sglang/srt/mem_cache/kv_cache_configurator.py
+index 7202fe89a8b4..da2b357e624d 100644
+--- a/python/sglang/srt/mem_cache/kv_cache_configurator.py
++++ b/python/sglang/srt/mem_cache/kv_cache_configurator.py
+@@ -285,6 +285,7 @@ class KVCacheConfigurator:
+     memory_pool_config: Optional[MemoryPoolConfig]
+     draft_model_idx: Optional[int] = None
+     kv_cache_dtype_str: Optional[str] = None
++    extra_mamba_cache_bytes_per_req: int = 0
+     mambaish_config: Optional[Any] = field(init=False)
+     hybrid_gdn_config: Optional[Any] = field(init=False)
+     hybrid_kda_config: Optional[Any] = field(init=False)
+@@ -2479,6 +2480,9 @@ def _handle_max_mamba_cache(self, total_rest_memory):
+         else:
+             replayssm_fixed_bytes = 0
+             replayssm_ring_per_slot = replayssm_ring_per_req
++        extra_per_slot = replayssm_ring_per_slot + int(
++            self.extra_mamba_cache_bytes_per_req * pp_layer_scale
++        )
+         if has_spec_dec:
+             assert get_spec().speculative_num_draft_tokens is not None
+             assert get_schedule().max_running_requests is not None
+@@ -2530,8 +2534,7 @@ def _handle_max_mamba_cache(self, total_rest_memory):
+             per_req = stage_per_req
+ 
+             # Solve jointly for max_mamba_cache_size (K), including the pool's
+-            # +1 padding slot on both buffers (see memory_pool.py):
+-            #   (K + 1) * per_req + (K / ratio + 1) * D * per_req = mamba_budget_bytes
++            # +1 padding slot on both buffers (see memory_pool.py).
+             mamba_budget = (
+                 total_rest_memory
+                 * get_schedule().mamba_full_memory_ratio
+@@ -2546,8 +2549,8 @@ def _handle_max_mamba_cache(self, total_rest_memory):
+                 get_context().override(
+                     "mamba_pool.memory_budget_spec",
+                     max_mamba_cache_size=int(
+-                        (mamba_budget_bytes - per_req * (1 + D))
+-                        // (per_req * (1 + D / ratio))
++                        (mamba_budget_bytes - per_req * (1 + D) - extra_per_slot)
++                        // (per_req * (1 + D / ratio) + extra_per_slot)
+                     ),
+                 )
+                 # Intermediate memory is included in mamba_budget, subtract it
+@@ -2559,7 +2562,7 @@ def _handle_max_mamba_cache(self, total_rest_memory):
+                 intermediate_size = per_req * (capped_reqs + 1) * D
+                 total_rest_memory = total_rest_memory - (intermediate_size / (1 << 30))
+             else:
+-                per_slot = per_req + replayssm_ring_per_slot
++                per_slot = per_req + extra_per_slot
+                 get_context().override(
+                     "mamba_pool.memory_budget",
+                     max_mamba_cache_size=int(
+@@ -2586,8 +2589,7 @@ def _handle_max_mamba_cache(self, total_rest_memory):
+ 
+         # +1 accounts for each pool's padding slot.
+         mamba_state_memory = (
+-            (get_schedule().max_mamba_cache_size + 1)
+-            * (stage_per_req + replayssm_ring_per_slot)
++            (get_schedule().max_mamba_cache_size + 1) * (stage_per_req + extra_per_slot)
+             + replayssm_fixed_bytes
+         ) / (1 << 30)
+         return total_rest_memory - mamba_state_memory
+diff --git a/test/registered/unit/layers/attention/test_mamba_track_state_dtype.py b/test/registered/unit/layers/attention/test_mamba_track_state_dtype.py
+index 879fe1df1bd2..6b75c40903ec 100644
+--- a/test/registered/unit/layers/attention/test_mamba_track_state_dtype.py
++++ b/test/registered/unit/layers/attention/test_mamba_track_state_dtype.py
+@@ -1,11 +1,20 @@
+ import unittest
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
+ 
+ import torch
+ 
+ from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
+     MambaAttnBackendBase,
+ )
++from sglang.srt.layers.attention.linear import gdn_backend, kda_backend
++from sglang.srt.layers.attention.linear.gdn_backend import (
++    GDNAttnBackend,
++    GDNKernelDispatcher,
++)
++from sglang.srt.layers.attention.linear.kda_backend import KDAAttnBackend
+ from sglang.srt.layers.attention.mamba.mamba2_metadata import ForwardMetadata
++from sglang.srt.model_executor.forward_batch_info import ForwardMode
+ from sglang.test.ci.ci_register import register_cpu_ci
+ from sglang.test.test_utils import CustomTestCase
+ 
+@@ -89,6 +98,148 @@ def test_no_unaligned_rows_leaves_pool_untouched(self):
+         )
+         self.assertTrue(torch.all(ssm_states == 0))
+ 
++    def test_default_prefill_convolution_hooks_preserve_arguments(self):
++        layer = SimpleNamespace(conv_weights=object(), bias=None, activation="silu")
++        batch = SimpleNamespace(
++            extend_prefix_lens=torch.tensor([0, 64]), extend_seq_lens_cpu=[2, 2]
++        )
++        qkv = torch.arange(24).view(4, 6)
++        states = torch.zeros(8, 6, 2)
++        indices = torch.tensor([6, 2])
++        for backend_type, module in (
++            (GDNAttnBackend, gdn_backend),
++            (KDAAttnBackend, kda_backend),
++        ):
++            with self.subTest(backend=backend_type.__name__):
++                backend = object.__new__(backend_type)
++                starts = torch.tensor([0, 2, 4])
++                backend.forward_metadata = SimpleNamespace(query_start_loc=starts)
++                with patch.object(
++                    module, "causal_conv1d_fn", return_value=qkv.T
++                ) as conv:
++                    output = backend._convolve_prefill(
++                        layer, batch, qkv, states, indices
++                    )
++                torch.testing.assert_close(output, qkv)
++                args, kwargs = conv.call_args
++                torch.testing.assert_close(args[0], qkv.T)
++                self.assertIs(args[1], layer.conv_weights)
++                self.assertIsNone(args[2])
++                self.assertEqual(kwargs["activation"], "silu")
++                self.assertIs(kwargs["conv_states"], states)
++                self.assertIs(kwargs["cache_indices"], indices)
++                self.assertIs(kwargs["query_start_loc"], starts)
++                self.assertEqual(kwargs["seq_lens_cpu"], [2, 2])
++                torch.testing.assert_close(
++                    kwargs["has_initial_state"], torch.tensor([False, True])
++                )
++
++    def test_gdn_prefill_hooks_and_checkpoint_routing(self):
++        layer = SimpleNamespace(
++            layer_id=3,
++            q_dim=2,
++            k_dim=2,
++            v_dim=2,
++            num_q_heads=1,
++            num_k_heads=1,
++            num_v_heads=1,
++            head_q_dim=2,
++            head_k_dim=2,
++            head_v_dim=2,
++        )
++        batch = SimpleNamespace(
++            forward_mode=ForwardMode.EXTEND,
++            extend_prefix_lens=torch.tensor([0, 64]),
++        )
++        qkv = torch.arange(24, dtype=torch.float32).view(4, 6)
++        indices = torch.tensor([6, 2])
++        metadata = ForwardMetadata(
++            query_start_loc=torch.tensor([0, 2, 4]),
++            mamba_cache_indices=indices,
++            has_mamba_track_mask=True,
++            conv_states_mask_indices=torch.tensor([4, 5]),
++            track_conv_indices=torch.tensor([[0, 1], [2, 3]]),
++            track_ssm_h_src=torch.tensor([0]),
++            track_ssm_h_dst=torch.tensor([4]),
++            track_ssm_h_batch_src=torch.tensor([1]),
++            track_chunk_idx=torch.tensor([-1, 0]),
++            track_ssm_final_src=torch.tensor([6]),
++            track_ssm_final_dst=torch.tensor([5]),
++        )
++        for snapshot in (False, True):
++            for contiguous in (True, False):
++                with self.subTest(snapshot=snapshot, contiguous=contiguous):
++                    backend = object.__new__(GDNAttnBackend)
++                    backend.forward_metadata = metadata
++                    backend.mis_metadata = None
++                    backend.requires_contiguous_prefill_state = contiguous
++                    conv_states = torch.zeros(16, 6, 2)[::2]
++                    ssm_states = torch.zeros(16, 1, 2, 2)[::2]
++                    cache = SimpleNamespace(conv=[conv_states], temporal=ssm_states)
++                    backend.req_to_token_pool = SimpleNamespace(
++                        mamba2_layer_cache=lambda _: cache
++                    )
++                    expected_indices = torch.arange(2) if contiguous else indices
++
++                    def convolve(_layer, _batch, x, states, slots):
++                        torch.testing.assert_close(slots, expected_indices)
++                        self.assertEqual(states.is_contiguous(), contiguous)
++                        states[slots] = 7
++                        return x + 10
++
++                    def extend(q, k, v, g, beta, **kwargs):
++                        self.assertEqual(kwargs["layer_id"], layer.layer_id)
++                        self.assertIs(
++                            kwargs["extend_prefix_lens"], batch.extend_prefix_lens
++                        )
++                        torch.testing.assert_close(
++                            kwargs["cache_indices"], expected_indices
++                        )
++                        self.assertEqual(
++                            kwargs["ssm_states"].is_contiguous(), contiguous
++                        )
++                        kwargs["ssm_states"][kwargs["cache_indices"]] = 5
++                        if snapshot:
++                            self.assertIs(
++                                kwargs["track_chunk_idx"], metadata.track_chunk_idx
++                            )
++                            track = kwargs["track_state"]
++                            self.assertEqual(track.dtype, torch.float32)
++                            self.assertEqual(track.shape, (2, 1, 2, 2))
++                            track[0] = 42
++                            track[1] = DOUBLE_ROUND_PROBE
++                            h = None
++                        else:
++                            self.assertIsNone(kwargs["track_state"])
++                            self.assertIsNone(kwargs["track_chunk_idx"])
++                            h = torch.full((1, 1, 1, 2, 2), 2.0)
++                        return v, None, h
++
++                    backend._convolve_prefill = Mock(side_effect=convolve)
++                    backend._prefill_gates = Mock(return_value=(None, None))
++                    backend.kernel_dispatcher = object.__new__(GDNKernelDispatcher)
++                    backend.kernel_dispatcher.extend_kernel = SimpleNamespace(
++                        supports_track_state_snapshot=snapshot, extend=extend
++                    )
++                    # Exercise the GPU gather policy with CPU tensors and fake kernels.
++                    with (
++                        patch.object(gdn_backend, "is_cpu", return_value=False),
++                        patch.object(gdn_backend, "is_cuda", return_value=False),
++                        patch.object(gdn_backend, "is_hip", return_value=False),
++                        patch.object(gdn_backend, "is_xpu", return_value=False),
++                        patch.object(gdn_backend, "is_npu", return_value=False),
++                    ):
++                        output = backend.forward_extend(layer, batch, qkv, None, None)
++                    backend._prefill_gates.assert_called_once_with(layer, None, None)
++                    torch.testing.assert_close(output.flatten(0, 2), qkv[:, 4:] + 10)
++                    torch.testing.assert_close(
++                        conv_states[[4, 5]], qkv.view(2, 2, 6).transpose(1, 2)
++                    )
++                    self.assertTrue(torch.all(conv_states[indices] == 7))
++                    self.assertTrue(torch.all(ssm_states[[6, 2, 5]] == 5))
++                    expected = DOUBLE_ROUND_PROBE if snapshot else 2.0
++                    self.assertTrue(torch.all(ssm_states[4] == expected))
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/test/registered/unit/mem_cache/test_mamba_donated_alloc_ratio.py b/test/registered/unit/mem_cache/test_mamba_donated_alloc_ratio.py
+index 91f91f27ae28..abbf74bf2f1a 100644
+--- a/test/registered/unit/mem_cache/test_mamba_donated_alloc_ratio.py
++++ b/test/registered/unit/mem_cache/test_mamba_donated_alloc_ratio.py
+@@ -299,6 +299,7 @@ def _pool_size(cls, pp_rank, pp_size):
+         start, end = get_pp_indices(cls.TOTAL_LAYERS, pp_rank, pp_size)
+         fake = SimpleNamespace(
+             mambaish_config=SimpleNamespace(mamba2_cache_params=params),
++            extra_mamba_cache_bytes_per_req=0,
+             server_args=SimpleNamespace(),
+             spec_algorithm=SimpleNamespace(is_none=lambda: True),
+             layer_info=SimpleNamespace(start_layer=start, end_layer=end),
+@@ -334,5 +335,64 @@ def test_every_stage_agrees_on_the_pool_size(self):
+         )
+ 
+ 
++class TestExtraMambaCacheSizing(unittest.TestCase):
++    @staticmethod
++    def _size(extra_bytes, *, pp_size=1, dp_size=1, draft_tokens=None, **schedule):
++        from sglang.srt import runtime_context as rc
++        from sglang.srt.mem_cache.kv_cache_configurator import KVCacheConfigurator
++        from sglang.srt.runtime_context import get_schedule
++
++        fake = SimpleNamespace(
++            mambaish_config=SimpleNamespace(
++                mamba2_cache_params=SimpleNamespace(
++                    layers=[0, 1, 2, 3], mamba_cache_per_req=4 << 20
++                )
++            ),
++            extra_mamba_cache_bytes_per_req=extra_bytes,
++            spec_algorithm=SimpleNamespace(is_none=lambda: draft_tokens is None),
++            attn_dp_size=dp_size,
++            pp_size=pp_size,
++            model_config=SimpleNamespace(num_hidden_layers=4),
++            _calculate_mamba_ratio=lambda: 2,
++        )
++        args = dict(
++            disable_radix_cache=False,
++            max_mamba_cache_size=None,
++            max_running_requests=256 if draft_tokens is not None else None,
++            mamba_full_memory_ratio=0.5,
++            enable_linear_replayssm_spec=False,
++            speculative_num_draft_tokens=draft_tokens,
++        )
++        args.update(schedule)
++        with rc.get_context().override_server_args(**args):
++            remaining = KVCacheConfigurator._handle_max_mamba_cache(fake, 120 / 1024)
++            return get_schedule().max_mamba_cache_size, remaining * (1 << 30)
++
++    def test_auto_capacity_reserves_backend_state(self):
++        self.assertEqual(self._size(0), (9, 80 << 20))
++        self.assertEqual(self._size(4 << 20), (4, 80 << 20))
++
++    def test_fixed_capacity_charges_padding_and_partitioned_state(self):
++        for pp_size in (1, 2):
++            for dp_size in (1, 2):
++                for schedule in (
++                    dict(max_mamba_cache_size=8),
++                    dict(disable_radix_cache=True, max_running_requests=8),
++                ):
++                    with self.subTest(pp=pp_size, dp=dp_size, **schedule):
++                        slots, remaining = self._size(
++                            8 << 20, pp_size=pp_size, dp_size=dp_size, **schedule
++                        )
++                        self.assertEqual(slots, 8 // dp_size)
++                        self.assertEqual(
++                            remaining,
++                            (120 << 20) - (slots + 1) * (12 << 20) // pp_size,
++                        )
++
++    def test_speculative_auto_capacity_keeps_scratch_separate(self):
++        self.assertEqual(self._size(0, draft_tokens=2), (3, 88 << 20))
++        self.assertEqual(self._size(4 << 20, draft_tokens=2), (2, 80 << 20))
++
++
+ if __name__ == "__main__":
+     unittest.main()

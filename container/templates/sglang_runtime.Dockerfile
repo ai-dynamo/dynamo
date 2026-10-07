@@ -27,6 +27,13 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd:$PATH
 
 {% if device == "cuda" %}
+# Apply the GLM-5.3-Flash backports before installing Dynamo or compiling Python
+# bytecode. The bundle checks the exact v0.5.21 source HEAD, a clean checkout,
+# checksums, and every hunk; a base-image upgrade must reconcile these patches.
+RUN --mount=type=bind,source=./container/deps/sglang/patches/v0.5.21,target=/tmp/sglang-patches,readonly \
+    bash /tmp/sglang-patches/apply.sh --apply /sgl-workspace/sglang && \
+    python3 -c 'from pathlib import Path; import importlib.util; path = Path(importlib.util.find_spec("sglang").origin).resolve(); assert path.is_relative_to("/sgl-workspace/sglang/python"), path; print("Patched SGLang import:", path)'
+
 # Install the TurboJPEG runtime used by frontend JPEG decoding and bring
 # base-image OS packages up to the current patch releases. --only-upgrade skips
 # anything not already installed while keeping both operations in one layer.
