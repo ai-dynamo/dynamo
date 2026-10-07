@@ -16,6 +16,9 @@ from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 logger = logging.getLogger(__name__)
+# Canonical variable the backend admission gate reads for its full-request
+# limit; it outranks the legacy DYN_ENGINE_REQUEST_LIMIT alias.
+_ENGINE_REQUEST_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT"
 _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
 _fpm_trace_invalid_warning_emitted = False
 
@@ -55,9 +58,10 @@ class DynamoRuntimeConfig(ConfigBase):
     # Honored only by the unified backend's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
-    # Worker-side request admission/rejection knobs. Disabled (None) by
-    # default; when set, these surface env vars that the Rust runtime reads
-    # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
+    # Explicit --engine-request-limit for the backend admission gate. None
+    # leaves the gate on its environment settings and default; validate()
+    # exports a set value, which the gate reads from the process environment
+    # (see lib/runtime/src/admission_gate.rs).
     engine_request_limit: Optional[int] = None
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
@@ -101,10 +105,14 @@ class DynamoRuntimeConfig(ConfigBase):
 
         self._validate_output_modalities()
 
-        if self.engine_request_limit is not None and self.engine_request_limit <= 0:
-            raise ValueError(
-                f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
-            )
+        if self.engine_request_limit is not None:
+            if self.engine_request_limit <= 0:
+                raise ValueError(
+                    f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+                )
+            # An explicit flag outranks both environment names, so it replaces
+            # the canonical one, which the gate reads ahead of the legacy alias.
+            os.environ[_ENGINE_REQUEST_LIMIT_ENV] = str(self.engine_request_limit)
 
         os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
@@ -403,21 +411,20 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "default health_check_payload(). Unified backend only.",
         )
 
-        # Worker-side request admission/rejection. Defaults to None (disabled);
-        # when unset the worker behaves exactly as before. Surfaces an env var —
-        # the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT directly. The Dynamo-side
-        # overflow queue is a small fixed burst (default 16, hard cap N+16) and is
-        # not a user-facing knob; advanced users may override it via the
-        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT env var.
-        add_argument(
-            g,
-            flag_name="--engine-request-limit",
-            env_var="DYN_ENGINE_REQUEST_LIMIT",
+        # Backend admission full-request limit. Registered without an
+        # environment default: the gate itself resolves the canonical variable,
+        # then the legacy alias, then its default, so only an explicit flag is
+        # set here, and validate() exports it ahead of both variables.
+        g.add_argument(
+            "--engine-request-limit",
+            dest="engine_request_limit",
+            type=int,
             default=None,
-            arg_type=int,
-            help="Max requests handled concurrently by the engine (worker-pool "
-            "semaphore size). Enables worker-side request rejection when set. "
-            "Disabled by default.",
+            help="Maximum concurrent engine requests admitted by the backend "
+            "admission gate, each held from admission until the request finishes. "
+            "Takes precedence over both environment variables.\n"
+            f"env var: {_ENGINE_REQUEST_LIMIT_ENV} (legacy alias: "
+            "DYN_ENGINE_REQUEST_LIMIT) | default: 10000",
         )
 
         add_argument(

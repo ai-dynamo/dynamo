@@ -167,3 +167,76 @@ def test_default_thinking_mode_rejects_invalid_value(monkeypatch):
 
     with pytest.raises(SystemExit):
         _parse_runtime_args(["--dyn-default-thinking-mode", "adaptive"])
+
+
+_ENGINE_LIMIT_ENV = (
+    "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT",
+    "DYN_ENGINE_REQUEST_LIMIT",
+    "DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT",
+)
+
+
+@pytest.fixture
+def engine_limit_env(monkeypatch):
+    """Clear the gate's engine-limit variables, so nothing ambient decides the
+    outcome and whatever validate() writes is restored afterwards."""
+    for name in (*_ENGINE_LIMIT_ENV, "DYN_RESPONSE_PLANE"):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def test_engine_request_limit_is_left_to_the_gate_by_default(engine_limit_env):
+    config, _ = _parse_runtime_args([])
+
+    assert config.engine_request_limit is None
+    assert not any(name in os.environ for name in _ENGINE_LIMIT_ENV)
+
+
+def test_engine_request_limit_flag_outranks_both_environment_names(engine_limit_env):
+    engine_limit_env.setenv("DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT", "5")
+    engine_limit_env.setenv("DYN_ENGINE_REQUEST_LIMIT", "3")
+
+    config, help_text = _parse_runtime_args(["--engine-request-limit", "7"])
+
+    assert config.engine_request_limit == 7
+    # Exported under the name the gate reads first, and only as the
+    # full-request limit.
+    assert os.environ["DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT"] == "7"
+    assert os.environ["DYN_ENGINE_REQUEST_LIMIT"] == "3"
+    assert "DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT" not in os.environ
+    assert "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT" in help_text
+    assert "DYN_ENGINE_REQUEST_LIMIT" in help_text
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT": "5"},
+        {"DYN_ENGINE_REQUEST_LIMIT": "3"},
+        # An invalid alias shadowed by a valid canonical value is never read.
+        {
+            "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT": "5",
+            "DYN_ENGINE_REQUEST_LIMIT": "invalid",
+        },
+    ],
+)
+def test_engine_request_limit_environment_is_resolved_by_the_gate(
+    engine_limit_env, environment
+):
+    for name, value in environment.items():
+        engine_limit_env.setenv(name, value)
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.engine_request_limit is None
+    assert {name: os.environ.get(name) for name in _ENGINE_LIMIT_ENV} == {
+        name: environment.get(name) for name in _ENGINE_LIMIT_ENV
+    }
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_engine_request_limit_rejects_non_positive_values(engine_limit_env, value):
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        _parse_runtime_args(["--engine-request-limit", value])
+
+    assert "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT" not in os.environ
