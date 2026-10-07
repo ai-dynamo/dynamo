@@ -230,7 +230,6 @@ compute_group_pools() {
     return
   fi
 
-  # Each group gets its weighted share of the pods, rounded, and at least one.
   local total_weight=$(( GROUP_WEIGHTS[0] + GROUP_WEIGHTS[1] + GROUP_WEIGHTS[2] ))
   local -a pool_sizes=()
   local max_size=0 assigned=0
@@ -239,7 +238,6 @@ compute_group_pools() {
     if [ "${pool_sizes[g]}" -lt 1 ]; then pool_sizes[g]=1; fi
     assigned=$(( assigned + pool_sizes[g] ))
   done
-  # If rounding leaves pods out of every pool, general gets them.
   if [ "$assigned" -lt "$count" ]; then
     pool_sizes[1]=$(( pool_sizes[1] + count - assigned ))
   fi
