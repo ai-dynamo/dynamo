@@ -1,0 +1,56 @@
+name: Cherry-Pick Request
+description: Request a merged fix on a release branch
+title: '[Cherry-Pick Request]: '
+labels: ["cherry-pick:requested"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to request a fix on a release branch after code freeze. Get the fix merged to `main` first. The maintainer who merged your PR opens the release PR.
+
+  - type: input
+    id: main-pr
+    attributes:
+      label: Merged Main PR
+      description: Link to the merged PR on `main`. Leave empty only for a release-only fix.
+      placeholder: https://github.com/ai-dynamo/dynamo/pull/12345
+    validations:
+      required: false
+
+  - type: input
+    id: target-release
+    attributes:
+      label: Target Release
+      description: Defaults to the release in code freeze.
+      placeholder: "1.6.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - Fix
+        - Test
+        - Infra
+        - CI
+        - Dependency
+    validations:
+      required: true
+
+  - type: textarea
+    id: reason
+    attributes:
+      label: Reason
+      description: What breaks in the release without it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Other PRs that must land first, if any.
+    validations:
+      required: false
