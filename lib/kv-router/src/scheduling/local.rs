@@ -1293,16 +1293,15 @@ mod tests {
         );
         let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
         let worker = WorkerWithDpRank::new(0, 0);
+        let mut tier_overlap_blocks = TierOverlapBlocks::default();
+        tier_overlap_blocks.host_pinned.insert(worker, 1);
 
         let response = scheduler
             .schedule(
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks {
-                    host_pinned: FxHashMap::from_iter([(worker, 1)]),
-                    ..Default::default()
-                },
+                tier_overlap_blocks,
                 FxHashMap::from_iter([(worker, 0.75)]),
                 FxHashMap::from_iter([(worker, 48)]),
                 None,

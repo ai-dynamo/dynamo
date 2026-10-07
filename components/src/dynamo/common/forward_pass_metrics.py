@@ -149,16 +149,6 @@ class QueuedRequestMetrics(
     # Population variance of KV context lengths for queued decode requests.
     var_decode_kv_tokens: float = 0.0
 
-    # Requests whose destination KV blocks are allocated but whose external
-    # KV transfer has not completed. These are also included in the queued
-    # decode totals above for planner compatibility, but are broken out here
-    # so routing does not mistake transfer wait for prefill compute.
-    num_remote_kv_waiting_requests: int = 0
-
-    # Tokens currently being received by requests in
-    # WAITING_FOR_REMOTE_KVS. This is transfer backlog, not prefill work.
-    sum_remote_kv_waiting_tokens: int = 0
-
 
 class ForwardPassMetrics(
     msgspec.Struct,
