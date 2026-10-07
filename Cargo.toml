@@ -29,6 +29,7 @@ members = [
     "lib/kvbm-logical",
     "lib/kvbm-physical",
     "lib/bench",
+    "lib/e2e-indexer-tools",
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
     "lib/sidecar/common",

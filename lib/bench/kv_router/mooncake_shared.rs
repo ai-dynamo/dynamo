@@ -253,6 +253,10 @@ impl MergedMooncakeBenchmark {
     pub(crate) fn block_size(&self) -> u32 {
         self.block_size
     }
+
+    pub(crate) fn into_worker_traces(self) -> Vec<Vec<WorkerTrace>> {
+        self.worker_traces.into_inner()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

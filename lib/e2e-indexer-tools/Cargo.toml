@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# EXPERIMENT ONLY (campaign e2e-indexer-contention-20261006): phantom KV publishers and a side
+# query driver for a serving indexer. Not for upstream.
+
+[package]
+name = "dynamo-e2e-indexer-tools"
+description = "Phantom KV-event publishers and a serving-indexer query driver (experiment only)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# `stream` (the phantom-stream format) stays dependency-light so the corpus exporter in
+# dynamo-bench can write it; the binaries need the runtime.
+default = ["bins"]
+bins = [
+  "dep:clap",
+  "dep:dynamo-llm",
+  "dep:dynamo-runtime",
+  "dep:futures",
+  "dep:hdrhistogram",
+  "dep:parking_lot",
+  "dep:tokio",
+  "dep:tracing",
+]
+
+[dependencies]
+anyhow = { workspace = true }
+dynamo-kv-router = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+clap = { version = "4", features = ["derive"], optional = true }
+dynamo-llm = { path = "../llm", default-features = false, optional = true }
+dynamo-runtime = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+hdrhistogram = { version = "7.5", optional = true }
+parking_lot = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[bin]]
+name = "phantom_publisher"
+required-features = ["bins"]
+
+[[bin]]
+name = "phantom_plan"
+required-features = ["bins"]

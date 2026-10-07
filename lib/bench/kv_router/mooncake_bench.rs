@@ -10,7 +10,9 @@ mod mooncake_shared;
 #[path = "scaling_diag.rs"]
 mod scaling_diag;
 
-use agentic_prep::{AgenticEngine, prepare_agentic_benchmark_cached};
+use agentic_prep::{
+    AgenticEngine, export_agentic_phantom_streams, prepare_agentic_benchmark_cached,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use dynamo_bench::kv_router_common::agentic::{AgenticCorpusConfig, AgenticPool};
 use dynamo_bench::kv_router_common::args::CommonArgs;
@@ -178,6 +180,11 @@ struct Args {
     #[clap(long)]
     prep_only: bool,
 
+    /// EXPERIMENT ONLY: load (or capture and cache) the agentic corpus, write it to this
+    /// directory as phantom streams for the e2e phantom publishers and query driver, and exit.
+    #[clap(long)]
+    export_phantom_streams: Option<String>,
+
     /// Instead of a timed run, replay the corpus quiescently and compare the backend's scores
     /// with an independent reference index for about this many evenly spaced queries.
     #[clap(long, default_value = "0")]
@@ -317,6 +324,9 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
         .saturating_mul(args.common.inference_worker_duplication_factor);
     if ranks > MAX_CRTC_RANKS {
         anyhow::bail!("{ranks} ranks exceed the CRTC slot capacity of {MAX_CRTC_RANKS}");
+    }
+    if args.export_phantom_streams.is_some() && args.workload != Workload::Agentic {
+        anyhow::bail!("--export-phantom-streams needs --workload agentic");
     }
     if (args.prep_only || args.correctness_check_queries > 0) && args.common.sweep {
         anyhow::bail!("--prep-only and --correctness-check-queries do not support --sweep");
@@ -728,24 +738,7 @@ async fn prepare_benchmark(
         return Ok(None);
     };
     if args.workload == Workload::Agentic {
-        let config = agentic_corpus_config(args)?;
-        let engine = AgenticEngine {
-            num_gpu_blocks: args.common.num_gpu_blocks,
-            block_size: args.common.block_size,
-            speedup_ratio: args.agentic_speedup_ratio,
-            sglang: args.agentic_engine == "sglang",
-        };
-        let key = serde_json::json!({
-            "pool_sha256": args.agentic_pool_sha256,
-            "engine": args.agentic_engine,
-            "block_size": engine.block_size,
-            "num_gpu_blocks": engine.num_gpu_blocks,
-            "speedup_ratio": engine.speedup_ratio,
-            "config": config,
-        });
-        if args.agentic_corpus_cache.is_some() && args.agentic_pool_sha256.is_none() {
-            anyhow::bail!("--agentic-corpus-cache requires --agentic-pool-sha256");
-        }
+        let (config, engine, key) = agentic_capture_inputs(args)?;
         let (prepared, timings, report) = prepare_agentic_benchmark_cached(
             std::path::Path::new(path),
             args.agentic_pool_sha256.as_deref(),
@@ -780,6 +773,56 @@ async fn prepare_benchmark(
     let prepared = prepare_scaled_benchmark(merged, benchmark_duration_ms);
     timings.merge_and_rescale_ms = elapsed_ms(started);
     Ok(Some((prepared, timings, None)))
+}
+
+/// The agentic corpus configuration, capture engine, and corpus-cache key of `args`.
+fn agentic_capture_inputs(
+    args: &Args,
+) -> anyhow::Result<(AgenticCorpusConfig, AgenticEngine, serde_json::Value)> {
+    let config = agentic_corpus_config(args)?;
+    let engine = AgenticEngine {
+        num_gpu_blocks: args.common.num_gpu_blocks,
+        block_size: args.common.block_size,
+        speedup_ratio: args.agentic_speedup_ratio,
+        sglang: args.agentic_engine == "sglang",
+    };
+    let key = serde_json::json!({
+        "pool_sha256": args.agentic_pool_sha256,
+        "engine": args.agentic_engine,
+        "block_size": engine.block_size,
+        "num_gpu_blocks": engine.num_gpu_blocks,
+        "speedup_ratio": engine.speedup_ratio,
+        "config": config,
+    });
+    if args.agentic_corpus_cache.is_some() && args.agentic_pool_sha256.is_none() {
+        anyhow::bail!("--agentic-corpus-cache requires --agentic-pool-sha256");
+    }
+    Ok((config, engine, key))
+}
+
+/// EXPERIMENT ONLY: write the agentic corpus as phantom streams.
+async fn run_export_phantom_streams_mode(args: &Args, out_dir: &str) -> anyhow::Result<()> {
+    let pool =
+        args.common.mooncake_trace_path.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("--export-phantom-streams needs the agentic pool path")
+        })?;
+    let (config, engine, key) = agentic_capture_inputs(args)?;
+    let summary = export_agentic_phantom_streams(
+        std::path::Path::new(pool),
+        args.agentic_pool_sha256.as_deref(),
+        &config,
+        engine,
+        args.agentic_corpus_cache
+            .as_deref()
+            .map(std::path::Path::new),
+        key,
+        std::path::Path::new(out_dir),
+    )
+    .await?;
+    let json = serde_json::to_string_pretty(&summary)?;
+    println!("{json}");
+    std::fs::write(&args.result_json_output, json)?;
+    Ok(())
 }
 
 fn agentic_json(report: Option<serde_json::Value>) -> anyhow::Result<Option<serde_json::Value>> {
@@ -968,6 +1011,9 @@ fn write_agentic_pool(args: &Args, output: &str) -> anyhow::Result<()> {
 async fn async_main(args: Args) -> anyhow::Result<()> {
     if let Some(output) = args.write_agentic_pool.as_deref() {
         return write_agentic_pool(&args, output);
+    }
+    if let Some(out_dir) = args.export_phantom_streams.as_deref() {
+        return run_export_phantom_streams_mode(&args, out_dir).await;
     }
     let indexer_names = indexer_names(&args);
 

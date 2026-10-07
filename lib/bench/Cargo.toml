@@ -50,6 +50,7 @@ dc-ckf-relay = [
 kv-router-stress-support = ["dep:reqwest"]
 mooncake = [
   "router-bench",
+  "dep:dynamo-e2e-indexer-tools",
   "dep:dynamo-mocker",
   "dep:flume",
   "dep:indicatif",
@@ -202,6 +203,7 @@ uuid = { workspace = true, optional = true }
 xxhash-rust = { workspace = true, optional = true }
 dynamo-tokens = { workspace = true, optional = true }
 dynamo-data-gen = { workspace = true, optional = true }
+dynamo-e2e-indexer-tools = { path = "../e2e-indexer-tools", default-features = false, optional = true }
 dynamo-mocker = { workspace = true, optional = true }
 dynamo-kv-router = { workspace = true }
 

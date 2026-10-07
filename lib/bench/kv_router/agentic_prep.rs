@@ -297,6 +297,237 @@ pub(crate) fn prepared_corpus_digest(prepared: &PreparedMooncakeBenchmark) -> St
     format!("{:016x}", hasher.digest())
 }
 
+/// EXPERIMENT ONLY (e2e indexer-contention campaign): load the corpus from `cache` (or capture
+/// it, writing `cache` when given) and write one phantom-stream base per captured worker to
+/// `out_dir`. Returns the stream manifest's summary.
+pub(crate) async fn export_agentic_phantom_streams(
+    pool_path: &Path,
+    expected_pool_sha256: Option<&str>,
+    config: &AgenticCorpusConfig,
+    engine: AgenticEngine,
+    cache: Option<&Path>,
+    key: serde_json::Value,
+    out_dir: &Path,
+) -> anyhow::Result<serde_json::Value> {
+    let (merged, warmup, capture, cache_json) = match cache.filter(|path| path.exists()) {
+        Some(path) => {
+            let (merged, warmup, report, digest) = corpus_cache::read(path, &key)?;
+            let cache_json = serde_json::json!({
+                "path": path.display().to_string(),
+                "digest": digest,
+                "loaded": true,
+            });
+            (merged, warmup, report, cache_json)
+        }
+        None => {
+            let (merged, warmup, report, _) =
+                capture_agentic(pool_path, expected_pool_sha256, config, engine).await?;
+            let report = serde_json::to_value(&report)?;
+            let cache_json = match cache {
+                Some(path) => {
+                    let digest = corpus_cache::write(path, &key, &report, &merged, &warmup)?;
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "digest": digest,
+                        "loaded": false,
+                    })
+                }
+                None => serde_json::Value::Null,
+            };
+            (merged, warmup, report, cache_json)
+        }
+    };
+    let provenance = serde_json::json!({
+        "exporter": "mooncake_bench --export-phantom-streams",
+        "key": key,
+        "capture": capture,
+        "corpus_cache": cache_json,
+    });
+    phantom_export::write(merged, warmup, provenance, out_dir)
+}
+
+mod phantom_export {
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use anyhow::{bail, ensure};
+    use dynamo_e2e_indexer_tools::stream::{
+        BaseInfo, BaseStream, EventLists, Manifest, base_file_name, write_base,
+    };
+    use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
+
+    use super::super::mooncake_shared::{
+        MergedMooncakeBenchmark, WarmupEvent, WorkerTrace, WorkerTraceEntry,
+    };
+
+    fn push_raw(
+        lists: &mut EventLists,
+        event: &KvCacheEvent,
+        tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            tier == StorageTier::Device && event.dp_rank == 0,
+            "phantom streams support device-tier, DP-rank-0 events only"
+        );
+        match &event.data {
+            KvCacheEventData::Stored(store) => {
+                if store.start_position.is_some()
+                    || store
+                        .blocks
+                        .iter()
+                        .any(|block| block.mm_extra_info.is_some())
+                {
+                    bail!("phantom streams do not support positional or multimodal stores");
+                }
+                lists.push_store(
+                    store.parent_hash.map(|hash| hash.0),
+                    store
+                        .blocks
+                        .iter()
+                        .map(|block| (block.block_hash.0, block.tokens_hash.0)),
+                );
+            }
+            KvCacheEventData::Removed(remove) => {
+                lists.push_remove(remove.block_hashes.iter().map(|hash| hash.0))
+            }
+            KvCacheEventData::Cleared => lists.push_clear(),
+        }
+        Ok(())
+    }
+
+    /// One base's timed trace and warm-up lists, taken once by an export thread.
+    type BaseWork = (Vec<WorkerTrace>, EventLists);
+
+    /// Timed events with one timestamp form one engine publish (one scheduler pass).
+    fn base_stream(trace: Vec<WorkerTrace>, warmup: EventLists) -> anyhow::Result<BaseStream> {
+        let mut stream = BaseStream {
+            warmup,
+            ..BaseStream::default()
+        };
+        let mut open_ts = None;
+        for WorkerTrace {
+            entry,
+            timestamp_us,
+        } in trace
+        {
+            match entry {
+                WorkerTraceEntry::Request(hashes) => stream
+                    .queries
+                    .push(timestamp_us, hashes.iter().map(|hash| hash.0)),
+                WorkerTraceEntry::Event {
+                    event,
+                    storage_tier,
+                } => {
+                    if open_ts != Some(timestamp_us) {
+                        if let Some(ts) = open_ts {
+                            stream.timed.close_list(ts);
+                        }
+                        open_ts = Some(timestamp_us);
+                    }
+                    push_raw(&mut stream.timed, &event, storage_tier)?;
+                }
+            }
+        }
+        if let Some(ts) = open_ts {
+            stream.timed.close_list(ts);
+        }
+        Ok(stream)
+    }
+
+    pub(super) fn write(
+        merged: MergedMooncakeBenchmark,
+        warmup: Vec<WarmupEvent>,
+        provenance: serde_json::Value,
+        out_dir: &Path,
+    ) -> anyhow::Result<serde_json::Value> {
+        std::fs::create_dir_all(out_dir)?;
+        let block_size = merged.block_size();
+        let traces = merged.into_worker_traces();
+        let workers = traces.len();
+
+        // The merged warm-up is ordered by (virtual time, worker, source order), so a run of
+        // one worker's events is one scheduler pass.
+        let mut warmups = vec![EventLists::default(); workers];
+        let mut previous: Option<usize> = None;
+        for event in warmup {
+            ensure!(
+                event.worker < workers,
+                "warm-up event for unknown worker {}",
+                event.worker
+            );
+            if let Some(worker) = previous.filter(|&worker| worker != event.worker) {
+                warmups[worker].close_list(0);
+            }
+            push_raw(&mut warmups[event.worker], &event.event, event.storage_tier)?;
+            previous = Some(event.worker);
+        }
+        if let Some(worker) = previous {
+            warmups[worker].close_list(0);
+        }
+
+        let work: Vec<Mutex<Option<BaseWork>>> = traces
+            .into_iter()
+            .zip(warmups)
+            .map(|item| Mutex::new(Some(item)))
+            .collect();
+        let infos: Vec<Mutex<Option<BaseInfo>>> = (0..workers).map(|_| Mutex::new(None)).collect();
+        let next = AtomicUsize::new(0);
+        let threads = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .min(workers.max(1));
+        std::thread::scope(|scope| -> anyhow::Result<()> {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| -> anyhow::Result<()> {
+                        loop {
+                            let base = next.fetch_add(1, Ordering::Relaxed);
+                            if base >= workers {
+                                return Ok(());
+                            }
+                            let (trace, warmup) = work[base]
+                                .lock()
+                                .unwrap()
+                                .take()
+                                .expect("each base is taken once");
+                            let stream = base_stream(trace, warmup)?;
+                            let file = base_file_name(base);
+                            write_base(&out_dir.join(&file), &stream)?;
+                            *infos[base].lock().unwrap() = Some(BaseInfo::describe(file, &stream));
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("export thread panicked")?;
+            }
+            Ok(())
+        })?;
+        let infos: Vec<BaseInfo> = infos
+            .into_iter()
+            .map(|info| info.into_inner().unwrap().expect("every base was written"))
+            .collect();
+        let manifest = Manifest::new(block_size, infos, provenance);
+        manifest.write(out_dir)?;
+        let sum = |f: &dyn Fn(&BaseInfo) -> u64| manifest.bases.iter().map(f).sum::<u64>();
+        Ok(serde_json::json!({
+            "mode": "export_phantom_streams",
+            "out_dir": out_dir.display().to_string(),
+            "bases": manifest.bases.len(),
+            "block_size": block_size,
+            "t0_us": manifest.t0_us,
+            "t1_us": manifest.t1_us,
+            "warmup_write_blocks": sum(&|base| base.warmup.write_blocks()),
+            "timed_events": sum(&|base| base.timed.events),
+            "timed_lists": sum(&|base| base.timed.lists),
+            "timed_stored_blocks": sum(&|base| base.timed.stored_blocks),
+            "timed_removed_blocks": sum(&|base| base.timed.removed_blocks),
+            "queries": sum(&|base| base.queries),
+            "query_blocks": sum(&|base| base.query_blocks),
+        }))
+    }
+}
+
 /// Binary corpus cache: the merged, not yet rescaled per-worker timelines plus the warm-up
 /// prefix and the capture provenance. Lookups are raw little-endian u64 arrays; KV events are
 /// MessagePack. An xxh3 digest of everything after the magic is stored as the trailer.

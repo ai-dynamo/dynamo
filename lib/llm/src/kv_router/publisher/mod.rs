@@ -29,6 +29,8 @@ mod batching;
 mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
+// EXPERIMENT ONLY (e2e indexer-contention campaign).
+mod offline;
 mod sinks;
 mod state_agent;
 mod state_agent_host;
@@ -49,6 +51,7 @@ pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
     MultimodalEmbeddingCacheUpdate,
 };
+pub use offline::OfflinePublisherPipeline;
 use sinks::EventPlanePublisher;
 pub use state_agent::{
     KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
