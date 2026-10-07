@@ -153,9 +153,10 @@ def test_spec_decode_runtime_data_ignores_invalid_nextn(speculative_num_steps):
     ],
 )
 def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected):
-    # enable_eagle must equal sglang's SpeculativeAlgorithm.is_eagle() -- the SAME predicate the
-    # radix cache uses to bigram-key its KV events -- so the KV-router frontend's block-hash window
-    # matches the worker's events. EAGLE3 + FROZEN_KV_MTP were previously omitted -> cache-blind.
+    # Without a model config, enable_eagle must equal sglang's SpeculativeAlgorithm.is_eagle() --
+    # the predicate the radix cache uses to bigram-key its KV events on non-hybrid models -- so the
+    # KV-router frontend's block-hash window matches the worker's events. EAGLE3 + FROZEN_KV_MTP
+    # were previously omitted -> cache-blind.
     # (NEXTN/EAGLE are normalized to EAGLE/FROZEN_KV_MTP in ServerArgs before register sees them.)
     # NOTE: import lazily. register.py does `from sglang.srt.environ import envs`, which is absent in
     # the lint/collection env of the `pytest-marker-report` pre-commit hook (unlike the sglang-free
@@ -163,6 +164,56 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
     from dynamo.sglang.register import _eagle_enabled_for
 
     assert _eagle_enabled_for(speculative_algorithm) is expected
+
+
+@pytest.mark.parametrize(
+    "speculative_algorithm, hybrid, expected",
+    [
+        ("EAGLE", False, True),
+        ("EAGLE3", False, True),
+        ("EAGLE", True, False),
+        ("EAGLE3", True, False),
+        ("FROZEN_KV_MTP", True, False),
+        ("NONE", True, False),
+    ],
+)
+def test_eagle_enabled_for_hybrid_linear_attention_model(
+    speculative_algorithm, hybrid, expected
+):
+    # sglang's radix tree bigram-keys KV events only when is_eagle() holds AND it has no Mamba
+    # component, which it gets exactly when uses_ssm_state(model_config) holds. A hybrid model
+    # (Qwen3-Next) under EAGLE/MTP publishes single-token keys, so enable_eagle must stay off or
+    # the router's bigram prompt hashes never match the worker's events.
+    # Lazy imports for the same collection reason as above; the configs need no download.
+    from sglang.srt.configs import Qwen3NextConfig
+    from transformers import LlamaConfig
+
+    from dynamo.sglang.register import _eagle_enabled_for
+
+    # The ModelConfig fields sglang's uses_ssm_state() reads.
+    model_config = SimpleNamespace(
+        hf_config=Qwen3NextConfig() if hybrid else LlamaConfig(),
+        linear_attn_registry_result=None,
+        is_draft_model=False,
+    )
+
+    assert _eagle_enabled_for(speculative_algorithm, model_config) is expected
+
+
+@pytest.mark.parametrize("ssm_check", ["unavailable", "raises"])
+def test_eagle_enabled_for_keeps_is_eagle_when_ssm_check_fails(monkeypatch, ssm_check):
+    # An sglang without uses_ssm_state (None), or a check that raises, keeps the
+    # is_eagle()-only answer instead of crashing registration.
+    from dynamo.sglang import register
+
+    def fake_uses_ssm_state(_model_config):
+        if ssm_check == "raises":
+            raise AttributeError("hf_config")
+        return None
+
+    monkeypatch.setattr(register, "sglang_uses_ssm_state", fake_uses_ssm_state)
+
+    assert register._eagle_enabled_for("EAGLE", SimpleNamespace()) is True
 
 
 @pytest.mark.parametrize(
@@ -276,6 +327,7 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
                 validate_total_tokens=True,
                 num_reserved_tokens=0,
                 rid_to_state={},
+                model_config=None,
             ),
             _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
         )
@@ -386,6 +438,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(
             context_len=4096,
             validate_total_tokens=True,
             num_reserved_tokens=4,
+            model_config=None,
         ),
     )
     capacity = SimpleNamespace(
