@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # GLM-5.3 Benchmark Recipe
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers all four GLM-5.3 DGDs in this recipe (the
-`glm52-*` Kubernetes names come from the recipe directory and are literal). Set `ENDPOINT` for the target DGD and
+[`perf.yaml`](perf.yaml) — covers all four GLM-5.3 DGDs in this recipe (all
+Kubernetes resources are named `glm53-*`). Set `ENDPOINT` for the target DGD and
 `SYNTHESIS_MAX_ISL` for its context limit.
 
 The Job waits for the target model on the DGD frontend, runs a short warmup,
@@ -21,10 +21,10 @@ Edit the `env` block in [`perf.yaml`](perf.yaml) and update the `podAffinity` `v
 
 | Variant target | `ENDPOINT` | `SYNTHESIS_MAX_ISL` | `TRACE_FILE` |
 | --- | --- | --- | --- |
-| B200 aggregate agentic | `glm52-agg-b200-agentic-frontend:8000` | `500000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| B200 disaggregated agentic | `glm52-disagg-b200-agentic-frontend:8000` | `500000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| H200 aggregate agentic | `glm52-agg-h200-agentic-frontend:8000` | `250000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| H200 disaggregated agentic | `glm52-disagg-h200-agentic-frontend:8000` | `250000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 aggregate agentic | `glm53-agg-b200-agentic-frontend:8000` | `500000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 disaggregated agentic | `glm53-disagg-b200-agentic-frontend:8000` | `500000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 aggregate agentic | `glm53-agg-h200-agentic-frontend:8000` | `250000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 disaggregated agentic | `glm53-disagg-h200-agentic-frontend:8000` | `250000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 
 If you run more than one benchmark in the same namespace, also update
 `metadata.name` and `labels.app` so Jobs and artifact directories stay
@@ -91,8 +91,8 @@ Keep `pvc-helper` for fetching artifacts, or delete it after staging.
 
 ```bash
 kubectl apply -f perf.yaml -n ${NAMESPACE}
-kubectl logs -n ${NAMESPACE} -l job-name=glm52-bench -f
-kubectl wait --for=condition=Complete job/glm52-bench \
+kubectl logs -n ${NAMESPACE} -l job-name=glm53-bench -f
+kubectl wait --for=condition=Complete job/glm53-bench \
   -n ${NAMESPACE} --timeout=10800s
 ```
 
@@ -103,14 +103,14 @@ not install or patch AIPerf at runtime.
 
 ```bash
 kubectl cp \
-  ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_glm52-bench \
+  ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_glm53-bench \
   ./results
 ```
 
 ### 5. Cleanup
 
 ```bash
-kubectl delete job glm52-bench -n ${NAMESPACE}
+kubectl delete job glm53-bench -n ${NAMESPACE}
 kubectl delete pod pvc-helper -n ${NAMESPACE}
 ```
 
@@ -120,9 +120,9 @@ kubectl delete pod pvc-helper -n ${NAMESPACE}
 frontend/router state between independent runs:
 
 ```bash
-kubectl delete job glm52-bench -n ${NAMESPACE} --ignore-not-found
+kubectl delete job glm53-bench -n ${NAMESPACE} --ignore-not-found
 
-DGD=glm52-agg-b200-agentic # Choose one of the four variant names above.
+DGD=glm53-agg-b200-agentic # Choose one of the four variant names above.
 kubectl delete pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD}
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
@@ -131,7 +131,7 @@ kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
 
 # Update CONCURRENCY in perf.yaml before each run.
 kubectl apply -f perf.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/glm52-bench \
+kubectl wait --for=condition=Complete job/glm53-bench \
   -n ${NAMESPACE} --timeout=10800s
 ```
 
@@ -142,7 +142,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ENDPOINT` | `glm52-agg-b200-agentic-frontend:8000` | Change per DGD variant |
+| `ENDPOINT` | `glm53-agg-b200-agentic-frontend:8000` | Change per DGD variant |
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
 | `SYNTHESIS_MAX_ISL` | `500000` | Use `250000` for H200 recipes |
 | `CONCURRENCY` | `64` | Single value; reset server state between values |

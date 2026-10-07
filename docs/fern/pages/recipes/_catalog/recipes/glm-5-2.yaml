@@ -38,10 +38,10 @@ targets:
     type: agentic-trace-replay
     traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 64
   deploy:
-    asset: recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml
+    asset: recipes/glm-5.3/sglang/agg-b200-agentic/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/glm-5.2/perf/perf.yaml
+    asset: recipes/glm-5.3/perf/perf.yaml
   expected_performance:
     available: true
     summary: 190.05 output tok/s/GPU, 61.92 user tok/s P50, TTFT P50 228.7 ms at concurrency 64 (4 workers, 15% agentic trace subset)
@@ -66,10 +66,10 @@ targets:
     type: agentic-trace-replay
     traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 128
   deploy:
-    asset: recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml
+    asset: recipes/glm-5.3/sglang/disagg-b200-agentic/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/glm-5.2/perf/perf.yaml
+    asset: recipes/glm-5.3/perf/perf.yaml
   expected_performance:
     available: true
     summary: 323.82 output tok/s/GPU, 63.13 user tok/s P50, TTFT P50 1280.1 ms at concurrency 128 (3P1D, 15% agentic trace subset)
@@ -91,10 +91,10 @@ targets:
     type: agentic-trace-replay
     traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 32
   deploy:
-    asset: recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml
+    asset: recipes/glm-5.3/sglang/agg-h200-agentic/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/glm-5.2/perf/perf.yaml
+    asset: recipes/glm-5.3/perf/perf.yaml
   expected_performance:
     available: true
     summary: 60.87 output tok/s/GPU, 57.33 user tok/s P50, TTFT P50 1158.2 ms at concurrency 32 (3 workers, 15% agentic trace subset)
@@ -118,16 +118,16 @@ targets:
     type: agentic-trace-replay
     traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 24
   deploy:
-    asset: recipes/glm-5.2/sglang/disagg-h200-agentic/deploy.yaml
+    asset: recipes/glm-5.3/sglang/disagg-h200-agentic/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/glm-5.2/perf/perf.yaml
+    asset: recipes/glm-5.3/perf/perf.yaml
   expected_performance:
     available: true
     summary: 84.33 output tok/s/GPU, 61.46 user tok/s P50, TTFT P50 1309.6 ms at concurrency 24 (1P1D, 15% agentic trace subset)
 related_benchmarks: []
 maintainer: milesial
 gaps:
-- Source recipe tree (recipes/glm-5.2/) lands in PR #11448; source links and asset-path validation resolve once that PR merges to main
+- Source recipe tree (recipes/glm-5.3/) lands in PR #11448; source links and asset-path validation resolve once that PR merges to main
 - Full 1M context not supported out of the box (B200 capped at 500K, H200 at 250K)
 - n>1 requests unsupported on the disaggregated targets

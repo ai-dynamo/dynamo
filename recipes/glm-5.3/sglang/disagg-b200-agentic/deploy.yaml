@@ -4,39 +4,41 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: glm52-disagg-h200-agentic-sglang-config
+  name: glm53-disagg-b200-agentic-sglang-config
   labels:
-    app.kubernetes.io/name: glm52-disagg-h200-agentic
+    app.kubernetes.io/name: glm53-disagg-b200-agentic
     app.kubernetes.io/part-of: dynamo
 data:
   prefill.yaml: |-
-    model-path: zai-org/GLM-5.3
+    model-path: RadixArk/GLM-5.3-NVFP4
     served-model-name: zai-org/GLM-5.3
     host: 0.0.0.0
     trust-remote-code: true
-    tensor-parallel-size: 8
-    data-parallel-size: 1
-    ep-size: 8
-    moe-a2a-backend: none
+    tensor-parallel-size: 4
+    data-parallel-size: 4
+    enable-dp-attention: true
+    ep-size: 4
+    quantization: modelopt_fp4
     kv-cache-dtype: fp8_e4m3
-    fp8-gemm-backend: flashinfer_deepgemm
-    mem-fraction-static: 0.92
-    max-running-requests: 64
+    context-length: 500000
+    mem-fraction-static: 0.86
     attention-backend: dsa
-    enable-prefill-cp: true
-    cp-strategy: interleave
-    disable-overlap-schedule: true
+    moe-runner-backend: flashinfer_trtllm_routed
+    chunked-prefill-size: 16384
+    max-prefill-tokens: 32768
+    max-running-requests: 32
+    watchdog-timeout: 3600
     cuda-graph-backend-decode: disabled
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 12345
     speculative-algorithm: EAGLE
     speculative-num-steps: 3
     speculative-eagle-topk: 1
     speculative-num-draft-tokens: 4
-    context-length: 250000
-    watchdog-timeout: 3600
-    disaggregation-mode: prefill
-    disaggregation-transfer-backend: mooncake
-    disaggregation-bootstrap-port: 12345
-    enable-metrics: true
+    enable-dp-lm-head: true
+    hicache-size: 200
+    enable-hierarchical-cache: true
     kv-events-config:
       publisher: zmq
       topic: kv-events
@@ -44,57 +46,48 @@ data:
     model-loader-extra-config:
       enable_multithread_load: true
       num_threads: 32
+    disable-overlap-schedule: true
+    enable-metrics: true
 
   decode.yaml: |-
-    model-path: zai-org/GLM-5.3
+    model-path: RadixArk/GLM-5.3-NVFP4
     served-model-name: zai-org/GLM-5.3
-    host: 0.0.0.0
     trust-remote-code: true
     tensor-parallel-size: 8
     data-parallel-size: 8
     enable-dp-attention: true
-    ep-size: 1
     moe-a2a-backend: none
-    fp8-gemm-backend: deep_gemm
-    enforce-shared-experts-fusion: true
+    fp4-gemm-backend: flashinfer_cutlass
+    enable-symm-mem: true
+    quantization: modelopt_fp4
     kv-cache-dtype: fp8_e4m3
-    context-length: 250000
-    mem-fraction-static: 0.95
-    max-running-requests: 64
-    cuda-graph-max-bs: 64
-    cuda-graph-bs:
-      - 1
-      - 2
-      - 4
-      - 8
-      - 16
-      - 20
-      - 24
-      - 28
-      - 32
-      - 36
-      - 40
-      - 44
-      - 48
-      - 52
-      - 56
-      - 60
-      - 64
-    attention-backend: dsa
+    context-length: 500000
+    disaggregation-mode: decode
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 12345
     speculative-algorithm: EAGLE
     speculative-num-steps: 3
     speculative-eagle-topk: 1
     speculative-num-draft-tokens: 4
+    speculative-attention-mode: decode
+    max-running-requests: 256
     watchdog-timeout: 3600
-    disaggregation-mode: decode
-    disaggregation-transfer-backend: mooncake
-    disaggregation-bootstrap-port: 12345
+    cuda-graph-max-bs: 256
+    mem-fraction-static: 0.84
     enable-metrics: true
+    speculative-moe-runner-backend: flashinfer_cutlass
+    speculative-moe-a2a-backend: none
+    num-continuous-decode-steps: 3
+    enable-flashinfer-allreduce-fusion: true
+    enable-dp-lm-head: true
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 32
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: glm52-disagg-h200-agentic
+  name: glm53-disagg-b200-agentic
 spec:
   backendFramework: sglang
   components:
@@ -135,7 +128,7 @@ spec:
                       - key: nvidia.com/gpu.product
                         operator: In
                         values:
-                          - NVIDIA-H200
+                          - NVIDIA-B200
           containers:
             - name: main
               command:
@@ -148,7 +141,8 @@ spec:
                   ulimit -n 1048576 || true
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/prefill.yaml \
-                    --dsa-prefill-backend flashmla_kv \
+                    --dsa-prefill-backend trtllm \
+                    --dsa-decode-backend trtllm \
                     --cuda-graph-backend-prefill disabled \
                     --dyn-tool-call-parser glm47 \
                     --dyn-reasoning-parser glm45 \
@@ -175,12 +169,12 @@ spec:
               imagePullPolicy: IfNotPresent
               resources:
                 requests:
-                  nvidia.com/gpu: "8"
-                  rdma/ib: "8"
+                  nvidia.com/gpu: "4"
+                  rdma/shared_ib: "1"
                   memory: 1Ti
                 limits:
-                  nvidia.com/gpu: "8"
-                  rdma/ib: "8"
+                  nvidia.com/gpu: "4"
+                  rdma/shared_ib: "1"
                   memory: 1Ti
               securityContext:
                 runAsUser: 0
@@ -227,13 +221,13 @@ spec:
                 claimName: model-cache
             - name: sglang-config
               configMap:
-                name: glm52-disagg-h200-agentic-sglang-config
+                name: glm53-disagg-b200-agentic-sglang-config
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
               value: "true"
               effect: NoSchedule
-      replicas: 1
+      replicas: 3
 
     - name: decode
       type: decode
@@ -248,16 +242,7 @@ spec:
                       - key: nvidia.com/gpu.product
                         operator: In
                         values:
-                          - NVIDIA-H200
-            podAffinity:
-              preferredDuringSchedulingIgnoredDuringExecution:
-                - weight: 100
-                  podAffinityTerm:
-                    labelSelector:
-                      matchLabels:
-                        nvidia.com/dynamo-component-type: prefill
-                        nvidia.com/dynamo-graph-deployment-name: glm52-disagg-h200-agentic
-                    topologyKey: topology.kubernetes.io/zone
+                          - NVIDIA-B200
           containers:
             - name: main
               command:
@@ -270,8 +255,6 @@ spec:
                   ulimit -n 1048576 || true
                   exec python3 -m dynamo.sglang \
                     --config /etc/sglang/decode.yaml \
-                    --dsa-prefill-backend flashmla_kv \
-                    --dsa-decode-backend flashmla_kv \
                     --dyn-tool-call-parser glm47 \
                     --dyn-reasoning-parser glm45 \
                     --reasoning-parser glm45
@@ -308,11 +291,11 @@ spec:
               resources:
                 requests:
                   nvidia.com/gpu: "8"
-                  rdma/ib: "8"
+                  rdma/shared_ib: "1"
                   memory: 200Gi
                 limits:
                   nvidia.com/gpu: "8"
-                  rdma/ib: "8"
+                  rdma/shared_ib: "1"
                   memory: 200Gi
               securityContext:
                 runAsUser: 0
@@ -359,7 +342,7 @@ spec:
                 claimName: model-cache
             - name: sglang-config
               configMap:
-                name: glm52-disagg-h200-agentic-sglang-config
+                name: glm53-disagg-b200-agentic-sglang-config
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal

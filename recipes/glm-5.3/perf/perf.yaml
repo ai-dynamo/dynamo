@@ -28,7 +28,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: glm52-bench
+  name: glm53-bench
 spec:
   backoffLimit: 1
   activeDeadlineSeconds: 10800
@@ -37,7 +37,7 @@ spec:
   template:
     metadata:
       labels:
-        app: glm52-bench
+        app: glm53-bench
     spec:
       # Co-locate the benchmark pod with a DGD frontend. Keep only the target
       # DGD in values when both variants are deployed in the same namespace.
@@ -53,7 +53,7 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                - glm52-agg-b200-agentic  # Update to match your ENDPOINT target DGD
+                - glm53-agg-b200-agentic  # Update to match your ENDPOINT target DGD
             topologyKey: kubernetes.io/hostname
       # tolerations: # Uncomment and populate for tainted frontend nodes.
       containers:
@@ -172,9 +172,9 @@ spec:
           echo ""
           echo "Done. Root: ${ROOT_DIR}"
         env:
-        # --- Edit ENDPOINT to target one of the four GLM-5.3 DGDs (glm52-* names are literal). ---
+        # --- Edit ENDPOINT to target one of the four GLM-5.3 DGDs (all resources are named glm53-*). ---
         - name: ENDPOINT
-          value: glm52-agg-b200-agentic-frontend:8000
+          value: glm53-agg-b200-agentic-frontend:8000
         - name: TRACE_FILE
           value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
         - name: SYNTHESIS_MAX_ISL

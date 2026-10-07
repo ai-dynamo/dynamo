@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# GLM-5.3/5.2 Recipes
+# GLM-5.3 Recipes
 
-Recipes for [GLM-5.3](https://huggingface.co/zai-org/GLM-5.3) / [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2).
+Recipes for [GLM-5.3](https://huggingface.co/zai-org/GLM-5.3). The same recipes also serve [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) as a fallback (see step 4 below); `recipes/glm-5.2` is kept as a symlink to this directory.
 
 ## Configurations
 

@@ -97,8 +97,8 @@ Create the shared model cache, then download the checkpoint for your target SKU.
 
 ```bash
 # Edit storageClassName in model-cache/model-cache.yaml first.
-kubectl apply -f recipes/glm-5.2/model-cache/model-cache.yaml -n ${NAMESPACE}
-kubectl apply -f recipes/glm-5.2/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.3/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.3/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
@@ -109,7 +109,7 @@ Then deploy the target DGD:
 <div data-sku="b200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.3/sglang/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -117,7 +117,7 @@ kubectl apply -f recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml -n ${NAMESP
 <div data-sku="b200" data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.3/sglang/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -125,7 +125,7 @@ kubectl apply -f recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml -n ${NAM
 <div data-sku="h200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.3/sglang/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -133,7 +133,7 @@ kubectl apply -f recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml -n ${NAMESP
 <div data-sku="h200" data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/glm-5.2/sglang/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.3/sglang/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -145,7 +145,7 @@ Send a test request to verify the deployment serves traffic. First forward the f
 <div data-sku="b200" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/glm52-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/glm53-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -153,7 +153,7 @@ kubectl port-forward svc/glm52-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPAC
 <div data-sku="b200" data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/glm52-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/glm53-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -161,7 +161,7 @@ kubectl port-forward svc/glm52-disagg-b200-agentic-frontend 8000:8000 -n ${NAMES
 <div data-sku="h200" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/glm52-agg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/glm53-agg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -169,7 +169,7 @@ kubectl port-forward svc/glm52-agg-h200-agentic-frontend 8000:8000 -n ${NAMESPAC
 <div data-sku="h200" data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/glm52-disagg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/glm53-disagg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -195,23 +195,23 @@ curl http://localhost:8000/v1/chat/completions \
 
 A single AIPerf trace-replay Job — `perf/perf.yaml` — covers all four DGDs. It replays a Mooncake-format agentic trace (64K ISL / 400 OSL, 90% KV cache hit rate) at one concurrency value and writes artifacts to the shared `model-cache` PVC. The benchmark pod is co-located with a DGD frontend through `podAffinity`.
 
-Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service, `SYNTHESIS_MAX_ISL` to its context limit, and `CONCURRENCY` to the value for that target. The `CONCURRENCY` values below reproduce the [Expected Performance (run on GLM-5.3)](#expected-performance-run-on-glm-53) numbers. The rows also require `SGLANG_SIMULATE_ACC_LEN=2.69`, `SGLANG_SIMULATE_ACC_METHOD=match-expected`, and `SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token` uncommented on the aggregated workers or the disaggregated decode workers (see [perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md)); keep them commented for accuracy evaluation and production:
+Edit the `env` block in `perf/perf.yaml` to target your deployed DGD — set `ENDPOINT` to the matching frontend service, `SYNTHESIS_MAX_ISL` to its context limit, and `CONCURRENCY` to the value for that target. The `CONCURRENCY` values below reproduce the [Expected Performance (run on GLM-5.3)](#expected-performance-run-on-glm-53) numbers. The rows also require `SGLANG_SIMULATE_ACC_LEN=2.69`, `SGLANG_SIMULATE_ACC_METHOD=match-expected`, and `SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token` uncommented on the aggregated workers or the disaggregated decode workers (see [perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/perf/README.md)); keep them commented for accuracy evaluation and production:
 
 | Target | `ENDPOINT` | `SYNTHESIS_MAX_ISL` | `CONCURRENCY` |
 | --- | --- | --- | --- |
-| B200 aggregated | `glm52-agg-b200-agentic-frontend:8000` | `500000` | `64` |
-| B200 disaggregated | `glm52-disagg-b200-agentic-frontend:8000` | `500000` | `128` |
-| H200 aggregated | `glm52-agg-h200-agentic-frontend:8000` | `250000` | `32` |
-| H200 disaggregated | `glm52-disagg-h200-agentic-frontend:8000` | `250000` | `24` |
+| B200 aggregated | `glm53-agg-b200-agentic-frontend:8000` | `500000` | `64` |
+| B200 disaggregated | `glm53-disagg-b200-agentic-frontend:8000` | `500000` | `128` |
+| H200 aggregated | `glm53-agg-h200-agentic-frontend:8000` | `250000` | `32` |
+| H200 disaggregated | `glm53-disagg-h200-agentic-frontend:8000` | `250000` | `24` |
 
 Then run the Job:
 
 ```bash
-kubectl apply -f recipes/glm-5.2/perf/perf.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/glm52-bench -n ${NAMESPACE} --timeout=7200s
+kubectl apply -f recipes/glm-5.3/perf/perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/glm53-bench -n ${NAMESPACE} --timeout=7200s
 ```
 
-For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md).
+For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/perf/README.md).
 
 ## Expected Performance (run on GLM-5.3)
 
@@ -256,11 +256,11 @@ All four targets serve GLM-5.3/5.2 on SGLang with KV-aware routing and EAGLE-sty
 
 ## Source
 
-- Source README: [recipes/glm-5.2/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/README.md)
-- Benchmark README: [recipes/glm-5.2/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/README.md)
-- Aggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/agg-b200-agentic/deploy.yaml)
-- Disaggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/disagg-b200-agentic/deploy.yaml)
-- Aggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/agg-h200-agentic/deploy.yaml)
-- Disaggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/sglang/disagg-h200-agentic/deploy.yaml)
-- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/model-cache/model-download.yaml)
-- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.2/perf/perf.yaml)
+- Source README: [recipes/glm-5.3/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/README.md)
+- Benchmark README: [recipes/glm-5.3/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/perf/README.md)
+- Aggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/sglang/agg-b200-agentic/deploy.yaml)
+- Disaggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/sglang/disagg-b200-agentic/deploy.yaml)
+- Aggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/sglang/agg-h200-agentic/deploy.yaml)
+- Disaggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/sglang/disagg-h200-agentic/deploy.yaml)
+- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/model-cache/model-download.yaml)
+- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3/perf/perf.yaml)

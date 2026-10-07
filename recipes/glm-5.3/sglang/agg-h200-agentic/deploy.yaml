@@ -4,9 +4,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: glm52-agg-h200-agentic-sglang-config
+  name: glm53-agg-h200-agentic-sglang-config
   labels:
-    app.kubernetes.io/name: glm52-agg-h200-agentic
+    app.kubernetes.io/name: glm53-agg-h200-agentic
     app.kubernetes.io/part-of: dynamo
 data:
   agg.yaml: |-
@@ -41,7 +41,7 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: glm52-agg-h200-agentic
+  name: glm53-agg-h200-agentic
 spec:
   backendFramework: sglang
   components:
@@ -178,7 +178,7 @@ spec:
                 claimName: model-cache
             - name: sglang-config
               configMap:
-                name: glm52-agg-h200-agentic-sglang-config
+                name: glm53-agg-h200-agentic-sglang-config
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
