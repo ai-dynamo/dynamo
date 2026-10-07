@@ -2262,7 +2262,6 @@ _GLM_TWO_CALLS = (
 
 
 def _assert_two_glm_calls_streamed(tokenizer, steps):
-    """Stream (text, token_ids) steps; both calls must come out as tool calls."""
     from vllm.reasoning import ReasoningParserManager
     from vllm.tool_parsers import ToolParserManager
 
