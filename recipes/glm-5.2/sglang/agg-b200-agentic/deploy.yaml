@@ -72,7 +72,7 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0@sha256:5d481e748e2383f0e7c8494990fff5b31d28e4c28a8388a23276334a9240dc17
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1@sha256:37badffd83eb334aee9d06fb442e36fc3c963314336c92622c78ac5c037d514d
               imagePullPolicy: IfNotPresent
               resources: {}
       replicas: 1
@@ -130,7 +130,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0@sha256:5d481e748e2383f0e7c8494990fff5b31d28e4c28a8388a23276334a9240dc17
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1@sha256:37badffd83eb334aee9d06fb442e36fc3c963314336c92622c78ac5c037d514d
               imagePullPolicy: IfNotPresent
               resources:
                 requests:

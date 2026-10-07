@@ -26,7 +26,7 @@ targets:
     count: 16
   runtime:
     framework: sglang
-    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
   topology: aggregated
   techniques:
   - nvfp4
@@ -52,7 +52,7 @@ targets:
     count: 20
   runtime:
     framework: sglang
-    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -80,7 +80,7 @@ targets:
     count: 24
   runtime:
     framework: sglang
-    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
   topology: aggregated
   techniques:
   - fp8
@@ -105,7 +105,7 @@ targets:
     count: 16
   runtime:
     framework: sglang
-    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
