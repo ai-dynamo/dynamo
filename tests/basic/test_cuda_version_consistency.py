@@ -106,8 +106,10 @@ def sh(cmd: str) -> str:
     A timeout is deliberately left to propagate: a signal we cannot read is a
     failure, not a signal that reports nothing.
     """
+    # Inspect the active runtime environment. A login shell re-runs profile
+    # scripts for every signal and can replace the venv's PATH before probing it.
     p = subprocess.run(
-        ["bash", "-lc", f"{cmd} 2>/dev/null"],
+        ["bash", "-c", f"{cmd} 2>/dev/null"],
         stdout=subprocess.PIPE,
         text=True,
         check=False,
