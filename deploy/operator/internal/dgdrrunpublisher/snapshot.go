@@ -50,7 +50,6 @@ type Snapshot struct {
 	Candidates    []SnapshotCandidate `json:"candidates"`
 }
 
-// SnapshotRun is the run-level state.
 type SnapshotRun struct {
 	Phase    string `json:"phase"`
 	Terminal bool   `json:"terminal"`
@@ -58,7 +57,6 @@ type SnapshotRun struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// SnapshotProgress is Sweeper progress.
 type SnapshotProgress struct {
 	Round     int32 `json:"round"`
 	Evaluated int32 `json:"evaluated"`
@@ -75,7 +73,6 @@ type SnapshotCandidate struct {
 	Error      string         `json:"error,omitempty"`
 }
 
-// ParseSnapshot decodes and validates snapshot bytes.
 func ParseSnapshot(data []byte) (*Snapshot, error) {
 	var snap Snapshot
 	if err := yaml.Unmarshal(data, &snap); err != nil {

@@ -159,34 +159,6 @@ func mustParse(t *testing.T, data []byte) *Snapshot {
 	return snap
 }
 
-func TestIdentityStableUnderReordering(t *testing.T) {
-	p, fc, _ := newPublisher(t)
-	ctx := context.Background()
-	if err := p.Reconcile(ctx, mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "b"}))); err != nil {
-		t.Fatal(err)
-	}
-	creates := len(fc.creates)
-	if err := p.Reconcile(ctx, mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "b"}, cand{id: "a"}))); err != nil {
-		t.Fatal(err)
-	}
-	if len(fc.creates) != creates || len(fc.deletes) != 0 {
-		t.Fatalf("reordering must not create/delete DGDCs: creates=%v deletes=%v", fc.creates, fc.deletes)
-	}
-}
-
-func TestSwapOrderPatchesOnlyRunStatus(t *testing.T) {
-	p, fc, _ := newPublisher(t)
-	ctx := context.Background()
-	_ = p.Reconcile(ctx, mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "b"})))
-	_ = p.Reconcile(ctx, mustParse(t, snapshotJSON(t, PhaseRunning, cand{id: "b"}, cand{id: "a"})))
-	if len(fc.patches) != 2 {
-		t.Fatalf("want 2 status patches, got %d", len(fc.patches))
-	}
-	if got, want := fc.patches[1].CandidateNames, []string{"run-b", "run-a"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("rank order = %v, want %v", got, want)
-	}
-}
-
 func TestSwapLeavesBothCandidatesUntouched(t *testing.T) {
 	p, fc, _ := newPublisher(t)
 	ctx := context.Background()
@@ -310,7 +282,6 @@ func TestFailedMaterializationIsNotCreatedButCounted(t *testing.T) {
 	}
 }
 
-// withTimestamp stamps a snapshot the way the Sweeper container does.
 func withTimestamp(t *testing.T, data []byte, timestamp string) []byte {
 	t.Helper()
 	var doc map[string]any
@@ -427,17 +398,41 @@ func TestRunTerminalSnapshotAcknowledges(t *testing.T) {
 	}
 }
 
-// Caught Sweeper failure: a terminal Failed snapshot still has its projection reconciled,
-// and the publisher succeeds (the Sweeper's exit code fails the Job).
-func TestRunTerminalFailedSnapshotIsReconciled(t *testing.T) {
-	p, fc, dir := newPublisher(t)
-	writeSnapshot(t, dir, snapshotJSON(t, PhaseFailed, cand{id: "a"}))
-	fc.setState(SweeperState{Exited: true, ExitCode: 1})
-	if err := runWithTimeout(t, p); err != nil {
-		t.Fatal(err)
+// A terminal Failed snapshot has its projection reconciled, then fails the publisher
+// whether or not the Sweeper itself exited non-zero.
+func TestRunTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
+	for name, state := range map[string]SweeperState{
+		"sweeper exit 0": {Exited: true, ExitCode: 0},
+		"sweeper exit 1": {Exited: true, ExitCode: 1},
+		"still running":  {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, fc, dir := newPublisher(t)
+			writeSnapshot(t, dir, snapshotJSON(t, PhaseFailed, cand{id: "a"}))
+			fc.setState(state)
+			err := runWithTimeout(t, p)
+			if !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed {
+				t.Fatalf("err = %v", err)
+			}
+			if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
+				t.Fatalf("creates = %v", fc.creates)
+			}
+		})
 	}
-	if !reflect.DeepEqual(fc.creates, []string{"run-a"}) {
-		t.Fatalf("creates = %v", fc.creates)
+}
+
+func TestRunLabelValueIsLabelSafeAndStable(t *testing.T) {
+	if got := RunLabelValue("short-run"); got != "short-run" {
+		t.Fatalf("short names are kept: %q", got)
+	}
+	long := strings.Repeat("a", 100) + "-x"
+	other := strings.Repeat("a", 100) + "-y"
+	got := RunLabelValue(long)
+	if len(got) > 63 || got == RunLabelValue(other) || got != RunLabelValue(long) {
+		t.Fatalf("label = %q (%d)", got, len(got))
+	}
+	if last := got[len(got)-1]; !(last >= '0' && last <= '9' || last >= 'a' && last <= 'f') {
+		t.Fatalf("must end alphanumeric: %q", got)
 	}
 }
 
