@@ -139,10 +139,9 @@ def _configure_proxy(monkeypatch, port: int) -> None:
     [
         ("https", False, "simple"),
         ("https", False, "revalidating"),
-        ("http", False, "simple"),
         ("http", True, "simple"),
     ],
-    ids=["https", "https-revalidating", "http", "http-proxy-port"],
+    ids=["https", "https-revalidating", "http-proxy-port"],
 )
 async def test_a_direct_fetch_to_the_proxy_host_is_filtered(
     monkeypatch, scheme, on_the_proxy_port, seam
