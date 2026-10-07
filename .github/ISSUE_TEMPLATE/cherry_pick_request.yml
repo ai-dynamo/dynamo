@@ -1,12 +1,14 @@
 name: Cherry-Pick Request
 description: Request a merged fix on a release branch
-title: '[Cherry-Pick Request]: '
+title: '[Cherry-Pick Request] [release/X.Y.Z]: '
 labels: ["cherry-pick:requested"]
 body:
   - type: markdown
     attributes:
       value: |
         Use this form to request a fix on a release branch after code freeze. Get the fix merged to `main` first. The maintainer who merged your PR opens the release PR.
+
+        In the title, replace `X.Y.Z` with the target release, for example `[release/1.6.0]`.
 
   - type: input
     id: main-pr
