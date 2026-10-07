@@ -39,7 +39,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
-use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::MockerConfig;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
@@ -434,7 +434,7 @@ pub(in crate::replay) struct KvRouterPlacement {
 
 impl KvRouterPlacement {
     pub(in crate::replay) fn new_with_selector_seed(
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -620,7 +620,7 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
 
 impl OfflineReplayRouter {
     pub(crate) fn new(
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -635,7 +635,7 @@ impl OfflineReplayRouter {
     }
 
     pub(crate) fn new_with_selector_seed(
-        args: &MockEngineArgs,
+        args: &MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -1253,7 +1253,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
-    use crate::common::protocols::{DirectRequest, MockEngineArgs};
+    use crate::common::protocols::{DirectRequest, MockerConfig};
     use crate::replay::ReplayPrefillLoadEstimator;
     use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
 
@@ -1272,20 +1272,24 @@ mod tests {
         }
     }
 
-    fn replay_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(256))
-            .build()
-            .unwrap()
+    fn replay_args() -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 256
+            }
+        }))
+        .unwrap()
     }
 
-    fn queueing_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(64)
-            .max_num_batched_tokens(Some(64))
-            .build()
-            .unwrap()
+    fn queueing_args() -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "max_num_batched_tokens": 64
+            }
+        }))
+        .unwrap()
     }
 
     fn router_config() -> KvRouterConfig {

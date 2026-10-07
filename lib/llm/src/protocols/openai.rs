@@ -409,6 +409,17 @@ pub struct ParsingOptions {
 
     pub reasoning_parser: Option<String>,
 
+    /// A disabled thinking request must not regain a reasoning channel during raw batch recovery.
+    #[serde(default)]
+    pub reasoning_disabled: bool,
+
+    /// JSON response formatting is a content contract, separate from guided tool JSON.
+    #[serde(default)]
+    pub structured_response: bool,
+
+    #[serde(default)]
+    pub default_thinking_mode: Option<String>,
+
     /// Final request policy for tool output. Some model parsers (currently
     /// Harmony) must still run during non-streaming aggregation to remove
     /// model-internal channel markup even when the request forbids tool calls.
@@ -477,6 +488,9 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            reasoning_disabled: false,
+            structured_response: false,
+            default_thinking_mode: None,
             suppress_tool_calls: false,
             guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
@@ -513,13 +527,11 @@ impl ParsingOptions {
             let whole_response_decoder = matches!(
                 self.tool_call_parser.as_deref(),
                 Some("harmony" | "kimi_k3" | "kimi-k3")
-            )
-                || chat_completions::unified_parser::selected_batch_family(
-                    self.tool_call_parser.as_deref(),
-                    self.reasoning_parser.as_deref(),
-                )
-                .is_some()
-                || chat_completions::tool_parser_v2::unified_family(
+            ) || chat_completions::unified_parser::configured_family(
+                self.tool_call_parser.as_deref(),
+                self.reasoning_parser.as_deref(),
+            ) == Some("muse_glimmer")
+                || chat_completions::unified_parser::selected_content_decoder_family(
                     self.tool_call_parser.as_deref(),
                     self.reasoning_parser.as_deref(),
                 )

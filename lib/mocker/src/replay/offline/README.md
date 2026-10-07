@@ -10,7 +10,7 @@ lifecycle, and report collector live in `aisimulate_core::replay`. This director
 contains only Dynamo-owned compatibility entrypoints and Router/Planner
 composition:
 
-- `entrypoints.rs` converts existing `MockEngineArgs` and workload inputs into
+- `entrypoints.rs` converts canonical `MockerConfig` and workload inputs into
   a canonical `ReplaySpec`, then calls `aisimulate_core::replay::Replayer`.
 - `extensions/kv_router` adapts Dynamo's existing `PlacementPolicy`-based
   Router implementation to the Replay composition boundary.

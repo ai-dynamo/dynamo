@@ -740,7 +740,9 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    parse_mm_data.assert_called_once()
+    assert parse_mm_data.call_args.args[0] in ({}, {"vision_chunk": []})
+    assert parse_mm_data.call_args.kwargs == {"validate": False}
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()

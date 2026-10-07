@@ -884,8 +884,11 @@ where
         let advertised_mode =
             ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
-        let configured_mode = ResponsePlaneMode::configured()
-            .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let configured_mode = match self.response_plane.get() {
+            Some(mode) => *mode,
+            None => ResponsePlaneMode::configured()
+                .map_err(|error| PipelineError::Generic(error.to_string()))?,
+        };
         let response_modes = ResponsePlaneModes {
             configured: configured_mode,
             advertised: advertised_mode,
@@ -973,7 +976,7 @@ where
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
-        self.bind_lifecycle_endpoint(endpoint);
+        self.bind_endpoint_config(endpoint);
     }
 
     fn add_metrics(
@@ -1009,7 +1012,7 @@ where
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
-        self.bind_lifecycle_endpoint(endpoint);
+        self.bind_endpoint_config(endpoint);
     }
 
     fn add_metrics(
