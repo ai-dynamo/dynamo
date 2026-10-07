@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{FpmPublisher, KvEventPublishers, MockerConfig, OutputSignal};
 use crate::grouped_scheduler::{
     GroupedSchedulers, RankOutputSink, RankSinks, create_single_rank_scheduler_with_rank_sink,
 };
@@ -25,7 +25,7 @@ pub(crate) struct LiveEngineScheduler {
 /// Returns a boxed [`SchedulerHandle`] that the engine wrapper can use
 /// without knowing which backend is running underneath.
 pub fn create_engine(
-    args: MockEngineArgs,
+    args: MockerConfig,
     dp_rank: u32,
     output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
     kv_event_publishers: KvEventPublishers,
@@ -53,7 +53,7 @@ pub fn create_engine(
 }
 
 pub(crate) fn create_engine_with_rank_sink(
-    args: MockEngineArgs,
+    args: MockerConfig,
     dp_rank: u32,
     rank_sink: RankSinks,
     cancellation_token: Option<CancellationToken>,
@@ -95,10 +95,7 @@ mod tests {
 
     #[tokio::test]
     async fn compatibility_entrypoint_rejects_attention_dp() {
-        let args = MockEngineArgs {
-            dp_size: 4,
-            ..MockEngineArgs::default()
-        };
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":4})).unwrap();
         let cancel = CancellationToken::new();
 
         let result = create_engine(

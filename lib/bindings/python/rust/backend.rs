@@ -385,17 +385,19 @@ pub struct RuntimeConfig {
 #[pymethods]
 impl RuntimeConfig {
     #[new]
-    #[pyo3(signature = (discovery_backend = None, request_plane = None, event_plane = None))]
+    #[pyo3(signature = (discovery_backend = None, request_plane = None, event_plane = None, *, response_plane = None))]
     fn new(
         discovery_backend: Option<String>,
         request_plane: Option<String>,
         event_plane: Option<String>,
+        response_plane: Option<String>,
     ) -> Self {
         Self {
             inner: RsRuntimeConfig {
                 discovery_backend,
                 request_plane,
                 event_plane,
+                response_plane,
             },
         }
     }

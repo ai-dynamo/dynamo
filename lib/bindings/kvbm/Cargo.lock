@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610040000000065"
+version = "0.13.0-dev.202610060000000067"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b1ee30a0c0a8f270064ae7ac276391527da224ee870a3680d7426c9a749ab33"
+checksum = "baa4fe3c1314053a9e439cd7a7595aec5fb2b22af0ae43d48687179846e7ed32"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2271,7 +2271,6 @@ dependencies = [
  "blake3",
  "bytes",
  "dashmap",
- "derive_builder",
  "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-tokens",

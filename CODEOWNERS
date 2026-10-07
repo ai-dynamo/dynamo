@@ -587,7 +587,7 @@ requirements.txt                                                                
 /agent-docs/                                                                                            @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
-/deploy/**/*lpx*                                                                                        @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
+/deploy/**/*lpx*                                                                                        @ai-dynamo/dynamo-operator-codeowners
 /benchmarks/router/                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /recipes/**/vllm/**                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /.devcontainer/vllm/                                                                                    @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
@@ -595,6 +595,7 @@ requirements.txt                                                                
 /lib/llm/src/mocker/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
 /tests/serve/trtllm/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /container/deps/vllm/                                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/deploy/helm/**/*lpx*                                                                                   @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
 /dev/nats-server.conf                                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/bench/kv_router/                                                                                   @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /recipes/**/sglang/**                                                                                   @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners

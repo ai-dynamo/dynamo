@@ -17,7 +17,7 @@ Start the mock vLLM endpoint:
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --listen 127.0.0.1:50051 \
   --model mocker-model \
-  --extra-engine-args '{"speedup_ratio":1000,"block_size":64}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":64}}'
 ```
 
 Point the existing Dynamo sidecar at it:
@@ -28,8 +28,8 @@ cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
 ```
 
 `--extra-engine-args` accepts inline JSON or a JSON file path. The values use
-`MockEngineArgs`; `engine_type=vllm`, `dp_size=1`, and
-`worker_type=aggregated` are required. Use `--seed` to change the deterministic
+the canonical launch shape: `engine.backend=vllm`, `dp_size=1`, and
+`engine.worker_type=aggregated` are required. Use `--seed` to change the deterministic
 synthetic token stream. `--max-concurrent-requests` bounds admitted RPCs
 (default `256`) independently of the scheduler's `max_num_seqs`, so accepted
 requests can still exercise Mocker queueing.
@@ -58,7 +58,7 @@ port mappings, a Service, or firewall rules need a known event port. For example
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --listen 0.0.0.0:50051 \
   --model mocker-model \
-  --extra-engine-args '{"speedup_ratio":1000,"block_size":64,"zmq_kv_events_port":5557}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":64},"dynamo":{"zmq_kv_events_port":5557}}'
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
   --grpc-endpoint mock-host:50051
@@ -70,13 +70,13 @@ use `-p 50051:50051 -p 5557:5557` on the mock-server container. The sidecar will
 connect to `mock-host:5557` for events.
 
 An explicit replay client can use the existing optional replay socket by adding
-`"zmq_replay_port":5558` to the engine arguments. The current sidecar receiver
+`"zmq_replay_port":5558` under `dynamo` in the engine arguments. The current sidecar receiver
 does not consume the advertised replay endpoint. The shared native PUB/SUB path
 can lose events before the subscription is ready, and restarting only the
 sidecar does not rebuild the index for blocks already in the mock server's
 cache. This server uses that existing path without additional recovery.
 
-Set `"enable_prefix_caching":false` to disable both prefix caching and KV
+Set `"enable_prefix_caching":false` under `engine` to disable both prefix caching and KV
 events. Decode servers do not publish events. As with regular mock workers,
 publisher setup failures are logged and serving continues without KV events.
 
@@ -87,11 +87,11 @@ Run separate endpoints for the two emulated vLLM roles:
 ```bash
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --listen 127.0.0.1:50051 --model mocker-model \
-  --disaggregation-mode prefill --extra-engine-args '{"speedup_ratio":1000}'
+  --disaggregation-mode prefill --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --listen 127.0.0.1:50052 --model mocker-model \
-  --disaggregation-mode decode --extra-engine-args '{"speedup_ratio":1000}'
+  --disaggregation-mode decode --extra-engine-args '{"engine":{"speedup_ratio":1000}}'
 ```
 
 Then start one sidecar for each endpoint:
