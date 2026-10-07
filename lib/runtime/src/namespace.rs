@@ -16,7 +16,8 @@ pub enum NamespaceFilter {
     Exact(String),
     /// Discover models from the prefix namespace and hyphen-delimited suffixes
     /// (e.g., "ns" matches "ns" and "ns-abc123", but not "ns2"). A suffix can
-    /// also be a separately named deployment, such as "ns-other".
+    /// also be a separately named deployment, such as "ns-other". An empty
+    /// prefix matches every namespace in either matching mode.
     Prefix(String),
 }
 
@@ -79,7 +80,10 @@ impl NamespaceFilter {
             NamespaceFilter::Exact(target) => namespace == target,
             NamespaceFilter::Prefix(prefix) => {
                 namespace.strip_prefix(prefix.as_str()).is_some_and(|rest| {
-                    prefix.ends_with('-') || rest.is_empty() || rest.starts_with('-')
+                    prefix.is_empty()
+                        || prefix.ends_with('-')
+                        || rest.is_empty()
+                        || rest.starts_with('-')
                 })
             }
         }
@@ -89,7 +93,7 @@ impl NamespaceFilter {
     pub fn matches_with_prefix_mode(&self, namespace: &str, mode: NamespacePrefixMode) -> bool {
         match (self, mode) {
             (NamespaceFilter::Prefix(prefix), NamespacePrefixMode::WorkerGeneration) => {
-                if namespace == prefix {
+                if prefix.is_empty() || namespace == prefix {
                     return true;
                 }
                 let Some(suffix) = namespace
@@ -193,6 +197,22 @@ mod tests {
         assert!(filter.matches("myns-dgd-abc123"));
         assert!(!filter.matches("myns-dgd2"));
         assert!(!filter.matches("myns"));
+    }
+
+    #[test]
+    fn empty_prefix_matches_every_namespace_in_both_modes() {
+        let filter = NamespaceFilter::Prefix(String::new());
+        for mode in [
+            NamespacePrefixMode::Literal,
+            NamespacePrefixMode::WorkerGeneration,
+        ] {
+            for namespace in ["", "ns", "ns-abc123", "other"] {
+                assert!(
+                    filter.matches_with_prefix_mode(namespace, mode),
+                    "{mode:?}: {namespace}"
+                );
+            }
+        }
     }
 
     #[test]
