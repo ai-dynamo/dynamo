@@ -315,7 +315,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `providerOverride` _[ProviderOverride](#provideroverride)_ | ProviderOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />only `topologyConstraint`. Standalone DCD OpenAPI omits this field. |  | Optional: \{\} <br /> |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | ProviderOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />`topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD<br />OpenAPI omits this field. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
 | `serviceName` _string_ | The name of the component |  |  |
@@ -1110,7 +1110,8 @@ Grove support is restricted as follows:
     `PodCliqueScalingGroupConfig`, according to the field location and
     component shape.
   - value may set topologyConstraint, and component contexts may set the
-    native minAvailable field. Availability is not supported at root or role scope.
+    native minAvailable field and rollingUpdate.maxUnavailable. Availability
+    and rollout budgets are not supported at root or role scope.
 
 All other providers, versions, targets, and fields are rejected.
 
@@ -1125,7 +1126,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | apiVersion is the Kubernetes API group and version of the provider schema.<br />Grove requires `grove.io/v1alpha1`. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `target` _string_ | target identifies the provider resource kind or embedded provider schema.<br />It may be omitted on input when the DGD location has one unambiguous target;<br />admission resolves and persists it. |  | Optional: \{\} <br /> |
-| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />targets accept `topologyConstraint`. Component contexts also accept<br />`spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on<br />PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the<br />deprecated component field preserves its value and leaves the update strategy unchanged. |  | Required: \{\} <br />Type: object <br /> |
+| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />targets accept `topologyConstraint`. Component contexts also accept<br />`spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on<br />PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the<br />deprecated component field preserves its value and leaves the update strategy unchanged.<br />Component contexts also accept rollingUpdate.maxUnavailable. |  | Required: \{\} <br />Type: object <br /> |
 
 
 #### ResourceItem
@@ -1900,7 +1901,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />only `topologyConstraint`. Standalone DCD OpenAPI omits this field. |  | Optional: \{\} <br /> |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />`topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD<br />OpenAPI omits this field. |  | Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in<br />podTemplate.spec.containers[name=main].image by default, or<br />podTemplate.spec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present.<br />With role PodTemplates, it applies to the main image in every selected template.<br />DGD admission requires it when any selected runtime image has no parseable semantic-version tag;<br />controller-generated DCDs may omit it.<br />Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical<br />MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
@@ -2795,7 +2796,8 @@ Grove support is restricted as follows:
     `PodCliqueScalingGroupConfig`, according to the field location and
     component shape.
   - value may set topologyConstraint, and component contexts may set the
-    native minAvailable field. Availability is not supported at root or role scope.
+    native minAvailable field and rollingUpdate.maxUnavailable. Availability
+    and rollout budgets are not supported at root or role scope.
 
 All other providers, versions, targets, and fields are rejected.
 
@@ -2810,7 +2812,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | apiVersion is the Kubernetes API group and version of the provider schema.<br />Grove requires `grove.io/v1alpha1`. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `target` _string_ | target identifies the provider resource kind or embedded provider schema.<br />It may be omitted on input when the DGD location has one unambiguous target;<br />admission resolves and persists it. |  | Optional: \{\} <br /> |
-| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />targets accept `topologyConstraint`. Component contexts also accept<br />`spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on<br />PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the<br />deprecated component field preserves its value and leaves the update strategy unchanged. |  | Required: \{\} <br />Type: object <br /> |
+| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />targets accept `topologyConstraint`. Component contexts also accept<br />`spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on<br />PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the<br />deprecated component field preserves its value and leaves the update strategy unchanged.<br />Component contexts also accept rollingUpdate.maxUnavailable. |  | Required: \{\} <br />Type: object <br /> |
 
 
 #### Restart

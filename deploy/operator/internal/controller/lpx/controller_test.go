@@ -2416,7 +2416,7 @@ func TestLPXStartupScalesMinimumSeedBeforePublishingRequests(t *testing.T) {
 			component.Replicas, component.MinAvailable = ptr.To(int32(3)), tc.minimum
 			if tc.native {
 				component.MinAvailable = nil
-				component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: "grove.io/v1alpha1", Target: "PodCliqueScalingGroupConfig", Value: apiextensionsv1.JSON{Raw: []byte(`{"minAvailable":2}`)}}
+				component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: "grove.io/v1alpha1", Target: "PodCliqueScalingGroupConfig", Value: apiextensionsv1.JSON{Raw: []byte(`{"minAvailable":2,"rollingUpdate":{"maxUnavailable":2}}`)}}
 			}
 			r := newLPXTestReconciler(t, registry, child, dgd)
 			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
@@ -2431,6 +2431,9 @@ func TestLPXStartupScalesMinimumSeedBeforePublishingRequests(t *testing.T) {
 			seed := ptr.Deref(tc.minimum, 1)
 			groupTemplate := pcs.Spec.Template.PodCliqueScalingGroupConfigs[0]
 			require.Equal(t, seed, *groupTemplate.Replicas)
+			if tc.native {
+				require.Equal(t, int32(2), *groupTemplate.RollingUpdate.MaxUnavailable)
+			}
 
 			t.Log("Wait without publishing requests while Grove has not created its scaling group")
 			result, err = r.Reconcile(t.Context(), key)

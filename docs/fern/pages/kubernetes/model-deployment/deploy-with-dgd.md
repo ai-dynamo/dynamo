@@ -726,9 +726,10 @@ Grove uses RollingRecreate by default for every DGD. To opt into Coherent, set `
 For deployments that explicitly select Coherent, review the [known recovery limitation](https://github.com/ai-dynamo/grove/issues/873) and complete these checks before changing worker images or pod templates:
 
 1. Review each component's effective `minAvailable` and whether it uses the deprecated field or a provider override. It defines the minimum viable replacement unit under Coherent. For new deployments, start at `1` unless the application requires a larger unit; the field is immutable after creation.
-2. Check how much serving capacity remains while that unit is unavailable. With eight replicas and `minAvailable: 4`, the default disruption budget allows four unavailable replicas. A changed component with only one replica can become completely unavailable.
-3. Plan with existing capacity: Grove has no surge support in alpha.14, and replica changes are deferred throughout an active coherent rollout. Do not depend on an HPA or the Planner adding replicas mid-rollout.
-4. Update compatible worker components together. Dynamo's shared worker hash can roll all workers when one worker template changes; a frontend participates when its own rendered template changes. Validate latency and throughput under representative traffic before increasing the disruption budget.
+2. Review any `providerOverride.value.rollingUpdate.maxUnavailable`. It is a ceiling on unavailable replicas, defaults to the effective minimum under Coherent, and must be at least that minimum.
+3. Check how much serving capacity remains while that unit is unavailable. With eight replicas and `minAvailable: 4`, the default disruption budget allows four unavailable replicas. A changed component with only one replica can become completely unavailable.
+4. Plan with existing capacity: Grove has no surge support in alpha.14, and replica changes are deferred throughout an active coherent rollout. Do not depend on an HPA or the Planner adding replicas mid-rollout.
+5. Update compatible worker components together. Dynamo's shared worker hash can roll all workers when one worker template changes; a frontend participates when its own rendered template changes. Validate latency and throughput under representative traffic before increasing the disruption budget.
 
 See [Coherent capacity and disruption](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#coherent-capacity-and-disruption) for budget semantics and examples. Coherent coordination applies within one PCS and does not guarantee zero downtime.
 

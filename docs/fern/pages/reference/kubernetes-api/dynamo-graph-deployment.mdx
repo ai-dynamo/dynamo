@@ -92,7 +92,7 @@ For a component with eight replicas:
 Grove can roll replicas beyond the minimum unit through additional tail steps. Progress depends on scheduling and remaining availability budget; it does not always wait for every replica in the previous batch to become Ready. Coherent does not guarantee an exact P/D ratio at every instant or zero downtime. For the detailed step plan, see [Grove's coherent update design](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.14/docs/proposals/393-coherent-rolling-updates/README.md).
 
 <Warning>
-  If `minAvailable == replicas`, the minimum unit can take the entire component offline. This also applies to a single-replica worker or frontend whose template changes. Unchanged frontends are not co-rolled solely because workers change. Replica counts alone do not establish whether the remaining workers can meet your latency and throughput service-level objectives (SLOs). Admission warns on creation and relevant rollout edits when an explicitly selected Coherent minimum could take the entire component offline. Replica-only edits warn when they introduce this risk; unrelated metadata updates and replica-only edits that leave existing risk unchanged do not repeat the warning. Pod-template edits still warn before a rollout that could take the component offline.
+  If `minAvailable == replicas`, the minimum unit can take the entire component offline. This also applies to a single-replica worker or frontend whose template changes. Unchanged frontends are not co-rolled solely because workers change. Replica counts alone do not establish whether the remaining workers can meet your latency and throughput service-level objectives (SLOs).
 </Warning>
 
 For new DGDs, use the provider-native `minAvailable: 1` default unless the application requires a larger viable unit. Keep the disruption budget at its default until the remaining capacity has been validated under representative traffic. Size spare serving capacity before a rollout; adding a larger budget does not add surge capacity. `minAvailable` is immutable after DGD creation, so review it before creating a deployment or opting an existing deployment into Coherent.
@@ -103,7 +103,7 @@ For LPX workloads with explicit replica counts, scheduling deadline cleanup also
 
 For RollingRecreate, `maxUnavailable` defaults to `1`; rolling update configuration is rejected with OnDelete. See [Grove's defaulting implementation](https://github.com/ai-dynamo/grove/blob/v0.1.0-alpha.14/operator/internal/webhook/admission/pcs/defaulting/podcliqueset.go).
 
-DGD does not currently expose `maxUnavailable`. The Dynamo operator leaves it unset in generated PCS templates, so Grove supplies the defaults above. Upgrading Grove alone does not add this field to the DGD API.
+Set `maxUnavailable` through a component-level provider override; see [Grove rollout budget overrides](#grove-rollout-budget-overrides). Without an override, Dynamo leaves it unset and Grove supplies the defaults above.
 
 <Note>
   An operator upgrade does not opt any DGD into Coherent. To opt an existing DGD into Coherent, set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent`. A strategy-only change leaves pod templates and worker hashes unchanged and does not itself trigger a workload rollout. All strategy transitions, including annotation changes or removal, wait until an active Grove update finishes (`status.updateProgress.updateEndedAt` is set). For LPX deployments, editing the annotation also changes the LPX input revision and causes child reconciliation. See the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#v160).
@@ -356,8 +356,120 @@ A sparse provider-native fragment, supported only for Grove-backed DGD resources
 </ParamField>
 
 <ParamField path="value" type="object" required={true}>
-  Sparse fragment of the target schema. `PodCliqueSet` accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. At component scope, `PodCliqueTemplateSpec` also accepts `spec.minAvailable`, and `PodCliqueScalingGroupConfig` accepts `minAvailable`. Root and role availability overrides and other fields are rejected. See [Configure native minimum availability](#configure-native-minimum-availability).
+  Sparse fragment of the target schema. `PodCliqueSet` accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. At component scope, `PodCliqueTemplateSpec` also accepts `spec.minAvailable`, and `PodCliqueScalingGroupConfig` accepts `minAvailable`. Component contexts also accept `rollingUpdate.maxUnavailable`, alone or alongside the other fields. Root and role availability overrides and other fields are rejected. See [Configure native minimum availability](#configure-native-minimum-availability).
 </ParamField>
+
+### Grove rollout budget overrides
+
+Available since Dynamo 1.6.0 with Grove v0.1.0-alpha.14 or later. Set `spec.components[*].providerOverride.value.rollingUpdate.maxUnavailable` to bound unavailable instances during a Grove rollout. Omit `target`; admission resolves it from the component shape, and Dynamo applies the fragment to the generated standalone clique or owning scaling group. You do not specify generated PCS names, list indices, or member clique names.
+
+The budget counts pods for standalone cliques and complete scaling-group replicas for PCSGs. One multinode scaling-group replica includes all ranks of a distributed worker. Set the budget on the component, never on its member roles or the graph root. A budget-only override can coexist with typed topology constraints; an override that also writes `topologyConstraint` retains the existing restriction against mixing native and typed topology.
+
+`maxUnavailable` must be a positive integer no larger than the component's desired `replicas` when set. LPX keeps its PCS scaling-group template at its immutable minimum, so an LPX budget cannot exceed that minimum. Under Coherent, its explicit budget must therefore equal the minimum. With omitted LPX replicas, admission cannot infer live serving capacity and does not emit the complete-outage warning. Under `Coherent`, it must also be at least the component's effective `minAvailable`. A native minimum or budget does not enable Coherent; only the explicit strategy annotation does. Grove rejects rolling update configuration under `OnDelete`. Admission warns on creation and relevant rollout edits when a Coherent budget could make every replica of a component unavailable, including singleton frontends. Replica-only edits warn when they introduce this risk; unrelated metadata updates and replica-only edits that leave existing risk unchanged do not repeat the warning. Pod-template edits still warn before a rollout that could take the component offline. The warning does not reject the configuration or guarantee a serving SLO. Only `maxUnavailable` is enabled in this subtree; other rollout knobs are rejected.
+
+Start with `minAvailable: 1` and `maxUnavailable: 1` for new components unless they require a larger viable unit. Increase the budget only after measuring whether the remaining replicas meet your serving SLOs. A budget of `2` permits two unavailable instances of that component; it does not mean two instances are always removed in every step. Existing unavailable replicas consume budget headroom, and Grove can use additional tail steps. See [Coherent capacity and disruption](#coherent-capacity-and-disruption).
+
+When omitted, Grove defaults the budget to `minAvailable` for `Coherent` and to `1` for `RollingRecreate`. Existing workloads acquire no explicit override on upgrade. Adding, changing, or removing only the budget preserves worker hashes and pod templates and does not initiate a workload rollout.
+
+<Warning>
+  Lower or remove the explicit budget before reducing desired replicas below it. Remove `rollingUpdate` before scaling a component to zero or switching the graph to `OnDelete`; keep the native `minAvailable` and any topology fragment when removing the budget. Admission rechecks these constraints on updates. Grove also blocks scaling while a coherent rollout is active.
+</Warning>
+
+The following single-node vLLM example uses a one-replica budget for both four prefill and eight decode replicas. Each minimum viable unit contains one prefill and one decode replica; additional tail steps account for the unequal totals. This is not a guarantee of an exact 1:2 P/D ratio at every instant. Replace the images with your compatible runtime image and create `hf-token-secret` if your model requires authentication. The override structure remains the same for multinode components; Dynamo routes it to the PCSG rather than a standalone clique.
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg
+  annotations:
+    nvidia.com/grove-update-strategy: Coherent
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          name: main
+    replicas: 2
+    type: frontend
+  - name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+              optional: true
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 8
+    type: decode
+    providerOverride:
+      apiVersion: grove.io/v1alpha1
+      value:
+        spec:
+          minAvailable: 1
+        rollingUpdate:
+          maxUnavailable: 1
+  - name: prefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+              optional: true
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 4
+    type: prefill
+    providerOverride:
+      apiVersion: grove.io/v1alpha1
+      value:
+        spec:
+          minAvailable: 1
+        rollingUpdate:
+          maxUnavailable: 1
+```
 
 ### ComponentReplicaStatus
 
