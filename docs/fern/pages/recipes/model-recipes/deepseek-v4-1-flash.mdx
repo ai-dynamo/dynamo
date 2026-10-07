@@ -119,9 +119,9 @@ The worker memory and shared-memory requests match the tested configuration.
 
 - Place the prefill and decode workers on separate RDMA-capable H200 nodes, with
   four GPUs per worker. The recipe requests four `rdma/ib` devices per worker
-  and selects their assigned NICs at startup. The cluster must provide the
-  `rdma/ib` device plugin and PCI allocation metadata. Do not set a static
-  `UCX_NET_DEVICES` value.
+  and selects their assigned NICs at startup. Configure the SR-IOV network
+  device plugin to provide `rdma/ib`, `PCIDEVICE_RDMA_IB`, and
+  `PCIDEVICE_RDMA_IB_INFO`. Do not set a static `UCX_NET_DEVICES` value.
 
 </div>
 
