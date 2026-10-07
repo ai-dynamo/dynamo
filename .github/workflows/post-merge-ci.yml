@@ -185,7 +185,7 @@ jobs:
       contents: read
     uses: $/.github/workflows/shared-build-sidecar.yml
     with:
-      build_timeout_minutes: 90
+      build_timeout_minutes: 120
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       diff_event_context: push
       diff_current_branch: ${{ github.ref_name }}

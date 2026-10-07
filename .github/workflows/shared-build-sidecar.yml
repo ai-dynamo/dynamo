@@ -14,7 +14,7 @@ on:
         description: 'Timeout in minutes for the sidecar build'
         required: false
         type: number
-        default: 60
+        default: 120
       extra_tags:
         description: 'Additional ECR tags (newline-separated)'
         required: false

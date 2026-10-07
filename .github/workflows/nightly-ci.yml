@@ -255,7 +255,7 @@ jobs:
     uses: $/.github/workflows/shared-build-sidecar.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      build_timeout_minutes: 90
+      build_timeout_minutes: 120
       diff_event_context: nightly
       image_tag_suffix: '-nightly'
 
