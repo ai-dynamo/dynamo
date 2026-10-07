@@ -180,7 +180,7 @@ mod tests {
         assert!(!filter.should_offload(hash(1)));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_time_based_decay() {
         let cancel_token = CancellationToken::new();
         let runtime = Handle::current();
