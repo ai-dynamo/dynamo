@@ -617,6 +617,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
     )
     parser.add_argument(
+        "--num-host-blocks",
+        type=int,
+        default=None,
+        help="Enable native vLLM G2 (host) KV offload with this per-DP-rank host cache "
+        "capacity in blocks. Host blocks are sized by --kv-bytes-per-token. Requires "
+        "prefix caching.",
+    )
+    for direction in ("d2h", "h2d"):
+        parser.add_argument(
+            f"--host-offload-{direction}-bandwidth-gbps",
+            type=float,
+            default=None,
+            help=f"Per-DP-rank native G2 {direction.upper()} bandwidth in decimal GB/s "
+            "(AISimulate default when unset; 0 is unlimited). Requires --num-host-blocks.",
+        )
+    parser.add_argument(
         "--stagger-delay",
         type=float,
         default=0.0,
