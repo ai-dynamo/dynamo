@@ -151,13 +151,13 @@ Three variables decide that scope, and the first one that applies wins:
 
 | Variable | Effect when it applies |
 |---|---|
-| `DYN_NAMESPACE_PREFIX` | Match this namespace and the worker generations under it, so `ns` matches `ns` and `ns-abc123` but not the separate deployment `ns2`. The value `dynamo` means every namespace |
+| `DYN_NAMESPACE_PREFIX` | Match this namespace and the worker generations under it, so `ns` matches `ns` and `ns-abc123` but not the separate deployment `ns2`. An explicitly empty value or `dynamo` means every namespace |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | Match the single namespace `{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}` |
 | `DYN_NAMESPACE` | Match this exact namespace. It falls back to `dynamo` only when unset, so setting it to an empty value searches the same empty namespace the workers register under |
 
-The `dynamo` value is the one case where a prefix deliberately reaches past its own deployment: every other deployment's pause, resume, and weight-update endpoints then appear in this listener's `/v1/rl/workers`. On Kubernetes it is opt-in through `globalDynamoNamespace: true`, which makes the operator set `DYN_NAMESPACE_PREFIX=dynamo`. Use it only when one trainer is meant to control every deployment in the cluster.
+An explicitly empty prefix or `dynamo` deliberately reaches past its own deployment: every other deployment's pause, resume, and weight-update endpoints then appear in this listener's `/v1/rl/workers`. On Kubernetes it is opt-in through `globalDynamoNamespace: true`, which makes the operator set `DYN_NAMESPACE_PREFIX=dynamo`. Use it only when one trainer is meant to control every deployment in the cluster.
 
-An empty `DYN_NAMESPACE_PREFIX` or `DYN_NAMESPACE_WORKER_SUFFIX` counts as absent, exactly as an unset one does. An empty `DYN_NAMESPACE` does not: it is the namespace to search. Model discovery agrees with RL discovery on the `dynamo` value but not on the empty one, where it reads an empty `DYN_NAMESPACE_PREFIX` as every namespace rather than as absent.
+An explicitly empty `DYN_NAMESPACE_PREFIX` selects every namespace, matching frontend model discovery, and takes precedence over `DYN_NAMESPACE_WORKER_SUFFIX`. Unset `DYN_NAMESPACE_PREFIX` allows the suffix or exact namespace rule to apply. An empty `DYN_NAMESPACE_WORKER_SUFFIX` counts as absent. An empty `DYN_NAMESPACE` remains the exact namespace to search when no prefix or suffix applies.
 
 This ordering matters because a worker that is given `DYN_NAMESPACE_WORKER_SUFFIX` registers under `{DYN_NAMESPACE}-{suffix}`, not under `{DYN_NAMESPACE}`. A listener configured for the bare namespace would find none of those workers.
 
