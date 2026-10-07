@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep Dynamo on one published AISimulate release."""
+"""Keep AISimulate release requirements and optional source patches consistent."""
 
 from __future__ import annotations
 
@@ -80,19 +80,25 @@ def _exact_version(requirement: Requirement) -> Version:
     return Version(specifiers[0].version)
 
 
-def _locked_cargo_version(path: Path) -> Version:
+def _locked_cargo_version(path: Path, patch: dict | None = None) -> Version:
     with path.open("rb") as handle:
         packages = tomllib.load(handle)["package"]
     matches = [package for package in packages if package["name"] == "aisimulate-core"]
     assert len(matches) == 1, f"expected one aisimulate-core package in {path}"
 
     package = matches[0]
-    assert package.get("source") == (
-        "registry+https://github.com/rust-lang/crates.io-index"
-    ), f"aisimulate-core must resolve from crates.io in {path}"
-    assert re.fullmatch(
-        r"[0-9a-f]{64}", str(package.get("checksum", ""))
-    ), f"aisimulate-core must have a registry checksum in {path}"
+    if patch is None:
+        assert package.get("source") == (
+            "registry+https://github.com/rust-lang/crates.io-index"
+        ), f"aisimulate-core must resolve from crates.io in {path}"
+        assert re.fullmatch(
+            r"[0-9a-f]{64}", str(package.get("checksum", ""))
+        ), f"aisimulate-core must have a registry checksum in {path}"
+    else:
+        assert package.get("source") == (
+            f"git+{patch['git']}?rev={patch['rev']}#{patch['rev']}"
+        ), f"aisimulate-core must resolve from the exact source patch in {path}"
+        assert "checksum" not in package
     return Version(str(package["version"]))
 
 
@@ -133,8 +139,21 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     ), "aisimulate-core must use one exact crates.io version"
     cargo_version = Version(cargo_requirement.removeprefix("="))
 
-    assert cargo_version == python_version
-    assert all(_locked_cargo_version(path) == cargo_version for path in LOCKFILES)
+    patch = cargo.get("patch", {}).get("crates-io", {}).get("aisimulate-core")
+    if patch is None:
+        assert cargo_version == python_version
+    else:
+        # Release freezes may pin Rust source ahead of the published Python wheel.
+        assert set(patch) == {"git", "rev"}
+        assert patch["git"] == "https://github.com/ai-dynamo/aisimulate.git"
+        assert re.fullmatch(r"[0-9a-f]{40}", patch["rev"])
+        for path in LOCKFILES[1:]:
+            with path.with_name("Cargo.toml").open("rb") as handle:
+                manifest = tomllib.load(handle)
+            assert manifest["patch"]["crates-io"]["aisimulate-core"] == patch
+    assert all(
+        _locked_cargo_version(path, patch) == cargo_version for path in LOCKFILES
+    )
 
 
 def test_container_stages_the_published_aisimulate_wheel() -> None:

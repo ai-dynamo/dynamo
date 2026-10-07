@@ -139,9 +139,8 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
     assert "aic-forward-pass" not in features
     with (ROOT / "Cargo.toml").open("rb") as handle:
-        canonical_core = tomllib.load(handle)["workspace"]["dependencies"][
-            "aisimulate-core"
-        ]
+        root_cargo = tomllib.load(handle)
+    canonical_core = root_cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert dependencies["aisimulate-core"] == {
         **canonical_core,
         "optional": True,
@@ -157,7 +156,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
             f"git+{canonical_core['git']}@{canonical_core['rev']}"
             "#subdirectory=python/aisimulate"
         )
-    else:
+    elif "aisimulate-core" not in root_cargo.get("patch", {}).get("crates-io", {}):
         assert (
             str(requirement.specifier).replace("==", "=").replace(".dev", "-dev.")
             == canonical_core["version"]
