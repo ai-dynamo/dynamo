@@ -164,7 +164,35 @@ pub struct NvImagesResponse {
     pub quality: Option<ImageQuality>,
 
     /// Token usage of the generation, when the model reports it
-    pub usage: Option<serde_json::Map<String, serde_json::Value>>,
+    pub usage: Option<ImageUsage>,
+}
+
+/// Token usage of an image generation. Keeps the wire format of the OpenAI
+/// `ImageGenUsage`, including the singular `output_token_details`.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ImageUsage {
+    /// Tokens (image and text) in the input prompt
+    pub input_tokens: u32,
+
+    /// Tokens (image and text) used for the generation
+    pub total_tokens: u32,
+
+    /// Tokens the model generated
+    pub output_tokens: u32,
+
+    /// The output tokens by kind
+    pub output_token_details: Option<ImageTokenDetails>,
+
+    /// The input tokens by kind
+    pub input_tokens_details: ImageTokenDetails,
+}
+
+/// A token count split by kind.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageTokenDetails {
+    pub text_tokens: u32,
+
+    pub image_tokens: u32,
 }
 
 /// One generated image. The worker sets one of `url` and `b64_json`.
@@ -299,8 +327,10 @@ mod tests {
             // The OpenAI type writes every absent optional field as null.
             r#"{"created":1,"data":[]}"#,
             r#"{"created":1,"data":[{"b64_json":"aGVsbG8=","url":null}],"size":"768x512"}"#,
-            // Rejected: an unknown background, a negative created, no data.
+            // Rejected: an unknown background, a negative created, no data,
+            // and a usage without its input token details.
             r#"{"created":1,"data":[],"background":"auto"}"#,
+            r#"{"created":1,"data":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}"#,
             r#"{"created":-1,"data":[]}"#,
             r#"{"created":1}"#,
         ] {
