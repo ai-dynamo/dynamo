@@ -76,7 +76,7 @@ Your own client uses the same frontend base URL:
 3. `GET /v1/batches/<batch id>` until the job reaches a terminal state.
 4. Download `GET /v1/files/<output_file_id>/content`, and the error file if `error_file_id` is present.
 
-Use a consistent `X-MaaS-Username` tenant header for all calls. Pass your deployment's authorization credentials when required. The example client uses a development tenant and placeholder bearer token. Input files are limited to 200 MiB in this profile; for larger workloads, split the JSONL into multiple input files and submit a job for each. Increasing the limit also requires sizing the frontend request-body limit, Processor work directory, and storage capacity.
+Use a consistent `X-MaaS-Username` tenant header for all calls. Pass your deployment's authorization credentials when required. The example client uses a development tenant and placeholder bearer token. Input files are limited to 200 MiB in this profile; for larger workloads, split the JSONL into multiple input files and submit a job for each. The Batch API has a disk-backed, 1 GiB temporary volume at `/tmp` for multipart uploads above 32 MiB, while its root filesystem stays read-only. Concurrent uploads share this temporary storage budget. Increasing the limit also requires sizing the frontend request-body limit, API temporary volume, Processor work directory, and storage capacity.
 
 ## Use an Existing DGD
 

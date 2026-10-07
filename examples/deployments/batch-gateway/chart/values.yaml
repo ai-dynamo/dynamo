@@ -39,6 +39,14 @@ batch-gateway:
         autoCreateBucket: false
   apiserver:
     replicaCount: 1
+    # Multipart uploads above 32 MiB spill to disk; keep the root filesystem read-only.
+    volumes:
+      - name: upload-tmp
+        emptyDir:
+          sizeLimit: 1Gi
+    volumeMounts:
+      - name: upload-tmp
+        mountPath: /tmp
     image:
       repository: ghcr.io/llm-d/batch-gateway-apiserver
       pullPolicy: IfNotPresent
