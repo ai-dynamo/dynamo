@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import platform
+import shlex
 import shutil
 import signal
 import subprocess
@@ -172,6 +173,43 @@ def test_mpi_uses_the_nixl_wheels_ucx():
     assert loaded["libraries"] and all(
         path.startswith(expected) for path in loaded["libraries"]
     ), f"MPI loaded UCX outside the NIXL wheel: {loaded}"
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "shell", [None, "-c", "-lc"], ids=["direct", "bash", "login-bash"]
+)
+def test_nixl_python_backend_comes_from_installed_wheel(shell):
+    """Shell startup must not select upstream NIXL bindings ahead of the wheel."""
+    record = "/opt/dynamo/nixl-versions.txt"
+    if not os.path.isfile(record):
+        pytest.skip("wheel-based runtime only; dev images use TRT-LLM's bundled NIXL")
+    with open(record) as versions:
+        expected_versions = {
+            line.split()[1] for line in versions if line.startswith("Version:")
+        }
+    assert len(expected_versions) == 1, expected_versions
+    probe = (
+        "import json, nixl_cu13\n"
+        "from importlib.metadata import distribution, version\n"
+        "from pathlib import Path\n"
+        "wheel = distribution('nixl-cu13')\n"
+        "print(json.dumps({'shim_version': version('nixl'),\n"
+        "    'backend_version': wheel.version,\n"
+        "    'backend': str(Path(nixl_cu13.__file__).resolve()),\n"
+        "    'expected': str(Path(wheel.locate_file('nixl_cu13/__init__.py')).resolve())}))\n"
+    )
+    args = [sys.executable, "-c", probe]
+    if shell is not None:
+        args = ["bash", shell, shlex.join(args)]
+    proc = _run(args)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    loaded = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert {
+        loaded["shim_version"],
+        loaded["backend_version"],
+    } == expected_versions, loaded
+    assert loaded["backend"] == loaded["expected"], loaded
 
 
 def test_comm_self_spawn_reaches_its_child():

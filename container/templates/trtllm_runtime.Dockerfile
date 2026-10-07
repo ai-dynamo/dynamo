@@ -317,6 +317,11 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     _nixl_ver="${NIXL_REF#v}" && \
     uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
+    # Upstream's shell setup prepends its source-built 1.4 bindings. Remove
+    # that override and the old bindings so inherited PYTHONPATH cannot select
+    # them ahead of the wheel. Keep the final-stage whiteout below in sync.
+    sed -i '/^case ":${PYTHONPATH:-}:" in$/,/^esac$/d' "${ENV}" && \
+    rm -rf /opt/nvidia/nvda_nixl/lib/python3/dist-packages && \
     NIXL_REQUIRED_LIBS="libnixl.so libnixl_build.so libnixl_common.so libserdes.so libstream.so libnixl_capi.so" \
     bash /tmp/install_nixl_from_wheel.sh \
         --cuda-major 13 \
@@ -873,6 +878,10 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/attrs-* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
+{% if target not in ("dev", "local-dev") %}
+# COPY cannot remove upstream Python bindings deleted by runtime_full.
+RUN rm -rf /opt/nvidia/nvda_nixl/lib/python3/dist-packages
+{% endif %}
 COPY --from=runtime_full / /
 
 # Package trees and shared JupyterLab assets are whiteouted before the overlay.
