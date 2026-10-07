@@ -29,7 +29,8 @@
 //
 // Termination state machine (see Publisher.Run):
 //
-//	terminal snapshot reconciled                       -> exit 0
+//	terminal Succeeded snapshot reconciled             -> exit 0
+//	terminal Failed snapshot reconciled                -> exit ExitRunFailed
 //	Sweeper exited non-zero, no terminal snapshot      -> reconcile last snapshot, exit 0
 //	                                                      (the Sweeper's exit fails the Job)
 //	Sweeper exited zero, no terminal snapshot          -> reconcile last snapshot,
@@ -55,11 +56,17 @@ const (
 	ExitAcknowledged            = 0
 	ExitReconcileFailed         = 1
 	ExitMissingTerminalSnapshot = 3
+	ExitRunFailed               = 4
 )
 
 // ErrMissingTerminalSnapshot means the Sweeper exited successfully without publishing a
 // terminal snapshot, which violates the producer protocol.
 var ErrMissingTerminalSnapshot = errors.New("sweeper exited without publishing a terminal snapshot")
+
+// ErrRunFailed means the Sweeper published a terminal Failed snapshot. The snapshot is
+// reconciled first; the error keeps a producer that reports failure but exits 0 from
+// letting the Job complete successfully.
+var ErrRunFailed = errors.New("sweeper reported a failed run")
 
 // ExitCode maps the result of Run to the process exit code.
 func ExitCode(err error) int {
@@ -68,6 +75,8 @@ func ExitCode(err error) int {
 		return ExitAcknowledged
 	case errors.Is(err, ErrMissingTerminalSnapshot):
 		return ExitMissingTerminalSnapshot
+	case errors.Is(err, ErrRunFailed):
+		return ExitRunFailed
 	default:
 		return ExitReconcileFailed
 	}
@@ -116,6 +125,7 @@ type Publisher struct {
 	lastStatus   *RunStatus
 	haveSnapshot bool // a snapshot has been reconciled
 	terminal     bool // the reconciled snapshot was terminal
+	phase        string
 }
 
 // CandidateName is the DGDC name for a candidate id. It depends only on the run and the
@@ -242,6 +252,7 @@ func (p *Publisher) syncOnce(ctx context.Context) error {
 	p.lastRaw = data
 	p.haveSnapshot = true
 	p.terminal = snap.Run.Terminal
+	p.phase = snap.Run.Phase
 	return nil
 }
 
@@ -268,7 +279,7 @@ func (p *Publisher) Run(ctx context.Context) error {
 		}
 
 		if syncErr == nil && p.terminal {
-			return nil
+			return p.terminalResult()
 		}
 		if stateErr == nil && state.Exited {
 			return p.finish(ctx, state, syncErr)
@@ -280,6 +291,14 @@ func (p *Publisher) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// terminalResult is the outcome once a terminal snapshot has been reconciled.
+func (p *Publisher) terminalResult() error {
+	if p.phase == PhaseFailed {
+		return ErrRunFailed
+	}
+	return nil
 }
 
 // finish handles the Sweeper having exited without a reconciled terminal snapshot. Any
@@ -299,7 +318,7 @@ func (p *Publisher) finish(ctx context.Context, state SweeperState, syncErr erro
 	}
 	switch {
 	case p.terminal:
-		return nil
+		return p.terminalResult()
 	case state.ExitCode != 0:
 		// Crash or caught failure without a terminal snapshot: the last-known projection
 		// is reconciled above; the Sweeper's own exit code fails the Job.
