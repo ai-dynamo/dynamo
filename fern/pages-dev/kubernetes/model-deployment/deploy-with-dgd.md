@@ -316,7 +316,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
   - name: decode
     type: decode
     sharedMemorySize: 16Gi
@@ -331,7 +331,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
           - --disaggregation-mode
           - decode
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 ```
 
 </Tab>
