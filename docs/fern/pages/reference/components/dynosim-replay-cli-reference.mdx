@@ -180,8 +180,6 @@ AISimulate's Weka importer also changes two behaviors from the former Dynamo imp
 `mooncake-delta`, `agentic_mooncake`, and `weka` require aggregated engine mode.
 The two agentic formats also require `trace_timestamps` and reject the virtual-time cutoff.
 `applied_compute_agentic` requires concurrency load.
-With the Dynamo stack, omit `planner` or set `planner.policy: disabled` for `mooncake-delta`,
-`agentic_mooncake`, and Dynamo traces that carry `agent_context` records.
 
 ### Typed agentic replay through the Dynamo API
 
@@ -262,8 +260,17 @@ and any future materialization tooling belong to AISimulate.
   polynomial model.
 - `router.policy: kv_router` requires more than one routable worker. Set
   `router.prefill_load_model.type` to `none` or `aic`.
-- `planner.policy` is `disabled` or `enabled`. When enabled, `planner.max_num_gpus` limits the
-  Planner runtime budget; it is distinct from recommendation candidate constraints.
+- `planner.policy` is `disabled` or `enabled`. Enabled settings use the production
+  `PlannerConfig` defaults and normalization. The default target is `throughput`, which enables
+  load scaling and disables throughput scaling. Throughput scaling with `target: sla` requires
+  both TTFT and ITL thresholds.
+- `planner.max_num_gpus` maps to Planner's `max_gpu_budget` (default 8); concrete predictions
+  also accept `min_num_gpus` for `min_gpu_budget` (default -1, no floor). Recommendations carry
+  `optimization.constraints.min_candidate_gpus` into that runtime floor when set. Other candidate
+  constraints govern the static search; `planner.max_num_gpus` governs runtime scaling.
+- Omitted Planner adjustment intervals use production defaults. Explicit `null` uses the default
+  only for an effectively disabled scaling mode. Exported enabled configurations contain concrete
+  intervals, including the load interval used for performance-model updates.
 - `evaluation.sla` accepts either `e2e_ms` alone or `ttft_ms` and `itl_ms` together. The two forms
   are mutually exclusive.
 

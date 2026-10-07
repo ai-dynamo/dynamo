@@ -21,7 +21,6 @@ metadata:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1901b8cf4e19d5d71b39428a6f73f481308cdff0272ae66937a731508cb7be1b
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid

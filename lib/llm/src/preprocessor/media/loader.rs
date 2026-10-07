@@ -17,7 +17,7 @@ use dynamo_runtime::error::{DynamoError, ErrorType};
 
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
+use super::rdma::{DataType, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent};
 use super::require_image_url;
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -557,6 +557,10 @@ impl MediaLoader {
         media_io_kwargs: Option<&MediaDecoder>,
         _hash_video: bool,
     ) -> Result<RdmaMediaDataDescriptor> {
+        // Drain before the cache lookup: the worker also reads cached buffers, so cache
+        // hits add notifications too.
+        drain_nixl_notifications(&self.nixl_agent);
+
         // Image-only fast path: cache lookup keyed by URL/datauri string.
         // Video/audio aren't cached yet (their lifetime/content semantics
         // are different — easy to add later if profiling justifies it).
