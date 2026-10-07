@@ -418,6 +418,7 @@ mod bounded_drain_tests {
     struct DropProbe(Arc<AtomicUsize>);
 
     impl DropProbe {
+        /// Count a live response until its embedded probe is dropped.
         fn new(live: &Arc<AtomicUsize>) -> Self {
             live.fetch_add(1, Ordering::SeqCst);
             Self(live.clone())
@@ -425,6 +426,7 @@ mod bounded_drain_tests {
     }
 
     impl Drop for DropProbe {
+        /// Record release of the response that owns this probe.
         fn drop(&mut self) {
             self.0.fetch_sub(1, Ordering::SeqCst);
         }
@@ -438,11 +440,13 @@ mod bounded_drain_tests {
     impl<S: Stream + Unpin> Stream for ProbedStream<S> {
         type Item = S::Item;
 
+        /// Delegate polling while keeping the lifetime probe in the stream.
         fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<S::Item>> {
             Pin::new(&mut self.get_mut().inner).poll_next(cx)
         }
     }
 
+    /// Attach a real engine context and a lifetime counter to a test stream.
     fn probed_response_stream<S>(inner: S, live: &Arc<AtomicUsize>) -> ManyOut<TestResponse>
     where
         S: Stream<Item = TestResponse> + Unpin + Send + 'static,
@@ -454,10 +458,12 @@ mod bounded_drain_tests {
         ResponseStream::new(Box::pin(probed), Context::new(()).context())
     }
 
+    /// Create a response item without an error annotation.
     fn healthy_item() -> TestResponse {
         Annotated::from_data(serde_json::json!({"token": "ok"}))
     }
 
+    /// Model a backend that answers once and never closes its response.
     fn one_item_then_pending(live: &Arc<AtomicUsize>) -> ManyOut<TestResponse> {
         probed_response_stream(
             stream::iter([healthy_item()]).chain(stream::pending()),
@@ -465,6 +471,7 @@ mod bounded_drain_tests {
         )
     }
 
+    /// A deadline must release the response and signal the engine to stop.
     #[tokio::test]
     async fn bounded_drain_releases_a_stream_that_never_closes() {
         let live = Arc::new(AtomicUsize::new(0));
@@ -495,6 +502,7 @@ mod bounded_drain_tests {
         );
     }
 
+    /// Shutdown must release a stalled response even with an hour left to drain.
     #[tokio::test]
     async fn cancelled_drain_releases_the_stream_before_the_budget_elapses() {
         let live = Arc::new(AtomicUsize::new(0));
@@ -524,6 +532,7 @@ mod bounded_drain_tests {
         assert!(context.is_stopped());
     }
 
+    /// Several concurrent canary drains must return the live-response count to zero.
     #[tokio::test]
     async fn repeated_drains_do_not_accumulate_live_streams() {
         let live = Arc::new(AtomicUsize::new(0));
@@ -554,6 +563,7 @@ mod bounded_drain_tests {
         );
     }
 
+    /// Normal completion must consume every item without stopping the engine.
     #[tokio::test]
     async fn terminating_stream_is_drained_completely_and_promptly() {
         let live = Arc::new(AtomicUsize::new(0));
@@ -592,6 +602,7 @@ mod bounded_drain_tests {
         );
     }
 
+    /// An expired request deadline must not give the detached drain a new budget.
     #[tokio::test]
     async fn drain_does_not_extend_a_deadline_the_request_already_spent() {
         let live = Arc::new(AtomicUsize::new(0));
@@ -615,6 +626,7 @@ mod bounded_drain_tests {
         assert_eq!(live.load(Ordering::SeqCst), 0);
     }
 
+    /// A producer that checks the stop signal on its next poll must be polled again.
     #[tokio::test]
     async fn drain_keeps_reading_after_the_stop_signal() {
         let flushed = Arc::new(AtomicUsize::new(0));
@@ -657,6 +669,7 @@ mod bounded_drain_tests {
     impl Stream for FlushOnStopStream {
         type Item = TestResponse;
 
+        /// Release the final item only after the context receives its stop signal.
         fn poll_next(
             self: Pin<&mut Self>,
             _cx: &mut TaskContext<'_>,

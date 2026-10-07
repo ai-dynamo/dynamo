@@ -180,6 +180,7 @@ mod tests {
         assert!(!filter.should_offload(hash(1)));
     }
 
+    /// Check each periodic decrement and removal at zero using a virtual clock.
     #[tokio::test(start_paused = true)]
     async fn test_time_based_decay() {
         let cancel_token = CancellationToken::new();
