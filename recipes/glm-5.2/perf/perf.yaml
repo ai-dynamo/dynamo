@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# AIPerf trace-replay benchmark for the GLM-5.3 / GLM-5.2 DGDs.
+# AIPerf trace-replay benchmark for the GLM-5.3 DGDs.
 #
 # One Job covers the aggregate and disaggregated B200 and H200 agentic
 # variants. Edit ENDPOINT and SYNTHESIS_MAX_ISL below to select a DGD. Restart
@@ -172,7 +172,7 @@ spec:
           echo ""
           echo "Done. Root: ${ROOT_DIR}"
         env:
-        # --- Edit ENDPOINT to target one of the four DGDs (glm52-* names are literal; they serve GLM-5.3 by default). ---
+        # --- Edit ENDPOINT to target one of the four GLM-5.3 DGDs (glm52-* names are literal). ---
         - name: ENDPOINT
           value: glm52-agg-b200-agentic-frontend:8000
         - name: TRACE_FILE
