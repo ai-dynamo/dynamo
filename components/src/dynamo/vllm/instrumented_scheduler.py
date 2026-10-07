@@ -1659,6 +1659,7 @@ class _FpmPublisherThread:
         max_queue_size: int = 10_000,
         start_paused: bool = False,
     ) -> None:
+        """Bind the publisher, record its endpoint, and start its worker thread."""
         self._queue: queue.Queue[ForwardPassMetrics | None] = queue.Queue(
             maxsize=max_queue_size
         )
