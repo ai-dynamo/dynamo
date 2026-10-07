@@ -843,7 +843,8 @@ impl<
             .with_available_workers(available.as_deref())
             .best_cached_tokens();
         let mut classification =
-            ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at);
+            ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
+                .with_pinned_worker(request.pinned_worker);
         if let Some(request_id) = request.mode.request_id() {
             classification = classification.with_request_id(request_id);
         }
@@ -2795,6 +2796,7 @@ policy_classes:
 
         request.pinned_worker = Some(pin);
         let mut classified = queue.build_classify_request(&request, now);
+        assert_eq!(classified.pinned_worker(), Some(pin));
         classified.set_worker_selection_target(worker);
         queue
             .validate_classification(&mut request, classified, now)

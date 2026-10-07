@@ -22,8 +22,8 @@ use tokio_util::sync::CancellationToken;
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
-    ResponseState, build_generate_request, data_parallel_rank, normalize_response_options,
-    request_has_multimodal_input,
+    ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
+    normalize_response_options, request_has_multimodal_input,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -169,6 +169,15 @@ impl VllmSidecarEngine {
         model: DiscoveredModel,
         vllm_http_url: Option<RlAdminBaseUrl>,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let dynamo_parsers = args.sidecar.common.dyn_tool_call_parser.is_some()
+            || args.sidecar.common.dyn_reasoning_parser.is_some();
+        if dynamo_parsers && let Some(parser) = model.reasoning_parser() {
+            // vLLM's own reasoning parser gates structured output on request
+            // settings that the gRPC protocol cannot carry.
+            return Err(client::invalid_argument(format!(
+                "Dynamo parsers need vLLM without its own reasoning parser, but vLLM runs `{parser}`; start vllm-rs with `--reasoning-parser none`"
+            )));
+        }
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
         let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
@@ -779,7 +788,10 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let request = normalize_response_options(request)?;
+        let mut request = normalize_response_options(request)?;
+        if self.model.reasoning_parser().is_none() {
+            consume_reasoning_parser_args(&mut request.extra_args);
+        }
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
@@ -1497,10 +1509,31 @@ mod tests {
         .unwrap();
         let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
         // Native parser names differ from the explicit Dynamo configuration.
-        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let mut info = model_info();
+        info.reasoning_parser = String::new();
+        let model = DiscoveredModel::from_proto(info, server_info()).unwrap();
         let (_, config) = VllmSidecarEngine::from_discovered(args, model, vllm_http_url).unwrap();
         assert_eq!(config.tool_call_parser.as_deref(), Some("qwen3_coder"));
         assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
+    fn dynamo_parsers_need_an_engine_without_a_reasoning_parser() {
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:12345",
+            "--dyn-reasoning-parser",
+            "qwen3",
+        ])
+        .unwrap();
+        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
+        // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let error = VllmSidecarEngine::from_discovered(args, model, vllm_http_url)
+            .err()
+            .expect("startup must fail");
+        assert!(error.to_string().contains("--reasoning-parser none"));
     }
 
     #[test]
