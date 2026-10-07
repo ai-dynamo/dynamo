@@ -15,7 +15,7 @@ use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
     RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
-    RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
+    RequestClassifierProviderError, RequestClassifierRegistryError,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use parking_lot::Mutex;
@@ -149,32 +149,12 @@ struct Inner {
 impl Inner {
     fn register(
         &self,
-        request_id: String,
-        session_id: String,
-        input_tokens: usize,
-        progress: RequestProgress,
-        session_final: bool,
-        pinned_worker: Option<dynamo_kv_router::protocols::WorkerWithDpRank>,
-        sequence_hashes: Option<Vec<u64>>,
+        registration: RequestRegistration,
     ) -> Result<Arc<Notify>, ThunderAgentError> {
         let capacities = self.capacity_provider.snapshot();
         let mut state = self.state.lock();
 
-        let result = state.register(
-            RequestRegistration::new(
-                request_id,
-                session_id,
-                input_tokens,
-                progress,
-                session_final,
-            )
-            .with_pinned_worker(pinned_worker)
-            .with_sequence_hashes(sequence_hashes),
-            &capacities,
-            Instant::now(),
-        );
-
-        result
+        state.register(registration, &capacities, Instant::now())
     }
 
     fn start_scheduler(self: &Arc<Self>) {
@@ -384,13 +364,15 @@ impl RequestClassifier for ThunderAgentClassifier {
             .flatten()
             .map(<[u64]>::to_vec);
         let notify = match self.inner.register(
-            request_id.clone(),
-            session_id,
-            input_tokens,
-            progress,
-            session_final,
-            pinned_worker,
-            sequence_hashes,
+            RequestRegistration::new(
+                request_id.clone(),
+                session_id,
+                input_tokens,
+                progress,
+                session_final,
+            )
+            .with_pinned_worker(pinned_worker)
+            .with_sequence_hashes(sequence_hashes),
         ) {
             Ok(notify) => notify,
             Err(error) => {
@@ -401,7 +383,7 @@ impl RequestClassifier for ThunderAgentClassifier {
         let inner = Arc::clone(&self.inner);
         let pending = PendingClassification::new(inner, request_id, notify);
         Box::pin(async move {
-            let result = await_release(pending, request)
+            await_release(pending, request)
                 .await
                 .map(|(mut request, worker)| {
                     if let Some(worker) = worker {
@@ -409,8 +391,7 @@ impl RequestClassifier for ThunderAgentClassifier {
                     }
                     request
                 })
-                .map_err(|error| Box::new(error) as Box<ClassifierError>);
-            result
+                .map_err(|error| Box::new(error) as Box<ClassifierError>)
         })
     }
 
@@ -423,7 +404,7 @@ impl RequestClassifier for ThunderAgentClassifier {
 mod tests {
     use std::time::Duration;
 
-    use dynamo_kv_router::plugins::request_classifier::RequestClassifierWorker;
+    use dynamo_kv_router::plugins::request_classifier::{RequestClassifierWorker, RequestProgress};
     use dynamo_kv_router::protocols::WorkerWithDpRank;
 
     use super::scheduler::ProgramLifecycle;
@@ -633,15 +614,13 @@ mod tests {
         let (progress, _) = RequestProgress::new(tokens);
         classifier
             .inner
-            .register(
+            .register(RequestRegistration::new(
                 request_id.to_owned(),
                 session_id.to_owned(),
                 tokens,
                 progress,
                 session_final,
-                None,
-                None,
-            )
+            ))
             .unwrap();
     }
 
@@ -1280,15 +1259,13 @@ mod tests {
         .unwrap();
         register(&classifier, "request-1", "session-a", 100, false);
 
-        let result = classifier.inner.register(
+        let result = classifier.inner.register(RequestRegistration::new(
             "request-2".into(),
             "session-b".into(),
             100,
             RequestProgress::new(100).0,
             false,
-            None,
-            None,
-        );
+        ));
         assert!(matches!(
             result,
             Err(ThunderAgentError::RequestLimitExceeded { limit: 1 })
