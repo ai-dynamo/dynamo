@@ -322,6 +322,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         --cuda-major 13 \
         --site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
         --prefix /opt/dynamo/nixl \
+        --ucx-prefix /opt/dynamo/ucx \
         --skip-headers && \
     \
     # Record effective NIXL versions (pip vs loaded .so) for diagnosis.
@@ -346,12 +347,12 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         if [ -n "$GMS_WHEEL" ]; then uv pip install --no-deps "$GMS_WHEEL"; fi; \
     fi
 
-# NIXL 1.5.0 bundles UCX 1.23.x; the nixl#1668 hang was reported against the
-# UCX 1.20.0 in nixl-cu13 0.10.1. nixl-sys resolves the C API with a bare
-# dlopen("libnixl_capi.so"), so the wheel directory must also be on the loader
-# path. Keep in sync with the pre_runtime ENV below.
-ENV LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/nixl/libnixl.so \
-    LD_LIBRARY_PATH=/opt/dynamo/nixl:${LD_LIBRARY_PATH} \
+# MPI otherwise loads the upstream UCX 1.22 before NIXL initializes its UCX
+# 1.23 backend. Pin all four UCX core libraries to the wheel to prevent symbol
+# interposition between releases. nixl-sys also needs libnixl_capi.so on the
+# loader path. Keep in sync with the pre_runtime ENV below.
+ENV LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/ucx/libucm.so.0:/opt/dynamo/ucx/libucs.so.0:/opt/dynamo/ucx/libuct.so.0:/opt/dynamo/ucx/libucp.so.0:/opt/dynamo/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/ucx:/opt/dynamo/nixl:${LD_LIBRARY_PATH} \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
 {% endif %}
 
@@ -991,8 +992,8 @@ ENV DYNAMO_HOME=/workspace \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/nixl/libnixl.so \
-    LD_LIBRARY_PATH=/opt/dynamo/nixl:/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/opt/dynamo/ucx/libucm.so.0:/opt/dynamo/ucx/libucs.so.0:/opt/dynamo/ucx/libuct.so.0:/opt/dynamo/ucx/libucp.so.0:/opt/dynamo/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/ucx:/opt/dynamo/nixl:/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
     OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins \
     NIXL_VERSION=

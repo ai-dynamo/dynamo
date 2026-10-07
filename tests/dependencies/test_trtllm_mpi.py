@@ -16,6 +16,7 @@ green.
 
 import contextlib
 import importlib.util
+import json
 import os
 import platform
 import shutil
@@ -34,8 +35,10 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.unit,
     pytest.mark.skipif(
-        importlib.util.find_spec("tensorrt_llm") is None
-        or importlib.util.find_spec("mpi4py") is None,
+        any(
+            importlib.util.find_spec(module) is None
+            for module in ("tensorrt_llm", "mpi4py")
+        ),
         reason="TRT-LLM images only (the selection is in trtllm_runtime.Dockerfile)",
     ),
     pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only"),
@@ -139,6 +142,36 @@ def test_mpi4py_loads_the_selected_mpi():
         f"mpi4py loaded {loaded}, not the Open MPI under {_MPI_LINK} ({selected}); "
         "check LD_LIBRARY_PATH in trtllm_runtime.Dockerfile"
     )
+
+
+@pytest.mark.core
+def test_mpi_uses_the_nixl_wheels_ucx():
+    """MPI must not preempt NIXL 1.5's UCX with the upstream 1.22 libraries."""
+    if not os.path.isfile("/opt/dynamo/nixl-versions.txt"):
+        pytest.skip("wheel-based runtime only; dev images use TRT-LLM's bundled NIXL")
+    probe = (
+        "from mpi4py import MPI\n"
+        "import ctypes, json, re\n"
+        "from pathlib import Path\n"
+        "ucp = ctypes.CDLL('libucp.so.0')\n"
+        "version = [ctypes.c_uint() for _ in range(3)]\n"
+        "ucp.ucp_get_version.argtypes = [ctypes.POINTER(ctypes.c_uint)] * 3\n"
+        "ucp.ucp_get_version.restype = None\n"
+        "ucp.ucp_get_version(*(ctypes.byref(part) for part in version))\n"
+        "libraries = sorted({str(Path(line.split()[-1]).resolve())\n"
+        "    for line in Path('/proc/self/maps').read_text().splitlines()\n"
+        "    if re.search(r'/libuc[mpst][-.]', line)})\n"
+        "print(json.dumps({'version': [part.value for part in version],\n"
+        "                  'libraries': libraries}))\n"
+    )
+    proc = _run([sys.executable, "-c", probe])
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    loaded = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert loaded["version"][:2] >= [1, 23], loaded
+    expected = os.path.realpath("/opt/dynamo/ucx") + "/"
+    assert loaded["libraries"] and all(
+        path.startswith(expected) for path in loaded["libraries"]
+    ), f"MPI loaded UCX outside the NIXL wheel: {loaded}"
 
 
 def test_comm_self_spawn_reaches_its_child():

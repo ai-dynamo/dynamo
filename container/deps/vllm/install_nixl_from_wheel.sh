@@ -18,6 +18,7 @@ Options:
   --wheel-lib-dir <path>     Explicit .nixl_cu*.mesonpy.libs directory.
   --headers-src <path>       NIXL include directory to copy beside wheel libs.
   --prefix <path>            Stable symlink prefix to create. Default: /opt/dynamo/nixl.
+  --ucx-prefix <path>        Also expose the wheel's UCX through generic SONAMEs.
   --skip-headers             Do not install or require headers.
   -h, --help                 Show this help text.
 
@@ -31,6 +32,7 @@ die() {
 }
 
 prefix="/opt/dynamo/nixl"
+ucx_prefix=""
 cuda_major="${CUDA_MAJOR:-}"
 python_version="${PYTHON_VERSION:-}"
 site_packages=""
@@ -68,6 +70,11 @@ while [ "$#" -gt 0 ]; do
         --prefix)
             [ "$#" -ge 2 ] || die "--prefix requires a value"
             prefix="${2%/}"
+            shift 2
+            ;;
+        --ucx-prefix)
+            [ "$#" -ge 2 ] || die "--ucx-prefix requires a value"
+            ucx_prefix="${2%/}"
             shift 2
             ;;
         --skip-headers)
@@ -131,3 +138,36 @@ mkdir -p "$(dirname "${prefix}")"
 ln -sfn "${wheel_lib_dir}" "${prefix}"
 
 echo "Installed NIXL wheel prefix: ${prefix} -> $(readlink -f "${prefix}")"
+
+if [ -n "${ucx_prefix}" ]; then
+    [ -n "${cuda_major}" ] || die "--ucx-prefix requires --cuda-major"
+    ucx_lib_dir="${wheel_lib_dir%/*}/nixl_cu${cuda_major}.libs"
+    [ -d "${ucx_lib_dir}/ucx" ] || die "missing wheel UCX modules: ${ucx_lib_dir}/ucx"
+
+    # MPI asks for generic UCX SONAMEs; NIXL's wheel uses auditwheel-renamed
+    # libraries. Point both names at the same files before either is loaded.
+    # Keep aliases beside their targets so UCX can find its modules via $ORIGIN.
+    shopt -s nullglob
+    for library in libucm libucs libuct libucp; do
+        candidates=("${ucx_lib_dir}/${library}-"*.so.0.*)
+        [ "${#candidates[@]}" -eq 1 ] || die "expected one wheel ${library}: ${candidates[*]}"
+        alias_path="${ucx_lib_dir}/${library}.so.0"
+        [ ! -e "${alias_path}" ] || [ -L "${alias_path}" ] || die "refusing to replace ${alias_path}"
+        ln -sfn "${candidates[0]##*/}" "${alias_path}"
+    done
+
+    # Loading libucs through .so.0 makes its module loader use that suffix too.
+    # The wheels retain only fully versioned module files, so restore the links.
+    for module_path in "${ucx_lib_dir}"/ucx/*.so.0.*; do
+        ln -sfn "${module_path##*/}" "${module_path%%.so.*}.so.0"
+    done
+    shopt -u nullglob
+    for module in libuct_cuda libucm_cuda; do
+        [ -f "${ucx_lib_dir}/ucx/${module}.so.0" ] || die "missing wheel UCX module: ${module}"
+    done
+
+    [ ! -e "${ucx_prefix}" ] || [ -L "${ucx_prefix}" ] || die "refusing to replace ${ucx_prefix}"
+    mkdir -p "$(dirname "${ucx_prefix}")"
+    ln -sfn "${ucx_lib_dir}" "${ucx_prefix}"
+    echo "Installed UCX wheel prefix: ${ucx_prefix} -> $(readlink -f "${ucx_prefix}")"
+fi
