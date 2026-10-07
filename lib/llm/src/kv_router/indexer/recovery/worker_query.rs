@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::recovery_lane::{RECOVERY_CONCURRENCY_LIMIT, RecoveryLane};
+use super::static_sources::{StaticBatchTally, record_static_rank_reset};
 use super::target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
 use super::worker_query_state::{LiveEventAction, RankState, RecoveryKey};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
@@ -368,6 +369,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
     ) -> Result<()> {
         // NOTE: This completion barrier is intentional. Rank reset is an infallible lane operation
         // whose removal must be visible before activation or clearing the pending reset.
+        record_static_rank_reset(source_id.publisher_id);
         self.target
             .reset_rank(source_id.publisher_id, key.0, key.1, reason)
             .await
@@ -573,11 +575,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         publisher_id: PublisherId,
         events: Vec<RouterEvent>,
     ) {
+        // EXPERIMENT ONLY: delivery accounting for static KV sources; a no-op for others.
+        let mut tally = StaticBatchTally::new(publisher_id);
         let Some(active) = self
             .publisher_bindings
             .get(&publisher_id)
             .map(|entry| entry.clone())
         else {
+            tally.dropped(events.len());
             tracing::debug!(
                 publisher_id,
                 "Dropping KV event batch from an inactive or ambiguous source"
@@ -623,6 +628,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .is_some_and(|active| Arc::ptr_eq(active, &binding))
             || slot.pending_reset.is_some()
         {
+            tally.dropped(events.len());
             return;
         }
 
@@ -631,6 +637,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             match slot.rank.observe_live_event(event, recoverable) {
                 LiveEventAction::Ignore => {}
                 LiveEventAction::Apply { event_id, event } => {
+                    let written = tally.written(&event);
                     if let Err(error) = self
                         .target
                         .admit_event(binding.source_id.publisher_id, event)
@@ -641,6 +648,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                         return;
                     }
                     slot.rank.commit_live_admission(event_id);
+                    tally.admitted(event_id, written);
                 }
                 LiveEventAction::Clear { event_id, event } => {
                     // NOTE: A clear is ordered only in this publisher's rank stream. It may
@@ -658,6 +666,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                         return;
                     }
                     slot.rank.commit_live_admission(event_id);
+                    tally.admitted(event_id, Default::default());
                 }
                 LiveEventAction::Recover {
                     start_event_id,
@@ -667,6 +676,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                         .await
                 }
                 LiveEventAction::ResetDegraded { event } => {
+                    tally.gap_reset();
                     self.cancel_recovery(key).await;
                     if let Err(error) = self
                         .reset_rank_or_fence(key, &binding.source_id, &mut slot)
@@ -676,6 +686,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                         return;
                     }
                     let event_id = event.event.event_id;
+                    let written = tally.written(&event);
                     if let Err(error) = self
                         .admit_events(binding.source_id.publisher_id, [event])
                         .await
@@ -685,6 +696,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                         return;
                     }
                     slot.rank.commit_live_admission(event_id);
+                    tally.admitted(event_id, written);
                 }
             }
         }

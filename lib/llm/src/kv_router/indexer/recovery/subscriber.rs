@@ -21,7 +21,10 @@ use super::{
     broker_zmq::run_broker_zmq_supervisor,
     direct_zmq::run_direct_zmq_supervisor,
     source_health, start_state_agent_router,
-    static_sources::{STATIC_KV_SOURCES_ENV, static_kv_sources_from_env, with_static_sources},
+    static_sources::{
+        STATIC_KV_SOURCES_ENV, start_static_source_accounting, static_kv_sources_from_env,
+        with_static_sources,
+    },
     worker_query::WorkerQueryClient,
 };
 use crate::{
@@ -458,6 +461,7 @@ pub async fn start_subscriber(
     let membership_watch = if static_sources.is_empty() {
         membership_watch
     } else {
+        start_static_source_accounting(&static_sources, cancel.child_token())?;
         with_static_sources(
             membership_watch,
             static_sources.clone(),
