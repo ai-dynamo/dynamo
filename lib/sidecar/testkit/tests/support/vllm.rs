@@ -66,6 +66,7 @@ impl SidecarFixture for Fixture {
     async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
         let mut args = fast_engine_args(EngineType::Vllm);
         args.speedup_ratio = config.speedup_ratio;
+        args.enable_prefix_caching = false;
         let service = VllmMockerService::new(
             MockerServerConfig {
                 model: config.model.clone(),
@@ -418,6 +419,7 @@ macro_rules! delegate_control {
 delegate_control! {
     get_server_info(pb::GetServerInfoRequest) -> pb::ServerInfo;
     abort(pb::AbortRequest) -> pb::AbortResponse;
+    shutdown(pb::ShutdownRequest) -> pb::ShutdownResponse;
     load_lora(pb::LoadLoraRequest) -> pb::LoadLoraResponse;
     unload_lora(pb::UnloadLoraRequest) -> pb::UnloadLoraResponse;
     list_loras(pb::ListLorasRequest) -> pb::ListLorasResponse;
@@ -531,7 +533,7 @@ impl ProcessFixture for Fixture {
     }
 
     fn assert_unhealthy_startup(logs: &str) {
-        assert!(logs.contains("did not become SERVING"), "{logs}");
+        assert!(logs.contains("startup deadline"), "{logs}");
     }
 
     fn endpoint(&self) -> String {

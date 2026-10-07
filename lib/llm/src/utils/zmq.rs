@@ -63,6 +63,26 @@ pub(crate) async fn connect_sub_socket(endpoint: &str, topic: Option<&str>) -> R
     Ok(socket)
 }
 
+/// Connect using the ordinary SUB options, retaining connection notifications
+/// only for the optional startup replay phase.
+pub(crate) async fn connect_sub_socket_with_monitor(
+    endpoint: &str,
+    topic: &str,
+) -> Result<(SubSocket, tmq::pair::Pair)> {
+    let ctx = Context::new();
+    let monitor_endpoint = "inproc://bootstrap-live-monitor";
+    let socket = configure_receive_builder(subscribe(&ctx))
+        .set_ipv6(ipv6_option_for(endpoint)?)
+        .monitor(
+            monitor_endpoint,
+            zmq::SocketEvent::HANDSHAKE_SUCCEEDED as i32 | zmq::SocketEvent::DISCONNECTED as i32,
+        )
+        .connect(endpoint)?
+        .subscribe(topic.as_bytes())?;
+    let monitor = tmq::pair(&ctx).connect(monitor_endpoint)?;
+    Ok((socket, monitor))
+}
+
 #[cfg_attr(not(feature = "block-manager"), allow(dead_code))]
 pub(crate) async fn bind_pub_socket(endpoint: &str) -> Result<SharedPubSocket> {
     let ctx = Context::new();

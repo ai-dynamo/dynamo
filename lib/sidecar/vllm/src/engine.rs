@@ -3,8 +3,6 @@
 
 use tonic_v14 as tonic;
 
-use std::collections::HashSet;
-
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
@@ -29,12 +27,15 @@ use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, reso
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
 
+#[path = "recovery.rs"]
+mod recovery;
+
 pub struct VllmSidecarEngine {
     endpoint: GrpcEndpoint,
     model: DiscoveredModel,
     mode: DisaggregationMode,
     transport: GrpcTransportConfig,
-    client: OnceCell<VllmClient>,
+    state: recovery::Lifecycle,
     runtime_endpoint: OnceCell<Endpoint>,
     lora_downloader: OnceCell<LoRADownloader>,
     is_lora_enabled: bool,
@@ -65,7 +66,7 @@ impl VllmSidecarEngine {
             model,
             mode,
             transport,
-            client: OnceCell::new(),
+            state: recovery::Lifecycle::default(),
             runtime_endpoint: OnceCell::new(),
             lora_downloader: OnceCell::new(),
             lifecycle: lora::LoraLifecycle::default(),
@@ -223,10 +224,8 @@ impl VllmSidecarEngine {
         Ok((engine, config))
     }
 
-    fn started_client(&self) -> Result<&VllmClient, DynamoError> {
-        self.client
-            .get()
-            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))
+    fn started_client(&self) -> Result<std::sync::Arc<VllmClient>, DynamoError> {
+        Ok(self.started_state()?.client.clone())
     }
 
     fn ready_endpoint(&self) -> Result<&Endpoint, DynamoError> {
@@ -476,7 +475,7 @@ impl VllmSidecarEngine {
             if let Err(cleanup_error) = self.unpublish_pending_loras(endpoint, &mut state).await {
                 tracing::warn!(%cleanup_error, lora_name = %adapter.lora_name, "failed to remove LoRA discovery record during rollback");
             }
-            self.rollback_loaded_adapter(client, &adapter).await;
+            self.rollback_loaded_adapter(&client, &adapter).await;
             self.lifecycle.forget(&adapter.lora_name).await;
             return Err(error);
         }
@@ -729,47 +728,36 @@ impl LLMEngine for VllmSidecarEngine {
         &self,
         _worker_id: u64,
     ) -> Result<dynamo_backend_common::EngineConfig, DynamoError> {
-        if self.client.initialized() {
-            return Err(client::engine_shutdown("vLLM sidecar has already started"));
-        }
-        tracing::info!(
-            endpoint = %self.endpoint,
-            connections = self.transport.connections,
-            mode = %self.mode,
-            "connecting to vLLM gRPC"
-        );
-        let startup_deadline = client::startup_deadline(self.transport.startup_deadline)?;
-        let client =
-            VllmClient::connect(&self.endpoint, self.transport, startup_deadline, false).await?;
-        client
-            .wait_for_services(
-                &[CONTROL_SERVICE, INFERENCE_SERVICE],
-                startup_deadline,
-                self.transport.retry_interval,
-            )
-            .await?;
-        let (model, server) = client.discover(startup_deadline).await?;
-        let observed = DiscoveredModel::from_proto(model, server)?;
-        self.model.ensure_startup_compatible(&observed)?;
-        let engine_config = observed.engine_config(!self.mode.is_encode())?;
-        let routing_image_token_id =
-            resolve_routing_image_token_id(&observed, startup_deadline).await;
-        self.routing_image_token_id
-            .set(routing_image_token_id)
-            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
-        let connection_count = client.connection_count();
-        self.client
-            .set(client)
-            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
-        tracing::info!(
-            endpoint = %self.endpoint,
-            connections = connection_count,
-            model = %observed.source,
-            served_model_name = %observed.served_name,
-            mode = %self.mode,
-            "vLLM gRPC services are ready"
-        );
-        Ok(engine_config)
+        self.initialize().await
+    }
+
+    async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+        self.wait_for_recovery().await
+    }
+
+    async fn recover_startup(
+        &self,
+    ) -> Result<Option<dynamo_backend_common::EngineConfig>, DynamoError> {
+        self.reconnect(true).await.map(|recovery| match recovery {
+            dynamo_backend_common::engine::EngineRecovery::Replacement(config) => Some(*config),
+            dynamo_backend_common::engine::EngineRecovery::SameInstance => {
+                unreachable!("startup recreates publishers")
+            }
+        })
+    }
+
+    async fn wait_for_unavailable(&self) -> Result<(), DynamoError> {
+        self.monitor_availability().await
+    }
+
+    async fn recover_serving(
+        &self,
+    ) -> Result<dynamo_backend_common::engine::EngineRecovery, DynamoError> {
+        self.reconnect(false).await
+    }
+
+    async fn on_recovery_complete(&self) -> Result<(), DynamoError> {
+        self.finish_recovery().await
     }
 
     async fn generate(
@@ -783,10 +771,17 @@ impl LLMEngine for VllmSidecarEngine {
                 self.model.served_name
             )));
         }
-        let client = self
-            .client
-            .get()
-            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
+        let connection = self.started_state()?;
+        if !self.cancel.is_cancelled()
+            && (connection.cancel.is_cancelled()
+                || self
+                    .state
+                    .is_recovering
+                    .load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(client::engine_shutdown("vLLM sidecar is recovering"));
+        }
+        let client = &connection.client;
         let request_id = ctx.id().to_string();
         let mut request = normalize_response_options(request)?;
         if self.model.reasoning_parser().is_none() {
@@ -812,7 +807,7 @@ impl LLMEngine for VllmSidecarEngine {
         };
         let defer_request_cancellation = self.mode.is_decode();
         let stopped_ctx = ctx.inner_arc();
-        let shutdown = self.cancel.child_token();
+        let shutdown = connection.cancel.child_token();
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
         let stream = tokio::select! {
@@ -1122,62 +1117,7 @@ impl LLMEngine for VllmSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
-        let client = self
-            .client
-            .get()
-            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
-        let expected_dp_range = self.model.data_parallel_range();
-        let expected_dp_size = expected_dp_range.end - expected_dp_range.start;
-        let mut ranks = HashSet::new();
-        let mut sources = Vec::new();
-        let reported_sources = client.kv_event_sources().await?;
-        if reported_sources.is_empty() {
-            return Ok(Vec::new());
-        }
-        let image_token_id = self.routing_image_token_id.get().copied().flatten();
-        for source in reported_sources {
-            if source.transport != "zmq" {
-                tracing::warn!(
-                    transport = %source.transport,
-                    endpoint = %source.endpoint,
-                    "Skipping unsupported vLLM KV-event transport"
-                );
-                continue;
-            }
-            let dp_rank = source.data_parallel_rank.ok_or_else(|| {
-                client::protocol_error(
-                    "GetKvEventSources returned a ZMQ source without data_parallel_rank",
-                )
-            })?;
-            if !expected_dp_range.contains(&dp_rank) {
-                return Err(client::protocol_error(format!(
-                    "GetKvEventSources returned rank {dp_rank}, outside the expected local range {expected_dp_range:?}",
-                )));
-            }
-            if !ranks.insert(dp_rank) {
-                return Err(client::protocol_error(format!(
-                    "GetKvEventSources returned duplicate rank {dp_rank}",
-                )));
-            }
-            if source.endpoint.trim().is_empty() {
-                return Err(client::protocol_error(
-                    "GetKvEventSources returned a ZMQ source without an endpoint",
-                ));
-            }
-            sources.push(KvEventSource::Zmq {
-                endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
-                topic: source.topic,
-                dp_rank,
-                image_token_id,
-            });
-        }
-        if ranks.len() != expected_dp_size as usize {
-            return Err(client::protocol_error(format!(
-                "GetKvEventSources returned ZMQ sources for {} of {expected_dp_size} local data-parallel ranks; KV routing requires one source for every local rank",
-                ranks.len()
-            )));
-        }
-        Ok(sources)
+        self.recovery_sources().await
     }
 }
 
@@ -1577,7 +1517,7 @@ mod tests {
                 supported,
                 "capabilities: {flags:?}"
             );
-            assert!(engine.client.get().is_none());
+            assert!(engine.started_state().is_err());
             if !supported {
                 assert_eq!(
                     engine
@@ -1590,7 +1530,7 @@ mod tests {
                     }),
                     "capabilities: {flags:?}"
                 );
-                assert!(engine.client.get().is_none());
+                assert!(engine.started_state().is_err());
             }
         }
     }

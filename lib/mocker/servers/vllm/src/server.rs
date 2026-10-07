@@ -176,6 +176,7 @@ impl VllmMockerService {
                 topic: String::new(),
                 data_parallel_rank: Some(DP_RANK),
                 replay_endpoint: sink.replay_endpoint().unwrap_or_default().to_string(),
+                buffer_steps: sink.replay_buffer_capacity() as u32,
                 encoding: "msgpack".to_string(),
                 schema_version: 1,
                 ..Default::default()
@@ -409,6 +410,15 @@ impl pb::control_server::Control for VllmMockerService {
         _request: Request<pb::GetModelInfoRequest>,
     ) -> Result<Response<pb::ModelInfo>, Status> {
         Ok(Response::new((*self.model_info).clone()))
+    }
+
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::failed_precondition(
+            "the vLLM mocker does not manage an engine process",
+        ))
     }
 
     async fn abort(

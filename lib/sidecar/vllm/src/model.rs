@@ -218,7 +218,7 @@ impl DiscoveredModel {
         })
     }
 
-    fn kv_cache_block_size(&self) -> Result<Option<u32>, DynamoError> {
+    pub(crate) fn kv_cache_block_size(&self) -> Result<Option<u32>, DynamoError> {
         let Some(block_size) = self.server.effective_attention_block_size else {
             return Ok(nonzero(self.server.kv_block_size));
         };
@@ -231,6 +231,14 @@ impl DiscoveredModel {
                 ))
             })?;
         Ok(Some(block_size))
+    }
+
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.server.instance_id
+    }
+
+    pub(crate) fn max_model_len(&self) -> u32 {
+        self.server.max_model_len
     }
 
     pub(crate) fn data_parallel_range(&self) -> &Range<u32> {

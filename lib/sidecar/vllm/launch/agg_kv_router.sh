@@ -70,9 +70,11 @@ VLLM_WORKER2_GPU="${VLLM_WORKER2_GPU:-1}"
 VLLM_WORKER1_HTTP_PORT="${VLLM_WORKER1_HTTP_PORT:-8100}"
 VLLM_WORKER1_GRPC_PORT="${VLLM_WORKER1_GRPC_PORT:-50051}"
 VLLM_WORKER1_KV_EVENT_PORT="${VLLM_WORKER1_KV_EVENT_PORT:-20080}"
+VLLM_WORKER1_KV_REPLAY_PORT="${VLLM_WORKER1_KV_REPLAY_PORT:-$(( VLLM_WORKER1_KV_EVENT_PORT + 100 ))}"
 VLLM_WORKER2_HTTP_PORT="${VLLM_WORKER2_HTTP_PORT:-8110}"
 VLLM_WORKER2_GRPC_PORT="${VLLM_WORKER2_GRPC_PORT:-50052}"
 VLLM_WORKER2_KV_EVENT_PORT="${VLLM_WORKER2_KV_EVENT_PORT:-20081}"
+VLLM_WORKER2_KV_REPLAY_PORT="${VLLM_WORKER2_KV_REPLAY_PORT:-$(( VLLM_WORKER2_KV_EVENT_PORT + 100 ))}"
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
@@ -87,8 +89,8 @@ if [[ -z "$GPU_MEM_ARGS" ]]; then
     GPU_MEM_ARGS="--kv-cache-memory-bytes $DEFAULT_KV_CACHE_BYTES --gpu-memory-utilization 0.01"
 fi
 
-KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_WORKER1_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
-KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_WORKER2_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
+KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_WORKER1_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_WORKER1_KV_REPLAY_PORT}\",\"buffer_steps\":${VLLM_KV_EVENT_BUFFER_STEPS:-10000},\"enable_kv_cache_events\":true}"
+KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_WORKER2_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_WORKER2_KV_REPLAY_PORT}\",\"buffer_steps\":${VLLM_KV_EVENT_BUFFER_STEPS:-10000},\"enable_kv_cache_events\":true}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching vLLM Native-gRPC Sidecars with KV Routing (2 workers)" "$MODEL" "$HTTP_PORT" \

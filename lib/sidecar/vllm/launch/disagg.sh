@@ -70,6 +70,7 @@ VLLM_PREFILL_GPU="${VLLM_PREFILL_GPU:-1}"
 VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT="${VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT:-5600}"
 VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT:-20097}"
 VLLM_PREFILL_KV_EVENT_PORT="${VLLM_PREFILL_KV_EVENT_PORT:-20081}"
+VLLM_PREFILL_KV_REPLAY_PORT="${VLLM_PREFILL_KV_REPLAY_PORT:-$(( VLLM_PREFILL_KV_EVENT_PORT + 100 ))}"
 
 # Default KV cache cap from profiling (2x safety over min=560 MiB); ~3.8 GiB
 # peak VRAM per engine. The profiler/test framework takes precedence through
@@ -118,7 +119,7 @@ vllm-rs serve "$MODEL" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL_KV_EVENT_PORT}\",\"replay_endpoint\":\"tcp://*:${VLLM_PREFILL_KV_REPLAY_PORT}\",\"buffer_steps\":${VLLM_KV_EVENT_BUFFER_STEPS:-10000},\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio::sync::watch;
 
-use crate::error::DynamoError;
+use crate::error::{BackendError, DynamoError, ErrorType};
 
 pub use dynamo_llm::first_token::FirstTokenNotifier;
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -184,6 +184,13 @@ pub struct EngineConfig {
     pub llm: Option<LlmRegistration>,
 }
 
+/// Result of recovering an engine while its serving endpoint is withdrawn.
+#[derive(Clone, Debug)]
+pub enum EngineRecovery {
+    SameInstance,
+    Replacement(Box<EngineConfig>),
+}
+
 /// Inference engine trait.
 ///
 /// Lifecycle:
@@ -335,6 +342,42 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// retain `ctx.metrics` past return.
     async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         Ok(MetricsBindings::default())
+    }
+
+    /// Complete one-time initialization after KV publishers are attached and
+    /// before registering serving endpoints. Failure must not permit serving.
+    async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
+    /// Optionally recover a failed bootstrap. Called before registration,
+    /// after the worker drops the failed attempt's publishers and local indexes.
+    /// Return fresh metadata to attach new publishers and retry the startup gate.
+    /// The default preserves fail-fast startup for other engines.
+    async fn recover_startup(&self) -> Result<Option<EngineConfig>, DynamoError> {
+        Ok(None)
+    }
+
+    /// Wait until serving or the local KV index is no longer safe. The engine
+    /// must also reject inference while unavailable, including stale routing.
+    async fn wait_for_unavailable(&self) -> Result<(), DynamoError> {
+        std::future::pending().await
+    }
+
+    /// Recover while the worker is withdrawn from discovery. Same-instance
+    /// recovery retains the existing publishers and must finish replay first.
+    /// Replacement metadata causes fresh KV publishers and another startup gate.
+    async fn recover_serving(&self) -> Result<EngineRecovery, DynamoError> {
+        Err(DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine does not support serving recovery")
+            .build())
+    }
+
+    /// Finalize engine-owned records after initial or replacement model metadata
+    /// is attached, before the worker becomes routable.
+    async fn on_recovery_complete(&self) -> Result<(), DynamoError> {
+        Ok(())
     }
 
     /// Canary payload registered with the runtime's `HealthCheckManager`.
@@ -507,6 +550,8 @@ pub enum KvEventSource {
         dp_rank: u32,
         /// Model image-placeholder token used to normalize multimodal events.
         image_token_id: Option<u32>,
+        /// Replay configuration and completion result for initial startup.
+        bootstrap: Option<dynamo_llm::kv_router::publisher::ZmqBootstrapConfig>,
     },
     Push {
         on_ready: OnPublisherReady,

@@ -33,12 +33,10 @@ spec:
           restartPolicy: Always
         containers:
         - name: main
-          image: vllm/vllm-openai:v0.28.0
+          image: vllm/vllm-openai:nightly-21d93d0d8c0e9627900020382bfce4730e61cab7
           startupProbe:
             grpc:
               port: 50051
-              # vLLM 0.28.0: overall health mirrors Control and Inference.
-              # Reverify this behavior when upgrading vLLM.
               service: ""
             periodSeconds: 5
             timeoutSeconds: 5

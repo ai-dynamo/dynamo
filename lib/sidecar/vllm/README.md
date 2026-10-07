@@ -21,7 +21,7 @@ vLLM runtime. Dynamo does not need copied schemas, a generation script, or Buf c
 
 - `vllm.Inference` for generation
 - `vllm.Control` for model and server discovery
-- Standard gRPC health for startup readiness
+- Standard gRPC health for startup readiness and continuous engine monitoring
 
 It is a standalone Rust executable and is also compiled into
 `ai-dynamo-runtime` for the importable `dynamo.vllm.sidecar` launcher.
@@ -122,7 +122,7 @@ to that port to trusted consumers because KV events contain request token IDs.
 
 ### Native Generate compatibility
 
-`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421), so the sidecar projects typed controls into the gRPC request and advertises `vllm_inference_v1_generate`. During rolling upgrades, v1.4 frontends can supply the legacy `extra_args.vllm_tito.sampling_params` envelope; canonical typed fields take precedence when both are present. Requests that rely on distinctions proto 0.3 cannot represent, such as explicit `top_k=0`, `top_k=-1`, or `min_p=0`, fail explicitly instead of silently changing sampling behavior.
+`vllm-proto 0.4.0` does not include the native sampling JSON extension proposed in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421), so the sidecar projects typed controls into the gRPC request and advertises `vllm_inference_v1_generate`. During rolling upgrades, v1.4 frontends can supply the legacy `extra_args.vllm_tito.sampling_params` envelope; canonical typed fields take precedence when both are present. Requests that rely on distinctions proto 0.4 cannot represent, such as explicit `top_k=0`, `top_k=-1`, or `min_p=0`, fail explicitly instead of silently changing sampling behavior.
 
 Prefill and encode use their canonical one-token request and do not apply decode sampling controls.
 
@@ -295,6 +295,47 @@ corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
 Each request owns its response stream but borrows a channel from the shared pool. Aggregate and prefill cancellation drops only that request's stream. Decode cancellation first submits the decode request and retains its stream until the first output token or a response containing `finish_info`, so a NIXL receiver can complete and release the transferred KV; it then drops the stream. If the stream ends early, returns a gRPC error, or produces an invalid response after cancellation, the sidecar logs the failure and reports the request as cancelled. vLLM automatically aborts the corresponding engine request while the pooled HTTP/2 connection remains available to other requests. The sidecar does not call the Control `Abort` RPC.
 
+## Engine lifecycle and KV recovery
+
+The sidecar withdraws the worker from routing when either gRPC service becomes
+unhealthy, its health stream closes, or KV event continuity is lost. A quiet
+healthy stream remains healthy. Reconnection to the same engine preserves its
+KV index and replays missing batches; a new `instance_id` replaces the index and
+rebuilds it before registration. Operator pause state survives recovery.
+`/live` and `/health` continue to describe the sidecar process and runtime
+connections, independently of engine readiness.
+
+When KV events are enabled, configure a replay endpoint and positive retention:
+
+```json
+{"publisher":"zmq","endpoint":"tcp://*:20081","replay_endpoint":"tcp://*:20181","buffer_steps":10000,"enable_kv_cache_events":true}
+```
+
+Each advertised local rank must supply MessagePack schema 1 and its own replay
+endpoint. An engine without KV event sources can still serve without KV event
+routing. The launch scripts configure replay for their event publishers; use
+`VLLM_KV_EVENT_BUFFER_STEPS` to change retention. TCP replay ports default to the
+live port plus 100 and accept matching `*_KV_REPLAY_PORT` overrides. The LoRA
+launcher accepts `VLLM_PREFILL_KV_REPLAY_ENDPOINT` for its IPC or TCP endpoint.
+Engines and sidecars must be
+able to reach both the live and replay endpoints.
+
+An empty replay does not prove that the engine cache is empty. While unregistered,
+the sidecar sends up to three rank-directed, one-token inference probes with a
+private cache salt and a prompt longer than one reported cache block. The probes
+request no remote KV transfer, including on prefill and decode engines. Only
+contiguous events applied locally, joined to the live stream, establish readiness.
+A periodic replay also checks for a dropped final batch on an idle stream.
+
+Only confirmed missing history triggers `Control.Shutdown`, which requires a
+vLLM build containing [vLLM #59316](https://github.com/vllm-project/vllm/pull/59316).
+The engine uses its configured shutdown timeout; an acknowledgement is not proof
+of exit. The sidecar stays alive for a supervisor-managed replacement and checks
+its identity before rebuilding. An unmanaged frontend rejecting Shutdown fails
+explicitly. Empty replay, timeout, and malformed events do not justify Shutdown.
+Recovery uses the configured gRPC startup deadline and exits on exhaustion.
+Stopping the sidecar itself never shuts down the engine.
+
 ## Test without vLLM or a GPU
 
 Use the CPU-only `dynamo-vllm-mocker-server` to exercise the same Inference, Control, and health contracts:
@@ -303,7 +344,7 @@ Use the CPU-only `dynamo-vllm-mocker-server` to exercise the same Inference, Con
 cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --listen 127.0.0.1:50051 \
   --model mocker-model \
-  --extra-engine-args '{"speedup_ratio":1000}'
+  --extra-engine-args '{"speedup_ratio":1000,"enable_prefix_caching":false}'
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
   --grpc-endpoint 127.0.0.1:50051

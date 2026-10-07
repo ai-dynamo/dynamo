@@ -333,6 +333,7 @@ impl PreparedRequest {
             logprobs,
             ranks,
             candidate_tokens,
+            sampling_mask: Vec::new(),
             finish_info: terminal.then(|| pb::FinishInfo {
                 num_output_tokens: total_output_tokens as u32,
                 finish_reason: if stop_token.is_some() {

@@ -819,7 +819,7 @@ fn compatibility_envelope_accepts_sampling_projected_to_proto() {
             }
         }));
         let wire = build_generate_request(request, "native".to_string(), mode)
-            .expect("vllm-proto 0.3 preserves projected sampling controls");
+            .expect("vllm-proto 0.4 preserves projected sampling controls");
         assert_eq!(wire.temperature, Some(0.2));
         let sampling = wire.sampling.expect("sampling");
         assert_eq!(sampling.top_p, 0.9);
@@ -918,7 +918,7 @@ fn native_generate_rejects_unrepresentable_sampling_controls() {
             "disabled".to_string(),
             DisaggregationMode::Aggregated,
         )
-        .expect_err("disabled top_k cannot be represented by proto 0.3");
+        .expect_err("disabled top_k cannot be represented by proto 0.4");
         assert!(error.to_string().contains("top_k"));
     }
 
@@ -929,7 +929,7 @@ fn native_generate_rejects_unrepresentable_sampling_controls() {
         "disabled".to_string(),
         DisaggregationMode::Aggregated,
     )
-    .expect_err("disabled min_p cannot be represented by proto 0.3");
+    .expect_err("disabled min_p cannot be represented by proto 0.4");
     assert!(error.to_string().contains("min_p"));
 }
 
