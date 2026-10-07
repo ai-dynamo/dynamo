@@ -74,6 +74,7 @@ from dynamo.common.utils.input_params import (
 )
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -91,13 +92,17 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
 )
-from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import _apply_kv_hint, publish_kv_hint_capabilities
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
 from .dp_topology import get_dp_range_for_worker
+from .engine_generate import (
+    adapt_engine_generate_request,
+    publish_engine_generate_capability,
+)
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
@@ -163,6 +168,38 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
 )
 # An object sentinel cannot collide with a caller-supplied version.
 _WEIGHT_VERSION_UNDECLARED: Final = object()
+
+
+def _modelexpress_startup_weight_version(config: Config) -> Any:
+    """Return the version enforced by the ModelExpress RL startup loader.
+
+    ModelExpress releases without the RL startup policy leave the version
+    undeclared. When the policy is available, its environment modules provide
+    the same parsed values used by the loader. The RL loader fails engine
+    initialization unless every rank loads the desired version, so a
+    subsequently constructed handler serves that version.
+    """
+    load_format = config.engine_args.load_format
+    if load_format not in MX_LOAD_FORMATS:
+        return _WEIGHT_VERSION_UNDECLARED
+
+    try:
+        modelexpress_envs = importlib.import_module("modelexpress.envs")
+        modelexpress_rl_envs = importlib.import_module("modelexpress_rl.envs")
+    except ModuleNotFoundError as exc:
+        if exc.name not in {
+            "modelexpress",
+            "modelexpress.envs",
+            "modelexpress_rl",
+            "modelexpress_rl.envs",
+        }:
+            raise
+        return _WEIGHT_VERSION_UNDECLARED
+
+    if getattr(modelexpress_envs, "MX_LOAD_STRATEGY_CHAIN", None) != "RL":
+        return _WEIGHT_VERSION_UNDECLARED
+    desired = getattr(modelexpress_rl_envs, "MX_REFIT_DESIRED_VERSION_UID", None)
+    return desired if desired is not None else _WEIGHT_VERSION_UNDECLARED
 
 
 def build_prompt_tokens_details(
@@ -524,6 +561,14 @@ def _attach_routed_experts_engine_data(
         engine_data["routed_experts"] = routed_experts
 
 
+def _attach_sampling_mask_engine_data(
+    tok: Dict[str, Any], sampling_mask: list[list[int]]
+) -> None:
+    engine_data = tok.setdefault("engine_data", {})
+    if isinstance(engine_data, dict):
+        engine_data["sampling_mask"] = sampling_mask
+
+
 def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
     """Yield each nvext dict on the request, in priority order:
 
@@ -573,6 +618,12 @@ def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
         if cache_salt:
             prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
             return
+    extra_args = request.get("extra_args")
+    vllm_tito = extra_args.get("vllm_tito") if isinstance(extra_args, dict) else None
+    if isinstance(vllm_tito, dict):
+        cache_salt = vllm_tito.get("cache_salt")
+        if cache_salt:
+            prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
 
 
 def _prompt_token_ids_for_engine_data(
@@ -695,7 +746,7 @@ def _accumulate_engine_data(
                 len(logprob_accumulator),
                 len(token_accumulator),
             )
-    if request_prompt_token_ids:
+    if request_prompt_token_ids and "prompt_token_ids" not in engine_data:
         engine_data["prompt_token_ids"] = list(request_prompt_token_ids)
     tok["engine_data"] = engine_data
 
@@ -891,28 +942,10 @@ def build_sampling_params(
     sampling_params.detokenize = False
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
 
+    # setattr skips __post_init__ (temperature clamp, _verify_args, greedy reset),
+    # and vLLM validates before the process_inputs clone reruns it.
+    sampling_params.__post_init__()
     return sampling_params
-
-
-def _apply_kv_hint(sampling_params: SamplingParams, kv_hint: Any) -> None:
-    """Attach the complete Dynamo KV hint message to vLLM's private input."""
-    if not isinstance(kv_hint, Mapping):
-        return
-
-    extra_args = (
-        dict(sampling_params.extra_args)
-        if isinstance(sampling_params.extra_args, dict)
-        else {}
-    )
-    existing_kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-    kv_transfer_params = (
-        dict(existing_kv_transfer_params)
-        if isinstance(existing_kv_transfer_params, dict)
-        else {}
-    )
-    kv_transfer_params[_KV_HINT_EXTRA_ARGS_KEY] = dict(kv_hint)
-    extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = kv_transfer_params
-    sampling_params.extra_args = extra_args
 
 
 def _update_kv_transfer_params(
@@ -1013,6 +1046,8 @@ def build_sampling_params_openai(
     ):
         sampling_params.thinking_token_budget = thinking_token_budget
 
+    # Same setattr gap as in build_sampling_params.
+    sampling_params.__post_init__()
     return sampling_params
 
 
@@ -1096,6 +1131,17 @@ def apply_data_parallel_runtime_config(
 ) -> None:
     runtime_config.data_parallel_start_rank = dp_range[0]
     runtime_config.data_parallel_size = dp_range[1]
+
+
+def resolve_rl_weight_world_size(parallel_config: Any) -> int:
+    if (
+        parallel_config.data_parallel_size != 1
+        or parallel_config.distributed_executor_backend == "external_launcher"
+    ):
+        raise ValueError(
+            "Dynamo vLLM RL currently does not support data parallelism and external launcher"
+        )
+    return parallel_config.world_size
 
 
 RequestT = TypeVar("RequestT")
@@ -1210,7 +1256,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # to prevent both bypassing the check before either inserts (atomicity).
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
-        self._weight_version: Any = _WEIGHT_VERSION_UNDECLARED
+        self._weight_version: Any = _modelexpress_startup_weight_version(config)
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -1232,7 +1278,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._deferred_aborts: dict[str, _DeferredAbort] = {}
 
         self._multimodal_request_processor = VllmMultimodalRequestProcessor(
-            model=config.model,
+            model=config.model_source_path,
             engine_client=engine,
             enable_multimodal=enable_multimodal,
             enable_frontend_decoding=enable_frontend_decoding,
@@ -1266,7 +1312,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.shutdown_event = shutdown_event
         # Request-plane RL method map served by rl_dispatch on
         # dyn://<namespace>.<component>.rl when --enable-rl / DYN_ENABLE_RL is set.
-        self.rl_route_registry = RLRouteRegistry(self.runtime, logger_=logger)
+        rl_world_size = None
+        if config.enable_rl:
+            rl_world_size = resolve_rl_weight_world_size(
+                engine.vllm_config.parallel_config
+            )
+        self.rl_route_registry = RLRouteRegistry(
+            self.runtime,
+            logger_=logger,
+            world_size=rl_world_size,
+        )
 
         # Load the custom encoder last. If a later init step raised, executor
         # GC would eventually reap the idle actor thread — but only once the
@@ -1312,7 +1367,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             config.engine_args,
         )
         encoder = AsyncVisionEncoder(backend)
-        encoder.load(config.model)
+        encoder.load(config.model_source_path)
         # Assign only after a successful load so a failed load (which already shut
         # its own thread down) leaves _custom_encoder None.
         self._custom_encoder = encoder
@@ -1320,7 +1375,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         logger.info(
             "Loaded CustomEncoder %s from %s with %s",
             custom_encoder_class,
-            config.model,
+            config.model_source_path,
             type(adapter).__name__,
         )
 
@@ -1911,6 +1966,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "message": f"Invalid mode '{mode}'; expected keep|wait|abort",
             }
         async with self._pause_lock:
+            active_loras = sorted(self._lora_state.active_requests)
+            if mode == "keep" and active_loras:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Cannot pause generation in keep mode with active LoRA requests: "
+                        + ", ".join(active_loras)
+                    ),
+                }
             try:
                 try:
                     await self.engine_client.pause_generation(
@@ -2534,6 +2598,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
         runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
 
+        if lora_worker_type in (WorkerType.Aggregated, WorkerType.Decode):
+            lora_config = self.engine_client.vllm_config.lora_config
+            publish_engine_generate_capability(
+                runtime_config,
+                ModelInput.Tokens,
+                lora_model_type,
+                lora_worker_type,
+                bool(
+                    lora_config
+                    and getattr(lora_config, "enable_tower_connector_lora", False)
+                ),
+            )
+
         lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
 
         await register_model(
@@ -2574,20 +2651,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         lora_request: LoRARequest | None,
         create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
     ) -> AsyncIterator[Any]:
-        """Yield results after atomically admitting a lazy LoRA request.
+        """Yield results after atomically admitting a LoRA request.
 
         vLLM admits an ``AsyncLLM.generate`` request on its first iteration.
         Holding the adapter lifecycle lock through that iteration prevents an
-        unload from deleting bookkeeping before lazy activation completes.
+        unload from removing lazy or preloaded adapter state before admission.
         """
-        if lora_request is None or self._preload_lora_into_engine():
-            self._track_lora_request_activation(lora_request)
+        if lora_request is None:
             async for result in create_generator(lora_request):
                 yield result
             return
 
         lock = self._get_lora_lock(lora_request.lora_name)
-        async with lock:
+        async with lock, self._pause_lock:
+            if self._paused:
+                raise RuntimeError(
+                    f"Cannot admit LoRA request '{lora_request.lora_name}' while "
+                    "generation is paused"
+                )
             # The adapter may have been unloaded or reloaded at a different path
             # while this request waited. Look it up again while holding the lock.
             admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
@@ -2600,16 +2681,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 raise ValueError(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
-            generator = create_generator(admitted_lora_request)
             self._track_lora_request_activation(admitted_lora_request)
-            try:
-                first_result = await anext(generator)
-            except StopAsyncIteration:
-                return
+            self._lora_state.begin_request(admitted_lora_request.lora_name)
 
-        yield first_result
-        async for result in generator:
-            yield result
+        engine_generator = create_generator(admitted_lora_request)
+        try:
+            async for result in engine_generator:
+                yield result
+        finally:
+            try:
+                close = getattr(engine_generator, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                self._lora_state.end_request(admitted_lora_request.lora_name)
 
     def _preload_lora_into_engine(self) -> bool:
         """Whether lifecycle registration should eagerly activate the adapter.
@@ -2718,7 +2803,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if is_hot_swap and old_info is not None and old_engine_loaded:
                         try:
-                            await self.engine_client.remove_lora(old_info.id)
+                            async with self._pause_lock:
+                                if getattr(
+                                    self, "_paused", False
+                                ) and self._lora_state.active_requests.get(
+                                    lora_name, 0
+                                ):
+                                    raise RuntimeError(
+                                        f"Cannot hot-swap LoRA '{lora_name}' while generation "
+                                        "is paused with active requests; resume generation or "
+                                        "abort the requests first"
+                                    )
+                            await self._lora_state.wait_until_idle(lora_name)
+                            async with self._pause_lock:
+                                await self.engine_client.remove_lora(old_info.id)
                             self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
                             if capacity_reserved:
@@ -2745,13 +2843,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     )
                     if preload_into_engine:
                         try:
-                            await self.engine_client.add_lora(
-                                LoRARequest(
-                                    lora_name=lora_name,
-                                    lora_int_id=lora_id,
-                                    lora_path=lora_path,
+                            async with self._pause_lock:
+                                await self.engine_client.add_lora(
+                                    LoRARequest(
+                                        lora_name=lora_name,
+                                        lora_int_id=lora_id,
+                                        lora_path=lora_path,
+                                    )
                                 )
-                            )
                             self._engine_loaded_loras.add(lora_name)
                         except Exception as e:
                             if (
@@ -2760,13 +2859,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 and old_engine_loaded
                             ):
                                 try:
-                                    await self.engine_client.add_lora(
-                                        LoRARequest(
-                                            lora_name=lora_name,
-                                            lora_int_id=old_info.id,
-                                            lora_path=old_info.path,
+                                    async with self._pause_lock:
+                                        await self.engine_client.add_lora(
+                                            LoRARequest(
+                                                lora_name=lora_name,
+                                                lora_int_id=old_info.id,
+                                                lora_path=old_info.path,
+                                            )
                                         )
-                                    )
                                     self._engine_loaded_loras.add(lora_name)
                                 except Exception as rollback_error:
                                     self._lora_state.loaded_loras.pop(lora_name, None)
@@ -2797,7 +2897,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if is_hot_swap:
                         try:
-                            await self.engine_client.reset_prefix_cache()
+                            async with self._pause_lock:
+                                await self.engine_client.reset_prefix_cache()
                         except Exception as e:
                             # The new adapter is already active in the engine, but
                             # the prefix cache still holds entries computed under
@@ -2810,16 +2911,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             if old_info is not None:
                                 try:
                                     if preload_into_engine:
-                                        await self.engine_client.remove_lora(lora_id)
+                                        async with self._pause_lock:
+                                            await self.engine_client.remove_lora(
+                                                lora_id
+                                            )
                                         self._engine_loaded_loras.discard(lora_name)
                                     if old_engine_loaded:
-                                        await self.engine_client.add_lora(
-                                            LoRARequest(
-                                                lora_name=lora_name,
-                                                lora_int_id=old_info.id,
-                                                lora_path=old_info.path,
+                                        async with self._pause_lock:
+                                            await self.engine_client.add_lora(
+                                                LoRARequest(
+                                                    lora_name=lora_name,
+                                                    lora_int_id=old_info.id,
+                                                    lora_path=old_info.path,
+                                                )
                                             )
-                                        )
                                         self._engine_loaded_loras.add(lora_name)
                                     self._lora_state.loaded_loras[lora_name] = old_info
                                     rolled_back = (
@@ -2870,7 +2975,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                     logger.debug(
                                         f"Rolling back: removing LoRA '{lora_name}' from engine"
                                     )
-                                    await self.engine_client.remove_lora(lora_id)
+                                    async with self._pause_lock:
+                                        await self.engine_client.remove_lora(lora_id)
                                     self._engine_loaded_loras.discard(lora_name)
                                 self._lora_state.loaded_loras.pop(lora_name, None)
                                 logger.debug(
@@ -2948,6 +3054,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     logger.debug(f"Unloading LoRA adapter: {lora_name}")
                     lora_id = lora.id
 
+                    if lora_name in self._engine_loaded_loras:
+                        async with self._pause_lock:
+                            if getattr(
+                                self, "_paused", False
+                            ) and self._lora_state.active_requests.get(lora_name, 0):
+                                yield {
+                                    "status": "error",
+                                    "message": (
+                                        f"Cannot unload LoRA '{lora_name}' while generation "
+                                        "is paused with active requests; resume generation or "
+                                        "abort the requests first"
+                                    ),
+                                    "lora_name": lora_name,
+                                }
+                                return
+                        await self._lora_state.wait_until_idle(lora_name)
+
                     # Stop advertising the adapter before mutating engine or
                     # tracking state. Otherwise requests can still route here
                     # after _resolve_lora_request has forgotten the adapter and
@@ -2982,7 +3105,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # reached vLLM.
                     if lora_name in self._engine_loaded_loras:
                         try:
-                            await self.engine_client.remove_lora(lora_id)
+                            async with self._pause_lock:
+                                await self.engine_client.remove_lora(lora_id)
                         except Exception as e:
                             if not self._is_lora_not_loaded_error(e):
                                 raise
@@ -3223,6 +3347,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     @staticmethod
+    def _kv_cache_hit_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
+        """Expose final cache counters for internal router observability."""
+        prompt_tokens = request_output.prompt_token_ids
+        cached_tokens = request_output.num_cached_tokens
+        if prompt_tokens is None or cached_tokens is None:
+            return {}
+        return {
+            "prompt_tokens": len(prompt_tokens),
+            "reused_tokens": cached_tokens,
+        }
+
+    @staticmethod
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
@@ -3281,6 +3417,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
         session_id=None,
+        report_kv_cache_hit=True,
+        want_engine_data=False,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3310,13 +3448,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             total_output_tokens_by_index: dict[int, int] = {}
             raw_routed_experts_by_output: dict[int, Any] = {}
+            raw_sampling_mask_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks, so the generation-finish chunk often
             # carries None. Capture the first non-None payload and attach it to
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
+            engine_prompt_token_ids: Optional[list[int]] = None
             async for res in gen:
                 # res is vllm's RequestOutput
+                if want_engine_data and engine_prompt_token_ids is None:
+                    engine_prompt_token_ids = res.prompt_token_ids
                 if (
                     prompt_logprobs_payload is None
                     and getattr(res, "prompt_logprobs", None) is not None
@@ -3362,7 +3504,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     finish_reason,
                     stop_reason,
                 ) in prepared_outputs:
-                    out = {
+                    out: Dict[str, Any] = {
                         "index": output_idx,
                         "token_ids": token_ids,
                     }
@@ -3373,6 +3515,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     raw_routed_experts = getattr(output, "routed_experts", None)
                     if raw_routed_experts is not None:
                         raw_routed_experts_by_output[output_idx] = raw_routed_experts
+                    raw_sampling_mask = getattr(output, "sampling_mask", None)
+                    if raw_sampling_mask is not None:
+                        raw_sampling_mask_by_output[output_idx] = raw_sampling_mask
 
                     # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
@@ -3386,16 +3531,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
+                        if engine_prompt_token_ids is not None:
+                            out["engine_data"] = {
+                                "prompt_token_ids": list(engine_prompt_token_ids)
+                            }
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        # With n > 1, later samples hit the prompt blocks earlier
+                        # ones just cached, and vLLM keeps the first buffered
+                        # sample's count when it merges outputs, so no sample's
+                        # count reliably measures prior reuse.
+                        kv_cache_hit = (
+                            BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                            if report_kv_cache_hit and sampling_params.n == 1
+                            else {}
+                        )
+                        if kv_cache_hit:
+                            out.setdefault("engine_data", {})[
+                                "kv_cache_hit"
+                            ] = kv_cache_hit
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
                             )
+                        kv_transfer_params = getattr(res, "kv_transfer_params", None)
+                        if kv_transfer_params is not None:
+                            engine_data = out.setdefault("engine_data", {})
+                            if isinstance(engine_data, dict):
+                                engine_data["kv_transfer_params"] = kv_transfer_params
                         # Emit the EFFECTIVE trim offset: clamp the requested
                         # routed_experts_prompt_start to the prompt length. vLLM
                         # clamps the returned routing rows the same way, so an
@@ -3414,6 +3581,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         if routed_experts is not None:
                             _attach_routed_experts_engine_data(out, routed_experts)
+                        sampling_mask = raw_sampling_mask_by_output.get(output_idx)
+                        if sampling_mask is not None:
+                            rows = getattr(sampling_mask, "token_ids", None)
+                            if rows is None:
+                                raise TypeError(
+                                    "vLLM sampling mask is missing token_ids"
+                                )
+                            normalized_rows = [list(row) for row in rows]
+                            output_token_count = total_output_tokens_by_index.get(
+                                output_idx, 0
+                            )
+                            if len(normalized_rows) != output_token_count:
+                                raise ValueError(
+                                    "vLLM sampling mask row count "
+                                    f"{len(normalized_rows)} does not match "
+                                    f"completion token count {output_token_count}"
+                                )
+                            _attach_sampling_mask_engine_data(out, normalized_rows)
+
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -3473,6 +3659,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         ] = None
 
     async def generate(self, request, context):
+        normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
@@ -3674,7 +3861,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             is_decode_only = False
             mode = DisaggregationMode.AGGREGATED
-
         has_external_encoder_result = request.get("encoder_result") is not None
         if has_external_encoder_result and mode != DisaggregationMode.AGGREGATED:
             yield {
@@ -3688,6 +3874,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
         has_mm_data = request.get("multi_modal_data") is not None
         assembled_prompt: EmbedsPrompt | TokensPrompt | None = None
+        engine_generate_input = None
+        extra_args = request.get("extra_args")
+        if isinstance(extra_args, dict) and "vllm_tito" in extra_args:
+            engine_generate_input = adapt_engine_generate_request(
+                request,
+                enable_multimodal=self._multimodal_request_processor.enable_multimodal,
+                decode_capable=mode != DisaggregationMode.PREFILL,
+                allow_multimodal_features=mode == DisaggregationMode.AGGREGATED,
+                vllm_config=self.engine_client.vllm_config,
+                default_sampling_params=self.default_sampling_params,
+            )
 
         if has_external_encoder_result:
             assembled_prompt = await self._assemble_external_encoder_prompt(
@@ -3696,6 +3893,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
+        elif engine_generate_input is not None:
+            multi_modal_data = None
+            mm_processor_kwargs = None
+            pre_rendered = engine_generate_input.prompt
         elif (
             mode == DisaggregationMode.AGGREGATED
             and self._custom_encoder is not None
@@ -3764,11 +3965,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         _apply_nvext_cache_salt(request, prompt)
 
         # Build sampling params from request
-        sampling_params = build_sampling_params(
-            request,
-            self.default_sampling_params,
-            self.model_max_len,
-            enable_rl=self.config.enable_rl,
+        sampling_params = (
+            engine_generate_input.sampling_params
+            if engine_generate_input is not None
+            else build_sampling_params(
+                request,
+                self.default_sampling_params,
+                self.model_max_len,
+                enable_rl=self.config.enable_rl,
+            )
         )
 
         if kv_params is not None:
@@ -3793,7 +3998,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = (
+            engine_generate_input.priority
+            if engine_generate_input is not None
+            else -int(routing.get("priority", 0))
+        )
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
@@ -3823,11 +4032,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # `NvExtResponseFieldSelection.engine_data` so this payload
                 # only reaches clients that asked for it.
                 want_engine_data = _nvext_extra_field_requested(request, "engine_data")
-                # Prompt token IDs the engine actually saw. Either the
-                # pre-tokenized `nvext.token_data` (TITO) or whatever the
-                # preprocessor produced from messages (MITO). We echo them
-                # back in engine_data so the client doesn't have to re-derive
-                # them from a request it might no longer hold.
+                # Fallback when the engine does not report prompt IDs. MITO
+                # image expansion can change these during engine preprocessing.
                 request_prompt_token_ids = (
                     _prompt_token_ids_for_engine_data(request, prompt)
                     if want_engine_data
@@ -3847,6 +4053,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
                         session_id=session_id,
+                        # Transferred prefill KV counts as cached in vLLM, so a
+                        # decode attempt's count would not be local reuse.
+                        report_kv_cache_hit=kv_params is None,
+                        want_engine_data=want_engine_data,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -4032,19 +4242,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self._multimodal_request_processor.initialize_prefill_handoff()
 
     async def generate(self, request, context):
+        normalize_request_token_ids(request)
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug("Prefill Request ID: %s", request_id)
-        try:
-            self._multimodal_request_processor.validate_multimodal_request(request)
-        except ValueError as exc:
-            logger.error("Request %s: %s", request_id, exc)
-            yield {
-                "status": "error",
-                "message": str(exc),
-                "disaggregated_params": None,
-            }
-            return
+        self._multimodal_request_processor.validate_multimodal_request(request)
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
@@ -4075,9 +4277,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         _apply_nvext_cache_salt(request, prompt)
 
-        # Build sampling params from request using shared utility
+        # Prefill generates only 1 token. Cap it before the builder, whose vLLM
+        # checks reject a client min_tokens above max_tokens=1.
+        stop_conditions = {
+            **(request.get("stop_conditions") or {}),
+            "max_tokens": 1,
+            "min_tokens": 1,
+        }
         sampling_params = build_sampling_params(
-            request,
+            {**request, "stop_conditions": stop_conditions},
             self.default_sampling_params,
             self.model_max_len,
             enable_rl=self.config.enable_rl,
@@ -4093,9 +4301,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             kv_protocol.prefill_request_kv_transfer_params(),
             preserve_kv_hint=True,
         )
-        # Override for prefill: only generate 1 token
-        sampling_params.max_tokens = 1
-        sampling_params.min_tokens = 1
 
         # Extract LoRA request if present
         model_name = request.get("model")
@@ -4169,6 +4374,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         request_output=res,
                     ),
                 }
+                # Parallel samples make the count unreliable; see generate_tokens.
+                kv_cache_hit = (
+                    BaseWorkerHandler._kv_cache_hit_engine_data(res)
+                    if sampling_params.n == 1
+                    else {}
+                )
+                if kv_cache_hit:
+                    output["engine_data"] = {"kv_cache_hit": kv_cache_hit}
 
                 # Log prefill completion with LoRA info
                 self._log_with_lora_context(

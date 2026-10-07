@@ -108,6 +108,7 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_ENCODER_HTTP_PORT" \
     --grpc-port "$VLLM_ENCODER_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --mm-encoder-only \
     --enforce-eager \
@@ -126,11 +127,12 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_PREFILL_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --ec-transfer-config "$CONSUMER_EC_CONFIG" \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
@@ -143,10 +145,11 @@ vllm-rs serve "$MODEL" \
     --port "$VLLM_DECODE_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE_GRPC_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --reasoning-parser none \
     -- \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

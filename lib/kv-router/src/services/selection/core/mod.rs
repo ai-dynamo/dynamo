@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use dynamo_tokens::SequenceHash;
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -26,8 +26,8 @@ use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
 use crate::protocols::{
-    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::queue::SchedulerBookingDescriptor;
 use crate::scheduling::selector::WorkerSelectionPolicy;
@@ -42,7 +42,7 @@ use crate::sequences::{
     ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
 use crate::services::common::replica_sync::{
-    HostReplicaSyncFactory, ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent,
+    HostReplicaSyncFactory, ReplicaInbox, ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent,
     ScopedSequencePublisher, setup_scoped_replica_sync,
 };
 use crate::services::indexer::backend::{Indexer, IndexerPolicy};
@@ -126,7 +126,7 @@ struct SelectionEntry {
     indexer: Indexer,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     scheduler: SelectionScheduler,
-    replica_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
+    replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
 }
@@ -323,12 +323,15 @@ impl SelectionCore {
 
     /// Create a local selector and report invalid tracking configuration.
     pub fn try_new_local(
-        kv_router_config: crate::config::KvRouterConfig,
+        mut kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
         cache_config: SelectionCacheConfig,
         policy_factory: WorkerSelectionPolicyFactory,
     ) -> anyhow::Result<Self> {
+        kv_router_config
+            .apply_policy_config()
+            .map_err(anyhow::Error::msg)?;
         kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
@@ -453,30 +456,8 @@ impl SelectionCore {
             tracing::trace!(%key, "Dropping replica event for unknown selector entry");
             return;
         };
-        if entry.block_size != block_size {
-            tracing::debug!(
-                %key,
-                expected_block_size = entry.block_size,
-                received_block_size = block_size,
-                "Dropping selector replica event with mismatched block size"
-            );
-            return;
-        }
-        let Some(replica_tx) = &entry.replica_tx else {
-            return;
-        };
-        match replica_tx.try_send(event) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(event)) => {
-                tracing::trace!(
-                    %key,
-                    request_id = %event.request_id,
-                    "Selector replica subscriber channel full; dropping event"
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!(%key, "Selector replica subscriber channel closed");
-            }
+        if let Some(inbox) = &entry.replica_inbox {
+            inbox.deliver(&key, entry.block_size, block_size, event);
         }
     }
 

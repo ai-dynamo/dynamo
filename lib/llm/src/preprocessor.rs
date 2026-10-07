@@ -54,18 +54,21 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
-use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
+    ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+};
+use crate::local_model::runtime_config::{
+    SGLANG_GENERATE_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
 };
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 #[cfg(feature = "mm-routing")]
 use crate::preprocessor::media::MediaFetcher;
-use crate::preprocessor::media::{MediaDecoder, MediaLoader};
+use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -753,10 +756,9 @@ pub struct MmImageEntry {
 }
 
 /// One replacement tracked in both the worker-visible and canonical routing
-/// token spaces. vLLM includes MM metadata on every block intersecting a
-/// feature span, including timestamp/delimiter-only boundary blocks. Those
-/// blocks need the worker token form plus `block_mm_infos`; blocks with an
-/// exact placeholder/object mapping use the canonical pad-value form.
+/// token spaces. Blocks with an exact placeholder/object mapping use the
+/// canonical pad-value form. For a timestamp/delimiter-only boundary block,
+/// the worker contract determines whether the hash also includes MM metadata.
 #[cfg(feature = "mm-routing")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedMmRoutingReplacement {
@@ -1020,10 +1022,9 @@ fn append_mm_routing_replacement_with_fill(
 /// normalizer block by block.
 ///
 /// Most blocks use canonical pad-value tokens. If a feature-span boundary
-/// does not contain an exact ordered placeholder/object mapping, vLLM keeps
-/// the worker tokens and hashes the block's MM metadata instead. Reproducing
-/// that fallback here keeps both sides identical without discarding the media
-/// identity carried by an ambiguous boundary block.
+/// does not contain an exact ordered placeholder/object mapping, the worker's
+/// KV-event identity contract determines whether to keep those canonical
+/// tokens or fall back to worker tokens plus MM metadata.
 #[cfg(feature = "mm-routing")]
 fn apply_tracked_mm_replacements(
     routing_prepend_bos: Option<TokenIdType>,
@@ -1032,6 +1033,7 @@ fn apply_tracked_mm_replacements(
     block_size: usize,
     image_token_id: Option<TokenIdType>,
     video_token_id: Option<TokenIdType>,
+    kv_event_mm_identity: mm_routing::KvEventMmIdentity,
 ) -> Result<(
     Vec<TokenIdType>,
     usize,
@@ -1149,6 +1151,11 @@ fn apply_tracked_mm_replacements(
                     normalized == routing_block,
                     "frontend MM replacement differs from KV-event normalization"
                 );
+            }
+            None if kv_event_mm_identity == mm_routing::KvEventMmIdentity::PadValueTokens => {
+                // SGLang has already replaced every placeholder with the
+                // canonical media pad before publishing this KV-event block.
+                // The request-side routing block is therefore complete as-is.
             }
             None => {
                 routing_block.copy_from_slice(worker_block);
@@ -1381,6 +1388,22 @@ fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
     parse_bool_opt(value)
 }
 
+/// Run CPU-bound preprocessing off the async runtime. On the multi-thread runtime
+/// `block_in_place` hands this worker to the blocking pool, so the I/O tasks that
+/// share the runtime keep draining sockets while a long conversation renders;
+/// under load a synchronous render here can leave request bodies unread for
+/// tens of seconds. Falls back to inline on the current-thread runtime, where
+/// `block_in_place` is not available.
+///
+/// Tokenization already does this via `spawn_blocking` (see `encode_with_timing`);
+/// the template render was the remaining synchronous step on the request path.
+fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
     match std::env::var(EMBEDDING_ADD_SPECIAL_TOKENS_ENV) {
         Ok(value) => match parse_embedding_add_special_tokens(&value) {
@@ -1481,7 +1504,8 @@ fn attach_request_context_metadata(
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
-/// All other trait methods delegate to the inner request.
+/// Other trait methods delegate to the inner request, except typed_messages:
+/// rendering must use the transformed messages rather than the original slice.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
@@ -1515,10 +1539,6 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
             );
         }
         minijinja::value::Value::from_serialize(&json)
-    }
-
-    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        self.inner.typed_messages()
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
@@ -1648,6 +1668,9 @@ pub struct OpenAIPreprocessor {
     /// variants are initialized independently on demand.
     embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
+    /// Exclusive bound for client token ids (`nvext.token_data`, token
+    /// prompts, and embedding token input), from `token_id_bound`.
+    token_id_bound: Option<usize>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
@@ -1707,6 +1730,69 @@ pub struct OpenAIPreprocessor {
 }
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+
+/// Exclusive bound for client token ids: the larger of the model's vocab size
+/// and the tokenizer's largest id plus one, so ids that only the model or only
+/// the tokenizer has (e.g. an image placeholder) stay valid. A zero counts as
+/// unknown. `None` means no check.
+fn token_id_bound(model_vocab: Option<usize>, tokenizer_bound: Option<usize>) -> Option<usize> {
+    model_vocab
+        .into_iter()
+        .chain(tokenizer_bound)
+        .filter(|&size| size > 0)
+        .max()
+}
+
+/// Reject token ids `>= bound` (client 400). `None` means no check.
+/// `field` names the request field in the error.
+fn ensure_token_ids_in_vocab(
+    field: &str,
+    tokens: &[crate::protocols::TokenIdType],
+    bound: Option<usize>,
+) -> anyhow::Result<()> {
+    if let Some(bound) = bound
+        && let Some(&bad) = tokens.iter().find(|&&t| t as usize >= bound)
+    {
+        return Err(invalid_argument_error(format!(
+            "{field} token id {bad} is out of range (must be < {bound})"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+fn resolve_qwen_video_processor_contract(
+    runtime_config: &ModelRuntimeConfig,
+) -> Result<Option<mm_routing::QwenVideoProcessorContract>> {
+    let vllm_contract = runtime_config
+        .get_engine_specific::<mm_routing::VllmQwenVideoProcessorContract>(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        )
+        .with_context(|| {
+            format!(
+                "invalid Qwen video processor runtime metadata under {VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY}"
+            )
+        })?
+        .map(mm_routing::QwenVideoProcessorContract::try_from)
+        .transpose()?;
+    let sglang_contract = runtime_config
+        .get_engine_specific::<mm_routing::SglangQwenVideoProcessorContract>(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        )
+        .with_context(|| {
+            format!(
+                "invalid Qwen video processor runtime metadata under {SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY}"
+            )
+        })?
+        .map(mm_routing::QwenVideoProcessorContract::try_from)
+        .transpose()?;
+
+    anyhow::ensure!(
+        vllm_contract.is_none() || sglang_contract.is_none(),
+        "multiple Qwen video processor contracts were published"
+    );
+    Ok(vllm_contract.or(sglang_contract))
+}
 
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
@@ -2016,6 +2102,19 @@ impl OpenAIPreprocessor {
                 reasoning_parser,
                 request.chat_template_args(),
             )
+    }
+
+    fn request_requires_reasoning<R: OAIChatLikeRequest>(
+        request: &R,
+        reasoning_parser: Option<&str>,
+        has_thinking_budget: bool,
+    ) -> bool {
+        Self::sglang_request_requires_reasoning(request, reasoning_parser)
+            || (has_thinking_budget
+                && Self::sglang_effective_reasoning_enabled(
+                    reasoning_parser,
+                    request.chat_template_args(),
+                ))
     }
 
     fn structured_response_supports_sglang_reasoning_gate(reasoning_parser: Option<&str>) -> bool {
@@ -2378,6 +2477,15 @@ impl OpenAIPreprocessor {
             );
         };
         let model_info = model_info.get_model_info()?;
+        // The tokenizer trait exposes no ids, so the card keeps the bound.
+        let tokenizer_id_bound = mdc.tokenizer_id_bound().unwrap_or_else(|| {
+            tracing::warn!(
+                model = %mdc.display_name,
+                "Tokenizer not loaded from this model card: only vocab_size bounds client token ids"
+            );
+            None
+        });
+        let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer_id_bound);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
@@ -2560,16 +2668,12 @@ impl OpenAIPreprocessor {
 
         #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
         let video_routing_processor = {
-            let qwen_contract = match runtime_config
-                .get_engine_specific::<mm_routing::QwenVideoProcessorContract>(
-                    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-                ) {
-                Ok(target) => target,
+            let qwen_contract = match resolve_qwen_video_processor_contract(&runtime_config) {
+                Ok(contract) => contract,
                 Err(error) => {
                     tracing::warn!(
                         target: "mm_routing",
                         %error,
-                        key = VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                         "invalid Qwen video processor runtime metadata; exact video routing disabled"
                     );
                     None
@@ -2701,6 +2805,7 @@ impl OpenAIPreprocessor {
             tokenizer,
             embedding_tokenizers,
             model_info,
+            token_id_bound,
             mdcsum,
             lora_name,
             runtime_config,
@@ -2803,7 +2908,7 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
-            self.apply_template(request)
+            off_runtime(|| self.apply_template(request))
                 .with_context(|| "Failed to apply prompt template")?
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
@@ -2975,6 +3080,20 @@ impl OpenAIPreprocessor {
             builder.eos_token_ids(eos_token_ids);
         }
 
+        let has_thinking_budget = stop_conditions.max_thinking_tokens.is_some();
+        if has_thinking_budget
+            && self
+                .runtime_config
+                .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
+            && Self::has_structured_response_format(request)
+            && !Self::structured_response_supports_sglang_reasoning_gate(
+                self.runtime_config.reasoning_parser.as_deref(),
+            )
+        {
+            return Err(invalid_argument_error(
+                "thinking_token_budget is not supported with GPT-OSS structured output on SGLang",
+            ));
+        }
         builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
 
@@ -3061,11 +3180,11 @@ impl OpenAIPreprocessor {
             builder.extra_args(Some(extra_args));
         }
 
-        // SGLang needs this request-scoped signal in addition to its native
-        // reasoning parser for thinking budgets and guided decoding.
-        builder.require_reasoning(Self::sglang_request_requires_reasoning(
+        // SGLang needs this signal for plain thinking, guided output, and budgets.
+        builder.require_reasoning(Self::request_requires_reasoning(
             request,
             self.runtime_config.reasoning_parser.as_deref(),
+            has_thinking_budget,
         ));
 
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
@@ -3198,6 +3317,20 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
         let continue_final = request.get_continue_final_message() == Some(true);
+        if continue_final
+            && self
+                .formatter
+                .media_message_order(request)
+                .is_some_and(|order| {
+                    order
+                        .last()
+                        .is_some_and(|&source| source != order.len() - 1)
+                })
+        {
+            return Err(invalid_argument_error(
+                "Cannot continue the final message because the prompt formatter moves it before other messages",
+            ));
+        }
         let formatted_prompt = if self.normalize_tool_call_args || continue_final {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
@@ -3439,6 +3572,24 @@ impl OpenAIPreprocessor {
 
                 match (url, uuid) {
                     (Some(url), _) => {
+                        // Every media URL passes here, with or without frontend
+                        // decoding, so this applies the workers' data: URL cap.
+                        if url.scheme() == "data" {
+                            let size = url.as_str().len();
+                            let limit = max_data_url_bytes();
+                            if size > limit {
+                                let message = format!(
+                                    "{type_str} data: URL is {size} bytes, exceeds the {limit}-byte limit. \
+                                     To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) on \
+                                     both the frontend and the workers."
+                                );
+                                // The text holds a fixed modality key and two
+                                // numbers, so the 400 body can carry it.
+                                return Err(crate::protocols::common::invalid_argument_error(
+                                    message,
+                                ));
+                            }
+                        }
                         if has_media_loader {
                             fetch_tasks.push(MediaFetchTask {
                                 modality: type_str,
@@ -4152,6 +4303,15 @@ impl OpenAIPreprocessor {
             // the frontend-tokenized prompt.
             let routing_bos =
                 routing_bos_to_prepend(self.routing_prepend_bos, image_counter_required);
+            #[cfg(feature = "media-ffmpeg")]
+            let kv_event_mm_identity = self
+                .video_routing_processor
+                .as_ref()
+                .map_or(mm_routing::KvEventMmIdentity::MmMetadata, |processor| {
+                    processor.kv_event_mm_identity()
+                });
+            #[cfg(not(feature = "media-ffmpeg"))]
+            let kv_event_mm_identity = mm_routing::KvEventMmIdentity::MmMetadata;
             match apply_tracked_mm_replacements(
                 routing_bos,
                 &replacements,
@@ -4159,6 +4319,7 @@ impl OpenAIPreprocessor {
                 block_size,
                 image_token_id,
                 video_token_id,
+                kv_event_mm_identity,
             ) {
                 Ok(expanded) => expanded,
                 Err(error) => {
@@ -4435,6 +4596,8 @@ impl OpenAIPreprocessor {
                             }
                         }
                     }
+                    // A token prompt skips the tokenizer, so bound its ids here.
+                    ensure_token_ids_in_vocab("prompt", &tokens_out, self.token_id_bound)?;
                 }
             }
             PromptInput::Text(_) => {
@@ -4472,6 +4635,12 @@ impl OpenAIPreprocessor {
                             let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
                                 token_data
                             {
+                                // token_data skips the tokenizer, so bound its ids here.
+                                ensure_token_ids_in_vocab(
+                                    "nvext.token_data",
+                                    tokens,
+                                    self.token_id_bound,
+                                )?;
                                 tracing::info!(
                                     token_count = tokens.len(),
                                     first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
@@ -4679,10 +4848,15 @@ impl OpenAIPreprocessor {
                     .map(|encoding| encoding.token_ids().to_vec())
                     .collect()
             }
+            // Token input skips the tokenizer, so bound its ids here.
             dynamo_protocols::types::EmbeddingInput::IntegerArray(token_ids) => {
+                ensure_token_ids_in_vocab("input", token_ids, self.token_id_bound)?;
                 vec![token_ids.clone()]
             }
             dynamo_protocols::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
+                for token_ids in token_arrays {
+                    ensure_token_ids_in_vocab("input", token_ids, self.token_id_bound)?;
+                }
                 token_arrays.clone()
             }
         };
@@ -5673,6 +5847,7 @@ impl OpenAIPreprocessor {
             metrics_template: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
             nvext: Option<serde_json::Value>,
+            prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
             response_template: Option<dynamo_protocols::types::CreateChatCompletionStreamResponse>,
         }
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
@@ -5726,10 +5901,9 @@ impl OpenAIPreprocessor {
 
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer Dynamo metadata)
         let jail_input = stream.map(move |mut a| {
-            let has_metadata = a
-                .data
-                .as_ref()
-                .is_some_and(|nv| nv.llm_metrics.is_some() || nv.nvext.is_some());
+            let has_metadata = a.data.as_ref().is_some_and(|nv| {
+                nv.llm_metrics.is_some() || nv.nvext.is_some() || nv.prompt_logprobs.is_some()
+            });
             if has_metadata {
                 let mut p = pending_in
                     .lock()
@@ -5754,6 +5928,9 @@ impl OpenAIPreprocessor {
                         p.metrics_template = Some(metrics);
                     }
                     merge_response_nvext(&mut p.nvext, nv.nvext.take());
+                    if let Some(prompt_logprobs) = nv.prompt_logprobs.take() {
+                        p.prompt_logprobs = Some(prompt_logprobs);
+                    }
                 }
             }
             if is_glm47 && let Some(data) = &a.data {
@@ -5858,6 +6035,7 @@ impl OpenAIPreprocessor {
             // nvext must wait for a non-payload-usage output with a choice.
             let has_choices = a.data.as_ref().is_some_and(|data| !data.choices.is_empty());
             let is_payload_usage = a.event.as_deref() == Some(ANNOTATION_PAYLOAD_USAGE);
+            let mut prompt_logprobs = None;
             let (llm_metrics, nvext) = a.data.as_ref().map_or((None, None), |_| {
                 let mut p = pending_out
                     .lock()
@@ -5869,6 +6047,7 @@ impl OpenAIPreprocessor {
                     metrics
                 });
                 let nvext = if has_choices && !is_payload_usage {
+                    prompt_logprobs = p.prompt_logprobs.take();
                     p.nvext.take()
                 } else {
                     None
@@ -5879,6 +6058,7 @@ impl OpenAIPreprocessor {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
                     nvext,
+                    prompt_logprobs,
                     llm_metrics,
                 }),
                 id: a.id,
@@ -5897,16 +6077,34 @@ impl OpenAIPreprocessor {
                     let state = recovery.entry(choice.index).or_default();
                     if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
                         let desired_content = &state.input_text[..marker_start];
+                        // An EOS inside a tool call is incomplete even if the engine reports stop.
+                        let dropped_call_reported_as_length = choice.finish_reason
+                            == Some(dynamo_protocols::types::FinishReason::Stop)
+                            && choice.delta.tool_calls.is_none()
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some();
+                        if dropped_call_reported_as_length {
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                why = "dropped_native_tool_call_reported_as_length",
+                                dropped_bytes = state.input_text.len() - desired_content.len(),
+                                "glm47 streaming: reporting length instead of stop for a tool call dropped at end of stream"
+                            );
+                            choice.finish_reason =
+                                Some(dynamo_protocols::types::FinishReason::Length);
+                        }
                         if choice.finish_reason
                             == Some(dynamo_protocols::types::FinishReason::Length)
                             && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
                         {
-                            tracing::warn!(
-                                choice_index = choice.index,
-                                why = "truncated_native_tool_call_suppressed",
-                                suppressed_bytes = state.input_text.len() - desired_content.len(),
-                                "glm47 streaming: suppressing incomplete native tool output on length finish"
-                            );
+                            // Count EOS drops separately from max_tokens truncation.
+                            if !dropped_call_reported_as_length {
+                                tracing::warn!(
+                                    choice_index = choice.index,
+                                    why = "truncated_native_tool_call_suppressed",
+                                    suppressed_bytes = state.input_text.len() - desired_content.len(),
+                                    "glm47 streaming: suppressing incomplete native tool output on length finish"
+                                );
+                            }
                             let replacement = desired_content
                                 .strip_prefix(&state.emitted_text)
                                 .unwrap_or_default();
@@ -5967,6 +6165,7 @@ impl OpenAIPreprocessor {
                     p.metrics_template = None;
                     p.chunk_tokens = 0;
                     p.nvext = None;
+                    p.prompt_logprobs = None;
                     p.response_template = None;
                 }
                 yield error;
@@ -5984,13 +6183,15 @@ impl OpenAIPreprocessor {
                     metrics
                 });
                 let nvext = p.nvext.take();
-                if llm_metrics.is_none() && nvext.is_none() {
+                let prompt_logprobs = p.prompt_logprobs.take();
+                if llm_metrics.is_none() && nvext.is_none() && prompt_logprobs.is_none() {
                     None
                 } else {
                     p.response_template.take().map(|inner| Annotated {
                         data: Some(NvCreateChatCompletionStreamResponse {
                             inner,
                             nvext,
+                            prompt_logprobs,
                             llm_metrics,
                         }),
                         id: None,
@@ -7256,17 +7457,14 @@ impl
         )?;
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
-        // Apply request payload aggregation strategy.
-        // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
-        // while the non-payload branch boxes the impl Stream from postprocessor_parsing_stream.
+        // Request payload capture is a pass-through: every chunk reaches the HTTP
+        // layer unchanged (metrics, errors, aggregation all behave as with capture
+        // off) while a copy is aggregated on the side for the record.
         let final_stream = if let Some(payload) = payload_handle {
-            let (stream, agg_fut) = if payload.streaming() {
-                // Streaming: apply scan (pass-through + parallel aggregation)
-                crate::request_trace::payload_stream::scan_aggregate_with_future(transformed_stream)
-            } else {
-                // Non-streaming: apply fold (collect all, then emit single chunk)
-                crate::request_trace::payload_stream::fold_aggregate_with_future(transformed_stream)
-            };
+            let (stream, agg_fut) =
+                crate::request_trace::payload_stream::scan_aggregate_with_future(Box::pin(
+                    transformed_stream,
+                ));
 
             // Spawn the payload emit off the request path. The outcome carries a drop
             // reason and any recovered partial response, so emit the record either way.
@@ -7498,6 +7696,327 @@ impl
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
 
 #[cfg(test)]
+mod token_data_tests {
+    use super::*;
+    use crate::common::checked_file::CheckedFile;
+    use crate::model_card::{ModelDeploymentCard, ModelInfoType, TokenizerKind};
+
+    /// `config.json` has `vocab_size` 128256; the mock tokenizer is smaller.
+    const LLAMA_DIR: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    /// The tokenizer has 32000 ids.
+    const TINYLLAMA_DIR: &str = "tests/data/sample-models/TinyLlama_v1.1";
+    const NO_VOCAB_SIZE: &str = r#"{"architectures":[],"model_type":"","eos_token_id":2}"#;
+    /// Ids 0 and 2 only, as in the HF `incomplete_vocab` test.
+    const GAP_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[],
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"b":2},"unk_token":"<unk>"}}"#;
+    /// Ids 0 and 1, and an added token that HF gives id 2.
+    const ADDED_TOKEN_TOKENIZER: &str = r#"{"version":"1.0","added_tokens":[{"id":2,
+        "content":"<x>","special":true,"single_word":false,"lstrip":false,"rstrip":false,
+        "normalized":false}],
+        "model":{"type":"WordLevel","vocab":{"<unk>":0,"a":1},"unk_token":"<unk>"}}"#;
+
+    /// TinyLlama's card with the given `config.json` and, if set, `tokenizer.json`.
+    fn tinyllama_card(
+        config: &str,
+        tokenizer: Option<&str>,
+    ) -> (ModelDeploymentCard, tempfile::TempDir) {
+        let mut mdc = ModelDeploymentCard::load_from_disk(TINYLLAMA_DIR, None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, config).unwrap();
+        mdc.model_info = Some(ModelInfoType::HfConfigJson(
+            CheckedFile::from_disk(&path).unwrap(),
+        ));
+        if let Some(tokenizer) = tokenizer {
+            let path = dir.path().join("tokenizer.json");
+            std::fs::write(&path, tokenizer).unwrap();
+            mdc.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+                CheckedFile::from_disk(&path).unwrap(),
+            ));
+        }
+        (mdc, dir)
+    }
+
+    /// TinyLlama's tokenizer with the given `config.json`.
+    fn tinyllama_with_config(config: &str) -> (Arc<OpenAIPreprocessor>, tempfile::TempDir) {
+        let (mdc, dir) = tinyllama_card(config, None);
+        (OpenAIPreprocessor::new(mdc).unwrap(), dir)
+    }
+
+    fn request(token_data: &[u32]) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {"token_data": token_data}
+        }))
+        .unwrap()
+    }
+
+    async fn assert_rejected(preprocessor: &OpenAIPreprocessor, token_data: &[u32]) {
+        let error = preprocessor
+            .preprocess_request(&request(token_data), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
+    }
+
+    async fn assert_forwarded(preprocessor: &OpenAIPreprocessor, token_data: &[u32]) {
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request(token_data), None)
+            .await
+            .unwrap();
+        assert_eq!(preprocessed.token_ids.as_slice(), token_data);
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_model_vocab() {
+        let mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_rejected(&preprocessor, &[1, 128256]).await;
+        assert_rejected(&preprocessor, &[u32::MAX]).await;
+        assert_forwarded(&preprocessor, &[1, 128255]).await;
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_tokenizer_vocab() {
+        // No `vocab_size` in config.json: the tokenizer sets the bound.
+        let (preprocessor, _dir) =
+            tinyllama_with_config(r#"{"architectures":[],"model_type":"","eos_token_id":2}"#);
+        assert_rejected(&preprocessor, &[1, 32000]).await;
+        assert_forwarded(&preprocessor, &[1, 31999]).await;
+
+        // A tokenizer id at or above the model's `vocab_size` stays valid.
+        let (preprocessor, _dir) = tinyllama_with_config(
+            r#"{"architectures":[],"model_type":"","eos_token_id":2,"vocab_size":31999}"#,
+        );
+        assert_forwarded(&preprocessor, &[1, 31999]).await;
+        assert_rejected(&preprocessor, &[1, 32000]).await;
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_largest_tokenizer_id() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        let encoding = mdc.tokenizer().unwrap().encode("b").unwrap();
+        assert_eq!(encoding.token_ids(), [2]);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_forwarded(&preprocessor, &[0, 2]).await;
+        assert_rejected(&preprocessor, &[0, 3]).await;
+    }
+
+    #[tokio::test]
+    async fn token_data_is_bounded_by_added_tokens() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(ADDED_TOKEN_TOKENIZER));
+        let encoding = mdc.tokenizer().unwrap().encode("<x>").unwrap();
+        assert_eq!(encoding.token_ids(), [2]);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert_forwarded(&preprocessor, &[0, 2]).await;
+        assert_rejected(&preprocessor, &[0, 3]).await;
+    }
+
+    fn completion(prompt: serde_json::Value) -> NvCreateCompletionRequest {
+        serde_json::from_value(serde_json::json!({"model": "test-model", "prompt": prompt}))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn token_prompt_is_bounded_by_model_vocab() {
+        let mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        for prompt in [
+            serde_json::json!([1, 128256]),
+            serde_json::json!([[1, 128256]]),
+            serde_json::json!([u32::MAX]),
+        ] {
+            let error = preprocessor
+                .preprocess_request(&completion(prompt), None)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<DynamoError>()
+                    .map(DynamoError::error_type),
+                Some(ErrorType::InvalidArgument),
+                "{error:#}"
+            );
+        }
+        let in_range: [u32; 2] = [1, 128255];
+        for prompt in [serde_json::json!(in_range), serde_json::json!([in_range])] {
+            let (preprocessed, _, _) = preprocessor
+                .preprocess_request(&completion(prompt), None)
+                .await
+                .unwrap();
+            assert_eq!(preprocessed.token_ids.as_slice(), in_range);
+        }
+    }
+
+    #[tokio::test]
+    async fn token_prompt_is_bounded_by_largest_tokenizer_id() {
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&completion(serde_json::json!([0, 2])), None)
+            .await
+            .unwrap();
+        assert_eq!(preprocessed.token_ids.as_slice(), [0, 2]);
+        let error = preprocessor
+            .preprocess_request(&completion(serde_json::json!([0, 3])), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
+    }
+
+    /// Records the token ids of each request that reaches the backend.
+    #[derive(Default)]
+    struct RecordingEmbeddingBackend(Mutex<Vec<Vec<Vec<u32>>>>);
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedEmbeddingRequest>,
+            ManyOut<Annotated<EmbeddingsEngineOutput>>,
+            Error,
+        > for RecordingEmbeddingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedEmbeddingRequest>,
+        ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            self.0.lock().unwrap().push(request.token_ids);
+            Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_token_input_is_bounded_by_model_vocab() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        mdc.model_type = crate::model_type::ModelType::Embedding;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+        let backend = Arc::new(RecordingEmbeddingBackend::default());
+        let next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
+        > = backend.clone();
+        let embed = |input: serde_json::Value| {
+            let request: NvCreateEmbeddingRequest =
+                serde_json::from_value(serde_json::json!({"model": "test-model", "input": input}))
+                    .unwrap();
+            PipelineContext::new(request)
+        };
+
+        for input in [
+            serde_json::json!([1, 128256]),
+            serde_json::json!([[1, 2], [1, 128256]]),
+            serde_json::json!([u32::MAX]),
+        ] {
+            let Err(error) =
+                Operator::generate(preprocessor.as_ref(), embed(input), next.clone()).await
+            else {
+                panic!("an out-of-range token input must fail");
+            };
+            assert_eq!(
+                error
+                    .downcast_ref::<DynamoError>()
+                    .map(DynamoError::error_type),
+                Some(ErrorType::InvalidArgument),
+                "{error:#}"
+            );
+        }
+        assert!(
+            backend.0.lock().unwrap().is_empty(),
+            "no request reached the backend"
+        );
+
+        for input in [
+            serde_json::json!([1, 128255]),
+            serde_json::json!([[1, 2], [3, 128255]]),
+        ] {
+            Operator::generate(preprocessor.as_ref(), embed(input), next.clone())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *backend.0.lock().unwrap(),
+            vec![vec![vec![1, 128255]], vec![vec![1, 2], vec![3, 128255]]]
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_token_input_is_bounded_by_largest_tokenizer_id() {
+        let (mut mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(GAP_TOKENIZER));
+        mdc.model_type = crate::model_type::ModelType::Embedding;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+        let backend = Arc::new(RecordingEmbeddingBackend::default());
+        let next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
+        > = backend.clone();
+        let embed = |input: serde_json::Value| {
+            let request: NvCreateEmbeddingRequest =
+                serde_json::from_value(serde_json::json!({"model": "test-model", "input": input}))
+                    .unwrap();
+            PipelineContext::new(request)
+        };
+
+        Operator::generate(
+            preprocessor.as_ref(),
+            embed(serde_json::json!([0, 2])),
+            next.clone(),
+        )
+        .await
+        .unwrap();
+        let Err(error) = Operator::generate(
+            preprocessor.as_ref(),
+            embed(serde_json::json!([0, 3])),
+            next.clone(),
+        )
+        .await
+        else {
+            panic!("an out-of-range token input must fail");
+        };
+        assert_eq!(
+            error
+                .downcast_ref::<DynamoError>()
+                .map(DynamoError::error_type),
+            Some(ErrorType::InvalidArgument),
+            "{error:#}"
+        );
+        assert_eq!(*backend.0.lock().unwrap(), vec![vec![vec![0, 2]]]);
+    }
+
+    #[test]
+    fn token_id_bound_ignores_unknown_and_zero_sizes() {
+        assert_eq!(token_id_bound(Some(151936), Some(151669)), Some(151936));
+        assert_eq!(token_id_bound(Some(128256), Some(128257)), Some(128257));
+        assert_eq!(token_id_bound(None, Some(32000)), Some(32000));
+        assert_eq!(token_id_bound(Some(0), Some(0)), None);
+        assert_eq!(token_id_bound(None, None), None);
+        assert!(ensure_token_ids_in_vocab("prompt", &[u32::MAX], None).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod strip_tests {
     use super::OpenAIPreprocessor;
 
@@ -7678,6 +8197,68 @@ mod extra_args_media_copy_tests {
     }
 
     #[tokio::test]
+    async fn continue_final_message_rejects_reordered_tool_results() {
+        use crate::engines::ValidateRequest;
+        use dynamo_renderer::deepseek::v41::DeepSeekV41Formatter;
+
+        let mut preprocessor = test_preprocessor();
+        preprocessor.formatter = Arc::new(DeepSeekV41Formatter);
+        let image = inline_data_url();
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"alias", "continue_final_message":true, "add_generation_prompt":false,
+            "reasoning_effort":"none", "messages":[
+                {"role":"assistant","tool_calls":[
+                    {"id":"a","type":"function","function":{"name":"image","arguments":"{}"}},
+                    {"id":"b","type":"function","function":{"name":"image","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"b","content":[
+                    {"type":"image_url","image_url":{"url":image}}, {"type":"text","text":"Result B"}
+                ]},
+                {"role":"tool","tool_call_id":"a","content":[
+                    {"type":"image_url","image_url":{"url":image}}, {"type":"text","text":"Result A"}
+                ]}
+            ]
+        })).unwrap();
+        ValidateRequest::validate(&request).unwrap();
+        let error = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Cannot continue the final message"),
+            "{error:#}"
+        );
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::InvalidArgument
+        );
+
+        request.inner.messages.swap(1, 2);
+        let ordered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(ordered.as_str().matches("<｜deepseek_image｜>").count(), 2);
+        assert!(ordered.as_str().ends_with("Result B"));
+
+        request.inner.messages.swap(1, 2);
+        request.inner.messages.push(
+            serde_json::from_value(serde_json::json!({
+                "role":"assistant","content":"Answer:"
+            }))
+            .unwrap(),
+        );
+        let assistant = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(
+            assistant.as_str().matches("<｜deepseek_image｜>").count(),
+            2
+        );
+        assert!(assistant.as_str().ends_with("Answer:"));
+
+        request.inner.messages.pop();
+        request.common.continue_final_message = Some(false);
+        let ordinary = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(ordinary.as_str().matches("<｜deepseek_image｜>").count(), 2);
+    }
+
+    #[tokio::test]
     async fn extra_args_messages_omit_inline_data_when_multi_modal_data_present() {
         let preprocessor = test_preprocessor();
         let data_url = inline_data_url();
@@ -7743,9 +8324,7 @@ mod extra_args_media_copy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::extensions::{
-        AGENT_CONTEXT_CONTEXT_KEY, AgentCompaction, AgentContext,
-    };
+    use crate::protocols::common::extensions::{AGENT_CONTEXT_CONTEXT_KEY, AgentContext};
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
@@ -7897,6 +8476,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         })
     }
@@ -8085,6 +8665,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn legacy_jail_preserves_prompt_logprobs_metadata() {
+        let expected: crate::protocols::common::llm_backend::PromptLogprobs =
+            serde_json::from_value(serde_json::json!([
+                null,
+                {"17": {"logprob": -0.25, "rank": 1, "decoded_token": " hello"}}
+            ]))
+            .expect("valid prompt logprobs");
+        let mut chunk = terminal_chat_stream_chunk();
+        chunk.data.as_mut().unwrap().prompt_logprobs = Some(Arc::new(expected.clone()));
+
+        let output = OpenAIPreprocessor::apply_tool_calling_jail(
+            None,
+            None,
+            None,
+            false,
+            false,
+            stream::iter(vec![chunk]),
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(
+            output
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .find_map(|data| data.prompt_logprobs.as_deref()),
+            Some(&expected)
+        );
+    }
+
     fn kimi_k3_reasoning_chunk(reasoning: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let mut chunk = chat_stream_chunk(0, Some(Role::Assistant));
         let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
@@ -8112,8 +8723,9 @@ mod tests {
         chunk
     }
 
-    async fn apply_glm47_streaming_length(
+    async fn apply_glm47_streaming_with_terminal(
         chunks: &[&str],
+        terminal: FinishReason,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
         let chunks: Vec<String> = chunks.iter().map(|chunk| (*chunk).to_string()).collect();
         let chunk_count = chunks.len();
@@ -8124,14 +8736,40 @@ mod tests {
             false,
             false,
             stream::iter(chunks.into_iter().enumerate().map(move |(index, content)| {
-                glm47_stream_chunk(
-                    &content,
-                    (index + 1 == chunk_count).then_some(FinishReason::Length),
-                )
+                glm47_stream_chunk(&content, (index + 1 == chunk_count).then_some(terminal))
             })),
         )
         .collect()
         .await
+    }
+
+    async fn apply_glm47_streaming_length(
+        chunks: &[&str],
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        apply_glm47_streaming_with_terminal(chunks, FinishReason::Length).await
+    }
+
+    fn has_finish_reason(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        reason: FinishReason,
+    ) -> bool {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .any(|choice| choice.finish_reason == Some(reason))
+    }
+
+    fn emitted_tool_call_count(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> usize {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .map(|tool_calls| tool_calls.len())
+            .sum()
     }
 
     fn stream_content(output: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> String {
@@ -8200,6 +8838,83 @@ mod tests {
             let output = apply_glm47_streaming_length(&[&input[..split], &input[split..]]).await;
             assert_glm47_streaming_length_output(&output, "I can help. ", split);
         }
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_bare_tool_call_marker_reports_length() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["I'll check. ", "<tool_call>"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "I'll check. ");
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_partial_function_name_reports_length() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["I'll check. <tool_call>ipy"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "I'll check. ");
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_partial_arguments_reports_length_without_markup() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["<tool_call>get_weather<arg_key>city</arg_key><arg_value>Par"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert!(stream_content(&output).is_empty());
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_without_marker_keeps_stop() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["Done. ", "The worker exited normally."],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "Done. The worker exited normally.");
+        assert!(has_finish_reason(&output, FinishReason::Stop));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_with_quoted_marker_keeps_stop() {
+        let content = r#"The literal "<tool_call>" marker is part of the explanation."#;
+        let output = apply_glm47_streaming_with_terminal(&[content], FinishReason::Stop).await;
+
+        assert!(has_finish_reason(&output, FinishReason::Stop));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_complete_call_on_stop_keeps_tool_calls() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(emitted_tool_call_count(&output), 1);
+        assert!(has_finish_reason(&output, FinishReason::ToolCalls));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
     }
 
     /// A prose-only answer never completes a call, so nothing drains the recovery
@@ -10275,6 +10990,172 @@ mod tests {
     }
 
     #[test]
+    fn test_sglang_gpt_oss_structured_output_rejects_thinking_budget() {
+        use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.reasoning_parser = Some("gpt_oss".to_string());
+        mdc.runtime_config
+            .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for response_format in [
+            serde_json::json!({"type": "json_object"}),
+            serde_json::json!({"type": "json_schema", "json_schema": {
+                "name": "result", "schema": {"type": "object", "properties": {}}
+            }}),
+        ] {
+            for budget_fields in [
+                serde_json::json!({"thinking_token_budget": 32}),
+                serde_json::json!({"thinking_token_budget": 0}),
+                serde_json::json!({"nvext": {"max_thinking_tokens": 16}}),
+                serde_json::json!({"thinking_token_budget": 0, "nvext": {"max_thinking_tokens": 16}}),
+            ] {
+                let mut value = serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "response_format": response_format,
+                });
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(budget_fields.as_object().unwrap().clone());
+                let request: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+                let error = preprocessor
+                    .builder(&request)
+                    .err()
+                    .expect("SGLang cannot honor GPT-OSS structured output with a thinking budget");
+                assert_eq!(
+                    error.downcast_ref::<DynamoError>().unwrap().error_type(),
+                    ErrorType::InvalidArgument,
+                );
+                assert!(error.to_string().contains("thinking_token_budget"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_gpt_oss_thinking_budget_preserves_supported_output_paths() {
+        use crate::local_model::runtime_config::{
+            SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+
+        for (capability, budget, structured, expected_reasoning) in [
+            (SGLANG_GENERATE_CAPABILITY, Some(32), false, true),
+            (SGLANG_GENERATE_CAPABILITY, None, true, false),
+            (VLLM_INFERENCE_V1_GENERATE_CAPABILITY, Some(0), true, true),
+        ] {
+            let mut mdc = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            mdc.runtime_config.reasoning_parser = Some("gpt_oss".to_string());
+            mdc.runtime_config
+                .set_engine_specific(capability, true)
+                .unwrap();
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking_token_budget": budget,
+                "response_format": if structured { serde_json::json!({"type": "json_object"}) } else { serde_json::Value::Null },
+            })).unwrap();
+            let preprocessed = preprocessor
+                .builder(&request)
+                .unwrap()
+                .token_ids(vec![1])
+                .build()
+                .unwrap();
+            assert_eq!(preprocessed.require_reasoning, expected_reasoning);
+            assert_eq!(preprocessed.stop_conditions.max_thinking_tokens, budget);
+        }
+    }
+
+    #[test]
+    fn test_request_requires_reasoning_with_thinking_budget() {
+        let cases = [
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 0}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"nvext": {"max_thinking_tokens": 16}}),
+                Some("qwen3"),
+                true,
+            ),
+            (serde_json::json!({}), Some("qwen3"), true),
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                None,
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32}),
+                Some("gemma4"),
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "chat_template_kwargs": {"enable_thinking": true}}),
+                Some("gemma4"),
+                true,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "chat_template_kwargs": {"enable_thinking": false}}),
+                Some("qwen3"),
+                false,
+            ),
+            (
+                serde_json::json!({"thinking_token_budget": 32, "response_format": {"type": "json_object"}}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"response_format": {"type": "json_object"}}),
+                Some("qwen3"),
+                true,
+            ),
+            (
+                serde_json::json!({"response_format": {"type": "json_object"}}),
+                Some("gpt_oss"),
+                false,
+            ),
+        ];
+        for (fields, parser, expected) in cases {
+            let mut value = serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+            let has_budget = request
+                .extract_stop_conditions()
+                .unwrap()
+                .max_thinking_tokens
+                .is_some();
+            assert_eq!(
+                OpenAIPreprocessor::request_requires_reasoning(&request, parser, has_budget),
+                expected,
+                "parser={parser:?}, fields={fields}",
+            );
+        }
+    }
+
+    #[test]
     fn test_plain_chat_forwards_reasoning_signal_to_worker() {
         let mut mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
@@ -10737,15 +11618,16 @@ mod tests {
     }
 
     #[test]
-    fn attach_agent_context_forwards_compaction() {
+    fn attach_agent_context_forwards_opaque_headers() {
         let agent_context = AgentContext {
             session_id: "codex-thread".to_string(),
             parent_session_id: None,
             session_final: None,
-            compaction: Some(AgentCompaction {
-                trigger: Some("manual".to_string()),
-                ..Default::default()
-            }),
+            agent_headers: std::collections::BTreeMap::from([(
+                "x-claude-code-future".into(),
+                vec!["unknown".into(), "second".into()],
+            )])
+            .into(),
             input_trigger: None,
         };
         let mut context = PipelineContext::new(());
@@ -10757,9 +11639,15 @@ mod tests {
         assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
         let wire = serde_json::to_value(&request).unwrap();
         assert_eq!(
-            wire["agent_context"]["compaction"]["trigger"],
-            serde_json::json!("manual")
+            wire["agent_context"]["agent_headers"]["x-claude-code-future"],
+            serde_json::json!(["unknown", "second"])
         );
+        let restored: AgentContext = serde_json::from_value(wire["agent_context"].clone()).unwrap();
+        assert_eq!(restored, agent_context);
+        assert!(std::sync::Arc::ptr_eq(
+            &request.agent_context.as_ref().unwrap().agent_headers,
+            &agent_context.agent_headers
+        ));
     }
 
     #[test]
@@ -10772,7 +11660,7 @@ mod tests {
             session_id: "agent-session".to_string(),
             parent_session_id: Some("agent-parent".to_string()),
             session_final: None,
-            compaction: None,
+            agent_headers: Default::default(),
             input_trigger: None,
         };
         let mut context = PipelineContext::new(());
@@ -10878,6 +11766,7 @@ mod tests {
             nvext: None,
             metadata: None,
             return_tokens_as_token_ids: None,
+            no_stop_trim: None,
             unsupported_fields: Default::default(),
         };
         let next: Arc<
@@ -10888,6 +11777,35 @@ mod tests {
             Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
         let Err(err) = result else {
             panic!("over-budget completion should fail admission");
+        };
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_completion_operator_rejects_out_of_range_token_prompt() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        // The card's vocab_size is 128256.
+        let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "prompt": [1, 128256]
+        }))
+        .unwrap();
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableBackend);
+
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("an out-of-range token prompt should fail before dispatch");
         };
         let dynamo_err = err
             .downcast_ref::<DynamoError>()
@@ -11186,6 +12104,51 @@ mod tests {
             "continue_final_message": true
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn normalized_args_request_preserves_render_transformations() {
+        use crate::preprocessor::prompt::CONTINUE_FINAL_MESSAGE_TAG;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "assistant", "content": "prefix", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"query\":\"hello\"}"}
+            }]}]
+        }))
+        .unwrap();
+        let normalized = NormalizedArgsRequest {
+            inner: &request,
+            normalize_tool_call_args: true,
+            continue_final_message: true,
+        };
+        assert!(request.typed_messages().is_some());
+        assert!(normalized.typed_messages().is_none());
+
+        let messages = serde_json::to_value(normalized.messages()).unwrap();
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            serde_json::json!({"query": "hello"})
+        );
+        assert_eq!(
+            messages[0]["content"],
+            format!("prefix{CONTINUE_FINAL_MESSAGE_TAG}")
+        );
+        // Keep string arguments in the template so only the adapter can perform
+        // this conversion; the renderer's own argument normalization is bypassed.
+        let formatter = test_prompt_formatter(
+            "{% for m in messages %}{% for call in m.tool_calls %}{% if call.function.arguments is string %}RAW{% else %}{{ call.function.arguments.query }}{% endif %}{% endfor %}{{ m.content }}{% endfor %}",
+        );
+        let rendered = formatter.render_prompt(&normalized).unwrap();
+        assert_eq!(
+            rendered.as_str(),
+            format!("helloprefix{CONTINUE_FINAL_MESSAGE_TAG}")
+        );
+        assert_eq!(
+            apply_continue_final_message(rendered).unwrap().as_str(),
+            "helloprefix"
+        );
     }
 
     fn render_with_continue_final_message(
@@ -12390,6 +13353,69 @@ mod tests {
         assert!(!MediaFetcher::is_policy_rejection(&recoverable));
     }
 
+    /// The gather loop applies the workers' data: URL cap on the path that
+    /// passes URLs through to the backend, where no worker check runs first.
+    #[tokio::test]
+    async fn gather_rejects_data_url_over_the_size_cap() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert!(preprocessor.media_loader.is_none());
+
+        let request_with_data_url = |size: usize| -> NvCreateChatCompletionRequest {
+            let prefix = "data:audio/wav;base64,";
+            let url = format!("{prefix}{}", "A".repeat(size - prefix.len()));
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "audio_url", "audio_url": {"url": url}}]
+                }]
+            }))
+            .unwrap()
+        };
+
+        temp_env::async_with_vars([("DYN_MM_MAX_DATA_URL_MB", Some("1"))], async {
+            let limit = 1024 * 1024;
+            let mut builder = PreprocessedRequest::builder();
+            preprocessor
+                .gather_multi_modal_data(&request_with_data_url(limit), &mut builder, None, &[])
+                .await
+                .expect("a data: URL at the cap is accepted");
+
+            let mut builder = PreprocessedRequest::builder();
+            let error = preprocessor
+                .gather_multi_modal_data(&request_with_data_url(limit + 1), &mut builder, None, &[])
+                .await
+                .expect_err("a data: URL over the cap is rejected");
+            let dynamo_error = error
+                .downcast_ref::<DynamoError>()
+                .expect("error should preserve the DynamoError type");
+            assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+            assert!(
+                dynamo_error.message().contains(
+                    "audio_url data: URL is 1048577 bytes, exceeds the 1048576-byte limit"
+                ),
+                "{}",
+                dynamo_error.message()
+            );
+            assert!(
+                dynamo_error.message().contains(
+                    "To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) on both \
+                     the frontend and the workers."
+                ),
+                "{}",
+                dynamo_error.message()
+            );
+            // The 400 body carries the same text.
+            assert_eq!(dynamo_error.public_message(), Some(dynamo_error.message()));
+        })
+        .await;
+    }
+
     /// A blocked destination on the URL-passthrough path must fail the whole
     /// request. The IP literal is refused before DNS, so no socket is opened.
     #[cfg(feature = "mm-routing")]
@@ -12500,6 +13526,48 @@ mod tests {
                 Some(RoutingImagePromptLayout::RepeatedPad),
             ),
             RoutingImageDimensionPolicy::Encoded
+        );
+    }
+
+    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[test]
+    fn dual_qwen_video_contracts_disable_exact_routing() {
+        let mut runtime_config = ModelRuntimeConfig::default();
+        runtime_config
+            .set_engine_specific(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                serde_json::json!({
+                    "placeholder_target": "bare_video_token",
+                    "resize_mode": "legacy_ceil"
+                }),
+            )
+            .unwrap();
+        runtime_config
+            .set_engine_specific(
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                serde_json::json!({
+                    "placeholder_target": "bare_video_token",
+                    "resize_mode": "legacy_ceil",
+                    "runless_boundary_hash": "tokens_only",
+                    "sglang_preprocess": {
+                        "image_factor": 28,
+                        "video_min_pixels": 100352,
+                        "video_max_pixels": 602112,
+                        "video_total_pixels": 90316800,
+                        "frame_factor": 2,
+                        "fps": 2.0,
+                        "min_frames": 4,
+                        "max_frames": 768
+                    }
+                }),
+            )
+            .unwrap();
+
+        let error = resolve_qwen_video_processor_contract(&runtime_config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("multiple Qwen video processor contracts")
         );
     }
 
@@ -12623,6 +13691,7 @@ mod tests {
             4,
             Some(99),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12631,6 +13700,67 @@ mod tests {
         assert_eq!(&tokens[4..], &[6, video_pad, video_pad, 2]);
         assert_eq!(infos[0].as_ref().unwrap().mm_objects[0].mm_hash, mm_hash);
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_video_boundary_matches_token_only_worker_contract() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let video_token_id = 100;
+        let mm_hash = 41;
+        let video_pad = pad_value_for_mm_hash(mm_hash);
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![9],
+            worker_tokens: vec![3, 4, 5, 6, video_token_id, video_token_id],
+            routing_tokens: vec![3, 4, 5, 6, video_pad, video_pad],
+        };
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[1, 9, 2],
+            4,
+            Some(99),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 8);
+        assert_eq!(&tokens[..4], &[1, 3, 4, 5]);
+        assert_eq!(&tokens[4..], &[6, video_pad, video_pad, 2]);
+        assert!(infos.iter().all(Option::is_none));
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_token_only_worker_still_validates_normalizable_blocks() {
+        let video_token_id = 100;
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash: 41,
+            target_tokens: vec![9],
+            worker_tokens: vec![video_token_id, video_token_id],
+            routing_tokens: vec![1, 2],
+        };
+
+        let error = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[9],
+            4,
+            Some(99),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("frontend MM replacement differs from KV-event normalization")
+        );
     }
 
     #[cfg(feature = "mm-routing")]
@@ -12673,6 +13803,7 @@ mod tests {
             4,
             Some(image_token_id),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12698,6 +13829,50 @@ mod tests {
             [image_hash, video_hash]
         );
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_mixed_token_only_boundary_preserves_canonical_pads() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let image_token_id = 99;
+        let video_token_id = 100;
+        let image_hash = 41;
+        let video_hash = 42;
+        let image_pad = pad_value_for_mm_hash(image_hash);
+        let video_pad = pad_value_for_mm_hash(video_hash);
+        let replacements = [
+            TrackedMmRoutingReplacement {
+                mm_hash: image_hash,
+                target_tokens: vec![image_token_id],
+                worker_tokens: vec![image_token_id; 14],
+                routing_tokens: vec![image_pad; 14],
+            },
+            TrackedMmRoutingReplacement {
+                mm_hash: video_hash,
+                target_tokens: vec![video_token_id],
+                worker_tokens: vec![7, 8, video_token_id, video_token_id],
+                routing_tokens: vec![7, 8, video_pad, video_pad],
+            },
+        ];
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &replacements,
+            &[image_token_id, video_token_id],
+            16,
+            Some(image_token_id),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 18);
+        assert_eq!(&tokens[..14], &[image_pad; 14]);
+        assert_eq!(&tokens[14..18], &[7, 8, video_pad, video_pad]);
+        assert!(tokens[18..].iter().all(|token| *token == 0));
+        assert!(infos.iter().all(Option::is_none));
     }
 
     #[cfg(feature = "mm-routing")]
@@ -12729,6 +13904,7 @@ mod tests {
             16,
             Some(image_token_id),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12771,6 +13947,7 @@ mod tests {
                     4,
                     Some(10),
                     Some(20),
+                    mm_routing::KvEventMmIdentity::MmMetadata,
                 )
                 .is_err(),
                 "invalid target sequence {token_ids:?} must fail closed"
@@ -12792,8 +13969,16 @@ mod tests {
             routing_tokens: vec![100, 19, pad, pad, 20, 101, 19, pad, 20],
         };
 
-        let (tokens, prompt_len, block_infos) =
-            apply_tracked_mm_replacements(None, &[replacement], &[7], 4, Some(18), None).unwrap();
+        let (tokens, prompt_len, block_infos) = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[7],
+            4,
+            Some(18),
+            None,
+            mm_routing::KvEventMmIdentity::MmMetadata,
+        )
+        .unwrap();
 
         assert_eq!(prompt_len, 9);
         assert_eq!(tokens, [100, 19, pad, pad, 20, 101, 19, pad, 20, 0, 0, 0]);
