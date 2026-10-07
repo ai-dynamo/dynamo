@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
+use dynamo_kv_router::{protocols::KV_EVENT_SUBJECT, router_event_wire::decode_router_event_batch};
 use dynamo_runtime::{
     component::Component,
     discovery::{
@@ -17,7 +17,7 @@ use dynamo_runtime::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{Codec, EventScope, ValidatedZmqSource, ValidatedZmqSourceError},
+    transports::event_plane::{EventScope, ValidatedZmqSource, ValidatedZmqSourceError},
 };
 use futures::StreamExt;
 use tokio::{
@@ -897,7 +897,6 @@ async fn consume_grouped_connection(
     client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     metrics: &KvZmqIngressMetrics,
 ) {
-    let codec = Codec::default();
     while let Some(item) = receiver.recv().await {
         let envelope = match item {
             DirectZmqSubItem::Envelope(envelope) => envelope,
@@ -910,7 +909,7 @@ async fn consume_grouped_connection(
                 continue;
             }
         };
-        let events = match codec.decode_payload::<Vec<RouterEvent>>(&envelope.payload) {
+        let events = match decode_router_event_batch(&envelope.payload) {
             Ok(events) => events,
             Err(error) => {
                 tracing::warn!(%error, publisher_id, "Failed to decode direct-ZMQ KV payload");
@@ -929,7 +928,6 @@ async fn consume_dedicated_connection(
     client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     metrics: &KvZmqIngressMetrics,
 ) {
-    let codec = Codec::default();
     loop {
         let Some(result) = source.next().await else {
             return;
@@ -951,7 +949,7 @@ async fn consume_dedicated_connection(
                 continue;
             }
         };
-        let events = match codec.decode_payload::<Vec<RouterEvent>>(&envelope.payload) {
+        let events = match decode_router_event_batch(&envelope.payload) {
             Ok(events) => events,
             Err(error) => {
                 tracing::warn!(%error, publisher_id, "Failed to decode direct-ZMQ KV payload");
