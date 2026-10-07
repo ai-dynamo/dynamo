@@ -119,6 +119,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 			allocationMetadata:     allocationMetadata,
 			partitions:             partitions,
 			connectors:             connectors,
+			propSyncEdges:          edgePositions,
 			agentReplicas:          agentReplicas,
 			localPartitionIDs:      localPartitionIDs,
 		})

@@ -697,7 +697,6 @@ requirements.txt                                                                
 /components/src/dynamo/sglang/publisher.py                                                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/trtllm/publisher.py                                                              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /container/deps/requirements.benchmark.txt                                                              @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners
-/deploy/operator/internal/gpu/discovery.go                                                              @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/block_manager/metrics_kvbm.rs                                                              @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/sidecar/testkit/tests/support/vllm.rs                                                              @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/thunderagent_router/                                                             @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-agents-codeowners

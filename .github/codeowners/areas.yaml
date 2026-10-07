@@ -956,10 +956,6 @@ shared:
   owners:
   - operator
   - planner
-- glob: deploy/operator/internal/gpu/discovery.go
-  owners:
-  - operator
-  - observability
 - glob: deploy/operator/internal/controller/lpx/
   owners:
   - operator
