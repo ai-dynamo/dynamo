@@ -401,6 +401,8 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
   </ParamField>
   <ParamField path="targetContainerName" type="string" default="main">
     The workload container to snapshot and restore. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+
+    Automatic captures run this container under Snapshot's cuInterpose launcher, so it must set `command`. The `main` container always has one, because the operator defaults it to `/bin/sh -c`. To opt out, set the pod template annotation `nvidia.com/cuda-shared-memory-support: disabled`. Multi-GPU captures can then fail when NCCL uses cuMem or NVLS memory.
   </ParamField>
   <ParamField path="job" type="ComponentCheckpointJobConfig">
     Customizes the DGD-managed `SnapshotJob` capture Pod.
