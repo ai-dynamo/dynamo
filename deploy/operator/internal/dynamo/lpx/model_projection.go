@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 
+	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -42,6 +43,9 @@ type ModelProjectionInput struct {
 	RuntimeBuildRef string
 	// BuildSnapshot is the normalized immutable build input.
 	BuildSnapshot NormalizedBuildSnapshot
+	// LocalPartitions selects hybrid runtime partitions that run on the Cyborg GPU.
+	// Nil runs every partition on LPUs.
+	LocalPartitions *dynamov1beta1.LPXLocalPartitions
 }
 
 // ModelProjection holds scheduler request inputs and runtime rendering state
@@ -61,6 +65,13 @@ type ModelProjection struct {
 	partitions    []BuildPartition
 	connectors    []lpxv1alpha1.PropSyncConnectorRequest
 	agentReplicas int
+	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
+	localPartitionIDs []int
+}
+
+// AgentReplicas returns the number of LPU Agent Pods that the projection requires.
+func (p *ModelProjection) AgentReplicas() int {
+	return p.agentReplicas
 }
 
 // Digest returns the immutable projection digest. The receiver must be non-nil.

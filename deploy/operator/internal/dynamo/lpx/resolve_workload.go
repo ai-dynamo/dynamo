@@ -120,6 +120,7 @@ func ResolveWorkload(
 			Models:          modelNames,
 			RuntimeBuildRef: model.BuildID,
 			BuildSnapshot:   snapshot,
+			LocalPartitions: model.LocalPartitions(),
 		}
 		projected, err := appendModelProjections(projections, intent)
 		if err != nil {

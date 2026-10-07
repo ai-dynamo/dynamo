@@ -35,6 +35,18 @@ fn request(request_id: &str) -> pb::GenerateRequest {
 }
 
 #[tokio::test]
+async fn engine_state_watch_is_explicitly_unsupported() {
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let error = service
+        .watch_engine_state(Request::new(pb::WatchEngineStateRequest::default()))
+        .await
+        .err()
+        .expect("Mocker does not implement native engine-state watching");
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+    assert!(error.message().contains("WatchEngineState"));
+}
+
+#[tokio::test]
 async fn service_rejects_normalized_multi_rank_ais_args() {
     let mut args = engine_args();
     args.ais_perf_config = Some(json!({
@@ -125,6 +137,38 @@ async fn generate_rejects_invalid_requests() {
             .expect("missing rendezvous metadata should be rejected")
             .code(),
         tonic::Code::FailedPrecondition
+    );
+}
+
+#[tokio::test]
+async fn omitted_max_new_tokens_uses_native_default() {
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let mut omitted = request("omitted-max-new-tokens");
+    let sampling = omitted.sampling_params.as_mut().unwrap();
+    sampling.max_new_tokens = None;
+    sampling.ignore_eos = Some(true);
+    let responses = service
+        .generate(Request::new(omitted))
+        .await
+        .unwrap()
+        .into_inner()
+        .map(|response| response.unwrap())
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        responses
+            .iter()
+            .map(|response| response.output_ids.len())
+            .sum::<usize>(),
+        128
+    );
+    let terminal = responses.last().unwrap();
+    assert!(terminal.finished);
+    assert_eq!(terminal.meta_info["completion_tokens"], "128");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&terminal.meta_info["finish_reason"]).unwrap(),
+        json!({"type": "length", "length": 128})
     );
 }
 

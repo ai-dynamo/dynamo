@@ -255,6 +255,7 @@ impl Process {
             .env("DYN_SYSTEM_HOST", "127.0.0.1")
             .env("DYN_SYSTEM_PORT", "0")
             .env("DYN_HEALTH_CHECK_ENABLED", "false")
+            .env("DYN_LOGGING_JSONL", "1")
             .env(
                 "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS",
                 grace_secs.to_string(),

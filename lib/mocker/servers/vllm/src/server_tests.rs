@@ -52,15 +52,15 @@ fn request(id: &str) -> pb::GenerateRequest {
 fn lora_requests_are_rejected() {
     let mut request = request("lora");
     request.lora_name = "adapter".to_string();
-    let error = PreparedRequest::new(request, &MockerServerConfig::default()).unwrap_err();
+    let error = PreparedRequest::new(request, &MockerServerConfig::default(), 4, None).unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unimplemented);
 }
 
 #[test]
 fn preparation_is_deterministic() {
     let config = MockerServerConfig::default();
-    let first = PreparedRequest::new(request("stable"), &config).unwrap();
-    let second = PreparedRequest::new(request("stable"), &config).unwrap();
+    let first = PreparedRequest::new(request("stable"), &config, 4, None).unwrap();
+    let second = PreparedRequest::new(request("stable"), &config, 4, None).unwrap();
     assert_eq!(first.uuid, second.uuid);
     assert_eq!(first.output_token(0), second.output_token(0));
     assert_eq!(first.output_token(1), second.output_token(1));
@@ -74,7 +74,8 @@ fn preparation_is_deterministic() {
 fn oversized_generation_is_rejected_before_token_planning() {
     let mut oversized = request("too-many-tokens");
     oversized.stopping.as_mut().unwrap().max_new_tokens = MAX_NEW_TOKENS + 1;
-    let error = PreparedRequest::new(oversized, &MockerServerConfig::default()).unwrap_err();
+    let error =
+        PreparedRequest::new(oversized, &MockerServerConfig::default(), 4, None).unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
 }
 
@@ -85,22 +86,79 @@ fn minimum_tokens_must_not_exceed_the_effective_maximum() {
     let stopping = contradictory.stopping.as_mut().unwrap();
     stopping.max_new_tokens = 1;
     stopping.min_new_tokens = 2;
-    let error = PreparedRequest::new(contradictory, &config).unwrap_err();
+    let error = PreparedRequest::new(contradictory, &config, 4, None).unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
     let mut default_boundary = request("default-boundary");
     let stopping = default_boundary.stopping.as_mut().unwrap();
     stopping.max_new_tokens = 0;
     stopping.min_new_tokens = DEFAULT_MAX_NEW_TOKENS;
-    let prepared = PreparedRequest::new(default_boundary, &config).unwrap();
+    let prepared = PreparedRequest::new(default_boundary, &config, 4, None).unwrap();
     assert_eq!(prepared.max_output_tokens, DEFAULT_MAX_NEW_TOKENS as usize);
 
     let mut above_default = request("above-default");
     let stopping = above_default.stopping.as_mut().unwrap();
     stopping.max_new_tokens = 0;
     stopping.min_new_tokens = DEFAULT_MAX_NEW_TOKENS + 1;
-    let error = PreparedRequest::new(above_default, &config).unwrap_err();
+    let error = PreparedRequest::new(above_default, &config, 4, None).unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn context_limit_finishes_by_length_before_a_planned_stop() {
+    let config = MockerServerConfig::default();
+    let mut req = request("context-window");
+    req.prompt = Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+        ids: vec![1, 2, 3, 4],
+    }));
+    req.stopping.as_mut().unwrap().max_new_tokens = 10;
+    let baseline = PreparedRequest::new(req.clone(), &config, 4, None).unwrap();
+    let tokens: Vec<_> = (0..5)
+        .map(|position| baseline.output_token(position))
+        .collect();
+    assert!(!tokens[..4].contains(&tokens[4]));
+    req.stopping.as_mut().unwrap().stop_token_ids = vec![tokens[4]];
+
+    let prepared = PreparedRequest::new(req.clone(), &config, 4, None).unwrap();
+    let shortened = prepared.sequence_output(&tokens[..4], 4, true);
+    let finish = shortened.finish_info.unwrap();
+    assert_eq!(
+        finish.finish_reason,
+        pb::finish_info::FinishReason::Length as i32
+    );
+    assert!(finish.stop_reason.is_none());
+
+    let mut args = admitting_args();
+    args.max_model_len = Some(8);
+    let service = VllmMockerService::new(config, args).unwrap();
+    let mut stream =
+        pb::inference_server::Inference::generate_stream(&service, Request::new(req.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+    let mut emitted = Vec::new();
+    let mut finishes = Vec::new();
+    while let Some(response) = stream.next().await {
+        if let Some(output) = response.unwrap().outputs {
+            emitted.extend(output.token_ids);
+            finishes.extend(output.finish_info);
+        }
+    }
+    assert_eq!(emitted, tokens[..4]);
+    assert_eq!(finishes.len(), 1);
+    assert_eq!(finishes[0].num_output_tokens, 4);
+    assert_eq!(
+        finishes[0].finish_reason,
+        pb::finish_info::FinishReason::Length as i32
+    );
+    assert!(finishes[0].stop_reason.is_none());
+
+    req.stopping.as_mut().unwrap().min_new_tokens = 6;
+    let error = pb::inference_server::Inference::generate(&service, Request::new(req))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("effective max_new_tokens (4)"));
 }
 
 #[test]
@@ -109,7 +167,7 @@ fn role_validation_rejects_missing_ambiguous_or_malformed_handoffs() {
         mode: ServerMode::Prefill,
         ..Default::default()
     };
-    let error = PreparedRequest::new(request("missing"), &prefill_config).unwrap_err();
+    let error = PreparedRequest::new(request("missing"), &prefill_config, 4, None).unwrap_err();
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
     let mut ambiguous = request("ambiguous");
@@ -122,7 +180,7 @@ fn role_validation_rejects_missing_ambiguous_or_malformed_handoffs() {
         }),
         ..Default::default()
     });
-    let error = PreparedRequest::new(ambiguous, &prefill_config).unwrap_err();
+    let error = PreparedRequest::new(ambiguous, &prefill_config, 4, None).unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
     for field in DECODE_RENDEZVOUS_FIELDS {
@@ -136,7 +194,7 @@ fn role_validation_rejects_missing_ambiguous_or_malformed_handoffs() {
             }),
             ..Default::default()
         });
-        let error = PreparedRequest::new(contradictory, &prefill_config).unwrap_err();
+        let error = PreparedRequest::new(contradictory, &prefill_config, 4, None).unwrap_err();
         assert_eq!(error.code(), tonic::Code::InvalidArgument, "field: {field}");
     }
 
@@ -154,7 +212,7 @@ fn role_validation_rejects_missing_ambiguous_or_malformed_handoffs() {
         mode: ServerMode::Decode,
         ..Default::default()
     };
-    let error = PreparedRequest::new(malformed, &decode_config).unwrap_err();
+    let error = PreparedRequest::new(malformed, &decode_config, 4, None).unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
 }
 
@@ -162,7 +220,7 @@ fn role_validation_rejects_missing_ambiguous_or_malformed_handoffs() {
 fn text_prompts_fail_with_an_actionable_status() {
     let mut request = request("text");
     request.prompt = Some(pb::generate_request::Prompt::Text("hello".to_string()));
-    let error = PreparedRequest::new(request, &MockerServerConfig::default()).unwrap_err();
+    let error = PreparedRequest::new(request, &MockerServerConfig::default(), 4, None).unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unimplemented);
     assert!(error.message().contains("token_ids"));
 }
@@ -325,11 +383,54 @@ async fn concurrent_request_limit_rejects_a_stalled_stream() {
     drop(first);
 }
 
+#[tokio::test]
+async fn abort_finishes_the_stream_without_a_transport_error() {
+    let mut args = admitting_args();
+    args.speedup_ratio = 0.01;
+    let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
+    let mut input = request("aborted");
+    input.stopping.as_mut().unwrap().max_new_tokens = 100;
+    let mut stream =
+        pb::inference_server::Inference::generate_stream(&service, Request::new(input))
+            .await
+            .unwrap()
+            .into_inner();
+    assert!(stream.next().await.unwrap().unwrap().prompt_info.is_some());
+
+    pb::control_server::Control::abort(
+        &service,
+        Request::new(pb::AbortRequest {
+            request_ids: vec!["aborted".to_string()],
+        }),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut generated = 0;
+        let finish = loop {
+            let output = stream.next().await.unwrap().unwrap().outputs.unwrap();
+            generated += output.num_tokens;
+            if let Some(finish) = output.finish_info {
+                assert!(output.token_ids.is_empty());
+                break finish;
+            }
+        };
+        assert_eq!(
+            finish.finish_reason,
+            pb::finish_info::FinishReason::Aborted as i32
+        );
+        assert_eq!(finish.num_output_tokens, generated);
+        assert!(finish.kv_transfer_params.is_none());
+        assert!(stream.next().await.is_none());
+    })
+    .await
+    .unwrap();
+    assert_eq!(service.active_request_count(), 0);
+}
+
 #[test]
-fn decode_rejects_a_handoff_missing_the_opacity_sentinel() {
-    // A decode payload carrying every rendezvous field but missing the
-    // non-rendezvous sentinel emulates a sidecar that failed to forward the
-    // opaque handoff verbatim; the decode role must reject it.
+fn decode_rejects_incomplete_or_flat_handoffs() {
     let prefill_config = MockerServerConfig {
         mode: ServerMode::Prefill,
         ..Default::default()
@@ -341,25 +442,40 @@ fn decode_rejects_a_handoff_missing_the_opacity_sentinel() {
         }),
         ..Default::default()
     });
-    let prepared = PreparedRequest::new(prefill_request, &prefill_config).unwrap();
-    let mut handoff = prepared.handoff();
-    assert!(
-        handoff.fields.remove(HANDOFF_SENTINEL_FIELD).is_some(),
-        "prefill handoff should stamp the opacity sentinel"
-    );
-
-    let mut decode_request = request("dropped-sentinel");
-    decode_request.kv = Some(pb::KvCacheParameters {
-        kv_transfer_params: Some(handoff),
-        ..Default::default()
-    });
+    let prepared = PreparedRequest::new(prefill_request, &prefill_config, 4, None).unwrap();
     let decode_config = MockerServerConfig {
         mode: ServerMode::Decode,
         ..Default::default()
     };
-    let error = PreparedRequest::new(decode_request, &decode_config).unwrap_err();
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
-    assert!(error.message().contains(HANDOFF_SENTINEL_FIELD));
+    for field in [
+        HANDOFF_SENTINEL_FIELD,
+        "remote_request_id",
+        "remote_block_ids",
+    ] {
+        let mut handoff = prepared.handoff();
+        if field == "remote_block_ids" {
+            handoff.fields.insert(
+                field.to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::ListValue(
+                        prost_types::ListValue {
+                            values: vec![number_value(0.0)],
+                        },
+                    )),
+                },
+            );
+        } else {
+            assert!(handoff.fields.remove(field).is_some());
+        }
+        let mut decode_request = request("malformed-handoff");
+        decode_request.kv = Some(pb::KvCacheParameters {
+            kv_transfer_params: Some(handoff),
+            ..Default::default()
+        });
+        let error = PreparedRequest::new(decode_request, &decode_config, 4, None).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains(field), "{error}");
+    }
 }
 
 #[tokio::test]

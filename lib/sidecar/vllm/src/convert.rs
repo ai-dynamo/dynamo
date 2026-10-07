@@ -207,10 +207,10 @@ pub(crate) fn build_generate_request(
     if mode.is_encode()
         && media
             .iter()
-            .any(|item| item.modality() != pb::Modality::Image)
+            .any(|item| !matches!(item.modality(), pb::Modality::Image | pb::Modality::Video))
     {
         return Err(client::invalid_argument(
-            "encode requests support image media only",
+            "encode requests support image and video media only",
         ));
     }
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
@@ -534,6 +534,17 @@ fn consume_preprocessed_mm_routing_hashes(
     }
     Ok(Some(hashes))
 }
+
+/// The frontend adds these for vLLM's structured-output reasoning gate, which
+/// the gRPC proto cannot carry. Drop them only when vLLM runs no reasoning
+/// parser, so nothing reads them.
+pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
+        extra.remove("reasoning_parser_kwargs");
+        extra.remove("reasoning_ended");
+    }
+}
+
 fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
     cache_namespace: Option<&str>,
@@ -1192,17 +1203,6 @@ fn validate_request(
     if mode.is_encode() && !has_media {
         return Err(client::invalid_argument(
             "encode requests require multimodal media",
-        ));
-    }
-    if mode.is_encode()
-        && request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .iter()
-                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
-        })
-    {
-        return Err(client::invalid_argument(
-            "encode requests support image media only",
         ));
     }
     if mode.is_encode() && request.encoder_result.is_some() {
