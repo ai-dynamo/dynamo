@@ -874,6 +874,10 @@ shared:
   owners:
   - planner
   - operator
+- glob: components/src/dynamo/aisimulate/output/dgdr_run/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
