@@ -3,11 +3,13 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# GLM-5.2 Benchmark Recipe
+# GLM-5.3 / GLM-5.2 Benchmark Recipe
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers all four GLM-5.2 DGDs. Set `ENDPOINT` for the
-target DGD and `SYNTHESIS_MAX_ISL` for its context limit.
+[`perf.yaml`](perf.yaml) — covers all four DGDs in this recipe. The DGDs serve
+`zai-org/GLM-5.3` by default (the `glm52-*` Kubernetes names come from the
+recipe directory and are literal). Set `ENDPOINT` for the target DGD and
+`SYNTHESIS_MAX_ISL` for its context limit.
 
 The Job waits for the target model on the DGD frontend, runs a short warmup,
 replays the configured trace at one `CONCURRENCY` value, and writes raw
@@ -145,7 +147,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
 | `SYNTHESIS_MAX_ISL` | `500000` | Use `250000` for H200 recipes |
 | `CONCURRENCY` | `64` | Single value; reset server state between values |
-| `TARGET_MODEL` | `zai-org/GLM-5.3` | Must match `--served-model-name` |
+| `TARGET_MODEL` | `zai-org/GLM-5.3` | Must match `--served-model-name` (`zai-org/GLM-5.2` when serving GLM-5.2) |
 
 ## Artifacts
 
@@ -154,7 +156,7 @@ Results are written to:
 ```text
 /model-cache/perf/<epoch>_<job-name>/
   warmup/
-  GLM-5.2_trace_c<concurrency>_<timestamp>/
+  GLM-5.3_trace_c<concurrency>_<timestamp>/   # basename of TARGET_MODEL
     profile_export_aiperf.json
     inputs.json
     ...
