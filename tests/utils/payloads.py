@@ -30,6 +30,7 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.engine_metrics import EngineMetrics
 from tests.utils.http_checks import check_health_generate as check_health_generate
 from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
@@ -90,6 +91,9 @@ class BasePayload:
         """Return the request body for one repeat_count iteration."""
         return self.body
 
+    def before_request(self) -> None:
+        """Prepare observations immediately before each HTTP request attempt."""
+
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
         raise NotImplementedError("Subclasses must implement response_handler()")
@@ -145,6 +149,75 @@ class HttpErrorPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return response.text
+
+
+@dataclass
+class HttpCancellationPayload(BasePayload):
+    """Disconnect an active chat stream and require early engine cleanup.
+
+    Follow this with a normal chat payload to verify recovery on the same
+    deployment. The supplied checker owns engine-specific metric semantics.
+    """
+
+    metrics: EngineMetrics = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+    timeout: int = 30
+    _before: float | None = field(default=None, init=False, repr=False)
+    _completion_progress: float = field(default=0, init=False, repr=False)
+
+    def before_request(self) -> None:
+        if not self.http_stream or self.body.get("stream") is not True:
+            raise ValueError("Cancellation requires a streaming request")
+        if self.body.get("ignore_eos") is not True or self.body.get("n", 1) != 1:
+            raise ValueError("Cancellation requires ignore_eos=True and n=1")
+        max_tokens = self.body.get("max_tokens")
+        if type(max_tokens) is not int or max_tokens <= 1:
+            raise ValueError("Cancellation requires max_tokens > 1")
+        if self.max_attempts != 1:
+            raise ValueError("Cancellation checks must not retry failed assertions")
+        self._completion_progress = self.metrics.completion_progress(max_tokens)
+        self.metrics.wait_for_scheduler()
+        self._before = self.metrics.progress()
+
+    def response_handler(self, response: requests.Response) -> str:
+        try:
+            if self._before is None:
+                raise RuntimeError("before_request must run before cancellation")
+            response.raise_for_status()
+            deadline = time.monotonic() + self.timeout
+            content = ""
+            # Read only the first generated fragment, without buffering a full
+            # response. Closing an unread requests stream closes its connection.
+            for line in response.iter_lines(chunk_size=1):
+                assert time.monotonic() < deadline, "No content before cancellation"
+                if not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                assert data != b"[DONE]", "Generation finished before cancellation"
+                chunk = json.loads(data)
+                assert "error" not in chunk, chunk
+                for choice in chunk.get("choices", []):
+                    assert choice.get("finish_reason") is None, (
+                        "Generation finished before cancellation",
+                        choice,
+                    )
+                    delta = choice.get("delta") or {}
+                    content = (
+                        delta.get("content") or delta.get("reasoning_content") or ""
+                    )
+                    if content:
+                        break
+                if content:
+                    break
+            assert content, "Stream ended without generated content"
+            self.metrics.wait_for_scheduler(active=True)
+        finally:
+            response.close()
+        self.metrics.assert_cancelled(
+            before=self._before, completion_progress=self._completion_progress
+        )
+        return content
 
 
 @dataclass

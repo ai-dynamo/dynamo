@@ -19,10 +19,11 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.serve.sidecar_checks import (
-    assert_cancellation_and_recovery,
     assert_kv_transfer,
+    assert_native_cancellation_and_recovery,
 )
 from tests.utils.constants import DynamoPortRange
+from tests.utils.engine_metrics import EngineMetrics, VllmMetricsChecker
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import (
@@ -34,6 +35,8 @@ from tests.utils.payloads import (
     ChatPayload,
     DisaggregatedChatPayload,
     GuidedDecodingChatPayload,
+    HttpCancellationPayload,
+    StreamingChatPayload,
 )
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
@@ -182,6 +185,32 @@ def _compatibility_payloads():
         needs_token_ids=True,
     )
     return [chat_payload_default(), logprobs, unicode_logprobs, structured]
+
+
+def _http_cancellation_payloads(metrics: EngineMetrics):
+    body = {
+        "messages": [{"role": "user", "content": "Count from one to a thousand."}],
+        "max_tokens": 2048,
+        "ignore_eos": True,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
+    }
+    return [
+        HttpCancellationPayload(
+            body=body,
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
+        ),
+        StreamingChatPayload(
+            body={**body, "max_tokens": 4, "stream_options": {"include_usage": True}},
+            expected_response=[],
+            expected_log=[],
+            expected_finish_reason="length",
+            expected_completion_tokens=4,
+        ),
+    ]
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -415,7 +444,12 @@ def test_serve_deployment(
                     backend=backend,
                     payload=payload,
                     prefill_http_port=int(engine_env["VLLM_PREFILL_HTTP_PORT"]),
-                    decode_http_port=int(engine_env["VLLM_DECODE_HTTP_PORT"]),
+                    prefill_metrics=VllmMetricsChecker(
+                        f"http://127.0.0.1:{engine_env['VLLM_PREFILL_HTTP_PORT']}/metrics"
+                    ),
+                    decode_metrics=VllmMetricsChecker(
+                        f"http://127.0.0.1:{engine_env['VLLM_DECODE_HTTP_PORT']}/metrics"
+                    ),
                     probe_path=probe_path,
                 )
 
@@ -432,6 +466,14 @@ def test_serve_deployment(
         monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
         monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
         with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:
+            metrics = VllmMetricsChecker(f"http://127.0.0.1:{engine_ports[0]}/metrics")
+            config = dataclasses.replace(
+                config,
+                request_payloads=[
+                    *config.request_payloads,
+                    *_http_cancellation_payloads(metrics),
+                ],
+            )
             run_serve_deployment(
                 config,
                 request,
@@ -441,12 +483,10 @@ def test_serve_deployment(
                     "VLLM_RS_HTTP_PORT": str(engine_ports[0]),
                     f"{backend.upper()}_GRPC_PORT": str(engine_ports[1]),
                 },
-                post_validation=lambda: assert_cancellation_and_recovery(
-                    backend=backend,
+                post_validation=lambda: assert_native_cancellation_and_recovery(
+                    metrics=metrics,
                     model=config.model,
                     namespace=namespace,
-                    frontend_port=config.frontend_port,
-                    engine_http_port=engine_ports[0],
                     discovery_backend=discovery_backend,
                 ),
             )
