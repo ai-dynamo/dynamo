@@ -17,6 +17,8 @@ import (
 
 const (
 	gbuildManifestV2CapnpFile             = "manifest.v2.capnp.bin"
+	chipArchXT                            = "polaris"
+	chipArchHX                            = "polarisB0"
 	runtimeIOProtocolHost          uint16 = 0
 	runtimeIOProtocolMultiEndpoint uint16 = 1
 	runtimeIOMaxMode               uint16 = 2
@@ -277,19 +279,38 @@ func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildParti
 		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d path: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
 	}
 
-	// Both families require a safe topology string, even when HX treats it as opaque.
+	// Topology names are opaque but must fit one runtime configuration line.
 	subject := fmt.Sprintf("%s LPU partition %d", gbuildManifestV2CapnpFile, ref.PartitionId())
+	if strings.TrimSpace(topology) == "" {
+		return BuildPartition{}, false, fmt.Errorf("%s topology must not be empty", subject)
+	}
 	if strings.ContainsAny(topology, "\x00\r\n") {
 		return BuildPartition{}, false, fmt.Errorf("%s topology must not contain NUL bytes or line breaks: %q", subject, topology)
 	}
 
-	// Metadata selects HX; only the 16-chip, 16-device HX shape can omit it.
+	programs, err := detail.Reserved4()
+	if err != nil || programs.List().Len() == 0 {
+		return BuildPartition{}, false, fmt.Errorf("%s programs are missing or invalid", subject)
+	}
+
+	chips, err := programs.List().Struct(0).Ptr(1)
+	if err != nil || chips.List().Len() == 0 {
+		return BuildPartition{}, false, fmt.Errorf("%s program chips are missing or invalid", subject)
+	}
+	architecture, err := chips.List().Struct(0).Ptr(1)
+	if err != nil {
+		return BuildPartition{}, false, fmt.Errorf("%s reading chip architecture: %w", subject, err)
+	}
+
 	var partition BuildPartition
 	var compatible bool
-	if detail.HasTopologyMetadata() || (detail.NumChips() == 16 && detail.DevicesPerNode() == 16) {
+	switch architecture.Text() {
+	case chipArchHX:
 		partition, compatible, err = buildHXPartition(subject, topology, detail)
-	} else {
+	case chipArchXT:
 		partition, err = buildXTPartition(subject, topology, detail)
+	default:
+		return BuildPartition{}, false, fmt.Errorf("%s unsupported chip architecture %q", subject, architecture.Text())
 	}
 	if err != nil {
 		return BuildPartition{}, false, err
