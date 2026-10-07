@@ -35,6 +35,7 @@ from dynamo.common.http import HttpConfigurationError, HttpStatusError, HttpTime
 from dynamo.common.http.aiohttp_client import AiohttpClient
 from dynamo.common.http.base import HttpClient
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.trtllm import multimodal_processor as mmp
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 
@@ -161,9 +162,7 @@ async def test_unsupported_audio_returns_client_error_before_loading(
     )
     processor._load_audio = AsyncMock()
 
-    with pytest.raises(
-        HttpStatusError, match="does not support audio input"
-    ) as excinfo:
+    with pytest.raises(InvalidArgument, match="does not support audio input"):
         await processor.process_openai_request(
             {
                 "extra_args": {"formatted_prompt": "Transcribe this"},
@@ -175,7 +174,6 @@ async def test_unsupported_audio_returns_client_error_before_loading(
             ep_disaggregated_params=None,
         )
 
-    assert excinfo.value.status == 400
     processor._load_audio.assert_not_awaited()
 
 

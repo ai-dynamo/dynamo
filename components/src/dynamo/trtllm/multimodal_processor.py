@@ -55,6 +55,7 @@ from dynamo.common.multimodal.media_source import decode_data_uri, describe_medi
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.token_ids import token_ids_to_list
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -471,10 +472,8 @@ class MultimodalRequestProcessor:
         if audio_items and not MULTIMODAL_PLACEHOLDER_REGISTRY.is_valid(
             self.model_type, "audio"
         ):
-            raise HttpStatusError(
-                400,
-                "This model does not support audio input in TensorRT-LLM",
-                "audio_url",
+            raise InvalidArgument(
+                "This model does not support audio input in TensorRT-LLM"
             )
 
         # EPD Flow Case 1: Encoder has fully processed the prompt
