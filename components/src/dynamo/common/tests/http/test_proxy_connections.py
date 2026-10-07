@@ -12,14 +12,15 @@ not run here, so the connect-time check is the only one in play, and no real
 DNS lookup happens.
 
 A fetch without a URL policy follows redirects itself, one hop at a time. The
-tests at the end also pin its time budget, its limit of 10 redirects, and the
-redirect targets that it takes and refuses, which are the ones aiohttp took
-and refused.
+tests at the end also pin its time budget, its limit of 10 redirects, the
+redirect targets that it takes and refuses, and the URL credentials that it
+keeps or drops on a redirect. In each case it does what aiohttp did.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import socket
 
@@ -48,6 +49,9 @@ _PROXY_HOST = "proxy.test"
 _BLOCKED = "resolves only to blocked IPs"
 _BODY = b"stub-ok"
 _STRICT = UrlValidationPolicy(allow_http=True, allow_private_ips=False)
+# The password needs escaping in a URL: "p%40ss%25" is "p@ss%".
+_USERINFO = "user:p%40ss%25"
+_BASIC_AUTH = b"Basic " + base64.b64encode(b"user:p@ss%")
 
 
 class _LoopbackInner:
@@ -71,7 +75,8 @@ class _LoopbackInner:
 
 
 class _LoopbackServer:
-    """Records the first line of each connection, and answers a GET with 200.
+    """Records the first line and the Authorization header of each connection,
+    and answers a GET with 200.
 
     With ``redirect``, a request line that starts with its prefix gets a 302
     to its ``Location`` template, where ``{port}`` is this server's port.
@@ -85,6 +90,7 @@ class _LoopbackServer:
         redirect_header: bytes = b"Location",
     ) -> None:
         self.first_lines: list[bytes] = []
+        self.authorizations: list[bytes | None] = []
         self._redirect = redirect
         self._delay = delay
         self._redirect_header = redirect_header
@@ -95,8 +101,18 @@ class _LoopbackServer:
                 data = await reader.read(65536)
             except ConnectionError:
                 data = b""
-            line = data.split(b"\r\n", 1)[0]
+            line, *headers = data.split(b"\r\n\r\n", 1)[0].split(b"\r\n")
             self.first_lines.append(line)
+            self.authorizations.append(
+                next(
+                    (
+                        h.split(b":", 1)[1].strip()
+                        for h in headers
+                        if h.lower().startswith(b"authorization:")
+                    ),
+                    None,
+                )
+            )
             await asyncio.sleep(self._delay)
             if self._redirect and line.startswith(self._redirect[0]):
                 location = self._redirect[1].format(port=self.port).encode()
@@ -361,3 +377,31 @@ async def test_a_url_that_does_not_parse_is_a_connection_error(
     finally:
         await client.close()
     assert isinstance(excinfo.value.__cause__, aiohttp.InvalidUrlClientError)
+
+
+async def test_a_same_origin_redirect_keeps_the_url_credentials() -> None:
+    async with _LoopbackServer((b"GET /start", "/next")) as server:
+        client = AiohttpClient()
+        try:
+            await client.fetch_bytes(
+                f"http://{_USERINFO}@127.0.0.1:{server.port}/start", 5.0
+            )
+        finally:
+            await client.close()
+    assert server.authorizations == [_BASIC_AUTH, _BASIC_AUTH]
+
+
+async def test_a_redirect_to_another_origin_drops_the_url_credentials() -> None:
+    """Another port is another origin."""
+    async with _LoopbackServer() as other:
+        redirect = (b"GET /start", f"http://127.0.0.1:{other.port}/next")
+        async with _LoopbackServer(redirect) as server:
+            client = AiohttpClient()
+            try:
+                await client.fetch_bytes(
+                    f"http://{_USERINFO}@127.0.0.1:{server.port}/start", 5.0
+                )
+            finally:
+                await client.close()
+    assert server.authorizations == [_BASIC_AUTH]
+    assert other.authorizations == [None]

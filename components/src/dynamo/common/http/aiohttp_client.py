@@ -54,12 +54,14 @@ _REDIRECT_SCHEMES = frozenset({"http", "https", ""})
 DYN_MM_TRUST_EGRESS_PROXY = "DYN_MM_TRUST_EGRESS_PROXY"
 
 
-def _redirect_target(base: URL, location: str) -> str:
+def _redirect_target(base: URL, location: str, previous: str) -> str:
     """The next hop of a redirect without a URL policy, checked like aiohttp.
 
     aiohttp followed these redirects before the client did. A target that it
     refused raises the same client error here, so the fetch reports it as
-    HttpConnectionError, as before.
+    HttpConnectionError, as before. Like aiohttp, a redirect to the same origin
+    keeps the credentials of the previous URL, and a redirect to another origin
+    drops them.
     """
     try:
         target = URL(location)
@@ -72,11 +74,16 @@ def _redirect_target(base: URL, location: str) -> str:
         raise aiohttp.NonHttpUrlRedirectClientError(location)
     target = base.join(target)
     try:
-        target.origin()
+        origin = target.origin()
     except ValueError as e:
         raise aiohttp.InvalidUrlRedirectClientError(
             target, "Invalid redirect URL origin"
         ) from e
+    # aiohttp strips the credentials from ``base``, the URL of the response,
+    # so take them from the URL that the previous hop requested.
+    prior = URL(previous)
+    if prior.user is not None and target.user is None and origin == prior.origin():
+        target = target.with_user(prior.user).with_password(prior.password)
     return str(target)
 
 
@@ -277,7 +284,7 @@ class AiohttpClient(HttpClient):
                             raise aiohttp.TooManyRedirects(
                                 response.request_info, (response,)
                             )
-                        current = _redirect_target(response.url, location)
+                        current = _redirect_target(response.url, location, current)
                         continue
                     response.raise_for_status()
                     return await collect_capped(
