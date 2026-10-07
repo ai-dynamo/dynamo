@@ -82,7 +82,6 @@ spec:
           - --moe-backend
           - flashinfer_cutlass
           - --enable-ep-weight-filter
-          - --numa-bind
           - --language-model-only
           - --reasoning-parser
           - deepseek_v41
@@ -181,7 +180,6 @@ spec:
           - --moe-backend
           - flashinfer_cutlass
           - --enable-ep-weight-filter
-          - --numa-bind
           - --language-model-only
           - --reasoning-parser
           - deepseek_v41

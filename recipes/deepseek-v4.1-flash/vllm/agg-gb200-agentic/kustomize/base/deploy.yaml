@@ -72,7 +72,6 @@ spec:
           - --enable-eplb
           - --eplb-config
           - '{"communicator":"torch_gloo"}'
-          - --numa-bind
           - --language-model-only
           - --reasoning-parser
           - deepseek_v41
