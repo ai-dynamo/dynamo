@@ -1672,6 +1672,8 @@ class _FpmPublisherThread:
         self._ctx = zmq.Context.instance()
         self._pub = self._ctx.socket(zmq.PUB)
         self._pub.bind(endpoint)
+        # Read socket metadata before the publisher thread takes ownership.
+        self.endpoint = self._pub.getsockopt(zmq.LAST_ENDPOINT).decode()
 
         self._running = True
         self._thread = threading.Thread(

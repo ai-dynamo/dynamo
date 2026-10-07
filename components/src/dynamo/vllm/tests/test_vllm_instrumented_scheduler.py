@@ -6993,17 +6993,15 @@ def test_fpm_utility_via_vllm_dispatch_retargets_active_and_heartbeat_ids():
     ctx = zmq.Context.instance()
     # The publisher binds an OS-assigned port and keeps it; probing a free port
     # and releasing it before the publisher binds lets another process take it.
-    # It starts paused so its thread does not use the socket while this thread
-    # reads LAST_ENDPOINT; ZMQ sockets are not thread-safe.
+    # Keep publishing paused until the subscriber is connected.
     publisher = instrumented_scheduler_module._FpmPublisherThread(
         "tcp://127.0.0.1:*", worker_id="", dp_rank=0, start_paused=True
     )
     sub = None
     try:
-        endpoint = publisher._pub.getsockopt(zmq.LAST_ENDPOINT).decode()
         sub = ctx.socket(zmq.SUB)
         sub.setsockopt(zmq.SUBSCRIBE, b"")
-        sub.connect(endpoint)
+        sub.connect(publisher.endpoint)
         publisher.resume()
 
         scheduler = object.__new__(InstrumentedScheduler)
