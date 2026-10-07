@@ -11,8 +11,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +35,7 @@ func ParseGroveUpdateStrategy(value string) (grovev1alpha1.UpdateStrategyType, e
 }
 
 // ResolveGroveUpdateStrategy selects the strategy for a non-nil DGD without mutating inputs.
+// Without an annotation, Grove defaults to RollingRecreate. Availability fields do not select a strategy.
 // existingPCS may be nil on creation. All strategy transitions wait for an active rollout.
 func ResolveGroveUpdateStrategy(dgd *v1beta1.DynamoGraphDeployment, existingPCS *grovev1alpha1.PodCliqueSet) (*grovev1alpha1.UpdateStrategyType, error) {
 	// Resolve explicit intent first so invalid annotations are never silently ignored.
@@ -47,9 +46,6 @@ func ResolveGroveUpdateStrategy(dgd *v1beta1.DynamoGraphDeployment, existingPCS 
 			return nil, err
 		}
 		desired = ptr.To(strategy)
-	} else if !provideroverride.HasLegacyGroveMinAvailable(dgd) &&
-		(provideroverride.HasGroveMinAvailableOverrides(dgd) || compatibility.GroveCoherentUpdates.Enabled(dgd.Annotations)) {
-		desired = ptr.To(grovev1alpha1.CoherentStrategy)
 	}
 
 	// Retain the strategy that initialized Grove's progress until that update finishes.

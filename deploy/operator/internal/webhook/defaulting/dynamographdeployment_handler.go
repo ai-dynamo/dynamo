@@ -99,9 +99,9 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil)
 	}
 
-	// Legacy fields are durable compatibility markers; new-form intent opts an older DGD in.
+	// Preserve legacy minimum defaults; native form defaulting does not select a rollout strategy.
 	legacyMinimum := provideroverride.HasLegacyGroveMinAvailable(dgd)
-	providerMinimum := !legacyMinimum && (provideroverride.HasGroveMinAvailableOverrides(dgd) || compatibility.GroveCoherentUpdates.Enabled(dgd.Annotations))
+	providerMinimum := !legacyMinimum && (provideroverride.HasGroveMinAvailableOverrides(dgd) || compatibility.GroveNativeMinAvailable.Enabled(dgd.Annotations))
 
 	// Apply component defaults on every operation, including newly added components.
 	for i := range dgd.Spec.Components {

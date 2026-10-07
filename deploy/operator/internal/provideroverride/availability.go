@@ -20,7 +20,7 @@ func HasLegacyGroveMinAvailable(dgd *v1beta1.DynamoGraphDeployment) bool {
 	return false
 }
 
-// HasGroveMinAvailableOverrides reports explicit availability opt-in in a non-nil DGD.
+// HasGroveMinAvailableOverrides reports native minimum availability in a non-nil DGD.
 func HasGroveMinAvailableOverrides(dgd *v1beta1.DynamoGraphDeployment) bool {
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]

@@ -59,8 +59,8 @@ func TestGenerateGrovePodCliqueSet_CoherentStrategyPreservesTemplates(t *testing
 			oldHash, err := ComputeDGDWorkersSpecHash(dgd)
 			require.NoError(t, err)
 
-			t.Log("Adopt the coherent default without changing the workload or worker generation")
-			delete(dgd.Annotations, commonconsts.KubeAnnotationGroveUpdateStrategy)
+			t.Log("Explicitly opt into Coherent without changing the workload or worker generation")
+			dgd.Annotations[commonconsts.KubeAnnotationGroveUpdateStrategy] = "Coherent"
 			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, &mockSecretsRetriever{}, nil, nil, workerHashSuffix, nil)
 			require.NoError(t, err)
 			require.NotNil(t, newPCS.Spec.UpdateStrategy)
@@ -107,15 +107,12 @@ func TestGroveUpdateStrategyPolicy(t *testing.T) {
 						}
 						original := dgd.DeepCopy()
 
-						t.Log("Both ordinary and LPX envelopes follow origin version rather than topology")
+						t.Log("Only the strategy annotation selects Coherent for ordinary and LPX envelopes")
 						ordinary, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
 						require.NoError(t, err)
 						lpx, err := RenderLPXPodCliqueSet(t.Context(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, "lpx-graph", nil)
 						require.NoError(t, err)
 						want := annotation
-						if want == "" && form != "legacy" && (form == nativeMinimumForm || origin == "1.6.0") {
-							want = string(grovev1alpha1.CoherentStrategy)
-						}
 						if want == "" {
 							require.Nil(t, ordinary.Spec.UpdateStrategy)
 						} else {
@@ -169,9 +166,10 @@ func TestGroveUpdateStrategyTransitionsWait(t *testing.T) {
 					require.NoError(t, err)
 					want := annotation
 					if want == "" {
-						want = string(grovev1alpha1.CoherentStrategy)
+						require.Nil(t, desired.Spec.UpdateStrategy)
+					} else {
+						require.Equal(t, grovev1alpha1.UpdateStrategyType(want), desired.Spec.UpdateStrategy.Type)
 					}
-					require.Equal(t, grovev1alpha1.UpdateStrategyType(want), desired.Spec.UpdateStrategy.Type)
 					require.Equal(t, existing.Spec.Template, desired.Spec.Template)
 				})
 			}
@@ -270,7 +268,7 @@ func TestGroveMinAvailableMigrationPreservesWorkload(t *testing.T) {
 			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
 			require.NoError(t, err)
 			require.Equal(t, oldPCS.Spec.Template, newPCS.Spec.Template)
-			require.Equal(t, grovev1alpha1.CoherentStrategy, newPCS.Spec.UpdateStrategy.Type)
+			require.Nil(t, newPCS.Spec.UpdateStrategy)
 
 			t.Log("Compose the native fragment without erasing generated container templates")
 			composed, err := provideroverride.ComposeGroveOverrides(dgd, newPCS)

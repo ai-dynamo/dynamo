@@ -2419,12 +2419,6 @@ func TestLPXStartupScalesMinimumSeedBeforePublishingRequests(t *testing.T) {
 				component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: "grove.io/v1alpha1", Target: "PodCliqueScalingGroupConfig", Value: apiextensionsv1.JSON{Raw: []byte(`{"minAvailable":2}`)}}
 			}
 			r := newLPXTestReconciler(t, registry, child, dgd)
-			if tc.native {
-				t.Log("Expose the pinned Grove schema required by native Coherent opt-in")
-				crd := &apiextensionsv1.CustomResourceDefinition{}
-				require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
-				require.NoError(t, r.Create(t.Context(), crd))
-			}
 			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
 			result, err := r.Reconcile(t.Context(), key)
 			require.NoError(t, err)
@@ -2433,6 +2427,7 @@ func TestLPXStartupScalesMinimumSeedBeforePublishingRequests(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, pcs)
 			require.True(t, metav1.IsControlledBy(pcs, child))
+			require.Nil(t, pcs.Spec.UpdateStrategy, "minimum availability does not opt into Coherent")
 			seed := ptr.Deref(tc.minimum, 1)
 			groupTemplate := pcs.Spec.Template.PodCliqueScalingGroupConfigs[0]
 			require.Equal(t, seed, *groupTemplate.Replicas)

@@ -560,7 +560,7 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 			wantMinAvailable: map[string]*int32{"P": ptr.To(int32(1)), "D": ptr.To(int32(1))},
 		},
 		{
-			name:    "native minimum opts an older graph in without recreating legacy defaults",
+			name:    "native minimum selects the native API form without recreating legacy defaults",
 			version: "1.6.0", op: admissionv1.Update, groveEnabled: true,
 			annotations:      map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0"},
 			components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "P", Replicas: ptr.To(int32(4)), ProviderOverride: providerOverrideForDefaulting(`{"spec":{"minAvailable":2}}`)}, {ComponentName: "D"}},

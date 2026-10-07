@@ -164,8 +164,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Deprecated: use providerOverride.value.spec.minAvailable for a standalone
 	// Grove PodClique, or providerOverride.value.minAvailable for a scaling group.
 	// The effective minimum is immutable after creation; moving the same value
-	// to the new form is supported and opts the entire Grove PCS into Coherent.
-	// Legacy fields retain RollingRecreate unless a strategy annotation overrides it.
+	// to the new form is supported without changing the update strategy.
+	// Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.
 	// New Grove deployments default the provider-native form to 1. Scale-to-zero
 	// preserves the minimum until replicas becomes positive again.
 	//

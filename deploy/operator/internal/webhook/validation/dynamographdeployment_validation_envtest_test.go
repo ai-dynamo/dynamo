@@ -944,6 +944,40 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].roles[0].providerOverride.value.spec.minAvailable: Forbidden: minAvailable (1) belongs to the owning component`},
 		},
 
+		// Only explicit Coherent intent emits warnings about full component disruption.
+		{
+			name:         "explicit Coherent native minimum can take the entire worker down",
+			deployment:   minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=2, minAvailable=2, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name:         "explicit Coherent default minimum warns for a single worker",
+			deployment:   minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:       "native minimum alone does not warn or enable Coherent",
+			deployment: minimumAvailabilityDGDForAdmission(2, 2, ""),
+		},
+		{
+			name:       "Coherent partial minimum leaves serving capacity",
+			deployment: minimumAvailabilityDGDForAdmission(1, 4, "Coherent"),
+		},
+		{
+			name:       "Coherent scaled-to-zero component does not warn",
+			deployment: minimumAvailabilityDGDForAdmission(2, 0, "Coherent"),
+		},
+		{
+			name:          "Coherent warning is not repeated on an unrelated label edit",
+			oldDeployment: minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
+			deployment:    dgdAdmissionWithLabel(t, minimumAvailabilityDGDForAdmission(2, 2, "Coherent")),
+		},
+		{
+			name:          "removing the Coherent annotation restores RollingRecreate without warning",
+			oldDeployment: minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
+			deployment:    minimumAvailabilityDGDForAdmission(2, 2, ""),
+		},
+
 		// Replica availability rules.
 		{
 			name: "v1beta1 replicas below minAvailable are rejected by CEL",
@@ -2748,7 +2782,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "typo": must be "mp" or "ray"`},
 		},
 		{
-			name: "Grove update strategy annotation accepts Coherent",
+			name:         "Grove update strategy annotation accepts Coherent",
+			wantWarnings: []string{`spec.components[0] ("frontend"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
 			}),
@@ -4109,4 +4144,15 @@ func nativeMinimumDGDForAdmission(minimum int32) *nvidiacomv1beta1.DynamoGraphDe
 		worker.Replicas = k8sptr.To(int32(4))
 		worker.ProviderOverride = groveProviderOverride("", fmt.Sprintf(`{"spec":{"minAvailable":%d}}`, minimum))
 	})
+}
+
+func minimumAvailabilityDGDForAdmission(minimum, replicas int32, strategy string) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := nativeMinimumDGDForAdmission(minimum)
+	dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
+	dgd.Spec.Components[0].Replicas = k8sptr.To(int32(2))
+	betaWorkerComponent(dgd).Replicas = k8sptr.To(replicas)
+	if strategy != "" {
+		dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = strategy
+	}
+	return dgd
 }

@@ -54,7 +54,7 @@ type ProviderOverride struct {
 	// targets accept `topologyConstraint`. Component contexts also accept
 	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
 	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
-	// deprecated component field preserves its value and opts the PCS into Coherent.
+	// deprecated component field preserves its value and leaves the update strategy unchanged.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object

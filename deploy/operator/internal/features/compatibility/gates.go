@@ -23,10 +23,10 @@ import semver "github.com/Masterminds/semver/v3"
 // first reconciled / created the DGD resource).
 
 var (
-	// GroveCoherentUpdates enables native availability defaults for newly created Grove workloads.
-	// Legacy minima preserve RollingRecreate; older graphs can explicitly opt in through overrides.
-	GroveCoherentUpdates = Gate{
-		Name:             "GroveCoherentUpdates",
+	// GroveNativeMinAvailable enables native availability defaults for newly created Grove workloads.
+	// Existing graphs retain their persisted minimum form. This gate does not select a rollout strategy.
+	GroveNativeMinAvailable = Gate{
+		Name:             "GroveNativeMinAvailable",
 		MinOriginVersion: *semver.MustParse("1.6.0"),
 	}
 

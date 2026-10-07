@@ -721,9 +721,9 @@ This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations ab
 
 ## Before updating a Grove deployment
 
-New Grove DGDs created by operator 1.6.0 or later default to Coherent with provider-native `minAvailable: 1`, unless the manifest uses the deprecated component `minAvailable` or an explicit strategy annotation. Existing DGDs retain their persisted legacy minima and RollingRecreate default. Moving all legacy minima to provider overrides explicitly opts in; preserve their effective values.
+Grove uses RollingRecreate by default for every DGD. To opt into Coherent, set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent`. New Grove DGDs created by operator 1.6.0 or later default provider-native `minAvailable` to `1` unless the manifest uses a deprecated component minimum. Existing DGDs retain their persisted legacy minima. Moving those minima to provider overrides preserves their effective values and does not select Coherent.
 
-Before changing worker images or pod templates:
+For deployments that explicitly select Coherent, review the [known recovery limitation](https://github.com/ai-dynamo/grove/issues/873) and complete these checks before changing worker images or pod templates:
 
 1. Review each component's effective `minAvailable` and whether it uses the deprecated field or a provider override. It defines the minimum viable replacement unit under Coherent. For new deployments, start at `1` unless the application requires a larger unit; the field is immutable after creation.
 2. Check how much serving capacity remains while that unit is unavailable. With eight replicas and `minAvailable: 4`, the default disruption budget allows four unavailable replicas. A changed component with only one replica can become completely unavailable.

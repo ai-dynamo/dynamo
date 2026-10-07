@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -145,6 +146,8 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	providerOverridesSupported        bool
 	workloadProvider                  string
 	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	groveUpdateStrategy               grovev1alpha1.UpdateStrategyType
+	groveStrategyChanged              bool
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -208,6 +211,23 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				minimumPath = fldPath.Child("providerOverride", "value", "spec", "minAvailable")
 			}
 			allErrs = append(allErrs, field.Invalid(minimumPath, minimum, "minAvailable must be less than or equal to replicas unless replicas is 0"))
+		}
+	}
+
+	// Coherent can consume the whole component even with the conservative default of one.
+	if options.grovePathway && options.groveUpdateStrategy == grovev1alpha1.CoherentStrategy && len(allErrs) == 0 && !(spec.IsLPX() && (spec.Replicas == nil || spec.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil)) {
+		replicas := k8sptr.Deref(spec.Replicas, 1)
+		minimum := provideroverride.EffectiveGroveMinAvailable(spec)
+		budget := minimum
+		old := options.oldComponent
+		relevantChange := old == nil || options.groveStrategyChanged
+		if old != nil {
+			oldBudget := provideroverride.EffectiveGroveMinAvailable(old)
+			relevantChange = relevantChange || !k8sptr.Equal(old.Replicas, spec.Replicas) || oldBudget != budget ||
+				!apiequality.Semantic.DeepEqual(old.PodTemplate, spec.PodTemplate) || !apiequality.Semantic.DeepEqual(old.Roles, spec.Roles)
+		}
+		if relevantChange && replicas > 0 && budget >= replicas && minimum > 0 {
+			v.warnf("%s (%q): Coherent updates may temporarily make this entire component unavailable (replicas=%d, minAvailable=%d, maxUnavailable=%d); provision spare serving capacity before updating", fldPath.String(), spec.ComponentName, replicas, minimum, budget)
 		}
 	}
 

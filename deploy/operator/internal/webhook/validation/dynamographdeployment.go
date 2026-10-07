@@ -32,6 +32,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -69,6 +70,8 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathway            bool
 	grovePathwayRequirement string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
+	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
@@ -201,6 +204,22 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		hasIntraPodFailover(&dgd.Spec),
 	)...)
 
+	// Validate desired strategy intent; admission has no observed PCS rollout state.
+	updateStrategy, err := dynamo.ResolveGroveUpdateStrategy(dgd, nil)
+	if err != nil {
+		// The metadata validator reports an invalid annotation at its exact path.
+		updateStrategy = nil
+	}
+
+	// Compare desired strategy intent to suppress repeated warnings on unrelated updates.
+	oldStrategy := grovev1alpha1.RollingRecreateStrategy
+	if oldDGD != nil {
+		resolved, oldErr := dynamo.ResolveGroveUpdateStrategy(oldDGD, nil)
+		if oldErr == nil {
+			oldStrategy = k8sptr.Deref(resolved, grovev1alpha1.RollingRecreateStrategy)
+		}
+	}
+
 	groveEnabled := features.MustGateFrom(v.ctx).Enabled(features.Grove)
 	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
 	workloadProvider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
@@ -214,6 +233,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 		oldComponents:           oldComponents,
+		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
+		oldGroveUpdateStrategy:  oldStrategy,
 	}
 	if grovePathway {
 		specOpts.pcsName = dynamo.PCSNameForDGD(
@@ -335,7 +356,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if len(spec.Components) == 0 {
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
-	// A PCS-wide strategy cannot safely mix legacy compatibility markers with native opt-in.
+	// Keep availability defaulting consistent while migrating the graph to its native minimum form.
 	hasLegacyMinimum := false
 	for i := range spec.Components {
 		hasLegacyMinimum = hasLegacyMinimum || spec.Components[i].MinAvailable != nil
@@ -439,6 +460,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
 				oldComponent:                      opts.oldComponents[component.ComponentName],
+				groveUpdateStrategy:               opts.groveUpdateStrategy,
+				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
 			},
 		)...)
 	}

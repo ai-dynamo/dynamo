@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -909,14 +908,10 @@ func TestGroveProgram_DefersScalingAndPreservesStatus(t *testing.T) {
 }
 
 func TestGroveProgram_UnsupportedCoherentDoesNotCreatePCS(t *testing.T) {
-	for _, explicit := range []bool{false, true} {
-		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
-			t.Log("Observe an older PCS schema with a new or explicitly opted-in DGD")
-			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend, Replicas: ptr.To(int32(1))}}}}
-			if explicit {
-				dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = "Coherent"
-				dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.1.0"
-			}
+	for _, origin := range []string{"1.1.0", "1.6.0"} {
+		t.Run("origin="+origin, func(t *testing.T) {
+			t.Log("Observe an older PCS schema with an explicitly opted-in DGD")
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Annotations: map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: origin, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend, Replicas: ptr.To(int32(1))}}}}
 			crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}, Spec: apiextensionsv1.CustomResourceDefinitionSpec{Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{Name: "v1alpha1", Served: true}}}}
 			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(dgd, crd).Build()
 			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
