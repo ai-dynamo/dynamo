@@ -76,6 +76,11 @@ struct Args {
     /// timed section then references blocks the indexer never saw).
     #[arg(long, default_value_t = 2.0e6)]
     warmup_blocks_per_sec: f64,
+    /// Pace each phantom's warm-up in proportion to its warm-up write blocks, so every phantom
+    /// finishes together after (this process's warm-up write blocks) / --warmup-blocks-per-sec.
+    /// The default gives every phantom the same rate, so the largest base sets the tail.
+    #[arg(long)]
+    warmup_proportional: bool,
     /// Fail if the indexer has not subscribed to every phantom socket within this many seconds.
     #[arg(long, default_value_t = 600.0)]
     subscribe_timeout_s: f64,
@@ -242,6 +247,10 @@ struct Phantom {
     /// Everything it sends when nothing is dropped: the warm-up (unless skipped) and the timed
     /// lists before `timed_end`. Event IDs run contiguously from 1 over both.
     planned: WriteTotals,
+    /// Warm-up write blocks this phantom sends (0 when the warm-up is skipped).
+    warmup_write_blocks: u64,
+    /// This phantom's warm-up pacing, in write blocks per second.
+    warmup_rate: f64,
     socket: PhantomSocket,
 }
 
@@ -349,9 +358,7 @@ async fn run_phantom(mut phantom: Phantom, pacing: Arc<Pacing>, shared: Arc<Shar
                 &shared.warmup,
                 &shared,
             );
-            next += Duration::from_secs_f64(
-                blocks.max(1) as f64 / pacing.warmup_blocks_per_sec_per_phantom,
-            );
+            next += Duration::from_secs_f64(blocks.max(1) as f64 / phantom.warmup_rate);
         }
         shared.warming.fetch_sub(1, Ordering::Relaxed);
         // Warm-up traffic after the timed start would load the measured window.
@@ -477,10 +484,32 @@ fn plan_sends(
             planned_warmup.add(warmup_totals);
             phantom.planned = warmup_totals;
             phantom.planned.add(timed);
+            phantom.warmup_write_blocks = warmup_totals.write_blocks();
         }
         start = end;
     }
     (planned_warmup, planned_timed)
+}
+
+/// Sets each phantom's warm-up rate and returns the expected warm-up duration in seconds (the
+/// slowest phantom's). Uniform pacing gives each phantom `rate / phantoms`; proportional pacing
+/// gives it `rate * its blocks / all blocks`, so every phantom finishes together.
+fn set_warmup_rates(phantoms: &mut [Phantom], rate: f64, proportional: bool) -> f64 {
+    if rate <= 0.0 || phantoms.is_empty() {
+        return 0.0;
+    }
+    let total: u64 = phantoms.iter().map(|phantom| phantom.warmup_write_blocks).sum();
+    let uniform = rate / phantoms.len() as f64;
+    let mut expected_s: f64 = 0.0;
+    for phantom in phantoms.iter_mut() {
+        phantom.warmup_rate = if proportional && total > 0 && phantom.warmup_write_blocks > 0 {
+            rate * phantom.warmup_write_blocks as f64 / total as f64
+        } else {
+            uniform
+        };
+        expected_s = expected_s.max(phantom.warmup_write_blocks as f64 / phantom.warmup_rate);
+    }
+    expected_s
 }
 
 /// Wait until the indexer has subscribed to every phantom socket; returns per-phantom
@@ -625,12 +654,19 @@ async fn main() -> Result<()> {
             base,
             timed_end: 0,
             planned: WriteTotals::default(),
+            warmup_write_blocks: 0,
+            warmup_rate: 0.0,
             socket,
         });
     }
     let warmup = args.warmup_blocks_per_sec > 0.0;
     let (planned_warmup, planned_timed) =
         plan_sends(&mut phantom_states, &map, stop_at_unix_us, warmup);
+    let warmup_expected_s = set_warmup_rates(
+        &mut phantom_states,
+        args.warmup_blocks_per_sec,
+        args.warmup_proportional,
+    );
     let sources_entry = format!(
         "{}+{}@tcp://{}:{}",
         layout.worker_id(args.first_phantom),
@@ -656,6 +692,8 @@ async fn main() -> Result<()> {
         "expected_timed_write_blocks_per_s": local_rates.write_blocks * speedup,
         "expected_timed_events_per_s": local_rates.events * speedup,
         "warmup_blocks_per_sec": args.warmup_blocks_per_sec,
+        "warmup_pacing": if args.warmup_proportional { "proportional" } else { "uniform" },
+        "warmup_expected_s": warmup_expected_s,
         "planned": {
             "warmup": planned_warmup.json(),
             "timed": planned_timed.json(),
