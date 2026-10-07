@@ -14,7 +14,12 @@ _EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
 
 
 def _configure_trtllm_snapshot_capture_env() -> None:
-    """Disable TRT-LLM's NCCL registered window before engine creation."""
+    """Disable TRT-LLM's NCCL registered window before engine creation unless
+    cuInterpose checkpoints it."""
+    from dynamo.common.snapshot.lifecycle import is_cuinterpose_loaded
+
+    if is_cuinterpose_loaded():
+        return
     env_name = "TLLM_NCCL_SYMMETRIC_ZERO_COPY"
     configured = os.environ.get(env_name)
     if configured and configured != "0":
