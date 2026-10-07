@@ -293,6 +293,23 @@ where
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
+            // The canary's idle timer is meant to answer "is the engine making
+            // progress", so the chunk arriving from the engine is what resets it --
+            // not the chunk reaching the request plane. Notifying after a
+            // successful publish conflated the two: under overload a client waits
+            // past its timeout and leaves, `publisher.send` then fails, the pump
+            // breaks, and the engine's progress was never recorded. The worker
+            // looked idle to the canary while it was still producing tokens, so
+            // the canary probe queued behind the busy batch, `/live` went 503 and
+            // the container was restarted -- removing capacity from an already
+            // overloaded deployment.
+            //
+            // Error chunks still do not count: they do not show a healthy engine.
+            // A genuinely stalled engine produces no chunks at all, so the timer
+            // still expires and the canary behaves exactly as before.
+            if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
+            }
             if (publisher.send(resp_bytes).await).is_err() {
                 send_complete_final = false;
                 if context.is_stopped() {
@@ -318,12 +335,6 @@ where
                         .inc();
                 }
                 break;
-            } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                    notifier.notify_one();
-                }
             }
             if encoded.stop_stream {
                 // Dropping the engine stream after the terminal frame is sent
@@ -1437,6 +1448,112 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
         )
+    }
+
+    /// What the engine does while every publish fails.
+    #[derive(Clone, Copy)]
+    enum Engine {
+        /// Produces one chunk, then ends the stream.
+        ProducesAChunk,
+        /// Never yields and never completes -- a stalled engine, which is what
+        /// the canary exists to catch.
+        Stalls,
+        /// Produces one error chunk. An error does not show a healthy engine, so
+        /// it must not reset the timer.
+        ProducesAnError,
+    }
+
+    /// Drive `pump_response_stream` with a publisher whose receiver is already
+    /// gone, so every `publisher.send` fails, and report whether the endpoint
+    /// health-check notifier fired.
+    ///
+    /// Dropping the receiver before the pump runs is the overload case from
+    /// #15707: the client waited past its timeout and left.
+    async fn notifier_fired_with_failing_publisher(engine: Engine) -> bool {
+        let ingress = TestIngress::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notify.clone())
+            .expect("notifier already set");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let engine_ctx = ctx.context();
+        let inner: std::pin::Pin<Box<dyn futures::Stream<Item = TestResponse> + Send>> =
+            match engine {
+                Engine::ProducesAChunk => Box::pin(stream::iter(vec![Annotated::from_data(
+                    serde_json::json!({ "token": 0 }),
+                )])),
+                Engine::Stalls => Box::pin(stream::pending()),
+                Engine::ProducesAnError => Box::pin(stream::iter(vec![Annotated::from_error(
+                    "engine refused the request",
+                )])),
+            };
+        let response_stream: ManyOut<TestResponse> = ResponseStream::new(inner, engine_ctx);
+
+        // A stalled engine never ends the stream, so the pump never returns;
+        // bound it rather than waiting forever.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ingress.pump_response_stream(
+                response_stream,
+                &publisher,
+                RequestPlanePayloadCodec::Json,
+            ),
+        )
+        .await;
+
+        // `notify_one` with no waiter stores a permit, so an already-satisfied
+        // `notified()` returns immediately.
+        tokio::time::timeout(std::time::Duration::from_millis(50), notify.notified())
+            .await
+            .is_ok()
+    }
+
+    /// The reported bug (#15707): the engine is producing chunks but the client
+    /// has gone, so every publish fails. The canary's idle timer tracks engine
+    /// progress, so it must still be reset — otherwise a worker serving traffic
+    /// looks idle, its `/live` probe times out behind the busy batch, and the
+    /// kubelet restarts it, deepening the overload it was already under.
+    #[tokio::test]
+    async fn health_check_notified_when_publish_fails_but_engine_progresses() {
+        assert!(
+            notifier_fired_with_failing_publisher(Engine::ProducesAChunk).await,
+            "a chunk from the engine must reset the canary timer even when it cannot be published"
+        );
+    }
+
+    /// The other half, which keeps the canary useful: an engine that is stalled —
+    /// yielding nothing and never completing the stream — must not reset the
+    /// timer, so a genuinely stuck worker is still detected and restarted.
+    ///
+    /// Note this is a stall, not an empty response. A stream that *completes*
+    /// without chunks does reset the timer, via the separate notify on clean
+    /// stream completion further down `pump_response_stream`, and that is
+    /// reasonable: a worker that answered and finished is alive. This change does
+    /// not touch that path.
+    #[tokio::test]
+    async fn health_check_not_notified_when_engine_stalls() {
+        assert!(
+            !notifier_fired_with_failing_publisher(Engine::Stalls).await,
+            "a stalled engine must not reset the canary timer"
+        );
+    }
+
+    /// The guard this change preserves: an error chunk is still not progress.
+    ///
+    /// Moving the notify ahead of the publish keeps `!is_error` deliberately — a
+    /// worker that is only emitting failures is not healthy, and letting those
+    /// reset the idle timer would keep a broken worker alive in the canary's view.
+    #[tokio::test]
+    async fn health_check_not_notified_by_an_error_chunk() {
+        assert!(
+            !notifier_fired_with_failing_publisher(Engine::ProducesAnError).await,
+            "an error response must not reset the canary timer"
+        );
     }
 
     /// Losing the `complete_final` send to a client that has already
