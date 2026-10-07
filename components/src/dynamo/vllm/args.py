@@ -34,6 +34,7 @@ from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.kv_cache_metadata_compat import enable_kv_cache_metadata_compat
+from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
 
 from . import envs
 
@@ -563,7 +564,7 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses NixlConnector.
 
     Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside PdConnector (kv_connector_extra_config.connectors contains
+    inside MultiConnector or PdConnector (kv_connector_extra_config.connectors contains
     "NixlConnector").
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
@@ -571,9 +572,9 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
         return False
     if kv_cfg.kv_connector == "NixlConnector":
         return True
-    # PdConnector wraps multiple connectors in kv_connector_extra_config.
+    # Wrapper connectors compose children in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
-    if kv_cfg.kv_connector == "PdConnector":
+    if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
