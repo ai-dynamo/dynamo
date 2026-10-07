@@ -1467,7 +1467,7 @@ def _restore_snapshot_engine(
     call_utility_async=None,
 ) -> tuple[SnapshotEngineSetupResult, Mock]:
     """A snapshot engine whose utility RPC and shutdown are recorded."""
-    engine_client = Mock()
+    engine_client = Mock(get_supported_tasks=AsyncMock(return_value=("realtime",)))
     engine_client.engine_core.call_utility_async = (
         call_utility_async if call_utility_async is not None else AsyncMock()
     )
