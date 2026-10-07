@@ -43,6 +43,9 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # bounds how far past the limit a single read can carry.
 _READ_CHUNK = 64 * 1024
 
+# aiohttp's default ``max_redirects``, kept for a fetch without a URL policy.
+_MAX_SIMPLE_REDIRECTS = 10
+
 # Set to "1" to assert that the configured egress proxy enforces destination
 # policy itself. Spelled like DYN_MM_ALLOW_INTERNAL, which it sits beside.
 DYN_MM_TRUST_EGRESS_PROXY = "DYN_MM_TRUST_EGRESS_PROXY"
@@ -185,21 +188,54 @@ class AiohttpClient(HttpClient):
         read_timeout: Optional[float] = None,
     ) -> bytes:
         allow_private = self._connect_allows_private(policy)
-        via_proxy = False
-        # Only when the check is meant to bite. If private destinations are
-        # already permitted for this fetch, the proxy gate protects nothing.
-        if not allow_private:
-            via_proxy = await self._require_trusted_egress_proxy(url)
-        session = await self._get_session(allow_private, via_proxy)
         client_timeout = self._effective_timeout(timeout, read_timeout)
+        # Follow redirects here, not in aiohttp. aiohttp keeps the first hop's
+        # session for every hop, so a hop that NO_PROXY sends direct could use
+        # the resolver that exempts the proxy. Each hop runs the proxy gate and
+        # picks its own session, and one deadline covers all hops.
+        loop = asyncio.get_running_loop()
+        started: Optional[float] = None
+        current = url
+        redirects = 0
         try:
-            async with session.get(
-                url, timeout=client_timeout, allow_redirects=True
-            ) as response:
-                response.raise_for_status()
-                return await collect_capped(
-                    response.content.iter_chunked(_READ_CHUNK), url, max_bytes
-                )
+            while True:
+                via_proxy = False
+                # Only when the check is meant to bite. If private destinations
+                # are already permitted for this fetch, the gate protects nothing.
+                if not allow_private:
+                    via_proxy = await self._require_trusted_egress_proxy(current)
+                session = await self._get_session(allow_private, via_proxy)
+                hop_timeout = client_timeout
+                if started is None:
+                    # The budget starts with the first request, as it did when
+                    # aiohttp followed the redirects.
+                    started = loop.time()
+                elif client_timeout.total is not None:
+                    remaining = client_timeout.total - (loop.time() - started)
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError()
+                    hop_timeout = aiohttp.ClientTimeout(
+                        total=remaining,
+                        sock_connect=client_timeout.sock_connect,
+                        sock_read=client_timeout.sock_read,
+                    )
+                async with session.get(
+                    current, timeout=hop_timeout, allow_redirects=False
+                ) as response:
+                    location = response.headers.get("Location")
+                    if response.status in _REDIRECT_STATUSES and location:
+                        redirects += 1
+                        if redirects >= _MAX_SIMPLE_REDIRECTS:
+                            # What aiohttp raised when it followed redirects.
+                            raise aiohttp.TooManyRedirects(
+                                response.request_info, (response,)
+                            )
+                        current = str(response.url.join(URL(location)))
+                        continue
+                    response.raise_for_status()
+                    return await collect_capped(
+                        response.content.iter_chunked(_READ_CHUNK), url, max_bytes
+                    )
         except aiohttp.ClientResponseError as e:
             raise HttpStatusError(e.status, e.message or "", url) from e
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:

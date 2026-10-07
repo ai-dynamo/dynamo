@@ -10,6 +10,9 @@ on a private address, or for a name that resolved to a public address when it
 was validated and to loopback when the client connected. URL validation does
 not run here, so the connect-time check is the only one in play, and no real
 DNS lookup happens.
+
+A fetch without a URL policy follows redirects itself, one hop at a time. The
+tests at the end also pin its time budget and its limit of 10 redirects.
 """
 
 from __future__ import annotations
@@ -18,9 +21,16 @@ import asyncio
 import contextlib
 import socket
 
+import aiohttp
 import pytest
 
-from dynamo.common.http import AiohttpClient, HttpConnectionError, _ssrf_resolver
+from dynamo.common.http import (
+    AiohttpClient,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+    _ssrf_resolver,
+)
 from dynamo.common.http.url_validator import UrlValidationPolicy
 
 pytestmark = [
@@ -59,10 +69,19 @@ class _LoopbackInner:
 
 
 class _LoopbackServer:
-    """Records the first line of each connection, and answers a GET with 200."""
+    """Records the first line of each connection, and answers a GET with 200.
 
-    def __init__(self) -> None:
+    With ``redirect``, a request line that starts with its prefix gets a 302
+    to its ``Location`` template, where ``{port}`` is this server's port.
+    ``delay`` holds each answer back for that many seconds.
+    """
+
+    def __init__(
+        self, redirect: tuple[bytes, str] | None = None, delay: float = 0.0
+    ) -> None:
         self.first_lines: list[bytes] = []
+        self._redirect = redirect
+        self._delay = delay
 
     async def _handle(self, reader, writer) -> None:
         try:
@@ -70,12 +89,22 @@ class _LoopbackServer:
                 data = await reader.read(65536)
             except ConnectionError:
                 data = b""
-            self.first_lines.append(data.split(b"\r\n", 1)[0])
-            if data.startswith(b"GET "):
+            line = data.split(b"\r\n", 1)[0]
+            self.first_lines.append(line)
+            await asyncio.sleep(self._delay)
+            if self._redirect and line.startswith(self._redirect[0]):
+                location = self._redirect[1].format(port=self.port).encode()
+                writer.write(
+                    b"HTTP/1.1 302 Found\r\nLocation: %s\r\nContent-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n" % location
+                )
+            elif data.startswith(b"GET "):
                 writer.write(
                     b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
                     b"Connection: close\r\n\r\n%s" % (len(_BODY), _BODY)
                 )
+            # The client can be gone already, for example after a timeout.
+            with contextlib.suppress(ConnectionError):
                 await writer.drain()
         finally:
             writer.close()
@@ -185,3 +214,80 @@ async def test_the_proxy_host_name_without_a_proxy_setting_is_filtered() -> None
         finally:
             await client.close()
     assert server.first_lines == []
+
+
+# --- Redirects without a URL policy ---
+
+
+async def test_a_redirect_to_the_proxy_gets_its_own_connector(monkeypatch) -> None:
+    """Each redirect picks its connector, like the first hop.
+
+    Here a proxied fetch is redirected to the proxy's own host and port, which
+    NO_PROXY sends direct. aiohttp used to follow the redirect on the first
+    hop's connector, whose resolver exempts the proxy.
+    """
+    monkeypatch.setenv("DYN_MM_TRUST_EGRESS_PROXY", "1")
+    redirect = (b"GET http://origin.test/", f"http://{_PROXY_HOST}:{{port}}/admin")
+    async with _LoopbackServer(redirect) as proxy:
+        _configure_proxy(monkeypatch, proxy.port)
+        client = AiohttpClient()
+        try:
+            with pytest.raises(HttpConnectionError, match=_BLOCKED):
+                await client.fetch_bytes("http://origin.test/x", 5.0)
+        finally:
+            await client.close()
+    assert proxy.first_lines == [b"GET http://origin.test/x HTTP/1.1"]
+
+
+async def test_a_redirect_from_a_direct_fetch_goes_through_the_proxy(
+    monkeypatch,
+) -> None:
+    """The other direction: a direct origin redirects to a URL that a trusted
+    proxy carries, and that hop goes through the proxy."""
+    monkeypatch.setenv("DYN_MM_TRUST_EGRESS_PROXY", "1")
+    async with _LoopbackServer() as proxy, _LoopbackServer(
+        (b"GET /start", "http://origin.test/y")
+    ) as origin:
+        _configure_proxy(monkeypatch, proxy.port)
+        # aiohttp skips the resolver for an IP literal, so this first hop goes
+        # direct and passes the connect-time check.
+        monkeypatch.setenv("NO_PROXY", f"{_PROXY_HOST},127.0.0.1")
+        client = AiohttpClient()
+        try:
+            body = await client.fetch_bytes(
+                f"http://127.0.0.1:{origin.port}/start", 5.0
+            )
+        finally:
+            await client.close()
+    assert body == _BODY
+    assert origin.first_lines == [b"GET /start HTTP/1.1"]
+    assert proxy.first_lines == [b"GET http://origin.test/y HTTP/1.1"]
+
+
+async def test_one_time_budget_covers_every_redirect_hop() -> None:
+    """Each hop gets only the time that is left of the request's budget.
+
+    Each hop alone fits in the budget, but the two together do not.
+    """
+    async with _LoopbackServer((b"GET /start", "/next"), delay=0.5) as server:
+        client = AiohttpClient()
+        try:
+            with pytest.raises(HttpTimeoutError):
+                await client.fetch_bytes(f"http://127.0.0.1:{server.port}/start", 0.8)
+        finally:
+            await client.close()
+    assert server.first_lines == [b"GET /start HTTP/1.1", b"GET /next HTTP/1.1"]
+
+
+async def test_redirects_without_a_policy_stop_at_ten() -> None:
+    """The limit and the error are aiohttp's, as before this loop existed."""
+    async with _LoopbackServer((b"GET ", "/again")) as server:
+        client = AiohttpClient()
+        try:
+            with pytest.raises(HttpStatusError) as excinfo:
+                await client.fetch_bytes(f"http://127.0.0.1:{server.port}/start", 5.0)
+        finally:
+            await client.close()
+    assert excinfo.value.status == 0
+    assert isinstance(excinfo.value.__cause__, aiohttp.TooManyRedirects)
+    assert len(server.first_lines) == 10
