@@ -21,6 +21,11 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 
@@ -63,4 +68,13 @@ func TestNamespaceAllowed(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestCRDDependencyEventsReachRestrictedNamespaceMapper(t *testing.T) {
+	t.Log("Allow cluster-scoped schema events to reach the mapper for a restricted operator")
+	config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "workloads"}}
+	filter := EphemeralDeploymentEventFilter(config, &RuntimeConfig{})
+	crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podcliquesets.grove.io"}}
+	require.True(t, filter.Create(event.CreateEvent{Object: crd}))
+	require.False(t, filter.Create(event.CreateEvent{Object: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "outside"}}}))
 }

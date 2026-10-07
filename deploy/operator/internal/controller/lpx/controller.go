@@ -39,12 +39,13 @@ type graphReconciler struct {
 	modelRegistry         lpx.ModelRegistry
 	config                *configv1alpha1.OperatorConfiguration
 	dockerSecretRetriever dynamo.SecretsRetriever
+	coherentSupport       *dynamo.GroveCoherentSupport
 
 	client.Client
 }
 
 // Setup registers the LPX controller and its dependencies when LPX is enabled.
-func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig, secrets dynamo.SecretsRetriever) error {
+func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig, secrets dynamo.SecretsRetriever, coherentSupport *dynamo.GroveCoherentSupport) error {
 	if !runtimeConfig.Gate.Enabled(features.LPX) {
 		return nil
 	}
@@ -55,6 +56,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		config:                config,
 		dockerSecretRetriever: secrets,
 		Client:                mgr.GetClient(),
+		coherentSupport:       coherentSupport,
 	}
 
 	if runtimeConfig.Gate.Enabled(features.Grove) {
@@ -86,7 +88,8 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
 
 // Reconcile observes dependencies once, then persists the final child status.
-// Cached misses and write conflicts are retried; no APIReader is used.
+// Workload observations use the cache; schema discovery uses the shared capability checker.
+// Cached misses and write conflicts are retried.
 // These observations are not an atomic snapshot; watches converge later edits.
 func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	deployment := &v1alpha1.LPXGraphDeployment{}
@@ -99,7 +102,10 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 
 	// Persist the workload outcome before converting errors into deadline retries.
 	defer func(previous *v1alpha1.LPXGraphDeploymentStatus) {
-		if err != nil {
+		if dynamo.IsGroveCoherentScaleGuardRejection(err) {
+			setReadyCondition(deployment, v1beta1.DGDStatePending, "Replica changes are deferred until the Grove coherent update completes")
+			meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionTrue, ObservedGeneration: deployment.Generation, Reason: "CoherentUpdateInProgress", Message: err.Error()})
+		} else if err != nil {
 			setReadyCondition(deployment, v1beta1.DGDStateFailed, err.Error())
 		} else {
 			deployment.Status.ObservedGeneration = deployment.Generation
@@ -207,9 +213,16 @@ func (r *graphReconciler) reconcileWorkloads(
 	}
 
 	// Share the rendered identities with capacity management and request publication.
-	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans)
+	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Reject unsupported Coherent intent before deleting or changing a workload.
+	if dynamo.GroveCoherentUpdateSelected(desiredPCS) {
+		if err := r.coherentSupport.Check(ctx); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Grove rolls compatible layouts; immutable structure or OnDelete builds replace the PCS.
@@ -220,7 +233,9 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	// Resolve capacity and requests for the complete graph before any group is changed.
 	var (
-		groupNames = slices.Sorted(maps.Keys(workloads))
+		scalingDeferred bool
+		scalingBlocked  = dynamo.GroveCoherentUpdateInProgress(pcs)
+		groupNames      = slices.Sorted(maps.Keys(workloads))
 
 		desiredRequests  = make(map[string]*lpxv1alpha1.LPUPipelineRequest)
 		explicitReplicas = make(map[string]*int32, len(plans))
@@ -235,50 +250,42 @@ func (r *graphReconciler) reconcileWorkloads(
 			plan := plans[groupName]
 			workload := workloads[groupName]
 			pcsg := pcsgs[plan.LPXScalingGroup]
-			explicitReplicas[plan.LPXScalingGroup] = dgd.GetComponentByName(groupName).Replicas
-
-			// External scalers own live capacity once Grove has created the groups.
-			if explicitReplicas[plan.LPXScalingGroup] == nil {
-				plan.Replicas = pcsg.Spec.Replicas
-				if err := plan.ValidateReplicaCount(); err != nil {
-					return ctrl.Result{}, err
-				}
+			// Keep request ordinals aligned with the capacity Grove permits us to manage.
+			replicas, explicit, deferred, err := resolveWorkloadCapacity(dgd.GetComponentByName(groupName), pcs, pcsg, pclqs, plan)
+			if err != nil {
+				return ctrl.Result{}, err
 			}
+			plan.Replicas = replicas
+			explicitReplicas[plan.LPXScalingGroup] = explicit
+			scalingDeferred = scalingDeferred || deferred
 
 			desired, missing := resolvePipelineRequests(deployment, requests, workload, plan)
 
 			maps.Copy(desiredRequests, desired)
 			missingRequests = append(missingRequests, missing...)
 
-			// Expanded models use their source component's policy, not the conductor's.
-			secondsByModel := make(map[string]*int64)
-			for _, projection := range workload.ModelProjections() {
-				if scheduling := dgd.GetComponentByName(projection.ComponentName()).LPX.Scheduling; scheduling != nil {
-					secondsByModel[projection.Model()] = scheduling.AttemptDeadlineSeconds
-				}
-			}
+			secondsByModel := pipelineRequestDeadlineSeconds(dgd, workload)
 			expired, next := pipelineRequestDeadlines(desired, secondsByModel, deadlineAt)
+			if scalingBlocked && explicit != nil {
+				_, removed := expiredPipelineRequestSuffix(slices.Collect(maps.Values(desired)), expired, pcsg.Spec.Replicas)
+				scalingDeferred = scalingDeferred || len(removed) > 0
+			}
 			expiredRequests = append(expiredRequests, expired...)
 			deadlineAt = next
 		}
 	}
+
+	setScalingDeferredCondition(deployment, scalingDeferred)
 
 	// Preserve the earliest deadline across workloads on every subsequent return.
 	defer func() {
 		result = requeueForPipelineRequestDeadline(deadlineAt, result, err)
 	}()
 
-	// Scale only existing groups with explicitly managed capacity.
-	var capacityChanged bool
-	for groupName, pcsg := range pcsgs {
-		if replicas := explicitReplicas[groupName]; replicas != nil {
-			changed, err := scaleDownPodCliqueScalingGroup(ctx, r, pcsg, *replicas)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-
-			capacityChanged = capacityChanged || changed
-		}
+	// Scale owned groups only when the rollout permits replica writes.
+	capacityChanged, err := r.scaleDownWorkloadCapacity(ctx, pcsgs, explicitReplicas, scalingBlocked)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Retire released requests after scale-down, keeping all removed names pending.
@@ -294,7 +301,7 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	// Failure blocks publication while each workload independently cleans up expired suffixes.
 	if len(expiredRequests) > 0 {
-		return r.reconcileSchedulingFailure(ctx, deployment, pcsgs, explicitReplicas, requests, desiredRequests, expiredRequests)
+		return r.reconcileSchedulingFailure(ctx, deployment, pcsgs, explicitReplicas, requests, desiredRequests, expiredRequests, scalingBlocked)
 	}
 
 	// Keep publication blocked after the failed requests have been removed.
@@ -335,7 +342,7 @@ func (r *graphReconciler) reconcileWorkloads(
 		pcsg := pcsgs[plan.LPXScalingGroup]
 		component := dgd.GetComponentByName(groupName)
 
-		changed, err := r.reconcileWorkloadCapacity(ctx, component, pcsg, pclqs, workload, plan)
+		changed, err := r.reconcileWorkloadCapacity(ctx, component, pcs, pcsg, pclqs, workload, plan)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -355,22 +362,114 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, nil
 	}
 
-	result = r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, pclqs, plans, desiredRequests)
+	result = r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, pclqs, plans, desiredRequests, scalingDeferred)
 	// Old configmaps remain available until all workloads are Ready.
 	return result, r.deleteUnusedConfigMaps(ctx, deployment, resources)
 }
 
+// pipelineRequestDeadlineSeconds selects each model's source component policy.
+// The non-nil workload was resolved from the complete, non-nil DGD.
+func pipelineRequestDeadlineSeconds(dgd *v1beta1.DynamoGraphDeployment, workload *lpx.Workload) map[string]*int64 {
+	secondsByModel := make(map[string]*int64)
+	for _, projection := range workload.ModelProjections() {
+		if scheduling := dgd.GetComponentByName(projection.ComponentName()).LPX.Scheduling; scheduling != nil {
+			secondsByModel[projection.Model()] = scheduling.AttemptDeadlineSeconds
+		}
+	}
+	return secondsByModel
+}
+
+// resolveWorkloadCapacity derives request capacity without changing the observed resources.
+// Coherent waits retain capacity ownership while request ordinals follow live replicas.
+// All pointer inputs are non-nil. A nil explicit count leaves capacity to Grove or an external scaler.
+func resolveWorkloadCapacity(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	pcs *grovev1alpha1.PodCliqueSet,
+	pcsg *grovev1alpha1.PodCliqueScalingGroup,
+	pclqs map[string]*grovev1alpha1.PodClique,
+	plan *lpx.MaterializationPlan,
+) (int32, *int32, bool, error) {
+	replicas, explicit := plan.Replicas, component.Replicas
+	deferred := false
+	scalingBlocked := dynamo.GroveCoherentUpdateInProgress(pcs)
+	if scalingBlocked {
+		deferred = explicit != nil && *explicit != pcsg.Spec.Replicas
+		if plan.CyborgTemplate != "" {
+			if role := component.ComponentRole(v1beta1.ComponentRoleLPXConductor); role != nil && role.Replicas != nil {
+				for index := range pcsg.Spec.Replicas {
+					name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, plan.CyborgTemplate)
+					if clique := pclqs[name]; clique == nil || clique.Spec.Replicas != *role.Replicas {
+						deferred = true
+					}
+				}
+			}
+		}
+	}
+	// External scaling and coherent waits both use the group's live replica count.
+	if explicit == nil || scalingBlocked {
+		replicas = pcsg.Spec.Replicas
+		capacityPlan := *plan
+		capacityPlan.Replicas = replicas
+		if err := capacityPlan.ValidateReplicaCount(); err != nil {
+			return 0, nil, false, err
+		}
+	}
+	return replicas, explicit, deferred, nil
+}
+
+// scaleDownWorkloadCapacity lowers explicit capacity only when replica writes are allowed.
+// Groups are owned observations; nil replica counts retain external capacity ownership.
+func (r *graphReconciler) scaleDownWorkloadCapacity(
+	ctx context.Context,
+	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
+	explicitReplicas map[string]*int32,
+	scalingBlocked bool,
+) (bool, error) {
+	if scalingBlocked {
+		return false, nil
+	}
+	var capacityChanged bool
+	for groupName, pcsg := range pcsgs {
+		if replicas := explicitReplicas[groupName]; replicas != nil {
+			changed, err := scaleDownPodCliqueScalingGroup(ctx, r, pcsg, *replicas)
+			if err != nil {
+				return false, err
+			}
+			capacityChanged = capacityChanged || changed
+		}
+	}
+	return capacityChanged, nil
+}
+
+// setScalingDeferredCondition records a capacity wait on the non-nil deployment.
+// Unaffected deployments retain their existing condition layout.
+func setScalingDeferredCondition(deployment *v1alpha1.LPXGraphDeployment, scalingDeferred bool) {
+	scalingCondition := metav1.Condition{Type: "ScalingDeferred", Status: metav1.ConditionFalse, ObservedGeneration: deployment.Generation, Reason: "ScalingAllowed", Message: "No Grove replica changes are deferred"}
+	if scalingDeferred {
+		scalingCondition.Status = metav1.ConditionTrue
+		scalingCondition.Reason = "CoherentUpdateInProgress"
+		scalingCondition.Message = "Replica changes are deferred until the Grove coherent update completes"
+	}
+	if scalingDeferred || meta.FindStatusCondition(deployment.Status.Conditions, "ScalingDeferred") != nil {
+		meta.SetStatusCondition(&deployment.Status.Conditions, scalingCondition)
+	}
+}
+
 // reconcileWorkloadCapacity applies explicit capacity and validates external Cyborg counts.
-// Component, pcsg, workload and plan are non-nil. Omitted replica counts are never written.
+// Component, pcs, pcsg, workload and plan are non-nil. Omitted replica counts are never written.
 // The returned bool reports successful scale writes that require a fresh observation.
 func (r *graphReconciler) reconcileWorkloadCapacity(
 	ctx context.Context,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	pcs *grovev1alpha1.PodCliqueSet,
 	pcsg *grovev1alpha1.PodCliqueScalingGroup,
 	pclqs map[string]*grovev1alpha1.PodClique,
 	workload *lpx.Workload,
 	plan *lpx.MaterializationPlan,
 ) (bool, error) {
+	if dynamo.GroveCoherentUpdateInProgress(pcs) {
+		return false, nil
+	}
 	if replicas := component.Replicas; replicas != nil {
 		changed, err := scalePodCliqueScalingGroup(ctx, r, pcsg, *replicas)
 		if changed || err != nil {
@@ -424,6 +523,7 @@ func (r *graphReconciler) reconcileReadiness(
 	pclqs map[string]*grovev1alpha1.PodClique,
 	plans map[string]*lpx.MaterializationPlan,
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
+	scalingDeferred bool,
 ) ctrl.Result {
 	readiness := dynamo.GroveReadiness{Ready: true}
 	deployment.Status.Components = make(map[string]v1alpha1.LPXComponentStatus)
@@ -462,6 +562,11 @@ func (r *graphReconciler) reconcileReadiness(
 
 	if !readiness.Ready {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, readiness.Message)
+		return ctrl.Result{}
+	}
+
+	if scalingDeferred {
+		setReadyCondition(deployment, v1beta1.DGDStatePending, "Replica changes are deferred until the Grove coherent update completes")
 		return ctrl.Result{}
 	}
 

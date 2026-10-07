@@ -21,6 +21,8 @@ import (
 	"context"
 	"strings"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,7 +61,12 @@ func GetKubeDiscoveryMode(annotations map[string]string) configv1alpha1.KubeDisc
 // EphemeralDeploymentEventFilter returns a predicate that filters events based on namespace configuration.
 func EphemeralDeploymentEventFilter(config *configv1alpha1.OperatorConfiguration, runtimeConfig *RuntimeConfig) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return NamespaceAllowed(config, runtimeConfig, o, o.GetNamespace())
+		namespace := o.GetNamespace()
+		// A CRD schema change is cluster-scoped; its mapper selects namespaced dependents.
+		if _, ok := o.(*apiextensionsv1.CustomResourceDefinition); ok {
+			namespace = config.Namespace.Restricted
+		}
+		return NamespaceAllowed(config, runtimeConfig, o, namespace)
 	})
 }
 

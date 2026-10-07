@@ -27,10 +27,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovecrds "github.com/ai-dynamo/grove/operator/api/core/v1alpha1/crds"
 	"github.com/stretchr/testify/require"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -58,7 +60,7 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 	r := newLPXTestReconciler(t, registry, child, dgd)
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
-	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
 	objects := materializeLPXTestPCS(t, child, pcs, plans["lpx"], plans[second.ComponentName])
 	for _, object := range objects {
@@ -253,7 +255,7 @@ func TestLPXExternalCyborgCapacityValidation(t *testing.T) {
 	r := newLPXTestReconciler(t, registry, child, dgd)
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
-	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+	pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
 	objects := materializeLPXTestPCS(t, child, pcs, plans["lpx"])
 	for _, object := range objects {
@@ -915,7 +917,7 @@ func TestLPXServiceReconciliation(t *testing.T) {
 	beforeModelService := modelService.DeepCopy()
 
 	t.Log("Publish the LPX-owned endpoint with its serving-role selector")
-	_, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+	_, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
 	require.NoError(t, r.reconcileRuntimeResources(t.Context(), child, resources))
 	service := &corev1.Service{}
@@ -930,7 +932,7 @@ func TestLPXServiceReconciliation(t *testing.T) {
 	expected := service.DeepCopy()
 	for _, global := range []bool{true, false} {
 		dgd.Spec.Components[0].GlobalDynamoNamespace = global
-		_, resources, err = r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+		_, resources, err = r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 		require.NoError(t, err)
 		require.NoError(t, r.reconcileRuntimeResources(t.Context(), child, resources))
 		require.NoError(t, r.Get(t.Context(), key, service))
@@ -2400,16 +2402,22 @@ func TestLPXScaleDownUpdatesGroveBeforeDeletingStaleRequest(t *testing.T) {
 func TestLPXStartupScalesMinimumSeedBeforePublishingRequests(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
+		native  bool
 		minimum *int32
 	}{
 		{name: "default minimum"},
 		{name: "explicit minimum", minimum: ptr.To(int32(2))},
+		{name: "provider-native minimum", minimum: ptr.To(int32(2)), native: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Start without Grove resources and create the owned PCS at its immutable minimum")
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 			component := dgd.GetComponentByName("lpx")
 			component.Replicas, component.MinAvailable = ptr.To(int32(3)), tc.minimum
+			if tc.native {
+				component.MinAvailable = nil
+				component.ProviderOverride = &v1beta1.ProviderOverride{APIVersion: "grove.io/v1alpha1", Target: "PodCliqueScalingGroupConfig", Value: apiextensionsv1.JSON{Raw: []byte(`{"minAvailable":2}`)}}
+			}
 			r := newLPXTestReconciler(t, registry, child, dgd)
 			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
 			result, err := r.Reconcile(t.Context(), key)
@@ -2419,6 +2427,7 @@ func TestLPXStartupScalesMinimumSeedBeforePublishingRequests(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, pcs)
 			require.True(t, metav1.IsControlledBy(pcs, child))
+			require.Nil(t, pcs.Spec.UpdateStrategy, "minimum availability does not opt into Coherent")
 			seed := ptr.Deref(tc.minimum, 1)
 			groupTemplate := pcs.Spec.Template.PodCliqueScalingGroupConfigs[0]
 			require.Equal(t, seed, *groupTemplate.Replicas)
@@ -2631,7 +2640,7 @@ func newLPXTestScheme(t testing.TB) *k8sruntime.Scheme {
 	scheme := k8sruntime.NewScheme()
 	for _, add := range []func(*k8sruntime.Scheme) error{
 		corev1.AddToScheme, resourcev1.AddToScheme, v1alpha1.AddToScheme, v1beta1.AddToScheme,
-		grovev1alpha1.AddToScheme, lpxv1alpha1.AddToScheme,
+		grovev1alpha1.AddToScheme, lpxv1alpha1.AddToScheme, apiextensionsv1.AddToScheme,
 	} {
 		require.NoError(t, add(scheme))
 	}
@@ -3108,12 +3117,14 @@ func newLPXTestReconciler(
 		LPX: configv1alpha1.LPXConfiguration{Enabled: true},
 	}
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, DRA: true, LPX: true}}
+	kubeClient := newLPXTestClient(t, seed...)
 	return &graphReconciler{
-		Client:        newLPXTestClient(t, seed...),
-		recorder:      recorder,
-		runtimeConfig: runtimeConfig,
-		modelRegistry: registry,
-		config:        config,
+		Client:          kubeClient,
+		coherentSupport: dynamo.NewGroveCoherentSupport(kubeClient, kubeClient),
+		recorder:        recorder,
+		runtimeConfig:   runtimeConfig,
+		modelRegistry:   registry,
+		config:          config,
 	}
 }
 
@@ -3400,7 +3411,7 @@ func TestLPXWaitsForAllScalingGroups(t *testing.T) {
 			r := newLPXTestReconciler(t, registry, child, dgd)
 			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 			require.NoError(t, err)
-			pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+			pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 			require.NoError(t, err)
 			createLPXTestObjects(t, t.Context(), r.Client, materializeLPXTestPCS(t, child, pcs, plans["lpx"], plans["external"])...)
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
@@ -3480,7 +3491,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 	require.Len(t, workloads, 2)
-	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
 	require.Len(t, resources, 4)
 	names := make(map[string]bool)
@@ -3494,7 +3505,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	slices.Reverse(reordered.Spec.Components)
 	reorderedWorkloads, reorderedPlans, err := r.resolveWorkloads(t.Context(), child, reordered)
 	require.NoError(t, err)
-	reorderedPCS, reorderedResources, err := r.renderPodCliqueSet(t.Context(), child, reordered, reorderedWorkloads, reorderedPlans)
+	reorderedPCS, reorderedResources, err := r.renderPodCliqueSet(t.Context(), child, reordered, reorderedWorkloads, reorderedPlans, nil)
 	require.NoError(t, err)
 	require.Equal(t, pcs, reorderedPCS)
 	require.Equal(t, resources, reorderedResources)
@@ -3684,6 +3695,7 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 		secondDeadline *int64
 		secondExternal bool
 		secondHealthy  bool
+		coherent       bool
 		wantFirst      int32
 		wantSecond     int32
 		wantRequests   int
@@ -3692,6 +3704,7 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 		{name: "healthy neighbor survives failure cleanup", firstExpired: 2, secondHealthy: true, secondDeadline: ptr.To(int64(60)), wantFirst: 2, wantSecond: 2, wantRequests: 4},
 		{name: "independent expired suffixes", firstExpired: 2, secondDeadline: ptr.To(int64(60)), wantFirst: 2, wantSecond: 1, wantRequests: 3},
 		{name: "external engine retains capacity ownership", firstExpired: 2, secondExternal: true, secondDeadline: ptr.To(int64(60)), wantFirst: 2, wantSecond: 2, wantRequests: 3},
+		{name: "coherent update holds owned cleanup while external cleanup proceeds", firstExpired: 2, secondExternal: true, coherent: true, secondDeadline: ptr.To(int64(60)), wantFirst: 3, wantSecond: 2, wantRequests: 4},
 		{name: "pending neighbor has a longer deadline", firstExpired: 2, secondDeadline: ptr.To(int64(300)), wantFirst: 2, wantSecond: 2, wantRequests: 4},
 		{name: "pending neighbor has no deadline", firstExpired: 2, wantFirst: 2, wantSecond: 2, wantRequests: 4},
 	} {
@@ -3710,7 +3723,7 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 			r := newLPXTestReconciler(t, registry, child, dgd)
 			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 			require.NoError(t, err)
-			pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
+			pcs, _, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 			require.NoError(t, err)
 			firstPlan, secondPlan := plans["lpx"], plans["timeout-engine"]
 			secondPlan.Replicas = 2
@@ -3734,6 +3747,27 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 				require.NoError(t, r.Update(t.Context(), request))
 			}
 
+			if tc.coherent {
+				t.Log("Pause replica writes during an active coherent update")
+				crd := &apiextensionsv1.CustomResourceDefinition{}
+				require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
+				require.NoError(t, r.Create(t.Context(), crd))
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+				pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.CoherentStrategy}
+				pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+				require.NoError(t, r.Update(t.Context(), pcs))
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+					Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+						if request, ok := object.(*lpxv1alpha1.LPUPipelineRequest); ok && request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name == firstPlan.LPXScalingGroup {
+							group := &grovev1alpha1.PodCliqueScalingGroup{}
+							require.NoError(t, delegated.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: firstPlan.LPXScalingGroup}, group))
+							require.LessOrEqual(t, int64(group.Spec.Replicas), request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex, "owned capacity must be reduced before deleting an expired request")
+						}
+						return delegated.Delete(ctx, object, opts...)
+					},
+				})
+			}
+
 			t.Log("Persist scheduling failure before deleting either workload's requests")
 			result, err := r.Reconcile(t.Context(), key)
 			require.NoError(t, err)
@@ -3753,6 +3787,32 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, requests, tc.wantRequests)
 
+			if tc.coherent {
+				t.Log("Retain owned expiry evidence and resume scale-down after rollout completion")
+				require.NoError(t, r.Get(t.Context(), key.NamespacedName, child))
+				require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, "ScalingDeferred"))
+				require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, schedulingFailedCondition))
+				deferred := meta.FindStatusCondition(child.Status.Conditions, "ScalingDeferred").DeepCopy()
+				_, err = r.Reconcile(t.Context(), key)
+				require.NoError(t, err)
+				require.NoError(t, r.Get(t.Context(), key.NamespacedName, child))
+				require.Equal(t, deferred, meta.FindStatusCondition(child.Status.Conditions, "ScalingDeferred"), "the wait condition must remain stable across reconciliations")
+				for _, request := range requests {
+					require.True(t, request.DeletionTimestamp.IsZero())
+				}
+				pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+				require.NoError(t, r.Update(t.Context(), pcs))
+				_, err = r.Reconcile(t.Context(), key)
+				require.NoError(t, err)
+				pcsgs, err = getPodCliqueScalingGroups(t.Context(), r.Client, pcs)
+				require.NoError(t, err)
+				require.EqualValues(t, 2, pcsgs[firstPlan.LPXScalingGroup].Spec.Replicas)
+				require.EqualValues(t, 2, pcsgs[secondPlan.LPXScalingGroup].Spec.Replicas)
+				requests, err = r.getPipelineRequests(t.Context(), pcs)
+				require.NoError(t, err)
+				require.Len(t, requests, 3)
+			}
+
 			t.Log("A failed generation must not republish either workload's retired requests")
 			_, err = r.Reconcile(t.Context(), key)
 			require.NoError(t, err)
@@ -3761,4 +3821,270 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 			require.Equal(t, requests, again)
 		})
 	}
+}
+
+func TestLPXCoherentUpdateDefersScaleAndRequestRetirement(t *testing.T) {
+	ctx := t.Context()
+	t.Log("Start with two published LPX replicas and an active coherent PCS")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
+	require.NoError(t, r.Create(ctx, crd))
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(findLPXTestPodCliqueSet(t, objects)), pcs))
+	pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.CoherentStrategy}
+	pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+	require.NoError(t, r.Update(ctx, pcs))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.NotNil(t, pcs.Status.UpdateProgress, "persist the active Grove update")
+
+	t.Log("Request scale-in and keep the annotation change pending until rollout completion")
+	liveDGD := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), liveDGD))
+	liveDGD.GetComponentByName("lpx").Replicas = ptr.To(int32(1))
+	if liveDGD.Annotations == nil {
+		liveDGD.Annotations = map[string]string{}
+	}
+	liveDGD.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = "RollingRecreate"
+	liveDGD.Generation++
+	require.NoError(t, r.Update(ctx, liveDGD))
+	liveChild := &v1alpha1.LPXGraphDeployment{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), liveChild))
+	liveChild.Generation++
+	var err error
+	liveChild.Spec.InputRevision, err = dynamo.LPXInputRevision(liveDGD, "")
+	require.NoError(t, err)
+	require.NoError(t, r.Update(ctx, liveChild))
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	for range 2 {
+		result, err := r.Reconcile(ctx, request)
+		require.NoError(t, err)
+		require.Zero(t, result)
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+		t.Logf("Observed PCS progress after reconcile: %+v", pcs.Status.UpdateProgress)
+	}
+	group := &grovev1alpha1.PodCliqueScalingGroup{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, group))
+	require.Equal(t, int32(2), group.Spec.Replicas)
+	retained := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, selected.requests[1].Name)
+	require.True(t, retained.DeletionTimestamp.IsZero())
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.Equal(t, grovev1alpha1.CoherentStrategy, pcs.Spec.UpdateStrategy.Type)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), liveChild))
+	require.True(t, meta.IsStatusConditionTrue(liveChild.Status.Conditions, "ScalingDeferred"))
+
+	t.Log("Complete the rollout and allow the queued scale-in and strategy edit")
+	pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+	require.NoError(t, r.Update(ctx, pcs))
+	for range 3 {
+		_, err = r.Reconcile(ctx, request)
+		require.NoError(t, err)
+	}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+	require.Equal(t, int32(1), group.Spec.Replicas)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.Equal(t, grovev1alpha1.RollingRecreateStrategy, pcs.Spec.UpdateStrategy.Type)
+}
+
+func TestLPXCoherentScaleGuardRetainsRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline *int64
+	}{
+		{name: "controller backoff"},
+		{name: "active deadline retry", deadline: ptr.To(int64(60))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			t.Log("Observe completed Grove progress before its admission cache catches up")
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
+			dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: tc.deadline}
+			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, selected)
+			pcs := findLPXTestPodCliqueSet(t, objects)
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+			pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.CoherentStrategy}
+			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now(), UpdateEndedAt: ptr.To(metav1.Now())}
+			require.NoError(t, r.Update(ctx, pcs))
+			pending := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].Name)
+			pending.Status = newTestPipelineRequest(child, pcs, pending.Name, time.Now(), lpxv1alpha1.RequestPhasePending).Status
+			require.NoError(t, r.Update(ctx, pending))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			dgd.Spec.Components[0].Replicas = ptr.To(int32(1))
+			require.NoError(t, r.Update(ctx, dgd))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+			observedGeneration := child.Status.ObservedGeneration
+			var err error
+			child.Spec.InputRevision, err = dynamo.LPXInputRevision(dgd, "")
+			require.NoError(t, err)
+			child.Generation++
+			require.NoError(t, r.Update(ctx, child))
+			guardErr := apierrors.NewForbidden(schema.GroupResource{Group: grovev1alpha1.SchemeGroupVersion.Group, Resource: "podcliquescalinggroups"}, selected.plan.LPXScalingGroup, errors.New("spec.replicas changes are not allowed while a coherent update is in progress on PodCliqueSet"))
+			rejectScale := true
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+					if subresource == "scale" && rejectScale {
+						return guardErr
+					}
+					return delegated.SubResource(subresource).Update(ctx, object, opts...)
+				},
+			})
+
+			t.Log("Keep Pending status and a retry even when no further Grove event arrives")
+			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+			result, err := r.Reconcile(ctx, key)
+			if tc.deadline == nil {
+				require.ErrorIs(t, err, guardErr)
+				require.Zero(t, result)
+			} else {
+				require.NoError(t, err)
+				require.Positive(t, result.RequeueAfter)
+				require.LessOrEqual(t, result.RequeueAfter, pipelineRequestDeadlineRetryInterval)
+			}
+			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+			require.Equal(t, observedGeneration, child.Status.ObservedGeneration)
+			require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, "ScalingDeferred"))
+			require.Equal(t, v1alpha1.LPXReadyReasonPending, meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition).Reason)
+			require.True(t, getTestPipelineRequest(t, ctx, r.Client, child.Namespace, selected.requests[1].Name).DeletionTimestamp.IsZero())
+
+			t.Log("The retained retry applies the scale once Grove's admission cache catches up")
+			rejectScale = false
+			_, err = r.Reconcile(ctx, key)
+			require.NoError(t, err)
+			group := &grovev1alpha1.PodCliqueScalingGroup{}
+			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, group))
+			require.EqualValues(t, 1, group.Spec.Replicas)
+		})
+	}
+}
+
+func TestLPXCoherentUpdateDefersCyborgScaleUntilLiveCapacityMatches(t *testing.T) {
+	ctx := t.Context()
+	t.Log("Publish a ready hybrid workload with two backbones and one Cyborg per backbone")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
+	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+	pcsg := getResource[*grovev1alpha1.PodCliqueScalingGroup](t, objects, selected.plan.LPXScalingGroup)
+	pcsg.Status.Replicas, pcsg.Status.UpdatedReplicas = 2, 2
+	pcsg.Status.AvailableReplicas, pcsg.Status.ScheduledReplicas = 2, 2
+	for _, object := range objects {
+		if clique, ok := object.(*grovev1alpha1.PodClique); ok {
+			clique.Status.Replicas, clique.Status.UpdatedReplicas = clique.Spec.Replicas, clique.Spec.Replicas
+			clique.Status.ReadyReplicas, clique.Status.ScheduledReplicas = clique.Spec.Replicas, clique.Spec.Replicas
+		}
+	}
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	pcs := findLPXTestPodCliqueSet(t, objects)
+	for _, desired := range selected.requests {
+		request := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, desired.Name)
+		request.Status = newTestPipelineRequest(child, pcs, request.Name, time.Now(), lpxv1alpha1.RequestPhaseBound).Status
+		require.NoError(t, r.Update(ctx, request))
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	require.NoError(t, yaml.Unmarshal([]byte(grovecrds.PodCliqueSetCRD()), crd))
+	require.NoError(t, r.Create(ctx, crd))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	pcs.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.CoherentStrategy}
+	pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
+	require.NoError(t, r.Update(ctx, pcs))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(3))
+	if dgd.Annotations == nil {
+		dgd.Annotations = make(map[string]string)
+	}
+	dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = "Coherent"
+	require.NoError(t, r.Update(ctx, dgd))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	var err error
+	child.Spec.InputRevision, err = dynamo.LPXInputRevision(dgd, "")
+	require.NoError(t, err)
+	child.Generation++
+	require.NoError(t, r.Update(ctx, child))
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+
+	t.Log("The updated template does not satisfy the deferred live Cyborg replica change")
+	for range 2 {
+		_, err = r.Reconcile(ctx, key)
+		require.NoError(t, err)
+	}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Name == selected.plan.CyborgTemplate {
+			require.EqualValues(t, 3, clique.Spec.Replicas)
+		}
+	}
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, "ScalingDeferred"))
+	require.Equal(t, v1alpha1.LPXReadyReasonPending, meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition).Reason)
+	cliques, err := getPodCliques(ctx, r.Client, pcs, map[string]*grovev1alpha1.PodCliqueScalingGroup{pcsg.Name: pcsg})
+	require.NoError(t, err)
+	for index := range pcsg.Spec.Replicas {
+		require.EqualValues(t, 1, cliques[selected.plan.ForReplica(index).CyborgClique].Spec.Replicas)
+	}
+
+	t.Log("One observed Cyborg change cannot clear the wait for another backbone")
+	firstCyborg := cliques[selected.plan.ForReplica(0).CyborgClique]
+	firstCyborg.Spec.Replicas = 3
+	require.NoError(t, r.Update(ctx, firstCyborg))
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, "ScalingDeferred"))
+
+	t.Log("A missing Cyborg observation also leaves the requested scaling deferred")
+	base := r.Client.(client.WithWatch)
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := delegated.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if cliques, ok := list.(*grovev1alpha1.PodCliqueList); ok {
+				cliques.Items = slices.DeleteFunc(cliques.Items, func(clique grovev1alpha1.PodClique) bool {
+					return clique.Name == selected.plan.ForReplica(1).CyborgClique
+				})
+			}
+			return nil
+		},
+	})
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, "ScalingDeferred"))
+	r.Client = base
+
+	t.Log("After completion, apply live capacity and wait for Grove readiness")
+	pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+	require.NoError(t, r.Update(ctx, pcs))
+	for range 2 {
+		_, err = r.Reconcile(ctx, key)
+		require.NoError(t, err)
+	}
+	cliques, err = getPodCliques(ctx, r.Client, pcs, map[string]*grovev1alpha1.PodCliqueScalingGroup{pcsg.Name: pcsg})
+	require.NoError(t, err)
+	for index := range pcsg.Spec.Replicas {
+		require.EqualValues(t, 3, cliques[selected.plan.ForReplica(index).CyborgClique].Spec.Replicas)
+	}
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	require.True(t, meta.IsStatusConditionFalse(child.Status.Conditions, "ScalingDeferred"))
+	require.False(t, meta.IsStatusConditionTrue(child.Status.Conditions, v1alpha1.LPXReadyCondition))
+	for _, clique := range cliques {
+		clique.Status.ObservedGeneration = ptr.To(clique.Generation)
+		clique.Status.Replicas, clique.Status.UpdatedReplicas = clique.Spec.Replicas, clique.Spec.Replicas
+		clique.Status.ReadyReplicas, clique.Status.ScheduledReplicas = clique.Spec.Replicas, clique.Spec.Replicas
+		require.NoError(t, r.Update(ctx, clique))
+	}
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, v1alpha1.LPXReadyCondition))
 }

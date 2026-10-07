@@ -20,6 +20,12 @@ package controller
 import (
 	"context"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -38,16 +44,24 @@ import (
 // significance, and request mapping. The DGD setup remains the composition
 // root and invokes this only when Grove is available.
 type groveWatchSetup struct {
-	reader client.Reader
+	reader        client.Reader
+	config        *configv1alpha1.OperatorConfiguration
+	runtimeConfig *commoncontroller.RuntimeConfig
 }
 
 // newGroveWatchSetup wires Grove-owned watch predicates and request mapping.
-func newGroveWatchSetup(reader client.Reader) *groveWatchSetup {
-	return &groveWatchSetup{reader: reader}
+// All inputs must be non-nil.
+func newGroveWatchSetup(reader client.Reader, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) *groveWatchSetup {
+	return &groveWatchSetup{reader: reader, config: config, runtimeConfig: runtimeConfig}
 }
 
 func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 	return ctrlBuilder.
+		Watches(&apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(s.mapGroveCRDToRequests),
+			builder.OnlyMetadata,
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetName() == dynamo.GrovePodCliqueSetCRDName
+			}), predicate.ResourceVersionChangedPredicate{})).
 		Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(event.CreateEvent) bool { return true },
 			DeleteFunc:  func(event.DeleteEvent) bool { return true },
@@ -216,4 +230,28 @@ func mapPodCliqueSetToDGDRequest(pcs *grovev1alpha1.PodCliqueSet) []ctrl.Request
 			Namespace: pcs.Namespace,
 		},
 	}}
+}
+
+// mapGroveCRDToRequests retries Grove DGDs when the installed strategy schema changes.
+func (s *groveWatchSetup) mapGroveCRDToRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	if obj.GetName() != dynamo.GrovePodCliqueSetCRDName {
+		return nil
+	}
+	// The reader's configured namespace scope bounds the affected deployments.
+	dgds := &nvidiacomv1beta1.DynamoGraphDeploymentList{}
+	if err := s.reader.List(ctx, dgds); err != nil {
+		log.FromContext(ctx).Error(err, "list DGDs after Grove CRD change")
+		return nil
+	}
+	requests := make([]ctrl.Request, 0, len(dgds.Items))
+	for i := range dgds.Items {
+		dgd := &dgds.Items[i]
+		if !commoncontroller.NamespaceAllowed(s.config, s.runtimeConfig, dgd, dgd.Namespace) {
+			continue
+		}
+		if dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == consts.WorkloadProviderGrove {
+			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}})
+		}
+	}
+	return requests
 }

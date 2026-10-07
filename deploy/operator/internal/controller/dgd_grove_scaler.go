@@ -26,6 +26,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,12 +42,15 @@ func newGroveScaler(kubeClient client.Client) *groveScaler {
 }
 
 // Reconcile applies component replica changes to the Grove resources created
-// asynchronously from the PodCliqueSet.
+// asynchronously from the PodCliqueSet. pcs may be nil before creation.
+// It returns whether scaling is deferred and whether a scale-guard denial needs
+// a retry because the cached PCS has no active update to await.
 func (s *groveScaler) Reconcile(
 	ctx context.Context,
 	req groveReconcileRequest,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) error {
+	pcs *grovev1alpha1.PodCliqueSet,
+) (deferred, retrySoon bool, err error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
 	managedComponents := req.ManagedComponents()
@@ -79,6 +83,30 @@ func (s *groveScaler) Reconcile(
 			resourceKind = "PodCliqueScalingGroup"
 			gvr = consts.PodCliqueScalingGroupGVR
 		}
+		// During a coherent update observe capacity without issuing forbidden scale writes.
+		if dynamo.GroveCoherentUpdateInProgress(pcs) {
+			var child client.Object
+			if usesPCSG {
+				child = &grovev1alpha1.PodCliqueScalingGroup{}
+			} else {
+				child = &grovev1alpha1.PodClique{}
+			}
+			if err := s.client.Get(ctx, client.ObjectKey{Name: resourceName, Namespace: req.DGD.Namespace}, child); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return deferred, retrySoon, err
+			}
+			switch resource := child.(type) {
+			case *grovev1alpha1.PodClique:
+				deferred = deferred || resource.Spec.Replicas != replicas
+			case *grovev1alpha1.PodCliqueScalingGroup:
+				deferred = deferred || resource.Spec.Replicas != replicas
+			}
+			continue
+		}
+
+		// Admission and controller observations can disagree at rollout start or completion.
 		if err := s.scaleResource(
 			ctx,
 			gvr,
@@ -86,6 +114,11 @@ func (s *groveScaler) Reconcile(
 			req.DGD.Namespace,
 			replicas,
 		); err != nil {
+			if dynamo.IsGroveCoherentScaleGuardRejection(err) {
+				deferred = true
+				retrySoon = true
+				continue
+			}
 			logger.Error(
 				err,
 				"Failed to scale Grove resource",
@@ -94,12 +127,12 @@ func (s *groveScaler) Reconcile(
 				"resourceName", resourceName,
 				"replicas", replicas,
 			)
-			return fmt.Errorf("failed to scale %s %s: %w", resourceKind, resourceName, err)
+			return deferred, retrySoon, fmt.Errorf("failed to scale %s %s: %w", resourceKind, resourceName, err)
 		}
 	}
 
-	logger.V(1).Info("Successfully reconciled Grove scaling operations")
-	return nil
+	logger.V(1).Info("Successfully reconciled Grove scaling operations", "deferred", deferred)
+	return deferred, retrySoon, nil
 }
 
 func (s *groveScaler) scaleResource(
