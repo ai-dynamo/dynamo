@@ -17,8 +17,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    IndexerRecoveryTarget, RecoveryTarget, broker_zmq::run_broker_zmq_supervisor,
-    direct_zmq::run_direct_zmq_supervisor, source_health, start_state_agent_router,
+    IndexerRecoveryTarget, RecoveryTarget,
+    broker_zmq::run_broker_zmq_supervisor,
+    direct_zmq::run_direct_zmq_supervisor,
+    source_health, start_state_agent_router,
+    static_sources::{STATIC_KV_SOURCES_ENV, static_kv_sources_from_env, with_static_sources},
     worker_query::WorkerQueryClient,
 };
 use crate::{
@@ -445,6 +448,22 @@ pub async fn start_subscriber(
             (membership_watch, completion_rx)
         }
     };
+    // EXPERIMENT ONLY: static sources join a private membership view used by this ingress.
+    let static_sources = static_kv_sources_from_env()?;
+    anyhow::ensure!(
+        static_sources.is_empty() || direct_zmq,
+        "{STATIC_KV_SOURCES_ENV} requires the direct-ZMQ event plane"
+    );
+    let health_watch = membership_watch.fork_receiver();
+    let membership_watch = if static_sources.is_empty() {
+        membership_watch
+    } else {
+        with_static_sources(
+            membership_watch,
+            static_sources.clone(),
+            cancel.child_token(),
+        )
+    };
     let client = WorkerQueryClient::spawn(
         endpoint.component().clone(),
         IndexerRecoveryTarget::new(indexer),
@@ -453,7 +472,7 @@ pub async fn start_subscriber(
     )
     .await?;
     let health_completion = source_health::spawn(
-        membership_watch.fork_receiver(),
+        health_watch,
         model.clone(),
         worker_role,
         source_requirement,
@@ -540,6 +559,7 @@ pub async fn start_subscriber(
             endpoint.id(),
             client,
             membership_watch,
+            static_sources,
             model,
             worker_type,
             metric_scope,

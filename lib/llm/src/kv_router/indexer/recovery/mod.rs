@@ -6,6 +6,7 @@ mod direct_zmq;
 mod recovery_lane;
 mod source_health;
 mod state_agent;
+mod static_sources;
 mod subscriber;
 mod target;
 mod worker_query;

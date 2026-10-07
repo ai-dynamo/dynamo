@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     IndexerRecoveryTarget,
+    static_sources::StaticKvSource,
     subscriber::{
         MismatchMetricScope, clear_mismatch_metric_on_cancellation, update_mismatch_metric,
         update_subscription_failure_metric,
@@ -103,6 +104,7 @@ pub(super) async fn run_direct_zmq_supervisor(
     serving_endpoint: EndpointId,
     client: Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     mut membership_watch: KvSourceMembershipWatch,
+    static_sources: Arc<[StaticKvSource]>,
     model: String,
     worker_type: &'static str,
     metric_scope: MismatchMetricScope,
@@ -213,6 +215,7 @@ pub(super) async fn run_direct_zmq_supervisor(
             metric_scope,
             &cancellation_token,
             endpoints_per_sub,
+            &static_sources,
         )
         .await;
         scope_cancel.cancel();
@@ -262,6 +265,7 @@ async fn consume_scope(
     metric_scope: MismatchMetricScope,
     cancellation_token: &CancellationToken,
     endpoints_per_sub: usize,
+    static_sources: &[StaticKvSource],
 ) -> ScopeExit {
     let expected_scope = EventScope::Endpoint {
         endpoint: kv_state_endpoint.clone(),
@@ -278,6 +282,31 @@ async fn consume_scope(
     let mut invalid_publishers = HashSet::new();
     let mut next_task_generation = 1_u64;
     let mut exit = ScopeExit::Retry;
+
+    // EXPERIMENT ONLY: static sources bypass event-channel discovery; they activate through
+    // the same readiness reconciliation once their private membership view lists them.
+    let static_publishers: HashSet<u64> = static_sources
+        .iter()
+        .map(StaticKvSource::publisher_id)
+        .collect();
+    for source in static_sources {
+        let task_generation = next_task_generation;
+        next_task_generation = next_task_generation.wrapping_add(1);
+        sources.insert(
+            source.publisher_id(),
+            spawn_source(
+                source.publisher_id(),
+                source.endpoint.clone(),
+                task_generation,
+                signal_tx.clone(),
+                group_pool.clone(),
+                client.clone(),
+                ingress_metrics.clone(),
+                cancellation_token.child_token(),
+            ),
+        );
+        ingress_metrics.increment_lifecycle("started");
+    }
 
     loop {
         tokio::select! {
@@ -398,6 +427,10 @@ async fn consume_scope(
                             tracing::warn!(publisher_id = instance_id, "Ignoring non-direct-ZMQ event channel in direct ingress");
                             continue;
                         };
+                        if static_publishers.contains(&instance_id) {
+                            tracing::error!(publisher_id = instance_id, "EXPERIMENT: ignoring a discovered event channel that reuses a static KV source publisher ID");
+                            continue;
+                        }
                         if invalid_publishers.contains(&instance_id) {
                             continue;
                         }
@@ -447,6 +480,9 @@ async fn consume_scope(
                     Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::EventChannel(
                         EventChannelInstanceId { scope, topic, instance_id },
                     ))) if scope == expected_scope && topic == KV_EVENT_SUBJECT => {
+                        if static_publishers.contains(&instance_id) {
+                            continue;
+                        }
                         invalid_publishers.remove(&instance_id);
                         if let Some(source) = sources.remove(&instance_id) {
                             stop_source(source, ingress_metrics).await;

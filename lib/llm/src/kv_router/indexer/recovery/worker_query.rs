@@ -3306,6 +3306,7 @@ mod tests {
                 serving_id.clone(),
                 client,
                 membership_watch,
+                Arc::from([]),
                 "test-model".to_string(),
                 "decode",
                 super::super::subscriber::MismatchMetricScope::Router(
