@@ -84,82 +84,52 @@ RUN python3 -B -m unittest discover -s lib/sidecar -p test_build_cache.py
 # Use a separate cache generation so older builders cannot replace artifacts
 # without updating the helper's source stamp.
 
-# ---- vLLM builder -----------------------------------------------------------
-FROM builder-base AS vllm-builder
-
-ARG TARGETARCH
-
-# The three builders share one target cache per architecture, so each backend
-# reuses the dependency artifacts the previous one compiled. sharing=locked
-# serializes them, which is required for correctness — cargo's .package-cache
-# lock lives in $CARGO_HOME, outside these mounts, so it cannot coordinate
-# separate build containers — and is also what bounds peak memory, since
-# codegen-units=1 plus LTO makes each release link expensive on its own.
-# Every id is per-architecture so the amd64 and arm64 halves of a multi-platform
-# build do not serialize against each other.
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-inputs-v3,target=/src/target,sharing=locked \
-    lib/sidecar/build-with-cache.sh build --release --locked -p dynamo-vllm-sidecar \
-    && strip target/release/dynamo-vllm-sidecar \
-    && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
-
-# ---- SGLang builder ---------------------------------------------------------
-FROM builder-base AS sglang-builder
-
-ARG TARGETARCH
-
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-inputs-v3,target=/src/target,sharing=locked \
-    lib/sidecar/build-with-cache.sh build --release --locked -p dynamo-sglang-sidecar \
-    && strip target/release/dynamo-sglang-sidecar \
-    && install -D target/release/dynamo-sglang-sidecar /out/dynamo-sglang-sidecar
-
-# ---- TensorRT-LLM builder ---------------------------------------------------
-FROM builder-base AS trtllm-builder
-
-ARG TARGETARCH
-
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-inputs-v3,target=/src/target,sharing=locked \
-    lib/sidecar/build-with-cache.sh build --release --locked -p dynamo-trtllm-sidecar \
-    && strip target/release/dynamo-trtllm-sidecar \
-    && install -D target/release/dynamo-trtllm-sidecar /out/dynamo-trtllm-sidecar
-
-# ---- compliance inventory ----------------------------------------------------
-FROM builder-base AS compliance-inventory
+# ---- sidecar builder --------------------------------------------------------
+FROM builder-base AS sidecar-builder
 
 ARG TARGETARCH
 ARG CARGO_CYCLONEDX_VERSION=0.5.9
 
-# Runtime images get cargo-cyclonedx output through maturin's wheel SBOMs. The
-# sidecars are standalone binaries, so run the same upstream generator directly
-# and stage its output where the common Rust compliance generator can read it.
+# Build all three sidecars and their compliance inventory in one RUN. BuildKit
+# takes one of its max-parallelism slots before a RUN waits for a
+# sharing=locked cache mount, so every separate RUN on these caches can hold a
+# slot idle while another one compiles. One RUN takes the locks once.
+#
+# sharing=locked is still required: cargo's .package-cache lock lives in
+# $CARGO_HOME, outside these mounts, so it cannot coordinate concurrent builds
+# of this Dockerfile on the same BuildKit daemon. Running the builds one after
+# another also bounds peak memory, since codegen-units=1 plus LTO makes each
+# release link expensive. Every id is per-architecture so the amd64 and arm64
+# halves of a multi-platform build do not serialize against each other.
+#
+# The target cache outlives this build and is shared with builds of other
+# revisions, and Cargo checks workspace crates by mtime, so a cached workspace
+# artifact newer than this checkout would be reused. `cargo clean --workspace`
+# drops only workspace artifacts; registry and git dependencies stay cached.
+#
+# Each sidecar keeps its own `cargo build -p` call. One
+# `cargo build -p a -p b -p c` would unify features and link the vLLM-only
+# features into the SGLang and TensorRT-LLM binaries.
+#
+# The SBOM step runs first so a registry or network failure fails fast,
+# before the long compile. Development and build-only dependencies cannot be
+# linked into these binaries and are omitted.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-tools-${TARGETARCH},target=/tmp/cargo-tools,sharing=locked \
-    CARGO_TARGET_DIR=/tmp/cargo-tools \
-    cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"
-
-# Generate one target-specific SBOM per shipped executable. Development and
-# build-only dependencies cannot be linked into these binaries and are omitted.
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH}-proto-v2,target=/src/target,sharing=locked \
     set -e; \
     RUSTARCH=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
         amd64) echo "x86_64-unknown-linux-gnu" ;; \
         arm64) echo "aarch64-unknown-linux-gnu" ;; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH:-unset}" >&2; exit 1 ;; \
-    esac) \
-    && mkdir -p /out/sidecar-sboms /out/rust-licenses \
-    && for spec in \
-        "lib/sidecar/vllm/Cargo.toml:dynamo-vllm-sidecar" \
-        "lib/sidecar/sglang/Cargo.toml:dynamo-sglang-sidecar" \
-        "lib/sidecar/trtllm/Cargo.toml:dynamo-trtllm-sidecar"; do \
-        manifest="${spec%%:*}"; \
-        binary="${spec##*:}"; \
+    esac); \
+    CARGO_TARGET_DIR=/tmp/cargo-tools \
+        cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"; \
+    mkdir -p /out/bin /out/sidecar-sboms /out/rust-licenses; \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar; do \
+        manifest="lib/sidecar/${pkg#dynamo-}"; \
+        manifest="${manifest%-sidecar}/Cargo.toml"; \
         cargo cyclonedx \
             --manifest-path "${manifest}" \
             --format json \
@@ -168,13 +138,17 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
             --target "${RUSTARCH}" \
             --no-build-deps; \
         install -m 0644 \
-            "$(dirname "${manifest}")/${binary}_bin.cdx.json" \
-            "/out/sidecar-sboms/${binary}.cyclonedx.json"; \
-    done \
-    && test -s /out/sidecar-sboms/dynamo-vllm-sidecar.cyclonedx.json \
-    && test -s /out/sidecar-sboms/dynamo-sglang-sidecar.cyclonedx.json \
-    && test -s /out/sidecar-sboms/dynamo-trtllm-sidecar.cyclonedx.json \
-    && for src in /usr/local/cargo/registry/src/*; do \
+            "$(dirname "${manifest}")/${pkg}_bin.cdx.json" \
+            "/out/sidecar-sboms/${pkg}.cyclonedx.json"; \
+        test -s "/out/sidecar-sboms/${pkg}.cyclonedx.json"; \
+    done; \
+    cargo clean --workspace --release --locked; \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar; do \
+        cargo build --release --locked -p "${pkg}"; \
+        strip "target/release/${pkg}"; \
+        install -D "target/release/${pkg}" "/out/bin/${pkg}"; \
+    done; \
+    for src in /usr/local/cargo/registry/src/*; do \
         [ -d "${src}" ] || continue; \
         find "${src}" -mindepth 1 -maxdepth 1 -type d | while IFS= read -r crate; do \
             dest="/out/rust-licenses/$(basename "${crate}")"; \
@@ -221,11 +195,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
-COPY --from=sglang-builder /out/dynamo-sglang-sidecar /usr/local/bin/
-COPY --from=trtllm-builder /out/dynamo-trtllm-sidecar /usr/local/bin/
-
+# The entrypoint script comes first so it does not wait behind the compile.
 COPY --chmod=755 lib/sidecar/dynamo-sidecar /usr/local/bin/dynamo-sidecar
+COPY --from=sidecar-builder /out/bin/ /usr/local/bin/
 
 # Numeric UID so Kubernetes runAsNonRoot can verify it.
 USER 1000
@@ -243,19 +215,17 @@ ARG TARGETARCH
 
 USER root
 COPY container/compliance/ /src/container/compliance/
-RUN mkdir -p /legal /tmp/runtime-root \
-    /tmp/sidecar-site/dynamo_sidecar.dist-info/sboms
 
 # Scan the filesystem that actually ships, rather than the build-tool packages
 # present in this helper stage. The Rust SBOM contains only dependencies linked
-# into the three sidecar executables.
-COPY --from=runtime-base / /tmp/runtime-root/
-COPY --from=compliance-inventory /out/sidecar-sboms/ \
-    /tmp/sidecar-site/dynamo_sidecar.dist-info/sboms/
-COPY --from=compliance-inventory /out/rust-licenses /tmp/rust-licenses
-
+# into the three sidecar executables. Bind mounts instead of COPY steps keep
+# this to one BuildKit op after the runtime image is assembled.
 ENV PYTHONPATH=/src/container
-RUN python3 -m compliance.generators \
+RUN --mount=type=bind,from=runtime-base,target=/tmp/runtime-root \
+    --mount=type=bind,from=sidecar-builder,source=/out/sidecar-sboms,target=/tmp/sidecar-site/dynamo_sidecar.dist-info/sboms \
+    --mount=type=bind,from=sidecar-builder,source=/out/rust-licenses,target=/tmp/rust-licenses \
+    mkdir -p /legal \
+    && python3 -m compliance.generators \
         --ecosystem rust,dpkg \
         --site-packages /tmp/sidecar-site \
         --dpkg-root /tmp/runtime-root \
@@ -277,9 +247,7 @@ COPY --from=licenses /legal/ /
 # builder runners route to a remote BuildKit worker with no local docker
 # daemon (see shared-build-sidecar.yml). Not used for any shipped image.
 FROM scratch AS sidecar-binaries
-COPY --from=vllm-builder /out/dynamo-vllm-sidecar /
-COPY --from=sglang-builder /out/dynamo-sglang-sidecar /
-COPY --from=trtllm-builder /out/dynamo-trtllm-sidecar /
+COPY --from=sidecar-builder /out/bin/ /
 
 # ---- shipped runtime ---------------------------------------------------------
 FROM runtime-base AS runtime
