@@ -24,7 +24,7 @@ use dynamo_runtime::{
 use crate::{
     kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
     local_model::runtime_config::ModelRuntimeConfig,
-    lora::LoraFilter,
+    lora::{LoraFilter, runtime::RUNTIME_LORA_PROTOCOL_VERSION},
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -36,7 +36,6 @@ use crate::{
 const RUNTIME_LORA_SCHEMES_RUNTIME_KEY: &str = "runtime_lora_schemes";
 const RUNTIME_LORA_SUPPORT_RUNTIME_KEY: &str = "supports_runtime_lora_resolution";
 const RUNTIME_LORA_VERSIONS_RUNTIME_KEY: &str = "runtime_lora_protocol_versions";
-const RUNTIME_LORA_PROTOCOL_VERSION: u32 = 2;
 
 fn runtime_lora_worker_schemes(config: &ModelRuntimeConfig) -> Option<Vec<String>> {
     if config
@@ -51,7 +50,7 @@ fn runtime_lora_worker_schemes(config: &ModelRuntimeConfig) -> Option<Vec<String
         .get_engine_specific::<Vec<u32>>(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)
         .ok()
         .flatten()?;
-    if !versions.contains(&RUNTIME_LORA_PROTOCOL_VERSION) {
+    if !versions.contains(&u32::from(RUNTIME_LORA_PROTOCOL_VERSION)) {
         return None;
     }
     let mut schemes = config

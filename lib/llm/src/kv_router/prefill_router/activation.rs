@@ -644,6 +644,7 @@ impl PrefillRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use super::*;
@@ -718,7 +719,7 @@ mod tests {
         );
     }
 
-    struct PrefillWorker(u32);
+    struct PrefillWorker(u32, Option<Arc<AtomicUsize>>);
 
     #[async_trait::async_trait]
     impl
@@ -732,6 +733,9 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            if let Some(calls) = &self.1 {
+                calls.fetch_add(1, Ordering::Relaxed);
+            }
             let mut output = LLMEngineOutput::stop();
             output.token_ids = vec![self.0];
             Ok(ResponseStream::new(
@@ -754,7 +758,7 @@ mod tests {
 
     async fn prefilled_worker(router: &PrefillRouter) -> u32 {
         let mut response = router
-            .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99)))
+            .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99, None)))
             .await
             .unwrap();
         let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
@@ -820,7 +824,7 @@ mod tests {
             workers.push(
                 endpoint
                     .endpoint_builder()
-                    .handler(Ingress::for_engine(Arc::new(PrefillWorker(marker))).unwrap())
+                    .handler(Ingress::for_engine(Arc::new(PrefillWorker(marker, None))).unwrap())
                     .start_with_registration()
                     .await
                     .unwrap(),
@@ -1037,6 +1041,183 @@ mod tests {
         for worker in workers {
             worker.shutdown().await.unwrap();
         }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn runtime_lora_rejected_before_prefill_dispatch() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::runtime_lora_rejected_before_prefill_dispatch"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env("DYNAMO_ROUTING_HOP_TEST", test_name)
+                .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .expect("prefill subprocess must finish within its deadline")
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(
+            runtime.clone(),
+            DistributedConfig {
+                discovery_backend: DiscoveryBackend::KvStore(kv::Selector::Memory),
+                nats_config: None,
+                request_plane: RequestPlaneMode::Tcp,
+                response_plane: None,
+                event_transport_kind: EventTransportKind::Zmq,
+            },
+        )
+        .await
+        .unwrap();
+        let namespace = format!("runtime-lora-prefill-{}", uuid::Uuid::new_v4());
+        let endpoint = drt
+            .namespace(namespace.clone())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("prefill");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker = endpoint
+            .endpoint_builder()
+            .handler(Ingress::for_engine(Arc::new(PrefillWorker(0, Some(calls.clone())))).unwrap())
+            .start_with_registration()
+            .await
+            .unwrap();
+        let runtime_request = || {
+            let mut req = request();
+            req.routing_mut().lora_resolution_version =
+                Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION);
+            req
+        };
+        drt.discovery()
+            .register(
+                DiscoverySpec::from_model(
+                    namespace.clone(),
+                    "workers".into(),
+                    "prefill".into(),
+                    &card(None),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let disabled = PrefillRouter::disabled(manager.clone(), RouterMode::RoundRobin, None);
+        let mut output = disabled
+            .generate(
+                SingleIn::new(runtime_request()),
+                Arc::new(PrefillWorker(99, None)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            output.next().await.unwrap().data.unwrap().token_ids,
+            vec![99]
+        );
+        drop(output);
+        for (generation, mode) in [(1, RouterMode::RoundRobin), (2, RouterMode::KV)] {
+            let selected = card(Some(RouterConfig::new(
+                mode,
+                KvRouterConfig {
+                    use_kv_events: false,
+                    router_track_active_blocks: false,
+                    ..Default::default()
+                },
+            )));
+            let (_admissions, admitted_ids) = watch::channel(vec![worker.instance().id()]);
+            let target = WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+                endpoint: endpoint.clone(),
+                group: endpoint.id().to_string(),
+                generation,
+                card: Arc::new(selected),
+                admitted_ids,
+            });
+            let target_id = target.id();
+            let router = PrefillRouter::new_with_selection_policy(
+                None,
+                manager.clone(),
+                mode,
+                16,
+                None,
+                SelectionPolicySource::Registry,
+                None,
+                None,
+                SessionAffinityMode::Hard,
+                "test-model".into(),
+                namespace.clone(),
+                LoadThresholdHandle::new(Default::default()),
+                drt.child_token(),
+                None,
+            );
+            router.set_target(Some(target));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !router
+                    .binding
+                    .load_full()
+                    .is_some_and(|binding| binding.target_id == target_id)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("prefill routing mode must activate");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(mut output) = router
+                        .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99, None)))
+                        .await
+                    {
+                        assert_eq!(
+                            output.next().await.unwrap().data.unwrap().token_ids,
+                            vec![0]
+                        );
+                        while output.next().await.is_some() {}
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ordinary request must reach the discovered prefill worker");
+            let calls_before = calls.load(Ordering::Relaxed);
+            let error = router
+                .generate(
+                    SingleIn::new(runtime_request()),
+                    Arc::new(PrefillWorker(99, Some(calls.clone()))),
+                )
+                .await
+                .expect_err("runtime LoRA must fail before prefill dispatch");
+            assert_eq!(
+                error.to_string(),
+                "InvalidRequest: runtime_lora_disaggregated_unsupported"
+            );
+            assert!(dynamo_runtime::error::match_error_chain(
+                error.as_ref(),
+                &[dynamo_runtime::error::ErrorType::InvalidArgument],
+                &[],
+            ));
+            assert_eq!(calls.load(Ordering::Relaxed), calls_before);
+        }
+
+        worker.shutdown().await.unwrap();
         runtime.shutdown();
     }
 }
