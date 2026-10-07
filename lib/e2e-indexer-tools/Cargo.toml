@@ -20,6 +20,7 @@ publish = false
 # dynamo-bench can write it; the binaries need the runtime.
 default = ["bins"]
 bins = [
+  "dep:bytes",
   "dep:clap",
   "dep:dynamo-llm",
   "dep:dynamo-runtime",
@@ -28,6 +29,8 @@ bins = [
   "dep:parking_lot",
   "dep:tokio",
   "dep:tracing",
+  "dep:zmq",
+  "dep:zmq-sys",
 ]
 
 [dependencies]
@@ -36,6 +39,7 @@ dynamo-kv-router = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+bytes = { workspace = true, optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 dynamo-llm = { path = "../llm", default-features = false, optional = true }
 dynamo-runtime = { workspace = true, optional = true }
@@ -44,6 +48,9 @@ hdrhistogram = { version = "7.5", optional = true }
 parking_lot = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
+# The runtime's libzmq bindings (via tmq), used directly for XPUB phantom sockets.
+zmq = { version = "0.10", optional = true }
+zmq-sys = { version = "0.12", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

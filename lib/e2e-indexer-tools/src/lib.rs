@@ -15,3 +15,5 @@ pub mod stream;
 pub mod pipeline;
 #[cfg(feature = "bins")]
 pub mod stats;
+#[cfg(feature = "bins")]
+pub mod xpub;

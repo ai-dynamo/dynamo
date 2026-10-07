@@ -2565,6 +2565,7 @@ name = "dynamo-e2e-indexer-tools"
 version = "1.6.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "dynamo-kv-router",
  "dynamo-llm",
@@ -2577,6 +2578,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "zmq",
+ "zmq-sys",
 ]
 
 [[package]]
