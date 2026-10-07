@@ -28,7 +28,7 @@ spec:
             value: kv
           - name: DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT
             value: '50'
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-a2d5a6d72656851c96a8cad3f563326d7af9cb8c-vllm-runtime@sha256:13b928b02d11fb4990d01684166653178cd040db24fdff787e62075f56d99b58
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -99,7 +99,7 @@ spec:
             value: '3600'
           - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
             value: '300'
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-a2d5a6d72656851c96a8cad3f563326d7af9cb8c-vllm-runtime@sha256:13b928b02d11fb4990d01684166653178cd040db24fdff787e62075f56d99b58
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
           imagePullPolicy: IfNotPresent
           name: main
           ports:

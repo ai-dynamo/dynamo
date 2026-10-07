@@ -18,7 +18,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-a2d5a6d72656851c96a8cad3f563326d7af9cb8c-vllm-runtime@sha256:13b928b02d11fb4990d01684166653178cd040db24fdff787e62075f56d99b58
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -50,7 +50,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-a2d5a6d72656851c96a8cad3f563326d7af9cb8c-vllm-runtime@sha256:13b928b02d11fb4990d01684166653178cd040db24fdff787e62075f56d99b58
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -85,7 +85,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-a2d5a6d72656851c96a8cad3f563326d7af9cb8c-vllm-runtime@sha256:13b928b02d11fb4990d01684166653178cd040db24fdff787e62075f56d99b58
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -117,7 +117,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-a2d5a6d72656851c96a8cad3f563326d7af9cb8c-vllm-runtime@sha256:13b928b02d11fb4990d01684166653178cd040db24fdff787e62075f56d99b58
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -152,7 +152,7 @@ targets:
     count: 16
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-a2d5a6d72656851c96a8cad3f563326d7af9cb8c-vllm-runtime@sha256:13b928b02d11fb4990d01684166653178cd040db24fdff787e62075f56d99b58
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -183,7 +183,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-a2d5a6d72656851c96a8cad3f563326d7af9cb8c-vllm-runtime@sha256:13b928b02d11fb4990d01684166653178cd040db24fdff787e62075f56d99b58
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
