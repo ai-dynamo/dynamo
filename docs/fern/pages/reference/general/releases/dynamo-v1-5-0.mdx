@@ -655,6 +655,7 @@ Dynamo v1.5.1 is a patch release on top of v1.5.0. It fixes **Dynamo Router over
 #### Known Issues
 
 - **SGLang Sidecar Inference 500 Errors:** Every inference request sent to the SGLang sidecar still fails with HTTP 500 and the error `'GenerateReqInput' object has no attribute 'batch_size'`. The cause is a protocol mismatch with the bundled SGLang version that is corrected in upstream SGLang v0.5.19. No workaround is available yet; the fix is targeted for v1.6.0.
+- **Video Decode Worker Crash:** Some H.264 videos sent as multimodal input crash the worker serving the request when PyNvVideoCodec 2.2.3 decodes the final frame, and later requests to that worker fail until it restarts. The issue also affects v1.5.0 on SGLang, TensorRT-LLM, and vLLM. Image and audio inputs are not affected. No workaround is available yet; the fix is targeted for v1.6.0.
 - **Carried Forward from v1.5.0:** The other [v1.5.0 known issues](known-issues.mdx#v150) still apply.
 
 Backend runtime versions (SGLang v0.5.18, TensorRT-LLM v1.3.0rc25, vLLM v0.28.0), NIXL refs and UCX v1.21.0 are unchanged from v1.5.0. CUDA variants are 13.0 for SGLang, 13.1 for TensorRT-LLM, and 13.0 for vLLM.
