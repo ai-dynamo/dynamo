@@ -205,6 +205,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 > | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
 > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
+> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
 >
 > Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer
