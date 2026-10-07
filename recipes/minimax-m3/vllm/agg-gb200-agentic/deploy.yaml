@@ -72,7 +72,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e01c0aa638b3d20e35b29f65c828fe7e52d033bf-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e46c79195aa3b138aa99e4a3e1cbddb0f4c54b14-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -117,7 +117,7 @@ spec:
               resourceClaimTemplateName: minimax-m3-agg-gb200-agentic-cd-channel
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e01c0aa638b3d20e35b29f65c828fe7e52d033bf-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e46c79195aa3b138aa99e4a3e1cbddb0f4c54b14-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:

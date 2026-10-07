@@ -16,7 +16,7 @@ decoding, KV-aware routing, and a one-million-token context limit.
 | `agg-gb200-agentic` | 3 aggregated TP4 replicas | 12x GB200 | GPU plus 400 GB CPU offload per replica |
 | `disagg-gb200-agentic` | 3 prefill and 3 decode TP4 replicas | 24x GB200 | GPU with NIXL transfer between prefill and decode |
 
-Both profiles use the `e01c0aa638` runtime image with the required
+Both profiles use the `e46c79195a` runtime image with the required
 fixes built in, real EAGLE3 verification, and multimodal input enabled. No
 runtime patches are applied. Each ConfigMap also contains a benchmark-only
 synthetic-acceptance option; that option is not the production default.
