@@ -376,6 +376,7 @@ def test_serve_deployment(
     if config.name.endswith("_disaggregated"):
         monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
         monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+        monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
         backend = config.name.removesuffix("_disaggregated")
         roles = ("DECODE", "PREFILL") if backend == "vllm" else ("PREFILL", "DECODE")
         device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
@@ -579,7 +580,11 @@ def test_sidecar_kv_routing(
         directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
         script_name="agg.sh" if dep else "agg_kv_router.sh",
         script_args=(
-            ["--disable-cuda-graph", "--disable-piecewise-cuda-graph"]
+            [
+                "--disable-cuda-graph",
+                "--cuda-graph-backend-prefill",
+                "disabled",
+            ]
             if backend == "sglang"
             else []
         ),

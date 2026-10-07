@@ -126,7 +126,7 @@ impl LocalModelBuilder {
         self
     }
 
-    /// The HF name of the model before we downloaded it, or a local path if
+    /// The HF name or NGC URI before we downloaded the model, or a local path if
     /// that was given on the cmd line. We need this because `model_path` is always
     /// a local path.
     pub fn source_path(&mut self, source_path: PathBuf) -> &mut Self {
@@ -313,7 +313,7 @@ impl LocalModelBuilder {
     }
 
     /// Make an LLM ready for use:
-    /// - Download it from Hugging Face (and NGC in future) if necessary
+    /// - Download it from Hugging Face or NGC if necessary
     /// - Resolve the path
     /// - Load it's ModelDeploymentCard card
     /// - Name it correctly
@@ -525,7 +525,7 @@ pub async fn update_model_taints(
 
 impl LocalModel {
     /// Ensure a model is accessible locally, returning it's path.
-    /// Downloads the model from Hugging Face if necessary.
+    /// Downloads the model from Hugging Face, or from NGC for `ngc://` names, if necessary.
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
@@ -697,7 +697,9 @@ impl LocalModel {
         }
 
         let source_path = PathBuf::from(self.card.source_path());
-        if !source_path.exists() {
+        // NGC retains worker HTTP/file locations; the frontend can fall back to NGC
+        // when a worker's local metadata files are not accessible there.
+        if !source_path.exists() && !self.card.source_path().starts_with("ngc://") {
             // The consumers of MDC (frontend) might not have the same local path as us, so
             // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
             //

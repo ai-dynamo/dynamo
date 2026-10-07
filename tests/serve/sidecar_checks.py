@@ -258,7 +258,7 @@ def _transferred(
     return sum(
         event["bytes"]
         for event in probe_events(probe_path)
-        if event["kind"] == "transfer"
+        if event.get("kind") in (None, "transfer")
     )
 
 

@@ -96,14 +96,18 @@ python -m pip install --extra-index-url https://buf.build/gen/python \
   "openengine-openengine-protocolbuffers-python==33.5.0.1.20260730172104+768a93c7b44e" \
   "openengine-openengine-protocolbuffers-pyi==36.2.0.1.20260730172104+768a93c7b44e"
 
+printf 'guided_decoding_backend: xgrammar\n' > engine.yaml
 python -m tensorrt_llm.commands.serve <model> \
   --grpc --grpc-protocol openengine --host 127.0.0.1 --port 50051 \
-  --max_seq_len 4096
+  --max_seq_len 4096 --extra_llm_api_options engine.yaml
 ```
 
 Without `--max_seq_len` the servicer leaves `max_context_length` unset. The
 sidecar below passes `--context-length`, so it starts either way; with neither
 setting it fails on the engine's first answer, naming both fixes.
+
+Without `guided_decoding_backend` the engine rejects every guided request. Dynamo
+sends a required or named `tool_choice` as a JSON schema, so those requests fail.
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
 loopback or a private interface. Remote access requires network controls or a
@@ -160,7 +164,9 @@ Both engines must be started with a KV cache transceiver so they can move KV
 cache between themselves (`cache_transceiver_config`); without it the engines
 cannot complete the handoff. Use the default `NIXL` backend — it picks its own
 underlying transport (UCX where there is no RDMA fabric) and is the path Dynamo
-uses elsewhere for disaggregation.
+uses elsewhere for disaggregation. Both engines also need
+`guided_decoding_backend`, because the sidecar sends the guide on the prefill
+and the decode request.
 
 OpenEngine has no request-type field, so the phase is carried on the wire like
 this:

@@ -563,7 +563,7 @@ async fn bootstrap_discovers_once_but_requires_start_before_serving() {
         "model-source".into(),
     ])
     .unwrap();
-    let (engine, _) = bootstrap.await.unwrap();
+    let (engine, _) = bootstrap.1.await.unwrap();
     assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
     let context = dynamo_backend_common::testing::mock_context();
     let result = engine

@@ -93,11 +93,11 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
   <Indent>
     <ParamField path="localPartitions" type="LPXLocalPartitions">
-      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. LPU-only, speculative, and HX builds reject this field.
+      Selects partitions of a hybrid build that the Cyborg conductor runs on its own GPU. Set `mode: All` to run every partition on the GPU, or `mode: IDs` with `ids` to run the listed partitions. `ids` is required with `IDs` and forbidden with `All`. Omitting `localPartitions` runs every partition on LPUs. Hybrid XT (LP20) and HX (LP30) builds support this field. LPU-only and speculative builds reject it.
 
-      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the conductor's `lpu_servers` and the Agents' partition configuration. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
+      The operator schedules Agent Pods and LPU pipeline requests only for the remaining partitions, and lists only those partitions in the Agents' partition configuration and, for XT builds, the conductor's `lpu_servers`. For HX builds, the request's allocation metadata also lists only the remaining partitions. When every partition is local, it renders no Agent PodClique and creates no LPU pipeline request. It publishes the resolved local partitions to the Cyborg `main` container as `LPX_LOCAL_PARTITION_IDS`, a comma-separated list of compiler partition IDs.
 
-      `ids` lists compiler partition IDs of the build's runtime partitions. A selected prop-sync chain is one runtime partition: select its first partition, which keeps the whole chain on the GPU. Unknown IDs and non-first chain members are rejected during reconciliation. Changing the selection changes the workload digest and rolls the workload.
+      `ids` lists compiler partition IDs of the build's runtime partitions. A selected prop-sync chain is one runtime partition: select its first partition, which keeps the whole chain on the GPU. Unknown IDs and non-first chain members are rejected during reconciliation. Because a chain moves as a unit, a local selection never splits a chain. The operator keeps a prop-sync connector only when both of its partitions remain on LPUs, and renumbers it to their positions among the remaining partitions. Changing the selection changes the workload digest and rolls the workload.
     </ParamField>
   </Indent>
 </Indent>
@@ -210,6 +210,14 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Overrides the backend-specific default mount path. When empty, the operator selects a default appropriate for the backend framework.
   </ParamField>
 </Indent>
+
+<Warning>
+  Cached artifacts (for example vLLM's `torch.compile`/CUDA graph cache) are specific to the
+  backend, torch, and CUDA versions that produced them. After upgrading to a new Dynamo release —
+  or any change to the underlying backend image — clear the PVC's contents before redeploying.
+  Stale entries from an older build have caused worker crashes at startup (for example an NVML
+  assertion failure during CUDA graph capture) that disappear once the cache is emptied.
+</Warning>
 
 <ParamField path="eppConfig" type="EPPConfig" deprecated={true}>
   Deprecated: omit `eppConfig` and use the native Rust EPP, which is configured through environment variables and takes no config file. Presence of this field selects the legacy Go EPP pod contract, so existing deployments keep running across an operator upgrade until you clear it.

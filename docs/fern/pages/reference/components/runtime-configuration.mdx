@@ -160,9 +160,12 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 <ParamField path="DYN_TCP_RPC_HOST" type="string" default="auto-detected local address">
   Host for the TCP request-plane server. Accepts IPv4 and IPv6 literals, bracketed IPv6 literals,
   wildcards, and interface names, including aliases such as `eth0:1`. If unset or empty, Dynamo
-  selects the first usable non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
-  loopback. On Unix, automatic selection excludes interfaces that are down. Dynamo trims surrounding
-  whitespace from configured hosts; a value containing only whitespace still fails server startup.
+  selects a usable non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6 loopback.
+  Within each family, it prefers the address the operating system uses for outbound traffic (on
+  Linux, the preferred source address of the route to an external address) when an up interface
+  carries it, and otherwise the first usable address in operating-system enumeration order. On Unix,
+  automatic selection excludes interfaces that are down. Dynamo trims surrounding whitespace from
+  configured hosts; a value containing only whitespace still fails server startup.
 
   For a named interface, Dynamo uses the same address selection order, restricted to that interface.
   It selects the first usable address in each category in operating-system enumeration order. An
@@ -221,7 +224,8 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   For an interface name, Dynamo selects the first usable IPv4 address, then IPv6. Dynamo trims
   whitespace and treats an empty value as unset. Unspecified addresses such as `0.0.0.0` and `::` are
   invalid, including IPv4-mapped wildcards such as `::ffff:0.0.0.0`. When unset, Dynamo selects a
-  usable non-loopback IPv4 address first, then IPv6. On Unix, automatic selection excludes down
+  usable non-loopback IPv4 address first, then IPv6, preferring the operating system's routed
+  source address as described for `DYN_TCP_RPC_HOST`. On Unix, automatic selection excludes down
   interfaces. If neither family has a usable non-loopback address, Dynamo selects IPv4 loopback,
   then IPv6 loopback, and falls back to `127.0.0.1` if neither is found. Remote subscribers cannot
   reach a loopback address. Automatic selection can choose an IPv4 link-local address or a bridge
@@ -307,7 +311,7 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-structural-tag-schema" type="string" default="auto">
-  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema only to tools with `strict=true`, leaving all other tools syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
+  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema unless the tool explicitly sets `strict=false`. Tools with `strict=false` remain syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>strict</Badge></span>
 

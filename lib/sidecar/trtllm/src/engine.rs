@@ -8,10 +8,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, usage,
+    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{
-    GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
+    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
@@ -80,11 +80,14 @@ impl TrtllmSidecarEngine {
 
     /// Parse CLI arguments before starting the sidecar runtime.
     pub fn from_cli() -> Result<
-        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
         DynamoError,
     > {
         let parsed = Self::from_parsed(<Args as clap::Parser>::parse())?;
-        Ok(Self::bootstrap(parsed))
+        Ok((parsed.1.runtime.clone(), Self::bootstrap(parsed)))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -92,12 +95,15 @@ impl TrtllmSidecarEngine {
     pub fn try_from_args_async(
         argv: Vec<String>,
     ) -> Result<
-        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        (
+            RuntimeConfig,
+            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
+        ),
         SidecarStartupError,
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         let initialized = Self::from_parsed(args)?;
-        Ok(Self::bootstrap(initialized))
+        Ok((initialized.1.runtime.clone(), Self::bootstrap(initialized)))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -126,6 +132,7 @@ impl TrtllmSidecarEngine {
         };
         let engine = Self::new(endpoint, transport, model.clone(), mode);
         let config = WorkerConfig {
+            runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
             // Every disaggregated role registers under its own component so
             // the frontend can target each separately; only an aggregated
