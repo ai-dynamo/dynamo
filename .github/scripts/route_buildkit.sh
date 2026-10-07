@@ -202,10 +202,8 @@ get_active_indices() {
 # cold-starts its cache.
 GROUP_KEYS=("vllm-sglang" "general" "trtllm")
 
-# Share of the active pods per group, in GROUP_KEYS order. In PR CI from
-# 2026-09-30 to 2026-10-07, the general group ran about half of the image
-# build work, vllm-sglang a third, and trtllm a sixth. At 14 pods these
-# weights give pools of 4, 7, and 3.
+# Share of the active pods per group, in GROUP_KEYS order, sized to the
+# relative build load of each group.
 GROUP_WEIGHTS=(30 50 20)
 
 # Map a flavor to a group index (0, 1, or 2).
