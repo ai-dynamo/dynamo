@@ -150,15 +150,19 @@ async def test_invalid_audio_returns_client_error(payload, audio_registry) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_type", ["qwen3_vl", "unknown"])
+@pytest.mark.parametrize(
+    "model_type,supports_audio",
+    [("qwen3_vl", True), ("unknown", True), ("multimodal", False)],
+)
 async def test_unsupported_audio_returns_client_error_before_loading(
-    model_type, audio_registry
+    model_type, supports_audio, audio_registry
 ) -> None:
     processor = MultimodalRequestProcessor(
         model_type=model_type,
         model_dir="unused",
         max_file_size_mb=10,
         tokenizer=MagicMock(),
+        supports_audio=supports_audio,
     )
     processor._load_audio = AsyncMock()
 

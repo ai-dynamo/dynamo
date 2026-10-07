@@ -166,8 +166,10 @@ class MultimodalRequestProcessor:
         tokenizer: Optional[TokenizerProtocol] = None,
         allowed_local_media_path: str = "",
         enable_frontend_decoding: bool = False,
+        supports_audio: bool = True,
     ):
         self.model_type = model_type
+        self.supports_audio = supports_audio
         self.model_dir = model_dir
         self.modality = ""
         self.allowed_local_media_path = allowed_local_media_path
@@ -427,7 +429,7 @@ class MultimodalRequestProcessor:
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
     ) -> Optional[Any]:
         """
-        Process OpenAI request and return multimodal data in TokensPrompt format.
+        Prepare an OpenAI request for TRT-LLM multimodal inference.
 
         Supports three flows:
         1. EPD Case 1: Encoder fully processed (has _epd_processed_prompt)
@@ -437,7 +439,7 @@ class MultimodalRequestProcessor:
         Returns dict compatible with TRT-LLM's generate_async:
         {
             "prompt_token_ids": List[int],
-            "multi_modal_data": Dict[str, List[torch.Tensor]]
+            "multi_modal_data": Dict[str, List[Any]]
         }
         or for EPD Case 1:
         {
@@ -469,8 +471,9 @@ class MultimodalRequestProcessor:
                 "audio_url",
             )
 
-        if audio_items and not MULTIMODAL_PLACEHOLDER_REGISTRY.is_valid(
-            self.model_type, "audio"
+        if audio_items and (
+            not self.supports_audio
+            or not MULTIMODAL_PLACEHOLDER_REGISTRY.is_valid(self.model_type, "audio")
         ):
             raise InvalidArgument(
                 "This model does not support audio input in TensorRT-LLM"
